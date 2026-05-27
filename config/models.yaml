@@ -5,12 +5,18 @@ roles:
         provider: anthropic
         model: claude-opus-4-7
         vision: true
+        priceMTk:
+          input: 5.0
+          output: 25.0
         parameters:
           max_tokens: 4096
       - name: gpt_5_5_high
         provider: openai
         model: gpt-5.5
         vision: true
+        priceMTk:
+          input: 5.0
+          output: 30.0
         parameters:
           max_output_tokens: 4096
           reasoning:
@@ -19,6 +25,9 @@ roles:
         provider: google
         model: gemini-3.5-flash
         vision: true
+        priceMTk:
+          input: 1.5
+          output: 9.0
         parameters:
           thinking_config:
             thinking_level: high
@@ -28,6 +37,9 @@ roles:
         provider: anthropic
         model: claude-opus-4-7
         vision: true
+        priceMTk:
+          input: 5.0
+          output: 25.0
         parameters:
           max_tokens: 4096
   analyst_worker:
@@ -36,12 +48,18 @@ roles:
         provider: anthropic
         model: claude-sonnet-4-6
         vision: true
+        priceMTk:
+          input: 3.0
+          output: 15.0
         parameters:
           max_tokens: 2048
       - name: gpt_5_5_medium
         provider: openai
         model: gpt-5.5
         vision: true
+        priceMTk:
+          input: 5.0
+          output: 30.0
         parameters:
           max_output_tokens: 2048
           reasoning:
@@ -52,12 +70,18 @@ roles:
         provider: anthropic
         model: claude-sonnet-4-6
         vision: false
+        priceMTk:
+          input: 3.0
+          output: 15.0
         parameters:
           max_tokens: 2048
       - name: gpt_5_5_medium
         provider: openai
         model: gpt-5.5
         vision: false
+        priceMTk:
+          input: 5.0
+          output: 30.0
         parameters:
           max_output_tokens: 2048
           reasoning:
@@ -66,6 +90,9 @@ roles:
         provider: google
         model: gemini-3.5-flash
         vision: false
+        priceMTk:
+          input: 1.5
+          output: 9.0
         parameters:
           thinking_config:
             thinking_level: high
@@ -75,5 +102,8 @@ roles:
         provider: openai
         model: gpt-5.4-nano
         vision: false
+        priceMTk:
+          input: 0.2
+          output: 1.25
         parameters:
           max_output_tokens: 1024

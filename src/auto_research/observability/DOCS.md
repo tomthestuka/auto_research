@@ -14,8 +14,7 @@ into per-role spend must exist from day one.
 - `costs.py` — turns normalized provider `ModelUsage` into a JSONL cost ledger
   row. The ledger lives in `AUTO_RESEARCH_RUNTIME_DIR/cost_ledger.jsonl`, or
   `~/.auto_research/cost_ledger.jsonl` by default.
-- Pricing is read from each model member's
-  `pricing_usd_per_million_tokens` config. Missing rates default to zero, so
+- Pricing is read from each model member's `priceMTk` config. Missing rates default to zero, so
   token counts are still recorded even before exact pricing is configured.
 
 ## Interfaces / Contracts
@@ -28,7 +27,8 @@ into per-role spend must exist from day one.
 - Live LangSmith verification is opt-in:
   `AUTO_RESEARCH_LIVE_LANGSMITH_TESTS=1 pytest tests/test_live_langsmith.py -s`.
   It sends a short poem prompt to each unique configured model call, creates
-  LangSmith traces, and prints the local cost ledger rows.
+  LangSmith traces, prints the local cost ledger rows, and writes timestamped
+  response/cost logs under `logs/dev/step-3/`.
 - Runtime LLM agents must not read this `DOCS.md`; this module only records
   runtime metadata emitted by provider calls.
 
@@ -55,6 +55,8 @@ into per-role spend must exist from day one.
   ledger logging.
 
 ## Changelog
+- 2026-05-27 — Renamed per-model unit pricing to `priceMTk` and made live
+  observability tests write timestamped logs under `logs/dev/step-3/`.
 - 2026-05-27 — Added an opt-in live LangSmith test that sends short poem prompts
   through configured model calls and prints cost ledger rows.
 - 2026-05-27 — Implemented step 3: provider-call tracing hook, JSONL cost

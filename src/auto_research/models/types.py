@@ -50,8 +50,8 @@ class RoleModelConfig(BaseModel):
     provider: ProviderName
     model: str = Field(min_length=1)
     vision: bool = False
+    priceMTk: dict[str, float] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
-    pricing_usd_per_million_tokens: dict[str, float] = Field(default_factory=dict)
 
 
 class RoleModelGroup(BaseModel):

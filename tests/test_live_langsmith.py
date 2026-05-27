@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 from auto_research.models import ModelMessage, load_registry
 from auto_research.observability import cost_ledger_path
+from tests.dev_logs import dev_log_path
 
 
 pytestmark = pytest.mark.skipif(
@@ -43,6 +44,8 @@ def test_live_langsmith_traces_and_cost_ledger(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path))
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
     assert os.getenv("LANGCHAIN_API_KEY"), "LANGCHAIN_API_KEY is required for live LangSmith tracing"
+    response_log_path = dev_log_path("step-3", "live_langsmith_responses", ".jsonl")
+    cost_log_path = dev_log_path("step-3", "live_langsmith_cost_ledger", ".jsonl")
 
     prompt = [
         ModelMessage(
@@ -66,6 +69,21 @@ def test_live_langsmith_traces_and_cost_ledger(tmp_path, monkeypatch):
                 f"usage {label}: input={response.usage.input_tokens} output={response.usage.output_tokens}",
                 flush=True,
             )
+            with response_log_path.open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps(
+                        {
+                            "label": label,
+                            "provider": handle.config.provider,
+                            "model": handle.config.model,
+                            "input_tokens": response.usage.input_tokens,
+                            "output_tokens": response.usage.output_tokens,
+                            "text": response.content,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                stream.write("\n")
         return failures
 
     failures = asyncio.run(run_all())
@@ -77,7 +95,13 @@ def test_live_langsmith_traces_and_cost_ledger(tmp_path, monkeypatch):
     ]
     assert rows
     print("cost ledger rows:", flush=True)
+    with cost_log_path.open("w", encoding="utf-8") as stream:
+        for row in rows:
+            stream.write(json.dumps(row, sort_keys=True))
+            stream.write("\n")
     for row in rows:
         print(json.dumps(row, sort_keys=True), flush=True)
         assert row["input_tokens"] >= 0
         assert row["output_tokens"] >= 0
+    print(f"wrote response log {response_log_path}", flush=True)
+    print(f"wrote cost log {cost_log_path}", flush=True)

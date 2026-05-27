@@ -43,8 +43,8 @@ def cost_ledger_path(data_dir: str | Path | None = None) -> Path:
 def cost_entry_for(role: str, config: RoleModelConfig, usage: ModelUsage) -> CostLedgerEntry:
     """Calculate a ledger entry from config pricing and token usage."""
 
-    input_rate = config.pricing_usd_per_million_tokens.get("input", 0.0)
-    output_rate = config.pricing_usd_per_million_tokens.get("output", 0.0)
+    input_rate = config.priceMTk.get("input", 0.0)
+    output_rate = config.priceMTk.get("output", 0.0)
     input_cost = usage.input_tokens * input_rate / 1_000_000
     output_cost = usage.output_tokens * output_rate / 1_000_000
     return CostLedgerEntry(

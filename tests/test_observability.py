@@ -13,7 +13,7 @@ def test_cost_entry_uses_configured_token_rates():
         name="priced",
         provider="openai",
         model="priced-model",
-        pricing_usd_per_million_tokens={"input": 2.0, "output": 8.0},
+        priceMTk={"input": 2.0, "output": 8.0},
     )
 
     entry = cost_entry_for(
@@ -43,7 +43,7 @@ def test_model_handle_appends_cost_ledger_row(tmp_path, monkeypatch):
             name="fake",
             provider="anthropic",
             model="fake-model",
-            pricing_usd_per_million_tokens={"input": 3.0, "output": 15.0},
+            priceMTk={"input": 3.0, "output": 15.0},
         ),
         provider=FakeProvider(),
     )

@@ -33,8 +33,9 @@ Google by editing YAML alone
   point; provider-specific structured output is wired when agents need it.
 - Provider calls return a normalized `ModelResponse` with `content`, `usage`,
   and the raw SDK response for later observability.
-- `pricing_usd_per_million_tokens` is optional per model member. When absent,
-  observability still records token counts with zero calculated dollar cost.
+- `priceMTk` is optional per model member and stores USD rates per million
+  tokens with `input` and `output` keys. When absent, observability still
+  records token counts with zero calculated dollar cost.
 
 ## Dependencies
 - External: `anthropic`, `openai`, `google-genai`, `pyyaml`, `pydantic`.
@@ -50,9 +51,8 @@ Google by editing YAML alone
 - `ModelResponse(content: str, usage: ModelUsage = ModelUsage(), raw: Any =
   None)` — normalized provider output.
 - `RoleModelConfig(name: str, provider: ProviderName, model: str,
-  vision: bool = False, parameters: dict[str, Any] = {},
-  pricing_usd_per_million_tokens: dict[str, float] = {})` — one model member
-  from YAML.
+  vision: bool = False, priceMTk: dict[str, float] = {},
+  parameters: dict[str, Any] = {})` — one model member from YAML.
 - `RoleModelGroup(members: list[RoleModelConfig])` — non-empty model group for
   one role.
 - `ModelsConfig(roles: dict[str, RoleModelGroup])` — validated
@@ -79,6 +79,8 @@ Google by editing YAML alone
   `ModelResponse`.
 
 ## Changelog
+- 2026-05-27 — Replaced `pricing_usd_per_million_tokens` with the shorter
+  config field `priceMTk`.
 - 2026-05-27 — Wired `ModelHandle.call()` through step-3 observability so every
   provider call can be traced and cost-logged.
 - 2026-05-27 — Changed the registry contract from one model per role to

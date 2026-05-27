@@ -19,9 +19,8 @@ role or swapping a provider is a YAML edit; no Python change.
 
 ## Interfaces / Contracts
 - `models.yaml` — role → non-empty `members` list. Each member has `name`,
-  `provider`, `model`, `vision`, `parameters`, and optional
-  `pricing_usd_per_million_tokens`. Loaded and validated by
-  `auto_research.models.registry`. Required roles: `reviewer`, `analyst_lead`,
+  `provider`, `model`, `vision`, `parameters`, and optional `priceMTk`.
+  Loaded and validated by `auto_research.models.registry`. Required roles: `reviewer`, `analyst_lead`,
   `analyst_worker`, `librarian_io`, `librarian_searcher`. Reviewer and
   analyst-tier models **must** be marked `vision: true` so figure references can
   be passed at the multimodal boundary (see
@@ -45,11 +44,13 @@ role or swapping a provider is a YAML edit; no Python change.
 - `models.yaml.roles.<role>.members[].parameters` — provider-specific keyword
   arguments. OpenAI reasoning uses `reasoning.effort`; Gemini 3 thinking uses
   `thinking_config.thinking_level`.
-- `models.yaml.roles.<role>.members[].pricing_usd_per_million_tokens` —
-  optional rates with `input` and `output` keys, consumed by
+- `models.yaml.roles.<role>.members[].priceMTk` — optional USD rates per
+  million tokens with `input` and `output` keys, consumed by
   `auto_research.observability`.
 
 ## Changelog
+- 2026-05-27 — Added `priceMTk` unit prices for configured models using
+  standard per-million-token public rates.
 - 2026-05-27 — Documented optional per-model pricing rates consumed by the
   step-3 cost ledger.
 - 2026-05-27 — Updated `models.yaml` to use role-level model groups for

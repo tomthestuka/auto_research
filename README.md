@@ -177,6 +177,8 @@ from auto_research import run_request   # interface; see module DOCS.md
   commit.
 - `CLAUDE.md` and `DOCS.md` are **build-time only** — never fed to runtime agents, which
   are configured solely from `prompts/`.
+- Development test logs, live model outputs, usage, and cost ledgers go under
+  `logs/dev/step-N/`, sorted by build-order step.
 
 ---
 

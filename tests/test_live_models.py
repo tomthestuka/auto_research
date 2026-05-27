@@ -12,6 +12,7 @@ import pytest
 from dotenv import load_dotenv
 
 from auto_research.models import ModelMessage, load_registry
+from tests.dev_logs import dev_log_path
 
 
 pytestmark = pytest.mark.skipif(
@@ -39,6 +40,7 @@ def _unique_handles():
 
 def test_configured_models_accept_minimal_call():
     load_dotenv()
+    log_path = dev_log_path("step-2", "live_models", ".jsonl")
     prompt = [
         ModelMessage(
             role="user",
@@ -57,7 +59,18 @@ def test_configured_models_accept_minimal_call():
                 failures.append((handle.config.provider, handle.config.model, repr(exc)))
                 continue
             served_model = getattr(response.raw, "model", None)
+            row = {
+                "provider": handle.config.provider,
+                "model": handle.config.model,
+                "raw_model": served_model,
+                "text": response.content,
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+            }
             results.append((handle.config.provider, handle.config.model, response.content))
+            with log_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(row, sort_keys=True))
+                stream.write("\n")
             print(
                 f"ok {handle.config.provider}:{handle.config.model}"
                 f" raw.model={served_model!r} text={response.content!r}",
@@ -71,3 +84,4 @@ def test_configured_models_accept_minimal_call():
     for provider, model, content in results:
         assert content.strip(), f"{provider}:{model} returned an empty response"
     assert not failures, "\n".join(f"{provider}:{model} failed with {error}" for provider, model, error in failures)
+    print(f"wrote dev log {log_path}", flush=True)

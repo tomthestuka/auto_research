@@ -229,6 +229,9 @@ only on `research_toolkit`. They are **not** the coding agent running git
   holding the SQLite file, the figures/artifacts store, and run logs.
 - **Testing:** minimal `pytest` on deterministic parts only (DB ops, query parsing,
   schema validation). Do not test LLM behavior.
+- **Development test logs:** any test command that intentionally emits logs, live model
+  outputs, usage, or cost data writes those artifacts under `logs/dev/step-N/`, sorted by
+  build-order step. These logs are local development artifacts, not runtime memory.
 
 ---
 
@@ -359,6 +362,8 @@ documented stubs.
   reviewer, analyst, and librarian roles as model groups.
 - 2026-05-27 — Marked step 3 (observability) done after wiring provider calls
   through optional LangSmith tracing and JSONL cost logging.
+- 2026-05-27 — Added the `logs/dev/step-N/` convention for development test logs
+  and renamed configured per-million-token unit prices to `priceMTk`.
 - 2026-05-26 — Added a hard rule in §3 requiring `README.md` to be kept synced in the
   same session as any change that touches what the README describes (status table,
   architecture, defaults, getting-started, contributor rules). Parallels the
