@@ -44,6 +44,14 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
   release.
 
 ## Changelog
+- 2026-05-27 — Step 3 completed: provider calls now flow through
+  `auto_research.observability` for optional LangSmith tracing and JSONL cost
+  ledger logging.
+- 2026-05-27 — Corrected step 2 so model roles resolve to groups instead of
+  single handles; `auto_research.models` now exposes `ModelGroupHandle`.
+- 2026-05-27 — Step 2 completed: `auto_research.models` now loads
+  `config/models.yaml`, resolves roles to provider handles, and exposes
+  provider-neutral call/usage types.
 - 2026-05-27 — Step 1 completed: `auto_research.schemas` now exports the
   Pydantic v2 inter-agent protocol and schema validation tests pass.
 - 2026-05-26 — Package seeded with submodule folders (each with its own `DOCS.md`)

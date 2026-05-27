@@ -1,0 +1,79 @@
+roles:
+  reviewer:
+    members:
+      - name: claude_opus_4_7
+        provider: anthropic
+        model: claude-opus-4-7
+        vision: true
+        parameters:
+          max_tokens: 4096
+      - name: gpt_5_5_high
+        provider: openai
+        model: gpt-5.5
+        vision: true
+        parameters:
+          max_output_tokens: 4096
+          reasoning:
+            effort: high
+      - name: gemini_3_5_flash_high
+        provider: google
+        model: gemini-3.5-flash
+        vision: true
+        parameters:
+          thinking_config:
+            thinking_level: high
+  analyst_lead:
+    members:
+      - name: claude_opus_4_7
+        provider: anthropic
+        model: claude-opus-4-7
+        vision: true
+        parameters:
+          max_tokens: 4096
+  analyst_worker:
+    members:
+      - name: claude_sonnet_4_6
+        provider: anthropic
+        model: claude-sonnet-4-6
+        vision: true
+        parameters:
+          max_tokens: 2048
+      - name: gpt_5_5_medium
+        provider: openai
+        model: gpt-5.5
+        vision: true
+        parameters:
+          max_output_tokens: 2048
+          reasoning:
+            effort: medium
+  librarian_io:
+    members:
+      - name: claude_sonnet_4_6
+        provider: anthropic
+        model: claude-sonnet-4-6
+        vision: false
+        parameters:
+          max_tokens: 2048
+      - name: gpt_5_5_medium
+        provider: openai
+        model: gpt-5.5
+        vision: false
+        parameters:
+          max_output_tokens: 2048
+          reasoning:
+            effort: medium
+      - name: gemini_3_5_flash_thinking
+        provider: google
+        model: gemini-3.5-flash
+        vision: false
+        parameters:
+          thinking_config:
+            thinking_level: high
+  librarian_searcher:
+    members:
+      - name: gpt_5_4_nano
+        provider: openai
+        model: gpt-5.4-nano
+        vision: false
+        parameters:
+          max_output_tokens: 1024

@@ -137,8 +137,9 @@ of every session (see [§3](#3-coding-agent-contract-read-this-every-session)).
 ## 6. Config-driven model registry
 
 LLM teams must be upgradable without code changes. All model selection lives in config
-(e.g. `config/models.yaml`), mapping **role → provider + model id + parameters**. No
-model identifier appears in source code.
+(e.g. `config/models.yaml`), mapping **role → one or more model members**. Each member
+has a provider, model id, vision flag, and provider-specific parameters. No model
+identifier appears in source code.
 
 Providers: **OpenAI, Anthropic, Google.** Reviewer-tier and analyst models **must be
 vision-capable** (figures, [§7](#7-schemas--protocols)).
@@ -147,11 +148,11 @@ Default tier mapping (a *config default*, edit freely — not code):
 
 | Role | Tier | Example defaults |
 |---|---|---|
-| Reviewer | top | `claude-opus-4-7`, `gpt-5.5` (reasoning effort high/xhigh), `gemini-3.1-pro` |
-| Analyst lead | top | same as reviewer tier |
-| Analyst worker | medium | `claude-sonnet-4-6`, `gpt-5.5` (effort medium), `gemini-3-flash` |
-| Librarian I/O | medium | `claude-sonnet-4-6`, `gpt-5.5` (effort medium), `gemini-3-flash` |
-| Librarian searcher | light | `claude-haiku-4-5`, `gpt-5.4-nano`, `gemini-3.1-flash-lite` |
+| Reviewer group | top | `claude-opus-4-7`, `gpt-5.5` (reasoning effort high), `gemini-3.5-flash` (thinking high) |
+| Analyst lead | top | `claude-opus-4-7` |
+| Analyst worker group | medium | `claude-sonnet-4-6`, `gpt-5.5` (reasoning effort medium) |
+| Librarian I/O group | medium | `claude-sonnet-4-6`, `gpt-5.5` (reasoning effort medium), `gemini-3.5-flash` (thinking high) |
+| Librarian searcher group | light | `gpt-5.4-nano` |
 | Embeddings (Phase 2) | — | `text-embedding-3-small` *(deferred — see [§10](#10-phase-2-readiness))* |
 
 Implement a thin provider abstraction so a role can be backed by any provider via config.
@@ -325,8 +326,8 @@ Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & docum
 |---|---|---|---|
 | 0 | Done | **Scaffolding & environment** — both repo skeletons, `environment.yml` (conda), `.env.example`, `.gitignore`, root `CLAUDE.md` + `AGENTS.md` symlink, `config/` dir, seed `DOCS.md` in each module folder. | Conda env builds; package imports cleanly. |
 | 1 | Done | **Schemas** — Pydantic v2 models incl. `FigureRef`. | Schema validation tests pass. |
-| 2 | Todo | **Config + model registry** — `config/models.yaml`, provider abstraction (OpenAI / Anthropic / Google), role→model resolution. | A real round-trip call succeeds for each provider via config. |
-| 3 | Todo | **Observability** — LangSmith tracing + per-call cost logging wired into the provider layer. | A traced call appears in LangSmith with recorded cost. |
+| 2 | Done | **Config + model registry** — `config/models.yaml`, provider abstraction (OpenAI / Anthropic / Google), role→model resolution. | A real round-trip call succeeds for each provider via config. |
+| 3 | Done | **Observability** — LangSmith tracing + per-call cost logging wired into the provider layer. | A traced call appears in LangSmith with recorded cost. |
 | 4 | Todo | **Storage** — SQLite layer (papers / memory / query_log), embedding space reserved; read/write modules. | Write then read back a paper record (pytest). |
 | 5 | Todo | **Librarian sources** — `QuerySource` interface + `arxiv`, `nasa_ads`, `web` (Tavily) modules. | Each source returns results for a sample query. |
 | 6 | Todo | **Retrieval** — `RetrievalBackend` with `text_search()` over SQLite; `vector_search()` stub raising `NotImplementedError`. | Store, then text-retrieve, a record. |
@@ -351,6 +352,13 @@ documented stubs.
   marked step 0 (scaffolding & environment) done.
 - 2026-05-27 — Marked step 1 (schemas) done after adding the Pydantic v2
   inter-agent protocol and validation tests.
+- 2026-05-27 — Marked step 2 (config + model registry) done after adding
+  `config/models.yaml`, role resolution, provider-neutral call types, and
+  OpenAI/Anthropic/Google adapters.
+- 2026-05-27 — Corrected §6 defaults and the model registry contract to represent
+  reviewer, analyst, and librarian roles as model groups.
+- 2026-05-27 — Marked step 3 (observability) done after wiring provider calls
+  through optional LangSmith tracing and JSONL cost logging.
 - 2026-05-26 — Added a hard rule in §3 requiring `README.md` to be kept synced in the
   same session as any change that touches what the README describes (status table,
   architecture, defaults, getting-started, contributor rules). Parallels the

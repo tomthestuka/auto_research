@@ -71,11 +71,12 @@ the analysts ("rework this").
         * vector search = Phase 2 stub (raises NotImplementedError)
 ```
 
-Model tiers are **config-driven** (`config/models.yaml`), spanning OpenAI, Anthropic, and
-Google. No model identifier is hardcoded. Defaults: reviewer / analyst-lead = top tier
-(Opus 4.7 · GPT-5.5 · Gemini 3.1 Pro); librarian-I/O & analyst-worker = medium
-(Sonnet 4.6 · GPT-5.5 medium · Gemini 3 Flash); librarian-searcher = light
-(Haiku 4.5 · GPT-5.4-nano · Gemini 3.1 Flash-Lite).
+Model groups are **config-driven** (`config/models.yaml`), spanning OpenAI, Anthropic,
+and Google. No model identifier is hardcoded. Defaults: reviewer group = Opus 4.7,
+GPT-5.5 high effort, and Gemini 3.5 Flash high thinking; analyst lead = Opus 4.7;
+analyst worker group = Sonnet 4.6 and GPT-5.5 medium effort; librarian I/O group =
+Sonnet 4.6, GPT-5.5 medium effort, and Gemini 3.5 Flash thinking; librarian searcher group =
+GPT-5.4-nano.
 
 ---
 
@@ -114,8 +115,8 @@ discipline as `DOCS.md`). Phase 2 items remain documented as deferred stubs in
 |---|---|---|
 | 0 | Done | Scaffolding & environment: repo skeleton, `environment.yml`, `.env.example`, `.gitignore`, `CLAUDE.md`, `AGENTS.md` symlink, `config/`, and seed `DOCS.md` files. |
 | 1 | Done | Schemas: Pydantic v2 message models including `FigureRef`. |
-| 2 | Todo | Config + model registry: `config/models.yaml`, provider abstraction, and role-to-model resolution. |
-| 3 | Todo | Observability: LangSmith tracing and per-call cost logging in the provider layer. |
+| 2 | Done | Config + model registry: `config/models.yaml`, provider abstraction, and role-to-model resolution. |
+| 3 | Done | Observability: LangSmith tracing and per-call cost logging in the provider layer. |
 | 4 | Todo | Storage: SQLite papers, memory, query log, and reserved embedding space. |
 | 5 | Todo | Librarian sources: shared `QuerySource` interface plus arXiv, NASA ADS, and Tavily web modules. |
 | 6 | Todo | Retrieval: `text_search()` over SQLite and `vector_search()` stub. |
