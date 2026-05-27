@@ -228,7 +228,13 @@ only on `research_toolkit`. They are **not** the coding agent running git
 - **Runtime data dir:** a configurable directory **outside both repos**, not committed,
   holding the SQLite file, the figures/artifacts store, and run logs.
 - **Testing:** minimal `pytest` on deterministic parts only (DB ops, query parsing,
-  schema validation). Do not test LLM behavior.
+  schema validation). Do not assert subjective LLM behavior.
+- **Live API tests:** every module that wraps an external API must leave an opt-in
+  real-API test stub alongside deterministic tests. Coding agents should default to
+  running the relevant live API test when working on that integration, unless the human
+  says not to, credentials are unavailable, or network/API spend is inappropriate for the
+  requested change. Live tests must be explicitly gated by an environment variable and
+  write their logs under `logs/dev/step-N/`.
 - **Development test logs:** any test command that intentionally emits logs, live model
   outputs, usage, or cost data writes those artifacts under `logs/dev/step-N/`, sorted by
   build-order step. These logs are local development artifacts, not runtime memory.
@@ -331,7 +337,7 @@ Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & docum
 | 1 | Done | **Schemas** — Pydantic v2 models incl. `FigureRef`. | Schema validation tests pass. |
 | 2 | Done | **Config + model registry** — `config/models.yaml`, provider abstraction (OpenAI / Anthropic / Google), role→model resolution. | A real round-trip call succeeds for each provider via config. |
 | 3 | Done | **Observability** — LangSmith tracing + per-call cost logging wired into the provider layer. | A traced call appears in LangSmith with recorded cost. |
-| 4 | Todo | **Storage** — SQLite layer (papers / memory / query_log), embedding space reserved; read/write modules. | Write then read back a paper record (pytest). |
+| 4 | Done | **Storage** — SQLite layer (papers / memory / query_log), embedding space reserved; read/write modules. | Write then read back a paper record (pytest). |
 | 5 | Todo | **Librarian sources** — `QuerySource` interface + `arxiv`, `nasa_ads`, `web` (Tavily) modules. | Each source returns results for a sample query. |
 | 6 | Todo | **Retrieval** — `RetrievalBackend` with `text_search()` over SQLite; `vector_search()` stub raising `NotImplementedError`. | Store, then text-retrieve, a record. |
 | 7 | Todo | **Runtime prompts** — one `prompts/<role>.md` per role. | Each prompt loads at runtime; no governance file referenced. |
@@ -364,6 +370,10 @@ documented stubs.
   through optional LangSmith tracing and JSONL cost logging.
 - 2026-05-27 — Added the `logs/dev/step-N/` convention for development test logs
   and renamed configured per-million-token unit prices to `priceMTk`.
+- 2026-05-27 — Added a testing rule requiring opt-in real API test stubs for
+  external integrations and a default preference for running them when relevant.
+- 2026-05-27 — Marked step 4 (storage) done after adding the SQLite layer,
+  reserved embedding space, local PDF ingestion, and deterministic storage tests.
 - 2026-05-26 — Added a hard rule in §3 requiring `README.md` to be kept synced in the
   same session as any change that touches what the README describes (status table,
   architecture, defaults, getting-started, contributor rules). Parallels the

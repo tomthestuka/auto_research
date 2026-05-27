@@ -37,6 +37,7 @@ class FakeProvider:
 
 def test_model_handle_appends_cost_ledger_row(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
     handle = ModelHandle(
         role="analyst_worker",
         config=RoleModelConfig(

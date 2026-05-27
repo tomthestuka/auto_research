@@ -150,6 +150,7 @@ class FakeProvider:
 
 def test_model_handle_normalizes_messages_and_delegates(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
     handle = ModelHandle(
         role="reviewer",
         config=RoleModelConfig(name="fake", provider="openai", model="fake-model", vision=True),
@@ -165,6 +166,7 @@ def test_model_handle_normalizes_messages_and_delegates(tmp_path, monkeypatch):
 
 def test_model_handle_rejects_images_for_non_vision_role(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
     handle = ModelHandle(
         role="librarian_searcher",
         config=RoleModelConfig(name="fake", provider="openai", model="fake-model", vision=False),

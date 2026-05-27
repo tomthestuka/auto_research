@@ -117,7 +117,7 @@ discipline as `DOCS.md`). Phase 2 items remain documented as deferred stubs in
 | 1 | Done | Schemas: Pydantic v2 message models including `FigureRef`. |
 | 2 | Done | Config + model registry: `config/models.yaml`, provider abstraction, and role-to-model resolution. |
 | 3 | Done | Observability: LangSmith tracing and per-call cost logging in the provider layer. |
-| 4 | Todo | Storage: SQLite papers, memory, query log, and reserved embedding space. |
+| 4 | Done | Storage: SQLite papers, memory, query log, and reserved embedding space. |
 | 5 | Todo | Librarian sources: shared `QuerySource` interface plus arXiv, NASA ADS, and Tavily web modules. |
 | 6 | Todo | Retrieval: `text_search()` over SQLite and `vector_search()` stub. |
 | 7 | Todo | Runtime prompts: one `prompts/<role>.md` file per role. |
@@ -145,6 +145,10 @@ Keys expected in `.env` (never committed): `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
 
 Runtime data (the SQLite file, the figures/artifacts store, run logs) lives in a
 configurable directory **outside both repos** and is not committed.
+For the current development runtime, `.env` may set
+`AUTO_RESEARCH_RUNTIME_DIR=/data/fzhou/ar_runtime/test_runtime`, yielding
+`/data/fzhou/ar_runtime/test_runtime/auto_research.sqlite3`. Locally supplied
+papers live in `/data/fzhou/ar_runtime/papers`.
 
 ---
 
@@ -177,6 +181,9 @@ from auto_research import run_request   # interface; see module DOCS.md
   commit.
 - `CLAUDE.md` and `DOCS.md` are **build-time only** — never fed to runtime agents, which
   are configured solely from `prompts/`.
+- External API integrations keep opt-in live test stubs, and coding agents default to
+  running the relevant live API checks unless told otherwise or blocked by credentials,
+  network, or spend concerns.
 - Development test logs, live model outputs, usage, and cost ledgers go under
   `logs/dev/step-N/`, sorted by build-order step.
 
