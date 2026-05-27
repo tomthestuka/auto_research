@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -144,6 +145,38 @@ def paper_from_local_file(path: str | Path) -> PaperRecord:
     )
 
 
+def paper_from_search_result(result, path: str | Path) -> PaperRecord:
+    """Create a paper record from source metadata plus a downloaded file."""
+
+    file_path = Path(path)
+    digest = sha256_file(file_path)
+    source_id = (
+        result.identifiers.get("arxiv_id")
+        or result.identifiers.get("bibcode")
+        or result.identifiers.get("doi")
+        or digest
+    )
+    return PaperRecord(
+        source=result.source,
+        source_id=source_id,
+        title=result.title,
+        authors=result.authors,
+        year=result.published.year if result.published else None,
+        abstract=result.abstract,
+        keywords=result.keywords,
+        local_path=file_path,
+        sha256=digest,
+    )
+
+
+def safe_filename(name: str, *, suffix: str = ".pdf") -> str:
+    """Return a filesystem-safe filename."""
+
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return f"{cleaned[:180] or 'paper'}{suffix}"
+
+
 class Storage:
     """Small async wrapper around a SQLite database file."""
 
@@ -282,6 +315,17 @@ async def ingest_local_papers(storage: Storage, papers_dir: str | Path) -> list[
         if paper is not None:
             inserted.append(paper)
     return inserted
+
+
+async def librarian_io_enrich_stub(storage: Storage, paper_id: int) -> None:
+    """Placeholder for librarian I/O PDF reading and abstraction.
+
+    Phase 1 only records metadata and local files. The librarian I/O agent will
+    later read downloaded PDFs, produce summaries/keywords, and write memory
+    records through the storage API.
+    """
+
+    _ = (storage, paper_id)
 
 
 def _paper_from_row(row: sqlite3.Row) -> StoredPaper:

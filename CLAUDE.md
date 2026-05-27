@@ -237,7 +237,8 @@ only on `research_toolkit`. They are **not** the coding agent running git
   write their logs under `logs/dev/step-N/`.
 - **Development test logs:** any test command that intentionally emits logs, live model
   outputs, usage, or cost data writes those artifacts under `logs/dev/step-N/`, sorted by
-  build-order step. These logs are local development artifacts, not runtime memory.
+  build-order step. Prefer JSONL for machine-readable records plus Markdown summaries
+  for human inspection. These logs are local development artifacts, not runtime memory.
 
 ---
 
@@ -338,7 +339,7 @@ Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & docum
 | 2 | Done | **Config + model registry** — `config/models.yaml`, provider abstraction (OpenAI / Anthropic / Google), role→model resolution. | A real round-trip call succeeds for each provider via config. |
 | 3 | Done | **Observability** — LangSmith tracing + per-call cost logging wired into the provider layer. | A traced call appears in LangSmith with recorded cost. |
 | 4 | Done | **Storage** — SQLite layer (papers / memory / query_log), embedding space reserved; read/write modules. | Write then read back a paper record (pytest). |
-| 5 | Todo | **Librarian sources** — `QuerySource` interface + `arxiv`, `nasa_ads`, `web` (Tavily) modules. | Each source returns results for a sample query. |
+| 5 | Done | **Librarian sources** — `QuerySource` interface + `arxiv`, `nasa_ads`, `web` (Tavily) modules. | Each source returns results for a sample query. |
 | 6 | Todo | **Retrieval** — `RetrievalBackend` with `text_search()` over SQLite; `vector_search()` stub raising `NotImplementedError`. | Store, then text-retrieve, a record. |
 | 7 | Todo | **Runtime prompts** — one `prompts/<role>.md` per role. | Each prompt loads at runtime; no governance file referenced. |
 | 8 | Todo | **Agent roles** — thin wrappers: librarian I/O, librarian searcher, analyst worker, analyst lead, reviewer (each loads its prompt, uses schemas + config models). | Each role runs one task in isolation. |
@@ -372,8 +373,12 @@ documented stubs.
   and renamed configured per-million-token unit prices to `priceMTk`.
 - 2026-05-27 — Added a testing rule requiring opt-in real API test stubs for
   external integrations and a default preference for running them when relevant.
+- 2026-05-27 — Clarified that development test logs should include
+  human-friendly Markdown summaries alongside machine-readable JSONL where useful.
 - 2026-05-27 — Marked step 4 (storage) done after adding the SQLite layer,
   reserved embedding space, local PDF ingestion, and deterministic storage tests.
+- 2026-05-27 — Marked step 5 (librarian sources) done after adding arXiv, NASA
+  ADS, and Tavily source adapters plus live sample-query verification.
 - 2026-05-26 — Added a hard rule in §3 requiring `README.md` to be kept synced in the
   same session as any change that touches what the README describes (status table,
   architecture, defaults, getting-started, contributor rules). Parallels the

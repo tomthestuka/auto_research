@@ -35,6 +35,11 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   metadata but preserve the original row id.
 - Local PDFs are ingested as `source="local_file"`, `source_id=<sha256>`, title
   from filename stem, `local_path`, and `sha256`.
+- Downloaded source PDFs are ingested with source metadata when available. For
+  example, arXiv downloads use `source="arxiv"` and `source_id=<arxiv_id>`.
+- `librarian_io_enrich_stub()` is the documented handoff point for the librarian
+  I/O team to read downloaded PDFs, extract abstractions/keywords, and write
+  `memory` rows. It intentionally does no work until agent roles land.
 - Tests use temp dirs and must not touch the real runtime DB.
 
 ## Dependencies
@@ -62,11 +67,17 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
 - `sha256_file(path: str | Path) -> str` — returns a file digest.
 - `paper_from_local_file(path: str | Path) -> PaperRecord` — builds minimal
   metadata for a local PDF or other file.
+- `paper_from_search_result(result: SearchResult, path: str | Path) ->
+  PaperRecord` — builds storage metadata from a source search result plus a
+  downloaded PDF path.
 - `Storage(path: str | Path | None = None)` — SQLite wrapper. Methods:
   `initialize()`, `upsert_paper(paper)`, `get_paper(paper_id)`,
   `list_papers()`, `insert_memory(memory)`, `log_query(query)`.
 - `ingest_local_papers(storage: Storage, papers_dir: str | Path) ->
   list[StoredPaper]` — upserts all `*.pdf` files in a directory.
+- `librarian_io_enrich_stub(storage: Storage, paper_id: int) -> None` —
+  no-op Phase 1 stub where the librarian I/O team will later read PDFs and write
+  memory abstractions.
 - `auto_research.storage.ingest_local.ingest_and_log(papers_dir: Path) -> dict`
   — developer utility that ingests PDFs and writes a `logs/dev/step-4/` JSON
   log.
@@ -79,4 +90,6 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   deterministic storage tests. Ingested 10 local PDFs from
   `/data/fzhou/ar_runtime/papers` into
   `/data/fzhou/ar_runtime/test_runtime/auto_research.sqlite3`.
+- 2026-05-27 — Added source-result ingestion and the librarian I/O enrichment
+  stub for future PDF reading/abstraction.
 - 2026-05-26 — Folder seeded during step 0.

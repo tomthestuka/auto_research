@@ -9,7 +9,9 @@ from auto_research.storage import (
     Storage,
     database_path,
     ingest_local_papers,
+    librarian_io_enrich_stub,
     paper_from_local_file,
+    paper_from_search_result,
 )
 
 
@@ -113,3 +115,36 @@ def test_ingest_local_papers_reads_pdf_directory(tmp_path):
     papers = asyncio.run(run())
 
     assert [paper.title for paper in papers] == ["One", "Three"]
+
+
+def test_paper_from_search_result_preserves_source_metadata(tmp_path):
+    from auto_research.schemas import SearchResult
+
+    path = tmp_path / "paper.pdf"
+    path.write_bytes(b"pdf")
+    result = SearchResult(
+        source="arxiv",
+        title="Metadata Title",
+        authors=["A. Author"],
+        abstract="Abstract",
+        identifiers={"arxiv_id": "1234.5678"},
+        keywords=["astro-ph.HE"],
+    )
+
+    paper = paper_from_search_result(result, path)
+
+    assert paper.source == "arxiv"
+    assert paper.source_id == "1234.5678"
+    assert paper.title == "Metadata Title"
+    assert paper.authors == ["A. Author"]
+    assert paper.sha256 is not None
+
+
+def test_librarian_io_enrich_stub_is_callable(tmp_path):
+    db = Storage(tmp_path / "test.sqlite3")
+
+    async def run():
+        await db.initialize()
+        await librarian_io_enrich_stub(db, 1)
+
+    asyncio.run(run())

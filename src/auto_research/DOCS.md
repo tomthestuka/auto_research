@@ -44,6 +44,8 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
   release.
 
 ## Changelog
+- 2026-05-27 — Step 5 completed: `auto_research.sources` now exposes the shared
+  `QuerySource` protocol plus arXiv, NASA ADS, and Tavily source adapters.
 - 2026-05-27 — Step 4 completed: `auto_research.storage` now provides SQLite
   schema initialization, paper/memory/query-log writes, local PDF ingestion, and
   reserved embedding space.

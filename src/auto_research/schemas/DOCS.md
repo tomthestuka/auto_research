@@ -30,6 +30,10 @@ carried by **reference** (`FigureRef`), never embedded
 - `SearchSource` is currently one of `"arxiv"`, `"nasa_ads"`, `"web"`, or
   `"local"`.
 - `SearchRequest.max_results` is bounded to `1..100`.
+- `SearchResult.pdf_url` is optional and is used by source adapters that can
+  offer a direct paper PDF download.
+- `SearchResult.full_text_links` carries resolver/source-button candidates such
+  as ADS `esource` links; `pdf_url` is the selected PDF-like download target.
 - `ReviewVerdict.needs_more_literature` and
   `ReviewVerdict.needs_analysis_rework` are the schema-level flags used by the
   Phase 1 feedback edges.
@@ -50,14 +54,17 @@ carried by **reference** (`FigureRef`), never embedded
   reviewer loop.
 - `SearchSource` — literal source label: `"arxiv"`, `"nasa_ads"`, `"web"`, or
   `"local"`.
+- `FullTextLink(link_type: str, url: HttpUrl, title: str | None = None)` —
+  candidate full-text or source link.
 - `SearchRequest(query: str, sources: list[SearchSource] = [],
   max_results: int = 10, since: date | None = None)` — request to search
   literature or local memory.
 - `SearchResult(source: SearchSource, title: str, url: HttpUrl | None = None,
   abstract: str | None = None, authors: list[str] = [],
   published: date | None = None, identifiers: dict[str, str] = {},
-  keywords: list[str] = [])` — normalized metadata for one paper or
-  authoritative web result.
+  keywords: list[str] = [], pdf_url: HttpUrl | None = None,
+  full_text_links: list[FullTextLink] = [])` — normalized metadata for one
+  paper or authoritative web result.
 - `AnalysisTask(question: str, instructions: str | None = None,
   literature: list[SearchResult] = [])` — work item sent to analyst workers.
 - `AnalystReport(summary: str, findings: list[str] = [],
@@ -72,4 +79,8 @@ carried by **reference** (`FigureRef`), never embedded
 - 2026-05-27 — Implemented the step-1 Pydantic protocol: base model, figure
   references, research requests, search messages, analysis messages, and review
   verdicts.
+- 2026-05-27 — Added optional `SearchResult.pdf_url` so source modules can hand
+  direct paper downloads to storage ingestion.
+- 2026-05-27 — Added `FullTextLink` and `SearchResult.full_text_links` for ADS
+  resolver/source-button candidates.
 - 2026-05-26 — Folder seeded during step 0.
