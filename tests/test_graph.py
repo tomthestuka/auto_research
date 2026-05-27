@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from langgraph.graph import END
 
 from auto_research.graph import build_graph
+from auto_research.retrieval import RetrievalBackend
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -18,13 +20,53 @@ from auto_research.schemas import (
 )
 
 
-class FakeLibrarian:
+class FakeIOAgent:
+    """Fake IO agent: composes a trivial search strategy and records calls."""
+
     def __init__(self):
-        self.queries: list[str] = []
+        self.compose_calls: int = 0
+        self.ingest_calls: int = 0
+        self._search_count: int = 0
+
+    async def compose_search_strategy(
+        self, request: ResearchRequest, *, follow_up=None
+    ) -> SearchRequest:
+        self.compose_calls += 1
+        query = request.question
+        if follow_up:
+            query = f"{query} | reviewer follow-up: {follow_up}"
+        return SearchRequest(query=query)
 
     async def search(self, request: SearchRequest) -> list[SearchResult]:
-        self.queries.append(request.query)
-        return [SearchResult(source="arxiv", title=f"Paper {len(self.queries)}")]
+        self._search_count += 1
+        return [SearchResult(source="arxiv", title=f"Paper {self._search_count}")]
+
+    async def ingest_results(self, results: list[SearchResult]) -> None:
+        self.ingest_calls += 1
+
+
+class FakeRetrieval:
+    """Fake retrieval backend: returns a synthetic local path per call."""
+
+    def __init__(self):
+        self._call_count: int = 0
+
+    async def text_search(self, query: str, *, limit: int = 10):
+        from auto_research.retrieval import MemoryHit
+
+        self._call_count += 1
+        return [
+            MemoryHit(
+                kind="paper",
+                id=self._call_count,
+                score=1,
+                title=f"FakePaper {self._call_count}",
+                local_path=Path(f"/fake/paper_{self._call_count}.pdf"),
+            )
+        ]
+
+    async def vector_search(self, query: str, *, limit: int = 10):
+        raise NotImplementedError
 
 
 class FakeReviewer:
@@ -95,12 +137,14 @@ def _invoke(graph, request: ResearchRequest, *, max_iterations: int = 3):
 
 
 def test_graph_runs_full_loop_in_single_pass():
-    librarian = FakeLibrarian()
+    io_agent = FakeIOAgent()
+    retrieval = FakeRetrieval()
     reviewer = FakeReviewer()
     lead = FakeLead()
     graph = build_graph(
         reviewer=reviewer,
-        librarian=librarian,
+        io_agent=io_agent,
+        retrieval=retrieval,
         workers=[FakeWorker("w1"), FakeWorker("w2")],
         lead=lead,
     )
@@ -113,14 +157,20 @@ def test_graph_runs_full_loop_in_single_pass():
     assert state["report"].summary == "final 1"
     assert reviewer.lit_calls == 1
     assert reviewer.analysis_calls == 1
+    assert io_agent.compose_calls == 1
+    assert io_agent.ingest_calls == 1
+    # literature is a list of Paths from the retrieval backend
+    assert state["literature"] == [Path("/fake/paper_1.pdf")]
 
 
 def test_graph_literature_feedback_capped_at_three():
-    librarian = FakeLibrarian()
+    io_agent = FakeIOAgent()
+    retrieval = FakeRetrieval()
     reviewer = FakeReviewer(lit_pass_after=99, analysis_pass_after=1)
     graph = build_graph(
         reviewer=reviewer,
-        librarian=librarian,
+        io_agent=io_agent,
+        retrieval=retrieval,
         workers=[FakeWorker()],
         lead=FakeLead(),
     )
@@ -128,21 +178,21 @@ def test_graph_literature_feedback_capped_at_three():
     state = _invoke(graph, ResearchRequest(question="What is X?"))
 
     assert state["lit_iterations"] == 3
-    assert librarian.queries[0] == "What is X?"
-    # Reviewer follow-up is fed back into the next query.
-    assert "reviewer follow-up" in librarian.queries[1]
+    assert io_agent.compose_calls == 3
+    assert io_agent.ingest_calls == 3
     assert state["analysis_iterations"] == 1
     assert state["verdict"].accepted is True
 
 
 def test_graph_analysis_feedback_capped_at_three():
-    librarian = FakeLibrarian()
+    io_agent = FakeIOAgent()
     reviewer = FakeReviewer(lit_pass_after=1, analysis_pass_after=99)
     lead = FakeLead()
     workers = [FakeWorker("w1")]
     graph = build_graph(
         reviewer=reviewer,
-        librarian=librarian,
+        io_agent=io_agent,
+        retrieval=FakeRetrieval(),
         workers=workers,
         lead=lead,
     )
@@ -157,11 +207,11 @@ def test_graph_analysis_feedback_capped_at_three():
 
 
 def test_graph_respects_custom_max_iterations():
-    librarian = FakeLibrarian()
     reviewer = FakeReviewer(lit_pass_after=99, analysis_pass_after=1)
     graph = build_graph(
         reviewer=reviewer,
-        librarian=librarian,
+        io_agent=FakeIOAgent(),
+        retrieval=FakeRetrieval(),
         workers=[FakeWorker()],
         lead=FakeLead(),
         max_iterations=2,
@@ -176,7 +226,8 @@ def test_build_graph_rejects_zero_max_iterations():
     with pytest.raises(ValueError, match="max_iterations"):
         build_graph(
             reviewer=FakeReviewer(),
-            librarian=FakeLibrarian(),
+            io_agent=FakeIOAgent(),
+            retrieval=FakeRetrieval(),
             workers=[FakeWorker()],
             lead=FakeLead(),
             max_iterations=0,

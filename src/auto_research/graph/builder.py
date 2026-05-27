@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Protocol
 
 from langgraph.graph import END, START, StateGraph
 
 from auto_research.consensus import ConsensusStrategy, DebateToConverge, LeadLike, WorkerLike
 from auto_research.graph.state import ResearchState
+from auto_research.retrieval import RetrievalBackend, SqliteRetrievalBackend, text_search_paths
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -19,11 +21,22 @@ from auto_research.schemas import (
 )
 
 
-class LibrarianLike(Protocol):
-    """Minimal interface used by the literature node."""
+class IOAgentLike(Protocol):
+    """Minimal interface required of the librarian I/O agent."""
+
+    async def compose_search_strategy(
+        self,
+        request: ResearchRequest,
+        *,
+        follow_up: str | None = None,
+    ) -> SearchRequest:
+        """Compose a focused search strategy from a research request."""
 
     async def search(self, request: SearchRequest) -> list[SearchResult]:
-        """Return literature for one search request."""
+        """Query external sources and return raw results."""
+
+    async def ingest_results(self, results: list[SearchResult]) -> None:
+        """Download, abstract, and store each search result."""
 
 
 class ReviewerLike(Protocol):
@@ -33,7 +46,7 @@ class ReviewerLike(Protocol):
         self,
         request: ResearchRequest,
         *,
-        literature: Sequence[SearchResult] = (),
+        literature: Sequence[Path] = (),
         report: AnalystReport | None = None,
     ) -> ReviewVerdict:
         """Return a review verdict for the supplied state."""
@@ -42,7 +55,8 @@ class ReviewerLike(Protocol):
 def build_graph(
     *,
     reviewer: ReviewerLike,
-    librarian: LibrarianLike,
+    io_agent: IOAgentLike,
+    retrieval: RetrievalBackend | None = None,
     workers: Sequence[WorkerLike],
     lead: LeadLike,
     consensus: ConsensusStrategy | None = None,
@@ -54,22 +68,34 @@ def build_graph(
 
     - paper-search review: ``review_literature -> literature``
     - analysis review: ``review_analysis -> analysis``
+
+    The literature node follows a four-step pipeline:
+    IO agent composes search strategy → IO agent queries online sources →
+    IO agent downloads and abstracts results → ``text_search_paths()`` queries
+    local SQLite (pure Python, no LLM). The reviewer receives local PDF paths
+    and loads them as full-document attachments.
     """
 
     if max_iterations < 1:
         raise ValueError("max_iterations must be at least 1")
     consensus_strategy = consensus or DebateToConverge(max_rounds=max_iterations)
+    _retrieval = retrieval or SqliteRetrievalBackend()
 
     async def literature_node(state: ResearchState) -> dict[str, Any]:
-        request = state["request"]
-        query = request.question
         prior = state.get("verdict")
-        if prior and prior.needs_more_literature and prior.follow_up:
-            query = f"{query} | reviewer follow-up: {prior.follow_up}"
-        search_request = SearchRequest(query=query)
-        results = await librarian.search(search_request)
+        follow_up = prior.follow_up if prior and prior.needs_more_literature else None
+        search_request = await io_agent.compose_search_strategy(
+            state["request"], follow_up=follow_up
+        )
+        raw = await io_agent.search(search_request)
+        await io_agent.ingest_results(raw)
+        paths = await text_search_paths(
+            search_request.query,
+            limit=search_request.max_results,
+            backend=_retrieval,
+        )
         return {
-            "literature": list(results),
+            "literature": paths,
             "lit_iterations": state.get("lit_iterations", 0) + 1,
         }
 
@@ -92,7 +118,7 @@ def build_graph(
         task = AnalysisTask(
             question=request.question,
             instructions="\n\n".join(instructions_parts) or None,
-            literature=state.get("literature", []),
+            previous_report=state.get("report"),
         )
         report = await consensus_strategy.run(workers, lead, task)
         return {

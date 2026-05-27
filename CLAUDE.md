@@ -321,6 +321,12 @@ Analyst workers reach agreement via bounded debate, behind a swappable
 - **Lead-scientist group:** the idea-generation team that reads the whole knowledge base.
 - **Sandbox hardening:** containers / seccomp / egress control beyond the Phase 1
   subprocess sandbox.
+- **IO search iteration:** `LibrarianIOAgent.evaluate_search_results()` returns
+  `accepted=True` in Phase 1. When activated: the IO lead evaluates the quality of
+  online search results, re-calls `compose_search_strategy()` with refinement context,
+  and re-searches up to `orchestration.yaml::io_search_max_iterations` additional times.
+  The loop lives inside `ingest_results()`, guarded by the stub verdict. Activate by
+  replacing the stub with a real LLM call and raising `io_search_max_iterations` above 1.
 
 ---
 
@@ -404,3 +410,13 @@ documented stubs.
   state machine with the two capped feedback edges, the deterministic full-loop
   / cap / early-exit tests, and the opt-in live graph test driving real
   reviewer / worker / lead calls.
+- 2026-05-27 — Architectural correction: IO team now owns the full literature
+  pipeline. `literature_node` calls `io_agent.compose_search_strategy()` →
+  `io_agent.search()` → `io_agent.ingest_results()` (download + IO consensus
+  abstraction + `mem_abbrev` to DB) → `searcher.search()` (local SQLite).
+  Reviewer receives only local SQLite results, with `local_path` populated for
+  full-PDF reading. `SearchResult.local_path` added. `memory.mem_abbrev` column
+  added (with migration). `IODebateToConverge` + IO protocols added to consensus.
+  `evaluate_search_results()` deferred stub added. `LibrarianLike` replaced by
+  `IOAgentLike` + `SearcherLike`. §13 documents IO search iteration stub.
+  94 deterministic tests pass.

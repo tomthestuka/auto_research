@@ -13,7 +13,6 @@ from auto_research.agents.roles import (
     AnalystWorkerAgent,
     CallableModel,
     LibrarianIOAgent,
-    LibrarianSearcherAgent,
     ReviewerAgent,
 )
 
@@ -24,7 +23,6 @@ __all__ = [
     "CallableModel",
     "FORBIDDEN_RUNTIME_REFERENCES",
     "LibrarianIOAgent",
-    "LibrarianSearcherAgent",
     "PROMPT_FILENAMES",
     "PromptRole",
     "ReviewerAgent",

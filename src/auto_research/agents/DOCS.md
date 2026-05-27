@@ -3,8 +3,11 @@
 ## Purpose
 Thin wrappers around the provider layer that bind a role to its prompt
 (`prompts/<role>.md`), its allowed tools, and its expected I/O schemas. One class
-per role — reviewer, librarian I/O, librarian searcher, analyst worker, analyst
-lead ([CLAUDE.md §10](../../../CLAUDE.md#10-agent-architecture--process-loop)).
+per role — reviewer, librarian I/O, analyst worker, analyst lead
+([CLAUDE.md §10](../../../CLAUDE.md#10-agent-architecture--process-loop)).
+The librarian searcher role has been replaced by the pure-Python `text_search_paths()`
+and `vector_search_paths()` tools in `auto_research.retrieval` — no LLM is involved
+in local retrieval.
 
 ## Architecture
 Each role is a small async class:
@@ -44,13 +47,39 @@ Prompt loading:
 
 Role wrappers:
 - `ReviewerAgent.review(request, *, literature=(), report=None) ->
-  ReviewVerdict`.
-- `LibrarianIOAgent.search(request) -> list[SearchResult]`.
-- `LibrarianIOAgent.ingest_document(document, *, paper_id=None,
-  instructions=None) -> MemoryRecord` passes a `DocumentRef` attachment to the
-  configured I/O model and returns one memory abstraction. It does not convert
-  PDFs to text in Python; bytes are loaded only at the provider-call boundary.
-- `LibrarianSearcherAgent.search(request) -> list[SearchResult]`.
+  ReviewVerdict`. `literature` is now `Sequence[Path]` — local PDF paths returned
+  by `text_search_paths()`. Each existing path is loaded as a `DocumentRef`
+  attachment so the model reads the full paper.
+- `LibrarianIOAgent(sources, storage, ...) -> LibrarianIOAgent`. Constructor
+  now accepts a `storage: Storage | None` (defaults to `Storage()`). The IO
+  agent satisfies both `IOAbstractionWorkerLike` and `IOAbstractionLeadLike`
+  protocols for use in `IODebateToConverge`.
+- `LibrarianIOAgent.compose_search_strategy(request, *, follow_up=None) ->
+  SearchRequest` — LLM call. Translates a research request (and optional
+  reviewer follow-up) into a focused `SearchRequest` (query, sources, limit).
+  Called by the graph before each online search pass.
+- `LibrarianIOAgent.search(request) -> list[SearchResult]` — no LLM call.
+  Queries external sources and returns raw results. Intent-blind: does not
+  filter or rank.
+- `LibrarianIOAgent.ingest_document(document, *, peer_abstracts=(), paper_id=None,
+  instructions=None) -> MemoryRecord` — LLM call. Passes a `DocumentRef`
+  attachment to the configured I/O model and returns one memory abstraction.
+  `peer_abstracts` are serialized into the payload for IO debate rounds.
+- `LibrarianIOAgent.abstract_document(document, *, peer_abstracts=()) ->
+  MemoryRecord` — worker shim over `ingest_document()`. Used by
+  `IODebateToConverge` as the worker-role method.
+- `LibrarianIOAgent.judge_abstract_convergence(document, abstracts, *,
+  round_index, max_rounds) -> ReviewVerdict` — lead-role convergence check for
+  IO debate.
+- `LibrarianIOAgent.adjudicate_abstract(document, abstracts) -> MemoryRecord`
+  — lead-role synthesis of the final memory record from worker abstractions.
+- `LibrarianIOAgent.ingest_results(results) -> None` — downloads, abstracts,
+  and stores each `SearchResult`. For PDF-bearing results: downloads via
+  `download_and_ingest_result()`, runs `IODebateToConverge` (2 worker passes +
+  lead), writes `mem_abbrev` to storage. For results without a PDF: stores
+  metadata only with `result.abstract` as `mem_abbrev` (no LLM call).
+- `LibrarianIOAgent.evaluate_search_results(request, results) -> ReviewVerdict`
+  — Phase 1 stub returning `accepted=True`. See CLAUDE.md §13.
 - `AnalystWorkerAgent.analyze(task, *, peer_reports=()) -> AnalystReport`.
 - `AnalystWorkerAgent.request_tools(task) -> list[ToolCallRequest]` captures
   requested shell/tool/database actions without executing them.
@@ -74,9 +103,8 @@ Role wrappers:
   `auto_research.observability`.
 
 ## Dictionary-level reference
-- `PromptRole` — literal type for the five Phase 1 runtime roles:
-  `reviewer`, `librarian_io`, `librarian_searcher`, `analyst_worker`,
-  `analyst_lead`.
+- `PromptRole` — literal type for the four Phase 1 runtime roles:
+  `reviewer`, `librarian_io`, `analyst_worker`, `analyst_lead`.
 - `PROMPT_FILENAMES` — role-to-filename mapping used by the loader.
 - `FORBIDDEN_RUNTIME_REFERENCES` — tuple of build-time governance filenames that
   runtime prompts must not reference.
@@ -88,17 +116,34 @@ Role wrappers:
 - `AgentRole` — base class that loads the role prompt, selects the model, sends
   task JSON, validates JSON responses, and stores the most recent
   `ModelResponse` on `last_response` for logging.
-- `ReviewerAgent` — reviewer wrapper. Method: `review()`.
-- `LibrarianIOAgent` — external-source librarian wrapper. Method: `search()`.
-  Method: `ingest_document()` for direct document attachment ingestion.
-- `LibrarianSearcherAgent` — local-memory librarian wrapper. Method:
-  `search()`.
+- `ReviewerAgent` — reviewer wrapper. Method: `review(request, *, literature: Sequence[Path], report)`.
+  Loads each path as a `DocumentRef` attachment for full-text access.
+- `LibrarianIOAgent(sources, storage, ...)` — IO librarian. Constructor accepts
+  injected `sources` and `storage`. Methods: `compose_search_strategy()`,
+  `search()`, `ingest_document()`, `abstract_document()`,
+  `judge_abstract_convergence()`, `adjudicate_abstract()`, `ingest_results()`,
+  `evaluate_search_results()`.
 - `AnalystWorkerAgent` — analyst worker wrapper. Method: `analyze()`.
   Method: `request_tools()`.
 - `AnalystLeadAgent` — analyst lead wrapper. Method: `adjudicate()`.
   Methods: `judge_convergence()`, `review_tool_requests()`.
 
 ## Changelog
+- 2026-05-27 — Removed `LibrarianSearcherAgent`. Local retrieval is now a
+  pure-Python tool (`text_search_paths()` / `vector_search_paths()` in
+  `auto_research.retrieval`) — no LLM involved. `ReviewerAgent.review()`
+  `literature` parameter changed from `Sequence[SearchResult]` to
+  `Sequence[Path]`; reviewer loads PDFs directly from paths. Removed
+  `librarian_searcher` prompt file and config role. `PromptRole` is now four roles.
+- 2026-05-27 — IO team architectural correction: `LibrarianIOAgent` gains
+  `compose_search_strategy()` (LLM call, forms `SearchRequest` from research
+  intent), `ingest_results()` (download + `IODebateToConverge` + storage write),
+  `abstract_document()` / `judge_abstract_convergence()` / `adjudicate_abstract()`
+  (IO debate worker/lead roles), and `evaluate_search_results()` (Phase 1 stub).
+  `ingest_document()` extended with `peer_abstracts`. `LibrarianIOAgent` now
+  carries a `storage: Storage` attribute. `ReviewerAgent.review()` attaches
+  downloaded PDFs via `local_path` for full-text review. `LibrarianSearcherAgent.
+  search()` post-populates `SearchResult.local_path`.
 - 2026-05-27 — Step 8 completed: added async role wrappers for reviewer,
   librarian I/O, librarian searcher, analyst worker, and analyst lead. The
   wrappers load runtime prompts, call configured model groups, validate schema

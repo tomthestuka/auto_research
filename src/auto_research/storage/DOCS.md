@@ -27,7 +27,12 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
 - Tables:
   - `papers(id, source, source_id, title, authors_json, year, abstract,
     keywords_json, local_path, sha256, inserted_at, embedding)`.
-  - `memory(id, paper_id, summary, tags_json, created_at, embedding)`.
+  - `memory(id, paper_id, summary, tags_json, mem_abbrev, created_at, embedding)`.
+    `mem_abbrev` is the IO-team consensus-produced memory abbreviation written by
+    `LibrarianIOAgent.ingest_results()`. For papers with a PDF, it is a rich
+    summary produced by `IODebateToConverge`; for papers without a PDF, it is
+    the original `SearchResult.abstract`. Added via additive migration in
+    `Storage._initialize()`.
   - `query_log(id, role, query, source, n_results, latency_ms, created_at)`.
   - `embeddings(id, owner_table, owner_id, embedding, created_at)` reserved for
     Phase 2.
@@ -57,7 +62,9 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   model.
 - `StoredPaper(PaperRecord)` — read model with `id` and `inserted_at`.
 - `MemoryRecord(paper_id: int | None = None, summary: str, tags: list[str] =
-  [])` — memory input model.
+  [], mem_abbrev: str | None = None)` — memory input model. `mem_abbrev` is
+  the IO-team consensus abbreviation written to the new `memory.mem_abbrev`
+  column.
 - `QueryLogRecord(role: str, query: str, source: str, n_results: int,
   latency_ms: float)` — query log input model.
 - `runtime_data_dir() -> Path` — returns `AUTO_RESEARCH_RUNTIME_DIR` or
@@ -70,6 +77,9 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
 - `paper_from_search_result(result: SearchResult, path: str | Path) ->
   PaperRecord` — builds storage metadata from a source search result plus a
   downloaded PDF path.
+- `paper_record_from_result(result: SearchResult) -> PaperRecord` — builds
+  a metadata-only record (no local file) from a search result. Dedup key is
+  the first of `arxiv_id / bibcode / doi / str(url) / title[:200]`.
 - `Storage(path: str | Path | None = None)` — SQLite wrapper. Methods:
   `initialize()`, `upsert_paper(paper)`, `get_paper(paper_id)`,
   `list_papers()`, `insert_memory(memory)`,
@@ -77,8 +87,8 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
 - `ingest_local_papers(storage: Storage, papers_dir: str | Path) ->
   list[StoredPaper]` — upserts all `*.pdf` files in a directory.
 - `librarian_io_enrich_stub(storage: Storage, paper_id: int) -> None` —
-  no-op Phase 1 stub where the librarian I/O team will later read PDFs and write
-  memory abstractions.
+  no-op stub; superseded by `LibrarianIOAgent.ingest_results()` which now
+  handles PDF download, IO debate abstraction, and memory writes.
 - `auto_research.storage.ingest_local.ingest_and_log(papers_dir: Path) -> dict`
   — developer utility that ingests PDFs and writes a `logs/dev/step-4/` JSON
   log.
@@ -86,6 +96,11 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   local paper ingestion utility.
 
 ## Changelog
+- 2026-05-27 — Added `mem_abbrev TEXT` column to `memory` table (in SCHEMA_SQL
+  and via additive migration in `_initialize()`). Added `mem_abbrev` field to
+  `MemoryRecord`. Added `paper_record_from_result()` for metadata-only paper
+  records from search results (used by `ingest_results()` for no-PDF paths).
+  Updated `_insert_memory()` to persist `mem_abbrev`.
 - 2026-05-27 — Implemented step 4 SQLite storage: schema creation, paper
   upsert/read/list, memory insert, query logging, local PDF ingestion, and
   deterministic storage tests. Ingested 10 local PDFs from

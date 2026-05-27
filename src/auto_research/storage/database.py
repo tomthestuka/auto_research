@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS memory (
     paper_id INTEGER REFERENCES papers(id) ON DELETE SET NULL,
     summary TEXT NOT NULL,
     tags_json TEXT NOT NULL DEFAULT '[]',
+    mem_abbrev TEXT,
     created_at TEXT NOT NULL,
     embedding BLOB
 );
@@ -94,6 +95,7 @@ class MemoryRecord(BaseModel):
     paper_id: int | None = None
     summary: str = Field(min_length=1)
     tags: list[str] = Field(default_factory=list)
+    mem_abbrev: str | None = None
 
 
 class QueryLogRecord(BaseModel):
@@ -169,6 +171,27 @@ def paper_from_search_result(result, path: str | Path) -> PaperRecord:
     )
 
 
+def paper_record_from_result(result) -> PaperRecord:
+    """Create a metadata-only paper record from a search result (no local file)."""
+
+    source_id = (
+        result.identifiers.get("arxiv_id")
+        or result.identifiers.get("bibcode")
+        or result.identifiers.get("doi")
+        or (str(result.url) if result.url else None)
+        or result.title[:200]
+    )
+    return PaperRecord(
+        source=result.source,
+        source_id=source_id,
+        title=result.title,
+        authors=result.authors,
+        year=result.published.year if result.published else None,
+        abstract=result.abstract,
+        keywords=result.keywords,
+    )
+
+
 def safe_filename(name: str, *, suffix: str = ".pdf") -> str:
     """Return a filesystem-safe filename."""
 
@@ -192,6 +215,10 @@ class Storage:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as conn:
             conn.executescript(SCHEMA_SQL)
+            try:
+                conn.execute("ALTER TABLE memory ADD COLUMN mem_abbrev TEXT")
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     async def upsert_paper(self, paper: PaperRecord) -> int:
         """Insert or update a paper and return its row id."""
@@ -268,13 +295,14 @@ class Storage:
         with sqlite3.connect(self.path) as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO memory (paper_id, summary, tags_json, created_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO memory (paper_id, summary, tags_json, mem_abbrev, created_at)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     memory.paper_id,
                     memory.summary,
                     json.dumps(memory.tags),
+                    memory.mem_abbrev,
                     datetime.now(UTC).isoformat(),
                 ),
             )

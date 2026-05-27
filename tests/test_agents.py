@@ -7,11 +7,9 @@ from auto_research.agents import (
     AnalystLeadAgent,
     AnalystWorkerAgent,
     LibrarianIOAgent,
-    LibrarianSearcherAgent,
     ReviewerAgent,
 )
 from auto_research.models import ModelResponse
-from auto_research.retrieval import MemoryHit
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -20,6 +18,7 @@ from auto_research.schemas import (
     SearchResult,
     document_from_file,
 )
+from auto_research.storage import MemoryRecord, Storage
 
 
 class FakeModel:
@@ -50,16 +49,6 @@ class FakeSource:
         ]
 
 
-class FakeRetrieval:
-    async def text_search(self, query: str, *, limit: int = 10):
-        assert query == "Cyg X-1"
-        assert limit == 1
-        return [MemoryHit(kind="paper", id=7, score=3, title="Local Cyg X-1", snippet="Stored note.")]
-
-    async def vector_search(self, query: str, *, limit: int = 10):
-        raise NotImplementedError
-
-
 def _user_payload(fake_model: FakeModel):
     user_message = fake_model.messages[1]
     marker = "Task data:\n"
@@ -77,17 +66,9 @@ def test_reviewer_agent_returns_verdict():
     assert fake.messages[0].content == "reviewer prompt"
 
 
-def test_librarian_io_agent_searches_injected_source_and_validates_results():
-    fake = FakeModel(
-        [
-            {
-                "source": "arxiv",
-                "title": "Cyg X-1 paper",
-                "url": "https://example.org/cyg",
-                "abstract": "Ranked summary.",
-            }
-        ]
-    )
+def test_librarian_io_agent_searches_injected_source_and_returns_raw_results():
+    # search() makes no LLM call — it returns raw source results directly.
+    fake = FakeModel({})
     agent = LibrarianIOAgent(sources={"arxiv": FakeSource()}, model=fake, prompt="librarian prompt")
 
     results = asyncio.run(
@@ -96,8 +77,8 @@ def test_librarian_io_agent_searches_injected_source_and_validates_results():
 
     assert results[0].source == "arxiv"
     assert results[0].title == "Cyg X-1 paper"
-    payload = _user_payload(fake)
-    assert payload["source_results"][0]["abstract"] == "A relevant paper."
+    assert results[0].abstract == "A relevant paper."
+    assert fake.messages is None  # no LLM call was made
 
 
 def test_librarian_io_agent_ingests_document_attachment(tmp_path):
@@ -120,17 +101,6 @@ def test_librarian_io_agent_ingests_document_attachment(tmp_path):
     assert fake.documents == (document,) or list(fake.documents) == [document]
     payload = _user_payload(fake)
     assert payload["document"]["path"] == str(pdf)
-
-
-def test_librarian_searcher_agent_uses_injected_retrieval():
-    fake = FakeModel([{"source": "local", "title": "Local Cyg X-1", "abstract": "Stored note."}])
-    agent = LibrarianSearcherAgent(retrieval=FakeRetrieval(), model=fake, prompt="searcher prompt")
-
-    results = asyncio.run(agent.search(SearchRequest(query="Cyg X-1", sources=["local"], max_results=1)))
-
-    assert results[0].source == "local"
-    payload = _user_payload(fake)
-    assert payload["local_hits"][0]["id"] == 7
 
 
 def test_agent_extracts_json_from_wrapped_model_text():
@@ -165,3 +135,52 @@ def test_analyst_lead_agent_adjudicates_reports():
     assert final.findings == ["Workers agree."]
     payload = _user_payload(fake)
     assert payload["worker_reports"][0]["summary"] == "Worker result."
+
+
+def test_librarian_io_agent_compose_search_strategy():
+    fake = FakeModel({"query": "Cyg X-1 X-ray polarization IXPE", "sources": ["arxiv"], "max_results": 5})
+    agent = LibrarianIOAgent(sources={}, model=fake, prompt="librarian prompt")
+
+    result = asyncio.run(
+        agent.compose_search_strategy(
+            ResearchRequest(question="What is the X-ray polarization of Cyg X-1?")
+        )
+    )
+
+    assert result.query == "Cyg X-1 X-ray polarization IXPE"
+    assert result.sources == ["arxiv"]
+    payload = _user_payload(fake)
+    assert "research_request" in payload
+    assert payload["research_request"]["question"] == "What is the X-ray polarization of Cyg X-1?"
+
+
+def test_librarian_io_agent_ingest_results_no_pdf(tmp_path):
+    """ingest_results() with no PDF: stores metadata record with mem_abbrev=abstract."""
+
+    stored_memories: list[MemoryRecord] = []
+
+    class FakeStorage:
+        async def upsert_paper(self, paper):
+            return 42
+
+        async def replace_memory_for_paper(self, memory: MemoryRecord):
+            stored_memories.append(memory)
+
+    fake = FakeModel({})  # LLM should not be called for no-PDF path
+    result = SearchResult(
+        source="arxiv",
+        title="Cyg X-1 polarization study",
+        abstract="We measure hard X-ray polarization of Cyg X-1.",
+        keywords=["X-ray", "polarization"],
+    )
+    agent = LibrarianIOAgent(sources={}, model=fake, prompt="librarian prompt")
+    agent.storage = FakeStorage()
+
+    asyncio.run(agent.ingest_results([result]))
+
+    assert len(stored_memories) == 1
+    mem = stored_memories[0]
+    assert mem.paper_id == 42
+    assert mem.mem_abbrev == "We measure hard X-ray polarization of Cyg X-1."
+    assert "X-ray" in mem.tags
+    assert fake.messages is None  # no LLM call made for no-PDF path

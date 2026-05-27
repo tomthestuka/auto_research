@@ -38,6 +38,11 @@ carried by **reference** (`FigureRef`), never embedded
   offer a direct paper PDF download.
 - `SearchResult.full_text_links` carries resolver/source-button candidates such
   as ADS `esource` links; `pdf_url` is the selected PDF-like download target.
+- `SearchResult.local_path` (`Path | None`) is populated by
+  `LibrarianSearcherAgent` for results that have a downloaded PDF in the local
+  papers directory. It stays `None` for online/external results returned by
+  `LibrarianIOAgent`. The reviewer loads these PDFs as `DocumentRef` attachments
+  at the model-call boundary.
 - `ReviewVerdict.needs_more_literature` and
   `ReviewVerdict.needs_analysis_rework` are the schema-level flags used by the
   Phase 1 feedback edges.
@@ -72,10 +77,14 @@ carried by **reference** (`FigureRef`), never embedded
   abstract: str | None = None, authors: list[str] = [],
   published: date | None = None, identifiers: dict[str, str] = {},
   keywords: list[str] = [], pdf_url: HttpUrl | None = None,
-  full_text_links: list[FullTextLink] = [])` — normalized metadata for one
-  paper or authoritative web result.
+  full_text_links: list[FullTextLink] = [],
+  local_path: Path | None = None)` — normalized metadata for one paper or
+  authoritative web result. `local_path` is set by `LibrarianSearcherAgent`
+  for locally stored papers.
 - `AnalysisTask(question: str, instructions: str | None = None,
-  literature: list[SearchResult] = [])` — work item sent to analyst workers.
+  literature: list[SearchResult] = [],
+  previous_report: AnalystReport | None = None)` — work item sent to analyst
+  workers. `previous_report` carries the prior round's result on rework iterations.
 - `AnalystReport(summary: str, findings: list[str] = [],
   figures: list[FigureRef] = [], uncertainty: str | None = None)` — worker or
   lead output, including figure references.
@@ -96,6 +105,10 @@ carried by **reference** (`FigureRef`), never embedded
   ToolCallRequest | None = None)` — lead review of a proposed tool action.
 
 ## Changelog
+- 2026-05-27 — Added `SearchResult.local_path: Path | None` so
+  `LibrarianSearcherAgent` can carry the on-disk PDF path back to the reviewer,
+  which then loads it as a `DocumentRef` attachment. Added
+  `AnalysisTask.previous_report` so rework iterations carry the prior report.
 - 2026-05-27 — Added document attachment references and separate tool-call
   request/review schemas so analysts can request shell/tool/database operations
   without putting execution requests inside reports.

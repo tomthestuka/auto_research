@@ -1,24 +1,37 @@
 # `auto_research.retrieval` — local-memory retrieval
 
 ## Purpose
-Lets the librarian searcher sub-team query the local SQLite memory. Phase 1
-provides exact/keyword text retrieval; vector retrieval is a documented stub for
-Phase 2.
+Pure-Python tools for querying the local SQLite DB. No LLM is involved.
+Phase 1 provides text/keyword retrieval; vector retrieval is a Phase 2 stub.
+These tools are callable from the graph's `literature_node`, the reviewer, and
+(Phase 2) the lead-scientist group.
 
 ## Architecture
-- `RetrievalBackend` interface with two methods. Phase 1 implements
-  `text_search()` over the SQLite `papers`/`memory` tables;
-  `vector_search()` raises `NotImplementedError` ([CLAUDE.md §10](../../../CLAUDE.md#10-agent-architecture--process-loop)
-  and [§13](../../../CLAUDE.md#13-phase-2-readiness)).
-- Text search uses lightweight normalized token matching across paper
-  title/abstract/keywords/path/source id and memory summary/tags. One-character
-  numeric tokens are ignored to avoid broad accidental matches.
-- Live retrieval verification is opt-in:
-  `AUTO_RESEARCH_LIVE_RETRIEVAL_TESTS=1 pytest tests/test_live_retrieval.py -s`.
-  It queries the runtime SQLite DB for `GX339-4` and writes JSONL plus Markdown
-  logs under `logs/dev/step-6/`.
+Two public tool functions (one module each) plus an internal backend:
+
+- `retrieval/text_search.py` — `text_search_paths()`: SQLite keyword match,
+  returns `list[Path]` for papers with a downloaded PDF.
+- `retrieval/vector_search.py` — `vector_search_paths()`: Phase 2 stub that
+  raises `NotImplementedError`.
+- `retrieval/backend.py` — `SqliteRetrievalBackend`: internal engine for
+  `text_search()` over `papers`/`memory` tables; used by `text_search_paths()`.
+  Text search uses lightweight normalized token matching across paper
+  title/abstract/keywords/path/source id and memory summary/tags/mem_abbrev.
+  One-character numeric tokens are ignored to avoid broad accidental matches.
+
+The graph's `literature_node` calls `text_search_paths()` after ingest;
+the reviewer receives the resulting `list[Path]` and loads them as full PDF
+attachments.
+
+Live retrieval verification is opt-in:
+`AUTO_RESEARCH_LIVE_RETRIEVAL_TESTS=1 pytest tests/test_live_retrieval.py -s`.
 
 ## Interfaces / Contracts
+- `text_search_paths(query, *, limit=10, backend=None) -> list[Path]`
+  — pure Python, no LLM. Returns local PDF paths for keyword-matching papers.
+  Only papers with a non-null `local_path` in the DB are included.
+- `vector_search_paths(query, *, limit=10, backend=None) -> list[Path]`
+  — Phase 2 stub; raises `NotImplementedError`.
 - `RetrievalBackend` protocol:
   - `async text_search(query: str, *, limit: int = 10) -> list[MemoryHit]`
   - `async vector_search(query: str, *, limit: int = 10) -> list[MemoryHit]`
@@ -28,18 +41,30 @@ Phase 2.
   ordering.
 
 ## Dependencies
-- Internal: `auto_research.storage`, `auto_research.schemas`.
+- Internal: `auto_research.storage`.
 
 ## Dictionary-level reference
 - `HitKind` — literal hit kind: `"paper"` or `"memory"`.
 - `MemoryHit(kind: HitKind, id: int, score: int, title: str, snippet: str | None
   = None, source: str | None = None, source_id: str | None = None,
-  local_path: Path | None = None)` — one retrieval result.
+  local_path: Path | None = None)` — one internal retrieval result (not exposed
+  to graph or agents directly; the public API returns `list[Path]`).
 - `RetrievalBackend` — protocol for local retrieval backends.
-- `SqliteRetrievalBackend(storage: Storage | None = None)` — Phase 1 backend
-  over the runtime SQLite DB. Methods: `text_search()` and `vector_search()`.
+- `SqliteRetrievalBackend(storage: Storage | None = None)` — Phase 1 backend.
+  Methods: `text_search()` and `vector_search()`.
+- `text_search_paths(query, *, limit=10, backend=None) -> list[Path]` — public
+  tool. SQLite text retrieval; returns PDF paths only.
+- `vector_search_paths(query, *, limit=10, backend=None) -> list[Path]` — public
+  tool; Phase 2 stub.
 
 ## Changelog
+- 2026-05-27 — Replaced LLM-based `LibrarianSearcherAgent` with two pure-Python
+  tool functions: `text_search_paths()` (in `retrieval/text_search.py`) and
+  `vector_search_paths()` (Phase 2 stub, `retrieval/vector_search.py`). Both
+  return `list[Path]` — local PDF paths only. No LLM call is made. These are the
+  canonical tools for the reviewer and future lead-scientist group.
+- 2026-05-27 — Memory text search haystack extended to include `mem_abbrev`
+  (IO-team consensus abbreviation) alongside `summary` and `tags_json`.
 - 2026-05-27 — Implemented step 6: SQLite text retrieval over papers/memory,
   `vector_search()` Phase 2 stub, deterministic tests, and live `GX339-4`
   retrieval logging. Runtime query returned `GX339_4` from the local paper DB.

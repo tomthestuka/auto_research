@@ -87,7 +87,9 @@ class SqliteRetrievalBackend:
                 )
 
         for row in memory_rows:
-            haystack = " ".join(str(part or "") for part in (row["summary"], row["tags_json"]))
+            haystack = " ".join(
+                str(part or "") for part in (row["summary"], row["tags_json"], row["mem_abbrev"])
+            )
             score = _score(terms, haystack)
             if score:
                 hits.append(

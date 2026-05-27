@@ -1,6 +1,7 @@
 """Literature search request and result messages."""
 
 from datetime import date
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, HttpUrl
@@ -42,3 +43,4 @@ class SearchResult(MessageModel):
     keywords: list[str] = Field(default_factory=list)
     pdf_url: HttpUrl | None = None
     full_text_links: list[FullTextLink] = Field(default_factory=list)
+    local_path: Path | None = None

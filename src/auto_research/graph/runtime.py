@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from auto_research.agents import (
     AnalystLeadAgent,
@@ -11,43 +14,65 @@ from auto_research.agents import (
     LibrarianIOAgent,
     ReviewerAgent,
 )
-from auto_research.consensus import ConsensusStrategy, LeadLike, WorkerLike
-from auto_research.graph.builder import LibrarianLike, ReviewerLike, build_graph
+from auto_research.consensus import ConsensusStrategy, DebateToConverge, LeadLike, WorkerLike
+from auto_research.graph.builder import IOAgentLike, ReviewerLike, build_graph
 from auto_research.models import resolve
+from auto_research.retrieval import RetrievalBackend, SqliteRetrievalBackend
 from auto_research.schemas import ResearchRequest, ReviewVerdict
+from auto_research.storage import Storage
 
 
 DEFAULT_WORKER_COUNT = 2
+DEFAULT_ORCHESTRATION_CONFIG = Path(__file__).resolve().parents[3] / "config" / "orchestration.yaml"
+
+
+def load_orchestration_config(path: str | Path = DEFAULT_ORCHESTRATION_CONFIG) -> dict:
+    """Load iteration caps from orchestration.yaml."""
+    with Path(path).open("r", encoding="utf-8") as stream:
+        return yaml.safe_load(stream) or {}
 
 
 async def run_request(
     request: ResearchRequest,
     *,
     reviewer: ReviewerLike | None = None,
-    librarian: LibrarianLike | None = None,
+    io_agent: IOAgentLike | None = None,
+    retrieval: RetrievalBackend | None = None,
     workers: Sequence[WorkerLike] | None = None,
     lead: LeadLike | None = None,
     consensus: ConsensusStrategy | None = None,
-    max_iterations: int = 3,
+    max_iterations: int | None = None,
 ) -> ReviewVerdict:
     """Run the research-loop graph for one request and return the verdict.
 
-    Missing dependencies are constructed from ``config/models.yaml``: a single
-    librarian I/O agent, ``DEFAULT_WORKER_COUNT`` analyst workers (or as many as
-    the registry exposes), one analyst lead, and one reviewer.
+    ``max_iterations`` and ``debate_max_rounds`` are read from
+    ``config/orchestration.yaml`` when not supplied explicitly.
+
+    Missing agent dependencies are constructed from ``config/models.yaml``.
+    Local retrieval uses ``SqliteRetrievalBackend`` by default (no LLM call).
     """
 
+    orch = load_orchestration_config()
+    if max_iterations is None:
+        max_iterations = int(orch.get("max_iterations", 3))
+    debate_max_rounds = int(orch.get("debate_max_rounds", 3))
+
+    storage = Storage()
     reviewer = reviewer or ReviewerAgent()
-    librarian = librarian or LibrarianIOAgent()
+    io_agent = io_agent or LibrarianIOAgent(storage=storage)
+    retrieval = retrieval or SqliteRetrievalBackend(storage)
     lead = lead or AnalystLeadAgent()
     if workers is None:
         worker_group = resolve("analyst_worker")
         worker_handles = worker_group.handles[:DEFAULT_WORKER_COUNT]
         workers = [AnalystWorkerAgent(model=handle) for handle in worker_handles]
+    if consensus is None:
+        consensus = DebateToConverge(max_rounds=debate_max_rounds)
 
     graph = build_graph(
         reviewer=reviewer,
-        librarian=librarian,
+        io_agent=io_agent,
+        retrieval=retrieval,
         workers=workers,
         lead=lead,
         consensus=consensus,

@@ -1,0 +1,14 @@
+# Iteration caps for the Phase 1 research loop.
+#
+# max_iterations: how many times the reviewer can send work back on each
+#   feedback edge (literature re-search, analysis rework). Hard cap per edge.
+# debate_max_rounds: how many rounds analyst workers debate before the lead
+#   adjudicates regardless of convergence. Hard cap inside consensus.
+#
+# io_search_max_iterations: stub (Phase 1 value: 1). When activated in Phase 2,
+#   controls how many times the IO lead may refine and re-run the search strategy
+#   before handing results to the searcher. Loop lives inside ingest_results().
+
+max_iterations: 3
+debate_max_rounds: 3
+io_search_max_iterations: 1  # Phase 2 stub — evaluate_search_results() currently returns accepted=True

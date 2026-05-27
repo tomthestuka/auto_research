@@ -15,7 +15,6 @@ REQUIRED_ROLES = frozenset(
         "analyst_lead",
         "analyst_worker",
         "librarian_io",
-        "librarian_searcher",
     }
 )
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "models.yaml"

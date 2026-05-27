@@ -19,12 +19,14 @@ from dotenv import load_dotenv
 from auto_research.agents import (
     AnalystLeadAgent,
     AnalystWorkerAgent,
+    LibrarianIOAgent,
     ReviewerAgent,
 )
 from auto_research.graph import build_graph
 from auto_research.models import load_registry
+from auto_research.retrieval import SqliteRetrievalBackend
 from auto_research.schemas import ResearchRequest, SearchRequest, SearchResult
-from auto_research.sources import ArxivSource
+from auto_research.storage import Storage
 from tests.dev_logs import dev_log_path, summarize_graph_log
 
 
@@ -45,15 +47,19 @@ def test_live_graph_end_to_end_gx339_question():
     load_dotenv()
     registry = load_registry()
     events: list[dict] = []
+    storage = Storage()
 
     reviewer = LoggingReviewer(
         ReviewerAgent(model=registry.resolve("reviewer").handles[0]), events
     )
-    # Step-10 verification focuses on graph orchestration. We use a thin
-    # arxiv-only librarian here to keep the literature node off the brittle
-    # LLM-ranking pass inside `LibrarianIOAgent`; that robustness work belongs
-    # to step 8 / step 5 (real-source + LLM rank reliability).
-    librarian = LoggingLibrarian(ArxivLibrarian(limit=5), events)
+    io_agent = LoggingIOAgent(
+        LibrarianIOAgent(
+            model=registry.resolve("librarian_io").handles[0],
+            storage=storage,
+        ),
+        events,
+    )
+    retrieval = SqliteRetrievalBackend(storage)
     worker_handles = registry.resolve("analyst_worker").handles[:2]
     workers = [
         LoggingWorker(AnalystWorkerAgent(model=handle), events, f"worker_{index}")
@@ -65,7 +71,8 @@ def test_live_graph_end_to_end_gx339_question():
 
     graph = build_graph(
         reviewer=reviewer,
-        librarian=librarian,
+        io_agent=io_agent,
+        retrieval=retrieval,
         workers=workers,
         lead=lead,
         max_iterations=3,
@@ -145,45 +152,45 @@ class LoggingReviewer:
         return verdict
 
 
-class ArxivLibrarian:
-    """Thin librarian wrapper that returns raw arXiv results."""
+class LoggingIOAgent:
+    """Wraps LibrarianIOAgent, delegates all methods and logs key calls."""
 
-    def __init__(self, *, limit: int = 5):
-        self.source = ArxivSource()
-        self.limit = limit
+    def __init__(self, agent: LibrarianIOAgent, events: list[dict]):
+        self.agent = agent
+        self.events = events
+        self.compose_calls = 0
+        self.ingest_calls = 0
+
+    async def compose_search_strategy(self, request, *, follow_up=None) -> SearchRequest:
+        self.compose_calls += 1
+        strategy = await self.agent.compose_search_strategy(request, follow_up=follow_up)
+        self.events.append(
+            _event(
+                f"io_compose_{self.compose_calls}",
+                self.agent,
+                output=strategy.model_dump(mode="json"),
+            )
+        )
+        return strategy
 
     async def search(self, request: SearchRequest) -> list[SearchResult]:
-        return await self.source.search(request.query, limit=self.limit)
+        return await self.agent.search(request)
 
-
-class LoggingLibrarian:
-    def __init__(self, inner, events: list[dict]):
-        self.inner = inner
-        self.events = events
-        self.calls = 0
-
-    async def search(self, request: SearchRequest):
-        self.calls += 1
-        results = await self.inner.search(request)
+    async def ingest_results(self, results: list[SearchResult]) -> None:
+        self.ingest_calls += 1
+        await self.agent.ingest_results(results)
         self.events.append(
             {
-                "event": f"literature_{self.calls}",
-                "role": "librarian",
-                "model_member": "arxiv_source",
-                "provider": "arxiv",
-                "model": "arxiv",
+                "event": f"io_ingest_{self.ingest_calls}",
+                "role": "librarian_io",
+                "model_member": "io_agent",
                 "status": "ok",
                 "input_tokens": 0,
                 "output_tokens": 0,
-                "output": {
-                    "query": request.query,
-                    "n_results": len(results),
-                    "results": [item.model_dump(mode="json") for item in results],
-                },
+                "output": {"n_ingested": len(results)},
                 "error": None,
             }
         )
-        return results
 
 
 class LoggingWorker:

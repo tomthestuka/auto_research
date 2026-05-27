@@ -8,7 +8,6 @@ from typing import Literal
 PromptRole = Literal[
     "reviewer",
     "librarian_io",
-    "librarian_searcher",
     "analyst_worker",
     "analyst_lead",
 ]
@@ -16,7 +15,6 @@ PromptRole = Literal[
 PROMPT_FILENAMES: dict[PromptRole, str] = {
     "reviewer": "reviewer.md",
     "librarian_io": "librarian_io.md",
-    "librarian_searcher": "librarian_searcher.md",
     "analyst_worker": "analyst_worker.md",
     "analyst_lead": "analyst_lead.md",
 }

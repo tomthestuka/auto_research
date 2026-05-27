@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TypedDict
 
 from auto_research.schemas import (
     AnalystReport,
     ResearchRequest,
     ReviewVerdict,
-    SearchResult,
 )
 
 
@@ -16,7 +16,7 @@ class ResearchState(TypedDict, total=False):
     """State carried through the orchestration graph."""
 
     request: ResearchRequest
-    literature: list[SearchResult]
+    literature: list[Path]
     report: AnalystReport | None
     verdict: ReviewVerdict | None
     lit_iterations: int

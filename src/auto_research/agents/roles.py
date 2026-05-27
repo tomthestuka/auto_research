@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from auto_research.agents.prompts import PromptRole, load_prompt
+from auto_research.consensus import IODebateToConverge
 from auto_research.models import ModelGroupHandle, ModelHandle, ModelMessage, ModelResponse, resolve
-from auto_research.retrieval import MemoryHit, RetrievalBackend, SqliteRetrievalBackend
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -22,9 +23,11 @@ from auto_research.schemas import (
     SearchResult,
     ToolCallRequest,
     ToolCallReview,
+    document_from_file,
 )
 from auto_research.sources import ArxivSource, NasaAdsSource, QuerySource, WebSource
-from auto_research.storage import MemoryRecord
+from auto_research.sources.downloads import download_and_ingest_result, papers_dir
+from auto_research.storage import MemoryRecord, Storage, paper_record_from_result
 
 
 T = TypeVar("T")
@@ -90,21 +93,32 @@ class ReviewerAgent(AgentRole):
         self,
         request: ResearchRequest,
         *,
-        literature: Sequence[SearchResult] = (),
+        literature: Sequence[Path] = (),
         report: AnalystReport | None = None,
     ) -> ReviewVerdict:
-        """Return a review verdict for the supplied research state."""
+        """Return a review verdict for the supplied research state.
+
+        ``literature`` is a list of local PDF paths returned by
+        ``text_search_paths()``. Each existing path is loaded as a
+        ``DocumentRef`` attachment so the model can read the full paper.
+        """
 
         payload = {
             "request": request.model_dump(mode="json"),
-            "literature": [item.model_dump(mode="json") for item in literature],
+            "literature_paths": [str(p) for p in literature],
             "analysis_report": report.model_dump(mode="json") if report else None,
         }
-        return await self._call(payload, TypeAdapter(ReviewVerdict), images=report.figures if report else ())
+        docs = [document_from_file(p) for p in literature if p.exists()]
+        return await self._call(
+            payload,
+            TypeAdapter(ReviewVerdict),
+            images=report.figures if report else (),
+            documents=docs,
+        )
 
 
 class LibrarianIOAgent(AgentRole):
-    """Librarian I/O role: query injected external sources and rank results."""
+    """Librarian I/O role: compose search strategies, query external sources, and abstract papers."""
 
     role = "librarian_io"
 
@@ -112,6 +126,7 @@ class LibrarianIOAgent(AgentRole):
         self,
         *,
         sources: Mapping[str, QuerySource] | None = None,
+        storage: Storage | None = None,
         model: CallableModel | None = None,
         model_group: ModelGroupHandle | None = None,
         model_name: str | None = None,
@@ -119,9 +134,29 @@ class LibrarianIOAgent(AgentRole):
     ):
         super().__init__(model=model, model_group=model_group, model_name=model_name, prompt=prompt)
         self.sources = dict(sources) if sources is not None else _default_sources()
+        self.storage = storage or Storage()
+
+    async def compose_search_strategy(
+        self,
+        request: ResearchRequest,
+        *,
+        follow_up: str | None = None,
+    ) -> SearchRequest:
+        """Compose a focused search strategy from a research request."""
+
+        payload = {
+            "research_request": request.model_dump(mode="json"),
+            "follow_up": follow_up,
+        }
+        return await self._call(payload, TypeAdapter(SearchRequest))
 
     async def search(self, request: SearchRequest) -> list[SearchResult]:
-        """Search requested external sources and return model-ranked results."""
+        """Query external sources and return raw results.
+
+        No LLM call: the I/O team does not filter or rank results. Per-paper
+        abstraction is a separate step via ingest_results().
+        A failing source is skipped so the others can still contribute results.
+        """
 
         selected = request.sources or ["arxiv", "nasa_ads", "web"]
         results: list[SearchResult] = []
@@ -129,17 +164,17 @@ class LibrarianIOAgent(AgentRole):
             source = self.sources.get(source_name)
             if source is None:
                 continue
-            results.extend(await source.search(request.query, limit=request.max_results))
-        payload = {
-            "request": request.model_dump(mode="json"),
-            "source_results": [item.model_dump(mode="json") for item in results],
-        }
-        return await self._call(payload, TypeAdapter(list[SearchResult]))
+            try:
+                results.extend(await source.search(request.query, limit=request.max_results))
+            except Exception:
+                pass  # one source failing does not abort the others
+        return results
 
     async def ingest_document(
         self,
         document: DocumentRef,
         *,
+        peer_abstracts: Sequence[MemoryRecord] = (),
         paper_id: int | None = None,
         instructions: str | None = None,
     ) -> MemoryRecord:
@@ -153,36 +188,106 @@ class LibrarianIOAgent(AgentRole):
                 "Compose a durable memory abstraction: abstract, key points, key methods, "
                 "data, and analysis results useful for future text search."
             ),
+            "peer_abstracts": [a.model_dump(mode="json") for a in peer_abstracts],
         }
         return await self._call(payload, TypeAdapter(MemoryRecord), documents=[document])
 
-
-class LibrarianSearcherAgent(AgentRole):
-    """Librarian searcher role: query local memory and summarize local hits."""
-
-    role = "librarian_searcher"
-
-    def __init__(
+    async def abstract_document(
         self,
+        document: DocumentRef,
         *,
-        retrieval: RetrievalBackend | None = None,
-        model: CallableModel | None = None,
-        model_group: ModelGroupHandle | None = None,
-        model_name: str | None = None,
-        prompt: str | None = None,
-    ):
-        super().__init__(model=model, model_group=model_group, model_name=model_name, prompt=prompt)
-        self.retrieval = retrieval or SqliteRetrievalBackend()
+        peer_abstracts: Sequence[MemoryRecord] = (),
+    ) -> MemoryRecord:
+        """Worker shim: produce one memory abstraction for IO debate."""
 
-    async def search(self, request: SearchRequest) -> list[SearchResult]:
-        """Return compact local-memory search results."""
+        return await self.ingest_document(document, peer_abstracts=peer_abstracts)
 
-        hits = await self.retrieval.text_search(request.query, limit=request.max_results)
+    async def judge_abstract_convergence(
+        self,
+        document: DocumentRef,
+        abstracts: Sequence[MemoryRecord],
+        *,
+        round_index: int,
+        max_rounds: int,
+    ) -> ReviewVerdict:
+        """Lead role: judge whether IO worker abstractions have converged."""
+
         payload = {
-            "request": request.model_dump(mode="json"),
-            "local_hits": [hit.model_dump(mode="json") for hit in hits],
+            "document": document.model_dump(mode="json"),
+            "abstracts": [a.model_dump(mode="json") for a in abstracts],
+            "round_index": round_index,
+            "max_rounds": max_rounds,
+            "decision_semantics": (
+                "accepted=true means workers have converged to a consistent memory abstraction; "
+                "accepted=false means another round would improve coverage or consistency."
+            ),
         }
-        return await self._call(payload, TypeAdapter(list[SearchResult]))
+        return await self._call(
+            payload, TypeAdapter(ReviewVerdict), documents=[document]
+        )
+
+    async def adjudicate_abstract(
+        self,
+        document: DocumentRef,
+        abstracts: Sequence[MemoryRecord],
+    ) -> MemoryRecord:
+        """Lead role: synthesize the final memory record from worker abstractions."""
+
+        payload = {
+            "document": document.model_dump(mode="json"),
+            "worker_abstracts": [a.model_dump(mode="json") for a in abstracts],
+            "instructions": (
+                "Synthesize the worker abstractions into one final memory record. "
+                "Produce a mem_abbrev that is a comprehensive, durable summary of the paper's "
+                "key findings, methods, data analysis, and results."
+            ),
+        }
+        return await self._call(payload, TypeAdapter(MemoryRecord), documents=[document])
+
+    async def ingest_results(self, results: list[SearchResult]) -> None:
+        """Download, abstract, and store each search result.
+
+        For PDF-bearing results: download → IODebateToConverge (2 worker passes +
+        lead adjudication) → write mem_abbrev to memory table.
+        For results without a PDF URL: store metadata only; use abstract as mem_abbrev.
+        """
+
+        consensus = IODebateToConverge(max_rounds=2)
+        for result in results:
+            stored = await download_and_ingest_result(
+                self.storage, result, target_dir=papers_dir()
+            )
+            if stored is not None and stored.local_path is not None:
+                doc = document_from_file(stored.local_path)
+                memory = await consensus.run([self, self], self, doc)
+                memory = MemoryRecord(
+                    paper_id=stored.id,
+                    summary=memory.summary,
+                    tags=memory.tags,
+                    mem_abbrev=memory.mem_abbrev,
+                )
+            else:
+                paper_id = await self.storage.upsert_paper(paper_record_from_result(result))
+                memory = MemoryRecord(
+                    paper_id=paper_id,
+                    summary=result.title,
+                    tags=result.keywords,
+                    mem_abbrev=result.abstract,
+                )
+            await self.storage.replace_memory_for_paper(memory)
+
+    async def evaluate_search_results(
+        self,
+        request: ResearchRequest,
+        results: list[SearchResult],
+    ) -> ReviewVerdict:
+        """Phase 1 stub — IO search iteration is deferred. See CLAUDE.md §13."""
+
+        _ = (request, results)
+        return ReviewVerdict(
+            accepted=True,
+            rationale="IO search evaluation deferred — see CLAUDE.md §13",
+        )
 
 
 class AnalystWorkerAgent(AgentRole):
