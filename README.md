@@ -113,7 +113,7 @@ discipline as `DOCS.md`). Phase 2 items remain documented as deferred stubs in
 | # | Status | What is being built |
 |---|---|---|
 | 0 | Done | Scaffolding & environment: repo skeleton, `environment.yml`, `.env.example`, `.gitignore`, `CLAUDE.md`, `AGENTS.md` symlink, `config/`, and seed `DOCS.md` files. |
-| 1 | Todo | Schemas: Pydantic v2 message models including `FigureRef`. |
+| 1 | Done | Schemas: Pydantic v2 message models including `FigureRef`. |
 | 2 | Todo | Config + model registry: `config/models.yaml`, provider abstraction, and role-to-model resolution. |
 | 3 | Todo | Observability: LangSmith tracing and per-call cost logging in the provider layer. |
 | 4 | Todo | Storage: SQLite papers, memory, query log, and reserved embedding space. |

@@ -44,5 +44,7 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
   release.
 
 ## Changelog
+- 2026-05-27 — Step 1 completed: `auto_research.schemas` now exports the
+  Pydantic v2 inter-agent protocol and schema validation tests pass.
 - 2026-05-26 — Package seeded with submodule folders (each with its own `DOCS.md`)
   during step 0. No code beyond the version constant.

@@ -324,7 +324,7 @@ Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & docum
 | # | Status | What is being built | Checkpoint (what works after) |
 |---|---|---|---|
 | 0 | Done | **Scaffolding & environment** — both repo skeletons, `environment.yml` (conda), `.env.example`, `.gitignore`, root `CLAUDE.md` + `AGENTS.md` symlink, `config/` dir, seed `DOCS.md` in each module folder. | Conda env builds; package imports cleanly. |
-| 1 | Todo | **Schemas** — Pydantic v2 models incl. `FigureRef`. | Schema validation tests pass. |
+| 1 | Done | **Schemas** — Pydantic v2 models incl. `FigureRef`. | Schema validation tests pass. |
 | 2 | Todo | **Config + model registry** — `config/models.yaml`, provider abstraction (OpenAI / Anthropic / Google), role→model resolution. | A real round-trip call succeeds for each provider via config. |
 | 3 | Todo | **Observability** — LangSmith tracing + per-call cost logging wired into the provider layer. | A traced call appears in LangSmith with recorded cost. |
 | 4 | Todo | **Storage** — SQLite layer (papers / memory / query_log), embedding space reserved; read/write modules. | Write then read back a paper record (pytest). |
@@ -349,6 +349,8 @@ documented stubs.
   added §14 build order.
 - 2026-05-27 — Converted §14 into an explicit build ledger with per-step status and
   marked step 0 (scaffolding & environment) done.
+- 2026-05-27 — Marked step 1 (schemas) done after adding the Pydantic v2
+  inter-agent protocol and validation tests.
 - 2026-05-26 — Added a hard rule in §3 requiring `README.md` to be kept synced in the
   same session as any change that touches what the README describes (status table,
   architecture, defaults, getting-started, contributor rules). Parallels the
