@@ -344,7 +344,7 @@ Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & docum
 | 5 | Done | **Librarian sources** — `QuerySource` interface + `arxiv`, `nasa_ads`, `web` (Tavily) modules. | Each source returns results for a sample query. |
 | 6 | Done | **Retrieval** — `RetrievalBackend` with `text_search()` over SQLite; `vector_search()` stub raising `NotImplementedError`. | Store, then text-retrieve, a record. |
 | 7 | Done | **Runtime prompts** — one `prompts/<role>.md` per role. | Each prompt loads at runtime; no governance file referenced. |
-| 8 | Done | **Agent roles** — thin wrappers: librarian I/O, librarian searcher, analyst worker, analyst lead, reviewer (each loads its prompt, uses schemas + config models). | Each role runs one task in isolation. |
+| 8 | Done | **Agent roles** — thin wrappers: librarian I/O, librarian searcher, analyst worker, analyst lead, reviewer (each loads its prompt, uses schemas + config models). | Role plumbing is verified: prompt loads, model resolves via config, structured Pydantic input goes in, structured output comes back, and trace/cost logging is exercised. This does **not** mean every role can do its full production job yet. |
 | 9 | Todo | **Consensus** — `ConsensusStrategy` = debate-to-converge (cap 3) + lead adjudication. | Workers converge (or hit the cap and the lead adjudicates) on a toy task. |
 | 10 | Todo | **Orchestration** — assemble the LangGraph graph and the two capped feedback edges (paper-search review, analysis review). | Full loop runs end-to-end on a sample request. |
 | 11 | Todo | **Tool-authoring & sandbox** — `research_toolkit` propose→branch→lead-review→**human-approve merge** flow; subprocess sandbox (timeout, workdir confinement). | Proposing a trivial tool is blocked until approval; `xspec_utils` runs inside the sandbox. |
@@ -388,6 +388,8 @@ documented stubs.
 - 2026-05-27 — Marked step 8 (agent roles) done after adding thin async
   wrappers for reviewer, librarian I/O, librarian searcher, analyst worker,
   and analyst lead, with deterministic isolation tests.
+- 2026-05-27 — Refined the step 8 checkpoint wording to clarify that it
+  validates per-role plumbing, not complete real-world role capability.
 - 2026-05-27 — Clarified that the reviewer triages research requests from the human
   in Phase 1 and may also receive authorized lead-scientist planning requests in
   Phase 2.

@@ -51,6 +51,8 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
 - 2026-05-27 — Step 8 completed: `auto_research.agents` now exposes async
   role wrappers for reviewer, librarian I/O, librarian searcher, analyst
   worker, and analyst lead.
+- 2026-05-27 — Clarified that step 8 validates role plumbing rather than full
+  production capability for roles whose tools are still deferred.
 - 2026-05-27 — Added generic observation-location config loading and document
   attachment support for librarian I/O ingestion.
 - 2026-05-27 — Step 7 completed: runtime prompts now exist for all Phase 1 roles,

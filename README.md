@@ -132,6 +132,18 @@ discipline as `DOCS.md`). Phase 2 items remain documented as deferred stubs in
 
 See `CLAUDE.md` §14 for checkpoints and deferred Phase 2 stubs.
 
+Step 8 validates per-role plumbing: prompt loading, config-driven model
+resolution, structured Pydantic input/output, and trace/cost logging. It does
+not mean each role can complete its full real-world job yet.
+
+| Role | Tools available at step 8? | What "one task" means |
+|---|---|---|
+| Librarian I/O | Yes — step 5 built arXiv / ADS / Tavily, and document attachments are wired through the model boundary. | Real source/document input can produce structured search results or memory abstractions. |
+| Librarian searcher | Yes — step 6 built `text_search()` over SQLite. | Real query returns structured records from the DB. |
+| Analyst worker | No — `research_toolkit` sandbox is not wired until step 11. | LLM-only reasoning or structured tool-request capture; no shell/tool execution yet. |
+| Analyst lead | N/A — pure adjudication. | Given worker reports or tool requests, produce structured adjudication/review. |
+| Reviewer | N/A — pure dispatch + review. | Given a request or stub results, produce a structured dispatch/review decision. |
+
 ---
 
 ## Getting started
