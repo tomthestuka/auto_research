@@ -44,6 +44,8 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
   release.
 
 ## Changelog
+- 2026-05-27 — Step 6 completed: `auto_research.retrieval` now exposes SQLite
+  text search over papers/memory and a `vector_search()` Phase 2 stub.
 - 2026-05-27 — Step 5 completed: `auto_research.sources` now exposes the shared
   `QuerySource` protocol plus arXiv, NASA ADS, and Tavily source adapters.
 - 2026-05-27 — Step 4 completed: `auto_research.storage` now provides SQLite

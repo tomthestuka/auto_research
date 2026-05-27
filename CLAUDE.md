@@ -340,7 +340,7 @@ Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & docum
 | 3 | Done | **Observability** — LangSmith tracing + per-call cost logging wired into the provider layer. | A traced call appears in LangSmith with recorded cost. |
 | 4 | Done | **Storage** — SQLite layer (papers / memory / query_log), embedding space reserved; read/write modules. | Write then read back a paper record (pytest). |
 | 5 | Done | **Librarian sources** — `QuerySource` interface + `arxiv`, `nasa_ads`, `web` (Tavily) modules. | Each source returns results for a sample query. |
-| 6 | Todo | **Retrieval** — `RetrievalBackend` with `text_search()` over SQLite; `vector_search()` stub raising `NotImplementedError`. | Store, then text-retrieve, a record. |
+| 6 | Done | **Retrieval** — `RetrievalBackend` with `text_search()` over SQLite; `vector_search()` stub raising `NotImplementedError`. | Store, then text-retrieve, a record. |
 | 7 | Todo | **Runtime prompts** — one `prompts/<role>.md` per role. | Each prompt loads at runtime; no governance file referenced. |
 | 8 | Todo | **Agent roles** — thin wrappers: librarian I/O, librarian searcher, analyst worker, analyst lead, reviewer (each loads its prompt, uses schemas + config models). | Each role runs one task in isolation. |
 | 9 | Todo | **Consensus** — `ConsensusStrategy` = debate-to-converge (cap 3) + lead adjudication. | Workers converge (or hit the cap and the lead adjudicates) on a toy task. |
@@ -379,6 +379,8 @@ documented stubs.
   reserved embedding space, local PDF ingestion, and deterministic storage tests.
 - 2026-05-27 — Marked step 5 (librarian sources) done after adding arXiv, NASA
   ADS, and Tavily source adapters plus live sample-query verification.
+- 2026-05-27 — Marked step 6 (retrieval) done after adding SQLite text search,
+  the `vector_search()` Phase 2 stub, and live `GX339-4` retrieval verification.
 - 2026-05-26 — Added a hard rule in §3 requiring `README.md` to be kept synced in the
   same session as any change that touches what the README describes (status table,
   architecture, defaults, getting-started, contributor rules). Parallels the

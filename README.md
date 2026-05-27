@@ -119,7 +119,7 @@ discipline as `DOCS.md`). Phase 2 items remain documented as deferred stubs in
 | 3 | Done | Observability: LangSmith tracing and per-call cost logging in the provider layer. |
 | 4 | Done | Storage: SQLite papers, memory, query log, and reserved embedding space. |
 | 5 | Done | Librarian sources: shared `QuerySource` interface plus arXiv, NASA ADS, and Tavily web modules. |
-| 6 | Todo | Retrieval: `text_search()` over SQLite and `vector_search()` stub. |
+| 6 | Done | Retrieval: `text_search()` over SQLite and `vector_search()` stub. |
 | 7 | Todo | Runtime prompts: one `prompts/<role>.md` file per role. |
 | 8 | Todo | Agent roles: reviewer, librarian I/O, librarian searcher, analyst worker, and analyst lead wrappers. |
 | 9 | Todo | Consensus: debate-to-converge strategy with cap 3 and lead adjudication. |

@@ -65,3 +65,31 @@ def summarize_source_log(jsonl_path: Path) -> Path:
             lines.append("")
     md_path.write_text("\n".join(lines), encoding="utf-8")
     return md_path
+
+
+def summarize_retrieval_log(jsonl_path: Path, *, query: str) -> Path:
+    """Write a Markdown summary beside a step-6 retrieval JSONL log."""
+
+    rows = [
+        json.loads(line)
+        for line in jsonl_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    md_path = jsonl_path.with_suffix(".md")
+    lines = [f"# {jsonl_path.stem}", "", f"- Query: `{query}`", f"- Hits: {len(rows)}", ""]
+    for index, row in enumerate(rows, start=1):
+        lines.extend(
+            [
+                f"## {index}. {row['title']}",
+                "",
+                f"- Kind: {row['kind']}",
+                f"- Score: {row['score']}",
+                f"- Source: {row.get('source')}",
+                f"- Source ID: {row.get('source_id')}",
+                f"- Local path: `{row.get('local_path')}`",
+                f"- Snippet: {row.get('snippet') or '(none)'}",
+                "",
+            ]
+        )
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    return md_path
