@@ -21,7 +21,7 @@ A src-layout package. Submodules are added in the order set by
 | `retrieval` | 6 | `RetrievalBackend` (text search now, vector search stubbed). |
 | `observations.py` | 8 | Generic loader for mission observation database/archive paths from `config/observations.yaml`. |
 | `agents` | 7-8 | Runtime prompt loader plus thin per-role wrappers that load `prompts/<role>.md`, call configured model groups, and validate schema JSON. |
-| `consensus` | 9 | `ConsensusStrategy` — debate-to-converge with lead adjudication. |
+| `consensus` | 9 | `ConsensusStrategy` — debate-to-converge with lead convergence checks and adjudication. |
 | `graph` | 10 | LangGraph assembly + the two capped feedback edges. |
 | `sandbox` | 11 | Subprocess sandbox + `research_toolkit` propose/branch/review/merge flow. |
 | `cli` | 12 | `python -m auto_research "..."` entry point. |
@@ -51,6 +51,8 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
 - 2026-05-27 — Step 8 completed: `auto_research.agents` now exposes async
   role wrappers for reviewer, librarian I/O, librarian searcher, analyst
   worker, and analyst lead.
+- 2026-05-27 — Step 9 completed: `auto_research.consensus` now exposes a
+  bounded debate-to-converge strategy for analyst workers and lead synthesis.
 - 2026-05-27 — Clarified that step 8 validates role plumbing rather than full
   production capability for roles whose tools are still deferred.
 - 2026-05-27 — Added generic observation-location config loading and document

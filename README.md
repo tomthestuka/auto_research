@@ -125,7 +125,7 @@ discipline as `DOCS.md`). Phase 2 items remain documented as deferred stubs in
 | 6 | Done | Retrieval: `text_search()` over SQLite and `vector_search()` stub. |
 | 7 | Done | Runtime prompts: one `prompts/<role>.md` file per role. |
 | 8 | Done | Agent roles: reviewer, librarian I/O, librarian searcher, analyst worker, and analyst lead wrappers. |
-| 9 | Todo | Consensus: debate-to-converge strategy with cap 3 and lead adjudication. |
+| 9 | Done | Consensus: debate-to-converge strategy with cap 3 and lead adjudication. |
 | 10 | Todo | Orchestration: LangGraph graph with capped paper-search and analysis-result feedback edges. |
 | 11 | Todo | Tool-authoring & sandbox: propose-review-human-approve flow plus subprocess sandbox. |
 | 12 | Todo | Entry points & tests: CLI, inspection notebook, and deterministic pytest coverage. |

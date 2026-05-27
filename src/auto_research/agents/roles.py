@@ -252,6 +252,29 @@ class AnalystLeadAgent(AgentRole):
         figures = [figure for report in reports for figure in report.figures]
         return await self._call(payload, TypeAdapter(AnalystReport), images=figures)
 
+    async def judge_convergence(
+        self,
+        task: AnalysisTask,
+        reports: Sequence[AnalystReport],
+        *,
+        round_index: int,
+        max_rounds: int,
+    ) -> ReviewVerdict:
+        """Judge whether worker reports have converged."""
+
+        payload = {
+            "task": task.model_dump(mode="json"),
+            "worker_reports": [report.model_dump(mode="json") for report in reports],
+            "round_index": round_index,
+            "max_rounds": max_rounds,
+            "decision_semantics": (
+                "accepted=true means workers have converged enough for final synthesis; "
+                "accepted=false means another debate round is useful if the cap allows it."
+            ),
+        }
+        figures = [figure for report in reports for figure in report.figures]
+        return await self._call(payload, TypeAdapter(ReviewVerdict), images=figures)
+
     async def review_tool_requests(
         self,
         requests: Sequence[ToolCallRequest],

@@ -55,6 +55,9 @@ Role wrappers:
 - `AnalystWorkerAgent.request_tools(task) -> list[ToolCallRequest]` captures
   requested shell/tool/database actions without executing them.
 - `AnalystLeadAgent.adjudicate(task, reports) -> AnalystReport`.
+- `AnalystLeadAgent.judge_convergence(task, reports, *, round_index,
+  max_rounds) -> ReviewVerdict` judges whether worker reports have converged
+  enough for final synthesis.
 - `AnalystLeadAgent.review_tool_requests(requests) -> list[ToolCallReview]`
   reviews proposed tool actions without executing them.
 - All wrappers accept an injected `model`; otherwise they resolve their role
@@ -93,7 +96,7 @@ Role wrappers:
 - `AnalystWorkerAgent` — analyst worker wrapper. Method: `analyze()`.
   Method: `request_tools()`.
 - `AnalystLeadAgent` — analyst lead wrapper. Method: `adjudicate()`.
-  Method: `review_tool_requests()`.
+  Methods: `judge_convergence()`, `review_tool_requests()`.
 
 ## Changelog
 - 2026-05-27 — Step 8 completed: added async role wrappers for reviewer,
@@ -103,6 +106,8 @@ Role wrappers:
   without prescribing toolkit use.
 - 2026-05-27 — Refined the step 8 documentation to distinguish plumbing
   validation from full production role capability.
+- 2026-05-27 — Added `AnalystLeadAgent.judge_convergence()` for step-9
+  debate-to-converge.
 - 2026-05-27 — Added the step-8 opt-in live role test and development log path.
 - 2026-05-27 — Added direct document attachment ingestion for librarian I/O and
   report-independent tool request/review methods for analysts.
