@@ -314,25 +314,28 @@ Analyst workers reach agreement via bounded debate, behind a swappable
 ## 14. Build order (Phase 1)
 
 Build bottom-up: foundation → schemas → models → data → sources → agents → graph →
-tooling → entry. Each step must leave a **working, documented increment** — update the
-relevant `DOCS.md` (and the README status table) before moving on. Stop and verify the
-checkpoint at each step.
+tooling → entry. This table is both the dependency order and the build ledger: it records
+what each step builds, what must work afterward, and whether the step is done. Each step
+must leave a **working, documented increment** — update the relevant `DOCS.md` (and the
+README status table) before moving on. Stop and verify the checkpoint at each step.
 
-| # | Step | Checkpoint (what works after) |
-|---|---|---|
-| 0 | **Scaffolding & environment** — both repo skeletons, `environment.yml` (conda), `.env.example`, `.gitignore`, root `CLAUDE.md` + `AGENTS.md` symlink, `config/` dir, seed `DOCS.md` in each module folder. | Conda env builds; package imports cleanly. |
-| 1 | **Schemas** — Pydantic v2 models incl. `FigureRef`. | Schema validation tests pass. |
-| 2 | **Config + model registry** — `config/models.yaml`, provider abstraction (OpenAI / Anthropic / Google), role→model resolution. | A real round-trip call succeeds for each provider via config. |
-| 3 | **Observability** — LangSmith tracing + per-call cost logging wired into the provider layer. | A traced call appears in LangSmith with recorded cost. |
-| 4 | **Storage** — SQLite layer (papers / memory / query_log), embedding space reserved; read/write modules. | Write then read back a paper record (pytest). |
-| 5 | **Librarian sources** — `QuerySource` interface + `arxiv`, `nasa_ads`, `web` (Tavily) modules. | Each source returns results for a sample query. |
-| 6 | **Retrieval** — `RetrievalBackend` with `text_search()` over SQLite; `vector_search()` stub raising `NotImplementedError`. | Store, then text-retrieve, a record. |
-| 7 | **Runtime prompts** — one `prompts/<role>.md` per role. | Each prompt loads at runtime; no governance file referenced. |
-| 8 | **Agent roles** — thin wrappers: librarian I/O, librarian searcher, analyst worker, analyst lead, reviewer (each loads its prompt, uses schemas + config models). | Each role runs one task in isolation. |
-| 9 | **Consensus** — `ConsensusStrategy` = debate-to-converge (cap 3) + lead adjudication. | Workers converge (or hit the cap and the lead adjudicates) on a toy task. |
-| 10 | **Orchestration** — assemble the LangGraph graph and the two capped feedback edges (paper-search review, analysis review). | Full loop runs end-to-end on a sample request. |
-| 11 | **Tool-authoring & sandbox** — `research_toolkit` propose→branch→lead-review→**human-approve merge** flow; subprocess sandbox (timeout, workdir confinement). | Proposing a trivial tool is blocked until approval; `xspec_utils` runs inside the sandbox. |
-| 12 | **Entry points & tests** — importable library + CLI (`python -m auto_research "…"`), notebook for inspection, minimal pytest on deterministic parts. | CLI runs a request end-to-end; notebook inspects a run. |
+Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & documented.
+
+| # | Status | What is being built | Checkpoint (what works after) |
+|---|---|---|---|
+| 0 | Done | **Scaffolding & environment** — both repo skeletons, `environment.yml` (conda), `.env.example`, `.gitignore`, root `CLAUDE.md` + `AGENTS.md` symlink, `config/` dir, seed `DOCS.md` in each module folder. | Conda env builds; package imports cleanly. |
+| 1 | Todo | **Schemas** — Pydantic v2 models incl. `FigureRef`. | Schema validation tests pass. |
+| 2 | Todo | **Config + model registry** — `config/models.yaml`, provider abstraction (OpenAI / Anthropic / Google), role→model resolution. | A real round-trip call succeeds for each provider via config. |
+| 3 | Todo | **Observability** — LangSmith tracing + per-call cost logging wired into the provider layer. | A traced call appears in LangSmith with recorded cost. |
+| 4 | Todo | **Storage** — SQLite layer (papers / memory / query_log), embedding space reserved; read/write modules. | Write then read back a paper record (pytest). |
+| 5 | Todo | **Librarian sources** — `QuerySource` interface + `arxiv`, `nasa_ads`, `web` (Tavily) modules. | Each source returns results for a sample query. |
+| 6 | Todo | **Retrieval** — `RetrievalBackend` with `text_search()` over SQLite; `vector_search()` stub raising `NotImplementedError`. | Store, then text-retrieve, a record. |
+| 7 | Todo | **Runtime prompts** — one `prompts/<role>.md` per role. | Each prompt loads at runtime; no governance file referenced. |
+| 8 | Todo | **Agent roles** — thin wrappers: librarian I/O, librarian searcher, analyst worker, analyst lead, reviewer (each loads its prompt, uses schemas + config models). | Each role runs one task in isolation. |
+| 9 | Todo | **Consensus** — `ConsensusStrategy` = debate-to-converge (cap 3) + lead adjudication. | Workers converge (or hit the cap and the lead adjudicates) on a toy task. |
+| 10 | Todo | **Orchestration** — assemble the LangGraph graph and the two capped feedback edges (paper-search review, analysis review). | Full loop runs end-to-end on a sample request. |
+| 11 | Todo | **Tool-authoring & sandbox** — `research_toolkit` propose→branch→lead-review→**human-approve merge** flow; subprocess sandbox (timeout, workdir confinement). | Proposing a trivial tool is blocked until approval; `xspec_utils` runs inside the sandbox. |
+| 12 | Todo | **Entry points & tests** — importable library + CLI (`python -m auto_research "…"`), notebook for inspection, minimal pytest on deterministic parts. | CLI runs a request end-to-end; notebook inspects a run. |
 
 After step 12 the Phase 1 skeleton is complete: a full team running real LLM calls
 end-to-end, with vector search, autonomous merge, and the lead-scientist group left as
@@ -344,6 +347,8 @@ documented stubs.
 
 - *(unreleased)* — Initial `CLAUDE.md` authored for Phase 1 (modular minimal skeleton);
   added §14 build order.
+- 2026-05-27 — Converted §14 into an explicit build ledger with per-step status and
+  marked step 0 (scaffolding & environment) done.
 - 2026-05-26 — Added a hard rule in §3 requiring `README.md` to be kept synced in the
   same session as any change that touches what the README describes (status table,
   architecture, defaults, getting-started, contributor rules). Parallels the

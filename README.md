@@ -105,41 +105,28 @@ system performs on `research_toolkit`; it is not a coding agent committing.)
 
 ## Build status (Phase 1)
 
-Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & documented ·
-**Stub** = interface left in place, body deferred · **Deferred** = Phase 2.
-Coding agents flip `Todo → Done` as work lands and keep this table synced (same discipline
-as `DOCS.md`).
+Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & documented.
+Coding agents flip `Todo → Done` as work lands and keep this table synced (same
+discipline as `DOCS.md`). Phase 2 items remain documented as deferred stubs in
+`CLAUDE.md`.
 
-| Component | Status |
-|---|---|
-| `auto_research` scaffolding | Done |
-| Pydantic schemas (incl. `FigureRef`) | Todo |
-| Config-driven model registry (OpenAI / Anthropic / Google) | Todo |
-| LangSmith tracing + per-call cost logging | Todo |
-| SQLite storage (papers / memory / query_log) | Todo |
-| Reserved embedding column/table | Todo |
-| `QuerySource` interface (extensible) | Todo |
-| Librarian source — arXiv | Todo |
-| Librarian source — NASA ADS | Todo |
-| Librarian source — web (Tavily) | Todo |
-| Retrieval — `text_search()` | Todo |
-| Retrieval — `vector_search()` | Stub |
-| Vector DB (sqlite-vec) + embeddings | Deferred |
-| Runtime `prompts/` per role | Todo |
-| Reviewer agent | Todo |
-| Librarian agents (I/O + searcher) | Todo |
-| Analyst agents (worker + lead) | Todo |
-| Consensus — debate-to-converge (cap 3) | Todo |
-| LangGraph orchestration + 2 feedback edges (cap 3) | Todo |
-| Tool-authoring flow (propose → review → human-approve merge) | Todo |
-| Execution sandbox (subprocess · timeout · workdir confinement) | Todo |
-| Autonomous tool-merge toggle | Deferred |
-| Sandbox hardening (containers / seccomp / egress) | Deferred |
-| CLI entry + notebook | Todo |
-| Minimal pytest (deterministic parts) | Todo |
-| Lead-scientist idea-generation group | Deferred |
+| # | Status | What is being built |
+|---|---|---|
+| 0 | Done | Scaffolding & environment: repo skeleton, `environment.yml`, `.env.example`, `.gitignore`, `CLAUDE.md`, `AGENTS.md` symlink, `config/`, and seed `DOCS.md` files. |
+| 1 | Todo | Schemas: Pydantic v2 message models including `FigureRef`. |
+| 2 | Todo | Config + model registry: `config/models.yaml`, provider abstraction, and role-to-model resolution. |
+| 3 | Todo | Observability: LangSmith tracing and per-call cost logging in the provider layer. |
+| 4 | Todo | Storage: SQLite papers, memory, query log, and reserved embedding space. |
+| 5 | Todo | Librarian sources: shared `QuerySource` interface plus arXiv, NASA ADS, and Tavily web modules. |
+| 6 | Todo | Retrieval: `text_search()` over SQLite and `vector_search()` stub. |
+| 7 | Todo | Runtime prompts: one `prompts/<role>.md` file per role. |
+| 8 | Todo | Agent roles: reviewer, librarian I/O, librarian searcher, analyst worker, and analyst lead wrappers. |
+| 9 | Todo | Consensus: debate-to-converge strategy with cap 3 and lead adjudication. |
+| 10 | Todo | Orchestration: LangGraph graph with capped paper-search and analysis-result feedback edges. |
+| 11 | Todo | Tool-authoring & sandbox: propose-review-human-approve flow plus subprocess sandbox. |
+| 12 | Todo | Entry points & tests: CLI, inspection notebook, and deterministic pytest coverage. |
 
-See `CLAUDE.md` §14 for the dependency-ordered build sequence.
+See `CLAUDE.md` §14 for checkpoints and deferred Phase 2 stubs.
 
 ---
 
