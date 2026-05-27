@@ -1,0 +1,1 @@
+"""Retrieval backend (text search now, vector search stubbed). Populated in step 6."""

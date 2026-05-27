@@ -1,0 +1,1 @@
+"""Provider abstraction + role→model registry. Populated in step 2."""

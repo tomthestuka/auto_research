@@ -1,0 +1,27 @@
+name: auto_research
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - pip
+  # schemas + config + env
+  - pydantic>=2.7
+  - pyyaml>=6
+  - python-dotenv>=1
+  # LLM provider SDKs
+  - anthropic>=0.40
+  - openai>=1.50
+  - google-genai>=0.3
+  # orchestration + observability
+  - langgraph>=0.2
+  - langsmith>=0.1.130
+  # literature sources
+  - arxiv>=2.1
+  - ads>=0.12
+  - tavily-python>=0.5
+  # tests
+  - pytest>=8
+  # pip is only needed for the editable install of this repo; everything else
+  # above is on conda-forge.
+  - pip:
+      - -e .

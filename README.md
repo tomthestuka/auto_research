@@ -112,7 +112,7 @@ as `DOCS.md`).
 
 | Component | Status |
 |---|---|
-| Repo scaffolding, conda env, `.env.example`, symlinks | Todo |
+| `auto_research` scaffolding | Done |
 | Pydantic schemas (incl. `FigureRef`) | Todo |
 | Config-driven model registry (OpenAI / Anthropic / Google) | Todo |
 | LangSmith tracing + per-call cost logging | Todo |
@@ -182,6 +182,9 @@ from auto_research import run_request   # interface; see module DOCS.md
   (`AGENTS.md`, etc.) are symlinks to it.
 - Every module folder keeps a **`DOCS.md`** (purpose · architecture · interfaces ·
   dependencies · dictionary-level reference · changelog), always synced to the code.
+- **`README.md` is kept synced too.** Any change that touches what this file describes
+  — the build-status table, architecture diagram, model defaults, getting-started, or
+  these contributor rules — must update the README in the same session.
 - Coding agents **never run git**; they edit files and summarize changes for the human to
   commit.
 - `CLAUDE.md` and `DOCS.md` are **build-time only** — never fed to runtime agents, which

@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto_research"
+version = "0.0.0"
+description = "Automated research assistant: a LangGraph team of LLM librarians, analysts, and reviewers."
+requires-python = ">=3.13"
+readme = "README.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]

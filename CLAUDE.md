@@ -80,6 +80,12 @@ Consequences:
   write, not git you execute.)
 - **Keep every `DOCS.md` synced.** Any code change must be reflected in the relevant
   `DOCS.md` in the same session, including a changelog entry. Out-of-sync docs are a bug.
+- **Keep `README.md` synced.** After every change, update `README.md` in the same
+  session whenever the change touches anything the README describes — the build
+  status table ([§14](#14-build-order-phase-1)), architecture diagram, model
+  defaults, getting-started, environment, or contributor rules. A change is not
+  complete until the README reflects it. Apply the same discipline as for
+  `DOCS.md`: prefer a precise edit over a sweeping rewrite.
 - **Never leak governance files into runtime.** `CLAUDE.md` and any `DOCS.md` must never
   be loaded into a runtime LLM's context — not as a system prompt, tool input, retrieved
   document, or otherwise. Runtime prompts come *only* from `prompts/` (see
@@ -338,3 +344,7 @@ documented stubs.
 
 - *(unreleased)* — Initial `CLAUDE.md` authored for Phase 1 (modular minimal skeleton);
   added §14 build order.
+- 2026-05-26 — Added a hard rule in §3 requiring `README.md` to be kept synced in the
+  same session as any change that touches what the README describes (status table,
+  architecture, defaults, getting-started, contributor rules). Parallels the
+  pre-existing `DOCS.md` sync rule.

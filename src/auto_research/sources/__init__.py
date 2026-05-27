@@ -1,0 +1,1 @@
+"""Librarian source modules behind a shared `QuerySource` interface. Populated in step 5."""
