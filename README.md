@@ -17,7 +17,7 @@ truth for how this project is built.
 ## The loop
 
 ```
-human request  →  reviewer dispatches literature + analysis tasks
+research request  →  reviewer dispatches literature + analysis tasks
                →  librarians search · analysts analyze (debate to converge)
                →  reviewer digests results, cross-checks prior publications
                →  human review
@@ -26,6 +26,9 @@ human request  →  reviewer dispatches literature + analysis tasks
 with two feedback edges (each capped at 3 iterations): the reviewer can send literature
 back to the librarians ("insufficient / obsolete — search again") and analyses back to
 the analysts ("rework this").
+
+In Phase 1 the request enters from the human. In Phase 2, authorized lead-scientist
+planning teams may also route requests through the same reviewer gate.
 
 ---
 
@@ -120,7 +123,7 @@ discipline as `DOCS.md`). Phase 2 items remain documented as deferred stubs in
 | 4 | Done | Storage: SQLite papers, memory, query log, and reserved embedding space. |
 | 5 | Done | Librarian sources: shared `QuerySource` interface plus arXiv, NASA ADS, and Tavily web modules. |
 | 6 | Done | Retrieval: `text_search()` over SQLite and `vector_search()` stub. |
-| 7 | Todo | Runtime prompts: one `prompts/<role>.md` file per role. |
+| 7 | Done | Runtime prompts: one `prompts/<role>.md` file per role. |
 | 8 | Todo | Agent roles: reviewer, librarian I/O, librarian searcher, analyst worker, and analyst lead wrappers. |
 | 9 | Todo | Consensus: debate-to-converge strategy with cap 3 and lead adjudication. |
 | 10 | Todo | Orchestration: LangGraph graph with capped paper-search and analysis-result feedback edges. |

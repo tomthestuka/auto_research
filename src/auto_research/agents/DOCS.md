@@ -18,8 +18,19 @@ Critical: **runtime LLMs never see `CLAUDE.md` or any `DOCS.md`**
 ([CLAUDE.md §4](../../../CLAUDE.md#4-claudemd-and-docsmd-are-build-time-only)).
 Only the file in `prompts/` plus task data goes into the model.
 
+Step 7 provides the prompt-loading utility and runtime prompt files. Step 8 will
+add the async role wrapper classes on top of this loader.
+
 ## Interfaces / Contracts
-*To be populated in step 8.* Planned classes:
+Prompt loading:
+- `load_prompt(role, root=None) -> str` loads `prompts/<role>.md`, strips leading
+  and trailing whitespace, and raises `ValueError` if the prompt text references
+  build-time governance filenames.
+- `prompts_dir(root=None) -> Path` returns the prompt directory, allowing tests to
+  inject a temporary prompt root.
+- `PROMPT_FILENAMES` maps the five Phase 1 roles to their Markdown filenames.
+
+Role wrappers are still planned for step 8:
 - `ReviewerAgent`, `LibrarianIOAgent`, `LibrarianSearcherAgent`,
   `AnalystWorkerAgent`, `AnalystLeadAgent`.
 
@@ -29,7 +40,17 @@ Only the file in `prompts/` plus task data goes into the model.
   `auto_research.observability`.
 
 ## Dictionary-level reference
-*(none yet.)*
+- `PromptRole` — literal type for the five Phase 1 runtime roles:
+  `reviewer`, `librarian_io`, `librarian_searcher`, `analyst_worker`,
+  `analyst_lead`.
+- `PROMPT_FILENAMES` — role-to-filename mapping used by the loader.
+- `FORBIDDEN_RUNTIME_REFERENCES` — tuple of build-time governance filenames that
+  runtime prompts must not reference.
+- `prompts_dir(root=None)` — returns an injected prompt root or the repository's
+  top-level `prompts/` directory.
+- `load_prompt(role, root=None)` — loads and validates one runtime prompt.
 
 ## Changelog
+- 2026-05-27 — Step 7 completed: added runtime prompt loading utilities and
+  governance-reference guards for prompt files.
 - 2026-05-26 — Folder seeded during step 0.

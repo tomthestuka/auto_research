@@ -19,7 +19,7 @@ A src-layout package. Submodules are added in the order set by
 | `storage` | 4 | SQLite layer (papers, memory, query_log; embedding column reserved for Phase 2). |
 | `sources` | 5 | `QuerySource` interface + `arxiv`, `nasa_ads`, `web` (Tavily) modules. |
 | `retrieval` | 6 | `RetrievalBackend` (text search now, vector search stubbed). |
-| `agents` | 8 | Thin per-role wrappers that load their `prompts/<role>.md` and call the provider layer. |
+| `agents` | 7-8 | Runtime prompt loader now; thin per-role wrappers that load `prompts/<role>.md` and call the provider layer next. |
 | `consensus` | 9 | `ConsensusStrategy` — debate-to-converge with lead adjudication. |
 | `graph` | 10 | LangGraph assembly + the two capped feedback edges. |
 | `sandbox` | 11 | Subprocess sandbox + `research_toolkit` propose/branch/review/merge flow. |
@@ -44,6 +44,8 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
   release.
 
 ## Changelog
+- 2026-05-27 — Step 7 completed: runtime prompts now exist for all Phase 1 roles,
+  with a guarded loader in `auto_research.agents`.
 - 2026-05-27 — Step 6 completed: `auto_research.retrieval` now exposes SQLite
   text search over papers/memory and a `vector_search()` Phase 2 stub.
 - 2026-05-27 — Step 5 completed: `auto_research.sources` now exposes the shared

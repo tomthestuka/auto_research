@@ -20,8 +20,9 @@ analyses, and reviews the results. The agent team has three roles:
   memory (searcher sub-team).
 - **Analysts** — perform analysis tasks; workers debate to convergence, a lead model
   adjudicates and maintains library discipline.
-- **Reviewer** — top-tier models that triage human requests, dispatch work, and review
-  results against prior literature.
+- **Reviewer** — top-tier models that triage research requests, dispatch work, and
+  review results against prior literature. In Phase 1 requests come from the human; in
+  Phase 2 they may also come from an authorized lead-scientist planning team.
 
 **Phase 1 (this phase): a working, minimal, modular skeleton** — a full team that runs
 end-to-end with real LLM calls, but with the smallest sensible code surface, clean
@@ -264,11 +265,12 @@ only on `research_toolkit`. They are **not** the coding agent running git
 - Lead (top tier) judges convergence, adjudicates, maintains library discipline, and
   drives the `research_toolkit` review/merge flow ([§8](#8-runtime-tool-authoring--sandbox)).
 
-**Reviewer** (top tier): triages the human request, dispatches analysis tasks (→ analysts)
-and literature tasks (→ librarians), digests results, and cross-checks against prior
-publications.
+**Reviewer** (top tier): triages the research request, dispatches analysis tasks
+(→ analysts) and literature tasks (→ librarians), digests results, and cross-checks
+against prior publications. Phase 1 requests enter from the human; Phase 2 may also
+route authorized lead-scientist planning requests through the same reviewer gate.
 
-**Process loop:** human request → reviewer dispatches analysis + literature tasks →
+**Process loop:** request → reviewer dispatches analysis + literature tasks →
 reviewer digests analysis results and compares with prior publications → human review.
 Implement **two real feedback edges**, each with a hard iteration cap (default 3):
 
@@ -341,7 +343,7 @@ Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & docum
 | 4 | Done | **Storage** — SQLite layer (papers / memory / query_log), embedding space reserved; read/write modules. | Write then read back a paper record (pytest). |
 | 5 | Done | **Librarian sources** — `QuerySource` interface + `arxiv`, `nasa_ads`, `web` (Tavily) modules. | Each source returns results for a sample query. |
 | 6 | Done | **Retrieval** — `RetrievalBackend` with `text_search()` over SQLite; `vector_search()` stub raising `NotImplementedError`. | Store, then text-retrieve, a record. |
-| 7 | Todo | **Runtime prompts** — one `prompts/<role>.md` per role. | Each prompt loads at runtime; no governance file referenced. |
+| 7 | Done | **Runtime prompts** — one `prompts/<role>.md` per role. | Each prompt loads at runtime; no governance file referenced. |
 | 8 | Todo | **Agent roles** — thin wrappers: librarian I/O, librarian searcher, analyst worker, analyst lead, reviewer (each loads its prompt, uses schemas + config models). | Each role runs one task in isolation. |
 | 9 | Todo | **Consensus** — `ConsensusStrategy` = debate-to-converge (cap 3) + lead adjudication. | Workers converge (or hit the cap and the lead adjudicates) on a toy task. |
 | 10 | Todo | **Orchestration** — assemble the LangGraph graph and the two capped feedback edges (paper-search review, analysis review). | Full loop runs end-to-end on a sample request. |
@@ -381,6 +383,11 @@ documented stubs.
   ADS, and Tavily source adapters plus live sample-query verification.
 - 2026-05-27 — Marked step 6 (retrieval) done after adding SQLite text search,
   the `vector_search()` Phase 2 stub, and live `GX339-4` retrieval verification.
+- 2026-05-27 — Marked step 7 (runtime prompts) done after adding all role prompt
+  files and guarded prompt-loading tests.
+- 2026-05-27 — Clarified that the reviewer triages research requests from the human
+  in Phase 1 and may also receive authorized lead-scientist planning requests in
+  Phase 2.
 - 2026-05-26 — Added a hard rule in §3 requiring `README.md` to be kept synced in the
   same session as any change that touches what the README describes (status table,
   architecture, defaults, getting-started, contributor rules). Parallels the
