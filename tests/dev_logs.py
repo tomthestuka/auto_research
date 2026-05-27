@@ -127,6 +127,38 @@ def summarize_agent_log(jsonl_path: Path) -> Path:
     return md_path
 
 
+def summarize_graph_log(jsonl_path: Path) -> Path:
+    """Write a Markdown summary beside a step-10 graph JSONL log."""
+
+    rows = [
+        json.loads(line)
+        for line in jsonl_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    md_path = jsonl_path.with_suffix(".md")
+    lines = [f"# {jsonl_path.stem}", "", f"- Events: {len(rows)}", ""]
+    for row in rows:
+        lines.extend(
+            [
+                f"## {row['event']}",
+                "",
+                f"- Role: `{row.get('role')}`",
+                f"- Member: `{row.get('model_member')}`",
+                f"- Status: {row.get('status')}",
+                f"- Input tokens: {row.get('input_tokens', 0)}",
+                f"- Output tokens: {row.get('output_tokens', 0)}",
+                "",
+            ]
+        )
+        output = row.get("output")
+        if output is not None:
+            lines.extend(["```json", json.dumps(output, indent=2), "```", ""])
+        if row.get("error"):
+            lines.extend(["### Error", "", f"`{row['error']}`", ""])
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    return md_path
+
+
 def summarize_consensus_log(jsonl_path: Path) -> Path:
     """Write a Markdown summary beside a step-9 consensus JSONL log."""
 

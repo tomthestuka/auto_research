@@ -346,7 +346,7 @@ Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & docum
 | 7 | Done | **Runtime prompts** — one `prompts/<role>.md` per role. | Each prompt loads at runtime; no governance file referenced. |
 | 8 | Done | **Agent roles** — thin wrappers: librarian I/O, librarian searcher, analyst worker, analyst lead, reviewer (each loads its prompt, uses schemas + config models). | Role plumbing is verified: prompt loads, model resolves via config, structured Pydantic input goes in, structured output comes back, and trace/cost logging is exercised. This does **not** mean every role can do its full production job yet. |
 | 9 | Done | **Consensus** — `ConsensusStrategy` = debate-to-converge (cap 3) + lead adjudication. | Workers converge (or hit the cap and the lead adjudicates) on a bounded task. |
-| 10 | Todo | **Orchestration** — assemble the LangGraph graph and the two capped feedback edges (paper-search review, analysis review). | Full loop runs end-to-end on a sample request. |
+| 10 | Done | **Orchestration** — assemble the LangGraph graph and the two capped feedback edges (paper-search review, analysis review). | Full loop runs end-to-end on a sample request. |
 | 11 | Todo | **Tool-authoring & sandbox** — `research_toolkit` propose→branch→lead-review→**human-approve merge** flow; subprocess sandbox (timeout, workdir confinement). | Proposing a trivial tool is blocked until approval; `xspec_utils` runs inside the sandbox. |
 | 12 | Todo | **Entry points & tests** — importable library + CLI (`python -m auto_research "…"`), notebook for inspection, minimal pytest on deterministic parts. | CLI runs a request end-to-end; notebook inspects a run. |
 
@@ -400,3 +400,7 @@ documented stubs.
   same session as any change that touches what the README describes (status table,
   architecture, defaults, getting-started, contributor rules). Parallels the
   pre-existing `DOCS.md` sync rule.
+- 2026-05-27 — Marked step 10 (orchestration) done after wiring the LangGraph
+  state machine with the two capped feedback edges, the deterministic full-loop
+  / cap / early-exit tests, and the opt-in live graph test driving real
+  reviewer / worker / lead calls.
