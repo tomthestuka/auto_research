@@ -280,6 +280,18 @@ class Storage:
             )
         return int(cursor.lastrowid)
 
+    async def replace_memory_for_paper(self, memory: MemoryRecord) -> int:
+        """Replace existing memory rows for a paper, then insert one row."""
+
+        return self._replace_memory_for_paper(memory)
+
+    def _replace_memory_for_paper(self, memory: MemoryRecord) -> int:
+        if memory.paper_id is None:
+            return self._insert_memory(memory)
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("DELETE FROM memory WHERE paper_id = ?", (memory.paper_id,))
+        return self._insert_memory(memory)
+
     async def log_query(self, query: QueryLogRecord) -> int:
         """Insert a query log row and return its row id."""
 

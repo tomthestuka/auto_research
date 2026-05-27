@@ -6,7 +6,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from auto_research.schemas import FigureRef
+from auto_research.schemas import DocumentRef, FigureRef
 
 
 ProviderName = Literal["anthropic", "google", "openai"]
@@ -50,6 +50,7 @@ class RoleModelConfig(BaseModel):
     provider: ProviderName
     model: str = Field(min_length=1)
     vision: bool = False
+    documents: bool = False
     priceMTk: dict[str, float] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
 
@@ -80,6 +81,7 @@ class ModelProvider(Protocol):
         *,
         schema: type[BaseModel] | None = None,
         images: Sequence[FigureRef] = (),
+        documents: Sequence[DocumentRef] = (),
     ) -> ModelResponse:
         """Call a provider model and return normalized output."""
 
@@ -98,6 +100,7 @@ class ModelHandle:
         *,
         schema: type[BaseModel] | None = None,
         images: Sequence[FigureRef] = (),
+        documents: Sequence[DocumentRef] = (),
     ) -> ModelResponse:
         """Call the configured provider for this role."""
 
@@ -109,6 +112,10 @@ class ModelHandle:
             raise ValueError(
                 f"role {self.role!r} member {self.config.name!r} is not configured for vision inputs"
             )
+        if documents and not self.config.documents:
+            raise ValueError(
+                f"role {self.role!r} member {self.config.name!r} is not configured for document inputs"
+            )
         from auto_research.observability import traced_model_call
 
         return await traced_model_call(
@@ -119,6 +126,7 @@ class ModelHandle:
                 self.config,
                 schema=schema,
                 images=images,
+                documents=documents,
             ),
         )
 

@@ -18,8 +18,11 @@ Critical: **runtime LLMs never see `CLAUDE.md` or any `DOCS.md`**
 ([CLAUDE.md §4](../../../CLAUDE.md#4-claudemd-and-docsmd-are-build-time-only)).
 Only the file in `prompts/` plus task data goes into the model.
 
-Step 7 provides the prompt-loading utility and runtime prompt files. Step 8 will
-add the async role wrapper classes on top of this loader.
+Step 8 adds thin role wrappers. They call the selected model member and validate
+the returned JSON against existing Pydantic schemas. Librarian tool access is
+injected through `QuerySource` and `RetrievalBackend`. Analyst wrappers expose
+available toolkit names, including `research_toolkit.xspec_utils`, as task
+context only; toolkit execution remains deferred to the sandbox step.
 
 ## Interfaces / Contracts
 Prompt loading:
@@ -30,9 +33,28 @@ Prompt loading:
   inject a temporary prompt root.
 - `PROMPT_FILENAMES` maps the five Phase 1 roles to their Markdown filenames.
 
-Role wrappers are still planned for step 8:
-- `ReviewerAgent`, `LibrarianIOAgent`, `LibrarianSearcherAgent`,
-  `AnalystWorkerAgent`, `AnalystLeadAgent`.
+Role wrappers:
+- `ReviewerAgent.review(request, *, literature=(), report=None) ->
+  ReviewVerdict`.
+- `LibrarianIOAgent.search(request) -> list[SearchResult]`.
+- `LibrarianIOAgent.ingest_document(document, *, paper_id=None,
+  instructions=None) -> MemoryRecord` passes a `DocumentRef` attachment to the
+  configured I/O model and returns one memory abstraction. It does not convert
+  PDFs to text in Python; bytes are loaded only at the provider-call boundary.
+- `LibrarianSearcherAgent.search(request) -> list[SearchResult]`.
+- `AnalystWorkerAgent.analyze(task, *, peer_reports=()) -> AnalystReport`.
+- `AnalystWorkerAgent.request_tools(task) -> list[ToolCallRequest]` captures
+  requested shell/tool/database actions without executing them.
+- `AnalystLeadAgent.adjudicate(task, reports) -> AnalystReport`.
+- `AnalystLeadAgent.review_tool_requests(requests) -> list[ToolCallReview]`
+  reviews proposed tool actions without executing them.
+- All wrappers accept an injected `model`; otherwise they resolve their role
+  from `config/models.yaml` and use the first configured group member unless
+  `model_name` is supplied.
+- Live role verification is opt-in:
+  `AUTO_RESEARCH_LIVE_AGENT_TESTS=1 pytest tests/test_live_agents.py -s`.
+  It runs one real model call for each role and writes JSONL plus Markdown logs
+  under `logs/dev/step-8/`.
 
 ## Dependencies
 - Internal: `auto_research.models`, `auto_research.schemas`,
@@ -49,8 +71,30 @@ Role wrappers are still planned for step 8:
 - `prompts_dir(root=None)` — returns an injected prompt root or the repository's
   top-level `prompts/` directory.
 - `load_prompt(role, root=None)` — loads and validates one runtime prompt.
+- `CallableModel` — protocol for injected model handles in role tests and
+  runtime wrappers.
+- `AgentRole` — base class that loads the role prompt, selects the model, sends
+  task JSON, validates JSON responses, and stores the most recent
+  `ModelResponse` on `last_response` for logging.
+- `ReviewerAgent` — reviewer wrapper. Method: `review()`.
+- `LibrarianIOAgent` — external-source librarian wrapper. Method: `search()`.
+  Method: `ingest_document()` for direct document attachment ingestion.
+- `LibrarianSearcherAgent` — local-memory librarian wrapper. Method:
+  `search()`.
+- `AnalystWorkerAgent` — analyst worker wrapper. Method: `analyze()`.
+  Method: `request_tools()`.
+- `AnalystLeadAgent` — analyst lead wrapper. Method: `adjudicate()`.
+  Method: `review_tool_requests()`.
 
 ## Changelog
+- 2026-05-27 — Step 8 completed: added async role wrappers for reviewer,
+  librarian I/O, librarian searcher, analyst worker, and analyst lead. The
+  wrappers load runtime prompts, call configured model groups, validate schema
+  JSON, inject source/retrieval dependencies, and expose toolkit availability
+  without prescribing toolkit use.
+- 2026-05-27 — Added the step-8 opt-in live role test and development log path.
+- 2026-05-27 — Added direct document attachment ingestion for librarian I/O and
+  report-independent tool request/review methods for analysts.
 - 2026-05-27 — Step 7 completed: added runtime prompt loading utilities and
   governance-reference guards for prompt files.
 - 2026-05-26 — Folder seeded during step 0.

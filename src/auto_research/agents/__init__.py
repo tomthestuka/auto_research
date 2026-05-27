@@ -7,11 +7,27 @@ from auto_research.agents.prompts import (
     load_prompt,
     prompts_dir,
 )
+from auto_research.agents.roles import (
+    AgentRole,
+    AnalystLeadAgent,
+    AnalystWorkerAgent,
+    CallableModel,
+    LibrarianIOAgent,
+    LibrarianSearcherAgent,
+    ReviewerAgent,
+)
 
 __all__ = [
+    "AgentRole",
+    "AnalystLeadAgent",
+    "AnalystWorkerAgent",
+    "CallableModel",
     "FORBIDDEN_RUNTIME_REFERENCES",
+    "LibrarianIOAgent",
+    "LibrarianSearcherAgent",
     "PROMPT_FILENAMES",
     "PromptRole",
+    "ReviewerAgent",
     "load_prompt",
     "prompts_dir",
 ]

@@ -93,3 +93,35 @@ def summarize_retrieval_log(jsonl_path: Path, *, query: str) -> Path:
         )
     md_path.write_text("\n".join(lines), encoding="utf-8")
     return md_path
+
+
+def summarize_agent_log(jsonl_path: Path) -> Path:
+    """Write a Markdown summary beside a step-8 live-agent JSONL log."""
+
+    rows = [
+        json.loads(line)
+        for line in jsonl_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    md_path = jsonl_path.with_suffix(".md")
+    lines = [f"# {jsonl_path.stem}", "", f"- Calls: {len(rows)}", ""]
+    for row in rows:
+        lines.extend(
+            [
+                f"## {row['role']}",
+                "",
+                f"- Model member: `{row['model_member']}`",
+                f"- Provider: `{row['provider']}`",
+                f"- Model: `{row['model']}`",
+                f"- Input tokens: {row['input_tokens']}",
+                f"- Output tokens: {row['output_tokens']}",
+                f"- Status: {row['status']}",
+                "",
+            ]
+        )
+        if row.get("error"):
+            lines.extend(["### Error", "", f"`{row['error']}`", ""])
+        else:
+            lines.extend(["### Parsed Output", "", "```json", json.dumps(row["output"], indent=2), "```", ""])
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    return md_path

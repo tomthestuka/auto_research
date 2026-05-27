@@ -72,7 +72,8 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   downloaded PDF path.
 - `Storage(path: str | Path | None = None)` — SQLite wrapper. Methods:
   `initialize()`, `upsert_paper(paper)`, `get_paper(paper_id)`,
-  `list_papers()`, `insert_memory(memory)`, `log_query(query)`.
+  `list_papers()`, `insert_memory(memory)`,
+  `replace_memory_for_paper(memory)`, `log_query(query)`.
 - `ingest_local_papers(storage: Storage, papers_dir: str | Path) ->
   list[StoredPaper]` — upserts all `*.pdf` files in a directory.
 - `librarian_io_enrich_stub(storage: Storage, paper_id: int) -> None` —
@@ -92,4 +93,7 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   `/data/fzhou/ar_runtime/test_runtime/auto_research.sqlite3`.
 - 2026-05-27 — Added source-result ingestion and the librarian I/O enrichment
   stub for future PDF reading/abstraction.
+- 2026-05-27 — Added `replace_memory_for_paper()` so development live checks can
+  let sequential librarian I/O model responses overwrite one durable memory
+  abstraction for a newly ingested paper while logging every model response.
 - 2026-05-26 — Folder seeded during step 0.

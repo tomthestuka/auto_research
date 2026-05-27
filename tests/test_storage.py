@@ -87,6 +87,31 @@ def test_memory_and_query_log_insert(tmp_path):
     assert query_id == 1
 
 
+def test_replace_memory_for_paper_overwrites_existing_rows(tmp_path):
+    db = Storage(tmp_path / "test.sqlite3")
+
+    async def run():
+        await db.initialize()
+        paper_id = await db.upsert_paper(PaperRecord(source="local_file", source_id="gx", title="GX339_4"))
+        first = await db.replace_memory_for_paper(
+            MemoryRecord(paper_id=paper_id, summary="First abstraction", tags=["first"])
+        )
+        second = await db.replace_memory_for_paper(
+            MemoryRecord(paper_id=paper_id, summary="Second spectural fit abstraction", tags=["second"])
+        )
+        return first, second
+
+    first, second = asyncio.run(run())
+
+    assert first == 1
+    assert second >= 1
+
+    from auto_research.retrieval import SqliteRetrievalBackend
+
+    hits = asyncio.run(SqliteRetrievalBackend(db).text_search("spectural fit"))
+    assert [hit.title for hit in hits] == [f"memory:{second}"]
+
+
 def test_paper_from_local_file_hashes_file(tmp_path):
     paper_path = tmp_path / "Example Paper.pdf"
     paper_path.write_bytes(b"pdf-ish")

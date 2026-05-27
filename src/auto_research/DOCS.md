@@ -19,7 +19,8 @@ A src-layout package. Submodules are added in the order set by
 | `storage` | 4 | SQLite layer (papers, memory, query_log; embedding column reserved for Phase 2). |
 | `sources` | 5 | `QuerySource` interface + `arxiv`, `nasa_ads`, `web` (Tavily) modules. |
 | `retrieval` | 6 | `RetrievalBackend` (text search now, vector search stubbed). |
-| `agents` | 7-8 | Runtime prompt loader now; thin per-role wrappers that load `prompts/<role>.md` and call the provider layer next. |
+| `observations.py` | 8 | Generic loader for mission observation database/archive paths from `config/observations.yaml`. |
+| `agents` | 7-8 | Runtime prompt loader plus thin per-role wrappers that load `prompts/<role>.md`, call configured model groups, and validate schema JSON. |
 | `consensus` | 9 | `ConsensusStrategy` — debate-to-converge with lead adjudication. |
 | `graph` | 10 | LangGraph assembly + the two capped feedback edges. |
 | `sandbox` | 11 | Subprocess sandbox + `research_toolkit` propose/branch/review/merge flow. |
@@ -31,6 +32,9 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
 - Package exports its version as `auto_research.__version__`.
 - Each submodule documents its own interface in its `DOCS.md`. Cross-module
   contracts go through `auto_research.schemas`.
+- `auto_research.observations.load_observations_config()` loads generic
+  mission observation locations from config; mission names are not hardcoded in
+  agent wrappers.
 
 ## Dependencies
 - External: `pydantic`, `langgraph`, `langsmith`, provider SDKs (`anthropic`,
@@ -44,6 +48,11 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
   release.
 
 ## Changelog
+- 2026-05-27 — Step 8 completed: `auto_research.agents` now exposes async
+  role wrappers for reviewer, librarian I/O, librarian searcher, analyst
+  worker, and analyst lead.
+- 2026-05-27 — Added generic observation-location config loading and document
+  attachment support for librarian I/O ingestion.
 - 2026-05-27 — Step 7 completed: runtime prompts now exist for all Phase 1 roles,
   with a guarded loader in `auto_research.agents`.
 - 2026-05-27 — Step 6 completed: `auto_research.retrieval` now exposes SQLite

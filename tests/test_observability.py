@@ -28,7 +28,7 @@ def test_cost_entry_uses_configured_token_rates():
 
 
 class FakeProvider:
-    async def call(self, messages, config, *, schema=None, images=()):
+    async def call(self, messages, config, *, schema=None, images=(), documents=()):
         return ModelResponse(
             content="done",
             usage=ModelUsage(input_tokens=100, output_tokens=25),

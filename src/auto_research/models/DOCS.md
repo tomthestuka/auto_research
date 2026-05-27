@@ -27,6 +27,9 @@ Google by editing YAML alone
 - `ModelHandle.call()` accepts text messages and optional `FigureRef` images.
   If images are passed to a role member whose config has `vision: false`, it
   raises `ValueError`.
+- `ModelHandle.call()` also accepts optional `DocumentRef` attachments. If
+  documents are passed to a role member whose config has `documents: false`, it
+  raises `ValueError`.
 - `ModelRegistry.resolve(role)` returns a `ModelGroupHandle`; callers choose a
   member with `member(name)` or iterate through `handles`.
 - `schema` is accepted in the call signature as the structured-output extension
@@ -51,7 +54,7 @@ Google by editing YAML alone
 - `ModelResponse(content: str, usage: ModelUsage = ModelUsage(), raw: Any =
   None)` — normalized provider output.
 - `RoleModelConfig(name: str, provider: ProviderName, model: str,
-  vision: bool = False, priceMTk: dict[str, float] = {},
+  vision: bool = False, documents: bool = False, priceMTk: dict[str, float] = {},
   parameters: dict[str, Any] = {})` — one model member from YAML.
 - `RoleModelGroup(members: list[RoleModelConfig])` — non-empty model group for
   one role.
@@ -81,6 +84,9 @@ Google by editing YAML alone
 ## Changelog
 - 2026-05-27 — Replaced `pricing_usd_per_million_tokens` with the shorter
   config field `priceMTk`.
+- 2026-05-27 — Added provider-level document attachment support and the
+  `documents` model-member capability flag. Librarian I/O members are configured
+  for direct PDF attachments.
 - 2026-05-27 — Wired `ModelHandle.call()` through step-3 observability so every
   provider call can be traced and cost-logged.
 - 2026-05-27 — Changed the registry contract from one model per role to

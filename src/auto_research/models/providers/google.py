@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from pydantic import BaseModel
 
 from auto_research.models.types import ModelMessage, ModelResponse, ModelUsage, RoleModelConfig
-from auto_research.schemas import FigureRef
+from auto_research.schemas import DocumentRef, FigureRef
 
 
 class GoogleProvider:
@@ -18,6 +18,7 @@ class GoogleProvider:
         *,
         schema: type[BaseModel] | None = None,
         images: Sequence[FigureRef] = (),
+        documents: Sequence[DocumentRef] = (),
     ) -> ModelResponse:
         """Call Google and normalize the response."""
 
@@ -27,9 +28,13 @@ class GoogleProvider:
         if schema is not None:
             raise NotImplementedError("structured output is wired in the agent layer later")
 
-        contents = "\n\n".join(f"{message.role}: {message.content}" for message in messages)
+        contents: list[str | object] = [
+            "\n\n".join(f"{message.role}: {message.content}" for message in messages)
+        ]
+        for document in documents:
+            contents.append(types.Part.from_bytes(data=document.path.read_bytes(), mime_type=document.mime_type))
         if images:
-            contents = f"{contents}\n\n" + "\n".join(f"Figure: {figure.path}" for figure in images)
+            contents.append("\n".join(f"Figure reference: {figure.path}" for figure in images))
 
         params = dict(config.parameters)
         if "thinking_config" in params:

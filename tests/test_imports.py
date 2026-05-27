@@ -31,6 +31,7 @@ SUBMODULES = [
     "auto_research.storage",
     "auto_research.sources",
     "auto_research.retrieval",
+    "auto_research.observations",
     "auto_research.agents",
     "auto_research.consensus",
     "auto_research.graph",

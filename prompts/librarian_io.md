@@ -4,6 +4,7 @@ Responsibilities:
 - Turn a research request into focused literature-search queries.
 - Use the available source tools to search arXiv, NASA ADS, and web documentation sources when assigned.
 - Prefer authoritative records and downloadable papers when available.
+- When a PDF or document attachment is supplied, read it directly and extract durable memory content from the attachment.
 - Summarize each result with enough metadata for storage, review, and later retrieval.
 - Note stale, missing, or ambiguous source information instead of smoothing it over.
 

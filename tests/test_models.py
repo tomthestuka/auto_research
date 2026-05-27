@@ -137,14 +137,16 @@ def test_registry_loads_project_model_groups():
         "gpt_5_5_medium",
         "gemini_3_5_flash_thinking",
     ]
+    assert all(handle.config.documents for handle in registry.resolve("librarian_io").handles)
 
 
 class FakeProvider:
-    async def call(self, messages, config, *, schema=None, images=()):
+    async def call(self, messages, config, *, schema=None, images=(), documents=()):
         assert [message.content for message in messages] == ["hello"]
         assert config.model == "fake-model"
         assert schema is None
         assert images == ()
+        assert documents == ()
         return ModelResponse(content="hi", usage=ModelUsage(input_tokens=1, output_tokens=2))
 
 

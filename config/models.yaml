@@ -52,7 +52,7 @@ roles:
           input: 3.0
           output: 15.0
         parameters:
-          max_tokens: 2048
+          max_tokens: 4096
       - name: gpt_5_5_medium
         provider: openai
         model: gpt-5.5
@@ -70,15 +70,17 @@ roles:
         provider: anthropic
         model: claude-sonnet-4-6
         vision: false
+        documents: true
         priceMTk:
           input: 3.0
           output: 15.0
         parameters:
-          max_tokens: 2048
+          max_tokens: 4096
       - name: gpt_5_5_medium
         provider: openai
         model: gpt-5.5
         vision: false
+        documents: true
         priceMTk:
           input: 5.0
           output: 30.0
@@ -90,6 +92,7 @@ roles:
         provider: google
         model: gemini-3.5-flash
         vision: false
+        documents: true
         priceMTk:
           input: 1.5
           output: 9.0

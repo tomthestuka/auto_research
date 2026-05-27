@@ -1,11 +1,12 @@
 """Anthropic provider adapter."""
 
+import base64
 from collections.abc import Sequence
 
 from pydantic import BaseModel
 
 from auto_research.models.types import ModelMessage, ModelResponse, ModelUsage, RoleModelConfig
-from auto_research.schemas import FigureRef
+from auto_research.schemas import DocumentRef, FigureRef
 
 
 class AnthropicProvider:
@@ -18,6 +19,7 @@ class AnthropicProvider:
         *,
         schema: type[BaseModel] | None = None,
         images: Sequence[FigureRef] = (),
+        documents: Sequence[DocumentRef] = (),
     ) -> ModelResponse:
         """Call Anthropic and normalize the response."""
 
@@ -34,13 +36,22 @@ class AnthropicProvider:
             for message in messages
             if message.role != "system"
         ]
-        if images:
-            provider_messages.append(
+        attachment_content = []
+        for document in documents:
+            attachment_content.append(
                 {
-                    "role": "user",
-                    "content": "\n".join(f"Figure: {figure.path}" for figure in images),
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": document.mime_type,
+                        "data": base64.b64encode(document.path.read_bytes()).decode("ascii"),
+                    },
                 }
             )
+        for figure in images:
+            attachment_content.append({"type": "text", "text": f"Figure reference: {figure.path}"})
+        if attachment_content:
+            provider_messages.append({"role": "user", "content": attachment_content})
 
         request = {
             "model": config.model,

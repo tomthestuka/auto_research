@@ -124,7 +124,7 @@ discipline as `DOCS.md`). Phase 2 items remain documented as deferred stubs in
 | 5 | Done | Librarian sources: shared `QuerySource` interface plus arXiv, NASA ADS, and Tavily web modules. |
 | 6 | Done | Retrieval: `text_search()` over SQLite and `vector_search()` stub. |
 | 7 | Done | Runtime prompts: one `prompts/<role>.md` file per role. |
-| 8 | Todo | Agent roles: reviewer, librarian I/O, librarian searcher, analyst worker, and analyst lead wrappers. |
+| 8 | Done | Agent roles: reviewer, librarian I/O, librarian searcher, analyst worker, and analyst lead wrappers. |
 | 9 | Todo | Consensus: debate-to-converge strategy with cap 3 and lead adjudication. |
 | 10 | Todo | Orchestration: LangGraph graph with capped paper-search and analysis-result feedback edges. |
 | 11 | Todo | Tool-authoring & sandbox: propose-review-human-approve flow plus subprocess sandbox. |
@@ -152,6 +152,10 @@ For the current development runtime, `.env` may set
 `AUTO_RESEARCH_RUNTIME_DIR=/data/fzhou/ar_runtime/test_runtime`, yielding
 `/data/fzhou/ar_runtime/test_runtime/auto_research.sqlite3`. Locally supplied
 papers live in `/data/fzhou/ar_runtime/papers`.
+
+Mission observation locations are configured generically in
+`config/observations.yaml` as `missions.<name>.obs_db_path`; agent code treats
+mission names as data rather than special cases.
 
 ---
 

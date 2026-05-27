@@ -1,0 +1,7 @@
+missions:
+  ixpe:
+    obs_db_path: /data/fzhou/XSPEC/Cyg_X-1/IXPE
+  nicer:
+    obs_db_path: /data/fzhou/XSPEC/Cyg_X-1/NICER
+  nustar:
+    obs_db_path: /data/fzhou/XSPEC/Cyg_X-1/NuSTAR

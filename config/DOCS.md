@@ -19,12 +19,17 @@ role or swapping a provider is a YAML edit; no Python change.
 
 ## Interfaces / Contracts
 - `models.yaml` — role → non-empty `members` list. Each member has `name`,
-  `provider`, `model`, `vision`, `parameters`, and optional `priceMTk`.
+  `provider`, `model`, `vision`, `parameters`, and optional `documents` and
+  `priceMTk`.
   Loaded and validated by `auto_research.models.registry`. Required roles: `reviewer`, `analyst_lead`,
   `analyst_worker`, `librarian_io`, `librarian_searcher`. Reviewer and
   analyst-tier models **must** be marked `vision: true` so figure references can
   be passed at the multimodal boundary (see
   [§7](../CLAUDE.md#7-schemas--protocols)).
+- `observations.yaml` — mission name → `obs_db_path`, a generic path to that
+  mission's observation database or archive root. Loaded by
+  `auto_research.observations`; mission names are data, not special cases in
+  code.
 - *(future)* `runtime.yaml` — runtime data dir (default `~/.auto_research/`),
   iteration caps, sandbox limits. Schema landed when first consumer needs it.
 
@@ -41,14 +46,24 @@ role or swapping a provider is a YAML edit; no Python change.
 - `models.yaml.roles.<role>.members[].model` — provider model identifier.
 - `models.yaml.roles.<role>.members[].vision` — whether the member may receive
   figures.
+- `models.yaml.roles.<role>.members[].documents` — whether the member may
+  receive document attachments. Librarian I/O members are configured with
+  `documents: true` so each team member can ingest PDFs directly.
 - `models.yaml.roles.<role>.members[].parameters` — provider-specific keyword
   arguments. OpenAI reasoning uses `reasoning.effort`; Gemini 3 thinking uses
   `thinking_config.thinking_level`.
 - `models.yaml.roles.<role>.members[].priceMTk` — optional USD rates per
   million tokens with `input` and `output` keys, consumed by
   `auto_research.observability`.
+- `observations.yaml.missions.<mission>.obs_db_path` — path to one mission's
+  observation database or archive root.
 
 ## Changelog
+- 2026-05-27 — Raised the Anthropic librarian I/O output cap so direct PDF
+  ingestion can return complete memory abstractions.
+- 2026-05-27 — Added `observations.yaml` for generic mission observation
+  locations and documented the `documents` model capability flag used for
+  librarian I/O PDF ingestion.
 - 2026-05-27 — Added `priceMTk` unit prices for configured models using
   standard per-million-token public rates.
 - 2026-05-27 — Documented optional per-model pricing rates consumed by the

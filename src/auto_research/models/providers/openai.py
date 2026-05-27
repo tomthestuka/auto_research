@@ -1,11 +1,12 @@
 """OpenAI provider adapter."""
 
+import base64
 from collections.abc import Sequence
 
 from pydantic import BaseModel
 
 from auto_research.models.types import ModelMessage, ModelResponse, ModelUsage, RoleModelConfig
-from auto_research.schemas import FigureRef
+from auto_research.schemas import DocumentRef, FigureRef
 
 
 class OpenAIProvider:
@@ -18,6 +19,7 @@ class OpenAIProvider:
         *,
         schema: type[BaseModel] | None = None,
         images: Sequence[FigureRef] = (),
+        documents: Sequence[DocumentRef] = (),
     ) -> ModelResponse:
         """Call OpenAI and normalize the response."""
 
@@ -26,14 +28,32 @@ class OpenAIProvider:
         if schema is not None:
             raise NotImplementedError("structured output is wired in the agent layer later")
 
-        input_items = [{"role": message.role, "content": message.content} for message in messages]
-        if images:
-            input_items.append(
+        input_items = [
+            {
+                "role": message.role,
+                "content": [{"type": "input_text", "text": message.content}],
+            }
+            for message in messages
+        ]
+        attachment_content = []
+        for document in documents:
+            data = base64.b64encode(document.path.read_bytes()).decode("ascii")
+            attachment_content.append(
                 {
-                    "role": "user",
-                    "content": "\n".join(f"Figure: {figure.path}" for figure in images),
+                    "type": "input_file",
+                    "filename": document.path.name,
+                    "file_data": f"data:{document.mime_type};base64,{data}",
                 }
             )
+        for figure in images:
+            attachment_content.append(
+                {
+                    "type": "input_text",
+                    "text": f"Figure reference: {figure.path}",
+                }
+            )
+        if attachment_content:
+            input_items.append({"role": "user", "content": attachment_content})
 
         response = await AsyncOpenAI().responses.create(
             model=config.model,

@@ -22,16 +22,18 @@ runtime prompt text that names build-time governance files.
 
 ## Interfaces / Contracts
 Runtime prompt files:
-- `reviewer.md` — request triage from a human or authorized upstream planning
-  team, dispatch, result review, feedback decisions, and final verdict framing.
-- `librarian_io.md` — external literature/source search, download and ingest
-  reporting, and bibliographic summaries.
+- `reviewer.md` — input portal for human or authorized upstream research
+  requests, work dispatch, result review, feedback decisions, and output portal
+  for triage plans or final verdicts.
+- `librarian_io.md` — external literature/source search, direct document/PDF
+  attachment reading, download and ingest reporting, and bibliographic
+  summaries.
 - `librarian_searcher.md` — local memory retrieval, staleness checks, and
   escalation recommendations.
-- `analyst_worker.md` — task analysis, debate revisions, assumptions, and figure
-  reference handling.
+- `analyst_worker.md` — task analysis, debate revisions, assumptions, figure
+  reference handling, and structured tool/data escalation requests.
 - `analyst_lead.md` — convergence judgment, adjudication, synthesis, and
-  tool-discipline review.
+  tool-discipline review without treating requested commands as executed.
 
 Each file is the complete system prompt for that role: identity, responsibilities,
 tools available, output schema expectations, escalation rules. The agent layer
@@ -49,6 +51,11 @@ loads it verbatim — do not embed templating logic here.
 - `analyst_lead.md` — system prompt for the analyst lead role.
 
 ## Changelog
+- 2026-05-27 — Clarified that the reviewer is both the user-input and
+  agent-output portal, and should triage new user requests instead of treating
+  absent downstream results as out-of-scope.
+- 2026-05-27 — Updated librarian I/O prompt for direct PDF/document attachment
+  ingestion and clarified analyst tool-request behavior.
 - 2026-05-27 — Clarified that the reviewer prompt can triage requests from the
   human or an authorized upstream planning team, preserving Phase 2 readiness.
 - 2026-05-27 — Step 7 completed: authored runtime prompts for all five Phase 1

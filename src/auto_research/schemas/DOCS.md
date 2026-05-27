@@ -10,6 +10,7 @@ One module per logical message family:
 
 - `base.py` — shared Pydantic configuration.
 - `figures.py` — artifact references.
+- `tools.py` — structured tool/shell/database action requests and reviews.
 - `requests.py` — top-level human request.
 - `search.py` — literature search messages.
 - `analysis.py` — analyst task/report messages.
@@ -27,6 +28,9 @@ carried by **reference** (`FigureRef`), never embedded
 - `FigureRef` carries only metadata: `path`, `caption`, `mime_type`,
   `produced_by`, `created_at`, `sha256`, and optional `thumbnail_b64`.
   Figure bytes are never stored in messages.
+- `DocumentRef` carries only metadata: `path`, `title`, `mime_type`,
+  `created_at`, and `sha256`. Document bytes are loaded only at provider-call
+  boundaries for models configured with document support.
 - `SearchSource` is currently one of `"arxiv"`, `"nasa_ads"`, `"web"`, or
   `"local"`.
 - `SearchRequest.max_results` is bounded to `1..100`.
@@ -49,6 +53,11 @@ carried by **reference** (`FigureRef`), never embedded
   created_at: datetime, sha256: str, thumbnail_b64: str | None = None)` —
   serializable artifact image reference. `sha256` must be a 64-character
   lowercase hexadecimal digest.
+- `DocumentRef(path: Path, title: str, mime_type: str, created_at: datetime,
+  sha256: str)` — serializable document attachment reference. Bytes stay out of
+  messages and logs.
+- `document_from_file(path: str | Path, *, title: str | None = None) ->
+  DocumentRef` — builds a document reference from a local file path.
 - `ResearchRequest(question: str, context: str | None = None,
   constraints: list[str] = [])` — the human's top-level ask entering the
   reviewer loop.
@@ -74,8 +83,22 @@ carried by **reference** (`FigureRef`), never embedded
   needs_more_literature: bool = False, needs_analysis_rework: bool = False,
   follow_up: str | None = None)` — reviewer decision and optional feedback
   request.
+- `ToolKind` — string tool request kind. Core categories include `"bash"`,
+  `"python"`, `"research_toolkit"`, `"observation_db"`, and
+  `"source_archive"`; registered tool names such as
+  `"research_toolkit.xspec_utils"` are also valid.
+- `ToolCallRequest(requested_by: str, kind: ToolKind, purpose: str,
+  command: str | None = None, arguments: dict[str, str] = {},
+  working_dir: Path | None = None, timeout_s: int = 300,
+  network_required: bool = False)` — structured request for future sandboxed
+  execution. It is separate from `AnalystReport`.
+- `ToolCallReview(approved: bool, rationale: str, revised_request:
+  ToolCallRequest | None = None)` — lead review of a proposed tool action.
 
 ## Changelog
+- 2026-05-27 — Added document attachment references and separate tool-call
+  request/review schemas so analysts can request shell/tool/database operations
+  without putting execution requests inside reports.
 - 2026-05-27 — Implemented the step-1 Pydantic protocol: base model, figure
   references, research requests, search messages, analysis messages, and review
   verdicts.

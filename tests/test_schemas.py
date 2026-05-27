@@ -9,11 +9,15 @@ from pydantic import ValidationError
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
+    DocumentRef,
     FigureRef,
     ResearchRequest,
     ReviewVerdict,
     SearchRequest,
     SearchResult,
+    ToolCallRequest,
+    ToolCallReview,
+    document_from_file,
 )
 
 
@@ -103,6 +107,20 @@ def test_figure_ref_rejects_bad_hash():
         )
 
 
+def test_document_ref_is_attachment_metadata_only(tmp_path):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.5\n")
+
+    document = document_from_file(pdf, title="Paper")
+    dumped = document.model_dump(mode="json")
+
+    assert isinstance(document, DocumentRef)
+    assert dumped["path"] == str(pdf)
+    assert dumped["title"] == "Paper"
+    assert dumped["mime_type"] == "application/pdf"
+    assert len(dumped["sha256"]) == 64
+
+
 def test_protocol_rejects_extra_fields():
     with pytest.raises(ValidationError):
         ReviewVerdict(accepted=True, rationale="Looks sound.", surprise="nope")
@@ -118,3 +136,18 @@ def test_review_verdict_flags_feedback_edges():
 
     assert verdict.needs_more_literature is True
     assert verdict.needs_analysis_rework is False
+
+
+def test_tool_call_request_is_report_independent():
+    request = ToolCallRequest(
+        requested_by="analyst_worker",
+        kind="bash",
+        purpose="List candidate observation files.",
+        command="find . -maxdepth 2 -type f",
+        working_dir="/tmp",
+    )
+    review = ToolCallReview(approved=False, rationale="Needs a confined working directory.")
+
+    assert request.kind == "bash"
+    assert request.network_required is False
+    assert review.approved is False
