@@ -51,6 +51,14 @@ loads it verbatim — do not embed templating logic here.
 - `analyst_lead.md` — system prompt for the analyst lead role.
 
 ## Changelog
+- 2026-05-27 — Added explicit scope boundaries across all five role prompts:
+  librarians own published literature and authoritative docs only; analysts
+  own all observation-archive triage (HEASARC etc.), data reduction, and
+  fitting, driven via structured tool requests that the runtime sandbox
+  executes (no native online capability lives in the analyst model call
+  itself); the reviewer dispatches accordingly and never asks librarians for
+  archive/data work. Triggered by a live-agent run where the reviewer
+  assigned HEASARC ObsID triage to the librarian I/O team.
 - 2026-05-27 — Clarified that the reviewer is both the user-input and
   agent-output portal, and should triage new user requests instead of treating
   absent downstream results as out-of-scope.
