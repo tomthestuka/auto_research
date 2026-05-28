@@ -127,9 +127,14 @@ writes the tool, lead reviews, human approves merge on GitHub.
   - `.describe_tool(name)` → `str` — `"<name>: <description>"` for prompts.
   - `.spec(name)` → `ToolSpec` — raises `KeyError` if unknown.
   - `.tool_catalogue()` → `str` — multi-line listing for prompt injection.
-- `run_tool(module, fn, args, *, timeout_s, workdir, toolkit_root, analyze_env=None)` →
+- `run_tool(module, fn, args, *, timeout_s, workdir, toolkit_root, analyze_env=None, analyze_ini_sh=None)` →
   `ToolResult` — async subprocess sandbox entry point. `analyze_env` selects
-  the Python interpreter; subprocess inherits parent env + PYTHONPATH override.
+  the Python interpreter; `analyze_ini_sh` (bash script path) is sourced to
+  inject HEADAS/CALDB/LD_LIBRARY_PATH; PYTHONPATH is always overridden to
+  toolkit_root.
+- `_source_ini_env(ini_sh)` → `dict` — sources a bash init script via
+  `bash -c 'source … && env -0'`, parses the result, and caches it. Falls back
+  to `os.environ` if sourcing fails.
 - `propose_and_pr(request, *, lead, toolkit_repo)` → `str` — Phase 2 stub;
   raises `NotImplementedError`.
 
@@ -144,3 +149,8 @@ writes the tool, lead reviews, human approves merge on GitHub.
   process environment (HEADAS, CALDB, LD_LIBRARY_PATH, etc.) with PYTHONPATH
   overridden to toolkit_root. Configured via `analyze_env` in
   `config/orchestration.yaml`.
+- 2026-05-28 — Added `analyze_ini_sh` parameter to `run_tool()` and
+  `_source_ini_env()` helper. When provided, the bash init script is sourced
+  once (NUL-separated `env` capture, cached) to inject HEADAS, CALDB,
+  LD_LIBRARY_PATH, etc. into the subprocess env before PYTHONPATH override.
+  Configured via `analyze_ini_sh` in `config/orchestration.yaml`.

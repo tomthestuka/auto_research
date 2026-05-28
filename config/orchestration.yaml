@@ -18,3 +18,6 @@ toolkit_root: /data/fzhou/research_toolkit
 # Must be a conda/venv prefix whose Python has the analysis stack (XSPEC, HEASoft, ixpeobssim, etc.).
 # The subprocess inherits the parent process environment so HEADAS/CALDB/LD_LIBRARY_PATH are available.
 analyze_env: /grad/fzhou/.conda/envs/astropy
+# Optional bash init script sourced before each tool subprocess to inject
+# HEASoft (HEADAS), CALDB, and LD_LIBRARY_PATH into the analysis environment.
+analyze_ini_sh: /data/fzhou/ini.sh

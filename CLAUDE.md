@@ -471,3 +471,10 @@ documented stubs.
   `_default_graph()`, and `run_research()`. Sandbox subprocess now inherits the parent
   process environment (HEADAS, CALDB, LD_LIBRARY_PATH) and uses the analysis env's
   Python interpreter instead of blanking the env.
+- 2026-05-28 — Added `analyze_ini_sh` config key to `config/orchestration.yaml`
+  (points to `/data/fzhou/ini.sh`). Added `_source_ini_env()` helper in `runner.py`
+  that sources the bash init script via `env -0` capture (cached). Added
+  `analyze_ini_sh` parameter to `run_tool()`, `build_graph()`, `_default_graph()`, and
+  `run_research()`. Subprocess env is now built from the sourced init script (injecting
+  HEADAS, CALDB, CALDBCONFIG, CALDBALIAS, GEOMAG_PATH, LD_LIBRARY_PATH) with PYTHONPATH
+  overridden to toolkit_root.

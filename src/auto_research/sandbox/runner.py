@@ -5,12 +5,50 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import textwrap
 import time
 from pathlib import Path
 
 from auto_research.schemas.tools import ToolResult
+
+# Cache: ini_sh path → env dict sourced from that script.
+_ini_env_cache: dict[str, dict[str, str]] = {}
+
+
+def _source_ini_env(ini_sh: str) -> dict[str, str]:
+    """Source a bash init script and return the resulting environment.
+
+    Uses ``env -0`` (NUL-separated output) for robustness.  Errors from
+    interactive shell components (gnome-keyring, SSH agent) are suppressed via
+    ``2>/dev/null``.  The result is cached so the script is only sourced once
+    per interpreter lifetime.
+    """
+    if ini_sh in _ini_env_cache:
+        return _ini_env_cache[ini_sh]
+    try:
+        result = subprocess.run(
+            ["bash", "-c", f"source {ini_sh!r} 2>/dev/null; env -0"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0 and result.stdout:
+            env: dict[str, str] = {}
+            for entry in result.stdout.split("\0"):
+                if "=" in entry:
+                    k, _, v = entry.partition("=")
+                    env[k] = v
+            if env:
+                _ini_env_cache[ini_sh] = env
+                return env
+    except Exception:  # noqa: BLE001
+        pass
+    # Fallback: parent env unchanged
+    fallback = dict(os.environ)
+    _ini_env_cache[ini_sh] = fallback
+    return fallback
 
 
 async def run_tool(
@@ -22,14 +60,16 @@ async def run_tool(
     workdir: Path,
     toolkit_root: Path,
     analyze_env: Path | None = None,
+    analyze_ini_sh: str | None = None,
 ) -> ToolResult:
     """Execute a research_toolkit callable in an isolated subprocess.
 
     The subprocess uses the Python interpreter from ``analyze_env`` when
-    provided (e.g. a conda env with XSPEC/HEASoft). It inherits the parent
-    process environment so HEADAS, CALDB, LD_LIBRARY_PATH, etc. are available,
-    with PYTHONPATH overridden to point at toolkit_root. Working directory is
-    set to workdir. On timeout or non-zero exit the result captures stderr.
+    provided (e.g. a conda env with XSPEC/HEASoft). When ``analyze_ini_sh``
+    is given, the script is sourced once (result cached) to inject HEADAS,
+    CALDB, LD_LIBRARY_PATH, and other HEASoft env vars. PYTHONPATH is always
+    overridden to point at toolkit_root. Working directory is set to workdir.
+    On timeout or non-zero exit the result captures stderr.
     """
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -54,7 +94,8 @@ async def run_tool(
             print(json.dumps({{"stdout": str(result)}}))
     """).strip()
 
-    env = {**os.environ, "PYTHONPATH": str(toolkit_root)}
+    base_env = _source_ini_env(analyze_ini_sh) if analyze_ini_sh else dict(os.environ)
+    env = {**base_env, "PYTHONPATH": str(toolkit_root)}
 
     t0 = time.monotonic()
     try:

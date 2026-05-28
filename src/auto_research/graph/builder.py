@@ -131,6 +131,7 @@ def build_graph(
     toolkit_root: Path | None = None,
     monitor: RunMonitor | None = None,
     analyze_env: Path | None = None,
+    analyze_ini_sh: str | None = None,
 ) -> Any:
     """Compile the Phase 1 research-loop graph.
 
@@ -383,6 +384,7 @@ def build_graph(
                     workdir=_workdir,
                     toolkit_root=_registry._root,
                     analyze_env=analyze_env,
+                    analyze_ini_sh=analyze_ini_sh,
                 )
                 new_results.append(result)
                 await _record(

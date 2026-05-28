@@ -64,6 +64,7 @@ def _default_graph():
     toolkit_root = Path(orch.get("toolkit_root", "/data/fzhou/research_toolkit"))
     analyze_env_str = orch.get("analyze_env")
     analyze_env = Path(analyze_env_str) if analyze_env_str else None
+    analyze_ini_sh: str | None = orch.get("analyze_ini_sh") or None
 
     storage = Storage()
     worker_group = resolve("analyst_worker")
@@ -81,6 +82,7 @@ def _default_graph():
         tool_retry_cap=tool_retry_cap,
         toolkit_root=toolkit_root,
         analyze_env=analyze_env,
+        analyze_ini_sh=analyze_ini_sh,
     )
 
 
@@ -152,6 +154,7 @@ async def run_research(
     toolkit_root = Path(orch.get("toolkit_root", "/data/fzhou/research_toolkit"))
     analyze_env_str = orch.get("analyze_env")
     analyze_env = Path(analyze_env_str) if analyze_env_str else None
+    analyze_ini_sh: str | None = orch.get("analyze_ini_sh") or None
 
     storage = Storage()
     reviewer = reviewer or ReviewerAgent(monitor=run_monitor)
@@ -192,6 +195,7 @@ async def run_research(
         toolkit_root=toolkit_root,
         monitor=run_monitor,
         analyze_env=analyze_env,
+        analyze_ini_sh=analyze_ini_sh,
     )
     try:
         final_state: dict[str, Any] = await graph.ainvoke(

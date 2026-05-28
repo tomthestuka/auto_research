@@ -186,7 +186,8 @@ iteration counters, and the cap.
   `build_graph` time and injects obs DB paths into every analyst task, and passes
   the live tool catalogue to both `analysis_node` and `tool_dispatch_node` so
   workers see available tools during debate and at dispatch.
-- 2026-05-28 — Added `analyze_env` parameter to `build_graph()`. Forwarded to
-  `run_tool()` in `tool_execution_node` so sandbox tools run in the configured
-  analysis Python environment. Read from `config/orchestration.yaml::analyze_env`
-  in both `_default_graph()` and `run_research()`.
+- 2026-05-28 — Added `analyze_env` and `analyze_ini_sh` parameters to
+  `build_graph()`. Both are forwarded to `run_tool()` in `tool_execution_node`
+  so sandbox tools run in the configured analysis Python environment with the
+  full HEASoft/CALDB environment sourced from the init script. Read from
+  `config/orchestration.yaml` in both `_default_graph()` and `run_research()`.
