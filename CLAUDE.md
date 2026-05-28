@@ -48,13 +48,15 @@ code" true *by construction*.
 | Repo | Contents | Who commits | Runtime access |
 |---|---|---|---|
 | **`auto_research`** | Orchestration: LangGraph graph, agent roles, runtime `prompts/`, Pydantic schemas, SQLite layer, librarian source modules (arxiv / NASA ADS / web). | **The human only.** | **Read-only.** Runtime agents never write here. |
-| **`research_toolkit`** | The analysts' domain tool library. Houses the human-authored `xspec_utils` and any tools the system creates at runtime. | The human (build-time) **and** the runtime system (via the gated flow in [§8](#8-runtime-tool-authoring--sandbox)). | **Writable**, but only through the gated propose→review→merge flow. |
+| **`research_toolkit`** | The analysts' domain tool library. Houses `xspec_utils` and any tools the human adds. Phase 2: tools the runtime proposes via Claude Agent SDK, after human approval. | **The human only** (Phase 1). Phase 2: runtime may open PRs via Claude Agent SDK; human still approves merge. | **Read-only** for the runtime in Phase 1 — agents discover and call tools but never write here. Phase 2: the gated propose→review→merge flow grants write access on approved PRs only. |
 
 Consequences:
 
-- The system's *own* code is `auto_research`, a repo the runtime cannot touch. The
-  runtime can only **extend `research_toolkit`**. Self-modification is therefore
-  impossible, not merely forbidden.
+- The system's *own* code is `auto_research`, a repo the runtime cannot touch. In
+  Phase 1, the runtime also cannot write to `research_toolkit` — it only discovers and
+  invokes existing tools via `ToolkitRegistry`. Phase 2 opens a narrow, gated write
+  path through `merge_flow` (Claude Agent SDK + human approval). Self-modification
+  remains impossible by construction.
 - Recommended placement: a development workspace directory containing both repos side by
   side, with this `CLAUDE.md` at the workspace root.
 
@@ -127,7 +129,9 @@ Every module folder maintains a `DOCS.md` with these sections, in order:
    what depends on it.
 5. **Dictionary-level reference** — every public symbol (function, class, method,
    constant) with its meaning, parameters, and return.
-6. **Changelog** — at the **end**, dated entries for every meaningful change.
+6. **Changelog** — at the **end**, dated entries for every meaningful change. New entries
+   are always **appended at the very bottom** of the Changelog section — never inserted
+   before existing entries. This applies to both `DOCS.md` and `CLAUDE.md` changelogs.
 
 Rules: `DOCS.md` must always reflect the **current** state of the code. Update it in the
 same session as the code change. Coding agents read the relevant `DOCS.md` at the start
@@ -187,26 +191,26 @@ logs, LangSmith traces, and SQLite). Pattern:
 
 ## 8. Runtime tool-authoring & sandbox
 
-Analysts will need to build new modules in `research_toolkit`. Because LLM-authored code
-that other agents import and run is arbitrary code execution, this flow is **gated**.
+**Phase 1 execution sandbox:** every tool call from analyst workers runs in an
+**isolated subprocess** with a timeout, a confined working directory, and `PYTHONPATH`
+limited to `research_toolkit`. No external harness is used.
 
-**Workflow (CLI-style, like Claude Code):**
+**Tool discovery:** research_toolkit packages expose a `TOOL_MANIFEST` dict at their
+top level. The `ToolkitRegistry` (`auto_research/sandbox/registry.py`) discovers tools
+by importing these manifests. Analyst workers receive the tool list and descriptions at
+dispatch time.
 
-1. An analyst proposes a new/changed tool → written to a **branch** in `research_toolkit`.
-2. The analyst-lead (Opus tier) reviews it for library discipline and hygiene.
-3. **Gate before merge to main** (Phase 1): **a human approves the merge.** Only after
-   merge does the tool become importable.
-4. Autonomous merge (lead approves + mandatory sandboxed test pass, no human) is a
-   **deferred config toggle**, not built now ([§10](#10-phase-2-readiness)).
+**Error-feedback loop:** when a tool call fails, the error (stderr + exit code) is fed
+back to the analyst worker, which self-corrects and re-issues the `ToolCallRequest`.
+Capped at `tool_retry_cap` (default 3, in `orchestration.yaml`).
 
-**Execution sandbox (Phase 1, applies to every tool — new *or* existing):** run tool code
-in an **isolated subprocess** with a timeout, a confined working directory, and no network
-unless explicitly whitelisted. Deeper hardening (containers, seccomp, egress control) is
-documented as a deferred task; do not build it now.
+**Human tool-writing (Phase 1):** the human writes new tools in `research_toolkit` and
+exposes them via `TOOL_MANIFEST`. Agents discover and invoke them autonomously.
 
-The git operations *inside this workflow* are part of the application you write; they act
-only on `research_toolkit`. They are **not** the coding agent running git
-([§3](#3-coding-agent-contract-read-this-every-session)).
+**Tool-authoring (Phase 2):** `merge_flow.propose_and_pr()` is a stub that raises
+`NotImplementedError`. Phase 2 implementation: analyst worker emits a tool spec →
+Claude Agent SDK writes and tests the code → lead reviews → human approves merge on
+GitHub. Deeper hardening (containers, seccomp, egress control) is also Phase 2.
 
 ---
 
@@ -259,11 +263,13 @@ only on `research_toolkit`. They are **not** the coding agent running git
   **`vector_search()` is a stub that raises `NotImplementedError`** (Phase 2).
 
 **Analysts.**
-- Workers (medium/small) own tools (`xspec_utils`, web search for docs, and — via the
-  gated flow — new tools they author). They run **debate-to-converge**
-  ([§11](#11-consensus-debate-to-converge)).
-- Lead (top tier) judges convergence, adjudicates, maintains library discipline, and
-  drives the `research_toolkit` review/merge flow ([§8](#8-runtime-tool-authoring--sandbox)).
+- Workers (medium/small) own tools (`xspec_utils`, web search for docs, and — in Phase 2
+  — new tools they author via Claude Agent SDK). They run **debate-to-converge**
+  ([§11](#11-consensus-debate-to-converge)). In Phase 1, workers discover available tools
+  via `ToolkitRegistry`, call them via the sandbox, and self-correct from execution errors.
+- Lead (top tier) judges convergence, adjudicates, maintains library discipline.
+  In Phase 2, drives the `research_toolkit` review/merge flow
+  ([§8](#8-runtime-tool-authoring--sandbox)).
 
 **Reviewer** (top tier): triages the research request, dispatches analysis tasks
 (→ analysts) and literature tasks (→ librarians), digests results, and cross-checks
@@ -317,7 +323,10 @@ Analyst workers reach agreement via bounded debate, behind a swappable
   column/table in the DB schema; intended backend **sqlite-vec** (stays in the existing
   SQLite file, no new infra); embedding model is config-driven. Estimated effort to
   activate later: low-to-moderate (~1–3 days) given these hooks.
-- **Autonomous tool-merge:** the config toggle described in [§8](#8-runtime-tool-authoring--sandbox).
+- **Tool authoring via Claude Agent SDK:** `sandbox/merge_flow.propose_and_pr()` raises
+  `NotImplementedError`. Phase 2: replace with Claude Agent SDK invocation — analyst
+  worker emits a tool spec; the SDK agent writes, tests, and proposes a PR on
+  `research_toolkit`; lead reviews; human approves merge.
 - **Lead-scientist group:** the idea-generation team that reads the whole knowledge base.
 - **Sandbox hardening:** containers / seccomp / egress control beyond the Phase 1
   subprocess sandbox.
@@ -353,7 +362,7 @@ Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & docum
 | 8 | Done | **Agent roles** — thin wrappers: librarian I/O, librarian searcher, analyst worker, analyst lead, reviewer (each loads its prompt, uses schemas + config models). | Role plumbing is verified: prompt loads, model resolves via config, structured Pydantic input goes in, structured output comes back, and trace/cost logging is exercised. This does **not** mean every role can do its full production job yet. |
 | 9 | Done | **Consensus** — `ConsensusStrategy` = debate-to-converge (cap 3) + lead adjudication. | Workers converge (or hit the cap and the lead adjudicates) on a bounded task. |
 | 10 | Done | **Orchestration** — assemble the LangGraph graph and the two capped feedback edges (paper-search review, analysis review). | Full loop runs end-to-end on a sample request. |
-| 11 | Todo | **Tool-authoring & sandbox** — `research_toolkit` propose→branch→lead-review→**human-approve merge** flow; subprocess sandbox (timeout, workdir confinement). | Proposing a trivial tool is blocked until approval; `xspec_utils` runs inside the sandbox. |
+| 11 | Todo | **Sandbox & tool execution** — `ToolkitRegistry` (manifest-based discovery), `runner.py` (subprocess sandbox: timeout, workdir, `PYTHONPATH` confinement), `tool_dispatch_node` + `tool_execution_node` in graph, error-feedback inner loop (capped at `tool_retry_cap`). `merge_flow.py` stub raises `NotImplementedError` (Phase 2 → Claude Agent SDK). | Known tools execute in sandbox; error-feedback loop self-corrects bad args; unknown tool triggers stub cleanly; `xspec_utils` runs on real Cyg X-1 data. |
 | 12 | Todo | **Entry points & tests** — importable library + CLI (`python -m auto_research "…"`), notebook for inspection, minimal pytest on deterministic parts. | CLI runs a request end-to-end; notebook inspects a run. |
 
 After step 12 the Phase 1 skeleton is complete: a full team running real LLM calls
@@ -420,3 +429,12 @@ documented stubs.
   `evaluate_search_results()` deferred stub added. `LibrarianLike` replaced by
   `IOAgentLike` + `SearcherLike`. §13 documents IO search iteration stub.
   94 deterministic tests pass.
+- 2026-05-28 — Added changelog-append rule to §5: new entries must always be appended
+  at the very bottom of the Changelog section, never inserted before existing entries.
+- 2026-05-28 — Architectural decision: tool-authoring deferred to Phase 2 via Claude
+  Agent SDK stub (`merge_flow.propose_and_pr()` raises `NotImplementedError`). Phase 1
+  sandbox uses subprocess isolation only; tool discovery via `TOOL_MANIFEST` convention;
+  analyst workers self-correct from execution errors (error-feedback loop, capped at
+  `tool_retry_cap`). Updated §2 trust boundary, §8 sandbox description, §10 analyst
+  role, §13 Phase 2 stub, §14 step 11 checkpoint to reflect the decision. No external
+  harness (Composio, OpenHands) used.

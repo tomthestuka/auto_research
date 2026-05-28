@@ -18,6 +18,7 @@ from auto_research.consensus import ConsensusStrategy, DebateToConverge, LeadLik
 from auto_research.graph.builder import IOAgentLike, ReviewerLike, build_graph
 from auto_research.models import resolve
 from auto_research.retrieval import RetrievalBackend, SqliteRetrievalBackend
+from auto_research.sandbox.registry import ToolkitRegistry
 from auto_research.schemas import ResearchRequest, ReviewVerdict
 from auto_research.storage import Storage
 
@@ -56,6 +57,8 @@ async def run_request(
     if max_iterations is None:
         max_iterations = int(orch.get("max_iterations", 3))
     debate_max_rounds = int(orch.get("debate_max_rounds", 3))
+    tool_retry_cap = int(orch.get("tool_retry_cap", 3))
+    toolkit_root = Path(orch.get("toolkit_root", "/data/fzhou/research_toolkit"))
 
     storage = Storage()
     reviewer = reviewer or ReviewerAgent()
@@ -69,6 +72,8 @@ async def run_request(
     if consensus is None:
         consensus = DebateToConverge(max_rounds=debate_max_rounds)
 
+    registry = ToolkitRegistry(toolkit_root)
+
     graph = build_graph(
         reviewer=reviewer,
         io_agent=io_agent,
@@ -77,6 +82,9 @@ async def run_request(
         lead=lead,
         consensus=consensus,
         max_iterations=max_iterations,
+        registry=registry,
+        tool_retry_cap=tool_retry_cap,
+        toolkit_root=toolkit_root,
     )
     final_state: dict[str, Any] = await graph.ainvoke(
         {
@@ -87,6 +95,8 @@ async def run_request(
             "lit_iterations": 0,
             "analysis_iterations": 0,
             "max_iterations": max_iterations,
+            "tool_results": [],
+            "tool_queue": [],
         }
     )
     return final_state["verdict"]

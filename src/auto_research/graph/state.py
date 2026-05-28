@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import operator
 from pathlib import Path
-from typing import TypedDict
+from typing import Annotated, TypedDict
 
 from auto_research.schemas import (
     AnalystReport,
     ResearchRequest,
     ReviewVerdict,
+    ToolCallRequest,
+    ToolResult,
 )
 
 
@@ -22,3 +25,6 @@ class ResearchState(TypedDict, total=False):
     lit_iterations: int
     analysis_iterations: int
     max_iterations: int
+    # Tool execution state (step 11)
+    tool_results: Annotated[list[ToolResult], operator.add]  # accumulated across all nodes
+    tool_queue: list[ToolCallRequest]                         # set by dispatch, consumed by execution

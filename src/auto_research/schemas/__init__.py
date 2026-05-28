@@ -6,7 +6,7 @@ from auto_research.schemas.figures import DocumentRef, FigureRef, document_from_
 from auto_research.schemas.requests import ResearchRequest
 from auto_research.schemas.review import ReviewVerdict
 from auto_research.schemas.search import FullTextLink, SearchRequest, SearchResult, SearchSource
-from auto_research.schemas.tools import ToolCallRequest, ToolCallReview, ToolKind
+from auto_research.schemas.tools import ToolCallRequest, ToolCallReview, ToolKind, ToolResult
 
 __all__ = [
     "AnalysisTask",
@@ -23,5 +23,6 @@ __all__ = [
     "ToolCallRequest",
     "ToolCallReview",
     "ToolKind",
+    "ToolResult",
     "document_from_file",
 ]

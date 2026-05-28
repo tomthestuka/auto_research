@@ -7,8 +7,9 @@ exposes a single async entry point that takes a `ResearchRequest` and returns a
 `ReviewVerdict`.
 
 ## Architecture
-A LangGraph `StateGraph` with four nodes and two real feedback edges, **each
-capped at `max_iterations` (default 3)**:
+A LangGraph `StateGraph` with six nodes, two outer feedback edges (each
+capped at `max_iterations`, default 3), and an inner tool error-feedback loop
+(capped at `tool_retry_cap`, default 3):
 
 ```
 START → literature → review_literature
@@ -16,13 +17,30 @@ START → literature → review_literature
                         ▼─────────────────────────────► literature   (loop ①)
                         │
                         ▼
-                     analysis → review_analysis
-                                  │  needs_analysis_rework & analysis < cap
-                                  ▼──────────────────────► analysis  (loop ②)
-                                  │
-                                  ▼
-                                 END
+                     analysis → tool_dispatch → tool_execution → review_analysis
+                                                                  │  needs_rework & analysis < cap
+                                                                  ▼─────────────► analysis  (loop ②)
+                                                                  │
+                                                                  ▼
+                                                                 END
 ```
+
+**`tool_dispatch_node`:** after `analysis_node`, calls
+`worker.request_tools(task)` on the first worker. For each `ToolCallRequest`:
+- Known in `ToolkitRegistry` → adds to `state["tool_queue"]`
+- Unknown → calls `propose_and_pr()` (Phase 2 stub), catches
+  `NotImplementedError`, adds a `ToolResult(exit_code=127)` to
+  `state["tool_results"]`
+
+**`tool_execution_node`:** for each request in `tool_queue`, runs
+`runner.run_tool()` in an isolated subprocess. On failure, calls
+`worker.request_tools(error_task)` to get revised arguments (LLM
+self-correction), up to `tool_retry_cap` attempts. Appends all `ToolResult`
+objects to `state["tool_results"]`. Clears `tool_queue` on completion.
+
+On subsequent analysis iterations (rework), `analysis_node` includes
+accumulated `tool_results` in the task instructions so workers can reason
+from actual tool output.
 
 The literature node follows a four-step pipeline:
 1. **IO agent composes search strategy** — `io_agent.compose_search_strategy()`
@@ -44,34 +62,35 @@ analyst report, the latest reviewer verdict, two iteration counters, and the cap
 
 ## Interfaces / Contracts
 - `build_graph(*, reviewer, io_agent, retrieval=None, workers, lead,
-  consensus=None, max_iterations=3) -> CompiledStateGraph` — pure constructor.
-  `retrieval` accepts any `RetrievalBackend`; defaults to
-  `SqliteRetrievalBackend()`. Defaults `consensus` to
-  `DebateToConverge(max_rounds=max_iterations)`. Raises `ValueError` if
-  `max_iterations < 1`. Reads no environment at import.
+  consensus=None, max_iterations=3, registry=None, tool_retry_cap=3,
+  toolkit_root=None) -> CompiledStateGraph` — pure constructor. `retrieval`
+  defaults to `SqliteRetrievalBackend()`. `consensus` defaults to
+  `DebateToConverge(max_rounds=max_iterations)`. `registry` defaults to
+  `ToolkitRegistry(toolkit_root or Path("/data/fzhou/research_toolkit"))`.
+  Raises `ValueError` if `max_iterations < 1`. Reads no environment at import.
 - `async run_request(request, *, reviewer=None, io_agent=None, retrieval=None,
   workers=None, lead=None, consensus=None, max_iterations=None) -> ReviewVerdict`
   — high-level entry. Missing dependencies are constructed from
-  `config/models.yaml`: one `ReviewerAgent`, one `LibrarianIOAgent(storage=storage)`,
-  one `SqliteRetrievalBackend(storage)`, `DEFAULT_WORKER_COUNT`
-  `AnalystWorkerAgent`s, one `AnalystLeadAgent`. Returns the final reviewer verdict.
+  `config/models.yaml`. Reads `tool_retry_cap` and `toolkit_root` from
+  `config/orchestration.yaml`. Returns the final reviewer verdict.
 - `ResearchState` — `TypedDict` with `request`, `literature: list[Path]`,
-  `report`, `verdict`, `lit_iterations`, `analysis_iterations`,
-  `max_iterations`. Nodes return partial-state dicts; LangGraph replaces values
-  on update.
-- `IOAgentLike` / `ReviewerLike` — minimal protocols for dependency injection.
-  `IOAgentLike` requires `compose_search_strategy()`, `search()`, and
-  `ingest_results()`. `ReviewerLike` requires `review(request, *, literature:
-  Sequence[Path], report)`.
-- Both feedback edges are gated by the reviewer's structured verdict flags
-  (`needs_more_literature`, `needs_analysis_rework`). The reviewer's
-  `follow_up` text is fed back into the next `compose_search_strategy()` call
-  and/or analysis instructions.
+  `report`, `verdict`, `lit_iterations`, `analysis_iterations`, `max_iterations`,
+  `tool_results: Annotated[list[ToolResult], operator.add]` (accumulated),
+  `tool_queue: list[ToolCallRequest]` (transient, set by dispatch, cleared by
+  execution).
+- `IOAgentLike` / `ReviewerLike` / `ToolWorkerLike` — minimal protocols for
+  dependency injection. `ToolWorkerLike` extends `WorkerLike` with
+  `async request_tools(task) -> list[ToolCallRequest]`.
+- Both outer feedback edges are gated by the reviewer's structured verdict flags
+  (`needs_more_literature`, `needs_analysis_rework`). The reviewer's `follow_up`
+  text is fed back into the next `compose_search_strategy()` call and/or analysis
+  instructions.
 - Live graph verification is opt-in:
-  `AUTO_RESEARCH_LIVE_GRAPH_TESTS=1 pytest tests/test_live_graph.py -s`. It
-  drives the compiled graph with `LoggingIOAgent` wrapping `LibrarianIOAgent`
-  and a `SqliteRetrievalBackend`, and writes JSONL plus Markdown logs under
-  `logs/dev/step-10/`.
+  `AUTO_RESEARCH_LIVE_GRAPH_TESTS=1 pytest tests/test_live_graph.py -s`. Writes
+  JSONL plus Markdown logs under `logs/dev/step-10/`.
+- Live sandbox verification is opt-in:
+  `AUTO_RESEARCH_LIVE_SANDBOX_TESTS=1 pytest tests/test_live_sandbox.py -s`.
+  Writes logs under `logs/dev/step-11/`.
 
 ## Dependencies
 - External: `langgraph`.
@@ -79,17 +98,16 @@ analyst report, the latest reviewer verdict, two iteration counters, and the cap
   `auto_research.models`, `auto_research.retrieval`, `auto_research.schemas`.
 
 ## Dictionary-level reference
-- `ResearchState` — TypedDict for the graph state; `literature` is now
-  `list[Path]` (local PDF paths from `text_search_paths()`).
-- `IOAgentLike` — protocol with `compose_search_strategy()`, `search()`, and
-  `ingest_results()`.
-- `ReviewerLike` — protocol with `async review(request, *, literature:
-  Sequence[Path], report) -> ReviewVerdict`.
-- `build_graph(...)` — constructs and compiles the state graph.
-- `run_request(request, ...)` — high-level entry point. Returns the final
-  `ReviewVerdict` after the graph runs.
-- `DEFAULT_WORKER_COUNT` — default number of analyst workers when
-  `run_request` constructs them from the registry (currently 2).
+- `ResearchState` — TypedDict for the graph state; `literature` is `list[Path]`;
+  `tool_results` is `Annotated[list[ToolResult], operator.add]`; `tool_queue` is
+  `list[ToolCallRequest]` (transient).
+- `IOAgentLike` — protocol with `compose_search_strategy()`, `search()`, `ingest_results()`.
+- `ReviewerLike` — protocol with `async review(request, *, literature, report)`.
+- `ToolWorkerLike` — protocol extending `WorkerLike` with `async request_tools(task)`.
+- `build_graph(...)` — constructs and compiles the state graph (six nodes).
+- `run_request(request, ...)` — high-level entry point; reads `tool_retry_cap` and
+  `toolkit_root` from `orchestration.yaml`. Returns the final `ReviewVerdict`.
+- `DEFAULT_WORKER_COUNT` — default analyst worker count (currently 2).
 
 ## Changelog
 - 2026-05-27 — Replaced `SearcherLike` / `LibrarianSearcherAgent` with
@@ -109,3 +127,9 @@ analyst report, the latest reviewer verdict, two iteration counters, and the cap
   feedback edges. Deterministic tests cover single-pass, literature-loop cap,
   analysis-loop cap, custom cap, and constructor validation.
 - 2026-05-26 — Folder seeded during step 0.
+- 2026-05-28 — Step 11: added `tool_dispatch_node` and `tool_execution_node`.
+  `ResearchState` gains `tool_results` (accumulated via `operator.add`) and
+  `tool_queue` (transient). `build_graph()` gains `registry`, `tool_retry_cap`,
+  `toolkit_root` parameters. `run_request()` reads these from `orchestration.yaml`.
+  `ToolWorkerLike` protocol added. `_build_task()` helper formats tool results into
+  task instructions for rework iterations.

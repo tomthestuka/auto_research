@@ -103,6 +103,11 @@ carried by **reference** (`FigureRef`), never embedded
   execution. It is separate from `AnalystReport`.
 - `ToolCallReview(approved: bool, rationale: str, revised_request:
   ToolCallRequest | None = None)` — lead review of a proposed tool action.
+- `ToolResult(tool_name: str, stdout: str, stderr: str, exit_code: int,
+  figures: list[FigureRef] = [], elapsed_s: float)` — result of a sandboxed
+  tool execution. Accumulated in `ResearchState.tool_results` (via
+  `operator.add`). Figures are `FigureRef` objects parsed from tool stdout.
+  `exit_code=127` indicates "tool unavailable" (Phase 2 stub).
 
 ## Changelog
 - 2026-05-27 — Added `SearchResult.local_path: Path | None` so
@@ -120,3 +125,5 @@ carried by **reference** (`FigureRef`), never embedded
 - 2026-05-27 — Added `FullTextLink` and `SearchResult.full_text_links` for ADS
   resolver/source-button candidates.
 - 2026-05-26 — Folder seeded during step 0.
+- 2026-05-28 — Added `ToolResult` schema for sandboxed tool execution results
+  (step 11). `exit_code=127` convention for "tool unavailable" (stub path).

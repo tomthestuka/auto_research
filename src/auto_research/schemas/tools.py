@@ -6,6 +6,7 @@ from typing import Annotated
 from pydantic import Field
 
 from auto_research.schemas.base import MessageModel
+from auto_research.schemas.figures import FigureRef
 
 
 NonEmptyStr = Annotated[str, Field(min_length=1)]
@@ -31,3 +32,14 @@ class ToolCallReview(MessageModel):
     approved: bool
     rationale: NonEmptyStr
     revised_request: ToolCallRequest | None = None
+
+
+class ToolResult(MessageModel):
+    """Result of a sandboxed tool execution."""
+
+    tool_name: NonEmptyStr
+    stdout: str
+    stderr: str
+    exit_code: int
+    figures: list[FigureRef] = Field(default_factory=list)
+    elapsed_s: float
