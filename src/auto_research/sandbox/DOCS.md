@@ -1,14 +1,17 @@
-# `auto_research.sandbox` — subprocess sandbox & tool registry
+# `auto_research.sandbox` — subprocess sandbox, tool registry, and run workspace
 
 ## Purpose
 
-Two tightly coupled responsibilities:
+Three tightly coupled responsibilities:
 
 1. **Tool registry** — discovers tools available in `research_toolkit` and
    describes them to analyst workers at dispatch time.
-2. **Execution sandbox** — runs every tool call in an isolated subprocess with
-   timeout, confined working directory, and `PYTHONPATH` limited to
-   `research_toolkit`.
+2. **Execution sandbox** — runs every tool call in a **persistent subprocess**
+   per analyst worker so XSPEC session state (loaded spectra, fitted models,
+   plots) accumulates across all debate rounds and rework cycles.
+3. **Run workspace** — per-run and per-agent folder layout under
+   `$AUTO_RESEARCH_RUNTIME_DIR/runs/{run_id}/`; per-agent `memory.md` files
+   record tool call history as bare terminal recordings.
 
 Tool-authoring (propose → branch → lead-review → human-approve → merge) is a
 **Phase 2 stub** in `merge_flow.py`. Phase 2 implementation: Claude Agent SDK.
@@ -20,7 +23,9 @@ See [CLAUDE.md §8](../../../CLAUDE.md#8-runtime-tool-authoring--sandbox) and
 ```
 sandbox/
 ├── registry.py    # ToolkitRegistry — manifest-based tool discovery
-├── runner.py      # run_tool()     — subprocess sandbox
+├── persistent.py  # PersistentSandbox — long-lived REPL subprocess per worker
+├── runner.py      # run_tool()     — one-shot subprocess (kept for ad-hoc use)
+├── workspace.py   # per-run/agent folder layout and memory.md utilities
 └── merge_flow.py  # propose_and_pr() — Phase 2 stub (NotImplementedError)
 ```
 
@@ -30,13 +35,20 @@ module-level dict `TOOL_MANIFEST: dict[str, ToolSpec]` at its top level.
 a new tool to research_toolkit requires only adding it to `TOOL_MANIFEST` — no
 changes to `auto_research`.
 
-**Graph wiring:** `tool_dispatch_node` runs after `analysis_node`. It calls
-`worker.request_tools(task)` on the first worker, checks each
-`ToolCallRequest` against the registry, and populates `state["tool_queue"]`.
-`tool_execution_node` then runs each queued tool via `runner.run_tool()`,
-appending `ToolResult` objects to `state["tool_results"]` (accumulated via
-`operator.add`). On failure, the worker is asked to revise its arguments (LLM
-self-correction), up to `tool_retry_cap` attempts.
+**Tool execution wiring:** Tool execution now lives inside `DebateToConverge`
+rather than in graph nodes.  After each round of `analyze()` calls, each
+worker with an attached `PersistentSandbox` calls `execute_tools()`, which
+calls `request_tools()` (LLM), runs each request through the sandbox, and
+appends a bare terminal recording to the worker's private `memory.md`.
+Truncated per-worker summaries are then injected into `task.instructions` for
+the next debate round so workers can reason from each other's results.  The
+error-feedback retry loop (up to `tool_retry_cap` attempts) lives inside
+`AnalystWorkerAgent.execute_tools()`.
+
+**`is_alive` flag:** if a worker's subprocess exits unexpectedly, `is_alive`
+becomes `False` and `execute_tools()` returns immediately — the worker
+continues analyzing (via memory) but stops calling tools for the rest of the
+session.
 
 ## Interfaces / Contracts
 
@@ -69,7 +81,53 @@ Invariants:
 - Tools in packages not in `_MANIFEST_MODULES` are silently skipped; add the
   package name to `_MANIFEST_MODULES` to enable discovery.
 
-### `run_tool`
+### `PersistentSandbox`
+
+```python
+class PersistentSandbox:
+    def __init__(
+        self,
+        toolkit_root: Path,
+        workdir: Path,
+        *,
+        analyze_env: Path | None = None,
+        analyze_ini_sh: str | None = None,
+        default_timeout_s: int = 300,
+    ) -> None: ...
+    async def start(self) -> None          # idempotent; spawn the REPL subprocess
+    async def call_tool(
+        self, module, fn, args, *, timeout_s=None
+    ) -> dict                              # send one call; return result dict
+    async def shutdown(self) -> None       # graceful stop; kill if needed
+    @property
+    def is_alive(self) -> bool             # False after death; not recoverable
+```
+
+- Spawns one long-lived subprocess that runs a JSON-line REPL loop.  The subprocess
+  stays alive across all debate rounds and rework cycles; XSPEC session state persists.
+- `call_tool()` sends `{"module": ..., "fn": ..., "args": {...}}\n` to stdin and reads
+  one JSON response line from stdout.  On timeout or death `is_alive` becomes `False`.
+- Uses `{analyze_env}/bin/python` when supplied; sources `analyze_ini_sh` via
+  `_source_ini_env()` for HEADAS/CALDB/LD_LIBRARY_PATH.  PYTHONPATH is overridden to
+  `toolkit_root`.
+
+### Workspace utilities
+
+```python
+def create_run_workspace(run_id: str, agent_keys: list[str]) -> dict[str, Path]
+def memory_path(run_id: str, agent_key: str) -> Path
+def figures_dir(run_id: str, agent_key: str) -> Path
+def run_dir(run_id: str) -> Path
+def append_memory(path: Path, text: str) -> None
+def read_memory(path: Path) -> str
+```
+
+- `create_run_workspace()` creates `$AUTO_RESEARCH_RUNTIME_DIR/runs/{run_id}/{key}/figures/`
+  for each agent key and returns `{key: agent_dir}`.
+- `memory_path()` returns `{agent_dir}/memory.md` (parent created if absent).
+- `append_memory()` appends bare terminal text; `read_memory()` returns contents or `""`.
+
+### `run_tool` (one-shot, kept for ad-hoc use)
 
 ```python
 async def run_tool(
@@ -81,19 +139,12 @@ async def run_tool(
     workdir: Path,
     toolkit_root: Path,
     analyze_env: Path | None = None,
+    analyze_ini_sh: str | None = None,
 ) -> ToolResult
 ```
 
-- Spawns an isolated Python subprocess. When `analyze_env` is provided (a
-  conda/venv prefix), uses `{analyze_env}/bin/python` as the interpreter so
-  tools run in the analysis environment (e.g. one with XSPEC/HEASoft). Falls
-  back to `sys.executable` (the orchestration env) when `None`.
-- The subprocess inherits the parent process environment so HEADAS, CALDB, and
-  LD_LIBRARY_PATH are available. PYTHONPATH is overridden to `toolkit_root`.
-- `workdir` is created if absent; the subprocess `chdir`s there on startup.
-- On timeout: `exit_code=124`, `stderr="Timed out after Ns"`.
-- Figures returned by the tool as `{"figures": [...]}` in stdout are parsed
-  into `ToolResult.figures` as `FigureRef` objects.
+Not used by the main orchestration loop (replaced by `PersistentSandbox`).
+Kept for standalone testing and ad-hoc tool invocation.
 
 ### `propose_and_pr` (Phase 2 stub)
 
@@ -111,11 +162,11 @@ writes the tool, lead reviews, human approves merge on GitHub.
 
 ## Dependencies
 
-- External: stdlib only (`asyncio`, `subprocess`, `importlib`, `sys`).
-- Internal: `auto_research.schemas` (`ToolCallRequest`, `ToolResult`,
-  `FigureRef`).
-- Depended on by: `auto_research.graph.builder` (nodes `tool_dispatch_node`
-  and `tool_execution_node`).
+- External: stdlib only (`asyncio`, `subprocess`, `importlib`, `sys`, `json`).
+- Internal: `auto_research.schemas` (`ToolCallRequest`, `ToolResult`, `FigureRef`).
+- Depended on by: `auto_research.agents.roles` (`AnalystWorkerAgent.execute_tools()`);
+  `auto_research.graph.runtime` (sandbox lifecycle); `auto_research.consensus`
+  (tool execution inside `DebateToConverge._run_tools()`).
 
 ## Dictionary-level reference
 
@@ -127,14 +178,21 @@ writes the tool, lead reviews, human approves merge on GitHub.
   - `.describe_tool(name)` → `str` — `"<name>: <description>"` for prompts.
   - `.spec(name)` → `ToolSpec` — raises `KeyError` if unknown.
   - `.tool_catalogue()` → `str` — multi-line listing for prompt injection.
+- `PersistentSandbox(toolkit_root, workdir, *, analyze_env, analyze_ini_sh, default_timeout_s)` —
+  long-lived REPL subprocess per analyst worker.
+  - `.start()` — spawn; idempotent.
+  - `.call_tool(module, fn, args, *, timeout_s)` → `dict` — one tool call.
+  - `.shutdown()` — graceful stop.
+  - `.is_alive` → `bool` — False after death; not recoverable.
+- `create_run_workspace(run_id, agent_keys)` → `dict[str, Path]` — create workspace folders.
+- `memory_path(run_id, agent_key)` → `Path` — path to agent's `memory.md`.
+- `figures_dir(run_id, agent_key)` → `Path` — path to agent's `figures/` dir.
+- `run_dir(run_id)` → `Path` — path to run's root dir.
+- `append_memory(path, text)` — append to memory.md.
+- `read_memory(path)` → `str` — read memory.md or return `""`.
 - `run_tool(module, fn, args, *, timeout_s, workdir, toolkit_root, analyze_env=None, analyze_ini_sh=None)` →
-  `ToolResult` — async subprocess sandbox entry point. `analyze_env` selects
-  the Python interpreter; `analyze_ini_sh` (bash script path) is sourced to
-  inject HEADAS/CALDB/LD_LIBRARY_PATH; PYTHONPATH is always overridden to
-  toolkit_root.
-- `_source_ini_env(ini_sh)` → `dict` — sources a bash init script via
-  `bash -c 'source … && env -0'`, parses the result, and caches it. Falls back
-  to `os.environ` if sourcing fails.
+  `ToolResult` — one-shot subprocess; kept for ad-hoc use.
+- `_source_ini_env(ini_sh)` → `dict` — sources a bash init script, caches result.
 - `propose_and_pr(request, *, lead, toolkit_repo)` → `str` — Phase 2 stub;
   raises `NotImplementedError`.
 
@@ -154,3 +212,11 @@ writes the tool, lead reviews, human approves merge on GitHub.
   once (NUL-separated `env` capture, cached) to inject HEADAS, CALDB,
   LD_LIBRARY_PATH, etc. into the subprocess env before PYTHONPATH override.
   Configured via `analyze_ini_sh` in `config/orchestration.yaml`.
+- 2026-05-28 — Replaced one-shot graph-node tool dispatch with persistent
+  per-worker sandbox.  Added `persistent.py` (`PersistentSandbox`): long-lived
+  REPL subprocess; JSON-line stdin/stdout protocol; `is_alive` property; no
+  subprocess recovery on death.  Added `workspace.py`: per-run/agent folder
+  creation, `memory_path()`, `figures_dir()`, `append_memory()`, `read_memory()`.
+  Tool execution moved into `DebateToConverge._run_tools()` via
+  `AnalystWorkerAgent.execute_tools()`.  `run_tool()` retained for ad-hoc use.
+  `sandbox/__init__.py` updated to export new classes.

@@ -131,8 +131,16 @@ Role wrappers:
   `search()`, `ingest_document()`, `abstract_document()`,
   `judge_abstract_convergence()`, `adjudicate_abstract()`, `ingest_results()`,
   `evaluate_search_results()`.
-- `AnalystWorkerAgent` — analyst worker wrapper. Method: `analyze()`.
-  Method: `request_tools()`.
+- `AnalystWorkerAgent(*, available_toolkits, sandbox=None, memory_path=None, worker_index=0, ...)` —
+  analyst worker wrapper.
+  - `analyze(task, *, peer_reports=())` → `AnalystReport`. Reads `memory_path`
+    and injects its content into the payload before each LLM call.
+  - `request_tools(task)` → `list[ToolCallRequest]` — structured tool requests, no execution.
+  - `execute_tools(task, registry, *, tool_retry_cap=3)` → `list[ToolResult]` —
+    calls `request_tools()`, runs each via `sandbox.call_tool()`, appends bare
+    terminal recording to `memory_path`. Returns `[]` if `sandbox` is `None` or dead.
+  - `is_alive` → `bool` — `True` when no sandbox attached; delegates to
+    `sandbox.is_alive` otherwise. Once `False`, `execute_tools()` is a no-op.
 - `AnalystLeadAgent` — analyst lead wrapper. Method: `adjudicate()`.
   Methods: `judge_convergence()`, `review_tool_requests()`.
 
@@ -170,3 +178,9 @@ Role wrappers:
 - 2026-05-28 — Step 12: role wrappers now accept an optional `RunMonitor` and
   record structured high-chatter input/output/error events for monitored CLI and
   notebook runs.
+- 2026-05-28 — `AnalystWorkerAgent` gains `sandbox: PersistentSandbox | None`,
+  `memory_path: Path | None`, `worker_index: int`, `is_alive` property, and
+  `execute_tools()` method.  `analyze()` now reads `memory_path` and injects
+  the contents into the payload for private memory continuity across debate rounds.
+  `_append_tool_results_to_memory()` helper added.  `time` and `ToolResult`
+  imported. `sandbox.workspace` imported for `append_memory` / `read_memory`.

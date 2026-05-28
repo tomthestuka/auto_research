@@ -7,9 +7,9 @@ exposes a single async entry point that takes a `ResearchRequest` and returns a
 `ReviewVerdict`.
 
 ## Architecture
-A LangGraph `StateGraph` with seven nodes, two outer feedback edges (each
-capped at `max_iterations`, default 3), and an inner tool error-feedback loop
-(capped at `tool_retry_cap`, default 3):
+A LangGraph `StateGraph` with five nodes and two outer feedback edges (each
+capped at `max_iterations`, default 3).  Tool execution is handled inside
+`DebateToConverge` via persistent per-worker sandboxes — not via graph nodes.
 
 ```
 START → literature → review_literature
@@ -17,12 +17,12 @@ START → literature → review_literature
                         ▼─────────────────────────────► literature   (loop ①)
                         │
                         ▼
-                     analysis → tool_dispatch → tool_execution → review_analysis
-                                                                  │  needs_rework & analysis < cap
-                                                                  ▼─────────────► analysis  (loop ②)
-                                                                  │
-                                                                  ▼
-                                                             finalize_run → END
+                     analysis → review_analysis
+                                  │  needs_rework & analysis < cap
+                                  ▼─────────────► analysis  (loop ②)
+                                  │
+                                  ▼
+                             finalize_run → END
 ```
 
 Reviewer nodes return state updates containing the newest `ReviewVerdict`.
@@ -32,22 +32,14 @@ Reviewer nodes return state updates containing the newest `ReviewVerdict`.
 accumulated verdict into `state["verdict"]`, then exits via a static edge to
 `END`.
 
-**`tool_dispatch_node`:** after `analysis_node`, calls
-`worker.request_tools(task)` on the first worker. For each `ToolCallRequest`:
-- Known in `ToolkitRegistry` → adds to `state["tool_queue"]`
-- Unknown → calls `propose_and_pr()` (Phase 2 stub), catches
-  `NotImplementedError`, adds a `ToolResult(exit_code=127)` to
-  `state["tool_results"]`
-
-**`tool_execution_node`:** for each request in `tool_queue`, runs
-`runner.run_tool()` in an isolated subprocess. On failure, calls
-`worker.request_tools(error_task)` to get revised arguments (LLM
-self-correction), up to `tool_retry_cap` attempts. Appends all `ToolResult`
-objects to `state["tool_results"]`. Clears `tool_queue` on completion.
-
-On subsequent analysis iterations (rework), `analysis_node` includes
-accumulated `tool_results` in the task instructions so workers can reason
-from actual tool output.
+**Tool execution inside `analysis_node`:** `analysis_node` calls
+`consensus_strategy.run(workers, lead, task)`. `DebateToConverge.run()` now
+includes a tool-execution phase after each round of `analyze()` calls.  Each
+worker with an attached `PersistentSandbox` calls `execute_tools()`, which
+calls `request_tools()`, executes via the sandbox, and appends results to the
+worker's private `memory_path`.  A truncated shared summary is injected into
+`task.instructions` for the next round.  Error-feedback retry is inside
+`AnalystWorkerAgent.execute_tools()`, capped at `tool_retry_cap`.
 
 The literature node follows a four-step pipeline:
 1. **IO agent composes search strategy** — `io_agent.compose_search_strategy()`
@@ -70,14 +62,15 @@ iteration counters, and the cap.
 
 ## Interfaces / Contracts
 - `build_graph(*, reviewer, io_agent, retrieval=None, workers, lead,
-  consensus=None, max_iterations=3, registry=None, tool_retry_cap=3,
-  toolkit_root=None, monitor=None, analyze_env=None) -> CompiledStateGraph` — pure constructor. `retrieval`
-  defaults to `SqliteRetrievalBackend()`. `consensus` defaults to
-  `DebateToConverge(max_rounds=max_iterations, monitor=monitor)`. `registry` defaults to
-  `ToolkitRegistry(toolkit_root or Path("/data/fzhou/research_toolkit"))`.
-  `analyze_env` (Path or None) is forwarded to `run_tool()` to select the
-  analysis Python interpreter (e.g. the conda env with XSPEC/HEASoft).
+  consensus=None, max_iterations=3, registry=None, monitor=None) -> CompiledStateGraph` —
+  pure constructor.  `retrieval` defaults to `SqliteRetrievalBackend()`.
+  `consensus` defaults to `DebateToConverge(max_rounds=max_iterations, monitor=monitor, registry=registry)`.
+  `registry` defaults to `ToolkitRegistry(Path("/data/fzhou/research_toolkit"))` and is
+  used for tool catalogue injection into task instructions.
   Raises `ValueError` if `max_iterations < 1`. Reads no environment at import.
+  `analyze_env`, `analyze_ini_sh`, `tool_retry_cap`, and `toolkit_root` are no longer
+  `build_graph()` parameters — they are consumed when constructing `PersistentSandbox`
+  and `DebateToConverge` in `runtime.py`.
 - `async run_request(request, *, reviewer=None, io_agent=None, retrieval=None,
   workers=None, lead=None, consensus=None, max_iterations=None, chatter=10,
   monitor=None, monitor_jsonl=None) -> ReviewVerdict` — compatibility entry.
@@ -85,19 +78,23 @@ iteration counters, and the cap.
 - `async run_research(request, *, ..., chatter=10, monitor=None,
   monitor_jsonl=None) -> ResearchRun` — high-level monitored entry. Missing
   dependencies are constructed from `config/models.yaml`. Reads
-  `tool_retry_cap` and `toolkit_root` from `config/orchestration.yaml`. Returns
-  the request, final verdict, final state, and `RunMonitor`.
+  `tool_retry_cap`, `toolkit_root`, `analyze_env`, and `analyze_ini_sh` from
+  `config/orchestration.yaml`.  Creates per-run workspace
+  (`$AUTO_RESEARCH_RUNTIME_DIR/runs/{run_id}/`), spawns one `PersistentSandbox`
+  per `AnalystWorkerAgent`, assigns each worker's `sandbox` and `memory_path`,
+  then tears all sandboxes down after the graph completes or raises.
+  Returns the request, final verdict, final state, and `RunMonitor`.
 - `ResearchState` — `TypedDict` with `request`, `literature: list[Path]`,
   `report`, `verdict`, `verdicts: Annotated[list[ReviewVerdict], operator.add]`,
-  `lit_iterations`, `analysis_iterations`, `max_iterations`, `tool_results:
-  Annotated[list[ToolResult], operator.add]` (accumulated), and `tool_queue:
-  list[ToolCallRequest]` (transient, set by dispatch, cleared by execution).
+  `lit_iterations`, `analysis_iterations`, `max_iterations`.
+  `tool_queue` and `tool_results` removed — tool state is now private to each
+  worker's `memory_path` file and embedded in the final `AnalystReport`.
 - Monitor events are optional. When a monitor is supplied, graph nodes record
   node starts, search strategy/results, local retrieval paths, analyst reports,
-  tool dispatch/execution attempts and results, and reviewer verdicts.
-- `IOAgentLike` / `ReviewerLike` / `ToolWorkerLike` — minimal protocols for
-  dependency injection. `ToolWorkerLike` extends `WorkerLike` with
-  `async request_tools(task) -> list[ToolCallRequest]`.
+  tool execution attempts and results (via consensus), and reviewer verdicts.
+- `IOAgentLike` / `ReviewerLike` — minimal protocols for dependency injection.
+  `ToolWorkerLike` protocol removed from `builder.py` (tool execution moved to
+  consensus/roles layers).
 - Both outer feedback edges are gated by the reviewer's structured verdict flags
   (`needs_more_literature`, `needs_analysis_rework`). The reviewer's `follow_up`
   text is fed back into the next `compose_search_strategy()` call and/or analysis
@@ -191,3 +188,12 @@ iteration counters, and the cap.
   so sandbox tools run in the configured analysis Python environment with the
   full HEASoft/CALDB environment sourced from the init script. Read from
   `config/orchestration.yaml` in both `_default_graph()` and `run_research()`.
+- 2026-05-28 — Replaced one-shot dispatch/execution graph nodes with persistent
+  per-worker sandbox architecture.  `tool_dispatch_node` and `tool_execution_node`
+  removed from the graph.  `ResearchState` no longer carries `tool_queue` or
+  `tool_results`; tool state lives in worker `memory_path` files.  `build_graph()`
+  signature simplified: `analyze_env`, `analyze_ini_sh`, `tool_retry_cap`, and
+  `toolkit_root` removed (now consumed by `PersistentSandbox` and `DebateToConverge`
+  in `runtime.py`).  `run_research()` creates the per-run workspace, spawns one
+  `PersistentSandbox` per worker, assigns `sandbox` and `memory_path` to each
+  `AnalystWorkerAgent`, and tears sandboxes down in a `finally` block.

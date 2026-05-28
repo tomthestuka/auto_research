@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,7 +21,9 @@ from auto_research.graph.builder import IOAgentLike, ReviewerLike, build_graph
 from auto_research.monitor import RunMonitor
 from auto_research.models import resolve
 from auto_research.retrieval import RetrievalBackend, SqliteRetrievalBackend
+from auto_research.sandbox.persistent import PersistentSandbox
 from auto_research.sandbox.registry import ToolkitRegistry
+from auto_research.sandbox.workspace import create_run_workspace, memory_path
 from auto_research.schemas import ResearchRequest, ReviewVerdict
 from auto_research.storage import Storage
 
@@ -56,19 +59,18 @@ def _default_graph():
     Synchronous; called at module import time by serve.py for LangGraph Studio.
     Reads config/orchestration.yaml and config/models.yaml. Requires API keys
     to be present in the environment (langgraph-cli loads .env before importing).
+    Workers are constructed without sandboxes (Studio use — no persistent processes).
     """
     orch = load_orchestration_config()
     max_iterations = int(orch.get("max_iterations", 3))
     debate_max_rounds = int(orch.get("debate_max_rounds", 3))
     tool_retry_cap = int(orch.get("tool_retry_cap", 3))
     toolkit_root = Path(orch.get("toolkit_root", "/data/fzhou/research_toolkit"))
-    analyze_env_str = orch.get("analyze_env")
-    analyze_env = Path(analyze_env_str) if analyze_env_str else None
-    analyze_ini_sh: str | None = orch.get("analyze_ini_sh") or None
 
     storage = Storage()
     worker_group = resolve("analyst_worker")
     workers = [AnalystWorkerAgent(model=h) for h in worker_group.handles[:DEFAULT_WORKER_COUNT]]
+    registry = ToolkitRegistry(toolkit_root)
 
     return build_graph(
         reviewer=ReviewerAgent(),
@@ -76,13 +78,13 @@ def _default_graph():
         retrieval=SqliteRetrievalBackend(storage),
         workers=workers,
         lead=AnalystLeadAgent(),
-        consensus=DebateToConverge(max_rounds=debate_max_rounds),
+        consensus=DebateToConverge(
+            max_rounds=debate_max_rounds,
+            registry=registry,
+            tool_retry_cap=tool_retry_cap,
+        ),
         max_iterations=max_iterations,
-        registry=ToolkitRegistry(toolkit_root),
-        tool_retry_cap=tool_retry_cap,
-        toolkit_root=toolkit_root,
-        analyze_env=analyze_env,
-        analyze_ini_sh=analyze_ini_sh,
+        registry=registry,
     )
 
 
@@ -141,12 +143,20 @@ async def run_research(
     Local retrieval uses ``SqliteRetrievalBackend`` by default (no LLM call).
     ``chatter`` follows the monitor's 1-10 verbosity scale; 10 records the full
     agent/tool/consensus narrative.
+
+    A per-run workspace is created under
+    ``$AUTO_RESEARCH_RUNTIME_DIR/runs/{run_id}/`` for each agent.  One
+    ``PersistentSandbox`` is spawned per analyst worker; all sandboxes are torn
+    down after the graph completes or raises.
     """
 
     if isinstance(request, str):
         request = ResearchRequest(question=request)
+
+    run_id = uuid.uuid4().hex
     run_monitor = monitor or RunMonitor(chatter=chatter, jsonl_path=monitor_jsonl)
     orch = load_orchestration_config()
+
     if max_iterations is None:
         max_iterations = int(orch.get("max_iterations", 3))
     debate_max_rounds = int(orch.get("debate_max_rounds", 3))
@@ -161,27 +171,72 @@ async def run_research(
     io_agent = io_agent or LibrarianIOAgent(storage=storage, monitor=run_monitor)
     retrieval = retrieval or SqliteRetrievalBackend(storage)
     lead = lead or AnalystLeadAgent(monitor=run_monitor)
+
+    # Build or validate worker list
     if workers is None:
         worker_group = resolve("analyst_worker")
         worker_handles = worker_group.handles[:DEFAULT_WORKER_COUNT]
-        workers = [AnalystWorkerAgent(model=handle, monitor=run_monitor) for handle in worker_handles]
+        workers = [
+            AnalystWorkerAgent(model=handle, monitor=run_monitor, worker_index=i)
+            for i, handle in enumerate(worker_handles)
+        ]
+
+    # Create per-agent workspace folders
+    analyst_keys = [f"analyst_worker_{i}" for i in range(len(workers))]
+    agent_keys = ["reviewer", "analyst_lead"] + analyst_keys
+    create_run_workspace(run_id, agent_keys)
+
+    # Assign memory paths to AnalystWorkerAgent instances (best-effort)
+    for i, worker in enumerate(workers):
+        if isinstance(worker, AnalystWorkerAgent):
+            worker.memory_path = memory_path(run_id, analyst_keys[i])
+
     _attach_monitor(reviewer, run_monitor)
     _attach_monitor(io_agent, run_monitor)
     _attach_monitor(lead, run_monitor)
     for worker in workers:
         _attach_monitor(worker, run_monitor)
-    if consensus is None:
-        consensus = DebateToConverge(max_rounds=debate_max_rounds, monitor=run_monitor)
 
     registry = ToolkitRegistry(toolkit_root)
+
+    if consensus is None:
+        consensus = DebateToConverge(
+            max_rounds=debate_max_rounds,
+            monitor=run_monitor,
+            registry=registry,
+            tool_retry_cap=tool_retry_cap,
+        )
+
+    # Spawn one persistent sandbox per AnalystWorkerAgent
+    sandboxes: list[PersistentSandbox] = []
+    for i, worker in enumerate(workers):
+        if isinstance(worker, AnalystWorkerAgent):
+            sandbox = PersistentSandbox(
+                toolkit_root=toolkit_root,
+                workdir=memory_path(run_id, analyst_keys[i]).parent,
+                analyze_env=analyze_env,
+                analyze_ini_sh=analyze_ini_sh,
+            )
+            worker.sandbox = sandbox
+            sandboxes.append(sandbox)
 
     await run_monitor.record(
         "run",
         "run.start",
         level=1,
         summary="Research run started",
-        data={"request": request, "max_iterations": max_iterations, "tool_retry_cap": tool_retry_cap},
+        data={
+            "run_id": run_id,
+            "request": request,
+            "max_iterations": max_iterations,
+            "tool_retry_cap": tool_retry_cap,
+        },
     )
+
+    # Start all sandboxes before the graph runs
+    for sandbox in sandboxes:
+        await sandbox.start()
+
     graph = build_graph(
         reviewer=reviewer,
         io_agent=io_agent,
@@ -191,12 +246,9 @@ async def run_research(
         consensus=consensus,
         max_iterations=max_iterations,
         registry=registry,
-        tool_retry_cap=tool_retry_cap,
-        toolkit_root=toolkit_root,
         monitor=run_monitor,
-        analyze_env=analyze_env,
-        analyze_ini_sh=analyze_ini_sh,
     )
+
     try:
         final_state: dict[str, Any] = await graph.ainvoke(
             {
@@ -208,8 +260,6 @@ async def run_research(
                 "lit_iterations": 0,
                 "analysis_iterations": 0,
                 "max_iterations": max_iterations,
-                "tool_results": [],
-                "tool_queue": [],
             }
         )
     except Exception as exc:
@@ -221,6 +271,11 @@ async def run_research(
             data={"error": repr(exc)},
         )
         raise
+    finally:
+        # Always tear down sandboxes
+        for sandbox in sandboxes:
+            await sandbox.shutdown()
+
     verdict = final_state["verdict"]
     await run_monitor.record(
         "run",
@@ -228,10 +283,10 @@ async def run_research(
         level=1,
         summary="Research run finished",
         data={
+            "run_id": run_id,
             "verdict": verdict,
             "lit_iterations": final_state.get("lit_iterations", 0),
             "analysis_iterations": final_state.get("analysis_iterations", 0),
-            "tool_result_count": len(final_state.get("tool_results") or []),
         },
     )
     return ResearchRun(request=request, verdict=verdict, final_state=final_state, monitor=run_monitor)

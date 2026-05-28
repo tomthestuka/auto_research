@@ -478,3 +478,22 @@ documented stubs.
   `run_research()`. Subprocess env is now built from the sourced init script (injecting
   HEADAS, CALDB, CALDBCONFIG, CALDBALIAS, GEOMAG_PATH, LD_LIBRARY_PATH) with PYTHONPATH
   overridden to toolkit_root.
+- 2026-05-28 — Replaced one-shot per-tool-call subprocess sandbox with a persistent
+  per-worker REPL subprocess.  Added `sandbox/persistent.py` (`PersistentSandbox`:
+  JSON-line REPL loop, `is_alive` flag, `start()` / `call_tool()` / `shutdown()`).
+  Added `sandbox/workspace.py` (per-run folder creation, per-agent `memory.md`
+  utilities).  Tool execution moved from graph nodes (`tool_dispatch_node`,
+  `tool_execution_node` — removed) into `DebateToConverge._run_tools()`, called after
+  each round of `analyze()` calls.  `AnalystWorkerAgent` gains `sandbox`,
+  `memory_path`, `worker_index`, `is_alive`, and `execute_tools()`.  `analyze()` reads
+  `memory_path` before each LLM call for private memory continuity.  Truncated peer
+  tool summaries are injected into task instructions between rounds.  `ResearchState`
+  no longer carries `tool_queue` or `tool_results` (removed).  `build_graph()` signature
+  simplified: `analyze_env`, `analyze_ini_sh`, `tool_retry_cap`, `toolkit_root` removed
+  (now consumed by `PersistentSandbox` and `DebateToConverge` in `runtime.py`).
+  `run_research()` creates workspace (uuid4 run_id), spawns one sandbox per worker,
+  assigns sandbox+memory_path, tears down in `finally`.  `xspec_utils/TOOL_MANIFEST`
+  replaced: `run_joint_spectral_fit` removed; six tools added:
+  `xspec_load_data`, `xspec_set_model`, `xspec_fit`, `xspec_plot`, `xspec_status`,
+  `xspec_group_pha` (split workflow, save_path on plot, XSPEC state persists across calls).
+  All six tools verified discovered by `ToolkitRegistry`.

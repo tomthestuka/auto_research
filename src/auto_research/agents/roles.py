@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
@@ -13,6 +14,7 @@ from auto_research.agents.prompts import PromptRole, load_prompt
 from auto_research.consensus import IODebateToConverge
 from auto_research.monitor import RunMonitor
 from auto_research.models import ModelGroupHandle, ModelHandle, ModelMessage, ModelResponse, resolve
+from auto_research.sandbox.workspace import append_memory, read_memory
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -24,6 +26,7 @@ from auto_research.schemas import (
     SearchResult,
     ToolCallRequest,
     ToolCallReview,
+    ToolResult,
     document_from_file,
 )
 from auto_research.sources import ArxivSource, NasaAdsSource, QuerySource, WebSource
@@ -365,7 +368,18 @@ class LibrarianIOAgent(AgentRole):
 
 
 class AnalystWorkerAgent(AgentRole):
-    """Analyst worker role: produce one analysis report."""
+    """Analyst worker role: produce one analysis report.
+
+    When a ``PersistentSandbox`` is attached (via ``sandbox``) and a
+    ``memory_path`` is given, this worker:
+    - Reads ``memory_path`` at the start of every ``analyze()`` call and injects
+      the contents into the payload (private, full history).
+    - Exposes ``execute_tools()`` which calls ``request_tools()``, runs each
+      request through the sandbox, appends results to ``memory_path``, and
+      returns the list of ``ToolResult`` objects.
+    - Exposes ``is_alive`` which is ``False`` if the sandbox subprocess has died;
+      once dead the worker stops calling tools for the session.
+    """
 
     role = "analyst_worker"
 
@@ -373,6 +387,9 @@ class AnalystWorkerAgent(AgentRole):
         self,
         *,
         available_toolkits: Sequence[str] = ("research_toolkit.xspec_utils",),
+        sandbox: Any | None = None,  # PersistentSandbox | None — avoid circular import
+        memory_path: Path | None = None,
+        worker_index: int = 0,
         model: CallableModel | None = None,
         model_group: ModelGroupHandle | None = None,
         model_name: str | None = None,
@@ -387,14 +404,29 @@ class AnalystWorkerAgent(AgentRole):
             monitor=monitor,
         )
         self.available_toolkits = tuple(available_toolkits)
+        self.sandbox = sandbox
+        self.memory_path = memory_path
+        self.worker_index = worker_index
+
+    @property
+    def is_alive(self) -> bool:
+        """True while the attached sandbox is running (or when no sandbox is used)."""
+        if self.sandbox is None:
+            return True
+        return bool(self.sandbox.is_alive)
 
     async def analyze(self, task: AnalysisTask, *, peer_reports: Sequence[AnalystReport] = ()) -> AnalystReport:
-        """Analyze a task, optionally with peer reports from a debate round."""
+        """Analyze a task, optionally with peer reports from a debate round.
 
+        Injects private ``memory`` from ``memory_path`` into the payload so the
+        worker can reason from its own tool-call history.
+        """
+        memory = read_memory(self.memory_path) if self.memory_path else ""
         payload = {
             "task": task.model_dump(mode="json"),
             "peer_reports": [report.model_dump(mode="json") for report in peer_reports],
             "available_toolkits": list(self.available_toolkits),
+            "memory": memory or None,
         }
         figures = [figure for report in peer_reports for figure in report.figures]
         return await self._call(
@@ -413,6 +445,99 @@ class AnalystWorkerAgent(AgentRole):
             "execution_policy": "Return requested tool operations only; do not claim they have run.",
         }
         return await self._call(payload, TypeAdapter(list[ToolCallRequest]), action="request_tools")
+
+    async def execute_tools(
+        self,
+        task: AnalysisTask,
+        registry: Any,  # ToolkitRegistry — avoid circular import
+        *,
+        tool_retry_cap: int = 3,
+    ) -> list[ToolResult]:
+        """Request tools from self then execute them through the persistent sandbox.
+
+        Results are appended to ``memory_path`` as a bare terminal recording.
+        Returns an empty list when the sandbox is dead or not configured.
+        """
+        if not self.is_alive or self.sandbox is None:
+            return []
+
+        requests: list[ToolCallRequest] = await self.request_tools(task)
+        if not requests:
+            return []
+
+        await self._record(
+            "analyst_worker.tools.request",
+            level=7,
+            summary=f"Worker {self.worker_index + 1} requested {len(requests)} tool(s)",
+            data={"requests": [r.model_dump(mode="json") for r in requests]},
+        )
+
+        results: list[ToolResult] = []
+        for req in requests:
+            if not registry.is_known(req.kind):
+                r = ToolResult(
+                    tool_name=req.kind,
+                    stdout="",
+                    stderr="Tool not registered in ToolkitRegistry",
+                    exit_code=127,
+                    elapsed_s=0.0,
+                )
+                results.append(r)
+                continue
+
+            spec = registry.spec(req.kind)
+            current_req = req
+            for attempt in range(tool_retry_cap):
+                t0 = time.monotonic()
+                raw = await self.sandbox.call_tool(
+                    spec["module"],
+                    spec["fn"],
+                    current_req.arguments,
+                    timeout_s=req.timeout_s,
+                )
+                elapsed = time.monotonic() - t0
+
+                from auto_research.schemas.figures import FigureRef  # local to avoid circularity
+                figures = [FigureRef.model_validate(f) for f in raw.get("figures", [])]
+                r = ToolResult(
+                    tool_name=req.kind,
+                    stdout=raw.get("stdout", ""),
+                    stderr=raw.get("stderr", ""),
+                    exit_code=raw.get("exit_code", 1),
+                    figures=figures,
+                    elapsed_s=elapsed,
+                )
+                results.append(r)
+
+                await self._record(
+                    "analyst_worker.tools.result",
+                    level=7,
+                    summary=f"Worker {self.worker_index + 1}: {req.kind} exit={r.exit_code} ({elapsed:.1f}s)",
+                    data={"result": r.model_dump(mode="json"), "attempt": attempt + 1},
+                )
+
+                if r.exit_code == 0:
+                    break
+
+                # LLM self-correction retry
+                if attempt < tool_retry_cap - 1 and self.is_alive:
+                    error_task = AnalysisTask(
+                        question=task.question,
+                        instructions=(
+                            f"Tool {req.kind} failed (attempt {attempt + 1}/{tool_retry_cap}).\n"
+                            f"Error: {r.stderr}\n"
+                            "Revise your tool call with corrected arguments."
+                        ),
+                    )
+                    revised = await self.request_tools(error_task)
+                    if revised:
+                        current_req = revised[0]
+
+        # Append bare terminal recording to memory
+        if self.memory_path and results:
+            _append_tool_results_to_memory(self.memory_path, results)
+
+        return results
 
 
 class AnalystLeadAgent(AgentRole):
@@ -565,3 +690,19 @@ def _default_sources() -> dict[str, QuerySource]:
         "nasa_ads": NasaAdsSource(),
         "web": WebSource(),
     }
+
+
+def _append_tool_results_to_memory(path: Path, results: Sequence[ToolResult]) -> None:
+    """Append bare terminal recordings of tool calls to the worker's memory file."""
+    import datetime
+    lines: list[str] = [f"\n## Tool calls — {datetime.datetime.utcnow().isoformat(timespec='seconds')}Z"]
+    for r in results:
+        status = "OK" if r.exit_code == 0 else f"FAILED (exit {r.exit_code})"
+        lines.append(f"\n### {r.tool_name}  [{status}]  ({r.elapsed_s:.1f}s)")
+        if r.stdout:
+            lines.append(f"stdout:\n{r.stdout}")
+        if r.stderr:
+            lines.append(f"stderr:\n{r.stderr}")
+        if r.figures:
+            lines.append(f"figures: {[str(f.path) for f in r.figures]}")
+    append_memory(path, "\n".join(lines) + "\n")

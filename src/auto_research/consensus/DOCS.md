@@ -64,9 +64,13 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `judge_convergence()` and `adjudicate()`.
 - `ConsensusStrategy` — protocol for swappable analyst consensus policies. Method:
   `run()`.
-- `DebateToConverge(max_rounds: int = 3, monitor: RunMonitor | None = None)` —
-  bounded analyst debate strategy.
-  Method: `run(workers, lead, task)`.
+- `DebateToConverge(max_rounds=3, monitor=None, registry=None, tool_retry_cap=3)` —
+  bounded analyst debate strategy.  When `registry` is supplied, runs tool
+  execution after each round of `analyze()` calls via
+  `AnalystWorkerAgent.execute_tools()`.  Per-worker results are appended to
+  `memory_path` and a truncated shared summary is injected into task instructions.
+  Method: `run(workers, lead, task)` → `AnalystReport`.
+  Internal: `_run_tools(workers, task)` → augmented `AnalysisTask`.
 - `IOAbstractionWorkerLike` — protocol for IO abstraction workers. Method:
   `abstract_document()`.
 - `IOAbstractionLeadLike` — protocol for IO abstraction lead. Methods:
@@ -90,3 +94,9 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
 - 2026-05-28 — Step 12: both consensus strategies accept an optional
   `RunMonitor` and record worker outputs, lead convergence decisions,
   revisions, and final adjudication.
+- 2026-05-28 — `DebateToConverge` gains `registry` and `tool_retry_cap` fields.
+  Tool execution now runs inside the consensus loop via `_run_tools()`: after
+  each round of `analyze()` calls, each worker's `execute_tools()` is called,
+  results appended to private `memory_path`, and a truncated shared summary is
+  injected into task instructions for the next round.  `_peer_tool_summary()`
+  helper added.  `ToolResult` imported from schemas.
