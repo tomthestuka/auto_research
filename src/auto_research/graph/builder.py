@@ -11,6 +11,7 @@ from langgraph.graph import END, START, StateGraph
 from auto_research.consensus import ConsensusStrategy, DebateToConverge, LeadLike, WorkerLike
 from auto_research.graph.state import ResearchState
 from auto_research.monitor import RunMonitor
+from auto_research.observations import ObservationsConfig, load_observations_config
 from auto_research.retrieval import RetrievalBackend, SqliteRetrievalBackend, text_search_paths
 from auto_research.sandbox.merge_flow import propose_and_pr
 from auto_research.sandbox.registry import ToolkitRegistry
@@ -86,6 +87,8 @@ def _build_task(
     state: ResearchState,
     *,
     extra_instructions: Sequence[str] = (),
+    obs_config: ObservationsConfig | None = None,
+    tool_catalogue: str | None = None,
 ) -> AnalysisTask:
     """Reconstruct the current AnalysisTask from graph state."""
     request = state["request"]
@@ -93,8 +96,16 @@ def _build_task(
     if request.context:
         instructions_parts.append(request.context)
     prior = _latest_verdict(state)
-    if prior and prior.needs_analysis_rework and prior.follow_up:
-        instructions_parts.append(f"Reviewer feedback for revision: {prior.follow_up}")
+    if prior and prior.follow_up:
+        label = "Reviewer feedback for revision" if prior.needs_analysis_rework else "Reviewer dispatch"
+        instructions_parts.append(f"{label}: {prior.follow_up}")
+    if obs_config and obs_config.missions:
+        obs_lines = ["Local observation databases (check these before querying remote archives):"]
+        for mission, cfg in obs_config.missions.items():
+            obs_lines.append(f"  {mission}: {cfg.obs_db_path}")
+        instructions_parts.append("\n".join(obs_lines))
+    if tool_catalogue:
+        instructions_parts.append(f"Available sandbox tools:\n{tool_catalogue}")
     tool_results = state.get("tool_results") or []
     if tool_results:
         instructions_parts.append(_format_tool_results(tool_results))
@@ -119,6 +130,7 @@ def build_graph(
     tool_retry_cap: int = 3,
     toolkit_root: Path | None = None,
     monitor: RunMonitor | None = None,
+    analyze_env: Path | None = None,
 ) -> Any:
     """Compile the Phase 1 research-loop graph.
 
@@ -143,6 +155,10 @@ def build_graph(
     consensus_strategy = consensus or DebateToConverge(max_rounds=max_iterations, monitor=monitor)
     _retrieval = retrieval or SqliteRetrievalBackend()
     _registry = registry or ToolkitRegistry(toolkit_root or Path("/data/fzhou/research_toolkit"))
+    try:
+        _obs_config: ObservationsConfig | None = load_observations_config()
+    except Exception:
+        _obs_config = None
 
     # Resolve runtime data dir for tool execution workdir.
     import os
@@ -234,7 +250,7 @@ def build_graph(
         return "analysis"
 
     async def analysis_node(state: ResearchState) -> dict[str, Any]:
-        task = _build_task(state)
+        task = _build_task(state, obs_config=_obs_config, tool_catalogue=_registry.tool_catalogue())
         await _record(
             monitor,
             "analyst.analysis.start",
@@ -272,10 +288,7 @@ def build_graph(
             return {"tool_queue": []}
 
         catalogue = _registry.tool_catalogue()
-        task = _build_task(
-            state,
-            extra_instructions=[f"Available sandbox tools:\n{catalogue}"],
-        )
+        task = _build_task(state, obs_config=_obs_config, tool_catalogue=catalogue)
         await _record(
             monitor,
             "tooling.dispatch.start",
@@ -369,6 +382,7 @@ def build_graph(
                     timeout_s=current_req.timeout_s,
                     workdir=_workdir,
                     toolkit_root=_registry._root,
+                    analyze_env=analyze_env,
                 )
                 new_results.append(result)
                 await _record(

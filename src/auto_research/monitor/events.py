@@ -167,13 +167,33 @@ class RunMonitor:
                 stream.write("\n")
         return target
 
-    def write_markdown(self, path: str | Path) -> Path:
-        """Write a grouped Markdown monitor report and return the path."""
+    def write_markdown(self, path: str | Path, *, grouped: bool = True) -> Path:
+        """Write a Markdown monitor report and return the path."""
 
         target = Path(path).expanduser()
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(self.render_markdown(grouped=True), encoding="utf-8")
+        target.write_text(self.render_markdown(grouped=grouped), encoding="utf-8")
         return target
+
+    @classmethod
+    def from_jsonl(cls, path: str | Path, *, chatter: int = 10) -> "RunMonitor":
+        """Reconstruct a RunMonitor from a previously written JSONL file."""
+
+        source = Path(path).expanduser()
+        events = [
+            MonitorEvent.model_validate_json(line)
+            for line in source.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        run_id = events[0].run_id if events else uuid4().hex
+        monitor = cls.__new__(cls)
+        monitor.chatter = validate_chatter(chatter)
+        monitor.run_id = run_id
+        monitor.jsonl_path = None
+        monitor._events = events
+        monitor._sequence = len(events)
+        monitor._lock = Lock()
+        return monitor
 
 
 def _render_events(events: Sequence[MonitorEvent]) -> list[str]:

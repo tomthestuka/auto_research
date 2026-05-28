@@ -71,10 +71,12 @@ iteration counters, and the cap.
 ## Interfaces / Contracts
 - `build_graph(*, reviewer, io_agent, retrieval=None, workers, lead,
   consensus=None, max_iterations=3, registry=None, tool_retry_cap=3,
-  toolkit_root=None, monitor=None) -> CompiledStateGraph` — pure constructor. `retrieval`
+  toolkit_root=None, monitor=None, analyze_env=None) -> CompiledStateGraph` — pure constructor. `retrieval`
   defaults to `SqliteRetrievalBackend()`. `consensus` defaults to
   `DebateToConverge(max_rounds=max_iterations, monitor=monitor)`. `registry` defaults to
   `ToolkitRegistry(toolkit_root or Path("/data/fzhou/research_toolkit"))`.
+  `analyze_env` (Path or None) is forwarded to `run_tool()` to select the
+  analysis Python interpreter (e.g. the conda env with XSPEC/HEASoft).
   Raises `ValueError` if `max_iterations < 1`. Reads no environment at import.
 - `async run_request(request, *, reviewer=None, io_agent=None, retrieval=None,
   workers=None, lead=None, consensus=None, max_iterations=None, chatter=10,
@@ -178,3 +180,13 @@ iteration counters, and the cap.
   reproducible in the user's environment. `review_literature` and
   `review_analysis` now append verdicts only; branch functions perform the
   capped loop routing.
+- 2026-05-28 — Fixed analyst task construction: `_build_task` now always injects
+  `prior.follow_up` as instructions (labelled "Reviewer dispatch" on first pass,
+  "Reviewer feedback for revision" on rework), loads `observations.yaml` once at
+  `build_graph` time and injects obs DB paths into every analyst task, and passes
+  the live tool catalogue to both `analysis_node` and `tool_dispatch_node` so
+  workers see available tools during debate and at dispatch.
+- 2026-05-28 — Added `analyze_env` parameter to `build_graph()`. Forwarded to
+  `run_tool()` in `tool_execution_node` so sandbox tools run in the configured
+  analysis Python environment. Read from `config/orchestration.yaml::analyze_env`
+  in both `_default_graph()` and `run_research()`.

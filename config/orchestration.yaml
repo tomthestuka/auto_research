@@ -14,3 +14,7 @@ debate_max_rounds: 3
 io_search_max_iterations: 1  # Phase 2 stub — evaluate_search_results() currently returns accepted=True
 tool_retry_cap: 3            # inner retry cap for tool execution error-feedback loop
 toolkit_root: /data/fzhou/research_toolkit
+# Python environment used for sandbox tool execution.
+# Must be a conda/venv prefix whose Python has the analysis stack (XSPEC, HEASoft, ixpeobssim, etc.).
+# The subprocess inherits the parent process environment so HEADAS/CALDB/LD_LIBRARY_PATH are available.
+analyze_env: /grad/fzhou/.conda/envs/astropy

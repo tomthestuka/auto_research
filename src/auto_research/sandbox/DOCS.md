@@ -80,10 +80,16 @@ async def run_tool(
     timeout_s: int = 300,
     workdir: Path,
     toolkit_root: Path,
+    analyze_env: Path | None = None,
 ) -> ToolResult
 ```
 
-- Spawns an isolated Python subprocess with `PYTHONPATH=toolkit_root`.
+- Spawns an isolated Python subprocess. When `analyze_env` is provided (a
+  conda/venv prefix), uses `{analyze_env}/bin/python` as the interpreter so
+  tools run in the analysis environment (e.g. one with XSPEC/HEASoft). Falls
+  back to `sys.executable` (the orchestration env) when `None`.
+- The subprocess inherits the parent process environment so HEADAS, CALDB, and
+  LD_LIBRARY_PATH are available. PYTHONPATH is overridden to `toolkit_root`.
 - `workdir` is created if absent; the subprocess `chdir`s there on startup.
 - On timeout: `exit_code=124`, `stderr="Timed out after Ns"`.
 - Figures returned by the tool as `{"figures": [...]}` in stdout are parsed
@@ -121,8 +127,9 @@ writes the tool, lead reviews, human approves merge on GitHub.
   - `.describe_tool(name)` → `str` — `"<name>: <description>"` for prompts.
   - `.spec(name)` → `ToolSpec` — raises `KeyError` if unknown.
   - `.tool_catalogue()` → `str` — multi-line listing for prompt injection.
-- `run_tool(module, fn, args, *, timeout_s, workdir, toolkit_root)` →
-  `ToolResult` — async subprocess sandbox entry point.
+- `run_tool(module, fn, args, *, timeout_s, workdir, toolkit_root, analyze_env=None)` →
+  `ToolResult` — async subprocess sandbox entry point. `analyze_env` selects
+  the Python interpreter; subprocess inherits parent env + PYTHONPATH override.
 - `propose_and_pr(request, *, lead, toolkit_repo)` → `str` — Phase 2 stub;
   raises `NotImplementedError`.
 
@@ -132,3 +139,8 @@ writes the tool, lead reviews, human approves merge on GitHub.
   `propose_and_pr()` Phase 2 stub. `TOOL_MANIFEST` convention established.
   `merge_flow.py` raises `NotImplementedError` (Claude Agent SDK in Phase 2).
 - 2026-05-26 — Folder seeded during step 0.
+- 2026-05-28 — Added `analyze_env` parameter to `run_tool()`. Subprocess now
+  uses `{analyze_env}/bin/python` when provided, and inherits the parent
+  process environment (HEADAS, CALDB, LD_LIBRARY_PATH, etc.) with PYTHONPATH
+  overridden to toolkit_root. Configured via `analyze_env` in
+  `config/orchestration.yaml`.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import textwrap
 import time
@@ -20,15 +21,22 @@ async def run_tool(
     timeout_s: int = 300,
     workdir: Path,
     toolkit_root: Path,
+    analyze_env: Path | None = None,
 ) -> ToolResult:
     """Execute a research_toolkit callable in an isolated subprocess.
 
-    The subprocess runs with PYTHONPATH limited to toolkit_root, and its
-    working directory set to workdir. Any write above workdir will resolve
-    inside it. On timeout or non-zero exit the result captures stderr.
+    The subprocess uses the Python interpreter from ``analyze_env`` when
+    provided (e.g. a conda env with XSPEC/HEASoft). It inherits the parent
+    process environment so HEADAS, CALDB, LD_LIBRARY_PATH, etc. are available,
+    with PYTHONPATH overridden to point at toolkit_root. Working directory is
+    set to workdir. On timeout or non-zero exit the result captures stderr.
     """
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
+
+    python_exec = (
+        str(Path(analyze_env) / "bin" / "python") if analyze_env else sys.executable
+    )
 
     # Inline runner script: deserialise args, call fn, serialise result.
     # FigureRefs written by the tool must be JSON-serialisable paths.
@@ -46,12 +54,12 @@ async def run_tool(
             print(json.dumps({{"stdout": str(result)}}))
     """).strip()
 
-    env = {"PYTHONPATH": str(toolkit_root)}
+    env = {**os.environ, "PYTHONPATH": str(toolkit_root)}
 
     t0 = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", runner_src,
+            python_exec, "-c", runner_src,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

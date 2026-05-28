@@ -5,6 +5,7 @@ roles:
         provider: anthropic
         model: claude-opus-4-7
         vision: true
+        documents: true
         priceMTk:
           input: 5.0
           output: 25.0
@@ -14,6 +15,7 @@ roles:
         provider: openai
         model: gpt-5.5
         vision: true
+        documents: true
         priceMTk:
           input: 5.0
           output: 30.0
@@ -25,6 +27,7 @@ roles:
         provider: google
         model: gemini-3.5-flash
         vision: true
+        documents: true
         priceMTk:
           input: 1.5
           output: 9.0

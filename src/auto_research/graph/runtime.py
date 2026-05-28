@@ -62,6 +62,8 @@ def _default_graph():
     debate_max_rounds = int(orch.get("debate_max_rounds", 3))
     tool_retry_cap = int(orch.get("tool_retry_cap", 3))
     toolkit_root = Path(orch.get("toolkit_root", "/data/fzhou/research_toolkit"))
+    analyze_env_str = orch.get("analyze_env")
+    analyze_env = Path(analyze_env_str) if analyze_env_str else None
 
     storage = Storage()
     worker_group = resolve("analyst_worker")
@@ -78,6 +80,7 @@ def _default_graph():
         registry=ToolkitRegistry(toolkit_root),
         tool_retry_cap=tool_retry_cap,
         toolkit_root=toolkit_root,
+        analyze_env=analyze_env,
     )
 
 
@@ -147,6 +150,8 @@ async def run_research(
     debate_max_rounds = int(orch.get("debate_max_rounds", 3))
     tool_retry_cap = int(orch.get("tool_retry_cap", 3))
     toolkit_root = Path(orch.get("toolkit_root", "/data/fzhou/research_toolkit"))
+    analyze_env_str = orch.get("analyze_env")
+    analyze_env = Path(analyze_env_str) if analyze_env_str else None
 
     storage = Storage()
     reviewer = reviewer or ReviewerAgent(monitor=run_monitor)
@@ -186,6 +191,7 @@ async def run_research(
         tool_retry_cap=tool_retry_cap,
         toolkit_root=toolkit_root,
         monitor=run_monitor,
+        analyze_env=analyze_env,
     )
     try:
         final_state: dict[str, Any] = await graph.ainvoke(

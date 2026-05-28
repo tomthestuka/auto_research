@@ -455,3 +455,19 @@ documented stubs.
   fixes, workarounds, or architectural changes for unexpected failures,
   environment/tooling oddities, ambiguous runtime behavior, or suspected
   dependency issues.
+- 2026-05-28 — Fixed several analyst-task construction issues in the graph:
+  (1) `_build_task` now always injects the reviewer's `follow_up` as instructions
+  regardless of `needs_analysis_rework` flag; (2) `observations.yaml` is loaded
+  at `build_graph` time and obs DB paths are injected into every `AnalysisTask`;
+  (3) the tool catalogue is passed to `analysis_node` (not just `tool_dispatch_node`)
+  so workers see available tools during debate. Updated `prompts/reviewer.md` to
+  instruct the reviewer to tell analysts to check local obs databases before remote
+  archives. Added `RunMonitor.from_jsonl()` and `grouped` param to `write_markdown()`.
+- 2026-05-28 — Created `xspec_utils/__init__.py` in research_toolkit with `TOOL_MANIFEST`
+  exposing two sandbox-compatible tools: `xspec_joint_fit` (composite load+fit+figure in
+  one XSPEC session) and `xspec_group_pha` (PHA grouping, no XSPEC needed). Added
+  `analyze_env` config key to `config/orchestration.yaml` (points to the conda env that
+  has XSPEC/HEASoft). Added `analyze_env` parameter to `run_tool()`, `build_graph()`,
+  `_default_graph()`, and `run_research()`. Sandbox subprocess now inherits the parent
+  process environment (HEADAS, CALDB, LD_LIBRARY_PATH) and uses the analysis env's
+  Python interpreter instead of blanking the env.

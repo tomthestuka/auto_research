@@ -26,7 +26,8 @@ inspection.
 - `RunMonitor.events_by_team()` returns events grouped in report order.
 - `RunMonitor.render_markdown(grouped=True)` returns a Markdown report.
 - `RunMonitor.write_jsonl(path=None)` writes all events as JSONL.
-- `RunMonitor.write_markdown(path)` writes a grouped Markdown report.
+- `RunMonitor.write_markdown(path, *, grouped=True)` writes a Markdown report. Pass `grouped=False` for sequential (pipeline-order) output.
+- `RunMonitor.from_jsonl(path, *, chatter=10)` reconstructs a RunMonitor from a previously written JSONL file (for offline rendering).
 - Monitor payloads are converted to JSON-safe values. Pydantic models are
   dumped in JSON mode, paths become strings, and unknown objects fall back to
   `repr()`.
@@ -52,3 +53,7 @@ inspection.
 ## Changelog
 - 2026-05-28 - Added the step-12 run monitor with 1-10 chatter, async-safe
   event collection, optional JSONL streaming, and team-block Markdown reports.
+- 2026-05-28 - Added `RunMonitor.from_jsonl()` classmethod for offline rendering
+  of previously written monitor JSONL files.
+- 2026-05-28 - Added `grouped` parameter to `write_markdown()` (default `True`);
+  pass `grouped=False` for sequential pipeline-order output.
