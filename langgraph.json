@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "research": "./src/auto_research/graph/serve.py:graph"
+  },
+  "env": ".env"
+}

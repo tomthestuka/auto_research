@@ -33,6 +33,37 @@ def load_orchestration_config(path: str | Path = DEFAULT_ORCHESTRATION_CONFIG) -
         return yaml.safe_load(stream) or {}
 
 
+def _default_graph():
+    """Build the compiled graph with all defaults from config.
+
+    Synchronous; called at module import time by serve.py for LangGraph Studio.
+    Reads config/orchestration.yaml and config/models.yaml. Requires API keys
+    to be present in the environment (langgraph-cli loads .env before importing).
+    """
+    orch = load_orchestration_config()
+    max_iterations = int(orch.get("max_iterations", 3))
+    debate_max_rounds = int(orch.get("debate_max_rounds", 3))
+    tool_retry_cap = int(orch.get("tool_retry_cap", 3))
+    toolkit_root = Path(orch.get("toolkit_root", "/data/fzhou/research_toolkit"))
+
+    storage = Storage()
+    worker_group = resolve("analyst_worker")
+    workers = [AnalystWorkerAgent(model=h) for h in worker_group.handles[:DEFAULT_WORKER_COUNT]]
+
+    return build_graph(
+        reviewer=ReviewerAgent(),
+        io_agent=LibrarianIOAgent(storage=storage),
+        retrieval=SqliteRetrievalBackend(storage),
+        workers=workers,
+        lead=AnalystLeadAgent(),
+        consensus=DebateToConverge(max_rounds=debate_max_rounds),
+        max_iterations=max_iterations,
+        registry=ToolkitRegistry(toolkit_root),
+        tool_retry_cap=tool_retry_cap,
+        toolkit_root=toolkit_root,
+    )
+
+
 async def run_request(
     request: ResearchRequest,
     *,

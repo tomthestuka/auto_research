@@ -21,7 +21,7 @@ dependencies:
   - tavily-python>=0.5
   # tests
   - pytest>=8
-  # pip is only needed for the editable install of this repo; everything else
-  # above is on conda-forge.
+  # langgraph-cli is not on conda-forge; everything else above is.
   - pip:
       - -e .
+      - langgraph-cli[inmem]

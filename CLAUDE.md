@@ -362,7 +362,7 @@ Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & docum
 | 8 | Done | **Agent roles** — thin wrappers: librarian I/O, librarian searcher, analyst worker, analyst lead, reviewer (each loads its prompt, uses schemas + config models). | Role plumbing is verified: prompt loads, model resolves via config, structured Pydantic input goes in, structured output comes back, and trace/cost logging is exercised. This does **not** mean every role can do its full production job yet. |
 | 9 | Done | **Consensus** — `ConsensusStrategy` = debate-to-converge (cap 3) + lead adjudication. | Workers converge (or hit the cap and the lead adjudicates) on a bounded task. |
 | 10 | Done | **Orchestration** — assemble the LangGraph graph and the two capped feedback edges (paper-search review, analysis review). | Full loop runs end-to-end on a sample request. |
-| 11 | Todo | **Sandbox & tool execution** — `ToolkitRegistry` (manifest-based discovery), `runner.py` (subprocess sandbox: timeout, workdir, `PYTHONPATH` confinement), `tool_dispatch_node` + `tool_execution_node` in graph, error-feedback inner loop (capped at `tool_retry_cap`). `merge_flow.py` stub raises `NotImplementedError` (Phase 2 → Claude Agent SDK). | Known tools execute in sandbox; error-feedback loop self-corrects bad args; unknown tool triggers stub cleanly; `xspec_utils` runs on real Cyg X-1 data. |
+| 11 | Done | **Sandbox & tool execution** — `ToolkitRegistry` (manifest-based discovery), `runner.py` (subprocess sandbox: timeout, workdir, `PYTHONPATH` confinement), `tool_dispatch_node` + `tool_execution_node` in graph, error-feedback inner loop (capped at `tool_retry_cap`). `merge_flow.py` stub raises `NotImplementedError` (Phase 2 → Claude Agent SDK). **LangGraph Studio wiring** — `serve.py` + `langgraph.json`; `langgraph dev` exposes live `ResearchState` per node via Studio. | Known tools execute in sandbox; error-feedback loop self-corrects bad args; unknown tool triggers stub cleanly; `xspec_utils` runs on real Cyg X-1 data. `langgraph dev` starts without error; Studio shows live graph state at each node. |
 | 12 | Todo | **Entry points & tests** — importable library + CLI (`python -m auto_research "…"`), notebook for inspection, minimal pytest on deterministic parts. | CLI runs a request end-to-end; notebook inspects a run. |
 
 After step 12 the Phase 1 skeleton is complete: a full team running real LLM calls
@@ -438,3 +438,7 @@ documented stubs.
   `tool_retry_cap`). Updated §2 trust boundary, §8 sandbox description, §10 analyst
   role, §13 Phase 2 stub, §14 step 11 checkpoint to reflect the decision. No external
   harness (Composio, OpenHands) used.
+- 2026-05-28 — Marked step 11 Done after adding LangGraph Studio wiring:
+  `serve.py` (module-level compiled graph for `langgraph dev`), `langgraph.json`
+  (repo-root CLI config), `_default_graph()` in `runtime.py`, and
+  `langgraph-cli[inmem]` in `environment.yml` pip block.

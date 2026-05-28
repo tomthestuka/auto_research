@@ -91,6 +91,13 @@ analyst report, the latest reviewer verdict, two iteration counters, and the cap
 - Live sandbox verification is opt-in:
   `AUTO_RESEARCH_LIVE_SANDBOX_TESTS=1 pytest tests/test_live_sandbox.py -s`.
   Writes logs under `logs/dev/step-11/`.
+- LangGraph Studio: run `langgraph dev` from the repo root (requires
+  `langgraph-cli[inmem]`). Server binds to `localhost:2024` on the remote
+  machine. Over SSH, forward the port locally:
+  `ssh -L 2024:localhost:2024 your_server`, then connect Studio from your
+  laptop at `https://smith.langchain.com/studio/?baseUrl=http://localhost:2024`.
+  Alternatively run `langgraph dev --host 0.0.0.0` and use the server's IP.
+  Entry point: `src/auto_research/graph/serve.py:graph`.
 
 ## Dependencies
 - External: `langgraph`.
@@ -107,6 +114,11 @@ analyst report, the latest reviewer verdict, two iteration counters, and the cap
 - `build_graph(...)` — constructs and compiles the state graph (six nodes).
 - `run_request(request, ...)` — high-level entry point; reads `tool_retry_cap` and
   `toolkit_root` from `orchestration.yaml`. Returns the final `ReviewVerdict`.
+- `_default_graph()` — synchronous; builds the compiled graph with all defaults from
+  config. Called at import time by `serve.py` for LangGraph Studio.
+- `load_orchestration_config(path?)` — loads `config/orchestration.yaml`; returns dict.
+- `serve.py` — LangGraph Studio entry point; exposes `graph = _default_graph()` at
+  module level so `langgraph dev` can import it. Referenced by `langgraph.json`.
 - `DEFAULT_WORKER_COUNT` — default analyst worker count (currently 2).
 
 ## Changelog
@@ -133,3 +145,7 @@ analyst report, the latest reviewer verdict, two iteration counters, and the cap
   `toolkit_root` parameters. `run_request()` reads these from `orchestration.yaml`.
   `ToolWorkerLike` protocol added. `_build_task()` helper formats tool results into
   task instructions for rework iterations.
+- 2026-05-28 — LangGraph Studio wiring: added `_default_graph()` to `runtime.py`
+  (synchronous default-config graph constructor) and `serve.py` (module-level `graph`
+  variable for `langgraph dev`). Added `langgraph.json` at repo root and
+  `langgraph-cli[inmem]` to `environment.yml` pip block.
