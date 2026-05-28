@@ -55,7 +55,7 @@ roles:
           input: 3.0
           output: 15.0
         parameters:
-          max_tokens: 4096
+          max_tokens: 16384
       - name: gpt_5_5_medium
         provider: openai
         model: gpt-5.5
@@ -64,7 +64,7 @@ roles:
           input: 5.0
           output: 30.0
         parameters:
-          max_output_tokens: 2048
+          max_output_tokens: 16384
           reasoning:
             effort: medium
   librarian_io:

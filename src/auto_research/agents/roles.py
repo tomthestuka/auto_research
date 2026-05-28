@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Mapping, Sequence
@@ -322,36 +323,47 @@ class LibrarianIOAgent(AgentRole):
         )
 
     async def ingest_results(self, results: list[SearchResult]) -> None:
-        """Download, abstract, and store each search result.
+        """Download, abstract, and store each search result in parallel.
 
-        For PDF-bearing results: download → IODebateToConverge (2 worker passes +
-        lead adjudication) → write mem_abbrev to memory table.
-        For results without a PDF URL: store metadata only; use abstract as mem_abbrev.
+        Papers already abstracted (mem_abbrev populated in memory table) are
+        skipped — PDFs are re-downloaded only if the file is absent.
+        Concurrency is capped at 4 simultaneous ingests to respect API rate limits.
         """
 
         consensus = IODebateToConverge(max_rounds=2, monitor=self.monitor)
-        for result in results:
-            stored = await download_and_ingest_result(
-                self.storage, result, target_dir=papers_dir()
-            )
-            if stored is not None and stored.local_path is not None:
-                doc = document_from_file(stored.local_path)
-                memory = await consensus.run([self, self], self, doc)
-                memory = MemoryRecord(
-                    paper_id=stored.id,
-                    summary=memory.summary,
-                    tags=memory.tags,
-                    mem_abbrev=memory.mem_abbrev,
+        sem = asyncio.Semaphore(4)
+
+        async def _ingest_one(result: SearchResult) -> None:
+            async with sem:
+                stored = await download_and_ingest_result(
+                    self.storage, result, target_dir=papers_dir()
                 )
-            else:
-                paper_id = await self.storage.upsert_paper(paper_record_from_result(result))
-                memory = MemoryRecord(
-                    paper_id=paper_id,
-                    summary=result.title,
-                    tags=result.keywords,
-                    mem_abbrev=result.abstract,
-                )
-            await self.storage.replace_memory_for_paper(memory)
+                if stored is not None and stored.local_path is not None:
+                    existing = await self.storage.get_memory_for_paper(stored.id)
+                    if existing is not None and existing.mem_abbrev:
+                        return
+                    doc = document_from_file(stored.local_path)
+                    memory = await consensus.run([self, self], self, doc)
+                    memory = MemoryRecord(
+                        paper_id=stored.id,
+                        summary=memory.summary,
+                        tags=memory.tags,
+                        mem_abbrev=memory.mem_abbrev,
+                    )
+                else:
+                    paper_id = await self.storage.upsert_paper(paper_record_from_result(result))
+                    existing = await self.storage.get_memory_for_paper(paper_id)
+                    if existing is not None and existing.mem_abbrev:
+                        return
+                    memory = MemoryRecord(
+                        paper_id=paper_id,
+                        summary=result.title,
+                        tags=result.keywords,
+                        mem_abbrev=result.abstract,
+                    )
+                await self.storage.replace_memory_for_paper(memory)
+
+        await asyncio.gather(*(_ingest_one(r) for r in results))
 
     async def evaluate_search_results(
         self,
@@ -645,11 +657,22 @@ def _parse_json_response(content: str, output: TypeAdapter[T]) -> T:
     text = _strip_json_fence(content)
     try:
         return output.validate_json(text)
-    except ValidationError as exc:
-        try:
-            return output.validate_python(_extract_json_value(text))
-        except (json.JSONDecodeError, ValidationError) as inner_exc:
-            raise ValueError("model response did not match the expected schema") from inner_exc
+    except ValidationError:
+        pass
+    try:
+        value = _extract_json_value(text)
+        return output.validate_python(value)
+    except (json.JSONDecodeError, ValidationError):
+        pass
+    # Last resort: if the model returned a single dict but a list was expected,
+    # wrap it (happens when a JSON array is truncated mid-write).
+    try:
+        value = _extract_json_value(text)
+        if isinstance(value, dict):
+            return output.validate_python([value])
+    except (json.JSONDecodeError, ValidationError):
+        pass
+    raise ValueError("model response did not match the expected schema")
 
 
 def _strip_json_fence(content: str) -> str:

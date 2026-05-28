@@ -308,6 +308,24 @@ class Storage:
             )
         return int(cursor.lastrowid)
 
+    async def get_memory_for_paper(self, paper_id: int) -> MemoryRecord | None:
+        """Return the most recent memory record for a paper, or None."""
+
+        with sqlite3.connect(self.path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM memory WHERE paper_id = ? ORDER BY id DESC LIMIT 1",
+                (paper_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return MemoryRecord(
+            paper_id=row["paper_id"],
+            summary=row["summary"],
+            tags=json.loads(row["tags_json"]),
+            mem_abbrev=row["mem_abbrev"],
+        )
+
     async def replace_memory_for_paper(self, memory: MemoryRecord) -> int:
         """Replace existing memory rows for a paper, then insert one row."""
 
