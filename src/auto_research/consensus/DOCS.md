@@ -30,11 +30,14 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   It requires at least one worker, asks all workers for initial reports, checks
   convergence through the lead after each round, requests revisions with peer
   reports when not converged, and returns a lead-adjudicated final report.
+  Optional `monitor` records worker reports, convergence verdicts, revisions,
+  and lead adjudication.
 - `IOAbstractionStrategy` protocol:
   `async run(workers, lead, document) -> MemoryRecord`.
 - `IODebateToConverge(max_rounds=3)` implements the IO abstraction policy.
   Same bounded debate structure as `DebateToConverge` but produces a
-  `MemoryRecord` rather than `AnalystReport`.
+  `MemoryRecord` rather than `AnalystReport`. Optional `monitor` records the
+  IO abstraction debate.
 - Worker objects for analyst debate must provide
   `analyze(task, *, peer_reports=()) -> AnalystReport`.
 - Lead objects for analyst debate must provide
@@ -61,7 +64,8 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `judge_convergence()` and `adjudicate()`.
 - `ConsensusStrategy` — protocol for swappable analyst consensus policies. Method:
   `run()`.
-- `DebateToConverge(max_rounds: int = 3)` — bounded analyst debate strategy.
+- `DebateToConverge(max_rounds: int = 3, monitor: RunMonitor | None = None)` —
+  bounded analyst debate strategy.
   Method: `run(workers, lead, task)`.
 - `IOAbstractionWorkerLike` — protocol for IO abstraction workers. Method:
   `abstract_document()`.
@@ -69,8 +73,9 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `judge_abstract_convergence()` and `adjudicate_abstract()`.
 - `IOAbstractionStrategy` — protocol for swappable IO abstraction policies.
   Method: `run()`.
-- `IODebateToConverge(max_rounds: int = 3)` — bounded IO abstraction debate
-  strategy. Method: `run(workers, lead, document)`.
+- `IODebateToConverge(max_rounds: int = 3, monitor: RunMonitor | None = None)`
+  — bounded IO abstraction debate strategy. Method:
+  `run(workers, lead, document)`.
 
 ## Changelog
 - 2026-05-27 — Added `IOAbstractionWorkerLike`, `IOAbstractionLeadLike`,
@@ -82,3 +87,6 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `DebateToConverge`, lead convergence checks, deterministic tests, and an
   opt-in live GX339-4 replication-planning debate test.
 - 2026-05-26 — Folder seeded during step 0.
+- 2026-05-28 — Step 12: both consensus strategies accept an optional
+  `RunMonitor` and record worker outputs, lead convergence decisions,
+  revisions, and final adjudication.

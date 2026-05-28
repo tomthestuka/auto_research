@@ -128,7 +128,7 @@ discipline as `DOCS.md`). Phase 2 items remain documented as deferred stubs in
 | 9 | Done | Consensus: debate-to-converge strategy with cap 3 and lead adjudication. |
 | 10 | Done | Orchestration: LangGraph graph with capped paper-search and analysis-result feedback edges. |
 | 11 | Done | Sandbox & tool execution: `ToolkitRegistry` (manifest-based discovery), subprocess sandbox (`runner.py`), `tool_dispatch_node` + `tool_execution_node` in graph, error-feedback inner loop. `merge_flow.py` stub (Phase 2 → Claude Agent SDK). LangGraph Studio: `langgraph dev` exposes live graph state per node. |
-| 12 | Todo | Entry points & tests: CLI, inspection notebook, and deterministic pytest coverage. |
+| 12 | Done | Entry points & tests: importable monitored library entry, CLI, inspection notebook, and deterministic pytest coverage. |
 
 See `CLAUDE.md` §14 for checkpoints and deferred Phase 2 stubs.
 
@@ -176,14 +176,24 @@ mission names as data rather than special cases.
 As a CLI:
 
 ```bash
-python -m auto_research "your research question"
+python -m auto_research "your research question" --chatter 10
 ```
 
 Or import the library / drive it from a notebook for inspection:
 
 ```python
-from auto_research import run_request   # interface; see module DOCS.md
+from auto_research import run_research
+
+run = await run_research("your research question", chatter=10)
+run.verdict
+run.markdown()
 ```
+
+The Step 12 inspection notebook is
+`notebooks/step12_monitor_inspection.ipynb`. Monitor artifacts are written as
+JSONL plus grouped Markdown reports. `--chatter` follows an XSPEC-style 1-10
+verbosity scale; `10` records the full agent, consensus, tool, and reviewer
+narrative.
 
 ---
 
@@ -198,6 +208,9 @@ from auto_research import run_request   # interface; see module DOCS.md
   these contributor rules — must update the README in the same session.
 - Coding agents **never run git**; they edit files and summarize changes for the human to
   commit.
+- When unexpected failures, environment/tooling oddities, ambiguous runtime behavior, or
+  suspected dependency issues appear, coding agents collect minimal facts and consult the
+  human before attempting fixes or workarounds.
 - `CLAUDE.md` and `DOCS.md` are **build-time only** — never fed to runtime agents, which
   are configured solely from `prompts/`.
 - External API integrations keep opt-in live test stubs, and coding agents default to

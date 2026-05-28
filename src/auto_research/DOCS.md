@@ -24,12 +24,17 @@ A src-layout package. Submodules are added in the order set by
 | `consensus` | 9 | `ConsensusStrategy` — debate-to-converge with lead convergence checks and adjudication. |
 | `graph` | 10 | LangGraph assembly + the two capped feedback edges. |
 | `sandbox` | 11 | Subprocess sandbox + `research_toolkit` propose/branch/review/merge flow. |
+| `monitor` | 12 | Async-safe run monitor with 1-10 chatter, JSONL logs, and team-block Markdown reports. |
 | `cli` | 12 | `python -m auto_research "..."` entry point. |
 
 Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--conventions)).
 
 ## Interfaces / Contracts
 - Package exports its version as `auto_research.__version__`.
+- Package exports monitored library entry points: `run_research()` returns a
+  `ResearchRun` with final state and monitor; `run_request()` remains the
+  verdict-only compatibility entry.
+- Package exports `RunMonitor` for notebook and test instrumentation.
 - Each submodule documents its own interface in its `DOCS.md`. Cross-module
   contracts go through `auto_research.schemas`.
 - `auto_research.observations.load_observations_config()` loads generic
@@ -46,6 +51,14 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
 ## Dictionary-level reference
 - `__version__: str` — package version. `"0.0.0"` until the first non-skeleton
   release.
+- `run_research(request, ..., chatter=10, monitor_jsonl=None) -> ResearchRun` —
+  monitored library entry for CLI/notebook use.
+- `run_request(request, ...) -> ReviewVerdict` — compatibility wrapper returning
+  only the final verdict.
+- `ResearchRun` — result object with request, final verdict, final graph state,
+  and monitor.
+- `RunMonitor` — async-safe event collector and renderer from
+  `auto_research.monitor`.
 
 ## Changelog
 - 2026-05-27 — Step 8 completed: `auto_research.agents` now exposes async
@@ -78,3 +91,6 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
   Pydantic v2 inter-agent protocol and schema validation tests pass.
 - 2026-05-26 — Package seeded with submodule folders (each with its own `DOCS.md`)
   during step 0. No code beyond the version constant.
+- 2026-05-28 — Step 12: added `auto_research.monitor`, exported
+  `run_research()` / `ResearchRun` / `RunMonitor`, and kept `run_request()` as
+  the verdict-only compatibility entry.

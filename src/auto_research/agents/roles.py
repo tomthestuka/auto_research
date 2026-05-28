@@ -11,6 +11,7 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from auto_research.agents.prompts import PromptRole, load_prompt
 from auto_research.consensus import IODebateToConverge
+from auto_research.monitor import RunMonitor
 from auto_research.models import ModelGroupHandle, ModelHandle, ModelMessage, ModelResponse, resolve
 from auto_research.schemas import (
     AnalysisTask,
@@ -59,10 +60,12 @@ class AgentRole:
         model_group: ModelGroupHandle | None = None,
         model_name: str | None = None,
         prompt: str | None = None,
+        monitor: RunMonitor | None = None,
     ):
         self.prompt = prompt or load_prompt(self.role)
         self.model = model or _select_model(model_group or resolve(self.role), model_name)
         self.last_response: ModelResponse | None = None
+        self.monitor = monitor
 
     async def _call(
         self,
@@ -71,17 +74,67 @@ class AgentRole:
         *,
         images=(),
         documents=(),
+        action: str = "call",
     ) -> T:
-        response = await self.model.call(
-            [
-                ModelMessage(role="system", content=self.prompt),
-                ModelMessage(role="user", content=_payload_text(payload, output)),
-            ],
-            images=images,
-            documents=documents,
+        await self._record(
+            f"{self.role}.{action}.input",
+            level=10,
+            summary=f"{self.role} received {action} input",
+            data={
+                "payload": payload,
+                "image_count": len(images),
+                "document_count": len(documents),
+                "documents": [doc.model_dump(mode="json") for doc in documents],
+            },
         )
-        self.last_response = response
-        return _parse_json_response(response.content, output)
+        try:
+            response = await self.model.call(
+                [
+                    ModelMessage(role="system", content=self.prompt),
+                    ModelMessage(role="user", content=_payload_text(payload, output)),
+                ],
+                images=images,
+                documents=documents,
+            )
+            self.last_response = response
+            parsed = _parse_json_response(response.content, output)
+        except Exception as exc:
+            await self._record(
+                f"{self.role}.{action}.error",
+                level=2,
+                summary=f"{self.role} failed during {action}",
+                data={"error": repr(exc)},
+            )
+            raise
+        await self._record(
+            f"{self.role}.{action}.output",
+            level=10,
+            summary=f"{self.role} returned {action} output",
+            data={
+                "output": parsed,
+                "usage": response.usage,
+                "raw_content": response.content,
+            },
+        )
+        return parsed
+
+    async def _record(
+        self,
+        event: str,
+        *,
+        level: int,
+        summary: str,
+        data: Mapping[str, Any] | None = None,
+    ) -> None:
+        if self.monitor is not None:
+            await self.monitor.record(
+                _team_for_role(self.role),
+                event,
+                level=level,
+                summary=summary,
+                actor=self.role,
+                data=data,
+            )
 
 
 class ReviewerAgent(AgentRole):
@@ -114,6 +167,7 @@ class ReviewerAgent(AgentRole):
             TypeAdapter(ReviewVerdict),
             images=report.figures if report else (),
             documents=docs,
+            action="review",
         )
 
 
@@ -131,8 +185,15 @@ class LibrarianIOAgent(AgentRole):
         model_group: ModelGroupHandle | None = None,
         model_name: str | None = None,
         prompt: str | None = None,
+        monitor: RunMonitor | None = None,
     ):
-        super().__init__(model=model, model_group=model_group, model_name=model_name, prompt=prompt)
+        super().__init__(
+            model=model,
+            model_group=model_group,
+            model_name=model_name,
+            prompt=prompt,
+            monitor=monitor,
+        )
         self.sources = dict(sources) if sources is not None else _default_sources()
         self.storage = storage or Storage()
 
@@ -148,7 +209,7 @@ class LibrarianIOAgent(AgentRole):
             "research_request": request.model_dump(mode="json"),
             "follow_up": follow_up,
         }
-        return await self._call(payload, TypeAdapter(SearchRequest))
+        return await self._call(payload, TypeAdapter(SearchRequest), action="compose_search_strategy")
 
     async def search(self, request: SearchRequest) -> list[SearchResult]:
         """Query external sources and return raw results.
@@ -190,7 +251,12 @@ class LibrarianIOAgent(AgentRole):
             ),
             "peer_abstracts": [a.model_dump(mode="json") for a in peer_abstracts],
         }
-        return await self._call(payload, TypeAdapter(MemoryRecord), documents=[document])
+        return await self._call(
+            payload,
+            TypeAdapter(MemoryRecord),
+            documents=[document],
+            action="ingest_document",
+        )
 
     async def abstract_document(
         self,
@@ -223,7 +289,10 @@ class LibrarianIOAgent(AgentRole):
             ),
         }
         return await self._call(
-            payload, TypeAdapter(ReviewVerdict), documents=[document]
+            payload,
+            TypeAdapter(ReviewVerdict),
+            documents=[document],
+            action="judge_abstract_convergence",
         )
 
     async def adjudicate_abstract(
@@ -242,7 +311,12 @@ class LibrarianIOAgent(AgentRole):
                 "key findings, methods, data analysis, and results."
             ),
         }
-        return await self._call(payload, TypeAdapter(MemoryRecord), documents=[document])
+        return await self._call(
+            payload,
+            TypeAdapter(MemoryRecord),
+            documents=[document],
+            action="adjudicate_abstract",
+        )
 
     async def ingest_results(self, results: list[SearchResult]) -> None:
         """Download, abstract, and store each search result.
@@ -252,7 +326,7 @@ class LibrarianIOAgent(AgentRole):
         For results without a PDF URL: store metadata only; use abstract as mem_abbrev.
         """
 
-        consensus = IODebateToConverge(max_rounds=2)
+        consensus = IODebateToConverge(max_rounds=2, monitor=self.monitor)
         for result in results:
             stored = await download_and_ingest_result(
                 self.storage, result, target_dir=papers_dir()
@@ -303,8 +377,15 @@ class AnalystWorkerAgent(AgentRole):
         model_group: ModelGroupHandle | None = None,
         model_name: str | None = None,
         prompt: str | None = None,
+        monitor: RunMonitor | None = None,
     ):
-        super().__init__(model=model, model_group=model_group, model_name=model_name, prompt=prompt)
+        super().__init__(
+            model=model,
+            model_group=model_group,
+            model_name=model_name,
+            prompt=prompt,
+            monitor=monitor,
+        )
         self.available_toolkits = tuple(available_toolkits)
 
     async def analyze(self, task: AnalysisTask, *, peer_reports: Sequence[AnalystReport] = ()) -> AnalystReport:
@@ -316,7 +397,12 @@ class AnalystWorkerAgent(AgentRole):
             "available_toolkits": list(self.available_toolkits),
         }
         figures = [figure for report in peer_reports for figure in report.figures]
-        return await self._call(payload, TypeAdapter(AnalystReport), images=figures)
+        return await self._call(
+            payload,
+            TypeAdapter(AnalystReport),
+            images=figures,
+            action="analyze",
+        )
 
     async def request_tools(self, task: AnalysisTask) -> list[ToolCallRequest]:
         """Return structured tool requests without executing them."""
@@ -326,7 +412,7 @@ class AnalystWorkerAgent(AgentRole):
             "available_toolkits": list(self.available_toolkits),
             "execution_policy": "Return requested tool operations only; do not claim they have run.",
         }
-        return await self._call(payload, TypeAdapter(list[ToolCallRequest]))
+        return await self._call(payload, TypeAdapter(list[ToolCallRequest]), action="request_tools")
 
 
 class AnalystLeadAgent(AgentRole):
@@ -342,8 +428,15 @@ class AnalystLeadAgent(AgentRole):
         model_group: ModelGroupHandle | None = None,
         model_name: str | None = None,
         prompt: str | None = None,
+        monitor: RunMonitor | None = None,
     ):
-        super().__init__(model=model, model_group=model_group, model_name=model_name, prompt=prompt)
+        super().__init__(
+            model=model,
+            model_group=model_group,
+            model_name=model_name,
+            prompt=prompt,
+            monitor=monitor,
+        )
         self.available_toolkits = tuple(available_toolkits)
 
     async def adjudicate(self, task: AnalysisTask, reports: Sequence[AnalystReport]) -> AnalystReport:
@@ -355,7 +448,12 @@ class AnalystLeadAgent(AgentRole):
             "available_toolkits": list(self.available_toolkits),
         }
         figures = [figure for report in reports for figure in report.figures]
-        return await self._call(payload, TypeAdapter(AnalystReport), images=figures)
+        return await self._call(
+            payload,
+            TypeAdapter(AnalystReport),
+            images=figures,
+            action="adjudicate",
+        )
 
     async def judge_convergence(
         self,
@@ -378,7 +476,12 @@ class AnalystLeadAgent(AgentRole):
             ),
         }
         figures = [figure for report in reports for figure in report.figures]
-        return await self._call(payload, TypeAdapter(ReviewVerdict), images=figures)
+        return await self._call(
+            payload,
+            TypeAdapter(ReviewVerdict),
+            images=figures,
+            action="judge_convergence",
+        )
 
     async def review_tool_requests(
         self,
@@ -391,7 +494,11 @@ class AnalystLeadAgent(AgentRole):
             "available_toolkits": list(self.available_toolkits),
             "execution_policy": "Review only; no tool or shell command has been executed.",
         }
-        return await self._call(payload, TypeAdapter(list[ToolCallReview]))
+        return await self._call(
+            payload,
+            TypeAdapter(list[ToolCallReview]),
+            action="review_tool_requests",
+        )
 
 
 def _select_model(group: ModelGroupHandle, model_name: str | None) -> ModelHandle:
@@ -442,6 +549,14 @@ def _extract_json_value(text: str) -> Any:
             continue
         return value
     raise json.JSONDecodeError("no JSON object or array found", text, 0)
+
+
+def _team_for_role(role: PromptRole) -> str:
+    if role == "reviewer":
+        return "reviewer"
+    if role == "librarian_io":
+        return "librarian"
+    return "analyst"
 
 
 def _default_sources() -> dict[str, QuerySource]:

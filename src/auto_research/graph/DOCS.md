@@ -7,7 +7,7 @@ exposes a single async entry point that takes a `ResearchRequest` and returns a
 `ReviewVerdict`.
 
 ## Architecture
-A LangGraph `StateGraph` with six nodes, two outer feedback edges (each
+A LangGraph `StateGraph` with seven nodes, two outer feedback edges (each
 capped at `max_iterations`, default 3), and an inner tool error-feedback loop
 (capped at `tool_retry_cap`, default 3):
 
@@ -22,8 +22,15 @@ START → literature → review_literature
                                                                   ▼─────────────► analysis  (loop ②)
                                                                   │
                                                                   ▼
-                                                                 END
+                                                             finalize_run → END
 ```
+
+Reviewer nodes return state updates containing the newest `ReviewVerdict`.
+`add_conditional_edges()` then routes from `review_literature` back to
+`literature` or onward to `analysis`, and from `review_analysis` back to
+`analysis` or onward to `finalize_run`. `finalize_run` copies the latest
+accumulated verdict into `state["verdict"]`, then exits via a static edge to
+`END`.
 
 **`tool_dispatch_node`:** after `analysis_node`, calls
 `worker.request_tools(task)` on the first worker. For each `ToolCallRequest`:
@@ -58,33 +65,42 @@ The analysis node builds an `AnalysisTask` from the question and optional
 instructions (carrying the reviewer's `follow_up` on rework).
 
 `ResearchState` carries: the request, a `list[Path]` literature set, the latest
-analyst report, the latest reviewer verdict, two iteration counters, and the cap.
+analyst report, the final reviewer verdict, accumulated reviewer verdicts, two
+iteration counters, and the cap.
 
 ## Interfaces / Contracts
 - `build_graph(*, reviewer, io_agent, retrieval=None, workers, lead,
   consensus=None, max_iterations=3, registry=None, tool_retry_cap=3,
-  toolkit_root=None) -> CompiledStateGraph` — pure constructor. `retrieval`
+  toolkit_root=None, monitor=None) -> CompiledStateGraph` — pure constructor. `retrieval`
   defaults to `SqliteRetrievalBackend()`. `consensus` defaults to
-  `DebateToConverge(max_rounds=max_iterations)`. `registry` defaults to
+  `DebateToConverge(max_rounds=max_iterations, monitor=monitor)`. `registry` defaults to
   `ToolkitRegistry(toolkit_root or Path("/data/fzhou/research_toolkit"))`.
   Raises `ValueError` if `max_iterations < 1`. Reads no environment at import.
 - `async run_request(request, *, reviewer=None, io_agent=None, retrieval=None,
-  workers=None, lead=None, consensus=None, max_iterations=None) -> ReviewVerdict`
-  — high-level entry. Missing dependencies are constructed from
-  `config/models.yaml`. Reads `tool_retry_cap` and `toolkit_root` from
-  `config/orchestration.yaml`. Returns the final reviewer verdict.
+  workers=None, lead=None, consensus=None, max_iterations=None, chatter=10,
+  monitor=None, monitor_jsonl=None) -> ReviewVerdict` — compatibility entry.
+  Runs `run_research()` and returns only the final reviewer verdict.
+- `async run_research(request, *, ..., chatter=10, monitor=None,
+  monitor_jsonl=None) -> ResearchRun` — high-level monitored entry. Missing
+  dependencies are constructed from `config/models.yaml`. Reads
+  `tool_retry_cap` and `toolkit_root` from `config/orchestration.yaml`. Returns
+  the request, final verdict, final state, and `RunMonitor`.
 - `ResearchState` — `TypedDict` with `request`, `literature: list[Path]`,
-  `report`, `verdict`, `lit_iterations`, `analysis_iterations`, `max_iterations`,
-  `tool_results: Annotated[list[ToolResult], operator.add]` (accumulated),
-  `tool_queue: list[ToolCallRequest]` (transient, set by dispatch, cleared by
-  execution).
+  `report`, `verdict`, `verdicts: Annotated[list[ReviewVerdict], operator.add]`,
+  `lit_iterations`, `analysis_iterations`, `max_iterations`, `tool_results:
+  Annotated[list[ToolResult], operator.add]` (accumulated), and `tool_queue:
+  list[ToolCallRequest]` (transient, set by dispatch, cleared by execution).
+- Monitor events are optional. When a monitor is supplied, graph nodes record
+  node starts, search strategy/results, local retrieval paths, analyst reports,
+  tool dispatch/execution attempts and results, and reviewer verdicts.
 - `IOAgentLike` / `ReviewerLike` / `ToolWorkerLike` — minimal protocols for
   dependency injection. `ToolWorkerLike` extends `WorkerLike` with
   `async request_tools(task) -> list[ToolCallRequest]`.
 - Both outer feedback edges are gated by the reviewer's structured verdict flags
   (`needs_more_literature`, `needs_analysis_rework`). The reviewer's `follow_up`
   text is fed back into the next `compose_search_strategy()` call and/or analysis
-  instructions.
+  instructions. The routing is implemented with LangGraph conditional edges
+  after each reviewer node has appended its verdict to `state["verdicts"]`.
 - Live graph verification is opt-in:
   `AUTO_RESEARCH_LIVE_GRAPH_TESTS=1 pytest tests/test_live_graph.py -s`. Writes
   JSONL plus Markdown logs under `logs/dev/step-10/`.
@@ -106,14 +122,18 @@ analyst report, the latest reviewer verdict, two iteration counters, and the cap
 
 ## Dictionary-level reference
 - `ResearchState` — TypedDict for the graph state; `literature` is `list[Path]`;
-  `tool_results` is `Annotated[list[ToolResult], operator.add]`; `tool_queue` is
+  `verdicts` and `tool_results` are accumulated lists; `tool_queue` is
   `list[ToolCallRequest]` (transient).
 - `IOAgentLike` — protocol with `compose_search_strategy()`, `search()`, `ingest_results()`.
 - `ReviewerLike` — protocol with `async review(request, *, literature, report)`.
 - `ToolWorkerLike` — protocol extending `WorkerLike` with `async request_tools(task)`.
-- `build_graph(...)` — constructs and compiles the state graph (six nodes).
+- `build_graph(...)` — constructs and compiles the state graph (seven nodes).
 - `run_request(request, ...)` — high-level entry point; reads `tool_retry_cap` and
   `toolkit_root` from `orchestration.yaml`. Returns the final `ReviewVerdict`.
+- `run_research(request, ...)` — monitored high-level entry point; returns
+  `ResearchRun`.
+- `ResearchRun(request, verdict, final_state, monitor)` — result object with
+  `.markdown()` for grouped monitor output.
 - `_default_graph()` — synchronous; builds the compiled graph with all defaults from
   config. Called at import time by `serve.py` for LangGraph Studio.
 - `load_orchestration_config(path?)` — loads `config/orchestration.yaml`; returns dict.
@@ -149,3 +169,12 @@ analyst report, the latest reviewer verdict, two iteration counters, and the cap
   (synchronous default-config graph constructor) and `serve.py` (module-level `graph`
   variable for `langgraph dev`). Added `langgraph.json` at repo root and
   `langgraph-cli[inmem]` to `environment.yml` pip block.
+- 2026-05-28 — Step 12: added monitored `run_research()` / `ResearchRun`,
+  optional `RunMonitor` instrumentation, accumulated `verdicts`, and
+  reviewer-node `Command(goto=...)` routing to avoid the installed LangGraph
+  async conditional-edge hang while preserving the two capped feedback edges.
+- 2026-05-28 — Restored reviewer routing to ordinary `add_conditional_edges()`
+  after terminal verification showed the async conditional-edge issue was not
+  reproducible in the user's environment. `review_literature` and
+  `review_analysis` now append verdicts only; branch functions perform the
+  capped loop routing.

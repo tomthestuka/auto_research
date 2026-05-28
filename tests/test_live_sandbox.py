@@ -46,6 +46,13 @@ def _log(name: str, data: dict) -> None:
     print(f"Logs written to {LOG_DIR}")
 
 
+def _monitor_paths(name: str) -> tuple[Path, Path]:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    jsonl = LOG_DIR / f"{name}_{ts}_monitor.jsonl"
+    return jsonl, jsonl.with_suffix(".md")
+
+
 @skip_live
 def test_xspec_local() -> None:
     """Analyst agents fit the Cyg X-1 X-ray continuum for one self-selected epoch.
@@ -54,7 +61,7 @@ def test_xspec_local() -> None:
     injected by tool_dispatch_node from ToolkitRegistry.
     """
     import asyncio
-    from auto_research.graph.runtime import run_request
+    from auto_research.graph.runtime import run_research
     from auto_research.schemas import ResearchRequest
 
     request = ResearchRequest(
@@ -65,7 +72,10 @@ def test_xspec_local() -> None:
         )
     )
 
-    verdict = asyncio.run(run_request(request))
+    monitor_jsonl, monitor_md = _monitor_paths("test_xspec_local")
+    run = asyncio.run(run_research(request, chatter=10, monitor_jsonl=monitor_jsonl))
+    verdict = run.verdict
+    run.monitor.write_markdown(monitor_md)
 
     log_data = {
         "request": request.question,
@@ -73,6 +83,8 @@ def test_xspec_local() -> None:
         "rationale": verdict.rationale,
         "needs_more_literature": verdict.needs_more_literature,
         "needs_analysis_rework": verdict.needs_analysis_rework,
+        "monitor_jsonl": str(monitor_jsonl),
+        "monitor_markdown": str(monitor_md),
     }
     _log("test_xspec_local", log_data)
 
@@ -88,7 +100,7 @@ def test_heasarc_selfcorrect() -> None:
     No LLM guidance: agents self-direct using the tool catalogue.
     """
     import asyncio
-    from auto_research.graph.runtime import run_request
+    from auto_research.graph.runtime import run_research
     from auto_research.schemas import ResearchRequest
 
     request = ResearchRequest(
@@ -99,7 +111,10 @@ def test_heasarc_selfcorrect() -> None:
         )
     )
 
-    verdict = asyncio.run(run_request(request))
+    monitor_jsonl, monitor_md = _monitor_paths("test_heasarc_selfcorrect")
+    run = asyncio.run(run_research(request, chatter=10, monitor_jsonl=monitor_jsonl))
+    verdict = run.verdict
+    run.monitor.write_markdown(monitor_md)
 
     log_data = {
         "request": request.question,
@@ -107,6 +122,8 @@ def test_heasarc_selfcorrect() -> None:
         "rationale": verdict.rationale,
         "needs_more_literature": verdict.needs_more_literature,
         "needs_analysis_rework": verdict.needs_analysis_rework,
+        "monitor_jsonl": str(monitor_jsonl),
+        "monitor_markdown": str(monitor_md),
     }
     _log("test_heasarc_selfcorrect", log_data)
 

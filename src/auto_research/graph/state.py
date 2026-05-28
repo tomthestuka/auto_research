@@ -22,6 +22,7 @@ class ResearchState(TypedDict, total=False):
     literature: list[Path]
     report: AnalystReport | None
     verdict: ReviewVerdict | None
+    verdicts: Annotated[list[ReviewVerdict], operator.add]
     lit_iterations: int
     analysis_iterations: int
     max_iterations: int

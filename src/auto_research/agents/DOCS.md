@@ -17,6 +17,10 @@ Each role is a small async class:
 3. Tool access (sources, retrieval, sandboxed toolkit calls) is injected — not
    imported globally — so swap-outs in tests are trivial.
 
+When a `RunMonitor` is injected, role wrappers record high-chatter input,
+parsed output, raw model content, attachment counts, and errors. These records
+are for human inspection only and are never fed back into runtime prompts.
+
 Critical: **runtime LLMs never see `CLAUDE.md` or any `DOCS.md`**
 ([CLAUDE.md §4](../../../CLAUDE.md#4-claudemd-and-docsmd-are-build-time-only)).
 Only the file in `prompts/` plus task data goes into the model.
@@ -92,6 +96,9 @@ Role wrappers:
 - All wrappers accept an injected `model`; otherwise they resolve their role
   from `config/models.yaml` and use the first configured group member unless
   `model_name` is supplied.
+- All wrappers accept an optional `monitor: RunMonitor | None`. At
+  `chatter=10`, each model-backed public method records its structured input and
+  parsed output. Errors are recorded at low chatter before being re-raised.
 - Live role verification is opt-in:
   `AUTO_RESEARCH_LIVE_AGENT_TESTS=1 pytest tests/test_live_agents.py -s`.
   It runs one real model call for each role and writes JSONL plus Markdown logs
@@ -115,7 +122,8 @@ Role wrappers:
   runtime wrappers.
 - `AgentRole` — base class that loads the role prompt, selects the model, sends
   task JSON, validates JSON responses, and stores the most recent
-  `ModelResponse` on `last_response` for logging.
+  `ModelResponse` on `last_response` for logging. Optional `monitor` records
+  model-call inputs, outputs, and errors.
 - `ReviewerAgent` — reviewer wrapper. Method: `review(request, *, literature: Sequence[Path], report)`.
   Loads each path as a `DocumentRef` attachment for full-text access.
 - `LibrarianIOAgent(sources, storage, ...)` — IO librarian. Constructor accepts
@@ -159,3 +167,6 @@ Role wrappers:
 - 2026-05-27 — Step 7 completed: added runtime prompt loading utilities and
   governance-reference guards for prompt files.
 - 2026-05-26 — Folder seeded during step 0.
+- 2026-05-28 — Step 12: role wrappers now accept an optional `RunMonitor` and
+  record structured high-chatter input/output/error events for monitored CLI and
+  notebook runs.

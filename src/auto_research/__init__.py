@@ -7,6 +7,7 @@ runtime cannot modify it (see CLAUDE.md §2). Domain tools live in the sibling
 
 __version__ = "0.0.0"
 
-from auto_research.graph import run_request
+from auto_research.graph import ResearchRun, run_research, run_request
+from auto_research.monitor import RunMonitor
 
-__all__ = ["__version__", "run_request"]
+__all__ = ["ResearchRun", "RunMonitor", "__version__", "run_research", "run_request"]

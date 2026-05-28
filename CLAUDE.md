@@ -97,6 +97,10 @@ Consequences:
   ([§6](#6-config-driven-model-registry)).
 - **Never commit secrets.** API keys live in `.env` (gitignored); ship a `.env.example`.
 - **Minimal code** ([§1](#1-project-overview)).
+- **Consult the human before fixing unexpected issues.** When an unexpected failure,
+  environment/tooling oddity, ambiguous runtime behavior, or suspected dependency issue
+  appears, collect only the minimal facts needed to describe it, then ask the human
+  before attempting a fix, workaround, or architectural change.
 
 ---
 
@@ -363,7 +367,7 @@ Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & docum
 | 9 | Done | **Consensus** — `ConsensusStrategy` = debate-to-converge (cap 3) + lead adjudication. | Workers converge (or hit the cap and the lead adjudicates) on a bounded task. |
 | 10 | Done | **Orchestration** — assemble the LangGraph graph and the two capped feedback edges (paper-search review, analysis review). | Full loop runs end-to-end on a sample request. |
 | 11 | Done | **Sandbox & tool execution** — `ToolkitRegistry` (manifest-based discovery), `runner.py` (subprocess sandbox: timeout, workdir, `PYTHONPATH` confinement), `tool_dispatch_node` + `tool_execution_node` in graph, error-feedback inner loop (capped at `tool_retry_cap`). `merge_flow.py` stub raises `NotImplementedError` (Phase 2 → Claude Agent SDK). **LangGraph Studio wiring** — `serve.py` + `langgraph.json`; `langgraph dev` exposes live `ResearchState` per node via Studio. | Known tools execute in sandbox; error-feedback loop self-corrects bad args; unknown tool triggers stub cleanly; `xspec_utils` runs on real Cyg X-1 data. `langgraph dev` starts without error; Studio shows live graph state at each node. |
-| 12 | Todo | **Entry points & tests** — importable library + CLI (`python -m auto_research "…"`), notebook for inspection, minimal pytest on deterministic parts. | CLI runs a request end-to-end; notebook inspects a run. |
+| 12 | Done | **Entry points & tests** — importable monitored library entry (`run_research()`), CLI (`python -m auto_research "…" --chatter 10`), notebook for inspection, minimal pytest on deterministic parts. | CLI runs a request end-to-end; notebook inspects a run with full-chatty monitor JSONL/Markdown logs grouped by team. |
 
 After step 12 the Phase 1 skeleton is complete: a full team running real LLM calls
 end-to-end, with vector search, autonomous merge, and the lead-scientist group left as
@@ -442,3 +446,12 @@ documented stubs.
   `serve.py` (module-level compiled graph for `langgraph dev`), `langgraph.json`
   (repo-root CLI config), `_default_graph()` in `runtime.py`, and
   `langgraph-cli[inmem]` in `environment.yml` pip block.
+- 2026-05-28 — Marked step 12 Done after adding the monitored library entry
+  `run_research()` / `ResearchRun`, the 1-10 `RunMonitor` chatter system with
+  async-safe JSONL and grouped Markdown reports, CLI flags including
+  `--chatter`, `notebooks/step12_monitor_inspection.ipynb`, deterministic
+  monitor tests, and full-chatty monitor logging in `tests/test_live_sandbox.py`.
+- 2026-05-28 — Added the coding-agent rule to consult the human before attempting
+  fixes, workarounds, or architectural changes for unexpected failures,
+  environment/tooling oddities, ambiguous runtime behavior, or suspected
+  dependency issues.
