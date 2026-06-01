@@ -53,6 +53,23 @@ becomes `False` and `execute_tools()` returns immediately — the worker
 continues analyzing (via memory) but stops calling tools for the rest of the
 session.
 
+**MCP tool path:** alongside `TOOL_MANIFEST` tools, analyst workers may call
+tools served by stdio MCP servers.  `builtin_server.py` runs as a subprocess
+and exposes file-tree tools only (`list_dir`, `read_file`).  `MCPToolClient`
+manages the server sessions and exposes tools to the registry under the naming
+convention `mcp.<server_name>.<tool_name>` (e.g. `mcp.builtin.list_dir`).
+`PersistentSandbox.call_mcp_tool()` forwards calls through the attached client.
+`ToolkitRegistry.load_mcp(client)` indexes MCP tools alongside manifest tools
+so the single `tool_catalogue()` string given to workers describes both.
+MCP tools dispatch through `execute_tools()` via `registry.is_mcp(kind)` —
+the same retry loop and memory-recording path as manifest tools.
+
+**Analyst env script:** `analyst_env.sh` is a minimal bash script sourced by
+`_source_ini_env()` before each persistent subprocess is spawned.  It sets only
+the analysis variables needed headlessly (HEADAS, CALDB, CALDBCONFIG, CALDBALIAS,
+GEOMAG_PATH) with no SSH agent, gnome-keyring, or interactive conda activation.
+`config/orchestration.yaml::analyze_ini_sh` points at this file.
+
 ## Interfaces / Contracts
 
 ### `ToolSpec` (TypedDict)
@@ -110,6 +127,12 @@ class PersistentSandbox:
   stays alive across all debate rounds and rework cycles; XSPEC session state persists.
 - `call_tool()` sends `{"module": ..., "fn": ..., "args": {...}}\n` to stdin and reads
   one JSON response line from stdout.  On timeout or death `is_alive` becomes `False`.
+- **Protocol integrity:** the REPL keeps a private duplicate of the original stdout fd
+  for JSON responses only, and redirects fd 1/2 to a capture file (OS level) for the
+  duration of each tool call.  This prevents tool/C-level console output (XSPEC,
+  ixpeobssim) from polluting the protocol stream — otherwise one noisy call corrupts
+  the line parser and kills the sandbox.  A truncated `console_tail` of captured output
+  is attached to the result dict for diagnosis.
 - Uses `{analyze_env}/bin/python` when supplied; sources `analyze_ini_sh`
   (`analyst_env.sh`) via `_source_ini_env()` for HEADAS/CALDB/LD_LIBRARY_PATH.
   PYTHONPATH is overridden to `toolkit_root`.
@@ -129,6 +152,68 @@ def read_memory(path: Path) -> str
   for each agent key and returns `{key: agent_dir}`.
 - `memory_path()` returns `{agent_dir}/memory.md` (parent created if absent).
 - `append_memory()` appends bare terminal text; `read_memory()` returns contents or `""`.
+
+### `MCPToolClient`
+
+```python
+class MCPToolClient:
+    def __init__(self, servers: list[dict] | None = None) -> None: ...
+    async def start(self) -> None          # spawn server subprocesses; establish sessions
+    def list_kinds(self) -> list[str]      # all registered MCP tool kinds
+    def describe(self, kind: str) -> str   # description string for a kind
+    async def call_tool(self, kind: str, arguments: dict) -> dict
+    async def shutdown(self) -> None       # close all sessions; terminate servers
+```
+
+- `servers` is a list of `{"name": str, "command": str, "args": list[str]}` dicts.
+  Defaults to a single `builtin` server running `builtin_server.py` via
+  `sys.executable`.
+- Tool kinds follow the convention `mcp.<server_name>.<tool_name>`.
+- `call_tool()` returns a dict with at minimum `stdout`, `stderr`, `exit_code`.
+  Non-zero `exit_code` or `result.isError=True` is surfaced in the same `ToolResult`
+  schema used by manifest tools, so the retry loop applies equally.
+
+### Built-in MCP server (`builtin_server.py`)
+
+Exposes **file-tree exploration only** — no shell execution, no writes, no network.
+Runs in the `auto_research` Python env (not the analysis env) and inherits the
+parent process environment so HEADAS/CALDB paths are visible to `bash_exec`-style
+inspection if needed.
+
+Tools:
+- `list_dir(path)` → `{"path": str, "entries": list[str]}` — alphabetically sorted
+  directory listing.
+- `read_file(path, max_bytes=65536)` → `{"content": str, "truncated": bool, "size_bytes": int}`
+  — read a text file up to `max_bytes`; UTF-8 with `errors="replace"`.
+
+Kind strings: `mcp.builtin.list_dir`, `mcp.builtin.read_file`.
+
+### `PersistentSandbox.call_mcp_tool`
+
+```python
+async def call_mcp_tool(
+    self,
+    kind: str,
+    args: dict,
+    *,
+    timeout_s: int | None = None,
+) -> dict
+```
+
+Forwards a tool call to the attached `MCPToolClient`.  Returns an error dict
+(`exit_code=127`) if no client is configured.  Timeout is not enforced at this
+layer — the MCP session itself handles it.
+
+### `ToolkitRegistry.load_mcp` / `is_mcp`
+
+```python
+def load_mcp(self, client: MCPToolClient) -> None  # index MCP tools into registry
+def is_mcp(self, kind: str) -> bool                # True if kind is an MCP tool
+```
+
+Call `load_mcp(client)` after `client.start()` to merge MCP kinds into the registry.
+`tool_catalogue()` includes both manifest and MCP tools in one string.
+`is_mcp()` is used by `execute_tools()` to route dispatch to `call_mcp_tool()`.
 
 ### `run_tool` (one-shot, kept for ad-hoc use)
 
@@ -165,7 +250,8 @@ writes the tool, lead reviews, human approves merge on GitHub.
 
 ## Dependencies
 
-- External: stdlib only (`asyncio`, `subprocess`, `importlib`, `sys`, `json`).
+- External: stdlib (`asyncio`, `subprocess`, `importlib`, `sys`, `json`);
+  `mcp` (FastMCP server + ClientSession for `builtin_server.py` and `mcp_client.py`).
 - Internal: `auto_research.schemas` (`ToolCallRequest`, `ToolResult`, `FigureRef`).
 - Depended on by: `auto_research.agents.roles` (`AnalystWorkerAgent.execute_tools()`);
   `auto_research.graph.runtime` (sandbox lifecycle); `auto_research.consensus`
@@ -196,6 +282,23 @@ writes the tool, lead reviews, human approves merge on GitHub.
 - `run_tool(module, fn, args, *, timeout_s, workdir, toolkit_root, analyze_env=None, analyze_ini_sh=None)` →
   `ToolResult` — one-shot subprocess; kept for ad-hoc use.
 - `_source_ini_env(ini_sh)` → `dict` — sources a bash init script, caches result.
+- `analyst_env.sh` — bash script setting HEADAS, CALDB, CALDBCONFIG, CALDBALIAS,
+  GEOMAG_PATH. Sourced by `_source_ini_env()`. No interactive cruft.
+  `config/orchestration.yaml::analyze_ini_sh` points at this file.
+- `MCPToolClient(servers)` — manages stdio MCP server sessions.
+  - `.start()` — spawn servers and establish sessions.
+  - `.list_kinds()` → `list[str]` — all `mcp.<name>.<tool>` kind strings.
+  - `.describe(kind)` → `str` — description for a kind.
+  - `.call_tool(kind, arguments)` → `dict` — call one MCP tool.
+  - `.shutdown()` — close sessions and terminate servers.
+- `builtin_server.py` — MCP stdio server with file-tree tools only.
+  - `list_dir(path)` → `{path, entries}`.
+  - `read_file(path, max_bytes)` → `{content, truncated, size_bytes}`.
+  Kind prefix: `mcp.builtin.*`.
+- `PersistentSandbox.call_mcp_tool(kind, args, *, timeout_s)` → `dict` —
+  forward one MCP call; returns error dict if no client attached.
+- `ToolkitRegistry.load_mcp(client)` — index MCP tools from a started client.
+- `ToolkitRegistry.is_mcp(kind)` → `bool` — True if kind is an MCP tool.
 - `propose_and_pr(request, *, lead, toolkit_repo)` → `str` — Phase 2 stub;
   raises `NotImplementedError`.
 
@@ -223,3 +326,22 @@ writes the tool, lead reviews, human approves merge on GitHub.
   Tool execution moved into `DebateToConverge._run_tools()` via
   `AnalystWorkerAgent.execute_tools()`.  `run_tool()` retained for ad-hoc use.
   `sandbox/__init__.py` updated to export new classes.
+- 2026-06-01 — Added `builtin_server.py` (MCP stdio server: `list_dir`,
+  `read_file` — file-tree exploration only) and `mcp_client.py`
+  (`MCPToolClient`: manages stdio MCP server sessions, tool-kind index, unified
+  `call_tool()` → `{stdout, stderr, exit_code}` result). `PersistentSandbox`
+  gains `mcp_client` constructor arg and `call_mcp_tool()` method.
+  `ToolkitRegistry` gains `load_mcp()` and `is_mcp()`. `run_research()` starts
+  `MCPToolClient` before sandbox spawn and shuts it down in `finally`.
+  `execute_tools()` routes `mcp.*` kinds through `call_mcp_tool()`.
+  `mcp_servers` key added to `orchestration.yaml` (empty list = builtin only).
+- 2026-06-01 — Added `analyst_env.sh`: dedicated headless analyst env script
+  replacing the personal `ini.sh` as `analyze_ini_sh`. Sets HEADAS, CALDB,
+  CALDBCONFIG, CALDBALIAS, GEOMAG_PATH with no SSH agent or competing conda
+  activation. `orchestration.yaml::analyze_ini_sh` repointed to this file.
+- 2026-06-01 — Hardened the `PersistentSandbox` REPL against tool console output
+  corrupting the JSON-line protocol. The REPL now keeps a private dup of the
+  original stdout fd for protocol responses and redirects fd 1/2 to a capture
+  file during each tool call (catches C-level XSPEC/ixpeobssim writes). Captured
+  output is attached as a truncated `console_tail`. Fixes noisy tools (e.g.
+  `load_data`) killing the sandbox with a JSON parse error.

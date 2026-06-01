@@ -15,8 +15,15 @@ from typing import Any
 from auto_research.sandbox.runner import _source_ini_env
 
 # REPL script executed inside the persistent subprocess.
+#
+# Protocol integrity: tools (XSPEC, ixpeobssim) write large amounts of console
+# output to stdout/stderr — including C-level writes that bypass sys.stdout.
+# That output must never reach the JSON-line protocol stream, or one noisy call
+# corrupts the parser and kills the sandbox.  We therefore (1) keep a private
+# copy of the original stdout fd for protocol responses only, and (2) redirect
+# fd 1/2 to a capture file at the OS level for the duration of each tool call.
 _REPL_SCRIPT = textwrap.dedent("""
-    import sys, json, importlib, traceback
+    import sys, os, json, importlib, traceback, tempfile
 
     def _coerce(v):
         \"\"\"Try to parse a string value as JSON; return as-is if it isn't valid JSON.\"\"\"
@@ -26,6 +33,9 @@ _REPL_SCRIPT = textwrap.dedent("""
             return json.loads(v)
         except (json.JSONDecodeError, ValueError):
             return v
+
+    # Private duplicate of the real stdout — used ONLY for JSON protocol lines.
+    _proto = os.fdopen(os.dup(1), "w")
 
     while True:
         line = sys.stdin.readline()
@@ -37,6 +47,12 @@ _REPL_SCRIPT = textwrap.dedent("""
             break
         if cmd.get("action") == "shutdown":
             break
+        # Redirect fd 1/2 to a capture file so tool/C-level console output
+        # cannot pollute the protocol stream.
+        _cap = tempfile.TemporaryFile(mode="w+")
+        _s1, _s2 = os.dup(1), os.dup(2)
+        os.dup2(_cap.fileno(), 1)
+        os.dup2(_cap.fileno(), 2)
         try:
             mod = importlib.import_module(cmd["module"])
             fn = getattr(mod, cmd["fn"])
@@ -53,8 +69,27 @@ _REPL_SCRIPT = textwrap.dedent("""
                 "stderr": traceback.format_exc(),
                 "stdout": "",
             }
-        sys.stdout.write(json.dumps(payload) + "\\n")
-        sys.stdout.flush()
+        finally:
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception:
+                pass
+            os.dup2(_s1, 1)
+            os.dup2(_s2, 2)
+            os.close(_s1)
+            os.close(_s2)
+            try:
+                _cap.seek(0)
+                _console = _cap.read()
+            except Exception:
+                _console = ""
+            _cap.close()
+        # Attach a truncated tail of captured console output for diagnosis.
+        if _console:
+            payload.setdefault("console_tail", _console[-2000:])
+        _proto.write(json.dumps(payload) + "\\n")
+        _proto.flush()
 """).strip()
 
 

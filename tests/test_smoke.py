@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import os
-from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -43,11 +42,32 @@ def _monitor_paths(name: str) -> tuple[Path, Path]:
     return jsonl, jsonl.with_suffix(".md")
 
 
-def _scan_tool_failures(monitor_jsonl: Path) -> dict[str, list[str]]:
-    """Return failed tool kinds grouped by prefix (mcp.* / research_toolkit.*)."""
-    failures: dict[str, list[str]] = defaultdict(list)
+# Tools that MUST succeed at least once for the env/sandbox to be considered healthy.
+XSPEC_KEY_TOOLS = {
+    "research_toolkit.xspec_utils.load_data",
+    "research_toolkit.xspec_utils.xspec_status",
+}
+MCP_FILETREE_TOOLS = {"mcp.builtin.list_dir", "mcp.builtin.read_file"}
+
+# Substrings that indicate an environment/sandbox failure (NOT retryable LLM
+# arg-formatting mistakes like "Field required" / "missing argument").
+INFRA_SIGNATURES = (
+    "sandbox is not alive",
+    "no module named",
+    "modulenotfounderror",
+    "importerror",
+    "no such file",
+    "cannot read response file",
+    "command not found",
+)
+
+
+def _evaluate_run(monitor_jsonl: Path) -> tuple[set[str], list[str]]:
+    """Return (kinds that succeeded >=once, infra-signature error messages)."""
+    succeeded: set[str] = set()
+    infra_errors: list[str] = []
     if not monitor_jsonl.exists():
-        return failures
+        return succeeded, infra_errors
     with monitor_jsonl.open() as f:
         for line in f:
             line = line.strip()
@@ -60,11 +80,16 @@ def _scan_tool_failures(monitor_jsonl: Path) -> dict[str, list[str]]:
             if event.get("event") != "analyst_worker.tools.result":
                 continue
             result = event.get("data", {}).get("result", {})
-            if result.get("exit_code", 0) != 0:
-                kind = result.get("tool_name", "unknown")
-                prefix = "mcp" if kind.startswith("mcp.") else "research_toolkit.xspec_utils"
-                failures[prefix].append(kind)
-    return failures
+            kind = result.get("tool_name", "unknown")
+            if result.get("exit_code", 0) == 0:
+                succeeded.add(kind)
+                continue
+            blob = f"{result.get('stderr', '')} {result.get('stdout', '')}".lower()
+            for sig in INFRA_SIGNATURES:
+                if sig in blob:
+                    infra_errors.append(f"{kind}: …{sig}…")
+                    break
+    return succeeded, infra_errors
 
 
 @skip_live
@@ -86,21 +111,25 @@ def test_sandbox_env_smoke() -> None:
 
     request = ResearchRequest(
         question=(
-            "DIAGNOSTIC SMOKE TEST — follow these steps exactly, do not deviate:\n"
-            "1. Use mcp.builtin.list_dir to list the directory /data/fzhou/XSPEC/Cyg_X-1/IXPE "
-            "and report what you find.\n"
-            "2. Use research_toolkit.xspec_utils.load_data to load ONLY IXPE obsid '02008401' "
-            "from /data/fzhou/XSPEC/Cyg_X-1/IXPE (epoch = {\"IXPE\":[\"02008401\"],\"STATE\":\"HSS\"}). "
-            "No other instruments.\n"
-            "3. Use research_toolkit.xspec_utils.xspec_status to report the current session state.\n"
-            "4. Report all results and confirm all three steps completed without error.\n"
-            "This is a tooling verification run. No spectral fitting is needed."
+            "No librarian involvement needed — this is a purely analytical task with no literature search. "
+            "What is the spectral data quality of the IXPE Cyg X-1 soft-state observation 02008401? "
+            "Load the IXPE-only data (from /data/fzhou/XSPEC/Cyg_X-1/IXPE, STATE:HSS) "
+            "and report session status: number of detector units loaded, "
+            "channel ranges, and any loading errors. No spectral fitting."
         )
     )
 
+    from auto_research.monitor import RunMonitor
+
     monitor_jsonl, monitor_md = _monitor_paths("smoke_env")
-    run = asyncio.run(run_research(request, chatter=10, monitor_jsonl=monitor_jsonl))
-    run.monitor.write_markdown(monitor_md)
+    monitor = RunMonitor(chatter=10, jsonl_path=monitor_jsonl)
+    try:
+        run = asyncio.run(run_research(request, monitor=monitor))
+    finally:
+        # Always write markdown so the log is human-readable even on failure.
+        monitor.write_markdown(monitor_md)
+        print(f"\nMonitor JSONL:  {monitor_jsonl}")
+        print(f"Monitor MD:     {monitor_md}")
 
     verdict = run.verdict
     print(f"\nAccepted:               {verdict.accepted}")
@@ -109,15 +138,24 @@ def test_sandbox_env_smoke() -> None:
     if verdict.follow_up:
         print(f"Follow-up:              {verdict.follow_up}")
     print(f"\nRationale:\n{verdict.rationale}")
-    print(f"\nMonitor JSONL:  {monitor_jsonl}")
-    print(f"Monitor MD:     {monitor_md}")
 
     assert verdict is not None, "Expected a ReviewVerdict"
 
-    # Fail-fast scan: any tool failure is a hard error with a clear bucket report.
-    failures = _scan_tool_failures(monitor_jsonl)
-    if failures:
-        lines = ["Tool failures detected:"]
-        for prefix, kinds in sorted(failures.items()):
-            lines.append(f"  [{prefix}] " + ", ".join(sorted(set(kinds))))
-        raise AssertionError("\n".join(lines))
+    # Env-health criteria (retryable LLM arg-formatting noise is ignored):
+    #   1. each xspec key tool (load_data, xspec_status) succeeded >=once,
+    #   2. at least one MCP file-tree tool (list_dir / read_file) succeeded,
+    #   3. no environment/sandbox-signature errors occurred.
+    succeeded, infra_errors = _evaluate_run(monitor_jsonl)
+    print(f"\nTools that succeeded: {sorted(succeeded)}")
+
+    problems: list[str] = []
+    missing_xspec = sorted(XSPEC_KEY_TOOLS - succeeded)
+    if missing_xspec:
+        problems.append("xspec_utils key tools never succeeded: " + ", ".join(missing_xspec))
+    if not (MCP_FILETREE_TOOLS & succeeded):
+        problems.append("no MCP file-tree tool (list_dir/read_file) succeeded")
+    if infra_errors:
+        problems.append("environment/sandbox errors:\n    " + "\n    ".join(infra_errors))
+
+    if problems:
+        raise AssertionError("Smoke test env-health failure:\n  " + "\n  ".join(problems))
