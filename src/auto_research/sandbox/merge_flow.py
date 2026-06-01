@@ -1,7 +1,8 @@
 """Tool-authoring propose→review→merge flow — Phase 2 stub.
 
-Phase 1: raises NotImplementedError. The tool_dispatch_node catches this and
-tells the analyst worker the requested tool is unavailable.
+Phase 1: raises NotImplementedError. Tool execution now happens inside analyst
+consensus; callers surface unavailable tool-authoring requests through the same
+tool-error feedback path.
 
 Phase 2 implementation (deferred): analyst worker emits a tool spec →
 Claude Agent SDK writes and tests the code → analyst lead reviews →

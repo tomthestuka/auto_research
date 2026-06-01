@@ -12,11 +12,13 @@ Logs: logs/dev/step-12/
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
+
+load_dotenv()
 
 LIVE = os.getenv("AUTO_RESEARCH_LIVE_FULL_SUITE_TESTS") == "1"
 skip_live = pytest.mark.skipif(not LIVE, reason="Set AUTO_RESEARCH_LIVE_FULL_SUITE_TESTS=1 to run")
@@ -26,7 +28,7 @@ LOG_DIR = Path(__file__).resolve().parents[1] / "logs" / "dev" / "step-12"
 
 def _monitor_paths(name: str) -> tuple[Path, Path]:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     jsonl = LOG_DIR / f"{name}_{ts}_monitor.jsonl"
     return jsonl, jsonl.with_suffix(".md")
 
@@ -42,7 +44,6 @@ def test_cyg_x1_ixpe_softstate() -> None:
     - AnalystLead: convergence judge and adjudication
     - Reviewer: literature and analysis review with capped feedback edges
     """
-    load_dotenv()
     import asyncio
 
     from auto_research.graph.runtime import run_research

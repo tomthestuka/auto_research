@@ -27,7 +27,7 @@ sandbox/
 ├── runner.py         # run_tool()     — one-shot subprocess (kept for ad-hoc use)
 ├── workspace.py      # per-run/agent folder layout and memory.md utilities
 ├── analyst_env.sh    # dedicated headless analyst env (HEADAS, CALDB, no cruft)
-├── builtin_server.py # MCP stdio server: list_dir, read_file (file-tree only)
+├── builtin_server.py # MCP stdio server: bash_exec, list_dir, read_file
 ├── mcp_client.py     # MCPToolClient — manages stdio MCP server sessions
 └── merge_flow.py     # propose_and_pr() — Phase 2 stub (NotImplementedError)
 ```
@@ -55,7 +55,9 @@ session.
 
 **MCP tool path:** alongside `TOOL_MANIFEST` tools, analyst workers may call
 tools served by stdio MCP servers.  `builtin_server.py` runs as a subprocess
-and exposes file-tree tools only (`list_dir`, `read_file`).  `MCPToolClient`
+and currently exposes `bash_exec`, `list_dir`, and `read_file`.  The P2
+hardening task will restrict this path to read-only file-tree traversal.
+`MCPToolClient`
 manages the server sessions and exposes tools to the registry under the naming
 convention `mcp.<server_name>.<tool_name>` (e.g. `mcp.builtin.list_dir`).
 `PersistentSandbox.call_mcp_tool()` forwards calls through the attached client.
@@ -175,18 +177,21 @@ class MCPToolClient:
 
 ### Built-in MCP server (`builtin_server.py`)
 
-Exposes **file-tree exploration only** — no shell execution, no writes, no network.
-Runs in the `auto_research` Python env (not the analysis env) and inherits the
-parent process environment so HEADAS/CALDB paths are visible to `bash_exec`-style
-inspection if needed.
+Currently exposes shell execution plus file-tree exploration. Runs in the
+`auto_research` Python env (not the analysis env) and inherits the parent
+process environment so HEADAS/CALDB paths are visible to `bash_exec` commands.
+Restricting MCP to read-only filesystem tools is a documented P2 task.
 
 Tools:
+- `bash_exec(command, cwd=None, timeout_s=60)` → `{"stdout": str, "stderr": str, "exit_code": int}`
+  — run a shell command through the MCP server process.
 - `list_dir(path)` → `{"path": str, "entries": list[str]}` — alphabetically sorted
   directory listing.
 - `read_file(path, max_bytes=65536)` → `{"content": str, "truncated": bool, "size_bytes": int}`
   — read a text file up to `max_bytes`; UTF-8 with `errors="replace"`.
 
-Kind strings: `mcp.builtin.list_dir`, `mcp.builtin.read_file`.
+Kind strings: `mcp.builtin.bash_exec`, `mcp.builtin.list_dir`,
+`mcp.builtin.read_file`.
 
 ### `PersistentSandbox.call_mcp_tool`
 
@@ -291,7 +296,8 @@ writes the tool, lead reviews, human approves merge on GitHub.
   - `.describe(kind)` → `str` — description for a kind.
   - `.call_tool(kind, arguments)` → `dict` — call one MCP tool.
   - `.shutdown()` — close sessions and terminate servers.
-- `builtin_server.py` — MCP stdio server with file-tree tools only.
+- `builtin_server.py` — MCP stdio server with shell and file-tree tools.
+  - `bash_exec(command, cwd=None, timeout_s=60)` → `{stdout, stderr, exit_code}`.
   - `list_dir(path)` → `{path, entries}`.
   - `read_file(path, max_bytes)` → `{content, truncated, size_bytes}`.
   Kind prefix: `mcp.builtin.*`.
@@ -345,3 +351,7 @@ writes the tool, lead reviews, human approves merge on GitHub.
   file during each tool call (catches C-level XSPEC/ixpeobssim writes). Captured
   output is attached as a truncated `console_tail`. Fixes noisy tools (e.g.
   `load_data`) killing the sandbox with a JSON parse error.
+- 2026-06-01 — Corrected the MCP documentation to match the current
+  `builtin_server.py`: the built-in server still exposes `bash_exec` alongside
+  `list_dir` and `read_file`. Restricting MCP to read-only filesystem traversal
+  remains the separate P2 hardening task.

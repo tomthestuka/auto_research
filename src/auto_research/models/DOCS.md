@@ -20,9 +20,8 @@ Google by editing YAML alone
 
 ## Interfaces / Contracts
 - `config/models.yaml` must define all required roles: `reviewer`,
-  `analyst_lead`, `analyst_worker`, `librarian_io`, and
-  `librarian_searcher`. Each role maps to `members`, a non-empty list of model
-  configs.
+  `analyst_lead`, `analyst_worker`, and `librarian_io`. Each role maps to
+  `members`, a non-empty list of model configs.
 - Model identifiers and per-role parameters live in YAML, not Python source.
 - `ModelHandle.call()` accepts text messages and optional `FigureRef` images.
   If images are passed to a role member whose config has `vision: false`, it
@@ -61,10 +60,10 @@ Google by editing YAML alone
 - `ModelsConfig(roles: dict[str, RoleModelGroup])` — validated
   `config/models.yaml` shape.
 - `ModelProvider` — async protocol implemented by provider adapters:
-  `call(messages, config, *, schema=None, images=()) -> ModelResponse`.
+  `call(messages, config, *, schema=None, images=(), documents=()) -> ModelResponse`.
 - `ModelHandle(role: str, config: RoleModelConfig, provider: ModelProvider)` —
   resolved callable handle for one role member. Method:
-  `async call(messages, *, schema=None, images=()) -> ModelResponse`.
+  `async call(messages, *, schema=None, images=(), documents=()) -> ModelResponse`.
 - `ModelGroupHandle(role: str, handles: tuple[ModelHandle, ...])` — resolved
   model group. Method: `member(name: str) -> ModelHandle`.
 - `REQUIRED_ROLES` — required role names that must appear in config.
@@ -96,3 +95,6 @@ Google by editing YAML alone
   provider-neutral call types, OpenAI/Anthropic/Google adapters, and
   deterministic registry tests.
 - 2026-05-26 — Folder seeded during step 0.
+- 2026-06-01 — Synced the required-role list with the current registry
+  (`reviewer`, `analyst_lead`, `analyst_worker`, `librarian_io`) and updated the
+  provider/handle signatures to include document attachments.

@@ -47,7 +47,7 @@ Prompt loading:
   build-time governance filenames.
 - `prompts_dir(root=None) -> Path` returns the prompt directory, allowing tests to
   inject a temporary prompt root.
-- `PROMPT_FILENAMES` maps the five Phase 1 roles to their Markdown filenames.
+- `PROMPT_FILENAMES` maps the four runtime LLM roles to their Markdown filenames.
 
 Role wrappers:
 - `ReviewerAgent.review(request, *, literature=(), report=None) ->
@@ -209,3 +209,6 @@ Role wrappers:
   are auto-filled. Added `TestExecuteToolsDispatch` deterministic tests in
   `tests/test_sandbox.py` covering command-forward, retry-reroute, unknown-tool,
   retry-cap, and obs-path injection.
+- 2026-06-01 — Synced the prompt-loader contract with the current four runtime
+  LLM roles. The former librarian searcher role remains replaced by pure-Python
+  retrieval tools.

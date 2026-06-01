@@ -124,10 +124,10 @@ discipline as `DOCS.md`). Phase 2 items remain documented as deferred stubs in
 | 5 | Done | Librarian sources: shared `QuerySource` interface plus arXiv, NASA ADS, and Tavily web modules. |
 | 6 | Done | Retrieval: `text_search()` over SQLite and `vector_search()` stub. |
 | 7 | Done | Runtime prompts: one `prompts/<role>.md` file per role. |
-| 8 | Done | Agent roles: reviewer, librarian I/O, librarian searcher, analyst worker, and analyst lead wrappers. |
+| 8 | Done | Agent roles: reviewer, librarian I/O, analyst worker, and analyst lead wrappers; local retrieval is pure Python. |
 | 9 | Done | Consensus: debate-to-converge strategy with cap 3 and lead adjudication. |
 | 10 | Done | Orchestration: LangGraph graph with capped paper-search and analysis-result feedback edges. |
-| 11 | Done | Sandbox & tool execution: `ToolkitRegistry` (manifest-based discovery), subprocess sandbox (`runner.py`), `tool_dispatch_node` + `tool_execution_node` in graph, error-feedback inner loop. `merge_flow.py` stub (Phase 2 → Claude Agent SDK). LangGraph Studio: `langgraph dev` exposes live graph state per node. |
+| 11 | Done | Sandbox & tool execution: `ToolkitRegistry` (manifest-based discovery), persistent per-worker `PersistentSandbox`, built-in MCP tools, and tool execution inside analyst consensus with capped error-feedback retries. `merge_flow.py` stub (Phase 2 → Claude Agent SDK). LangGraph Studio: `langgraph dev` exposes live graph state per node. |
 | 12 | Done | Entry points & tests: importable monitored library entry, CLI, inspection notebook, and deterministic pytest coverage. |
 
 See `CLAUDE.md` §14 for checkpoints and deferred Phase 2 stubs.
@@ -139,7 +139,7 @@ not mean each role can complete its full real-world job yet.
 | Role | Tools available at step 8? | What "one task" means |
 |---|---|---|
 | Librarian I/O | Yes — step 5 built arXiv / ADS / Tavily, and document attachments are wired through the model boundary. | Real source/document input can produce structured search results or memory abstractions. |
-| Librarian searcher | Yes — step 6 built `text_search()` over SQLite. | Real query returns structured records from the DB. |
+| Local retrieval | Yes — step 6 built `text_search()` over SQLite. | Pure-Python retrieval returns local paper paths from the DB; no runtime LLM role. |
 | Analyst worker | Yes — step 11 wired `ToolkitRegistry` + subprocess sandbox. Workers call `request_tools()`, tools execute via sandbox, errors trigger LLM self-correction loop. | Tool-catalogue-aware analysis; `xspec_utils` and any registered research_toolkit tools. |
 | Analyst lead | N/A — pure adjudication. | Given worker reports or tool requests, produce structured adjudication/review. |
 | Reviewer | N/A — pure dispatch + review. | Given a request or stub results, produce a structured dispatch/review decision. |

@@ -121,16 +121,21 @@ iteration counters, and the cap.
 
 ## Dictionary-level reference
 - `ResearchState` — TypedDict for the graph state; `literature` is `list[Path]`;
-  `verdicts` and `tool_results` are accumulated lists; `tool_queue` is
-  `list[ToolCallRequest]` (transient).
+  `verdicts` is an accumulated list of reviewer decisions. Tool queues/results
+  are not graph state; tool calls run inside analyst consensus and are recorded
+  in per-worker `memory.md` files.
 - `IOAgentLike` — protocol with `compose_search_strategy()`, `search()`, `ingest_results()`.
 - `ReviewerLike` — protocol with `async review(request, *, literature, report)`.
-- `ToolWorkerLike` — protocol extending `WorkerLike` with `async request_tools(task)`.
-- `build_graph(...)` — constructs and compiles the state graph (seven nodes).
-- `run_request(request, ...)` — high-level entry point; reads `tool_retry_cap` and
-  `toolkit_root` from `orchestration.yaml`. Returns the final `ReviewVerdict`.
+- `build_graph(...)` — constructs and compiles the five-node state graph
+  (`literature`, `review_literature`, `analysis`, `review_analysis`,
+  `finalize_run`).
+- `run_request(request, ...)` — compatibility entry point; delegates to
+  `run_research()` and returns the final `ReviewVerdict`.
 - `run_research(request, ...)` — monitored high-level entry point; returns
-  `ResearchRun`.
+  `ResearchRun`. Reads `tool_retry_cap`, `toolkit_root`, `analyze_env`,
+  `analyze_ini_sh`, and `mcp_servers` from `orchestration.yaml`, starts one
+  persistent sandbox per analyst worker, and shuts down sandboxes/MCP clients in
+  `finally`.
 - `ResearchRun(request, verdict, final_state, monitor)` — result object with
   `.markdown()` for grouped monitor output.
 - `_default_graph()` — synchronous; builds the compiled graph with all defaults from
@@ -197,3 +202,7 @@ iteration counters, and the cap.
   in `runtime.py`).  `run_research()` creates the per-run workspace, spawns one
   `PersistentSandbox` per worker, assigns `sandbox` and `memory_path` to each
   `AnalystWorkerAgent`, and tears sandboxes down in a `finally` block.
+- 2026-06-01 — Synced the dictionary reference with the current persistent
+  sandbox graph: removed stale `tool_queue` / `tool_results` /
+  `ToolWorkerLike` references, corrected the graph node count to five, and
+  documented `run_research()` ownership of sandbox/MCP lifecycle config.

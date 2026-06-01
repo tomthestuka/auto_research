@@ -105,9 +105,10 @@ carried by **reference** (`FigureRef`), never embedded
   ToolCallRequest | None = None)` — lead review of a proposed tool action.
 - `ToolResult(tool_name: str, stdout: str, stderr: str, exit_code: int,
   figures: list[FigureRef] = [], elapsed_s: float)` — result of a sandboxed
-  tool execution. Accumulated in `ResearchState.tool_results` (via
-  `operator.add`). Figures are `FigureRef` objects parsed from tool stdout.
-  `exit_code=127` indicates "tool unavailable" (Phase 2 stub).
+  tool execution. Produced by `AnalystWorkerAgent.execute_tools()`, written to
+  the worker's private `memory.md`, and summarized into subsequent analyst task
+  instructions by the consensus layer. Figures are `FigureRef` objects parsed
+  from tool stdout. `exit_code=127` indicates "tool unavailable" (Phase 2 stub).
 
 ## Changelog
 - 2026-05-27 — Added `SearchResult.local_path: Path | None` so
@@ -127,3 +128,6 @@ carried by **reference** (`FigureRef`), never embedded
 - 2026-05-26 — Folder seeded during step 0.
 - 2026-05-28 — Added `ToolResult` schema for sandboxed tool execution results
   (step 11). `exit_code=127` convention for "tool unavailable" (stub path).
+- 2026-06-01 — Updated the `ToolResult` contract to reflect the persistent
+  sandbox architecture: tool results now live in worker memory/consensus
+  summaries rather than `ResearchState.tool_results`.

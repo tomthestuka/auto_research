@@ -28,8 +28,6 @@ Runtime prompt files:
 - `librarian_io.md` — external literature/source search, direct document/PDF
   attachment reading, download and ingest reporting, and bibliographic
   summaries.
-- `librarian_searcher.md` — local memory retrieval, staleness checks, and
-  escalation recommendations.
 - `analyst_worker.md` — task analysis, debate revisions, assumptions, figure
   reference handling, and structured tool/data escalation requests.
 - `analyst_lead.md` — convergence judgment, adjudication, synthesis, and
@@ -46,7 +44,6 @@ loads it verbatim — do not embed templating logic here.
 ## Dictionary-level reference
 - `reviewer.md` — system prompt for the reviewer role.
 - `librarian_io.md` — system prompt for the librarian I/O role.
-- `librarian_searcher.md` — system prompt for the librarian searcher role.
 - `analyst_worker.md` — system prompt for analyst worker roles.
 - `analyst_lead.md` — system prompt for the analyst lead role.
 
@@ -70,3 +67,6 @@ loads it verbatim — do not embed templating logic here.
   roles and documented their loader contract.
 - 2026-05-26 — Folder seeded as part of step 0 scaffolding. Per-role prompts to be
   authored in step 7.
+- 2026-06-01 — Synced the prompt inventory with the current four runtime prompt
+  files. The former librarian searcher prompt is no longer a runtime role;
+  local retrieval is handled by pure-Python retrieval tools.

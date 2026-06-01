@@ -21,8 +21,8 @@ role or swapping a provider is a YAML edit; no Python change.
 - `models.yaml` — role → non-empty `members` list. Each member has `name`,
   `provider`, `model`, `vision`, `parameters`, and optional `documents` and
   `priceMTk`.
-  Loaded and validated by `auto_research.models.registry`. Required roles: `reviewer`, `analyst_lead`,
-  `analyst_worker`, `librarian_io`, `librarian_searcher`. Reviewer and
+  Loaded and validated by `auto_research.models.registry`. Required roles:
+  `reviewer`, `analyst_lead`, `analyst_worker`, and `librarian_io`. Reviewer and
   analyst-tier models **must** be marked `vision: true` so figure references can
   be passed at the multimodal boundary (see
   [§7](../CLAUDE.md#7-schemas--protocols)).
@@ -30,8 +30,8 @@ role or swapping a provider is a YAML edit; no Python change.
   mission's observation database or archive root. Loaded by
   `auto_research.observations`; mission names are data, not special cases in
   code.
-- *(future)* `runtime.yaml` — runtime data dir (default `~/.auto_research/`),
-  iteration caps, sandbox limits. Schema landed when first consumer needs it.
+- `orchestration.yaml` — graph iteration caps, debate round cap, tool retry cap,
+  toolkit root, analyst sandbox environment, and MCP server configuration.
 
 ## Dependencies
 - Read by: `auto_research.models`, plus any downstream module that needs to
@@ -57,6 +57,17 @@ role or swapping a provider is a YAML edit; no Python change.
   `auto_research.observability`.
 - `observations.yaml.missions.<mission>.obs_db_path` — path to one mission's
   observation database or archive root.
+- `orchestration.yaml.max_iterations` — hard cap for each outer reviewer
+  feedback edge.
+- `orchestration.yaml.debate_max_rounds` — hard cap for analyst debate rounds
+  before lead adjudication.
+- `orchestration.yaml.io_search_max_iterations` — Phase 2 hook for future
+  librarian I/O search-refinement loops; Phase 1 keeps it at `1` because
+  `evaluate_search_results()` is a stub.
+- `orchestration.yaml.tool_retry_cap` — inner retry cap for
+  `AnalystWorkerAgent.execute_tools()` error feedback.
+- `orchestration.yaml.toolkit_root` — path to the sibling `research_toolkit`
+  repository used by `ToolkitRegistry` and `PersistentSandbox`.
 - `orchestration.yaml.analyze_ini_sh` — path to the dedicated headless analyst
   env script (`src/auto_research/sandbox/analyst_env.sh`). Sourced by
   `_source_ini_env()` in `sandbox/runner.py` before each persistent REPL subprocess
@@ -64,6 +75,9 @@ role or swapping a provider is a YAML edit; no Python change.
   agent, no conda activation (the sandbox invokes `analyze_env/bin/python` directly).
 - `orchestration.yaml.analyze_env` — conda/venv prefix whose `bin/python` is used
   for analyst sandbox subprocesses (must have PyXSPEC + analysis stack installed).
+- `orchestration.yaml.mcp_servers` — optional stdio MCP server configs exposed
+  alongside manifest tools. Empty or omitted means use only the built-in MCP
+  server (`bash_exec`, `list_dir`, `read_file` at present).
 
 ## Changelog
 - 2026-05-27 — Raised the Anthropic librarian I/O output cap so direct PDF
@@ -79,3 +93,9 @@ role or swapping a provider is a YAML edit; no Python change.
   reviewers, analyst workers, librarian I/O, and the remaining role bindings.
 - 2026-05-27 — Added `models.yaml` and documented the step-2 registry schema.
 - 2026-05-26 — Folder seeded as part of step 0 scaffolding.
+- 2026-06-01 — Synced config docs with the current four required model roles
+  and documented the active `orchestration.yaml` keys, including persistent
+  sandbox and MCP settings.
+- 2026-06-01 — Corrected the built-in MCP description to match current code:
+  the default server still exposes `bash_exec` in addition to `list_dir` and
+  `read_file`; the read-only MCP restriction remains a separate P2 task.
