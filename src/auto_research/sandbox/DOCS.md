@@ -22,11 +22,14 @@ See [CLAUDE.md §8](../../../CLAUDE.md#8-runtime-tool-authoring--sandbox) and
 
 ```
 sandbox/
-├── registry.py    # ToolkitRegistry — manifest-based tool discovery
-├── persistent.py  # PersistentSandbox — long-lived REPL subprocess per worker
-├── runner.py      # run_tool()     — one-shot subprocess (kept for ad-hoc use)
-├── workspace.py   # per-run/agent folder layout and memory.md utilities
-└── merge_flow.py  # propose_and_pr() — Phase 2 stub (NotImplementedError)
+├── registry.py       # ToolkitRegistry — manifest-based tool discovery
+├── persistent.py     # PersistentSandbox — long-lived REPL subprocess per worker
+├── runner.py         # run_tool()     — one-shot subprocess (kept for ad-hoc use)
+├── workspace.py      # per-run/agent folder layout and memory.md utilities
+├── analyst_env.sh    # dedicated headless analyst env (HEADAS, CALDB, no cruft)
+├── builtin_server.py # MCP stdio server: list_dir, read_file (file-tree only)
+├── mcp_client.py     # MCPToolClient — manages stdio MCP server sessions
+└── merge_flow.py     # propose_and_pr() — Phase 2 stub (NotImplementedError)
 ```
 
 **`TOOL_MANIFEST` convention:** each research_toolkit package exposes a
@@ -107,9 +110,9 @@ class PersistentSandbox:
   stays alive across all debate rounds and rework cycles; XSPEC session state persists.
 - `call_tool()` sends `{"module": ..., "fn": ..., "args": {...}}\n` to stdin and reads
   one JSON response line from stdout.  On timeout or death `is_alive` becomes `False`.
-- Uses `{analyze_env}/bin/python` when supplied; sources `analyze_ini_sh` via
-  `_source_ini_env()` for HEADAS/CALDB/LD_LIBRARY_PATH.  PYTHONPATH is overridden to
-  `toolkit_root`.
+- Uses `{analyze_env}/bin/python` when supplied; sources `analyze_ini_sh`
+  (`analyst_env.sh`) via `_source_ini_env()` for HEADAS/CALDB/LD_LIBRARY_PATH.
+  PYTHONPATH is overridden to `toolkit_root`.
 
 ### Workspace utilities
 

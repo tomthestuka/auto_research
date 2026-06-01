@@ -20,7 +20,7 @@ from __future__ import annotations
 import importlib
 import sys
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 
 class ToolSpec(TypedDict):
@@ -37,11 +37,12 @@ _MANIFEST_MODULES: list[str] = [
 
 
 class ToolkitRegistry:
-    """Discovers and describes tools available in research_toolkit."""
+    """Discovers and describes tools available in research_toolkit and via MCP."""
 
     def __init__(self, toolkit_root: Path) -> None:
         self._root = Path(toolkit_root)
         self._tools: dict[str, ToolSpec] = {}
+        self._mcp_tools: dict[str, str] = {}  # kind -> description
         self._loaded = False
 
     # ------------------------------------------------------------------
@@ -61,6 +62,19 @@ class ToolkitRegistry:
                 try:
                     mod = importlib.import_module(pkg)
                     manifest: dict[str, ToolSpec] = getattr(mod, "TOOL_MANIFEST", {})
+                    # Enrich descriptions with function docstrings when available.
+                    for name, spec in manifest.items():
+                        try:
+                            fn_mod = importlib.import_module(spec["module"])
+                            fn = getattr(fn_mod, spec["fn"])
+                            doc = (fn.__doc__ or "").strip()
+                            if doc:
+                                spec = dict(spec)
+                                spec["description"] = doc
+                                manifest = dict(manifest)
+                                manifest[name] = spec  # type: ignore[assignment]
+                        except Exception:  # noqa: BLE001
+                            pass
                     self._tools.update(manifest)
                 except Exception:  # noqa: BLE001
                     pass  # package not installed or missing manifest – skip silently
@@ -69,17 +83,27 @@ class ToolkitRegistry:
                 sys.path.remove(root_str)
         self._loaded = True
 
+    def load_mcp(self, client: Any) -> None:
+        """Index tools from a started MCPToolClient into the registry."""
+        for kind in client.list_kinds():
+            self._mcp_tools[kind] = client.describe(kind)
+
+    def is_mcp(self, kind: str) -> bool:
+        return kind in self._mcp_tools
+
     def is_known(self, tool_name: str) -> bool:
         self.load()
-        return tool_name in self._tools
+        return tool_name in self._tools or tool_name in self._mcp_tools
 
     def list_tools(self) -> list[str]:
         self.load()
-        return list(self._tools)
+        return list(self._tools) + list(self._mcp_tools)
 
     def describe_tool(self, tool_name: str) -> str:
         """Return a short description suitable for injection into analyst prompts."""
         self.load()
+        if tool_name in self._mcp_tools:
+            return f"{tool_name}: {self._mcp_tools[tool_name]}"
         spec = self._tools[tool_name]
         return f"{tool_name}: {spec['description']}"
 
@@ -92,9 +116,17 @@ class ToolkitRegistry:
     def tool_catalogue(self) -> str:
         """Return a multi-line catalogue of all tools for prompt injection."""
         self.load()
-        if not self._tools:
+        has_toolkit = bool(self._tools)
+        has_mcp = bool(self._mcp_tools)
+        if not has_toolkit and not has_mcp:
             return "(no tools registered)"
-        lines = ["Available tools in research_toolkit:"]
-        for name, spec in self._tools.items():
-            lines.append(f"  {name}: {spec['description']}")
+        lines = []
+        if has_toolkit:
+            lines.append("Available tools in research_toolkit:")
+            for name, spec in self._tools.items():
+                lines.append(f"  {name}: {spec['description']}")
+        if has_mcp:
+            lines.append("Available MCP tools:")
+            for kind, desc in self._mcp_tools.items():
+                lines.append(f"  {kind}: {desc}")
         return "\n".join(lines)

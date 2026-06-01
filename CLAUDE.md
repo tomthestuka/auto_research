@@ -377,123 +377,24 @@ documented stubs.
 
 ## Changelog
 
-- *(unreleased)* — Initial `CLAUDE.md` authored for Phase 1 (modular minimal skeleton);
-  added §14 build order.
-- 2026-05-27 — Converted §14 into an explicit build ledger with per-step status and
-  marked step 0 (scaffolding & environment) done.
-- 2026-05-27 — Marked step 1 (schemas) done after adding the Pydantic v2
-  inter-agent protocol and validation tests.
-- 2026-05-27 — Marked step 2 (config + model registry) done after adding
-  `config/models.yaml`, role resolution, provider-neutral call types, and
-  OpenAI/Anthropic/Google adapters.
-- 2026-05-27 — Corrected §6 defaults and the model registry contract to represent
-  reviewer, analyst, and librarian roles as model groups.
-- 2026-05-27 — Marked step 3 (observability) done after wiring provider calls
-  through optional LangSmith tracing and JSONL cost logging.
-- 2026-05-27 — Added the `logs/dev/step-N/` convention for development test logs
-  and renamed configured per-million-token unit prices to `priceMTk`.
-- 2026-05-27 — Added a testing rule requiring opt-in real API test stubs for
-  external integrations and a default preference for running them when relevant.
-- 2026-05-27 — Clarified that development test logs should include
-  human-friendly Markdown summaries alongside machine-readable JSONL where useful.
-- 2026-05-27 — Marked step 4 (storage) done after adding the SQLite layer,
-  reserved embedding space, local PDF ingestion, and deterministic storage tests.
-- 2026-05-27 — Marked step 5 (librarian sources) done after adding arXiv, NASA
-  ADS, and Tavily source adapters plus live sample-query verification.
-- 2026-05-27 — Marked step 6 (retrieval) done after adding SQLite text search,
-  the `vector_search()` Phase 2 stub, and live `GX339-4` retrieval verification.
-- 2026-05-27 — Marked step 7 (runtime prompts) done after adding all role prompt
-  files and guarded prompt-loading tests.
-- 2026-05-27 — Marked step 8 (agent roles) done after adding thin async
-  wrappers for reviewer, librarian I/O, librarian searcher, analyst worker,
-  and analyst lead, with deterministic isolation tests.
-- 2026-05-27 — Refined the step 8 checkpoint wording to clarify that it
-  validates per-role plumbing, not complete real-world role capability.
-- 2026-05-27 — Marked step 9 (consensus) done after adding the
-  debate-to-converge strategy, lead convergence checks, deterministic tests, and
-  live GX339-4 replication-planning verification.
-- 2026-05-27 — Clarified that the reviewer triages research requests from the human
-  in Phase 1 and may also receive authorized lead-scientist planning requests in
-  Phase 2.
-- 2026-05-26 — Added a hard rule in §3 requiring `README.md` to be kept synced in the
-  same session as any change that touches what the README describes (status table,
-  architecture, defaults, getting-started, contributor rules). Parallels the
-  pre-existing `DOCS.md` sync rule.
-- 2026-05-27 — Marked step 10 (orchestration) done after wiring the LangGraph
-  state machine with the two capped feedback edges, the deterministic full-loop
-  / cap / early-exit tests, and the opt-in live graph test driving real
-  reviewer / worker / lead calls.
-- 2026-05-27 — Architectural correction: IO team now owns the full literature
-  pipeline. `literature_node` calls `io_agent.compose_search_strategy()` →
-  `io_agent.search()` → `io_agent.ingest_results()` (download + IO consensus
-  abstraction + `mem_abbrev` to DB) → `searcher.search()` (local SQLite).
-  Reviewer receives only local SQLite results, with `local_path` populated for
-  full-PDF reading. `SearchResult.local_path` added. `memory.mem_abbrev` column
-  added (with migration). `IODebateToConverge` + IO protocols added to consensus.
-  `evaluate_search_results()` deferred stub added. `LibrarianLike` replaced by
-  `IOAgentLike` + `SearcherLike`. §13 documents IO search iteration stub.
-  94 deterministic tests pass.
-- 2026-05-28 — Added changelog-append rule to §5: new entries must always be appended
-  at the very bottom of the Changelog section, never inserted before existing entries.
-- 2026-05-28 — Architectural decision: tool-authoring deferred to Phase 2 via Claude
-  Agent SDK stub (`merge_flow.propose_and_pr()` raises `NotImplementedError`). Phase 1
-  sandbox uses subprocess isolation only; tool discovery via `TOOL_MANIFEST` convention;
-  analyst workers self-correct from execution errors (error-feedback loop, capped at
-  `tool_retry_cap`). Updated §2 trust boundary, §8 sandbox description, §10 analyst
-  role, §13 Phase 2 stub, §14 step 11 checkpoint to reflect the decision. No external
-  harness (Composio, OpenHands) used.
-- 2026-05-28 — Marked step 11 Done after adding LangGraph Studio wiring:
-  `serve.py` (module-level compiled graph for `langgraph dev`), `langgraph.json`
-  (repo-root CLI config), `_default_graph()` in `runtime.py`, and
-  `langgraph-cli[inmem]` in `environment.yml` pip block.
-- 2026-05-28 — Marked step 12 Done after adding the monitored library entry
-  `run_research()` / `ResearchRun`, the 1-10 `RunMonitor` chatter system with
-  async-safe JSONL and grouped Markdown reports, CLI flags including
-  `--chatter`, `notebooks/step12_monitor_inspection.ipynb`, deterministic
-  monitor tests, and full-chatty monitor logging in `tests/test_live_sandbox.py`.
-- 2026-05-28 — Added the coding-agent rule to consult the human before attempting
-  fixes, workarounds, or architectural changes for unexpected failures,
-  environment/tooling oddities, ambiguous runtime behavior, or suspected
-  dependency issues.
-- 2026-05-28 — Fixed several analyst-task construction issues in the graph:
-  (1) `_build_task` now always injects the reviewer's `follow_up` as instructions
-  regardless of `needs_analysis_rework` flag; (2) `observations.yaml` is loaded
-  at `build_graph` time and obs DB paths are injected into every `AnalysisTask`;
-  (3) the tool catalogue is passed to `analysis_node` (not just `tool_dispatch_node`)
-  so workers see available tools during debate. Updated `prompts/reviewer.md` to
-  instruct the reviewer to tell analysts to check local obs databases before remote
-  archives. Added `RunMonitor.from_jsonl()` and `grouped` param to `write_markdown()`.
-- 2026-05-28 — Created `xspec_utils/__init__.py` in research_toolkit with `TOOL_MANIFEST`
-  exposing two sandbox-compatible tools: `xspec_joint_fit` (composite load+fit+figure in
-  one XSPEC session) and `xspec_group_pha` (PHA grouping, no XSPEC needed). Added
-  `analyze_env` config key to `config/orchestration.yaml` (points to the conda env that
-  has XSPEC/HEASoft). Added `analyze_env` parameter to `run_tool()`, `build_graph()`,
-  `_default_graph()`, and `run_research()`. Sandbox subprocess now inherits the parent
-  process environment (HEADAS, CALDB, LD_LIBRARY_PATH) and uses the analysis env's
-  Python interpreter instead of blanking the env.
-- 2026-05-28 — Added `analyze_ini_sh` config key to `config/orchestration.yaml`
-  (points to `/data/fzhou/ini.sh`). Added `_source_ini_env()` helper in `runner.py`
-  that sources the bash init script via `env -0` capture (cached). Added
-  `analyze_ini_sh` parameter to `run_tool()`, `build_graph()`, `_default_graph()`, and
-  `run_research()`. Subprocess env is now built from the sourced init script (injecting
-  HEADAS, CALDB, CALDBCONFIG, CALDBALIAS, GEOMAG_PATH, LD_LIBRARY_PATH) with PYTHONPATH
-  overridden to toolkit_root.
-- 2026-05-28 — Replaced one-shot per-tool-call subprocess sandbox with a persistent
-  per-worker REPL subprocess.  Added `sandbox/persistent.py` (`PersistentSandbox`:
-  JSON-line REPL loop, `is_alive` flag, `start()` / `call_tool()` / `shutdown()`).
-  Added `sandbox/workspace.py` (per-run folder creation, per-agent `memory.md`
-  utilities).  Tool execution moved from graph nodes (`tool_dispatch_node`,
-  `tool_execution_node` — removed) into `DebateToConverge._run_tools()`, called after
-  each round of `analyze()` calls.  `AnalystWorkerAgent` gains `sandbox`,
-  `memory_path`, `worker_index`, `is_alive`, and `execute_tools()`.  `analyze()` reads
-  `memory_path` before each LLM call for private memory continuity.  Truncated peer
-  tool summaries are injected into task instructions between rounds.  `ResearchState`
-  no longer carries `tool_queue` or `tool_results` (removed).  `build_graph()` signature
-  simplified: `analyze_env`, `analyze_ini_sh`, `tool_retry_cap`, `toolkit_root` removed
-  (now consumed by `PersistentSandbox` and `DebateToConverge` in `runtime.py`).
-  `run_research()` creates workspace (uuid4 run_id), spawns one sandbox per worker,
-  assigns sandbox+memory_path, tears down in `finally`.  `xspec_utils/TOOL_MANIFEST`
-  replaced: `run_joint_spectral_fit` removed; six tools added:
-  `xspec_load_data`, `xspec_set_model`, `xspec_fit`, `xspec_plot`, `xspec_status`,
-  `xspec_group_pha` (split workflow, save_path on plot, XSPEC state persists across calls).
-  All six tools verified discovered by `ToolkitRegistry`.
+- 2026-05-27 — Steps 0–9 complete: scaffolding, schemas, config/model-registry (OpenAI/Anthropic/Google), observability (LangSmith + JSONL cost log), SQLite storage, librarian sources (arXiv/NASA ADS/Tavily), retrieval (`text_search()`; `vector_search()` stub), runtime prompts, agent roles (all five), consensus (`DebateToConverge` cap-3 + lead adjudication). IO team owns full literature pipeline (`compose_search_strategy` → `search` → `ingest_results` → local SQLite); `IODebateToConverge` added; `evaluate_search_results()` deferred stub; `LibrarianLike` → `IOAgentLike` + `SearcherLike`. Governance: README sync rule, changelog-append-only rule, `logs/dev/step-N/` convention, real-API test stubs.
+- 2026-05-28 — Steps 10–12 complete: LangGraph graph with two capped feedback edges; LangGraph Studio wiring (`serve.py`, `langgraph.json`); monitored library entry `run_research()` / `ResearchRun`, 1-10 chatter system, CLI, notebook. Analyst graph fixes: `_build_task` always injects `follow_up`; `observations.yaml` loaded at graph-build time; tool catalogue passed to `analysis_node`. Tool-authoring deferred to Phase 2 (`merge_flow.propose_and_pr()` stub). Rule added: consult human before fixing unexpected issues.
+- 2026-05-28 — Sandbox overhauled: one-shot subprocess replaced by persistent per-worker REPL (`PersistentSandbox`; `sandbox/persistent.py`). Subprocess env sourced from `analyze_ini_sh` init script (HEADAS, CALDB, HEASoft vars). Tool execution moved into `DebateToConverge._run_tools()`; `tool_dispatch_node`/`tool_execution_node` removed. `xspec_utils` split into six stateful tools: `xspec_load_data`, `xspec_set_model`, `xspec_fit`, `xspec_plot`, `xspec_status`, `xspec_group_pha`. Workers gain `sandbox`, `memory_path`, `worker_index`; `analyze()` reads private `memory.md` before each LLM call.
+- 2026-06-01 — Dedicated analyst env script: `sandbox/analyst_env.sh` replaces the personal login `ini.sh` as the value of `analyze_ini_sh`. Script is headless-only (HEADAS + CALDB vars; no SSH agent, no mismatched conda activation). `config/orchestration.yaml` repointed. Verified PyXSPEC imports cleanly with the new script.
+- 2026-06-01 — `xspec_utils` refactored: AI interface moved from `__init__.py` + `lib/sandbox_tools.py` into a new `xspec_utils.skills` sub-package. `skills/__init__.py` is pure-data `TOOL_MANIFEST` (no xspec import; importable in orchestration env). `skills/session.py` holds xspec-dependent wrappers (`run_fit`, `xspec_status`, `plot_fit`, `plot_iqu`). `plot_fit` wraps `inspect_fit` (one PNG); `plot_iqu` wraps `plot_iqu_decomp` (one PNG per DU). `lib/sandbox_tools.py` deleted. `__init__.py` gutted to re-export from skills via relative import. Fixed wrong function name in fit_tbabs_hss entry. Registry discovers 8 tools.
+- 2026-06-01 — Added `tests/test_smoke.py`: gated by `AUTO_RESEARCH_SMOKE_TESTS=1`, log dir `logs/dev/step-11/`. Prompt directs analyst to call MCP `list_dir`, `load_data` (IXPE 02008401 only), and `xspec_status`. Post-run scan asserts zero tool failures, bucketed by `mcp.*` vs `research_toolkit.xspec_utils.*`.
+
+---
+
+## TODO
+
+Statuses: **Todo** = not yet started · **In progress** = actively being worked · **Done** = complete & tested.
+Priorities: **P1** = blocking correctness · **P2** = important reliability · **P3** = quality / architecture.
+
+| Priority | Status | What | Checkpoint |
+|---|---|---|---|
+| P1 | In progress | **Fix analyst sandbox env + smoke test** — `analyst_env.sh` created; `analyze_ini_sh` repointed; `tests/test_smoke.py` written (IXPE 02008401 load + MCP list_dir + xspec_status, fail-fast bucket report). Run `AUTO_RESEARCH_SMOKE_TESTS=1 pytest tests/test_smoke.py -s` to validate. | `test_smoke.py` passes: zero MCP and zero xspec_utils tool failures. |
+| P1 | Todo | **Analyst workers own subprocesses exclusively** — XSPEC kernel processes are singletons; shared sandboxes corrupt state. Audit `DebateToConverge` and `run_research()`: each worker gets exactly one `PersistentSandbox` instance (started once, torn down in `finally`); no sandbox shared between workers; `is_alive` guard prevents double-start. | Deterministic isolation test passes; two workers running in parallel do not interfere. |
+| P2 | Done | **Refactor `xspec_utils`: separate human and AI interfaces** — `xspec_utils.skills` sub-package created alongside human `lib/`. `skills/__init__.py` is pure-data `TOOL_MANIFEST` (no xspec import). `skills/session.py` holds xspec wrappers (`run_fit`, `xspec_status`, `plot_fit`, `plot_iqu`). Human `lib/*.py` and `*/*.sh` untouched. Registry discovers 8 tools. | `ToolkitRegistry` discovers 8 tools in orchestration env with no xspec import. |
+| P2 | Todo | **Restrict MCP tool usage to file-tree exploration only** — Runtime agents must not use MCP for network access, shell execution, or writes. Restrict registered MCP tools to read-only filesystem traversal (directory listing, path/metadata reading). Enforce via prompt instructions and/or MCP tool registration filter at role-init time. | Agent prompt tests confirm no network/write MCP tools are reachable; file-tree MCP calls succeed. |
+| P3 | Todo | **Implement consensus for the librarian IO ingest team** — IO ingest currently runs without a debate loop. Activate `IODebateToConverge` (stub exists in `consensus.py`): multiple IO workers each produce abstract/keyword extractions; IO lead judges convergence; hard cap at 3 rounds. Replace `evaluate_search_results()` stub (`accepted=True`) with a real IO-lead LLM call. | IO consensus test converges (or hits cap and lead adjudicates) on a sample ingest task; `test_full_suite.py` passes. |

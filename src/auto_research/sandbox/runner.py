@@ -95,7 +95,9 @@ async def run_tool(
     """).strip()
 
     base_env = _source_ini_env(analyze_ini_sh) if analyze_ini_sh else dict(os.environ)
-    env = {**base_env, "PYTHONPATH": str(toolkit_root)}
+    existing = base_env.get("PYTHONPATH", "")
+    pythonpath = str(toolkit_root) + (":" + existing if existing else "")
+    env = {**base_env, "PYTHONPATH": pythonpath}
 
     t0 = time.monotonic()
     try:

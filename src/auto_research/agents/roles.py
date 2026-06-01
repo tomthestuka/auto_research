@@ -497,16 +497,25 @@ class AnalystWorkerAgent(AgentRole):
                 results.append(r)
                 continue
 
-            spec = registry.spec(req.kind)
+            is_mcp = registry.is_mcp(req.kind)
+            if not is_mcp:
+                spec = registry.spec(req.kind)
             current_req = req
             for attempt in range(tool_retry_cap):
                 t0 = time.monotonic()
-                raw = await self.sandbox.call_tool(
-                    spec["module"],
-                    spec["fn"],
-                    current_req.arguments,
-                    timeout_s=req.timeout_s,
-                )
+                if is_mcp:
+                    raw = await self.sandbox.call_mcp_tool(
+                        current_req.kind,
+                        current_req.arguments,
+                        timeout_s=req.timeout_s,
+                    )
+                else:
+                    raw = await self.sandbox.call_tool(
+                        spec["module"],
+                        spec["fn"],
+                        current_req.arguments,
+                        timeout_s=req.timeout_s,
+                    )
                 elapsed = time.monotonic() - t0
 
                 from auto_research.schemas.figures import FigureRef  # local to avoid circularity
@@ -533,12 +542,15 @@ class AnalystWorkerAgent(AgentRole):
 
                 # LLM self-correction retry
                 if attempt < tool_retry_cap - 1 and self.is_alive:
+                    error_detail = r.stderr or r.stdout or "(no error detail)"
                     error_task = AnalysisTask(
                         question=task.question,
                         instructions=(
                             f"Tool {req.kind} failed (attempt {attempt + 1}/{tool_retry_cap}).\n"
-                            f"Error: {r.stderr}\n"
-                            "Revise your tool call with corrected arguments."
+                            f"Error: {error_detail}\n"
+                            "Revise your tool call. Use the EXACT kind string from the catalogue — "
+                            "do not shorten or guess tool names.\n\n"
+                            f"{registry.tool_catalogue()}"
                         ),
                     )
                     revised = await self.request_tools(error_task)

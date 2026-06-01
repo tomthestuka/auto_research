@@ -21,6 +21,7 @@ from auto_research.graph.builder import IOAgentLike, ReviewerLike, build_graph
 from auto_research.monitor import RunMonitor
 from auto_research.models import resolve
 from auto_research.retrieval import RetrievalBackend, SqliteRetrievalBackend
+from auto_research.sandbox.mcp_client import MCPToolClient
 from auto_research.sandbox.persistent import PersistentSandbox
 from auto_research.sandbox.registry import ToolkitRegistry
 from auto_research.sandbox.workspace import create_run_workspace, memory_path
@@ -199,6 +200,12 @@ async def run_research(
 
     registry = ToolkitRegistry(toolkit_root)
 
+    # Start MCP client and index its tools into the registry
+    mcp_server_configs: list[dict] | None = orch.get("mcp_servers") or None
+    mcp_client = MCPToolClient(servers=mcp_server_configs)
+    await mcp_client.start()
+    registry.load_mcp(mcp_client)
+
     if consensus is None:
         consensus = DebateToConverge(
             max_rounds=debate_max_rounds,
@@ -216,6 +223,7 @@ async def run_research(
                 workdir=memory_path(run_id, analyst_keys[i]).parent,
                 analyze_env=analyze_env,
                 analyze_ini_sh=analyze_ini_sh,
+                mcp_client=mcp_client,
             )
             worker.sandbox = sandbox
             sandboxes.append(sandbox)
@@ -272,9 +280,9 @@ async def run_research(
         )
         raise
     finally:
-        # Always tear down sandboxes
         for sandbox in sandboxes:
             await sandbox.shutdown()
+        await mcp_client.shutdown()
 
     verdict = final_state["verdict"]
     await run_monitor.record(

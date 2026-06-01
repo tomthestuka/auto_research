@@ -10,11 +10,22 @@ import textwrap
 import time
 from pathlib import Path
 
+from typing import Any
+
 from auto_research.sandbox.runner import _source_ini_env
 
 # REPL script executed inside the persistent subprocess.
 _REPL_SCRIPT = textwrap.dedent("""
     import sys, json, importlib, traceback
+
+    def _coerce(v):
+        \"\"\"Try to parse a string value as JSON; return as-is if it isn't valid JSON.\"\"\"
+        if not isinstance(v, str):
+            return v
+        try:
+            return json.loads(v)
+        except (json.JSONDecodeError, ValueError):
+            return v
 
     while True:
         line = sys.stdin.readline()
@@ -29,7 +40,8 @@ _REPL_SCRIPT = textwrap.dedent("""
         try:
             mod = importlib.import_module(cmd["module"])
             fn = getattr(mod, cmd["fn"])
-            result = fn(**cmd["args"])
+            args = {k: _coerce(v) for k, v in cmd.get("args", {}).items()}
+            result = fn(**args)
             if isinstance(result, dict):
                 payload = dict(result)
             else:
@@ -66,6 +78,7 @@ class PersistentSandbox:
         analyze_env: Path | str | None = None,
         analyze_ini_sh: str | None = None,
         default_timeout_s: int = 300,
+        mcp_client: Any | None = None,
     ) -> None:
         self._toolkit_root = Path(toolkit_root)
         self._workdir = Path(workdir)
@@ -74,6 +87,7 @@ class PersistentSandbox:
         self._default_timeout_s = default_timeout_s
         self._proc: asyncio.subprocess.Process | None = None
         self._alive = False
+        self.mcp_client = mcp_client
 
     @property
     def is_alive(self) -> bool:
@@ -99,7 +113,9 @@ class PersistentSandbox:
             if self._analyze_ini_sh
             else dict(os.environ)
         )
-        env = {**base_env, "PYTHONPATH": str(self._toolkit_root)}
+        existing = base_env.get("PYTHONPATH", "")
+        pythonpath = str(self._toolkit_root) + (":" + existing if existing else "")
+        env = {**base_env, "PYTHONPATH": pythonpath}
         self._proc = await asyncio.create_subprocess_exec(
             python_exec,
             "-c",
@@ -154,6 +170,21 @@ class PersistentSandbox:
         except Exception as exc:  # noqa: BLE001
             self._alive = False
             return {"exit_code": 1, "stderr": str(exc), "stdout": ""}
+
+    async def call_mcp_tool(
+        self,
+        kind: str,
+        args: dict,
+        *,
+        timeout_s: int | None = None,
+    ) -> dict:
+        """Forward a tool call to the attached MCPToolClient.
+
+        Returns an error dict if no MCP client is configured.
+        """
+        if self.mcp_client is None:
+            return {"exit_code": 127, "stderr": "no MCP client configured", "stdout": ""}
+        return await self.mcp_client.call_tool(kind, args)
 
     async def shutdown(self) -> None:
         """Gracefully stop the subprocess; kill if it does not exit within 5 s."""

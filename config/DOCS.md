@@ -57,6 +57,13 @@ role or swapping a provider is a YAML edit; no Python change.
   `auto_research.observability`.
 - `observations.yaml.missions.<mission>.obs_db_path` — path to one mission's
   observation database or archive root.
+- `orchestration.yaml.analyze_ini_sh` — path to the dedicated headless analyst
+  env script (`src/auto_research/sandbox/analyst_env.sh`). Sourced by
+  `_source_ini_env()` in `sandbox/runner.py` before each persistent REPL subprocess
+  is spawned. Sets HEADAS, CALDB, CALDBCONFIG, CALDBALIAS, GEOMAG_PATH. No SSH
+  agent, no conda activation (the sandbox invokes `analyze_env/bin/python` directly).
+- `orchestration.yaml.analyze_env` — conda/venv prefix whose `bin/python` is used
+  for analyst sandbox subprocesses (must have PyXSPEC + analysis stack installed).
 
 ## Changelog
 - 2026-05-27 — Raised the Anthropic librarian I/O output cap so direct PDF

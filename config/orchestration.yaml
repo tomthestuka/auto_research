@@ -18,6 +18,12 @@ toolkit_root: /data/fzhou/research_toolkit
 # Must be a conda/venv prefix whose Python has the analysis stack (XSPEC, HEASoft, ixpeobssim, etc.).
 # The subprocess inherits the parent process environment so HEADAS/CALDB/LD_LIBRARY_PATH are available.
 analyze_env: /grad/fzhou/.conda/envs/astropy
-# Optional bash init script sourced before each tool subprocess to inject
-# HEASoft (HEADAS), CALDB, and LD_LIBRARY_PATH into the analysis environment.
-analyze_ini_sh: /data/fzhou/ini.sh
+# Dedicated headless analyst env script sourced before each tool subprocess.
+# Injects HEASoft (HEADAS), CALDB, and related vars without interactive cruft
+# (no SSH agent, no gnome-keyring, no competing conda activation).
+# See src/auto_research/sandbox/analyst_env.sh.
+analyze_ini_sh: /nfsdata1/fzhou/auto_research/src/auto_research/sandbox/analyst_env.sh
+# MCP servers to expose to analyst workers alongside TOOL_MANIFEST tools.
+# Each entry: {name, command, args}.  Omit or leave empty to use only the
+# built-in server (bash_exec, list_dir, read_file).
+mcp_servers: []

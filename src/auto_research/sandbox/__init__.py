@@ -1,5 +1,6 @@
-"""Sandbox execution, tool registry, and run workspace for research_toolkit."""
+"""Sandbox execution, tool registry, MCP client, and run workspace for research_toolkit."""
 
+from auto_research.sandbox.mcp_client import MCPToolClient
 from auto_research.sandbox.merge_flow import propose_and_pr
 from auto_research.sandbox.persistent import PersistentSandbox
 from auto_research.sandbox.registry import ToolkitRegistry, ToolSpec
@@ -14,6 +15,7 @@ from auto_research.sandbox.workspace import (
 )
 
 __all__ = [
+    "MCPToolClient",
     "PersistentSandbox",
     "ToolkitRegistry",
     "ToolSpec",

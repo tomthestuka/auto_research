@@ -17,7 +17,13 @@ class ToolCallRequest(MessageModel):
     """A structured request for a tool action that the sandbox may later execute."""
 
     requested_by: NonEmptyStr
-    kind: NonEmptyStr
+    kind: NonEmptyStr = Field(
+        description=(
+            "Exact tool kind string from the catalogue — e.g. "
+            "'mcp.builtin.bash_exec' or 'research_toolkit.xspec_utils.xspec_fit'. "
+            "Never shorten or guess; copy verbatim from the catalogue."
+        )
+    )
     purpose: NonEmptyStr
     command: str | None = None
     arguments: dict[str, str] = Field(default_factory=dict)

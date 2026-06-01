@@ -19,6 +19,8 @@ dependencies:
   - arxiv>=2.1
   - ads>=0.12
   - tavily-python>=0.5
+  # MCP client
+  - mcp>=1.27
   # tests
   - pytest>=8
   # langgraph-cli is not on conda-forge; everything else above is.

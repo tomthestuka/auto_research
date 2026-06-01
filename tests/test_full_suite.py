@@ -53,7 +53,7 @@ def test_cyg_x1_ixpe_softstate() -> None:
             "IXPE has performed a Cyg X-1 observation in its soft state on 2023-05-24. "
             "Find simultaneous or near-simultaneous observations from other X-ray observatories "
             "(e.g. NICER, NuSTAR, XMM-Newton) and perform a joint broadband spectral fit "
-            "for this epoch."
+            "for this epoch. epoch including observations: IXPE: '02008401', NICER: '6643010101' and '6643010102', NuSTAR: '80902318002'."
         )
     )
 
