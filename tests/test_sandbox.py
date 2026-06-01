@@ -1,19 +1,17 @@
-"""Deterministic tests for sandbox/runner.py, sandbox/registry.py, and sandbox/merge_flow.py."""
+"""Deterministic tests for sandbox/runner.py, sandbox/registry.py, sandbox/merge_flow.py,
+and AnalystWorkerAgent.execute_tools() dispatch/retry routing."""
 
 from __future__ import annotations
 
 import asyncio
-import sys
 from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from auto_research.sandbox.merge_flow import propose_and_pr
 from auto_research.sandbox.registry import ToolkitRegistry
 from auto_research.sandbox.runner import run_tool
-from auto_research.schemas import ToolCallRequest
+from auto_research.schemas import AnalysisTask, ToolCallRequest
 from auto_research.schemas.tools import ToolResult
 
 
@@ -209,184 +207,170 @@ class TestMergeFlowStub:
 
 
 # ---------------------------------------------------------------------------
-# Graph routing (error-feedback routing logic, no LLM)
+# execute_tools() dispatch + retry routing (no LLM; fake registry/sandbox)
 # ---------------------------------------------------------------------------
 
-class TestGraphToolRouting:
-    """Verify tool_dispatch_node routing logic with mocked workers."""
+class _FakeSandbox:
+    """Records dispatches; result dicts come from injectable callables."""
 
-    def test_unknown_tool_produces_unavailable_result(self, tmp_path: Path) -> None:
-        """tool_dispatch_node: unknown tool → ToolResult exit_code 127 in tool_results."""
-        from auto_research.graph.builder import build_graph
-        from auto_research.schemas import ResearchRequest, AnalysisTask
+    def __init__(self, *, mcp_fn=None, tool_fn=None) -> None:
+        self.is_alive = True
+        self.mcp_calls: list[tuple[str, dict]] = []
+        self.tool_calls: list[tuple[str, str, dict]] = []
+        self._mcp_fn = mcp_fn or (lambda kind, args: {"exit_code": 0, "stdout": "", "stderr": ""})
+        self._tool_fn = tool_fn or (lambda module, fn, args: {"exit_code": 0, "stdout": "", "stderr": ""})
 
-        reg = _make_registry(tmp_path, manifest={})  # empty: all tools unknown
+    async def call_mcp_tool(self, kind, args, *, timeout_s=None):
+        self.mcp_calls.append((kind, dict(args)))
+        return self._mcp_fn(kind, args)
 
-        # Stub worker that requests a tool the registry doesn't know.
-        class StubWorker:
-            async def analyze(self, task: Any, *, peer_reports: Any = ()) -> Any:
-                from auto_research.schemas import AnalystReport
-                return AnalystReport(summary="stub", findings=[])
+    async def call_tool(self, module, fn, args, *, timeout_s=None):
+        self.tool_calls.append((module, fn, dict(args)))
+        return self._tool_fn(module, fn, args)
 
-            async def request_tools(self, task: Any) -> list[ToolCallRequest]:
-                return [ToolCallRequest(
-                    requested_by="worker",
-                    kind="nonexistent_tool",
-                    purpose="testing",
-                )]
 
-        class StubLead:
-            async def judge_convergence(self, task, reports, *, round_index, max_rounds):
-                from auto_research.schemas import ReviewVerdict
-                return ReviewVerdict(accepted=True, rationale="ok")
+class _FakeRegistry:
+    def __init__(self, known: set[str], mcp: set[str], schema: dict | None = None) -> None:
+        self._known = set(known)
+        self._mcp = set(mcp)
+        self._schema = schema or {}
 
-            async def adjudicate(self, task, reports):
-                from auto_research.schemas import AnalystReport
-                return AnalystReport(summary="adjudicated", findings=[])
+    def is_known(self, k): return k in self._known
+    def is_mcp(self, k): return k in self._mcp
+    def spec(self, k): return {"module": "mod", "fn": "fn", "args_schema": self._schema}
+    def tool_catalogue(self): return "(catalogue)"
 
-        class StubReviewer:
-            async def review(self, request, *, literature=(), report=None):
-                from auto_research.schemas import ReviewVerdict
-                return ReviewVerdict(accepted=True, rationale="ok")
 
-        class StubIO:
-            async def compose_search_strategy(self, request, *, follow_up=None):
-                from auto_research.schemas import SearchRequest
-                return SearchRequest(query="test")
+def _worker(sandbox):
+    from auto_research.agents.roles import AnalystWorkerAgent
+    w = AnalystWorkerAgent(model=object(), available_toolkits=[])
+    w.sandbox = sandbox
+    w.memory_path = None
+    return w
 
-            async def search(self, request):
-                return []
 
-            async def ingest_results(self, results):
-                pass
+def _script_requests(worker, batches: list[list[ToolCallRequest]]) -> None:
+    """Make worker.request_tools() yield successive batches, then []."""
+    state = {"i": 0}
 
-        class StubRetrieval:
-            async def text_search(self, query, *, limit=10):
-                return []
+    async def rt(task):
+        i = state["i"]
+        state["i"] += 1
+        return list(batches[i]) if i < len(batches) else []
 
-        import asyncio
+    worker.request_tools = rt
 
-        async def _run():
-            graph = build_graph(
-                reviewer=StubReviewer(),
-                io_agent=StubIO(),
-                retrieval=StubRetrieval(),
-                workers=[StubWorker()],
-                lead=StubLead(),
-                max_iterations=1,
-                registry=reg,
-                tool_retry_cap=1,
-            )
-            state = await graph.ainvoke({
-                "request": ResearchRequest(question="test"),
-                "literature": [],
-                "report": None,
-                "verdict": None,
-                "lit_iterations": 0,
-                "analysis_iterations": 0,
-                "max_iterations": 1,
-                "tool_results": [],
-                "tool_queue": [],
-            })
-            return state
 
-        final = asyncio.run(_run())
-        tool_results: list[ToolResult] = final.get("tool_results", [])
-        unavailable = [r for r in tool_results if r.exit_code == 127]
-        assert len(unavailable) == 1
-        assert "nonexistent_tool" in unavailable[0].tool_name
+class TestExecuteToolsDispatch:
+    """Routing/retry behavior of AnalystWorkerAgent.execute_tools()."""
+
+    def test_command_field_forwarded(self, tmp_path: Path) -> None:
+        """The ToolCallRequest.command field is merged into args for shell tools."""
+        def mcp_fn(kind, args):
+            ok = "command" in args
+            return {"exit_code": 0 if ok else 1,
+                    "stdout": args.get("command", ""),
+                    "stderr": "" if ok else "command Field required"}
+
+        sb = _FakeSandbox(mcp_fn=mcp_fn)
+        w = _worker(sb)
+        reqs = [ToolCallRequest(requested_by="w", kind="mcp.builtin.bash_exec",
+                                purpose="p", command="echo hi", arguments={})]
+        _script_requests(w, [reqs])
+        reg = _FakeRegistry(known={"mcp.builtin.bash_exec"}, mcp={"mcp.builtin.bash_exec"})
+
+        results = asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=3))
+        assert sb.mcp_calls[0][1] == {"command": "echo hi"}
+        assert results[-1].exit_code == 0
+
+    def test_retry_reroutes_on_kind_change(self, tmp_path: Path) -> None:
+        """A retry returning a different kind is routed (and labelled) by that kind."""
+        sb = _FakeSandbox(
+            mcp_fn=lambda k, a: {"exit_code": 1, "stdout": "", "stderr": "fail"},
+            tool_fn=lambda m, f, a: {"exit_code": 0, "stdout": "loaded", "stderr": ""},
+        )
+        w = _worker(sb)
+        first = [ToolCallRequest(requested_by="w", kind="mcp.builtin.bash_exec",
+                                 purpose="p", arguments={})]
+        revised = [ToolCallRequest(requested_by="w", kind="tk.load_data",
+                                   purpose="p", arguments={"x": "1"})]
+        _script_requests(w, [first, revised])
+        reg = _FakeRegistry(known={"mcp.builtin.bash_exec", "tk.load_data"},
+                            mcp={"mcp.builtin.bash_exec"})
+
+        results = asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=3))
+        # The retried toolkit kind went to call_tool, never to the MCP transport.
+        assert len(sb.tool_calls) == 1
+        assert all(kind != "tk.load_data" for kind, _ in sb.mcp_calls)
+        assert any(r.tool_name == "tk.load_data" and r.exit_code == 0 for r in results)
+
+    def test_unknown_tool_returns_127(self, tmp_path: Path) -> None:
+        """An unknown kind yields exit_code 127 and is never dispatched to the sandbox."""
+        sb = _FakeSandbox()
+        w = _worker(sb)
+        reqs = [ToolCallRequest(requested_by="w", kind="nope_tool", purpose="p")]
+        _script_requests(w, [reqs])
+        reg = _FakeRegistry(known=set(), mcp=set())
+
+        results = asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=1))
+        assert len(results) == 1
+        assert results[0].exit_code == 127
+        assert "nope_tool" in results[0].tool_name
+        assert sb.mcp_calls == [] and sb.tool_calls == []
 
     def test_retry_cap_stops_loop(self, tmp_path: Path) -> None:
-        """tool_execution_node: retry loop stops at tool_retry_cap failures."""
-        from auto_research.sandbox.runner import run_tool as _run_tool
+        """A persistently failing tool is attempted exactly tool_retry_cap times."""
+        sb = _FakeSandbox(mcp_fn=lambda k, a: {"exit_code": 1, "stdout": "", "stderr": "fail"})
+        w = _worker(sb)
+        failing = [ToolCallRequest(requested_by="w", kind="mcp.builtin.bash_exec",
+                                   purpose="p", command="x")]
 
-        call_count = 0
+        # Worker re-requests the same failing tool on every retry.
+        async def rt(task):
+            return list(failing)
 
-        async def failing_run_tool(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            return ToolResult(
-                tool_name="fail_tool",
-                stdout="",
-                stderr="simulated failure",
-                exit_code=1,
-                elapsed_s=0.0,
-            )
+        w.request_tools = rt
+        reg = _FakeRegistry(known={"mcp.builtin.bash_exec"}, mcp={"mcp.builtin.bash_exec"})
 
-        # A worker that requests the same tool every time (even on error retry).
-        class RetryWorker:
-            async def analyze(self, task, *, peer_reports=()):
-                from auto_research.schemas import AnalystReport
-                return AnalystReport(summary="stub", findings=[])
+        cap = 2
+        results = asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=cap))
+        assert len(sb.mcp_calls) == cap
+        assert all(r.exit_code == 1 for r in results)
 
-            async def request_tools(self, task):
-                return [ToolCallRequest(
-                    requested_by="worker",
-                    kind="echo_tool",
-                    purpose="testing retry",
-                )]
+    def test_instrument_paths_autofilled_from_config(self, tmp_path: Path, monkeypatch) -> None:
+        """ixpe_path declared by the tool but omitted by the model is filled from config."""
+        import auto_research.agents.roles as roles
+        monkeypatch.setattr(roles, "_observation_path_args",
+                            lambda: {"ixpe_path": "/cfg/IXPE", "nustar_path": "/cfg/NuSTAR"})
 
-        class StubLead:
-            async def judge_convergence(self, task, reports, *, round_index, max_rounds):
-                from auto_research.schemas import ReviewVerdict
-                return ReviewVerdict(accepted=True, rationale="ok")
+        sb = _FakeSandbox()
+        w = _worker(sb)
+        reqs = [ToolCallRequest(requested_by="w", kind="tk.load_data",
+                                purpose="p", arguments={"epoch": "{}"})]  # no ixpe_path
+        _script_requests(w, [reqs])
+        # tool declares ixpe_path (and not nustar_path) in its schema
+        schema = {"properties": {"epoch": {}, "ixpe_path": {}}}
+        reg = _FakeRegistry(known={"tk.load_data"}, mcp=set(), schema=schema)
 
-            async def adjudicate(self, task, reports):
-                from auto_research.schemas import AnalystReport
-                return AnalystReport(summary="adjudicated", findings=[])
+        asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=1))
+        _, _, args = sb.tool_calls[0]
+        assert args["ixpe_path"] == "/cfg/IXPE"   # injected from config
+        assert "nustar_path" not in args           # not declared by tool → not injected
 
-        class StubReviewer:
-            async def review(self, request, *, literature=(), report=None):
-                from auto_research.schemas import ReviewVerdict
-                return ReviewVerdict(accepted=True, rationale="ok")
+    def test_model_supplied_path_not_overridden(self, tmp_path: Path, monkeypatch) -> None:
+        """A path the model explicitly supplies is respected (config only fills gaps)."""
+        import auto_research.agents.roles as roles
+        monkeypatch.setattr(roles, "_observation_path_args",
+                            lambda: {"ixpe_path": "/cfg/IXPE"})
 
-        class StubIO:
-            async def compose_search_strategy(self, request, *, follow_up=None):
-                from auto_research.schemas import SearchRequest
-                return SearchRequest(query="test")
+        sb = _FakeSandbox()
+        w = _worker(sb)
+        reqs = [ToolCallRequest(requested_by="w", kind="tk.load_data",
+                                purpose="p", arguments={"ixpe_path": "/custom/IXPE"})]
+        _script_requests(w, [reqs])
+        reg = _FakeRegistry(known={"tk.load_data"}, mcp=set(),
+                            schema={"properties": {"ixpe_path": {}}})
 
-            async def search(self, request):
-                return []
-
-            async def ingest_results(self, results):
-                pass
-
-        class StubRetrieval:
-            async def text_search(self, query, *, limit=10):
-                return []
-
-        retry_cap = 2
-        reg = _make_registry(tmp_path)
-
-        import asyncio
-        from auto_research.graph.builder import build_graph
-        from auto_research.schemas import ResearchRequest
-
-        with patch("auto_research.graph.builder.run_tool", side_effect=failing_run_tool):
-            async def _run():
-                graph = build_graph(
-                    reviewer=StubReviewer(),
-                    io_agent=StubIO(),
-                    retrieval=StubRetrieval(),
-                    workers=[RetryWorker()],
-                    lead=StubLead(),
-                    max_iterations=1,
-                    registry=reg,
-                    tool_retry_cap=retry_cap,
-                )
-                return await graph.ainvoke({
-                    "request": ResearchRequest(question="test"),
-                    "literature": [],
-                    "report": None,
-                    "verdict": None,
-                    "lit_iterations": 0,
-                    "analysis_iterations": 0,
-                    "max_iterations": 1,
-                    "tool_results": [],
-                    "tool_queue": [],
-                })
-
-            asyncio.run(_run())
-
-        # Each attempt calls run_tool once; retry_cap attempts total.
-        assert call_count == retry_cap
+        asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=1))
+        _, _, args = sb.tool_calls[0]
+        assert args["ixpe_path"] == "/custom/IXPE"

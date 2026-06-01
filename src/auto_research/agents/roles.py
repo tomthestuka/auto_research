@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from collections.abc import Mapping, Sequence
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
@@ -13,6 +14,7 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from auto_research.agents.prompts import PromptRole, load_prompt
 from auto_research.consensus import IODebateToConverge
+from auto_research.observations import load_observations_config
 from auto_research.monitor import RunMonitor
 from auto_research.models import ModelGroupHandle, ModelHandle, ModelMessage, ModelResponse, resolve
 from auto_research.sandbox.workspace import append_memory, read_memory
@@ -484,44 +486,51 @@ class AnalystWorkerAgent(AgentRole):
             data={"requests": [r.model_dump(mode="json") for r in requests]},
         )
 
+        from auto_research.schemas.figures import FigureRef  # local to avoid circularity
+
         results: list[ToolResult] = []
         for req in requests:
-            if not registry.is_known(req.kind):
-                r = ToolResult(
-                    tool_name=req.kind,
-                    stdout="",
-                    stderr="Tool not registered in ToolkitRegistry",
-                    exit_code=127,
-                    elapsed_s=0.0,
-                )
-                results.append(r)
-                continue
-
-            is_mcp = registry.is_mcp(req.kind)
-            if not is_mcp:
-                spec = registry.spec(req.kind)
+            # Routing and argument resolution are recomputed every attempt from
+            # `current_req`, because the self-correction retry may return a request
+            # with a different kind that must route differently.
             current_req = req
             for attempt in range(tool_retry_cap):
+                kind = current_req.kind
+                # Merge the dedicated `command` field into the args so shell tools
+                # (e.g. mcp.builtin.bash_exec) receive it; the model puts shell
+                # commands there rather than in `arguments`.
+                args = dict(current_req.arguments)
+                if current_req.command and "command" not in args:
+                    args["command"] = current_req.command
+
                 t0 = time.monotonic()
-                if is_mcp:
+                if not registry.is_known(kind):
+                    raw = {
+                        "exit_code": 127,
+                        "stderr": f"Tool not registered in ToolkitRegistry: {kind}",
+                        "stdout": "",
+                    }
+                elif registry.is_mcp(kind):
                     raw = await self.sandbox.call_mcp_tool(
-                        current_req.kind,
-                        current_req.arguments,
-                        timeout_s=req.timeout_s,
+                        kind, args, timeout_s=current_req.timeout_s
                     )
                 else:
+                    spec = registry.spec(kind)
+                    # Auto-fill instrument data paths (ixpe_path/nicer_path/…) from
+                    # observations.yaml when the tool declares them and the model
+                    # omitted them, so a path is always supplied from config.
+                    schema_props = (spec.get("args_schema") or {}).get("properties", {})
+                    for arg_name, path in _observation_path_args().items():
+                        if arg_name in schema_props and not args.get(arg_name):
+                            args[arg_name] = path
                     raw = await self.sandbox.call_tool(
-                        spec["module"],
-                        spec["fn"],
-                        current_req.arguments,
-                        timeout_s=req.timeout_s,
+                        spec["module"], spec["fn"], args, timeout_s=current_req.timeout_s
                     )
                 elapsed = time.monotonic() - t0
 
-                from auto_research.schemas.figures import FigureRef  # local to avoid circularity
                 figures = [FigureRef.model_validate(f) for f in raw.get("figures", [])]
                 r = ToolResult(
-                    tool_name=req.kind,
+                    tool_name=kind,
                     stdout=raw.get("stdout", ""),
                     stderr=raw.get("stderr", ""),
                     exit_code=raw.get("exit_code", 1),
@@ -533,7 +542,7 @@ class AnalystWorkerAgent(AgentRole):
                 await self._record(
                     "analyst_worker.tools.result",
                     level=7,
-                    summary=f"Worker {self.worker_index + 1}: {req.kind} exit={r.exit_code} ({elapsed:.1f}s)",
+                    summary=f"Worker {self.worker_index + 1}: {kind} exit={r.exit_code} ({elapsed:.1f}s)",
                     data={"result": r.model_dump(mode="json"), "attempt": attempt + 1},
                 )
 
@@ -546,10 +555,11 @@ class AnalystWorkerAgent(AgentRole):
                     error_task = AnalysisTask(
                         question=task.question,
                         instructions=(
-                            f"Tool {req.kind} failed (attempt {attempt + 1}/{tool_retry_cap}).\n"
+                            f"Tool {kind} failed (attempt {attempt + 1}/{tool_retry_cap}).\n"
                             f"Error: {error_detail}\n"
                             "Revise your tool call. Use the EXACT kind string from the catalogue — "
-                            "do not shorten or guess tool names.\n\n"
+                            "do not shorten or guess tool names. For shell tools, put the command "
+                            "in the `command` field.\n\n"
                             f"{registry.tool_catalogue()}"
                         ),
                     )
@@ -654,6 +664,21 @@ def _select_model(group: ModelGroupHandle, model_name: str | None) -> ModelHandl
     if model_name is not None:
         return group.member(model_name)
     return group.handles[0]
+
+
+@lru_cache(maxsize=1)
+def _observation_path_args() -> dict[str, str]:
+    """Map tool path-args to configured observation roots, e.g. ``ixpe_path`` →
+    the IXPE ``obs_db_path`` from ``config/observations.yaml``.
+
+    Convention: mission ``<m>`` in observations.yaml fills a tool argument named
+    ``<m>_path``.  Used to auto-supply instrument data paths so the model need not.
+    """
+    try:
+        cfg = load_observations_config()
+    except Exception:  # noqa: BLE001
+        return {}
+    return {f"{mission}_path": str(c.obs_db_path) for mission, c in cfg.missions.items()}
 
 
 def _payload_text(payload: Mapping[str, Any], output: TypeAdapter[Any]) -> str:

@@ -137,8 +137,14 @@ Role wrappers:
     and injects its content into the payload before each LLM call.
   - `request_tools(task)` → `list[ToolCallRequest]` — structured tool requests, no execution.
   - `execute_tools(task, registry, *, tool_retry_cap=3)` → `list[ToolResult]` —
-    calls `request_tools()`, runs each via `sandbox.call_tool()`, appends bare
-    terminal recording to `memory_path`. Returns `[]` if `sandbox` is `None` or dead.
+    calls `request_tools()`, runs each via `sandbox.call_tool()` /
+    `sandbox.call_mcp_tool()`, appends a bare terminal recording to `memory_path`.
+    Returns `[]` if `sandbox` is `None` or dead. Per attempt it (a) merges the
+    `ToolCallRequest.command` field into the args, (b) recomputes routing from
+    `current_req.kind` so a retry that changes tool routes correctly, and
+    (c) for toolkit tools, auto-fills `<mission>_path` args declared in the tool
+    `args_schema` from `config/observations.yaml` (via `_observation_path_args()`)
+    when the model omitted them.
   - `is_alive` → `bool` — `True` when no sandbox attached; delegates to
     `sandbox.is_alive` otherwise. Once `False`, `execute_tools()` is a no-op.
 - `AnalystLeadAgent` — analyst lead wrapper. Method: `adjudicate()`.
@@ -184,3 +190,22 @@ Role wrappers:
   the contents into the payload for private memory continuity across debate rounds.
   `_append_tool_results_to_memory()` helper added.  `time` and `ToolResult`
   imported. `sandbox.workspace` imported for `append_memory` / `read_memory`.
+- 2026-06-01 — Fixed two dispatch bugs in `execute_tools()`: (1) the
+  `ToolCallRequest.command` field is now merged into the args passed to tools
+  (`args["command"] = current_req.command` when set), so shell tools like
+  `mcp.builtin.bash_exec` receive the command the model placed there instead of
+  an empty dict; (2) routing (`is_known` / `is_mcp` / `spec`) and the recorded
+  `tool_name` / `timeout_s` are now recomputed per attempt from `current_req`,
+  so a self-correction retry that returns a different `kind` is routed and
+  labelled correctly (previously a retried toolkit kind was still sent to the
+  MCP transport, yielding "MCP tool not found").
+- 2026-06-01 — `execute_tools()` now auto-fills instrument data-path arguments
+  (`ixpe_path`/`nicer_path`/`nustar_path`) for toolkit tools from
+  `config/observations.yaml` via the cached `_observation_path_args()` helper —
+  only when the tool's `args_schema` declares the arg and the model left it
+  empty (model-supplied paths are respected). Strengthened `prompts/analyst_worker.md`
+  with tool-argument discipline: use exact schema arg names (no aliases like
+  `cmd` for `command`), supply all required args, and note that instrument paths
+  are auto-filled. Added `TestExecuteToolsDispatch` deterministic tests in
+  `tests/test_sandbox.py` covering command-forward, retry-reroute, unknown-tool,
+  retry-cap, and obs-path injection.
