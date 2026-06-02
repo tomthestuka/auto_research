@@ -395,3 +395,11 @@ writes the tool, lead reviews, human approves merge on GitHub.
   `_configure_xspec_once()` boot config (alongside `Fit.query = "no"` and
   `Xset.allowPrompting = False`) to lower XSPEC console verbosity and reduce
   captured-output volume per tool call.
+- 2026-06-01 — MCP builtin server moved to the astropy env. `MCPToolClient`
+  now passes `server.get("env")` to `StdioServerParameters`. `runtime.py`
+  gains `_builtin_server_config()`: when `mcp_servers` is empty/unset, builds
+  the default builtin server config using `{analyze_env}/bin/python`, overlays
+  the HEASoft/CALDB env from `analyze_ini_sh` (via `_source_ini_env`), and
+  sets `PYTHONPATH=toolkit_root` and `PATH` with the astropy bin first.
+  Result: `bash_exec` commands can `import astropy, xspec_utils` and inline
+  Python runs in the same env as the REPL. Verified end-to-end.

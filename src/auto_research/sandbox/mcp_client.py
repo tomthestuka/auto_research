@@ -55,6 +55,7 @@ class MCPToolClient:
             params = StdioServerParameters(
                 command=server["command"],
                 args=server.get("args", []),
+                env=server.get("env"),
             )
             read, write = await self._stack.enter_async_context(stdio_client(params))
             session = await self._stack.enter_async_context(ClientSession(read, write))

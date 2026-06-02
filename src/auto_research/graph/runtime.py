@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -52,6 +53,47 @@ def load_orchestration_config(path: str | Path = DEFAULT_ORCHESTRATION_CONFIG) -
     """Load iteration caps from orchestration.yaml."""
     with Path(path).open("r", encoding="utf-8") as stream:
         return yaml.safe_load(stream) or {}
+
+
+def _builtin_server_config(
+    analyze_env: Path | None,
+    analyze_ini_sh: str | None,
+    toolkit_root: Path,
+) -> dict:
+    """Build the default builtin-MCP-server config dict.
+
+    When ``analyze_env`` is set, the server subprocess is spawned from that
+    env's Python interpreter so ``bash_exec`` commands can import astropy and
+    xspec_utils.  The subprocess environment is populated from the analyst init
+    script (HEADAS, CALDB, LD_LIBRARY_PATH) plus PYTHONPATH=toolkit_root so the
+    research_toolkit packages are importable without the REPL.
+    """
+    from auto_research.sandbox.builtin_server import __file__ as _bs_file
+    from auto_research.sandbox.runner import _source_ini_env
+
+    builtin_path = str(Path(_bs_file).resolve())
+    if analyze_env:
+        python = str(analyze_env / "bin" / "python")
+    else:
+        import sys
+        python = sys.executable
+
+    # Inherit current process env, overlay HEASoft/CALDB vars from ini script,
+    # then set PYTHONPATH so toolkit packages are importable.
+    env = dict(os.environ)
+    if analyze_ini_sh:
+        env.update(_source_ini_env(analyze_ini_sh))
+    env["PYTHONPATH"] = str(toolkit_root)
+    # Ensure the analysis env's bin is first on PATH for `python` resolution.
+    if analyze_env:
+        env["PATH"] = str(analyze_env / "bin") + os.pathsep + env.get("PATH", "")
+
+    return {
+        "name": "builtin",
+        "command": python,
+        "args": [builtin_path],
+        "env": env,
+    }
 
 
 def _default_graph():
@@ -200,8 +242,12 @@ async def run_research(
 
     registry = ToolkitRegistry(toolkit_root)
 
-    # Start MCP client and index its tools into the registry
+    # Start MCP client and index its tools into the registry.
+    # When mcp_servers is empty/unset, build the default builtin-server config
+    # using the analysis env python so bash_exec can import astropy/xspec_utils.
     mcp_server_configs: list[dict] | None = orch.get("mcp_servers") or None
+    if not mcp_server_configs:
+        mcp_server_configs = [_builtin_server_config(analyze_env, analyze_ini_sh, toolkit_root)]
     mcp_client = MCPToolClient(servers=mcp_server_configs)
     await mcp_client.start()
     registry.load_mcp(mcp_client)
