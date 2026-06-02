@@ -34,6 +34,17 @@ _REPL_SCRIPT = textwrap.dedent("""
         except (json.JSONDecodeError, ValueError):
             return v
 
+    def _configure_xspec_once():
+        \"\"\"Make the REPL's XSPEC session non-interactive at subprocess boot.\"\"\"
+        try:
+            from xspec import Fit, Xset
+        except Exception:
+            return
+        Fit.query = "no"
+        Xset.allowPrompting = False
+
+    _configure_xspec_once()
+
     # Private duplicate of the real stdout — used ONLY for JSON protocol lines.
     _proto = os.fdopen(os.dup(1), "w")
 
@@ -100,9 +111,9 @@ class PersistentSandbox:
     all debate rounds and rework cycles within one research run.  The subprocess
     is started once via ``start()`` and torn down via ``shutdown()``.
 
-    If the subprocess exits unexpectedly ``is_alive`` becomes ``False`` and
-    ``call_tool()`` immediately returns an error result — the worker stops
-    requesting tools for the rest of the session.
+    If the subprocess exits unexpectedly or times out, ``call_tool()`` returns
+    the non-zero result for that call and starts a fresh REPL for subsequent
+    calls. The replacement process has a clean XSPEC session.
     """
 
     def __init__(
@@ -163,6 +174,34 @@ class PersistentSandbox:
         )
         self._alive = True
 
+    async def restart(self) -> None:
+        """Kill any current subprocess and spawn a fresh REPL."""
+        await self._kill_current()
+        await self.start()
+
+    async def _kill_current(self) -> None:
+        """Terminate the current subprocess, if any."""
+        proc = self._proc
+        if proc is None:
+            self._alive = False
+            return
+        try:
+            if proc.returncode is None:
+                proc.kill()
+                await asyncio.wait_for(proc.wait(), timeout=5)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            self._alive = False
+
+    async def _restart_for_failure(self) -> str:
+        """Restart after a tool-call failure; return a suffix on restart failure."""
+        try:
+            await self.restart()
+        except Exception as exc:  # noqa: BLE001
+            return f"; sandbox restart failed: {exc}"
+        return ""
+
     async def call_tool(
         self,
         module: str,
@@ -174,11 +213,14 @@ class PersistentSandbox:
         """Send one tool call to the persistent subprocess and return the result dict.
 
         Returns a dict with at minimum ``exit_code``, ``stdout``, and ``stderr``.
-        On timeout or subprocess death ``exit_code`` is non-zero and ``is_alive``
-        becomes ``False``.
+        On timeout or subprocess death ``exit_code`` is non-zero and the sandbox
+        attempts to spawn a replacement subprocess for subsequent calls.
         """
         if not self.is_alive:
-            return {"exit_code": 1, "stderr": "sandbox is not alive", "stdout": ""}
+            try:
+                await self.start()
+            except Exception as exc:  # noqa: BLE001
+                return {"exit_code": 1, "stderr": f"sandbox restart failed: {exc}", "stdout": ""}
         timed = timeout_s if timeout_s is not None else self._default_timeout_s
         cmd = json.dumps({"module": module, "fn": fn, "args": args}) + "\n"
         assert self._proc is not None
@@ -190,21 +232,19 @@ class PersistentSandbox:
                 timeout=timed,
             )
             if not line:
-                self._alive = False
+                restart_error = await self._restart_for_failure()
                 return {
                     "exit_code": 1,
-                    "stderr": "sandbox subprocess exited unexpectedly",
+                    "stderr": "sandbox subprocess exited unexpectedly" + restart_error,
                     "stdout": "",
                 }
             return json.loads(line.decode())
         except asyncio.TimeoutError:
-            self._alive = False
-            self._proc.kill()
-            await self._proc.communicate()
-            return {"exit_code": 124, "stderr": f"Timed out after {timed}s", "stdout": ""}
+            restart_error = await self._restart_for_failure()
+            return {"exit_code": 124, "stderr": f"Timed out after {timed}s{restart_error}", "stdout": ""}
         except Exception as exc:  # noqa: BLE001
-            self._alive = False
-            return {"exit_code": 1, "stderr": str(exc), "stdout": ""}
+            restart_error = await self._restart_for_failure()
+            return {"exit_code": 1, "stderr": str(exc) + restart_error, "stdout": ""}
 
     async def call_mcp_tool(
         self,

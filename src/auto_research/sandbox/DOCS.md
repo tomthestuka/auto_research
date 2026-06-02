@@ -48,10 +48,10 @@ the next debate round so workers can reason from each other's results.  The
 error-feedback retry loop (up to `tool_retry_cap` attempts) lives inside
 `AnalystWorkerAgent.execute_tools()`.
 
-**`is_alive` flag:** if a worker's subprocess exits unexpectedly, `is_alive`
-becomes `False` and `execute_tools()` returns immediately — the worker
-continues analyzing (via memory) but stops calling tools for the rest of the
-session.
+**`is_alive` flag and recovery:** if a worker's subprocess exits unexpectedly
+or times out, the failing `call_tool()` returns a non-zero result and
+`PersistentSandbox` starts a fresh REPL before subsequent tool calls.  The new
+process has a clean XSPEC session, so analysts must reload any state they need.
 
 **MCP tool path:** alongside `TOOL_MANIFEST` tools, analyst workers may call
 tools served by stdio MCP servers.  `builtin_server.py` runs as a subprocess
@@ -117,18 +117,25 @@ class PersistentSandbox:
         default_timeout_s: int = 300,
     ) -> None: ...
     async def start(self) -> None          # idempotent; spawn the REPL subprocess
+    async def restart(self) -> None        # kill current subprocess and spawn fresh
     async def call_tool(
         self, module, fn, args, *, timeout_s=None
     ) -> dict                              # send one call; return result dict
     async def shutdown(self) -> None       # graceful stop; kill if needed
     @property
-    def is_alive(self) -> bool             # False after death; not recoverable
+    def is_alive(self) -> bool             # True while current subprocess is running
 ```
 
 - Spawns one long-lived subprocess that runs a JSON-line REPL loop.  The subprocess
   stays alive across all debate rounds and rework cycles; XSPEC session state persists.
+- At subprocess boot, the REPL imports PyXSPEC when available and sets
+  `Fit.query = "no"` and `Xset.allowPrompting = False` exactly once for that
+  process.  This matches the reference notebook behavior and prevents XSPEC
+  file-name prompts from blocking the JSON protocol.
 - `call_tool()` sends `{"module": ..., "fn": ..., "args": {...}}\n` to stdin and reads
-  one JSON response line from stdout.  On timeout or death `is_alive` becomes `False`.
+  one JSON response line from stdout.  On timeout or death it kills the current
+  process, starts a replacement, and returns the failed result for the call that
+  triggered recovery.
 - **Protocol integrity:** the REPL keeps a private duplicate of the original stdout fd
   for JSON responses only, and redirects fd 1/2 to a capture file (OS level) for the
   duration of each tool call.  This prevents tool/C-level console output (XSPEC,
@@ -237,7 +244,22 @@ async def run_tool(
 ```
 
 Not used by the main orchestration loop (replaced by `PersistentSandbox`).
-Kept for standalone testing and ad-hoc tool invocation.
+Kept for standalone testing and ad-hoc tool invocation.  Its public API remains
+async, but internally it uses bounded synchronous `subprocess.run()` for stable
+stdin/timeout behavior in the local Python environment.
+
+### Isolation test
+
+`AUTO_RESEARCH_LIVE_SANDBOX_ISOLATION_TESTS=1 pytest tests/test_sandbox_isolation.py -s`
+starts two `PersistentSandbox` instances with the configured analyst env, loads
+IXPE obsid `02008401` in the first subprocess, and verifies that
+`xspec_status()` in the second subprocess reports an empty XSPEC session. Logs
+are written under `logs/dev/step-11/`.
+
+`AUTO_RESEARCH_LIVE_SANDBOX_POLICY_TESTS=1 pytest tests/test_live_sandbox_policy.py -s`
+starts two configured analyst subprocesses in the live HEASoft/PyXSPEC
+environment and verifies both boot with `Fit.query == "no"` and
+`Xset.allowPrompting is False`.
 
 ### `propose_and_pr` (Phase 2 stub)
 
@@ -275,9 +297,10 @@ writes the tool, lead reviews, human approves merge on GitHub.
 - `PersistentSandbox(toolkit_root, workdir, *, analyze_env, analyze_ini_sh, default_timeout_s)` —
   long-lived REPL subprocess per analyst worker.
   - `.start()` — spawn; idempotent.
+  - `.restart()` — kill the current subprocess, if any, and spawn a fresh REPL.
   - `.call_tool(module, fn, args, *, timeout_s)` → `dict` — one tool call.
   - `.shutdown()` — graceful stop.
-  - `.is_alive` → `bool` — False after death; not recoverable.
+  - `.is_alive` → `bool` — True while the current subprocess is running.
 - `create_run_workspace(run_id, agent_keys)` → `dict[str, Path]` — create workspace folders.
 - `memory_path(run_id, agent_key)` → `Path` — path to agent's `memory.md`.
 - `figures_dir(run_id, agent_key)` → `Path` — path to agent's `figures/` dir.
@@ -355,3 +378,15 @@ writes the tool, lead reviews, human approves merge on GitHub.
   `builtin_server.py`: the built-in server still exposes `bash_exec` alongside
   `list_dir` and `read_file`. Restricting MCP to read-only filesystem traversal
   remains the separate P2 hardening task.
+- 2026-06-01 — Added `tests/test_sandbox_isolation.py`, an opt-in live
+  subprocess-isolation test for the remaining P1 audit. It mirrors the analysis
+  team's persistent sandbox setup, loads IXPE `02008401` in one subprocess, and
+  asserts a second subprocess's `xspec_status()` returns an empty XSPEC session.
+- 2026-06-01 — `PersistentSandbox` now configures PyXSPEC once at REPL boot
+  (`Fit.query = "no"`, `Xset.allowPrompting = False`) to match the reference
+  notebook and prevent interactive XSPEC prompts from blocking the protocol.
+  Timed-out or unexpectedly exited REPLs are replaced with a fresh subprocess
+  before subsequent tool calls.  Added deterministic restart/policy tests plus
+  `tests/test_live_sandbox_policy.py` for the live HEASoft policy check.  The
+  legacy `run_tool()` one-shot runner now uses bounded synchronous
+  `subprocess.run()` internally for stable timeout behavior.

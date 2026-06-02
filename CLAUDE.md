@@ -395,6 +395,22 @@ documented stubs.
 - 2026-06-01 — Corrected MCP documentation to match current code: the built-in
   MCP server still exposes `bash_exec`, `list_dir`, and `read_file`. The
   read-only MCP restriction remains the separate P2 TODO.
+- 2026-06-01 — Marked the second §TODO P1 (analyst workers own subprocesses
+  exclusively) **Done**: added `tests/test_sandbox_isolation.py`, which starts
+  two configured `PersistentSandbox` subprocesses, loads IXPE `02008401` in the
+  first, and verifies `xspec_status()` in the second reports an empty XSPEC
+  session. Verified with
+  `AUTO_RESEARCH_LIVE_SANDBOX_ISOLATION_TESTS=1 conda run -n auto_research pytest tests/test_sandbox_isolation.py -s`.
+- 2026-06-01 — Persistent sandbox recovery hardened: each REPL subprocess now
+  configures PyXSPEC once at boot (`Fit.query='no'`,
+  `Xset.allowPrompting=False`) to match the Cyg X-1 reference notebook and
+  avoid interactive XSPEC file prompts.  Timed-out/dead subprocesses are killed
+  and replaced inside the same per-worker `PersistentSandbox`; subsequent tool
+  calls run in a clean XSPEC session.  Added deterministic restart/policy tests
+  plus `tests/test_live_sandbox_policy.py` for live HEASoft policy verification.
+  Verified the full NuSTAR+NICER+IXPE epoch (`80902318002`,
+  `6643010101`/`6643010102`, `02008401`) loads successfully in the patched
+  persistent sandbox.
 
 ---
 
@@ -406,7 +422,7 @@ Priorities: **P1** = blocking correctness · **P2** = important reliability · *
 | Priority | Status | What | Checkpoint |
 |---|---|---|---|
 | P1 | Done | **Fix analyst sandbox env + smoke test** — `analyst_env.sh` created; `analyze_ini_sh` repointed; `tests/test_smoke.py` added (IXPE 02008401 load + MCP list_dir + xspec_status; env-health criteria: key tools succeed ≥once, no infra-signature errors). Along the way fixed: `PersistentSandbox` protocol corruption (fd-redirect), `xspec_status` div-by-zero, `execute_tools` command-forward + per-attempt routing, and obs-path auto-fill from `observations.yaml`; strengthened `prompts/analyst_worker.md` arg discipline. | `test_smoke.py` passes; all four tool paths succeed; tool-call friction reduced to a single benign command timeout. |
-| P1 | Todo | **Analyst workers own subprocesses exclusively** — XSPEC kernel processes are singletons; shared sandboxes corrupt state. Audit `DebateToConverge` and `run_research()`: each worker gets exactly one `PersistentSandbox` instance (started once, torn down in `finally`); no sandbox shared between workers; `is_alive` guard prevents double-start. | Deterministic isolation test passes; two workers running in parallel do not interfere. |
+| P1 | Done | **Analyst workers own subprocesses exclusively** — XSPEC kernel processes are singletons; shared sandboxes corrupt state. `run_research()` assigns one `PersistentSandbox` per `AnalystWorkerAgent`, and tears all down in `finally`; each sandbox owns at most one live REPL subprocess at a time and may replace it after timeout/death. Added `tests/test_sandbox_isolation.py` to start two configured sandboxes, load IXPE `02008401` in one, and verify `xspec_status()` in the other reports an empty XSPEC session. | Isolation test passes; two worker subprocesses do not share XSPEC state. |
 | P2 | Done | **Refactor `xspec_utils`: separate human and AI interfaces** — `xspec_utils.skills` sub-package created alongside human `lib/`. `skills/__init__.py` is pure-data `TOOL_MANIFEST` (no xspec import). `skills/session.py` holds xspec wrappers (`run_fit`, `xspec_status`, `plot_fit`, `plot_iqu`). Human `lib/*.py` and `*/*.sh` untouched. Registry discovers 8 tools. | `ToolkitRegistry` discovers 8 tools in orchestration env with no xspec import. |
 | P2 | Todo | **Restrict MCP tool usage to file-tree exploration only** — Runtime agents must not use MCP for network access, shell execution, or writes. Restrict registered MCP tools to read-only filesystem traversal (directory listing, path/metadata reading). Enforce via prompt instructions and/or MCP tool registration filter at role-init time. | Agent prompt tests confirm no network/write MCP tools are reachable; file-tree MCP calls succeed. |
 | P3 | Todo | **Implement consensus for the librarian IO ingest team** — IO ingest currently runs without a debate loop. Activate `IODebateToConverge` (stub exists in `consensus.py`): multiple IO workers each produce abstract/keyword extractions; IO lead judges convergence; hard cap at 3 rounds. Replace `evaluate_search_results()` stub (`accepted=True`) with a real IO-lead LLM call. | IO consensus test converges (or hits cap and lead adjudicates) on a sample ingest task; `test_full_suite.py` passes. |

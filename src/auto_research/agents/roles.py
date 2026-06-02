@@ -472,8 +472,10 @@ class AnalystWorkerAgent(AgentRole):
         Results are appended to ``memory_path`` as a bare terminal recording.
         Returns an empty list when the sandbox is dead or not configured.
         """
-        if not self.is_alive or self.sandbox is None:
+        if self.sandbox is None:
             return []
+        if not self.sandbox.is_alive:
+            await self.sandbox.start()
 
         requests: list[ToolCallRequest] = await self.request_tools(task)
         if not requests:

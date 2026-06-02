@@ -139,14 +139,15 @@ Role wrappers:
   - `execute_tools(task, registry, *, tool_retry_cap=3)` → `list[ToolResult]` —
     calls `request_tools()`, runs each via `sandbox.call_tool()` /
     `sandbox.call_mcp_tool()`, appends a bare terminal recording to `memory_path`.
-    Returns `[]` if `sandbox` is `None` or dead. Per attempt it (a) merges the
+    Returns `[]` if `sandbox` is `None`; if an attached sandbox is not alive it
+    starts a replacement before requesting tools. Per attempt it (a) merges the
     `ToolCallRequest.command` field into the args, (b) recomputes routing from
     `current_req.kind` so a retry that changes tool routes correctly, and
     (c) for toolkit tools, auto-fills `<mission>_path` args declared in the tool
     `args_schema` from `config/observations.yaml` (via `_observation_path_args()`)
     when the model omitted them.
   - `is_alive` → `bool` — `True` when no sandbox attached; delegates to
-    `sandbox.is_alive` otherwise. Once `False`, `execute_tools()` is a no-op.
+    `sandbox.is_alive` otherwise.
 - `AnalystLeadAgent` — analyst lead wrapper. Method: `adjudicate()`.
   Methods: `judge_convergence()`, `review_tool_requests()`.
 
@@ -212,3 +213,9 @@ Role wrappers:
 - 2026-06-01 — Synced the prompt-loader contract with the current four runtime
   LLM roles. The former librarian searcher role remains replaced by pure-Python
   retrieval tools.
+- 2026-06-01 — `AnalystWorkerAgent.execute_tools()` now asks an attached
+  `PersistentSandbox` to start a replacement if the current subprocess is not
+  alive, instead of treating the worker as permanently tool-disabled for the
+  rest of the run.  This pairs with `PersistentSandbox` timeout/death recovery:
+  the failed tool call is still recorded as non-zero, but later calls can run in
+  a clean XSPEC subprocess.

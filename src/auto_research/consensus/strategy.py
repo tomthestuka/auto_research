@@ -186,7 +186,8 @@ class DebateToConverge:
                 all_results.append([])
                 continue
             alive = getattr(worker, "is_alive", True)
-            if not alive:
+            sandbox = getattr(worker, "sandbox", None)
+            if not alive and sandbox is None:
                 all_results.append([])
                 continue
             results: list[ToolResult] = await worker.execute_tools(  # type: ignore[attr-defined]

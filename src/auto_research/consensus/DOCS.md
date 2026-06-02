@@ -69,6 +69,9 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   execution after each round of `analyze()` calls via
   `AnalystWorkerAgent.execute_tools()`.  Per-worker results are appended to
   `memory_path` and a truncated shared summary is injected into task instructions.
+  Workers with an attached restartable sandbox are allowed through to
+  `execute_tools()` even if the previous subprocess died; the worker/sandbox
+  layer starts a clean replacement.
   Method: `run(workers, lead, task)` → `AnalystReport`.
   Internal: `_run_tools(workers, task)` → augmented `AnalysisTask`.
 - `IOAbstractionWorkerLike` — protocol for IO abstraction workers. Method:
@@ -100,3 +103,6 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   results appended to private `memory_path`, and a truncated shared summary is
   injected into task instructions for the next round.  `_peer_tool_summary()`
   helper added.  `ToolResult` imported from schemas.
+- 2026-06-01 — `_run_tools()` now allows workers with attached sandboxes to
+  reach `execute_tools()` even when the previous subprocess is dead, so
+  `PersistentSandbox` can start a clean replacement after timeout/death.

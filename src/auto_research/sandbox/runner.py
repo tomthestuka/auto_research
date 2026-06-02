@@ -100,33 +100,31 @@ async def run_tool(
     env = {**base_env, "PYTHONPATH": pythonpath}
 
     t0 = time.monotonic()
+    stdin_bytes = json.dumps(args).encode()
     try:
-        proc = await asyncio.create_subprocess_exec(
-            python_exec, "-c", runner_src,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        completed = subprocess.run(
+            [python_exec, "-c", runner_src],
+            input=stdin_bytes,
+            capture_output=True,
             env=env,
             cwd=str(workdir),
+            timeout=timeout_s,
         )
-        stdin_bytes = json.dumps(args).encode()
-        try:
-            stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(stdin_bytes),
-                timeout=timeout_s,
-            )
-            exit_code = proc.returncode
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            elapsed = time.monotonic() - t0
-            return ToolResult(
-                tool_name=f"{module}.{fn}",
-                stdout="",
-                stderr=f"Timed out after {timeout_s}s",
-                exit_code=124,
-                elapsed_s=elapsed,
-            )
+        stdout_b = completed.stdout
+        stderr_b = completed.stderr
+        exit_code = completed.returncode
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.monotonic() - t0
+        stdout = (exc.stdout or b"").decode(errors="replace")
+        stderr = (exc.stderr or b"").decode(errors="replace")
+        message = f"Timed out after {timeout_s}s"
+        return ToolResult(
+            tool_name=f"{module}.{fn}",
+            stdout=stdout.strip(),
+            stderr=(stderr.strip() + "\n" + message).strip(),
+            exit_code=124,
+            elapsed_s=elapsed,
+        )
     except Exception as exc:  # noqa: BLE001
         elapsed = time.monotonic() - t0
         return ToolResult(

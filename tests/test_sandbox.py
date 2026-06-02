@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from auto_research.sandbox.merge_flow import propose_and_pr
+from auto_research.sandbox.persistent import PersistentSandbox
 from auto_research.sandbox.registry import ToolkitRegistry
 from auto_research.sandbox.runner import run_tool
 from auto_research.schemas import AnalysisTask, ToolCallRequest
@@ -192,6 +193,117 @@ class TestRunner:
 
 
 # ---------------------------------------------------------------------------
+# PersistentSandbox — persistent REPL lifecycle
+# ---------------------------------------------------------------------------
+
+class TestPersistentSandbox:
+    def test_xspec_noninteractive_policy_set_once_per_subprocess(self, tmp_path: Path) -> None:
+        """The REPL sets Fit.query / Xset.allowPrompting once at subprocess boot."""
+        (tmp_path / "xspec.py").write_text(
+            """
+class _Fit:
+    def __init__(self):
+        object.__setattr__(self, "sets", [])
+
+    def __setattr__(self, name, value):
+        if name == "query":
+            self.sets.append(value)
+        object.__setattr__(self, name, value)
+
+
+class _Xset:
+    def __init__(self):
+        object.__setattr__(self, "sets", [])
+
+    def __setattr__(self, name, value):
+        if name == "allowPrompting":
+            self.sets.append(value)
+        object.__setattr__(self, name, value)
+
+
+Fit = _Fit()
+Xset = _Xset()
+""",
+            encoding="utf-8",
+        )
+        (tmp_path / "probe.py").write_text(
+            """
+def status():
+    from xspec import Fit, Xset
+    return {
+        "fit_query": Fit.query,
+        "fit_sets": Fit.sets,
+        "allow_prompting": Xset.allowPrompting,
+        "allow_sets": Xset.sets,
+        "exit_code": 0,
+    }
+""",
+            encoding="utf-8",
+        )
+
+        async def run() -> tuple[dict, dict]:
+            sandbox = PersistentSandbox(toolkit_root=tmp_path, workdir=tmp_path)
+            await sandbox.start()
+            try:
+                first = await sandbox.call_tool("probe", "status", {})
+                second = await sandbox.call_tool("probe", "status", {})
+                return first, second
+            finally:
+                await sandbox.shutdown()
+
+        first, second = asyncio.run(run())
+
+        assert first["fit_query"] == "no"
+        assert first["fit_sets"] == ["no"]
+        assert first["allow_prompting"] is False
+        assert first["allow_sets"] == [False]
+        assert second["fit_sets"] == ["no"]
+        assert second["allow_sets"] == [False]
+
+    def test_restarts_after_timeout(self, tmp_path: Path) -> None:
+        """A timed-out REPL is killed and replaced before the next tool call."""
+        (tmp_path / "slow_tool.py").write_text(
+            """
+import time
+
+
+def sleep(secs=60):
+    time.sleep(secs)
+
+
+def ping():
+    return {"stdout": "pong", "exit_code": 0}
+""",
+            encoding="utf-8",
+        )
+
+        async def run() -> tuple[dict, int | None, int | None, dict, bool]:
+            sandbox = PersistentSandbox(toolkit_root=tmp_path, workdir=tmp_path)
+            await sandbox.start()
+            first_pid = sandbox._proc.pid if sandbox._proc else None
+            try:
+                timed_out = await sandbox.call_tool(
+                    "slow_tool", "sleep", {"secs": 60}, timeout_s=1
+                )
+                restarted_pid = sandbox._proc.pid if sandbox._proc else None
+                ping = await sandbox.call_tool("slow_tool", "ping", {}, timeout_s=5)
+                alive_after_ping = sandbox.is_alive
+                return timed_out, first_pid, restarted_pid, ping, alive_after_ping
+            finally:
+                await sandbox.shutdown()
+
+        timed_out, first_pid, restarted_pid, ping, alive_after_ping = asyncio.run(run())
+
+        assert timed_out["exit_code"] == 124
+        assert first_pid is not None
+        assert restarted_pid is not None
+        assert restarted_pid != first_pid
+        assert ping["exit_code"] == 0
+        assert ping["stdout"] == "pong"
+        assert alive_after_ping is True
+
+
+# ---------------------------------------------------------------------------
 # merge_flow — Phase 2 stub
 # ---------------------------------------------------------------------------
 
@@ -227,6 +339,17 @@ class _FakeSandbox:
     async def call_tool(self, module, fn, args, *, timeout_s=None):
         self.tool_calls.append((module, fn, dict(args)))
         return self._tool_fn(module, fn, args)
+
+
+class _RestartableFakeSandbox(_FakeSandbox):
+    def __init__(self) -> None:
+        super().__init__()
+        self.is_alive = False
+        self.starts = 0
+
+    async def start(self):
+        self.starts += 1
+        self.is_alive = True
 
 
 class _FakeRegistry:
@@ -374,3 +497,18 @@ class TestExecuteToolsDispatch:
         asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=1))
         _, _, args = sb.tool_calls[0]
         assert args["ixpe_path"] == "/custom/IXPE"
+
+    def test_dead_sandbox_is_started_before_tool_execution(self, tmp_path: Path) -> None:
+        """A rebootable dead sandbox is restarted instead of making tools a no-op."""
+        sb = _RestartableFakeSandbox()
+        w = _worker(sb)
+        reqs = [ToolCallRequest(requested_by="w", kind="tk.echo",
+                                purpose="p", arguments={"x": "1"})]
+        _script_requests(w, [reqs])
+        reg = _FakeRegistry(known={"tk.echo"}, mcp=set())
+
+        results = asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=1))
+
+        assert sb.starts == 1
+        assert len(sb.tool_calls) == 1
+        assert results[0].exit_code == 0

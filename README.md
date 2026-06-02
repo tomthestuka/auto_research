@@ -127,7 +127,7 @@ discipline as `DOCS.md`). Phase 2 items remain documented as deferred stubs in
 | 8 | Done | Agent roles: reviewer, librarian I/O, analyst worker, and analyst lead wrappers; local retrieval is pure Python. |
 | 9 | Done | Consensus: debate-to-converge strategy with cap 3 and lead adjudication. |
 | 10 | Done | Orchestration: LangGraph graph with capped paper-search and analysis-result feedback edges. |
-| 11 | Done | Sandbox & tool execution: `ToolkitRegistry` (manifest-based discovery), persistent per-worker `PersistentSandbox`, built-in MCP tools, and tool execution inside analyst consensus with capped error-feedback retries. `merge_flow.py` stub (Phase 2 → Claude Agent SDK). LangGraph Studio: `langgraph dev` exposes live graph state per node. |
+| 11 | Done | Sandbox & tool execution: `ToolkitRegistry` (manifest-based discovery), persistent per-worker `PersistentSandbox` with non-interactive XSPEC boot policy and timeout/death restart, built-in MCP tools, and tool execution inside analyst consensus with capped error-feedback retries. `merge_flow.py` stub (Phase 2 → Claude Agent SDK). LangGraph Studio: `langgraph dev` exposes live graph state per node. |
 | 12 | Done | Entry points & tests: importable monitored library entry, CLI, inspection notebook, and deterministic pytest coverage. |
 
 See `CLAUDE.md` §14 for checkpoints and deferred Phase 2 stubs.
