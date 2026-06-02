@@ -42,6 +42,7 @@ _REPL_SCRIPT = textwrap.dedent("""
             return
         Fit.query = "no"
         Xset.allowPrompting = False
+        Xset.chatter = 5
 
     _configure_xspec_once()
 
@@ -98,7 +99,7 @@ _REPL_SCRIPT = textwrap.dedent("""
             _cap.close()
         # Attach a truncated tail of captured console output for diagnosis.
         if _console:
-            payload.setdefault("console_tail", _console[-2000:])
+            payload.setdefault("console_tail", _console[-8000:])
         _proto.write(json.dumps(payload) + "\\n")
         _proto.flush()
 """).strip()

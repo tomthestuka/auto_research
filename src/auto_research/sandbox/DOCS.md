@@ -129,9 +129,10 @@ class PersistentSandbox:
 - Spawns one long-lived subprocess that runs a JSON-line REPL loop.  The subprocess
   stays alive across all debate rounds and rework cycles; XSPEC session state persists.
 - At subprocess boot, the REPL imports PyXSPEC when available and sets
-  `Fit.query = "no"` and `Xset.allowPrompting = False` exactly once for that
-  process.  This matches the reference notebook behavior and prevents XSPEC
-  file-name prompts from blocking the JSON protocol.
+  `Fit.query = "no"`, `Xset.allowPrompting = False`, and `Xset.chatter = 5`
+  exactly once for that process.  The first two match the reference notebook
+  behavior and prevent XSPEC file-name prompts from blocking the JSON protocol;
+  `chatter = 5` lowers XSPEC console verbosity to reduce captured-output volume.
 - `call_tool()` sends `{"module": ..., "fn": ..., "args": {...}}\n` to stdin and reads
   one JSON response line from stdout.  On timeout or death it kills the current
   process, starts a replacement, and returns the failed result for the call that
@@ -390,3 +391,7 @@ writes the tool, lead reviews, human approves merge on GitHub.
   `tests/test_live_sandbox_policy.py` for the live HEASoft policy check.  The
   legacy `run_tool()` one-shot runner now uses bounded synchronous
   `subprocess.run()` internally for stable timeout behavior.
+- 2026-06-01 — Added `Xset.chatter = 5` to the persistent REPL's
+  `_configure_xspec_once()` boot config (alongside `Fit.query = "no"` and
+  `Xset.allowPrompting = False`) to lower XSPEC console verbosity and reduce
+  captured-output volume per tool call.

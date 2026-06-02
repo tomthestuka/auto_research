@@ -512,3 +512,104 @@ class TestExecuteToolsDispatch:
         assert sb.starts == 1
         assert len(sb.tool_calls) == 1
         assert results[0].exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# _normalize_tool_raw and _append_tool_results_to_memory
+# ---------------------------------------------------------------------------
+
+class TestNormalizeToolRaw:
+    """Unit tests for _normalize_tool_raw."""
+
+    def test_bash_exec_passthrough(self) -> None:
+        """A result that already has stdout is returned unchanged."""
+        from auto_research.agents.roles import _normalize_tool_raw
+        raw = {"stdout": "hello", "stderr": "", "exit_code": 0}
+        result = _normalize_tool_raw(raw)
+        assert result["stdout"] == "hello"
+
+    def test_list_dir_entries_serialized(self) -> None:
+        """list_dir's {path, entries} payload is serialized into stdout."""
+        from auto_research.agents.roles import _normalize_tool_raw
+        raw = {"path": "/foo", "entries": ["a", "b", "c"], "exit_code": 0}
+        result = _normalize_tool_raw(raw)
+        assert result["stdout"]
+        assert "entries" in result["stdout"]
+        assert "a" in result["stdout"]
+
+    def test_load_data_indices_dict_serialized(self) -> None:
+        """load_data's nested indices dict is serialized into stdout as JSON."""
+        from auto_research.agents.roles import _normalize_tool_raw
+        indices = {"IXPE": {"02008401": {"DU1": [1, 2, 3]}}, "NICER": {}}
+        raw = {**indices, "exit_code": 0}
+        result = _normalize_tool_raw(raw)
+        assert "02008401" in result["stdout"]
+
+    def test_none_return_coerced(self) -> None:
+        """A tool returning None (fit_tbabs_hss) produces no extra stdout."""
+        from auto_research.agents.roles import _normalize_tool_raw
+        raw = {"stdout": "None", "exit_code": 0}
+        result = _normalize_tool_raw(raw)
+        assert result["stdout"] == "None"
+
+    def test_console_tail_folded_into_stdout(self) -> None:
+        """console_tail is appended to stdout so model sees XSPEC console prints."""
+        from auto_research.agents.roles import _normalize_tool_raw
+        raw = {"stdout": "fit done", "console_tail": "XSPEC: stat=1.23", "exit_code": 0}
+        result = _normalize_tool_raw(raw)
+        assert "fit done" in result["stdout"]
+        assert "stat=1.23" in result["stdout"]
+
+    def test_console_tail_only(self) -> None:
+        """console_tail alone (no stdout) is surfaced without a leading separator."""
+        from auto_research.agents.roles import _normalize_tool_raw
+        raw = {"console_tail": "loading spectra", "exit_code": 0}
+        result = _normalize_tool_raw(raw)
+        assert "loading spectra" in result["stdout"]
+
+    def test_protocol_keys_excluded_from_serialization(self) -> None:
+        """exit_code/stderr/figures/console_tail are not re-serialized into stdout."""
+        from auto_research.agents.roles import _normalize_tool_raw
+        raw = {"exit_code": 0, "stderr": "warn", "figures": [], "console_tail": "log"}
+        result = _normalize_tool_raw(raw)
+        # Only console_tail → stdout; stderr/figures/exit_code must not appear as JSON keys
+        assert "stderr" not in result["stdout"]
+        assert "exit_code" not in result["stdout"]
+
+
+class TestAppendToolResultsToMemory:
+    """Unit tests for stdout/stderr truncation in _append_tool_results_to_memory."""
+
+    def _make_result(self, stdout: str = "", stderr: str = "") -> ToolResult:
+        return ToolResult(
+            tool_name="test.tool", stdout=stdout, stderr=stderr,
+            exit_code=0, elapsed_s=0.1,
+        )
+
+    def test_short_output_written_verbatim(self, tmp_path: Path) -> None:
+        from auto_research.agents.roles import _append_tool_results_to_memory
+        mem = tmp_path / "memory.md"
+        r = self._make_result(stdout="short output")
+        _append_tool_results_to_memory(mem, [r])
+        assert "short output" in mem.read_text()
+
+    def test_long_stdout_truncated(self, tmp_path: Path) -> None:
+        from auto_research.agents.roles import _append_tool_results_to_memory, _STDOUT_MEM_CAP
+        mem = tmp_path / "memory.md"
+        big = "x" * (_STDOUT_MEM_CAP + 5000)
+        r = self._make_result(stdout=big)
+        _append_tool_results_to_memory(mem, [r])
+        content = mem.read_text()
+        # Truncation marker present and file is bounded
+        assert "truncated" in content
+        assert len(content) < _STDOUT_MEM_CAP + 500  # overhead for headers
+
+    def test_long_stderr_truncated(self, tmp_path: Path) -> None:
+        from auto_research.agents.roles import _append_tool_results_to_memory, _STDERR_MEM_CAP
+        mem = tmp_path / "memory.md"
+        big = "e" * (_STDERR_MEM_CAP + 3000)
+        r = self._make_result(stderr=big)
+        _append_tool_results_to_memory(mem, [r])
+        content = mem.read_text()
+        assert "truncated" in content
+        assert len(content) < _STDERR_MEM_CAP + 500

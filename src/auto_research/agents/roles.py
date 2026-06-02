@@ -530,6 +530,7 @@ class AnalystWorkerAgent(AgentRole):
                     )
                 elapsed = time.monotonic() - t0
 
+                raw = _normalize_tool_raw(raw)
                 figures = [FigureRef.model_validate(f) for f in raw.get("figures", [])]
                 r = ToolResult(
                     tool_name=kind,
@@ -754,17 +755,61 @@ def _default_sources() -> dict[str, QuerySource]:
     }
 
 
+# Keys that belong to the transport protocol — not serialized as tool payload.
+_PROTOCOL_KEYS: frozenset[str] = frozenset(
+    {"stdout", "stderr", "exit_code", "figures", "console_tail"}
+)
+
+# Per-field character caps written to memory.md (crash-prevention).
+_STDOUT_MEM_CAP = 8_000
+_STDERR_MEM_CAP = 2_000
+
+
+def _normalize_tool_raw(raw: dict) -> dict:
+    """Ensure every tool result has a non-empty ``stdout`` for the model to read.
+
+    Tools that return structured payloads without a ``stdout`` key (e.g.
+    ``list_dir`` → ``{path, entries}``, ``load_data`` → nested indices dict)
+    are invisible to the model otherwise.  When ``stdout`` is absent or empty,
+    serialize the non-protocol payload keys as compact JSON.
+
+    Also folds any captured ``console_tail`` (XSPEC/C-level prints) into
+    ``stdout`` so the model sees count-rate and fit-convergence logs.
+    """
+    stdout = raw.get("stdout") or ""
+    if not stdout:
+        extra = {k: v for k, v in raw.items() if k not in _PROTOCOL_KEYS}
+        if extra:
+            stdout = json.dumps(extra, indent=2, default=str)
+
+    console = raw.get("console_tail") or ""
+    if console:
+        sep = "\n--- console ---\n"
+        stdout = (stdout + sep + console) if stdout else (sep.lstrip() + console)
+
+    return {**raw, "stdout": stdout}
+
+
 def _append_tool_results_to_memory(path: Path, results: Sequence[ToolResult]) -> None:
-    """Append bare terminal recordings of tool calls to the worker's memory file."""
+    """Append bare terminal recordings of tool calls to the worker's memory file.
+
+    stdout and stderr are capped at write time so memory.md stays bounded.
+    """
     import datetime
-    lines: list[str] = [f"\n## Tool calls — {datetime.datetime.utcnow().isoformat(timespec='seconds')}Z"]
+    lines: list[str] = [f"\n## Tool calls — {datetime.datetime.now(datetime.UTC).isoformat(timespec='seconds')}"]
     for r in results:
         status = "OK" if r.exit_code == 0 else f"FAILED (exit {r.exit_code})"
         lines.append(f"\n### {r.tool_name}  [{status}]  ({r.elapsed_s:.1f}s)")
         if r.stdout:
-            lines.append(f"stdout:\n{r.stdout}")
+            text = r.stdout
+            if len(text) > _STDOUT_MEM_CAP:
+                text = text[:_STDOUT_MEM_CAP] + f"\n[stdout truncated — {len(r.stdout):,} chars total]"
+            lines.append(f"stdout:\n{text}")
         if r.stderr:
-            lines.append(f"stderr:\n{r.stderr}")
+            text = r.stderr
+            if len(text) > _STDERR_MEM_CAP:
+                text = text[:_STDERR_MEM_CAP] + f"\n[stderr truncated — {len(r.stderr):,} chars total]"
+            lines.append(f"stderr:\n{text}")
         if r.figures:
             lines.append(f"figures: {[str(f.path) for f in r.figures]}")
     append_memory(path, "\n".join(lines) + "\n")

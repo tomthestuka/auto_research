@@ -138,13 +138,17 @@ Role wrappers:
   - `request_tools(task)` → `list[ToolCallRequest]` — structured tool requests, no execution.
   - `execute_tools(task, registry, *, tool_retry_cap=3)` → `list[ToolResult]` —
     calls `request_tools()`, runs each via `sandbox.call_tool()` /
-    `sandbox.call_mcp_tool()`, appends a bare terminal recording to `memory_path`.
-    Returns `[]` if `sandbox` is `None`; if an attached sandbox is not alive it
-    starts a replacement before requesting tools. Per attempt it (a) merges the
-    `ToolCallRequest.command` field into the args, (b) recomputes routing from
-    `current_req.kind` so a retry that changes tool routes correctly, and
+    `sandbox.call_mcp_tool()`, normalizes the raw result via
+    `_normalize_tool_raw()`, and appends a truncated terminal recording to
+    `memory_path`. Returns `[]` if `sandbox` is `None`; if an attached sandbox
+    is not alive it starts a replacement before requesting tools. Per attempt it
+    (a) merges the `ToolCallRequest.command` field into the args, (b) recomputes
+    routing from `current_req.kind` so a retry that changes tool routes correctly,
     (c) for toolkit tools, auto-fills `<mission>_path` args declared in the tool
-    `args_schema` from `config/observations.yaml` (via `_observation_path_args()`)
+    `args_schema` from `config/observations.yaml` (via `_observation_path_args()`),
+    and (d) calls `_normalize_tool_raw()` so structured payloads without a
+    `stdout` key (e.g. `list_dir` → `{entries}`, `load_data` → indices dict) are
+    serialized into `stdout`, and any captured `console_tail` is folded in.
     when the model omitted them.
   - `is_alive` → `bool` — `True` when no sandbox attached; delegates to
     `sandbox.is_alive` otherwise.
@@ -219,3 +223,15 @@ Role wrappers:
   rest of the run.  This pairs with `PersistentSandbox` timeout/death recovery:
   the failed tool call is still recorded as non-zero, but later calls can run in
   a clean XSPEC subprocess.
+- 2026-06-01 — Added `_normalize_tool_raw()` and `_PROTOCOL_KEYS` constant.
+  The normalizer is called on every raw tool result in `execute_tools()` before
+  building `ToolResult`: when `stdout` is absent/empty, non-protocol payload
+  keys are serialized as compact JSON (fixes `list_dir`/`read_file` MCP tools
+  and `load_data` which returns the indices dict); any captured `console_tail`
+  is folded into `stdout` after a separator so the model sees XSPEC console
+  output. `_append_tool_results_to_memory()` now caps stdout at 8,000 chars and
+  stderr at 2,000 chars on write, with a `[truncated N chars total]` marker.
+  `console_tail` cap in `persistent.py` raised from 2,000 → 8,000 chars.
+  Deprecated `datetime.utcnow()` replaced with `datetime.now(datetime.UTC)`.
+  10 new deterministic tests added (`TestNormalizeToolRaw`,
+  `TestAppendToolResultsToMemory`). P1 TODO items updated.
