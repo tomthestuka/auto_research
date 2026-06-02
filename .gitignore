@@ -19,3 +19,8 @@ dist/
 
 # local test artifacts
 logs/dev/
+
+# agents
+.agents/
+.claude/
+.codex/
