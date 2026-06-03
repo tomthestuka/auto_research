@@ -51,9 +51,4 @@ inspection.
 - `RunMonitor` - lock-protected event collector and Markdown/JSONL renderer.
 
 ## Changelog
-- 2026-05-28 - Added the step-12 run monitor with 1-10 chatter, async-safe
-  event collection, optional JSONL streaming, and team-block Markdown reports.
-- 2026-05-28 - Added `RunMonitor.from_jsonl()` classmethod for offline rendering
-  of previously written monitor JSONL files.
-- 2026-05-28 - Added `grouped` parameter to `write_markdown()` (default `True`);
-  pass `grouped=False` for sequential pipeline-order output.
+- 2026-05-28 — Step 12 built: `RunMonitor` (1–10 chatter scale, async-safe event collection, optional JSONL streaming, team-block Markdown reports via `write_markdown(grouped=True)`). `from_jsonl()` for offline rendering.

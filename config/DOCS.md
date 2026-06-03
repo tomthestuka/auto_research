@@ -80,22 +80,5 @@ role or swapping a provider is a YAML edit; no Python change.
   server (`bash_exec`, `list_dir`, `read_file` at present).
 
 ## Changelog
-- 2026-05-27 — Raised the Anthropic librarian I/O output cap so direct PDF
-  ingestion can return complete memory abstractions.
-- 2026-05-27 — Added `observations.yaml` for generic mission observation
-  locations and documented the `documents` model capability flag used for
-  librarian I/O PDF ingestion.
-- 2026-05-27 — Added `priceMTk` unit prices for configured models using
-  standard per-million-token public rates.
-- 2026-05-27 — Documented optional per-model pricing rates consumed by the
-  step-3 cost ledger.
-- 2026-05-27 — Updated `models.yaml` to use role-level model groups for
-  reviewers, analyst workers, librarian I/O, and the remaining role bindings.
-- 2026-05-27 — Added `models.yaml` and documented the step-2 registry schema.
-- 2026-05-26 — Folder seeded as part of step 0 scaffolding.
-- 2026-06-01 — Synced config docs with the current four required model roles
-  and documented the active `orchestration.yaml` keys, including persistent
-  sandbox and MCP settings.
-- 2026-06-01 — Corrected the built-in MCP description to match current code:
-  the default server still exposes `bash_exec` in addition to `list_dir` and
-  `read_file`; the read-only MCP restriction remains a separate P2 task.
+- 2026-05-26/27 — Steps 0–5 built: `models.yaml` (role groups, `priceMTk` pricing, `vision`/`documents` flags), `observations.yaml` (mission obs DB paths), `orchestration.yaml` (iteration caps, `toolkit_root`, `analyze_env`, `analyze_ini_sh`, `mcp_servers`). Librarian I/O output cap raised for full PDF ingestion.
+- 2026-06-03 — Added `orchestration.yaml::disabled_tools`: list of tool names stripped from `ToolkitRegistry` at load time, independent of what research_toolkit exposes.

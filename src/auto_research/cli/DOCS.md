@@ -36,6 +36,4 @@ a grouped Markdown report, and prints the final `ReviewVerdict`.
 - `auto_research.__main__` — module entry point for `python -m auto_research`.
 
 ## Changelog
-- 2026-05-26 — Folder seeded during step 0.
-- 2026-05-28 — Step 12: implemented the CLI with `--chatter`, JSON/text final
-  output, and monitor JSONL/Markdown artifact paths.
+- 2026-05-26/28 — Step 12 built: CLI entry (`python -m auto_research`) with `--chatter` flag, JSON/text final output, monitor JSONL/Markdown artifact paths.

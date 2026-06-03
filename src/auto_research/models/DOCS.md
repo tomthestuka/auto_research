@@ -81,20 +81,4 @@ Google by editing YAML alone
   `ModelResponse`.
 
 ## Changelog
-- 2026-05-27 — Replaced `pricing_usd_per_million_tokens` with the shorter
-  config field `priceMTk`.
-- 2026-05-27 — Added provider-level document attachment support and the
-  `documents` model-member capability flag. Librarian I/O members are configured
-  for direct PDF attachments.
-- 2026-05-27 — Wired `ModelHandle.call()` through step-3 observability so every
-  provider call can be traced and cost-logged.
-- 2026-05-27 — Changed the registry contract from one model per role to
-  role-level model groups and added tests for the requested reviewer, analyst
-  worker, and librarian I/O memberships.
-- 2026-05-27 — Implemented step 2: `config/models.yaml`, validated role registry,
-  provider-neutral call types, OpenAI/Anthropic/Google adapters, and
-  deterministic registry tests.
-- 2026-05-26 — Folder seeded during step 0.
-- 2026-06-01 — Synced the required-role list with the current registry
-  (`reviewer`, `analyst_lead`, `analyst_worker`, `librarian_io`) and updated the
-  provider/handle signatures to include document attachments.
+- 2026-05-26/27 — Steps 2–3 built: `config/models.yaml`, validated role registry (four roles: `reviewer`, `analyst_lead`, `analyst_worker`, `librarian_io`), role-level model groups, OpenAI/Anthropic/Google adapters, `ModelHandle.call()` wired through observability, `priceMTk` per-million-token pricing, `vision`/`documents` capability flags for PDF-attaching librarian I/O members.

@@ -58,14 +58,4 @@ Live retrieval verification is opt-in:
   tool; Phase 2 stub.
 
 ## Changelog
-- 2026-05-27 — Replaced LLM-based `LibrarianSearcherAgent` with two pure-Python
-  tool functions: `text_search_paths()` (in `retrieval/text_search.py`) and
-  `vector_search_paths()` (Phase 2 stub, `retrieval/vector_search.py`). Both
-  return `list[Path]` — local PDF paths only. No LLM call is made. These are the
-  canonical tools for the reviewer and future lead-scientist group.
-- 2026-05-27 — Memory text search haystack extended to include `mem_abbrev`
-  (IO-team consensus abbreviation) alongside `summary` and `tags_json`.
-- 2026-05-27 — Implemented step 6: SQLite text retrieval over papers/memory,
-  `vector_search()` Phase 2 stub, deterministic tests, and live `GX339-4`
-  retrieval logging. Runtime query returned `GX339_4` from the local paper DB.
-- 2026-05-26 — Folder seeded during step 0.
+- 2026-05-26/27 — Step 6 built: `RetrievalBackend` interface, `SqliteRetrievalBackend.text_search()` (searches `summary`, `tags_json`, `mem_abbrev`), `vector_search()` Phase 2 stub. Pure-Python path — no LLM call. Deterministic tests; opt-in live retrieval test.

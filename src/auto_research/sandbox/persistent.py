@@ -156,11 +156,9 @@ class PersistentSandbox:
             if self._analyze_env
             else sys.executable
         )
-        base_env = (
-            _source_ini_env(self._analyze_ini_sh)
-            if self._analyze_ini_sh
-            else dict(os.environ)
-        )
+        if not self._analyze_ini_sh:
+            raise ValueError("analyze_ini_sh must be configured — no env fallback")
+        base_env = _source_ini_env(self._analyze_ini_sh)
         existing = base_env.get("PYTHONPATH", "")
         pythonpath = str(self._toolkit_root) + (":" + existing if existing else "")
         env = {**base_env, "PYTHONPATH": pythonpath}

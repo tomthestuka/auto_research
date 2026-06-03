@@ -39,10 +39,11 @@ _MANIFEST_MODULES: list[str] = [
 class ToolkitRegistry:
     """Discovers and describes tools available in research_toolkit and via MCP."""
 
-    def __init__(self, toolkit_root: Path) -> None:
+    def __init__(self, toolkit_root: Path, *, disabled_tools: list[str] | None = None) -> None:
         self._root = Path(toolkit_root)
         self._tools: dict[str, ToolSpec] = {}
         self._mcp_tools: dict[str, str] = {}  # kind -> description
+        self._disabled: set[str] = set(disabled_tools or [])
         self._loaded = False
 
     # ------------------------------------------------------------------
@@ -81,6 +82,8 @@ class ToolkitRegistry:
         finally:
             if inserted:
                 sys.path.remove(root_str)
+        for name in self._disabled:
+            self._tools.pop(name, None)
         self._loaded = True
 
     def load_mcp(self, client: Any) -> None:

@@ -78,15 +78,21 @@ def _builtin_server_config(
         import sys
         python = sys.executable
 
-    # Inherit current process env, overlay HEASoft/CALDB vars from ini script,
-    # then set PYTHONPATH so toolkit packages are importable.
-    env = dict(os.environ)
-    if analyze_ini_sh:
-        env.update(_source_ini_env(analyze_ini_sh))
-    env["PYTHONPATH"] = str(toolkit_root)
-    # Ensure the analysis env's bin is first on PATH for `python` resolution.
-    if analyze_env:
-        env["PATH"] = str(analyze_env / "bin") + os.pathsep + env.get("PATH", "")
+    # Build env from the analyst ini script — same pattern as PersistentSandbox.
+    # Do NOT inherit os.environ: production envs may have conda activations or
+    # other PATH/PYTHONPATH state we don't want.  analyze_ini_sh is the
+    # authoritative source; its bash subprocess captures the clean HEASoft env
+    # (headas-init.sh sets PATH with HEASoft's Python first, LD_LIBRARY_PATH,
+    # etc.).  PYTHONPATH covers toolkit_root (import xspec_utils) and its parent
+    # (from research_toolkit import xspec_utils).
+    if not analyze_ini_sh:
+        raise ValueError("analyze_ini_sh must be configured — no env fallback")
+    base_env = _source_ini_env(analyze_ini_sh)
+    existing = base_env.get("PYTHONPATH", "")
+    pythonpath = str(toolkit_root) + os.pathsep + str(toolkit_root.parent)
+    if existing:
+        pythonpath += os.pathsep + existing
+    env = {**base_env, "PYTHONPATH": pythonpath}
 
     return {
         "name": "builtin",
@@ -109,11 +115,12 @@ def _default_graph():
     debate_max_rounds = int(orch.get("debate_max_rounds", 3))
     tool_retry_cap = int(orch.get("tool_retry_cap", 3))
     toolkit_root = Path(orch.get("toolkit_root", "/data/fzhou/research_toolkit"))
+    disabled_tools: list[str] = orch.get("disabled_tools") or []
 
     storage = Storage()
     worker_group = resolve("analyst_worker")
     workers = [AnalystWorkerAgent(model=h) for h in worker_group.handles[:DEFAULT_WORKER_COUNT]]
-    registry = ToolkitRegistry(toolkit_root)
+    registry = ToolkitRegistry(toolkit_root, disabled_tools=disabled_tools)
 
     return build_graph(
         reviewer=ReviewerAgent(),
@@ -208,6 +215,7 @@ async def run_research(
     analyze_env_str = orch.get("analyze_env")
     analyze_env = Path(analyze_env_str) if analyze_env_str else None
     analyze_ini_sh: str | None = orch.get("analyze_ini_sh") or None
+    disabled_tools: list[str] = orch.get("disabled_tools") or []
 
     storage = Storage()
     reviewer = reviewer or ReviewerAgent(monitor=run_monitor)
@@ -240,7 +248,7 @@ async def run_research(
     for worker in workers:
         _attach_monitor(worker, run_monitor)
 
-    registry = ToolkitRegistry(toolkit_root)
+    registry = ToolkitRegistry(toolkit_root, disabled_tools=disabled_tools)
 
     # Start MCP client and index its tools into the registry.
     # When mcp_servers is empty/unset, build the default builtin-server config

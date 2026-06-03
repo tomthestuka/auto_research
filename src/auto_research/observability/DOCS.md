@@ -55,10 +55,4 @@ into per-role spend must exist from day one.
   ledger logging.
 
 ## Changelog
-- 2026-05-27 — Renamed per-model unit pricing to `priceMTk` and made live
-  observability tests write timestamped logs under `logs/dev/step-3/`.
-- 2026-05-27 — Added an opt-in live LangSmith test that sends short poem prompts
-  through configured model calls and prints cost ledger rows.
-- 2026-05-27 — Implemented step 3: provider-call tracing hook, JSONL cost
-  ledger, runtime data-dir helper, and deterministic observability tests.
-- 2026-05-26 — Folder seeded during step 0.
+- 2026-05-26/27 — Step 3 built: LangSmith tracing hook, JSONL cost ledger (`priceMTk` per-call costing), runtime data-dir helper, deterministic observability tests. Opt-in live LangSmith test under `AUTO_RESEARCH_LIVE_LANGSMITH_TESTS=1`.

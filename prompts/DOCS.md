@@ -48,25 +48,5 @@ loads it verbatim — do not embed templating logic here.
 - `analyst_lead.md` — system prompt for the analyst lead role.
 
 ## Changelog
-- 2026-05-27 — Added explicit scope boundaries across all five role prompts:
-  librarians own published literature and authoritative docs only; analysts
-  own all observation-archive triage (HEASARC etc.), data reduction, and
-  fitting, driven via structured tool requests that the runtime sandbox
-  executes (no native online capability lives in the analyst model call
-  itself); the reviewer dispatches accordingly and never asks librarians for
-  archive/data work. Triggered by a live-agent run where the reviewer
-  assigned HEASARC ObsID triage to the librarian I/O team.
-- 2026-05-27 — Clarified that the reviewer is both the user-input and
-  agent-output portal, and should triage new user requests instead of treating
-  absent downstream results as out-of-scope.
-- 2026-05-27 — Updated librarian I/O prompt for direct PDF/document attachment
-  ingestion and clarified analyst tool-request behavior.
-- 2026-05-27 — Clarified that the reviewer prompt can triage requests from the
-  human or an authorized upstream planning team, preserving Phase 2 readiness.
-- 2026-05-27 — Step 7 completed: authored runtime prompts for all five Phase 1
-  roles and documented their loader contract.
-- 2026-05-26 — Folder seeded as part of step 0 scaffolding. Per-role prompts to be
-  authored in step 7.
-- 2026-06-01 — Synced the prompt inventory with the current four runtime prompt
-  files. The former librarian searcher prompt is no longer a runtime role;
-  local retrieval is handled by pure-Python retrieval tools.
+- 2026-05-26/27 — Step 7 built: four runtime prompt files (reviewer, librarian_io, analyst_worker, analyst_lead). Scope boundaries enforced: librarians own literature only; analysts drive all observation-archive triage and data work via tool requests; reviewer dispatches accordingly. Librarian searcher role retired; local retrieval is pure-Python.
+- 2026-06-03 — `analyst_worker.md` hardened: `load_data` resp-path warnings expected (ignore); `BKG: None` correct for bright sources like Cyg X-1; `python -c "..."` via `bash_exec` permitted for inline computation (no file writes); `run_fit` takes no `indices`; all `fit_*` require `indices` from `load_data`.

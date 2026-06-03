@@ -163,6 +163,9 @@ def test_librarian_io_agent_ingest_results_no_pdf(tmp_path):
         async def upsert_paper(self, paper):
             return 42
 
+        async def get_memory_for_paper(self, paper_id):
+            return None
+
         async def replace_memory_for_paper(self, memory: MemoryRecord):
             stored_memories.append(memory)
 

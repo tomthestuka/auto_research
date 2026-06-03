@@ -111,23 +111,4 @@ carried by **reference** (`FigureRef`), never embedded
   from tool stdout. `exit_code=127` indicates "tool unavailable" (Phase 2 stub).
 
 ## Changelog
-- 2026-05-27 — Added `SearchResult.local_path: Path | None` so
-  `LibrarianSearcherAgent` can carry the on-disk PDF path back to the reviewer,
-  which then loads it as a `DocumentRef` attachment. Added
-  `AnalysisTask.previous_report` so rework iterations carry the prior report.
-- 2026-05-27 — Added document attachment references and separate tool-call
-  request/review schemas so analysts can request shell/tool/database operations
-  without putting execution requests inside reports.
-- 2026-05-27 — Implemented the step-1 Pydantic protocol: base model, figure
-  references, research requests, search messages, analysis messages, and review
-  verdicts.
-- 2026-05-27 — Added optional `SearchResult.pdf_url` so source modules can hand
-  direct paper downloads to storage ingestion.
-- 2026-05-27 — Added `FullTextLink` and `SearchResult.full_text_links` for ADS
-  resolver/source-button candidates.
-- 2026-05-26 — Folder seeded during step 0.
-- 2026-05-28 — Added `ToolResult` schema for sandboxed tool execution results
-  (step 11). `exit_code=127` convention for "tool unavailable" (stub path).
-- 2026-06-01 — Updated the `ToolResult` contract to reflect the persistent
-  sandbox architecture: tool results now live in worker memory/consensus
-  summaries rather than `ResearchState.tool_results`.
+- 2026-05-26/28 — Steps 1–11 built: full Pydantic v2 protocol (`ResearchRequest`, `SearchResult` with `pdf_url`/`full_text_links`/`local_path`, `AnalysisTask`/`AnalystReport`, `ReviewVerdict`, `FigureRef`, `DocumentRef`, `ToolCallRequest`/`ToolResult`). `ToolResult.exit_code=127` convention for unknown tools. Tool results live in worker memory files, not in `ResearchState`.

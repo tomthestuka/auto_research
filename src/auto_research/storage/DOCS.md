@@ -96,19 +96,4 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   local paper ingestion utility.
 
 ## Changelog
-- 2026-05-27 — Added `mem_abbrev TEXT` column to `memory` table (in SCHEMA_SQL
-  and via additive migration in `_initialize()`). Added `mem_abbrev` field to
-  `MemoryRecord`. Added `paper_record_from_result()` for metadata-only paper
-  records from search results (used by `ingest_results()` for no-PDF paths).
-  Updated `_insert_memory()` to persist `mem_abbrev`.
-- 2026-05-27 — Implemented step 4 SQLite storage: schema creation, paper
-  upsert/read/list, memory insert, query logging, local PDF ingestion, and
-  deterministic storage tests. Ingested 10 local PDFs from
-  `/data/fzhou/ar_runtime/papers` into
-  `/data/fzhou/ar_runtime/test_runtime/auto_research.sqlite3`.
-- 2026-05-27 — Added source-result ingestion and the librarian I/O enrichment
-  stub for future PDF reading/abstraction.
-- 2026-05-27 — Added `replace_memory_for_paper()` so development live checks can
-  let sequential librarian I/O model responses overwrite one durable memory
-  abstraction for a newly ingested paper while logging every model response.
-- 2026-05-26 — Folder seeded during step 0.
+- 2026-05-26/27 — Step 4 built: SQLite schema (papers, memory with `mem_abbrev`, query_log; embedding column reserved for Phase 2), paper upsert/read/list, memory insert, `replace_memory_for_paper()`, `paper_record_from_result()` for no-PDF metadata ingestion, local PDF ingestion, deterministic storage tests.

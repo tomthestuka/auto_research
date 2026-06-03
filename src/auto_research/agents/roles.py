@@ -504,6 +504,15 @@ class AnalystWorkerAgent(AgentRole):
                 args = dict(current_req.arguments)
                 if current_req.command and "command" not in args:
                     args["command"] = current_req.command
+                # Auto-inject the analyst's working directory into bash_exec so
+                # files written by `python -c "..."` land in the worker's folder
+                # rather than the MCP server's launch cwd.
+                if (
+                    kind == "mcp.builtin.bash_exec"
+                    and "cwd" not in args
+                    and self.memory_path is not None
+                ):
+                    args["cwd"] = str(self.memory_path.parent)
 
                 t0 = time.monotonic()
                 if not registry.is_known(kind):

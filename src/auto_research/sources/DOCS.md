@@ -64,16 +64,4 @@ Each module is independent; no source imports another.
   metadata, and returns the stored row.
 
 ## Changelog
-- 2026-05-27 — Added source PDF download/ingest hooks. Live `black hole binary`
-  query downloaded and ingested three arXiv PDFs into
-  `/data/fzhou/ar_runtime/papers`; NASA ADS returned metadata without direct PDF
-  URLs for that query.
-- 2026-05-27 — Added Markdown summaries beside source live-test JSONL logs for
-  human-friendly inspection.
-- 2026-05-27 — Added NASA ADS resolver support for "Full Text Sources" links.
-  Live `black hole binary` query resolved, downloaded, and ingested three NASA
-  ADS full-text PDFs/scans.
-- 2026-05-27 — Implemented step 5: `QuerySource`, arXiv, NASA ADS, and Tavily
-  source adapters with deterministic normalization tests and opt-in live tests.
-  Live sample query `black hole binary` returned results from all three sources.
-- 2026-05-26 — Folder seeded during step 0.
+- 2026-05-26/27 — Step 5 built: `QuerySource` interface, arXiv adapter, NASA ADS adapter (with Full Text Sources resolver for PDF download), Tavily web adapter. PDF download/ingest hooks. Deterministic normalization tests; opt-in live tests under `AUTO_RESEARCH_LIVE_SOURCES_TESTS=1`.

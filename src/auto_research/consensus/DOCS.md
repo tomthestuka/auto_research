@@ -85,24 +85,4 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `run(workers, lead, document)`.
 
 ## Changelog
-- 2026-05-27 — Added `IOAbstractionWorkerLike`, `IOAbstractionLeadLike`,
-  `IOAbstractionStrategy` protocols and `IODebateToConverge` strategy for
-  IO-team paper abstraction debate. Mirrors `DebateToConverge` over
-  `MemoryRecord` (workers produce memory abstractions, lead judges convergence
-  and adjudicates).
-- 2026-05-27 — Step 9 completed: added `ConsensusStrategy`,
-  `DebateToConverge`, lead convergence checks, deterministic tests, and an
-  opt-in live GX339-4 replication-planning debate test.
-- 2026-05-26 — Folder seeded during step 0.
-- 2026-05-28 — Step 12: both consensus strategies accept an optional
-  `RunMonitor` and record worker outputs, lead convergence decisions,
-  revisions, and final adjudication.
-- 2026-05-28 — `DebateToConverge` gains `registry` and `tool_retry_cap` fields.
-  Tool execution now runs inside the consensus loop via `_run_tools()`: after
-  each round of `analyze()` calls, each worker's `execute_tools()` is called,
-  results appended to private `memory_path`, and a truncated shared summary is
-  injected into task instructions for the next round.  `_peer_tool_summary()`
-  helper added.  `ToolResult` imported from schemas.
-- 2026-06-01 — `_run_tools()` now allows workers with attached sandboxes to
-  reach `execute_tools()` even when the previous subprocess is dead, so
-  `PersistentSandbox` can start a clean replacement after timeout/death.
+- 2026-05-26/28 — Steps 9–12 built: `ConsensusStrategy`, `DebateToConverge` (cap-3 debate, lead adjudication, `RunMonitor` recording, `registry`/`tool_retry_cap` for in-loop tool execution via `_run_tools()`), `IODebateToConverge` (IO-team abstraction debate over `MemoryRecord`). `_run_tools()` calls `execute_tools()` per worker after each round, appends results to private `memory_path`, injects a shared summary into the next round. Workers with dead sandboxes are restarted before tool calls.

@@ -27,3 +27,7 @@ analyze_ini_sh: /nfsdata1/fzhou/auto_research/src/auto_research/sandbox/analyst_
 # Each entry: {name, command, args}.  Omit or leave empty to use only the
 # built-in server (bash_exec, list_dir, read_file).
 mcp_servers: []
+# Tools to suppress from the catalogue and is_known() regardless of what
+# research_toolkit exposes.  Add tool names here to hide broken or deprecated
+# tools without touching the toolkit repo.
+disabled_tools: []
