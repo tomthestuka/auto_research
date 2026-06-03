@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from auto_research.monitor import RunMonitor
 from auto_research.schemas import AnalysisTask, AnalystReport, DocumentRef, ReviewVerdict, ToolResult
+from auto_research.schemas.figures import FigureRef
 from auto_research.storage import MemoryRecord
 
 
@@ -116,7 +117,8 @@ class DebateToConverge:
             )
 
         # --- tool execution after initial reports ---
-        task = await self._run_tools(workers, task)
+        task, tool_figures = await self._run_tools(workers, task)
+        reports = _merge_figures(reports, tool_figures)
 
         for round_index in range(1, self.max_rounds + 1):
             verdict = await lead.judge_convergence(
@@ -135,6 +137,11 @@ class DebateToConverge:
             )
             if verdict.accepted or round_index == self.max_rounds:
                 final = await lead.adjudicate(task, reports)
+                # Carry all tool figures onto the final report so the reviewer
+                # receives them at the multimodal boundary (ReviewerAgent.review
+                # passes images=report.figures).
+                all_figures = _deduplicated([f for r in reports for f in r.figures])
+                final = final.model_copy(update={"figures": all_figures})
                 await _record(
                     self.monitor,
                     "analyst.lead.adjudication",
@@ -161,7 +168,8 @@ class DebateToConverge:
             reports = revised
 
             # --- tool execution after revision ---
-            task = await self._run_tools(workers, task)
+            task, tool_figures = await self._run_tools(workers, task)
+            reports = _merge_figures(reports, tool_figures)
 
         raise RuntimeError("unreachable consensus loop exit")
 
@@ -169,16 +177,17 @@ class DebateToConverge:
         self,
         workers: Sequence[WorkerLike],
         task: AnalysisTask,
-    ) -> AnalysisTask:
-        """Execute tools for each capable worker; return an augmented task.
+    ) -> tuple[AnalysisTask, list[list[FigureRef]]]:
+        """Execute tools for each capable worker; return augmented task and per-worker figures.
 
         Workers that expose ``execute_tools()`` and are alive call their sandbox.
         Results are appended to each worker's private memory and a truncated
         shared summary is added to ``task.instructions`` for the next round.
-        Returns the original task unchanged when ``registry`` is ``None``.
+        Returns the original task and empty figure lists when ``registry`` is ``None``.
         """
+        empty: list[list[FigureRef]] = [[] for _ in workers]
         if self.registry is None:
-            return task
+            return task, empty
 
         all_results: list[list[ToolResult]] = []
         for index, worker in enumerate(workers):
@@ -205,9 +214,13 @@ class DebateToConverge:
                 data={"results": [r.model_dump(mode="json") for r in results]},
             )
 
+        per_worker_figures: list[list[FigureRef]] = [
+            [f for r in results for f in r.figures] for results in all_results
+        ]
+
         summary = _peer_tool_summary(all_results)
         if not summary:
-            return task
+            return task, per_worker_figures
 
         new_instructions = "\n\n".join(
             filter(None, [task.instructions, summary])
@@ -216,7 +229,34 @@ class DebateToConverge:
             question=task.question,
             instructions=new_instructions,
             previous_report=task.previous_report,
-        )
+        ), per_worker_figures
+
+
+def _deduplicated(figures: list[FigureRef]) -> list[FigureRef]:
+    """Deduplicate figures by path, preserving first-seen order."""
+    seen: set[str] = set()
+    out: list[FigureRef] = []
+    for f in figures:
+        key = str(f.path)
+        if key not in seen:
+            seen.add(key)
+            out.append(f)
+    return out
+
+
+def _merge_figures(
+    reports: list[AnalystReport],
+    per_worker_figures: list[list[FigureRef]],
+) -> list[AnalystReport]:
+    """Return reports with tool figures merged in, deduped by path."""
+    merged = []
+    for report, figs in zip(reports, per_worker_figures):
+        if figs:
+            report = report.model_copy(
+                update={"figures": _deduplicated(list(report.figures) + figs)}
+            )
+        merged.append(report)
+    return merged
 
 
 def _peers_for(reports: Sequence[AnalystReport], index: int) -> list[AnalystReport]:

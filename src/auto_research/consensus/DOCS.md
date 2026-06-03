@@ -68,12 +68,17 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   bounded analyst debate strategy.  When `registry` is supplied, runs tool
   execution after each round of `analyze()` calls via
   `AnalystWorkerAgent.execute_tools()`.  Per-worker results are appended to
-  `memory_path` and a truncated shared summary is injected into task instructions.
+  `memory_path`; a truncated shared summary is injected into task instructions;
+  and `FigureRef`s from each worker's tool results are merged (deduped by path)
+  onto the matching `AnalystReport.figures` so they flow through
+  `lead.adjudicate()` → `lead.judge_convergence()` → final report → reviewer.
   Workers with an attached restartable sandbox are allowed through to
   `execute_tools()` even if the previous subprocess died; the worker/sandbox
   layer starts a clean replacement.
   Method: `run(workers, lead, task)` → `AnalystReport`.
-  Internal: `_run_tools(workers, task)` → augmented `AnalysisTask`.
+  Internals: `_run_tools(workers, task)` → `(AnalysisTask, list[list[FigureRef]])`;
+  `_merge_figures(reports, per_worker_figures)` → updated reports;
+  `_deduplicated(figures)` → deduped by path.
 - `IOAbstractionWorkerLike` — protocol for IO abstraction workers. Method:
   `abstract_document()`.
 - `IOAbstractionLeadLike` — protocol for IO abstraction lead. Methods:
@@ -86,3 +91,4 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
 
 ## Changelog
 - 2026-05-26/28 — Steps 9–12 built: `ConsensusStrategy`, `DebateToConverge` (cap-3 debate, lead adjudication, `RunMonitor` recording, `registry`/`tool_retry_cap` for in-loop tool execution via `_run_tools()`), `IODebateToConverge` (IO-team abstraction debate over `MemoryRecord`). `_run_tools()` calls `execute_tools()` per worker after each round, appends results to private `memory_path`, injects a shared summary into the next round. Workers with dead sandboxes are restarted before tool calls.
+- 2026-06-03 — Figure propagation fix. `_run_tools()` now returns `(AnalysisTask, list[list[FigureRef]])`. New `_merge_figures()` merges per-worker tool figures onto `AnalystReport.figures` (deduped by path via `_deduplicated()`). `run()` applies this after each tool phase and copies all accumulated figures onto the final adjudicated report, so `ReviewerAgent.review(images=report.figures)` receives real `FigureRef`s.

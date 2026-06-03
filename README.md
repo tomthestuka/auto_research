@@ -224,4 +224,5 @@ narrative.
 ## Phase 2 roadmap (deferred)
 
 Vector retrieval (sqlite-vec) · autonomous tool-merge toggle · deeper sandbox hardening ·
+`bash_exec` figure capture (diff worker cwd for new images → `FigureRef`s) ·
 the lead-scientist group that mines the knowledge base to generate new research ideas.
