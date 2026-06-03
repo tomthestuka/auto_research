@@ -66,8 +66,14 @@ def test_cyg_x1_ixpe_softstate() -> None:
             "plot_iqu, group_pha) and that any inline Python executed via "
             "`mcp.builtin.bash_exec` with `python -c` successfully imports xspec and "
             "xspec_utils without errors.\n"
+            "- The existing toolkit will not produce publication-level results. "
+            "You may send back one round of revision to analysts, asking for better results. "
+            "They should attempt to run inline calculations via python -c until they get "
+            "non-error outputs and reasonable-looking fit statistics, "
+            "but they are not expected to achieve publication-quality fits.\n"
             "- Accept the analysis if tools were called with correct arguments and returned "
-            "non-error outputs, even if fit statistics are not publication-quality."
+            "non-error outputs, even if fit statistics are not publication-quality.\n"
+            "- If any of the tools or environments seemed broken, abort the run immediately and report."
         ),
     )
 
