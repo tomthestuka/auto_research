@@ -176,6 +176,113 @@ class ReviewerAgent(AgentRole):
             action="review",
         )
 
+    async def compose_machine_report(
+        self,
+        request: ResearchRequest,
+        report: AnalystReport,
+        references: "list",
+        verdict: ReviewVerdict,
+        run_id: str,
+    ) -> "ResearchReport":
+        """Compose a structured machine-readable research report (JSONL handle).
+
+        After the LLM returns the parsed report, figures/references/run_id/created_at
+        are overwritten deterministically so machine refs are correct by construction.
+        Only the prose fields (title, abstract, sections, key_findings) are LLM-authored.
+        """
+        from datetime import UTC, datetime
+
+        from auto_research.schemas.report import ResearchReport
+
+        payload = {
+            "output_format": "jsonl",
+            "output_format_instructions": (
+                "You are composing a structured machine-readable research report in JSON. "
+                "Populate title, abstract, sections (list of {heading, body}), and key_findings. "
+                "The runtime will overwrite figures, references, run_id, and created_at — "
+                "you may leave them as empty lists / empty string / now."
+            ),
+            "request": request.model_dump(mode="json"),
+            "analysis_report": report.model_dump(mode="json"),
+            "verdict_rationale": verdict.rationale,
+            "references": [r.model_dump(mode="json") for r in references],
+            "run_id": run_id,
+        }
+        result: ResearchReport = await self._call(
+            payload,
+            TypeAdapter(ResearchReport),
+            images=report.figures,
+            action="compose_machine_report",
+        )
+        return result.model_copy(
+            update={
+                "run_id": run_id,
+                "request_question": request.question,
+                "figures": report.figures,
+                "references": references,
+                "verdict_rationale": verdict.rationale,
+                "created_at": datetime.now(UTC),
+            }
+        )
+
+    async def compose_latex_report(
+        self,
+        request: ResearchRequest,
+        report: AnalystReport,
+        staged_figures: "list[tuple]",
+        references: "list",
+        verdict: ReviewVerdict,
+        *,
+        feedback: list[str] | None = None,
+    ) -> str:
+        """Compose a LaTeX research report (human handle).
+
+        Returns the raw LaTeX string. ``staged_figures`` is a list of
+        (FigureRef, relpath) pairs; relpaths are relative to the report directory
+        and must be used verbatim in \\includegraphics{}.
+        ``feedback`` carries compile/ref errors from the prior attempt for
+        self-correction.
+        """
+        from auto_research.schemas.report import LatexReport
+
+        fig_descriptions = [
+            {"relpath": relpath, "caption": figref.caption, "sha256": figref.sha256}
+            for figref, relpath in staged_figures
+        ]
+        ref_descriptions = [
+            r.model_dump(mode="json") for r in references
+        ]
+        payload = {
+            "output_format": "tex",
+            "output_format_instructions": (
+                "You are composing a LaTeX research report. "
+                "Return a JSON object with a single key 'latex' whose value is the complete "
+                "LaTeX document as a string. In JSON strings, every backslash must be escaped "
+                "as \\\\ (e.g. \\\\section{}, \\\\includegraphics{}). "
+                "Use only the exact figure relpaths and cite keys supplied below. "
+                "Use \\\\includegraphics{<relpath>} verbatim for each figure. "
+                "Define a self-contained \\\\begin{thebibliography} block; do not use an "
+                "external .bib file. Cite only the provided keys with \\\\cite{<key>}."
+            ),
+            "request": request.model_dump(mode="json"),
+            "analysis_report": report.model_dump(mode="json"),
+            "verdict_rationale": verdict.rationale,
+            "figures": fig_descriptions,
+            "references": ref_descriptions,
+        }
+        if feedback:
+            payload["feedback"] = (
+                "The previous attempt had these errors — fix them exactly:\n"
+                + "\n".join(f"  - {e}" for e in feedback)
+            )
+        result: LatexReport = await self._call(
+            payload,
+            TypeAdapter(LatexReport),
+            images=report.figures,
+            action="compose_latex_report",
+        )
+        return result.latex
+
 
 class LibrarianIOAgent(AgentRole):
     """Librarian I/O role: compose search strategies, query external sources, and abstract papers."""

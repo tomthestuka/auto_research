@@ -31,3 +31,9 @@ mcp_servers: []
 # research_toolkit exposes.  Add tool names here to hide broken or deprecated
 # tools without touching the toolkit repo.
 disabled_tools: []
+# Report composition (compose_report graph node, runs on accepted verdicts).
+# report_formats: which output handles to produce. Options: 'jsonl' (machine/upstream),
+#   'tex' (LaTeX + pdflatex PDF for human review). Both by default.
+# report_retry_cap: max LaTeX compile+ref-check iterations before accepting residual errors.
+report_formats: [jsonl, tex]
+report_retry_cap: 2

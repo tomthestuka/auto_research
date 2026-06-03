@@ -24,6 +24,13 @@ def figures_dir(run_id: str, agent_key: str) -> Path:
     return d
 
 
+def report_dir(run_id: str) -> Path:
+    """Return (and ensure parent + figures/ exist for) the reviewer's report directory."""
+    d = agent_dir(run_id, "reviewer") / "report"
+    (d / "figures").mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def memory_path(run_id: str, agent_key: str) -> Path:
     """Return (and ensure parent exists for) the agent's memory.md path."""
     d = agent_dir(run_id, agent_key)

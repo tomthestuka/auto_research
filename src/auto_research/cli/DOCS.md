@@ -37,3 +37,4 @@ a grouped Markdown report, and prints the final `ReviewVerdict`.
 
 ## Changelog
 - 2026-05-26/28 — Step 12 built: CLI entry (`python -m auto_research`) with `--chatter` flag, JSON/text final output, monitor JSONL/Markdown artifact paths.
+- 2026-06-03 — Added `--report-format {jsonl,tex}` (repeatable; default both via config). Report artifact paths printed in text mode; included in `--format json` object when present.

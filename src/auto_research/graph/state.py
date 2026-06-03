@@ -11,6 +11,7 @@ from auto_research.schemas import (
     ResearchRequest,
     ReviewVerdict,
 )
+from auto_research.schemas.report import ResearchReport
 
 
 class ResearchState(TypedDict, total=False):
@@ -24,3 +25,8 @@ class ResearchState(TypedDict, total=False):
     lit_iterations: int
     analysis_iterations: int
     max_iterations: int
+    # Report artifacts (populated by compose_report node on accepted verdicts)
+    research_report: ResearchReport | None
+    report_jsonl: Path | None
+    report_latex: Path | None
+    report_pdf: Path | None

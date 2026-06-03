@@ -111,4 +111,5 @@ carried by **reference** (`FigureRef`), never embedded
   from tool stdout. `exit_code=127` indicates "tool unavailable" (Phase 2 stub).
 
 ## Changelog
+- 2026-06-03 — Added report schemas (`schemas/report.py`): `ReportSection`, `Reference`, `ResearchReport` (machine handle), `LatexReport` (human handle). Exported from `schemas/__init__.py`.
 - 2026-05-26/28 — Steps 1–11 built: full Pydantic v2 protocol (`ResearchRequest`, `SearchResult` with `pdf_url`/`full_text_links`/`local_path`, `AnalysisTask`/`AnalystReport`, `ReviewVerdict`, `FigureRef`, `DocumentRef`, `ToolCallRequest`/`ToolResult`). `ToolResult.exit_code=127` convention for unknown tools. Tool results live in worker memory files, not in `ResearchState`.

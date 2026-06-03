@@ -147,6 +147,7 @@ def test_graph_runs_full_loop_in_single_pass():
         retrieval=retrieval,
         workers=[FakeWorker("w1"), FakeWorker("w2")],
         lead=lead,
+        report_formats=[],
     )
 
     state = _invoke(graph, ResearchRequest(question="What is X?"))
@@ -173,6 +174,7 @@ def test_graph_literature_feedback_capped_at_three():
         retrieval=retrieval,
         workers=[FakeWorker()],
         lead=FakeLead(),
+        report_formats=[],
     )
 
     state = _invoke(graph, ResearchRequest(question="What is X?"))
@@ -215,6 +217,7 @@ def test_graph_respects_custom_max_iterations():
         workers=[FakeWorker()],
         lead=FakeLead(),
         max_iterations=2,
+        report_formats=[],
     )
 
     state = _invoke(graph, ResearchRequest(question="q"), max_iterations=2)

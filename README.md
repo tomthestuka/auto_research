@@ -158,8 +158,11 @@ Keys expected in `.env` (never committed): `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
 `GOOGLE_API_KEY`, `ADS_DEV_KEY` (NASA ADS), `TAVILY_API_KEY`, and LangSmith tracing
 (`LANGCHAIN_TRACING_V2=true`, `LANGCHAIN_API_KEY`).
 
-Runtime data (the SQLite file, the figures/artifacts store, run logs) lives in a
-configurable directory **outside both repos** and is not committed.
+Runtime data (the SQLite file, the figures/artifacts store, run logs, and report
+artifacts) lives in a configurable directory **outside both repos** and is not
+committed. On accepted verdicts, `runs/{run_id}/reviewer/report/` holds
+`report.jsonl` (machine handle for upstream planning teams), `report.tex` + symlinked
+`figures/` (human LaTeX project), and `report.pdf` (compiled by pdflatex).
 For the current development runtime, `.env` may set
 `AUTO_RESEARCH_RUNTIME_DIR=/data/fzhou/ar_runtime/test_runtime`, yielding
 `/data/fzhou/ar_runtime/test_runtime/auto_research.sqlite3`. Locally supplied

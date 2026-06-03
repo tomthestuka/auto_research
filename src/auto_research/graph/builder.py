@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
@@ -12,8 +13,17 @@ from auto_research.consensus import ConsensusStrategy, DebateToConverge, LeadLik
 from auto_research.graph.state import ResearchState
 from auto_research.monitor import RunMonitor
 from auto_research.observations import ObservationsConfig, load_observations_config
+from auto_research.report import (
+    build_references,
+    compile_latex,
+    stage_figures,
+    validate_latex_refs,
+    write_report_jsonl,
+    write_report_latex,
+)
 from auto_research.retrieval import RetrievalBackend, SqliteRetrievalBackend, text_search_paths
 from auto_research.sandbox.registry import ToolkitRegistry
+from auto_research.sandbox.workspace import report_dir as _report_dir
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -22,6 +32,7 @@ from auto_research.schemas import (
     SearchRequest,
     SearchResult,
 )
+from auto_research.storage import Storage
 
 
 class IOAgentLike(Protocol):
@@ -97,6 +108,10 @@ def build_graph(
     max_iterations: int = 3,
     registry: ToolkitRegistry | None = None,
     monitor: RunMonitor | None = None,
+    run_id: str | None = None,
+    storage: Storage | None = None,
+    report_retry_cap: int = 2,
+    report_formats: list[str] | None = None,
 ) -> Any:
     """Compile the Phase 1 research-loop graph.
 
@@ -280,12 +295,100 @@ def build_graph(
     async def finalize_run_node(state: ResearchState) -> dict[str, Any]:
         return {"verdict": _latest_verdict(state)}
 
+    _run_id = run_id or uuid.uuid4().hex
+    _storage = storage or Storage()
+    _report_formats: list[str] = report_formats if report_formats is not None else ["jsonl", "tex"]
+
+    async def compose_report_node(state: ResearchState) -> dict[str, Any]:
+        verdict = state["verdict"]
+        analyst_report = state.get("report")
+        literature = state.get("literature") or []
+
+        rdir = _report_dir(_run_id)
+        references = await build_references(_storage, literature)
+
+        result: dict[str, Any] = {}
+
+        if "jsonl" in _report_formats:
+            machine = await reviewer.compose_machine_report(  # type: ignore[attr-defined]
+                state["request"], analyst_report, references, verdict, _run_id
+            )
+            jsonl_path = write_report_jsonl(machine, rdir / "report.jsonl")
+            result["research_report"] = machine
+            result["report_jsonl"] = jsonl_path
+            await _record(
+                monitor,
+                "reviewer.compose_report.jsonl",
+                level=3,
+                summary="Reviewer wrote machine report (JSONL)",
+                actor="reviewer",
+                data={"path": str(jsonl_path)},
+            )
+
+        if "tex" in _report_formats:
+            staged = stage_figures(analyst_report.figures if analyst_report else [], rdir)
+            feedback: list[str] | None = None
+            latex_path: Path | None = None
+            pdf_path: Path | None = None
+
+            for attempt in range(max(1, report_retry_cap)):
+                latex = await reviewer.compose_latex_report(  # type: ignore[attr-defined]
+                    state["request"], analyst_report, staged, references, verdict,
+                    feedback=feedback,
+                )
+                latex_path = write_report_latex(latex, rdir / "report.tex")
+                errs = validate_latex_refs(latex, staged, references)
+                ok, cerrs = compile_latex(rdir)
+                errs = errs + cerrs
+                await _record(
+                    monitor,
+                    "reviewer.compose_report.compile",
+                    level=4,
+                    summary=f"LaTeX compile attempt {attempt + 1}: {'OK' if not errs else f'{len(errs)} error(s)'}",
+                    actor="reviewer",
+                    data={"attempt": attempt + 1, "errors": errs},
+                )
+                if not errs:
+                    pdf_candidates = list(rdir.glob("*.pdf"))
+                    pdf_path = pdf_candidates[0] if pdf_candidates else None
+                    break
+                feedback = errs
+
+            if errs:
+                await _record(
+                    monitor,
+                    "reviewer.compose_report.compile_warning",
+                    level=2,
+                    summary=f"LaTeX compile finished with {len(errs)} residual error(s) after {report_retry_cap} attempt(s)",
+                    actor="reviewer",
+                    data={"errors": errs},
+                )
+            result["report_latex"] = latex_path
+            if pdf_path:
+                result["report_pdf"] = pdf_path
+
+        await _record(
+            monitor,
+            "run.report",
+            level=1,
+            summary="Research report artifacts written",
+            data={k: str(v) for k, v in result.items() if isinstance(v, Path)},
+        )
+        return result
+
+    def route_after_finalize(state: ResearchState) -> str:
+        verdict = state.get("verdict")
+        if verdict and verdict.accepted and _report_formats:
+            return "compose_report"
+        return END
+
     builder = StateGraph(ResearchState)
     builder.add_node("literature", literature_node)
     builder.add_node("review_literature", review_literature_node)
     builder.add_node("analysis", analysis_node)
     builder.add_node("review_analysis", review_analysis_node)
     builder.add_node("finalize_run", finalize_run_node)
+    builder.add_node("compose_report", compose_report_node)
 
     builder.add_edge(START, "literature")
     builder.add_edge("literature", "review_literature")
@@ -300,7 +403,12 @@ def build_graph(
         after_review_analysis,
         {"analysis": "analysis", "finalize_run": "finalize_run"},
     )
-    builder.add_edge("finalize_run", END)
+    builder.add_conditional_edges(
+        "finalize_run",
+        route_after_finalize,
+        {"compose_report": "compose_report", END: END},
+    )
+    builder.add_edge("compose_report", END)
 
     return builder.compile()
 

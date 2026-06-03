@@ -42,6 +42,10 @@ class ResearchRun:
     verdict: ReviewVerdict
     final_state: dict[str, Any]
     monitor: RunMonitor
+    research_report: Any = None  # ResearchReport | None — avoids circular import at class def
+    report_jsonl: Path | None = None
+    report_latex: Path | None = None
+    report_pdf: Path | None = None
 
     def markdown(self) -> str:
         """Return the grouped monitor report."""
@@ -151,6 +155,7 @@ async def run_request(
     chatter: int = 10,
     monitor: RunMonitor | None = None,
     monitor_jsonl: str | Path | None = None,
+    report_formats: str | list[str] | None = None,
 ) -> ReviewVerdict:
     """Run the research-loop graph for one request and return the verdict."""
 
@@ -166,8 +171,25 @@ async def run_request(
         chatter=chatter,
         monitor=monitor,
         monitor_jsonl=monitor_jsonl,
+        report_formats=report_formats,
     )
     return run.verdict
+
+
+def _normalize_report_formats(
+    value: str | list[str] | None,
+    default: list[str],
+) -> list[str]:
+    """Normalize report_formats to a validated list."""
+    _valid = {"jsonl", "tex"}
+    if value is None:
+        return list(default)
+    if isinstance(value, str):
+        value = [value]
+    unknown = set(value) - _valid
+    if unknown:
+        raise ValueError(f"Unknown report_formats: {sorted(unknown)}. Valid: {sorted(_valid)}")
+    return list(value)
 
 
 async def run_research(
@@ -183,6 +205,7 @@ async def run_research(
     chatter: int = 10,
     monitor: RunMonitor | None = None,
     monitor_jsonl: str | Path | None = None,
+    report_formats: str | list[str] | None = None,
 ) -> ResearchRun:
     """Run the graph and return the verdict, final state, and monitor.
 
@@ -216,6 +239,9 @@ async def run_research(
     analyze_env = Path(analyze_env_str) if analyze_env_str else None
     analyze_ini_sh: str | None = orch.get("analyze_ini_sh") or None
     disabled_tools: list[str] = orch.get("disabled_tools") or []
+    report_retry_cap = int(orch.get("report_retry_cap", 2))
+    default_formats: list[str] = orch.get("report_formats") or ["jsonl", "tex"]
+    resolved_formats = _normalize_report_formats(report_formats, default_formats)
 
     storage = Storage()
     reviewer = reviewer or ReviewerAgent(monitor=run_monitor)
@@ -309,6 +335,10 @@ async def run_research(
         max_iterations=max_iterations,
         registry=registry,
         monitor=run_monitor,
+        run_id=run_id,
+        storage=storage,
+        report_retry_cap=report_retry_cap,
+        report_formats=resolved_formats,
     )
 
     try:
@@ -351,7 +381,16 @@ async def run_research(
             "analysis_iterations": final_state.get("analysis_iterations", 0),
         },
     )
-    return ResearchRun(request=request, verdict=verdict, final_state=final_state, monitor=run_monitor)
+    return ResearchRun(
+        request=request,
+        verdict=verdict,
+        final_state=final_state,
+        monitor=run_monitor,
+        research_report=final_state.get("research_report"),
+        report_jsonl=final_state.get("report_jsonl"),
+        report_latex=final_state.get("report_latex"),
+        report_pdf=final_state.get("report_pdf"),
+    )
 
 
 def _attach_monitor(target: object, monitor: RunMonitor) -> None:

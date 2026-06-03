@@ -136,6 +136,7 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path) -> 
             max_iterations=1,
             chatter=10,
             monitor_jsonl=tmp_path / "monitor.jsonl",
+            report_formats=[],
         )
     )
 

@@ -49,6 +49,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="text",
         help="Output format for the final verdict.",
     )
+    parser.add_argument(
+        "--report-format",
+        action="append",
+        choices=("jsonl", "tex"),
+        default=None,
+        dest="report_formats",
+        metavar="{jsonl,tex}",
+        help=(
+            "Which report artifact(s) to produce on an accepted verdict. "
+            "May be supplied more than once. Defaults to both jsonl and tex."
+        ),
+    )
     return parser
 
 
@@ -76,22 +88,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             request,
             chatter=chatter,
             monitor_jsonl=jsonl_path,
+            report_formats=args.report_formats,
         )
     )
     run.monitor.write_markdown(md_path)
 
     if args.format == "json":
-        print(
-            json.dumps(
-                {
-                    "verdict": run.verdict.model_dump(mode="json"),
-                    "monitor_jsonl": str(jsonl_path),
-                    "monitor_markdown": str(md_path),
-                },
-                indent=2,
-                sort_keys=True,
-            )
-        )
+        out: dict = {
+            "verdict": run.verdict.model_dump(mode="json"),
+            "monitor_jsonl": str(jsonl_path),
+            "monitor_markdown": str(md_path),
+        }
+        if run.report_jsonl:
+            out["report_jsonl"] = str(run.report_jsonl)
+        if run.report_latex:
+            out["report_latex"] = str(run.report_latex)
+        if run.report_pdf:
+            out["report_pdf"] = str(run.report_pdf)
+        print(json.dumps(out, indent=2, sort_keys=True))
     else:
         print(f"Accepted: {run.verdict.accepted}")
         print(f"Needs more literature: {run.verdict.needs_more_literature}")
@@ -103,6 +117,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("")
         print(f"Monitor JSONL: {jsonl_path}")
         print(f"Monitor Markdown: {md_path}")
+        if run.report_jsonl:
+            print(f"Report JSONL:   {run.report_jsonl}")
+        if run.report_latex:
+            print(f"Report LaTeX:   {run.report_latex}")
+        if run.report_pdf:
+            print(f"Report PDF:     {run.report_pdf}")
     return 0
 
 
