@@ -37,12 +37,13 @@ _REPL_SCRIPT = textwrap.dedent("""
     def _configure_xspec_once():
         \"\"\"Make the REPL's XSPEC session non-interactive at subprocess boot.\"\"\"
         try:
-            from xspec import AllModels, Fit, Xset
+            from xspec import AllModels, Fit, Plot, Xset
         except Exception:
             return
         Fit.query = "no"
         Xset.allowPrompting = False
         Xset.chatter = 5
+        Plot.xAxis = "keV"
         AllModels.lmod('relxill', '/data/fzhou/XSPEC/relxill/')
 
     _configure_xspec_once()

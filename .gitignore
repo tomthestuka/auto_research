@@ -24,3 +24,6 @@ logs/dev/
 .agents/
 .claude/
 .codex/
+
+# verification tests
+tmp/
