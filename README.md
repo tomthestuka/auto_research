@@ -146,57 +146,135 @@ not mean each role can complete its full real-world job yet.
 
 ---
 
-## Getting started
+## Setup
+
+There are **two environments**, and you only need the second one to run the analyst
+XSPEC tools:
+
+1. **Orchestration env** (`auto_research` conda env) — required for everything: the
+   LangGraph graph, LLM calls, librarians, reviewer, report composition. Pure Python +
+   API keys.
+2. **Analysis sandbox env** — required only so analyst workers can execute the
+   `research_toolkit` XSPEC tools (`load_data`, `fit_*`, `plot_*`). This is HEASoft /
+   PyXSPEC / `ixpeobssim` / `relxill` plus the `research_toolkit` repo and the observation
+   data. Heavy and host-specific. **Without it the graph still runs end-to-end** — only
+   the analyst tool calls fail (caught by the error-feedback loop).
+
+### 1. Orchestration env (everyone)
 
 ```bash
-conda env create -f environment.yml
-conda activate auto_research
-cp .env.example .env          # then fill in your keys
+conda env create -f environment.yml      # creates the `auto_research` env (Python 3.13)
+conda activate auto_research             # `pip install -e .` + langgraph-cli run automatically
+cp .env.example .env                     # then fill in your keys (see Configuration)
 ```
 
-Keys expected in `.env` (never committed): `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-`GOOGLE_API_KEY`, `ADS_DEV_KEY` (NASA ADS), `TAVILY_API_KEY`, and LangSmith tracing
-(`LANGCHAIN_TRACING_V2=true`, `LANGCHAIN_API_KEY`).
+Verify it imports and the deterministic tests pass (these need **no** API keys, no XSPEC):
 
-Runtime data (the SQLite file, the figures/artifacts store, run logs, and report
-artifacts) lives in a configurable directory **outside both repos** and is not
-committed. On accepted verdicts, `runs/{run_id}/reviewer/report/` holds
-`report.jsonl` (machine handle for upstream planning teams), `report.tex` + symlinked
-`figures/` (human LaTeX project), and `report.pdf` (compiled by pdflatex).
-For the current development runtime, `.env` may set
-`AUTO_RESEARCH_RUNTIME_DIR=/data/fzhou/ar_runtime/test_runtime`, yielding
-`/data/fzhou/ar_runtime/test_runtime/auto_research.sqlite3`. Locally supplied
-papers live in `/data/fzhou/ar_runtime/papers`.
+```bash
+pytest -q          # ~150 deterministic tests; live/XSPEC tests are opt-in and skipped
+```
 
-Mission observation locations are configured generically in
-`config/observations.yaml` as `missions.<name>.obs_db_path`; agent code treats
-mission names as data rather than special cases.
+### 2a. On our cluster (fastest)
+
+The analysis env and data already exist and work — point the config at them and you are
+done. The committed `config/orchestration.yaml` and `config/observations.yaml` already
+reference these paths:
+
+| What | Path (already present on the cluster) |
+|---|---|
+| Analysis Python env (PyXSPEC, ixpeobssim) | `/grad/fzhou/.conda/envs/astropy` |
+| HEASoft/CALDB init script | `src/auto_research/sandbox/analyst_env.sh` (HEASoft 6.34) |
+| `research_toolkit` repo (`toolkit_root`) | `/data/fzhou/research_toolkit` |
+| `relxill` model tables | `/data/fzhou/XSPEC/relxill/` |
+| Cyg X-1 observations | `/data/fzhou/XSPEC/Cyg_X-1/{IXPE,NICER,NuSTAR}` |
+
+So on the cluster you only need: your own `auto_research` conda env (step 1), your own
+`.env` with API keys, and an `AUTO_RESEARCH_RUNTIME_DIR` you can write to. Leave the
+analysis paths as-is.
+
+### 2b. On your own machine
+
+To run the analyst XSPEC tools off-cluster you must reproduce the analysis stack and
+repoint the config. Roughly:
+
+1. **HEASoft (incl. PyXSPEC)** — install HEASoft and confirm `python -c "import xspec"`
+   works under its Python. Edit `src/auto_research/sandbox/analyst_env.sh` so `HEADAS`,
+   `CALDB`, etc. point at your install.
+2. **Analysis Python env** — a conda/venv whose Python has PyXSPEC on the path plus
+   `ixpeobssim` (for IXPE reduction/response). Set `analyze_env` in
+   `config/orchestration.yaml` to its prefix.
+3. **`relxill`** — install the model tables; the boot policy loads them from
+   `/data/fzhou/XSPEC/relxill/` in `src/auto_research/sandbox/persistent.py` — change that
+   path to yours.
+4. **`research_toolkit`** — clone the sibling repo and set `toolkit_root` in
+   `config/orchestration.yaml`.
+5. **Observation data** — put your data somewhere and set the per-mission `obs_db_path`s
+   in `config/observations.yaml`.
+
+If you only care about the literature/reviewer loop, skip step 2 entirely — the analyst
+tools simply won't be available.
 
 ---
 
-## Running
+## Configuration
 
-As a CLI:
+| File | Purpose |
+|---|---|
+| `.env` | API keys + runtime dir. Loaded automatically. Never committed (`cp .env.example .env`). |
+| `config/models.yaml` | Role → model-group mapping (OpenAI/Anthropic/Google). No model IDs in code. |
+| `config/orchestration.yaml` | Iteration caps, `toolkit_root`, `analyze_env`, `analyze_ini_sh`, `disabled_tools`, `report_formats`, `report_retry_cap`. |
+| `config/observations.yaml` | `missions.<name>.obs_db_path` — local observation locations, treated as data. |
+
+**Keys** (the provider SDKs read these directly; see `.env.example` for the full template):
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `ADS_DEV_KEY` (NASA ADS),
+`TAVILY_API_KEY`; optional LangSmith tracing (`LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`).
+
+**Runtime data dir** (`AUTO_RESEARCH_RUNTIME_DIR`, defaults to `~/.auto_research`) lives
+**outside both repos** and is not committed. It holds the SQLite DB, figures/artifacts,
+run logs, and reviewer reports. On an accepted verdict,
+`runs/{run_id}/reviewer/report/` holds `report.jsonl` (machine handle for upstream
+planning teams), `report.tex` + symlinked `figures/` (human LaTeX project), and
+`report.pdf` (compiled by `pdflatex` when available).
+
+---
+
+## Usage & entry points
+
+**CLI** — one request end-to-end:
 
 ```bash
 python -m auto_research "your research question" --chatter 10
+# options: --context TEXT  --constraint TEXT (repeatable)
+#          --report-format {jsonl,tex} (repeatable; default both)
+#          --format {text,json}  --monitor-jsonl PATH  --monitor-md PATH
 ```
 
-Or import the library / drive it from a notebook for inspection:
+**Library** — monitored run from Python / a notebook:
 
 ```python
 from auto_research import run_research
 
 run = await run_research("your research question", chatter=10)
-run.verdict
-run.markdown()
+run.verdict          # ReviewVerdict
+run.markdown()       # grouped monitor report
+run.report_pdf       # path to the compiled report (if accepted + tex requested)
 ```
 
-The Step 12 inspection notebook is
-`notebooks/step12_monitor_inspection.ipynb`. Monitor artifacts are written as
-JSONL plus grouped Markdown reports. `--chatter` follows an XSPEC-style 1-10
-verbosity scale; `10` records the full agent, consensus, tool, and reviewer
-narrative.
+**LangGraph Studio** — live per-node graph state (`langgraph.json` → `graph/serve.py`):
+
+```bash
+langgraph dev        # reads .env, serves the `research` graph in Studio
+```
+
+**Notebook** — `notebooks/step12_monitor_inspection.ipynb` reconstructs and inspects a
+run from its monitor JSONL.
+
+**Tests** — `pytest -q` for deterministic checks. Live API / XSPEC tests are opt-in via
+env flags (e.g. `AUTO_RESEARCH_LIVE_FULL_SUITE_TESTS=1`) and write logs under
+`logs/dev/step-N/`.
+
+`--chatter` follows an XSPEC-style 1-10 verbosity scale; `10` records the full agent,
+consensus, tool, and reviewer narrative as JSONL plus a grouped Markdown report.
 
 ---
 
