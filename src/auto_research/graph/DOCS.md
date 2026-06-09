@@ -76,8 +76,9 @@ iteration counters, and the cap.
   monitor=None, monitor_jsonl=None) -> ReviewVerdict` — compatibility entry.
   Runs `run_research()` and returns only the final reviewer verdict.
 - `async run_research(request, *, ..., chatter=10, monitor=None,
-  monitor_jsonl=None) -> ResearchRun` — high-level monitored entry. Missing
-  dependencies are constructed from `config/models.yaml`. Reads
+  monitor_jsonl=None) -> ResearchRun` — high-level monitored entry. Calls
+  `check_required_env()` immediately (crashes if any required API key is absent).
+  Missing dependencies are constructed from `config/models.yaml`. Reads
   `tool_retry_cap`, `toolkit_root`, `analyze_env`, and `analyze_ini_sh` from
   `config/orchestration.yaml`.  Creates per-run workspace
   (`$AUTO_RESEARCH_RUNTIME_DIR/runs/{run_id}/`), spawns one `PersistentSandbox`
@@ -149,3 +150,4 @@ iteration counters, and the cap.
 - 2026-05-26/28 — Steps 10–12 built: `ResearchState`, `build_graph()` (five-node LangGraph with two capped feedback edges, `add_conditional_edges`), Studio wiring (`_default_graph()`, `serve.py`, `langgraph.json`). `run_research()` / `ResearchRun` / `run_request()`: per-run workspace creation, one `PersistentSandbox` per worker, `MCPToolClient` lifecycle, `RunMonitor` injection, teardown in `finally`. `literature_node` pipeline: compose strategy → online search → ingest → `text_search_paths()`. `_build_task()` injects reviewer follow-up, obs DB paths, and live tool catalogue into every analyst task. Tool state lives in worker `memory_path` files; `ResearchState` carries no tool queue/results.
 - 2026-06-03 — `compose_report` node added to graph (runs after `finalize_run` on accepted verdicts, conditional on `report_formats`). `build_graph()` gains `run_id`, `storage`, `report_retry_cap`, `report_formats`. `run_research()` gains `report_formats` param; reads `report_retry_cap`/`report_formats` from `orchestration.yaml`; passes `run_id` and `storage` to graph. `ResearchRun` gains `research_report`, `report_jsonl`, `report_latex`, `report_pdf`. `ResearchState` gains the same four optional fields. `_normalize_report_formats()` validates and normalizes the harness handle.
 - 2026-06-03 — `run_research()` and `_default_graph()` read `orchestration.yaml::disabled_tools` and pass it to `ToolkitRegistry`. `_builtin_server_config()` builds MCP server env from `_source_ini_env` (no `os.environ` fallback; `ValueError` if `analyze_ini_sh` missing); PYTHONPATH covers `toolkit_root` and `toolkit_root.parent`.
+- 2026-06-09 — `run_research()` calls `check_required_env()` at entry so both CLI and library callers crash immediately on missing API keys.

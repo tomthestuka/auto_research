@@ -310,7 +310,7 @@ writes the tool, lead reviews, human approves merge on GitHub.
 - `read_memory(path)` → `str` — read memory.md or return `""`.
 - `run_tool(module, fn, args, *, timeout_s, workdir, toolkit_root, analyze_env=None, analyze_ini_sh=None)` →
   `ToolResult` — one-shot subprocess; kept for ad-hoc use.
-- `_source_ini_env(ini_sh)` → `dict` — sources a bash init script, caches result.
+- `_source_ini_env(ini_sh)` → `dict` — sources a bash init script, caches result. Raises `RuntimeError` on any failure (non-zero exit, empty env, or subprocess exception) — no fallback to `os.environ`.
 - `analyst_env.sh` — bash script setting HEADAS, CALDB, CALDBCONFIG, CALDBALIAS,
   GEOMAG_PATH. Sourced by `_source_ini_env()`. No interactive cruft.
   `config/orchestration.yaml::analyze_ini_sh` points at this file.
@@ -338,4 +338,5 @@ writes the tool, lead reviews, human approves merge on GitHub.
 - 2026-06-01 — Sandbox hardening. REPL: fd-redirect prevents C-level console output from corrupting the JSON protocol; `console_tail` captured and attached to results. XSPEC configured once at boot (`Fit.query='no'`, `Xset.allowPrompting=False`, `Xset.chatter=5`). MCP builtin server spawned in astropy env via `_builtin_server_config` (explicit python path; env from `_source_ini_env`; PYTHONPATH=toolkit_root). Isolation test (`test_sandbox_isolation.py`) and policy tests (`test_live_sandbox_policy.py`) added.
 - 2026-06-03 — `workspace.py` gains `report_dir(run_id) -> Path` — returns `agent_dir(run_id, "reviewer") / "report"` and ensures `figures/` subdir exists.
 - 2026-06-03 — `_configure_xspec_once()` boot policy now also sets `Plot.xAxis = "keV"`. PyXSPEC defaults `xAxis` to `"channel"`, which made `plot_fit` residual panels render against channel number (starting at 0) and misalign with the energy-axis spectrum panel. Setting it once at REPL boot fixes all plots and also makes energy-based ignore/notice ranges interpreted consistently.
+- 2026-06-09 — `_source_ini_env()` now raises `RuntimeError` on any failure (subprocess exception, non-zero exit, or empty result) instead of falling back to `os.environ`. No env fallback for the analyst subprocess.
 - 2026-06-03 — `ToolkitRegistry` gains `disabled_tools` constructor param: named tools are stripped from `self._tools` at load time, making them absent from `tool_catalogue()` and `is_known()`. `_builtin_server_config()` and `PersistentSandbox._spawn()` raise `ValueError` if `analyze_ini_sh` is missing — no `os.environ` fallback; env is always `_source_ini_env(analyze_ini_sh)`. PYTHONPATH now covers both `toolkit_root` and `toolkit_root.parent`. Sandbox/policy tests migrated to real HEASoft env; `test_mcp_bash_env_xspec_and_toolkit` live test confirms `import xspec`, `import xspec_utils`, and `from research_toolkit import xspec_utils` all succeed.

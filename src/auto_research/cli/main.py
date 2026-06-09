@@ -10,6 +10,7 @@ from typing import Sequence
 
 from dotenv import load_dotenv
 
+from auto_research.env import check_required_env
 from auto_research.graph import run_research
 from auto_research.monitor import default_monitor_jsonl_path, validate_chatter
 from auto_research.schemas import ResearchRequest
@@ -68,6 +69,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run one research request from the command line."""
 
     load_dotenv()
+    check_required_env()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from auto_research.env import check_required_env
 from auto_research.agents import (
     AnalystLeadAgent,
     AnalystWorkerAgent,
@@ -222,6 +223,8 @@ async def run_research(
     ``PersistentSandbox`` is spawned per analyst worker; all sandboxes are torn
     down after the graph completes or raises.
     """
+
+    check_required_env()
 
     if isinstance(request, str):
         request = ResearchRequest(question=request)

@@ -31,10 +31,12 @@ a grouped Markdown report, and prints the final `ReviewVerdict`.
 ## Dictionary-level reference
 - `build_parser() -> argparse.ArgumentParser` — constructs the command-line
   parser.
-- `main(argv=None) -> int` — CLI entry. Loads `.env`, runs one monitored request,
-  writes monitor artifacts, and prints the final verdict.
+- `main(argv=None) -> int` — CLI entry. Loads `.env`, calls `check_required_env()`
+  (crashes with a clear message if any required key is absent), runs one monitored
+  request, writes monitor artifacts, and prints the final verdict.
 - `auto_research.__main__` — module entry point for `python -m auto_research`.
 
 ## Changelog
 - 2026-05-26/28 — Step 12 built: CLI entry (`python -m auto_research`) with `--chatter` flag, JSON/text final output, monitor JSONL/Markdown artifact paths.
 - 2026-06-03 — Added `--report-format {jsonl,tex}` (repeatable; default both via config). Report artifact paths printed in text mode; included in `--format json` object when present.
+- 2026-06-09 — `main()` now calls `check_required_env()` after `load_dotenv()`; crashes immediately if any required API key is missing.

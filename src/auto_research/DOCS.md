@@ -13,6 +13,7 @@ A src-layout package. Submodules are added in the order set by
 
 | Submodule | Step | Role |
 |---|---|---|
+| `env.py` | — | Launch-time required-env check (`check_required_env()`). |
 | `schemas` | 1 | Pydantic v2 message protocol between agents. |
 | `models` | 2 | Provider abstraction + role→model registry from `config/models.yaml`. |
 | `observability` | 3 | LangSmith tracing + per-call cost logging hooked into the provider layer. |
@@ -91,6 +92,7 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
   Pydantic v2 inter-agent protocol and schema validation tests pass.
 - 2026-05-26 — Package seeded with submodule folders (each with its own `DOCS.md`)
   during step 0. No code beyond the version constant.
+- 2026-06-09 — Added `auto_research.env` (`check_required_env()`): crashes at launch when any required env var is missing; called in `cli/main.py` after `load_dotenv()` and at the top of `graph/runtime.run_research()`. `sandbox/runner._source_ini_env` now raises `RuntimeError` on failure instead of falling back to `os.environ`.
 - 2026-05-28 — Step 12: added `auto_research.monitor`, exported
   `run_research()` / `ResearchRun` / `RunMonitor`, and kept `run_request()` as
   the verdict-only compatibility entry.

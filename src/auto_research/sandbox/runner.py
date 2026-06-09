@@ -24,6 +24,8 @@ def _source_ini_env(ini_sh: str) -> dict[str, str]:
     interactive shell components (gnome-keyring, SSH agent) are suppressed via
     ``2>/dev/null``.  The result is cached so the script is only sourced once
     per interpreter lifetime.
+
+    Raises ``RuntimeError`` on any failure — no fallback to ``os.environ``.
     """
     if ini_sh in _ini_env_cache:
         return _ini_env_cache[ini_sh]
@@ -34,21 +36,22 @@ def _source_ini_env(ini_sh: str) -> dict[str, str]:
             text=True,
             timeout=15,
         )
-        if result.returncode == 0 and result.stdout:
-            env: dict[str, str] = {}
-            for entry in result.stdout.split("\0"):
-                if "=" in entry:
-                    k, _, v = entry.partition("=")
-                    env[k] = v
-            if env:
-                _ini_env_cache[ini_sh] = env
-                return env
-    except Exception:  # noqa: BLE001
-        pass
-    # Fallback: parent env unchanged
-    fallback = dict(os.environ)
-    _ini_env_cache[ini_sh] = fallback
-    return fallback
+    except Exception as exc:
+        raise RuntimeError(f"Failed to source analyst env from {ini_sh!r}: {exc}") from exc
+    if result.returncode != 0 or not result.stdout:
+        raise RuntimeError(
+            f"Sourcing analyst env {ini_sh!r} failed (exit {result.returncode}):\n"
+            f"{result.stderr.strip()}"
+        )
+    env: dict[str, str] = {}
+    for entry in result.stdout.split("\0"):
+        if "=" in entry:
+            k, _, v = entry.partition("=")
+            env[k] = v
+    if not env:
+        raise RuntimeError(f"Sourcing analyst env {ini_sh!r} produced an empty environment")
+    _ini_env_cache[ini_sh] = env
+    return env
 
 
 async def run_tool(
