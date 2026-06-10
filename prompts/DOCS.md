@@ -29,13 +29,16 @@ Runtime prompt files:
   attachment reading, download and ingest reporting, and bibliographic
   summaries.
 - `analyst_worker.md` — task analysis, debate revisions, assumptions, figure
-  reference handling, and structured tool/data escalation requests.
-- `analyst_lead.md` — convergence judgment, adjudication, synthesis, and
-  tool-discipline review without treating requested commands as executed.
+  reference handling, and the two-call analyze/request_tools protocol.
+- `analyst_lead.md` — convergence judgment, adjudication, and synthesis.
 
 Each file is the complete system prompt for that role: identity, responsibilities,
-tools available, output schema expectations, escalation rules. The agent layer
-loads it verbatim — do not embed templating logic here.
+output expectations, and scope/escalation rules. **Prompts do not enumerate tools
+or tool arguments** — the available tools, their argument schemas, and their
+descriptions are supplied to the model through tool loading (native function
+calling, `ToolkitRegistry.tool_definitions()` + manifest descriptions), not the
+prompt. The agent layer loads each prompt verbatim — do not embed templating
+logic here.
 
 ## Dependencies
 - Read by: `auto_research.agents` (one prompt per role wrapper).
@@ -52,3 +55,4 @@ loads it verbatim — do not embed templating logic here.
 - 2026-06-03 — `analyst_worker.md` hardened: `load_data` resp-path warnings expected (ignore); `BKG: None` correct for bright sources like Cyg X-1; `python -c "..."` via `bash_exec` permitted for inline computation (no file writes); `run_fit` takes no `indices`; all `fit_*` require `indices` from `load_data`.
 - 2026-06-03 — `analyst_worker.md` further hardened from full-suite run analysis: `load_data` must be called alone in its own request batch before dependents (plot_fit, plot_iqu, fit_*); `python -c` multi-statement must use `;` not `\n` escapes; `xspec` has no `__version__` (probe with `print("OK")`); `group_pha` argument is `e_edges` not `bin_edges`; `BKG: None` explanation corrected (negligible contribution, not data-reduction stage).
 - 2026-06-03 — `analyst_worker.md`: added `load_data` epoch-ordering gotcha (not a hard rule) — when a polarization model (`polconst`/`plabs`) is used and IXPE is present, list IXPE first (IXPE = data group 1), because those models anchor to DG1, which must be an IXPE (I/Q/U) group; a non-IXPE DG1 diverges the fit. Order is irrelevant for non-polarized fits or IXPE-absent epochs. Distinguished from the cross-calibration reference (`fit_*` `spec_pref`, NuSTAR by default), which the worker does not control. Root-caused from a full-suite run where the LLM built NuSTAR-first epochs (per the old toolkit convention) and the joint fit stuck at stat/dof≈60 instead of ≈1.8.
+- 2026-06-09 — Native function-calling refactor (P0): **removed all tool-specific content from the prompts**. `analyst_worker.md` no longer enumerates tools, arguments, or per-tool gotchas (the `indices`/`load_data`-batching/IXPE-first/`run_fit`/`group_pha` notes, the inline-`python -c` rules, the Cyg X-1 resp-path/BKG notes). That information now flows through tool loading: each tool's `args_schema` + `description` (manifest) and the `bash_exec` docstring. The IXPE-first ordering and resp-path/BKG notes were relocated into `load_data`'s manifest description; the inline-`python -c` guidance into `bash_exec`'s description. The prompt keeps only role, scope, the two-call protocol, and tool-name-agnostic guidance ("call a producer before its consumer; never fabricate a producer's output"). `analyst_lead.md` lost its `xspec_fit` tool-name example.

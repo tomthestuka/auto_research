@@ -31,12 +31,28 @@ class ModelUsage(BaseModel):
     output_tokens: int = Field(default=0, ge=0)
 
 
-class ModelResponse(BaseModel):
-    """Provider-neutral text response and usage."""
+class ToolCall(BaseModel):
+    """One provider-native tool/function call extracted from a model response."""
 
     model_config = ConfigDict(extra="forbid")
 
-    content: str
+    name: str = Field(min_length=1)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelResponse(BaseModel):
+    """Provider-neutral response: free text, structured output, and/or tool calls.
+
+    A structured-output call (``schema=``) populates ``parsed`` with the
+    provider-parsed object. A function-calling call (``tools=``) populates
+    ``tool_calls``. A plain call populates ``content``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = ""
+    parsed: Any | None = None
+    tool_calls: list[ToolCall] = Field(default_factory=list)
     usage: ModelUsage = Field(default_factory=ModelUsage)
     raw: Any = None
 
@@ -80,10 +96,19 @@ class ModelProvider(Protocol):
         config: RoleModelConfig,
         *,
         schema: type[BaseModel] | None = None,
+        tools: Sequence[Mapping[str, Any]] | None = None,
+        tool_choice: str = "auto",
         images: Sequence[FigureRef] = (),
         documents: Sequence[DocumentRef] = (),
     ) -> ModelResponse:
-        """Call a provider model and return normalized output."""
+        """Call a provider model and return normalized output.
+
+        ``schema`` and ``tools`` are mutually exclusive. ``schema`` requests
+        native structured output (result in ``ModelResponse.parsed``); ``tools``
+        requests native function calling (result in ``ModelResponse.tool_calls``).
+        Each tool is a neutral dict ``{"name", "description", "input_schema"}``.
+        ``tool_choice`` is ``"auto"`` or ``"required"``.
+        """
 
 
 @dataclass(frozen=True)
@@ -99,11 +124,19 @@ class ModelHandle:
         messages: Sequence[ModelMessage | Mapping[str, str]],
         *,
         schema: type[BaseModel] | None = None,
+        tools: Sequence[Mapping[str, Any]] | None = None,
+        tool_choice: str = "auto",
         images: Sequence[FigureRef] = (),
         documents: Sequence[DocumentRef] = (),
     ) -> ModelResponse:
-        """Call the configured provider for this role."""
+        """Call the configured provider for this role.
 
+        ``schema`` (structured output) and ``tools`` (function calling) are
+        mutually exclusive.
+        """
+
+        if schema is not None and tools is not None:
+            raise ValueError("schema and tools are mutually exclusive in one call")
         normalized = [
             message if isinstance(message, ModelMessage) else ModelMessage.model_validate(message)
             for message in messages
@@ -125,6 +158,8 @@ class ModelHandle:
                 normalized,
                 self.config,
                 schema=schema,
+                tools=tools,
+                tool_choice=tool_choice,
                 images=images,
                 documents=documents,
             ),

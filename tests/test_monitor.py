@@ -40,8 +40,10 @@ def test_monitor_filters_by_chatter_and_groups(tmp_path: Path) -> None:
         )
     )
 
+    # In-memory events are filtered by chatter (level<=5 kept), but the JSONL log
+    # is always full fidelity: BOTH events are written regardless of chatter.
     assert [event.event for event in monitor.events] == ["analyst.visible"]
-    assert (tmp_path / "run.jsonl").read_text(encoding="utf-8").count("\n") == 1
+    assert (tmp_path / "run.jsonl").read_text(encoding="utf-8").count("\n") == 2
     report = monitor.render_markdown()
     assert "## Analysts" in report
     assert "analyst.visible" in report

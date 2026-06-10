@@ -26,13 +26,22 @@ _REPL_SCRIPT = textwrap.dedent("""
     import sys, os, json, importlib, traceback, tempfile
 
     def _coerce(v):
-        \"\"\"Try to parse a string value as JSON; return as-is if it isn't valid JSON.\"\"\"
+        \"\"\"Back-compat guard for argument values.
+
+        Native function calling delivers correctly-typed arguments, so values
+        pass through untouched. Only a string that is clearly a JSON container
+        ('{' or '[') is parsed — a legacy/edge path. Scalar strings are left as
+        strings so a value like '123', 'true', or a title is never mis-coerced.
+        \"\"\"
         if not isinstance(v, str):
             return v
-        try:
-            return json.loads(v)
-        except (json.JSONDecodeError, ValueError):
-            return v
+        s = v.strip()
+        if s[:1] in ('{', '['):
+            try:
+                return json.loads(s)
+            except (json.JSONDecodeError, ValueError):
+                return v
+        return v
 
     def _configure_xspec_once():
         \"\"\"Make the REPL's XSPEC session non-interactive at subprocess boot.\"\"\"

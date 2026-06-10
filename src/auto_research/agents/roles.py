@@ -8,9 +8,9 @@ import time
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol
 
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel
 
 from auto_research.agents.prompts import PromptRole, load_prompt
 from auto_research.consensus import IODebateToConverge
@@ -28,16 +28,12 @@ from auto_research.schemas import (
     SearchRequest,
     SearchResult,
     ToolCallRequest,
-    ToolCallReview,
     ToolResult,
     document_from_file,
 )
 from auto_research.sources import ArxivSource, NasaAdsSource, QuerySource, WebSource
 from auto_research.sources.downloads import download_and_ingest_result, papers_dir
 from auto_research.storage import MemoryRecord, Storage, paper_record_from_result
-
-
-T = TypeVar("T")
 
 
 class CallableModel(Protocol):
@@ -48,10 +44,12 @@ class CallableModel(Protocol):
         messages: Sequence[ModelMessage | Mapping[str, str]],
         *,
         schema: type[BaseModel] | None = None,
+        tools: Sequence[Mapping[str, Any]] | None = None,
+        tool_choice: str = "auto",
         images: Sequence[FigureRef] = (),
         documents: Sequence[DocumentRef] = (),
     ) -> ModelResponse:
-        """Call the model and return text content."""
+        """Call the model; return structured output and/or tool calls."""
 
 
 class AgentRole:
@@ -76,13 +74,22 @@ class AgentRole:
     async def _call(
         self,
         payload: Mapping[str, Any],
-        output: TypeAdapter[T],
+        output_model: type[BaseModel],
         *,
         images=(),
         documents=(),
         action: str = "call",
         overrides: dict | None = None,
-    ) -> T:
+    ) -> Any:
+        """Call the model for a structured message and validate it strictly.
+
+        Uses provider-native structured output (``schema=output_model``): the
+        provider returns a parsed object in ``ModelResponse.parsed``, which is
+        validated against ``output_model``. There is **no salvage parsing** — a
+        missing or off-schema result raises loudly. ``overrides`` injects
+        runtime-owned fields (e.g. ``run_id``) after the model result and before
+        validation.
+        """
         await self._record(
             f"{self.role}.{action}.input",
             level=10,
@@ -98,13 +105,26 @@ class AgentRole:
             response = await self.model.call(
                 [
                     ModelMessage(role="system", content=self.prompt),
-                    ModelMessage(role="user", content=_payload_text(payload, output)),
+                    ModelMessage(role="user", content=_payload_text(payload)),
                 ],
+                schema=output_model,
                 images=images,
                 documents=documents,
             )
             self.last_response = response
-            parsed = _parse_json_response(response.content, output, overrides=overrides)
+            value = response.parsed
+            if value is None:
+                raise ValueError(
+                    f"{self.role}.{action}: provider returned no structured output for "
+                    f"{output_model.__name__}"
+                )
+            if overrides:
+                if not isinstance(value, dict):
+                    raise ValueError(
+                        f"{self.role}.{action}: cannot apply overrides to non-object output"
+                    )
+                value = {**value, **overrides}
+            parsed = output_model.model_validate(value)
         except Exception as exc:
             await self._record(
                 f"{self.role}.{action}.error",
@@ -171,7 +191,7 @@ class ReviewerAgent(AgentRole):
         docs = [document_from_file(p) for p in literature if p.exists()]
         return await self._call(
             payload,
-            TypeAdapter(ReviewVerdict),
+            ReviewVerdict,
             images=report.figures if report else (),
             documents=docs,
             action="review",
@@ -211,7 +231,7 @@ class ReviewerAgent(AgentRole):
         }
         result: ResearchReport = await self._call(
             payload,
-            TypeAdapter(ResearchReport),
+            ResearchReport,
             images=report.figures,
             action="compose_machine_report",
             overrides={
@@ -281,7 +301,7 @@ class ReviewerAgent(AgentRole):
             )
         result: LatexReport = await self._call(
             payload,
-            TypeAdapter(LatexReport),
+            LatexReport,
             images=report.figures,
             action="compose_latex_report",
         )
@@ -326,7 +346,7 @@ class LibrarianIOAgent(AgentRole):
             "research_request": request.model_dump(mode="json"),
             "follow_up": follow_up,
         }
-        return await self._call(payload, TypeAdapter(SearchRequest), action="compose_search_strategy")
+        return await self._call(payload, SearchRequest, action="compose_search_strategy")
 
     async def search(self, request: SearchRequest) -> list[SearchResult]:
         """Query external sources and return raw results.
@@ -370,7 +390,7 @@ class LibrarianIOAgent(AgentRole):
         }
         return await self._call(
             payload,
-            TypeAdapter(MemoryRecord),
+            MemoryRecord,
             documents=[document],
             action="ingest_document",
         )
@@ -407,7 +427,7 @@ class LibrarianIOAgent(AgentRole):
         }
         return await self._call(
             payload,
-            TypeAdapter(ReviewVerdict),
+            ReviewVerdict,
             documents=[document],
             action="judge_abstract_convergence",
         )
@@ -430,7 +450,7 @@ class LibrarianIOAgent(AgentRole):
         }
         return await self._call(
             payload,
-            TypeAdapter(MemoryRecord),
+            MemoryRecord,
             documents=[document],
             action="adjudicate_abstract",
         )
@@ -556,20 +576,69 @@ class AnalystWorkerAgent(AgentRole):
         figures = [figure for report in peer_reports for figure in report.figures]
         return await self._call(
             payload,
-            TypeAdapter(AnalystReport),
+            AnalystReport,
             images=figures,
             action="analyze",
         )
 
-    async def request_tools(self, task: AnalysisTask) -> list[ToolCallRequest]:
-        """Return structured tool requests without executing them."""
+    async def request_tools(
+        self, task: AnalysisTask, registry: Any
+    ) -> list[ToolCallRequest]:
+        """Elicit tool calls via provider-native function calling.
 
+        Every toolkit/MCP tool is offered to the model as a function constrained
+        by its own ``args_schema`` (``registry.tool_definitions()``). The model's
+        native tool calls are mapped back to ``ToolCallRequest`` objects whose
+        ``arguments`` are real, per-tool-schema-validated values — never a
+        hand-serialized JSON string. An empty result means "no tools needed".
+        """
         payload = {
             "task": task.model_dump(mode="json"),
             "available_toolkits": list(self.available_toolkits),
-            "execution_policy": "Return requested tool operations only; do not claim they have run.",
+            "execution_policy": "Call the tools you need; do not claim a tool has run.",
         }
-        return await self._call(payload, TypeAdapter(list[ToolCallRequest]), action="request_tools")
+        await self._record(
+            "analyst_worker.request_tools.input",
+            level=10,
+            summary=f"{self.role} received request_tools input",
+            data={"payload": payload},
+        )
+        try:
+            response = await self.model.call(
+                [
+                    ModelMessage(role="system", content=self.prompt),
+                    ModelMessage(role="user", content=_payload_text(payload)),
+                ],
+                tools=registry.tool_definitions(),
+                tool_choice="auto",
+            )
+            self.last_response = response
+            requests = [
+                ToolCallRequest(
+                    requested_by=self.role,
+                    kind=registry.kind_for_function(call.name),
+                    arguments=dict(call.arguments),
+                )
+                for call in response.tool_calls
+            ]
+        except Exception as exc:
+            await self._record(
+                "analyst_worker.request_tools.error",
+                level=2,
+                summary=f"{self.role} failed during request_tools",
+                data={"error": repr(exc)},
+            )
+            raise
+        await self._record(
+            "analyst_worker.request_tools.output",
+            level=10,
+            summary=f"{self.role} requested {len(requests)} tool call(s)",
+            data={
+                "output": [r.model_dump(mode="json") for r in requests],
+                "usage": response.usage,
+            },
+        )
+        return requests
 
     async def execute_tools(
         self,
@@ -588,7 +657,7 @@ class AnalystWorkerAgent(AgentRole):
         if not self.sandbox.is_alive:
             await self.sandbox.start()
 
-        requests: list[ToolCallRequest] = await self.request_tools(task)
+        requests: list[ToolCallRequest] = await self.request_tools(task, registry)
         if not requests:
             return []
 
@@ -672,7 +741,8 @@ class AnalystWorkerAgent(AgentRole):
                 if r.exit_code == 0:
                     break
 
-                # LLM self-correction retry
+                # LLM self-correction retry: feed the failure back and let the
+                # model re-issue a native tool call with corrected arguments.
                 if attempt < tool_retry_cap - 1 and self.is_alive:
                     error_detail = r.stderr or r.stdout or "(no error detail)"
                     error_task = AnalysisTask(
@@ -680,13 +750,10 @@ class AnalystWorkerAgent(AgentRole):
                         instructions=(
                             f"Tool {kind} failed (attempt {attempt + 1}/{tool_retry_cap}).\n"
                             f"Error: {error_detail}\n"
-                            "Revise your tool call. Use the EXACT kind string from the catalogue — "
-                            "do not shorten or guess tool names. For shell tools, put the command "
-                            "in the `command` field.\n\n"
-                            f"{registry.tool_catalogue()}"
+                            "Re-issue the tool call with corrected arguments."
                         ),
                     )
-                    revised = await self.request_tools(error_task)
+                    revised = await self.request_tools(error_task, registry)
                     if revised:
                         current_req = revised[0]
 
@@ -732,7 +799,7 @@ class AnalystLeadAgent(AgentRole):
         figures = [figure for report in reports for figure in report.figures]
         return await self._call(
             payload,
-            TypeAdapter(AnalystReport),
+            AnalystReport,
             images=figures,
             action="adjudicate",
         )
@@ -760,26 +827,9 @@ class AnalystLeadAgent(AgentRole):
         figures = [figure for report in reports for figure in report.figures]
         return await self._call(
             payload,
-            TypeAdapter(ReviewVerdict),
+            ReviewVerdict,
             images=figures,
             action="judge_convergence",
-        )
-
-    async def review_tool_requests(
-        self,
-        requests: Sequence[ToolCallRequest],
-    ) -> list[ToolCallReview]:
-        """Review proposed tool requests without executing them."""
-
-        payload = {
-            "tool_requests": [request.model_dump(mode="json") for request in requests],
-            "available_toolkits": list(self.available_toolkits),
-            "execution_policy": "Review only; no tool or shell command has been executed.",
-        }
-        return await self._call(
-            payload,
-            TypeAdapter(list[ToolCallReview]),
-            action="review_tool_requests",
         )
 
 
@@ -804,69 +854,14 @@ def _observation_path_args() -> dict[str, str]:
     return {f"{mission}_path": str(c.obs_db_path) for mission, c in cfg.missions.items()}
 
 
-def _payload_text(payload: Mapping[str, Any], output: TypeAdapter[Any]) -> str:
-    schema = output.json_schema()
-    return (
-        "Return only JSON that validates against this JSON Schema.\n\n"
-        f"JSON Schema:\n{json.dumps(schema, sort_keys=True)}\n\n"
-        f"Task data:\n{json.dumps(payload, sort_keys=True)}"
-    )
+def _payload_text(payload: Mapping[str, Any]) -> str:
+    """Serialize task data for the user message.
 
-
-def _parse_json_response(
-    content: str,
-    output: TypeAdapter[T],
-    *,
-    overrides: dict | None = None,
-) -> T:
-    text = _strip_json_fence(content)
-    if not overrides:
-        # Fast path: validate the raw JSON string directly when no injection needed.
-        try:
-            return output.validate_json(text)
-        except ValidationError:
-            pass
-    try:
-        value = _extract_json_value(text)
-        if overrides and isinstance(value, dict):
-            value = {**value, **overrides}
-        return output.validate_python(value)
-    except (json.JSONDecodeError, ValidationError):
-        pass
-    if not overrides:
-        # Last resort: if the model returned a single dict but a list was expected,
-        # wrap it (happens when a JSON array is truncated mid-write).
-        try:
-            value = _extract_json_value(text)
-            if isinstance(value, dict):
-                return output.validate_python([value])
-        except (json.JSONDecodeError, ValidationError):
-            pass
-    raise ValueError("model response did not match the expected schema")
-
-
-def _strip_json_fence(content: str) -> str:
-    text = content.strip()
-    if not text.startswith("```"):
-        return text
-    lines = text.splitlines()
-    if lines and lines[0].startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
-
-
-def _extract_json_value(text: str) -> Any:
-    decoder = json.JSONDecoder()
-    starts = [index for index, char in enumerate(text) if char in "[{"]
-    for index in starts:
-        try:
-            value, _ = decoder.raw_decode(text[index:])
-        except json.JSONDecodeError:
-            continue
-        return value
-    raise json.JSONDecodeError("no JSON object or array found", text, 0)
+    The output schema is enforced by the provider (native structured output /
+    function calling), so it is no longer injected into the prompt — only the
+    task data is sent.
+    """
+    return json.dumps(payload, sort_keys=True)
 
 
 def _team_for_role(role: PromptRole) -> str:

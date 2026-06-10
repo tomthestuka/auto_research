@@ -31,10 +31,18 @@ Google by editing YAML alone
   raises `ValueError`.
 - `ModelRegistry.resolve(role)` returns a `ModelGroupHandle`; callers choose a
   member with `member(name)` or iterate through `handles`.
-- `schema` is accepted in the call signature as the structured-output extension
-  point; provider-specific structured output is wired when agents need it.
-- Provider calls return a normalized `ModelResponse` with `content`, `usage`,
-  and the raw SDK response for later observability.
+- **Native structured output and function calling.** `call(..., schema=Model)`
+  requests provider-native **structured output** (OpenAI `responses.parse`,
+  Google `response_schema`, Anthropic forced single-tool use); the parsed object
+  is returned in `ModelResponse.parsed`. `call(..., tools=[...], tool_choice=...)`
+  requests provider-native **function calling**; the model's tool calls are
+  returned in `ModelResponse.tool_calls`. `schema` and `tools` are mutually
+  exclusive in one call (the two are separate provider mechanisms). Each tool is
+  a provider-neutral dict `{"name", "description", "input_schema"}`. There is no
+  prompt-injected JSON schema and no salvage JSON parsing — agents validate the
+  parsed result with Pydantic and fail loudly on mismatch.
+- Provider calls return a normalized `ModelResponse` with `content`, `parsed`,
+  `tool_calls`, `usage`, and the raw SDK response for later observability.
 - `priceMTk` is optional per model member and stores USD rates per million
   tokens with `input` and `output` keys. When absent, observability still
   records token counts with zero calculated dollar cost.
@@ -50,8 +58,12 @@ Google by editing YAML alone
   message. Unknown fields are forbidden.
 - `ModelUsage(input_tokens: int = 0, output_tokens: int = 0)` — normalized token
   usage.
-- `ModelResponse(content: str, usage: ModelUsage = ModelUsage(), raw: Any =
-  None)` — normalized provider output.
+- `ToolCall(name: str, arguments: dict[str, Any] = {})` — one provider-native
+  tool/function call extracted from a model response.
+- `ModelResponse(content: str = "", parsed: Any | None = None,
+  tool_calls: list[ToolCall] = [], usage: ModelUsage = ModelUsage(),
+  raw: Any = None)` — normalized provider output. `parsed` carries native
+  structured output; `tool_calls` carries native function calls.
 - `RoleModelConfig(name: str, provider: ProviderName, model: str,
   vision: bool = False, documents: bool = False, priceMTk: dict[str, float] = {},
   parameters: dict[str, Any] = {})` — one model member from YAML.
@@ -60,10 +72,13 @@ Google by editing YAML alone
 - `ModelsConfig(roles: dict[str, RoleModelGroup])` — validated
   `config/models.yaml` shape.
 - `ModelProvider` — async protocol implemented by provider adapters:
-  `call(messages, config, *, schema=None, images=(), documents=()) -> ModelResponse`.
+  `call(messages, config, *, schema=None, tools=None, tool_choice="auto",
+  images=(), documents=()) -> ModelResponse`.
 - `ModelHandle(role: str, config: RoleModelConfig, provider: ModelProvider)` —
   resolved callable handle for one role member. Method:
-  `async call(messages, *, schema=None, images=(), documents=()) -> ModelResponse`.
+  `async call(messages, *, schema=None, tools=None, tool_choice="auto",
+  images=(), documents=()) -> ModelResponse`. Raises `ValueError` if both
+  `schema` and `tools` are passed.
 - `ModelGroupHandle(role: str, handles: tuple[ModelHandle, ...])` — resolved
   model group. Method: `member(name: str) -> ModelHandle`.
 - `REQUIRED_ROLES` — required role names that must appear in config.
@@ -82,3 +97,5 @@ Google by editing YAML alone
 
 ## Changelog
 - 2026-05-26/27 — Steps 2–3 built: `config/models.yaml`, validated role registry (four roles: `reviewer`, `analyst_lead`, `analyst_worker`, `librarian_io`), role-level model groups, OpenAI/Anthropic/Google adapters, `ModelHandle.call()` wired through observability, `priceMTk` per-million-token pricing, `vision`/`documents` capability flags for PDF-attaching librarian I/O members.
+- 2026-06-09 — Native structured output + function calling (P0). The three provider adapters now implement the `schema=`/`tools=` contract instead of raising `NotImplementedError`: OpenAI uses Responses `text.format` json_schema for structured output and Responses `function` tools for function calling; Google uses `response_mime_type`+`response_schema` and `FunctionDeclaration`s; Anthropic uses a forced single synthetic tool for structured output and native `tools`+`tool_choice` for function calling. `ModelResponse` gained `parsed` and `tool_calls`; `ToolCall` added. `call()` accepts `tools`/`tool_choice`; `schema` and `tools` are mutually exclusive. This replaces the prompt-injected-JSON-schema + salvage-parser path that crashed on hand-serialized nested arguments (the `plot_fit`/`plot_iqu` `indices` truncation bug).
+- 2026-06-09 — Provider schema sanitizers (follow-up). OpenAI/Google structured output accept only restricted JSON-Schema dialects, so the rich Pydantic schemas (`AnalystReport`/`ResearchReport`/… embedding `Path`/`HttpUrl`/`$ref`/`extra="forbid"`) are sanitized per provider before sending: OpenAI (`_strict_json_schema_format`) strips unsupported `format` (`path`/`uri`) and `default`, then strict-ifies (`additionalProperties:false`, all-`required`) and sends via `responses.create(text={"format":{"type":"json_schema",...}})` — replacing `responses.parse`, which 400'd on `format:path`. Google (`_to_gemini_schema`) inlines `$ref`/`$defs` and strips `additionalProperties`/`default`/`title`/unsupported `format`. Both sanitizers are **properties-aware** — they strip JSON-Schema keyword *annotations* but never a property whose field name happens to be `title`/`default`/`format` (regression: `ResearchReport.title`). Verified live: all six message schemas pass structured output on OpenAI and Google.

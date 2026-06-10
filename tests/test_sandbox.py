@@ -265,7 +265,7 @@ def _script_requests(worker, batches: list[list[ToolCallRequest]]) -> None:
     """Make worker.request_tools() yield successive batches, then []."""
     state = {"i": 0}
 
-    async def rt(task):
+    async def rt(task, registry=None):
         i = state["i"]
         state["i"] += 1
         return list(batches[i]) if i < len(batches) else []
@@ -338,7 +338,7 @@ class TestExecuteToolsDispatch:
                                    purpose="p", command="x")]
 
         # Worker re-requests the same failing tool on every retry.
-        async def rt(task):
+        async def rt(task, registry=None):
             return list(failing)
 
         w.request_tools = rt
@@ -401,6 +401,70 @@ class TestExecuteToolsDispatch:
         assert sb.starts == 1
         assert len(sb.tool_calls) == 1
         assert results[0].exit_code == 0
+
+
+class TestRequestToolsFunctionCalling:
+    """request_tools() maps native tool calls to ToolCallRequest with real args."""
+
+    def test_nested_arguments_preserved_as_object(self) -> None:
+        """The regression that motivated the refactor: indices is a real nested
+        dict, never a hand-serialized (and truncatable) JSON string."""
+        from auto_research.agents.roles import AnalystWorkerAgent
+        from auto_research.models.types import ModelResponse, ToolCall
+
+        nested = {"IXPE": {"02008401": {"DU1": [1, 2, 3]}}, "NICER": {"6643010101": {"mpu7": [10]}}}
+
+        class _FCModel:
+            async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
+                           images=(), documents=()):
+                assert schema is None and tools is not None  # function-calling path
+                assert tool_choice == "auto"
+                return ModelResponse(
+                    tool_calls=[
+                        ToolCall(
+                            name="research_toolkit_xspec_utils_plot_fit",
+                            arguments={"indices": nested, "xlim": [1, 79]},
+                        )
+                    ]
+                )
+
+        class _Reg:
+            def tool_definitions(self):
+                return [{"name": "research_toolkit_xspec_utils_plot_fit",
+                         "description": "d", "input_schema": {"type": "object"}}]
+
+            def kind_for_function(self, name):
+                return name.replace("research_toolkit_xspec_utils_", "research_toolkit.xspec_utils.")
+
+        w = AnalystWorkerAgent(model=_FCModel(), available_toolkits=[])
+        reqs = asyncio.run(w.request_tools(AnalysisTask(question="q"), _Reg()))
+
+        assert len(reqs) == 1
+        assert reqs[0].kind == "research_toolkit.xspec_utils.plot_fit"
+        # Arguments are real typed values, not strings.
+        assert reqs[0].arguments["indices"] == nested
+        assert isinstance(reqs[0].arguments["indices"], dict)
+        assert reqs[0].arguments["xlim"] == [1, 79]
+
+    def test_no_tool_calls_means_done(self) -> None:
+        from auto_research.agents.roles import AnalystWorkerAgent
+        from auto_research.models.types import ModelResponse
+
+        class _FCModel:
+            async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
+                           images=(), documents=()):
+                return ModelResponse(tool_calls=[])
+
+        class _Reg:
+            def tool_definitions(self):
+                return []
+
+            def kind_for_function(self, name):
+                return name
+
+        w = AnalystWorkerAgent(model=_FCModel(), available_toolkits=[])
+        reqs = asyncio.run(w.request_tools(AnalysisTask(question="q"), _Reg()))
+        assert reqs == []
 
 
 # ---------------------------------------------------------------------------

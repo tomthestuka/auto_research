@@ -85,14 +85,17 @@ Role wrappers:
 - `LibrarianIOAgent.evaluate_search_results(request, results) -> ReviewVerdict`
   — Phase 1 stub returning `accepted=True`. See CLAUDE.md §13.
 - `AnalystWorkerAgent.analyze(task, *, peer_reports=()) -> AnalystReport`.
-- `AnalystWorkerAgent.request_tools(task) -> list[ToolCallRequest]` captures
-  requested shell/tool/database actions without executing them.
+- `AnalystWorkerAgent.request_tools(task, registry) -> list[ToolCallRequest]`
+  elicits tool calls via provider-native **function calling**: every toolkit/MCP
+  tool is offered to the model as a function constrained by its own `args_schema`
+  (`registry.tool_definitions()`), and the model's native tool calls are mapped
+  back to `ToolCallRequest` objects whose `arguments` are real, per-tool-validated
+  values (never a hand-serialized JSON string). An empty result means "no tools
+  needed". Does not execute the calls.
 - `AnalystLeadAgent.adjudicate(task, reports) -> AnalystReport`.
 - `AnalystLeadAgent.judge_convergence(task, reports, *, round_index,
   max_rounds) -> ReviewVerdict` judges whether worker reports have converged
   enough for final synthesis.
-- `AnalystLeadAgent.review_tool_requests(requests) -> list[ToolCallReview]`
-  reviews proposed tool actions without executing them.
 - All wrappers accept an injected `model`; otherwise they resolve their role
   from `config/models.yaml` and use the first configured group member unless
   `model_name` is supplied.
@@ -135,25 +138,29 @@ Role wrappers:
   analyst worker wrapper.
   - `analyze(task, *, peer_reports=())` → `AnalystReport`. Reads `memory_path`
     and injects its content into the payload before each LLM call.
-  - `request_tools(task)` → `list[ToolCallRequest]` — structured tool requests, no execution.
+  - `request_tools(task, registry)` → `list[ToolCallRequest]` — native
+    function-calling elicitation (per-tool `args_schema` constrains arguments); no execution.
   - `execute_tools(task, registry, *, tool_retry_cap=3)` → `list[ToolResult]` —
-    calls `request_tools()`, runs each via `sandbox.call_tool()` /
+    calls `request_tools(task, registry)`, runs each via `sandbox.call_tool()` /
     `sandbox.call_mcp_tool()`, normalizes the raw result via
     `_normalize_tool_raw()`, and appends a truncated terminal recording to
     `memory_path`. Returns `[]` if `sandbox` is `None`; if an attached sandbox
     is not alive it starts a replacement before requesting tools. Per attempt it
-    (a) merges the `ToolCallRequest.command` field into the args, (b) recomputes
-    routing from `current_req.kind` so a retry that changes tool routes correctly,
-    (c) for toolkit tools, auto-fills `<mission>_path` args declared in the tool
-    `args_schema` from `config/observations.yaml` (via `_observation_path_args()`),
-    and (d) calls `_normalize_tool_raw()` so structured payloads without a
-    `stdout` key (e.g. `list_dir` → `{entries}`, `load_data` → indices dict) are
-    serialized into `stdout`, and any captured `console_tail` is folded in.
-    when the model omitted them.
+    (a) merges the legacy `ToolCallRequest.command` field into the args if present
+    (back-compat — function calling normally delivers `command` as an argument),
+    (b) recomputes routing from `current_req.kind` so a retry that changes tool
+    routes correctly, (c) for toolkit tools, auto-fills `<mission>_path` args
+    declared in the tool `args_schema` from `config/observations.yaml` (via
+    `_observation_path_args()`) when the model omitted them, and (d) calls
+    `_normalize_tool_raw()` so structured payloads without a `stdout` key (e.g.
+    `list_dir` → `{entries}`, `load_data` → indices dict) are serialized into
+    `stdout`, with any captured `console_tail` folded in. On tool-execution
+    failure it re-issues `request_tools` with the error fed back, up to
+    `tool_retry_cap`.
   - `is_alive` → `bool` — `True` when no sandbox attached; delegates to
     `sandbox.is_alive` otherwise.
-- `AnalystLeadAgent` — analyst lead wrapper. Method: `adjudicate()`.
-  Methods: `judge_convergence()`, `review_tool_requests()`.
+- `AnalystLeadAgent` — analyst lead wrapper.
+  Methods: `adjudicate()`, `judge_convergence()`.
 
 ## Changelog
 - 2026-05-26/27 — Steps 7–8 built: prompt loading with governance-reference guard; async role wrappers for reviewer, librarian I/O, analyst worker, and analyst lead. `LibrarianSearcherAgent` replaced by pure-Python `text_search_paths()`. `LibrarianIOAgent` gains full literature pipeline: `compose_search_strategy()`, `search()`, `ingest_results()` (download + `IODebateToConverge` + storage), `evaluate_search_results()` Phase 1 stub. `ReviewerAgent.review()` loads PDFs as `DocumentRef` attachments. Opt-in live role test under `AUTO_RESEARCH_LIVE_AGENT_TESTS=1`.
@@ -161,3 +168,4 @@ Role wrappers:
 - 2026-06-03 — `ReviewerAgent` gains `compose_machine_report()` (structured `ResearchReport`; overwrites figures/references/created_at deterministically after LLM prose) and `compose_latex_report()` (returns raw LaTeX string from `LatexReport` schema; accepts `feedback` errors for retry self-correction; passes `images=report.figures`).
 - 2026-06-09 — `_call()` gains `overrides: dict | None` parameter; `_parse_json_response` merges overrides into the extracted dict before Pydantic validation. `compose_machine_report` uses this to inject `run_id`, `request_question`, `verdict_rationale`, and `created_at` before the schema is validated, fixing crashes where the model omits runtime-owned fields (`run_id` has no default; `request_question`/`verdict_rationale`/`created_at` fail `NonEmptyStr`/`datetime` constraints when left as placeholders).
 - 2026-06-03 — `execute_tools()` auto-injects `cwd=memory_path.parent` into `mcp.builtin.bash_exec` when the model omits `cwd`, so `python -c "..."` output lands in the analyst's workspace folder. Fixed `FakeStorage` test stub missing `get_memory_for_paper`.
+- 2026-06-09 — Native structured output + function calling (P0). `_call()` rewritten: it passes the output Pydantic model to `model.call(schema=...)`, takes `ModelResponse.parsed`, applies `overrides`, and validates strictly with `model_validate` — **no salvage parsing**; a missing/off-schema result raises loudly. Deleted `_payload_text`'s schema-in-prompt body (now just task data), `_parse_json_response`, `_strip_json_fence`, `_extract_json_value`. Call sites pass a `type[BaseModel]` (no more `TypeAdapter`). `request_tools(task, registry)` rewritten to native function calling over `registry.tool_definitions()`; its arguments arrive as real per-tool-validated values, fixing the hand-serialized-`indices` truncation crash. Deleted the unused `AnalystLeadAgent.review_tool_requests` (the only bare-`list[...]` structured output). Prompts no longer carry tool-specific instructions — tool names/args/usage flow through tool loading (function definitions + manifest descriptions); `analyst_worker.md` trimmed accordingly.

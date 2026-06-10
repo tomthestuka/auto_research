@@ -3,6 +3,8 @@
 import asyncio
 import json
 
+import pytest
+
 from auto_research.agents import (
     AnalystLeadAgent,
     AnalystWorkerAgent,
@@ -22,17 +24,20 @@ from auto_research.storage import MemoryRecord, Storage
 
 
 class FakeModel:
+    """Stand-in model returning a fixed structured object via native structured output."""
+
     def __init__(self, content):
-        self.content = json.dumps(content)
+        self.obj = content
         self.messages = None
         self.images = None
+        self.schema = None
 
-    async def call(self, messages, *, schema=None, images=(), documents=()):
+    async def call(self, messages, *, schema=None, tools=None, tool_choice="auto", images=(), documents=()):
         self.messages = messages
         self.images = images
         self.documents = documents
-        assert schema is None
-        return ModelResponse(content=self.content)
+        self.schema = schema
+        return ModelResponse(parsed=self.obj)
 
 
 class FakeSource:
@@ -50,9 +55,9 @@ class FakeSource:
 
 
 def _user_payload(fake_model: FakeModel):
-    user_message = fake_model.messages[1]
-    marker = "Task data:\n"
-    return json.loads(user_message.content.split(marker, 1)[1])
+    # The user message is now just the task-data JSON (the output schema is
+    # enforced by the provider, not injected into the prompt).
+    return json.loads(fake_model.messages[1].content)
 
 
 def test_reviewer_agent_returns_verdict():
@@ -64,6 +69,32 @@ def test_reviewer_agent_returns_verdict():
     assert verdict.accepted is True
     assert verdict.rationale == "Evidence is sufficient."
     assert fake.messages[0].content == "reviewer prompt"
+
+
+def test_call_fails_loudly_when_no_structured_output():
+    """No salvage: a provider that returns no structured output raises, never fabricates."""
+
+    class _NullModel:
+        async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
+                       images=(), documents=()):
+            return ModelResponse(parsed=None)
+
+    agent = ReviewerAgent(model=_NullModel(), prompt="p")
+    with pytest.raises(ValueError):
+        asyncio.run(agent.review(ResearchRequest(question="q")))
+
+
+def test_call_fails_loudly_on_schema_mismatch():
+    """No salvage: an off-schema structured result raises a validation error."""
+
+    class _BadModel:
+        async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
+                       images=(), documents=()):
+            return ModelResponse(parsed={"unexpected": "shape"})
+
+    agent = ReviewerAgent(model=_BadModel(), prompt="p")
+    with pytest.raises(Exception):
+        asyncio.run(agent.review(ResearchRequest(question="q")))
 
 
 def test_librarian_io_agent_searches_injected_source_and_returns_raw_results():

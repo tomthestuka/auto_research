@@ -94,8 +94,17 @@ class ToolkitRegistry:
     def list_tools(self) -> list[str]
     def describe_tool(self, tool_name: str) -> str
     def spec(self, tool_name: str) -> ToolSpec       # raises KeyError if unknown
-    def tool_catalogue(self) -> str                  # multi-line for prompt injection
+    def tool_catalogue(self) -> str                  # multi-line text listing
+    def tool_definitions(self) -> list[dict]         # provider-neutral function defs
+    def kind_for_function(self, function_name) -> str  # reverse the name sanitization
 ```
+
+`tool_definitions()` returns `{"name", "description", "input_schema"}` for every
+toolkit tool (its `args_schema`) and MCP tool (its `inputSchema`), for
+provider-native **function calling** (`AnalystWorkerAgent.request_tools`).
+Because provider function names must match `^[A-Za-z0-9_-]{1,64}$`, the dotted
+`kind` is sanitized (dots → `_`) for `name`; `kind_for_function()` maps a
+returned tool-call name back to the canonical `kind` the sandbox routes on.
 
 Invariants:
 - `load()` prepends `toolkit_root` to `sys.path` only during import, then
@@ -171,6 +180,7 @@ class MCPToolClient:
     async def start(self) -> None          # spawn server subprocesses; establish sessions
     def list_kinds(self) -> list[str]      # all registered MCP tool kinds
     def describe(self, kind: str) -> str   # description string for a kind
+    def schema(self, kind: str) -> dict    # input JSON schema for a kind
     async def call_tool(self, kind: str, arguments: dict) -> dict
     async def shutdown(self) -> None       # close all sessions; terminate servers
 ```
@@ -294,7 +304,11 @@ writes the tool, lead reviews, human approves merge on GitHub.
   - `.list_tools()` → `list[str]` — names of all registered tools.
   - `.describe_tool(name)` → `str` — `"<name>: <description>"` for prompts.
   - `.spec(name)` → `ToolSpec` — raises `KeyError` if unknown.
-  - `.tool_catalogue()` → `str` — multi-line listing for prompt injection.
+  - `.tool_catalogue()` → `str` — multi-line text listing of all tools.
+  - `.tool_definitions()` → `list[dict]` — provider-neutral function definitions
+    (`{name, description, input_schema}`) for native function calling.
+  - `.kind_for_function(name)` → `str` — map a sanitized tool-call name back to
+    the canonical dotted `kind`.
 - `PersistentSandbox(toolkit_root, workdir, *, analyze_env, analyze_ini_sh, default_timeout_s)` —
   long-lived REPL subprocess per analyst worker.
   - `.start()` — spawn; idempotent.
@@ -318,6 +332,7 @@ writes the tool, lead reviews, human approves merge on GitHub.
   - `.start()` — spawn servers and establish sessions.
   - `.list_kinds()` → `list[str]` — all `mcp.<name>.<tool>` kind strings.
   - `.describe(kind)` → `str` — description for a kind.
+  - `.schema(kind)` → `dict` — input JSON schema (from the server's `inputSchema`).
   - `.call_tool(kind, arguments)` → `dict` — call one MCP tool.
   - `.shutdown()` — close sessions and terminate servers.
 - `builtin_server.py` — MCP stdio server with shell and file-tree tools.
@@ -340,3 +355,4 @@ writes the tool, lead reviews, human approves merge on GitHub.
 - 2026-06-03 — `_configure_xspec_once()` boot policy now also sets `Plot.xAxis = "keV"`. PyXSPEC defaults `xAxis` to `"channel"`, which made `plot_fit` residual panels render against channel number (starting at 0) and misalign with the energy-axis spectrum panel. Setting it once at REPL boot fixes all plots and also makes energy-based ignore/notice ranges interpreted consistently.
 - 2026-06-09 — Runtime dir moved from `AUTO_RESEARCH_RUNTIME_DIR` env var to `config/orchestration.yaml::runtime_dir`; `workspace.py` now calls `auto_research.env.runtime_data_dir()`. `_source_ini_env()` now raises `RuntimeError` on any failure (subprocess exception, non-zero exit, or empty result) instead of falling back to `os.environ`. No env fallback for the analyst subprocess.
 - 2026-06-03 — `ToolkitRegistry` gains `disabled_tools` constructor param: named tools are stripped from `self._tools` at load time, making them absent from `tool_catalogue()` and `is_known()`. `_builtin_server_config()` and `PersistentSandbox._spawn()` raise `ValueError` if `analyze_ini_sh` is missing — no `os.environ` fallback; env is always `_source_ini_env(analyze_ini_sh)`. PYTHONPATH now covers both `toolkit_root` and `toolkit_root.parent`. Sandbox/policy tests migrated to real HEASoft env; `test_mcp_bash_env_xspec_and_toolkit` live test confirms `import xspec`, `import xspec_utils`, and `from research_toolkit import xspec_utils` all succeed.
+- 2026-06-09 — Native function-calling support (P0). `ToolkitRegistry.tool_definitions()` returns provider-neutral function defs (`{name, description, input_schema}`) for all toolkit + MCP tools, with `kind_for_function()` reversing the dotted-kind → provider-safe-name sanitization. `MCPToolClient` now captures each tool's `inputSchema` and exposes `schema(kind)`. The REPL `_coerce` is demoted to a back-compat guard: it only parses strings that are clearly JSON containers (`{`/`[`), leaving scalar strings untouched so correctly-typed function-call arguments pass through unmodified. `bash_exec`'s docstring (its tool description) now carries the inline-`python -c` usage guidance that previously lived in `prompts/analyst_worker.md`.

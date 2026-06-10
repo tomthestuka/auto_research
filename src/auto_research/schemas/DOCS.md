@@ -96,11 +96,15 @@ carried by **reference** (`FigureRef`), never embedded
   `"python"`, `"research_toolkit"`, `"observation_db"`, and
   `"source_archive"`; registered tool names such as
   `"research_toolkit.xspec_utils"` are also valid.
-- `ToolCallRequest(requested_by: str, kind: ToolKind, purpose: str,
-  command: str | None = None, arguments: dict[str, str] = {},
+- `ToolCallRequest(requested_by: str = "analyst_worker", kind: ToolKind,
+  purpose: str = "", command: str | None = None, arguments: dict[str, Any] = {},
   working_dir: Path | None = None, timeout_s: int = 300,
-  network_required: bool = False)` — structured request for future sandboxed
-  execution. It is separate from `AnalystReport`.
+  network_required: bool = False)` — structured request for sandboxed execution,
+  built from a **provider-native tool call**: `kind` is the tool name and
+  `arguments` is the per-tool-schema-constrained argument map (real typed values,
+  e.g. a nested `indices` object — never a hand-serialized JSON string).
+  `requested_by`/`purpose` are runtime metadata and default, because the model
+  authors a native tool call, not this envelope. Separate from `AnalystReport`.
 - `ToolCallReview(approved: bool, rationale: str, revised_request:
   ToolCallRequest | None = None)` — lead review of a proposed tool action.
 - `ToolResult(tool_name: str, stdout: str, stderr: str, exit_code: int,
@@ -112,4 +116,5 @@ carried by **reference** (`FigureRef`), never embedded
 
 ## Changelog
 - 2026-06-03 — Added report schemas (`schemas/report.py`): `ReportSection`, `Reference`, `ResearchReport` (machine handle), `LatexReport` (human handle). Exported from `schemas/__init__.py`.
+- 2026-06-09 — Native function-calling refactor (P0). `ToolCallRequest.arguments` widened `dict[str, str]` → `dict[str, Any]`: tool requests are now built from provider-native tool calls whose arguments are constrained by each tool's own `args_schema`, so nested structures (e.g. `indices`) arrive as real objects, never hand-serialized JSON strings (which previously truncated mid-write and crashed `plot_fit`/`plot_iqu`). `requested_by` and `purpose` gained defaults (the model authors the native tool call, not the envelope metadata). `Any` here is the genuine open tool-arg map only — message schemas remain strictly closed and strictly validated.
 - 2026-05-26/28 — Steps 1–11 built: full Pydantic v2 protocol (`ResearchRequest`, `SearchResult` with `pdf_url`/`full_text_links`/`local_path`, `AnalysisTask`/`AnalystReport`, `ReviewVerdict`, `FigureRef`, `DocumentRef`, `ToolCallRequest`/`ToolResult`). `ToolResult.exit_code=127` convention for unknown tools. Tool results live in worker memory files, not in `ResearchState`.

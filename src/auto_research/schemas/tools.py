@@ -1,7 +1,7 @@
 """Tool and shell-execution request messages."""
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import Field
 
@@ -14,19 +14,24 @@ ToolKind = str
 
 
 class ToolCallRequest(MessageModel):
-    """A structured request for a tool action that the sandbox may later execute."""
+    """A structured request for a tool action that the sandbox may later execute.
 
-    requested_by: NonEmptyStr
+    Built from a provider-native tool call: ``kind`` is the tool name and
+    ``arguments`` is the provider-validated, per-tool-schema-constrained argument
+    map. ``requested_by``/``purpose`` are runtime metadata (the model authors a
+    native tool call, not this envelope), so both carry defaults.
+    """
+
+    requested_by: str = "analyst_worker"
     kind: NonEmptyStr = Field(
         description=(
-            "Exact tool kind string from the catalogue — e.g. "
-            "'mcp.builtin.bash_exec' or 'research_toolkit.xspec_utils.xspec_fit'. "
-            "Never shorten or guess; copy verbatim from the catalogue."
+            "Exact tool kind string — e.g. 'mcp.builtin.bash_exec' or "
+            "'research_toolkit.xspec_utils.plot_fit'. Set from the native tool call name."
         )
     )
-    purpose: NonEmptyStr
+    purpose: str = ""
     command: str | None = None
-    arguments: dict[str, str] = Field(default_factory=dict)
+    arguments: dict[str, Any] = Field(default_factory=dict)
     working_dir: Path | None = None
     timeout_s: int = Field(default=300, ge=1, le=3600)
     network_required: bool = False

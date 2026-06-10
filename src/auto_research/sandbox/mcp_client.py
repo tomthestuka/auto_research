@@ -46,6 +46,7 @@ class MCPToolClient:
         # kind -> (server_name, tool_name)
         self._tool_index: dict[str, tuple[str, str]] = {}
         self._tool_descs: dict[str, str] = {}
+        self._tool_schemas: dict[str, dict] = {}  # kind -> input JSON schema
         self._stack: contextlib.AsyncExitStack = contextlib.AsyncExitStack()
 
     async def start(self) -> None:
@@ -66,6 +67,8 @@ class MCPToolClient:
                 kind = f"mcp.{server['name']}.{tool.name}"
                 self._tool_index[kind] = (server["name"], tool.name)
                 self._tool_descs[kind] = tool.description or tool.name
+                schema = getattr(tool, "inputSchema", None)
+                self._tool_schemas[kind] = schema or {"type": "object", "properties": {}}
 
     def list_kinds(self) -> list[str]:
         """Return all registered MCP tool kinds."""
@@ -74,6 +77,10 @@ class MCPToolClient:
     def describe(self, kind: str) -> str:
         """Return a description string for a tool kind."""
         return self._tool_descs.get(kind, kind)
+
+    def schema(self, kind: str) -> dict:
+        """Return the input JSON schema for a tool kind."""
+        return self._tool_schemas.get(kind, {"type": "object", "properties": {}})
 
     async def call_tool(self, kind: str, arguments: dict) -> dict:
         """Call a tool by its full kind string and return a result dict.

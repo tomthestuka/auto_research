@@ -141,10 +141,11 @@ def test_registry_loads_project_model_groups():
 
 
 class FakeProvider:
-    async def call(self, messages, config, *, schema=None, images=(), documents=()):
+    async def call(self, messages, config, *, schema=None, tools=None, tool_choice="auto", images=(), documents=()):
         assert [message.content for message in messages] == ["hello"]
         assert config.model == "fake-model"
         assert schema is None
+        assert tools is None
         assert images == ()
         assert documents == ()
         return ModelResponse(content="hi", usage=ModelUsage(input_tokens=1, output_tokens=2))
