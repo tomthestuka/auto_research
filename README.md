@@ -269,6 +269,14 @@ langgraph dev        # reads .env, serves the `research` graph in Studio
 **Notebook** — `notebooks/step12_monitor_inspection.ipynb` reconstructs and inspects a
 run from its monitor JSONL.
 
+**Run visualiser** — Gantt timeline + cost pie from any monitor JSONL:
+
+```bash
+python -m auto_research.observability.plot_run <monitor.jsonl> [output.png]
+# reads pricing and model assignment from config/models.yaml automatically
+# default output: <stem>.viz.png in the current directory
+```
+
 **Tests** — `pytest -q` for deterministic checks. Live API / XSPEC tests are opt-in via
 env flags (e.g. `AUTO_RESEARCH_LIVE_FULL_SUITE_TESTS=1`) and write logs under
 `logs/dev/step-N/`.

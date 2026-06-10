@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-
-def _runtime_dir() -> Path:
-    return Path(os.environ.get("AUTO_RESEARCH_RUNTIME_DIR", Path.home() / ".auto_research"))
+from auto_research.env import runtime_data_dir
 
 
 def run_dir(run_id: str) -> Path:
-    return _runtime_dir() / "runs" / run_id
+    return runtime_data_dir() / "runs" / run_id
 
 
 def agent_dir(run_id: str, agent_key: str) -> Path:

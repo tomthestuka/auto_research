@@ -10,7 +10,7 @@ Three tightly coupled responsibilities:
    per analyst worker so XSPEC session state (loaded spectra, fitted models,
    plots) accumulates across all debate rounds and rework cycles.
 3. **Run workspace** — per-run and per-agent folder layout under
-   `$AUTO_RESEARCH_RUNTIME_DIR/runs/{run_id}/`; per-agent `memory.md` files
+   `<runtime_dir>/runs/{run_id}/` (`runtime_dir` from `config/orchestration.yaml`); per-agent `memory.md` files
    record tool call history as bare terminal recordings.
 
 Tool-authoring (propose → branch → lead-review → human-approve → merge) is a
@@ -158,7 +158,7 @@ def append_memory(path: Path, text: str) -> None
 def read_memory(path: Path) -> str
 ```
 
-- `create_run_workspace()` creates `$AUTO_RESEARCH_RUNTIME_DIR/runs/{run_id}/{key}/figures/`
+- `create_run_workspace()` creates `<runtime_dir>/runs/{run_id}/{key}/figures/`
   for each agent key and returns `{key: agent_dir}`.
 - `memory_path()` returns `{agent_dir}/memory.md` (parent created if absent).
 - `append_memory()` appends bare terminal text; `read_memory()` returns contents or `""`.
@@ -338,5 +338,5 @@ writes the tool, lead reviews, human approves merge on GitHub.
 - 2026-06-01 — Sandbox hardening. REPL: fd-redirect prevents C-level console output from corrupting the JSON protocol; `console_tail` captured and attached to results. XSPEC configured once at boot (`Fit.query='no'`, `Xset.allowPrompting=False`, `Xset.chatter=5`). MCP builtin server spawned in astropy env via `_builtin_server_config` (explicit python path; env from `_source_ini_env`; PYTHONPATH=toolkit_root). Isolation test (`test_sandbox_isolation.py`) and policy tests (`test_live_sandbox_policy.py`) added.
 - 2026-06-03 — `workspace.py` gains `report_dir(run_id) -> Path` — returns `agent_dir(run_id, "reviewer") / "report"` and ensures `figures/` subdir exists.
 - 2026-06-03 — `_configure_xspec_once()` boot policy now also sets `Plot.xAxis = "keV"`. PyXSPEC defaults `xAxis` to `"channel"`, which made `plot_fit` residual panels render against channel number (starting at 0) and misalign with the energy-axis spectrum panel. Setting it once at REPL boot fixes all plots and also makes energy-based ignore/notice ranges interpreted consistently.
-- 2026-06-09 — `_source_ini_env()` now raises `RuntimeError` on any failure (subprocess exception, non-zero exit, or empty result) instead of falling back to `os.environ`. No env fallback for the analyst subprocess.
+- 2026-06-09 — Runtime dir moved from `AUTO_RESEARCH_RUNTIME_DIR` env var to `config/orchestration.yaml::runtime_dir`; `workspace.py` now calls `auto_research.env.runtime_data_dir()`. `_source_ini_env()` now raises `RuntimeError` on any failure (subprocess exception, non-zero exit, or empty result) instead of falling back to `os.environ`. No env fallback for the analyst subprocess.
 - 2026-06-03 — `ToolkitRegistry` gains `disabled_tools` constructor param: named tools are stripped from `self._tools` at load time, making them absent from `tool_catalogue()` and `is_known()`. `_builtin_server_config()` and `PersistentSandbox._spawn()` raise `ValueError` if `analyze_ini_sh` is missing — no `os.environ` fallback; env is always `_source_ini_env(analyze_ini_sh)`. PYTHONPATH now covers both `toolkit_root` and `toolkit_root.parent`. Sandbox/policy tests migrated to real HEASoft env; `test_mcp_bash_env_xspec_and_toolkit` live test confirms `import xspec`, `import xspec_utils`, and `from research_toolkit import xspec_utils` all succeed.

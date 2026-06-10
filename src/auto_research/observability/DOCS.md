@@ -4,7 +4,8 @@
 Wires every LLM call through LangSmith for tracing and records per-call token
 counts and dollar cost. Cost-tiering is a design pillar
 ([CLAUDE.md §6](../../../CLAUDE.md#6-config-driven-model-registry)), so visibility
-into per-role spend must exist from day one.
+into per-role spend must exist from day one. Also houses `plot_run.py`, a
+standalone CLI visualiser for monitor JSONL files.
 
 ## Architecture
 - `tracing.py` — wraps provider calls from `ModelHandle.call()`. If
@@ -12,8 +13,8 @@ into per-role spend must exist from day one.
   member, provider, and model metadata. When tracing is not enabled, it runs the
   provider call directly.
 - `costs.py` — turns normalized provider `ModelUsage` into a JSONL cost ledger
-  row. The ledger lives in `AUTO_RESEARCH_RUNTIME_DIR/cost_ledger.jsonl`, or
-  `~/.auto_research/cost_ledger.jsonl` by default.
+  row. The ledger lives in `<runtime_dir>/cost_ledger.jsonl` (runtime dir set
+  in `config/orchestration.yaml::runtime_dir`; defaults to `~/.auto_research`).
 - Pricing is read from each model member's `priceMTk` config. Missing rates default to zero, so
   token counts are still recorded even before exact pricing is configured.
 
@@ -41,8 +42,8 @@ into per-role spend must exist from day one.
   provider: ProviderName, model: str, input_tokens: int, output_tokens: int,
   input_cost_usd: float, output_cost_usd: float, total_cost_usd: float)` — one
   serialized ledger row for an LLM call.
-- `runtime_data_dir() -> Path` — returns `AUTO_RESEARCH_RUNTIME_DIR`, expanded,
-  or `~/.auto_research` when unset.
+- `runtime_data_dir() -> Path` — re-exported from `auto_research.env`; returns
+  the `runtime_dir` from `config/orchestration.yaml` (defaults to `~/.auto_research`).
 - `cost_ledger_path(data_dir: str | Path | None = None) -> Path` — returns the
   ledger file path.
 - `cost_entry_for(role: str, config: RoleModelConfig, usage: ModelUsage) ->
@@ -56,3 +57,5 @@ into per-role spend must exist from day one.
 
 ## Changelog
 - 2026-05-26/27 — Step 3 built: LangSmith tracing hook, JSONL cost ledger (`priceMTk` per-call costing), runtime data-dir helper, deterministic observability tests. Opt-in live LangSmith test under `AUTO_RESEARCH_LIVE_LANGSMITH_TESTS=1`.
+- 2026-06-09 — `runtime_data_dir()` in `costs.py` replaced by re-export from `auto_research.env`; runtime dir now configured via `config/orchestration.yaml::runtime_dir` instead of `AUTO_RESEARCH_RUNTIME_DIR` env var.
+- 2026-06-09 — `plot_run.py` added (moved from repo root): Gantt + cost-pie visualiser for monitor JSONL files. Pricing and model assignment now read from `config/models.yaml` instead of being hardcoded. Usage: `python -m auto_research.observability.plot_run <monitor.jsonl> [output.png]`.

@@ -81,7 +81,7 @@ iteration counters, and the cap.
   Missing dependencies are constructed from `config/models.yaml`. Reads
   `tool_retry_cap`, `toolkit_root`, `analyze_env`, and `analyze_ini_sh` from
   `config/orchestration.yaml`.  Creates per-run workspace
-  (`$AUTO_RESEARCH_RUNTIME_DIR/runs/{run_id}/`), spawns one `PersistentSandbox`
+  (`<runtime_dir>/runs/{run_id}/`; `runtime_dir` from `config/orchestration.yaml`), spawns one `PersistentSandbox`
   per `AnalystWorkerAgent`, assigns each worker's `sandbox` and `memory_path`,
   then tears all sandboxes down after the graph completes or raises.
   Returns the request, final verdict, final state, and `RunMonitor`.

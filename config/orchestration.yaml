@@ -9,6 +9,11 @@
 #   controls how many times the IO lead may refine and re-run the search strategy
 #   before handing results to the searcher. Loop lives inside ingest_results().
 
+# Runtime data directory (outside both repos; not committed).
+# Holds the SQLite DB, figures/artifacts, run logs, cost ledger, and reviewer reports.
+# Must be a path you can write to.
+runtime_dir: /data/fzhou/ar_runtime/test_runtime
+
 max_iterations: 3
 debate_max_rounds: 3
 io_search_max_iterations: 1  # Phase 2 stub — evaluate_search_results() currently returns accepted=True

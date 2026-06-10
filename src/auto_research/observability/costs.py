@@ -1,12 +1,12 @@
 """Per-call cost ledger helpers."""
 
 import json
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from auto_research.env import runtime_data_dir
 from auto_research.models.types import ModelUsage, ProviderName, RoleModelConfig
 
 
@@ -25,12 +25,6 @@ class CostLedgerEntry(BaseModel):
     input_cost_usd: float = Field(ge=0)
     output_cost_usd: float = Field(ge=0)
     total_cost_usd: float = Field(ge=0)
-
-
-def runtime_data_dir() -> Path:
-    """Return the runtime data dir used for observability artifacts."""
-
-    return Path(os.getenv("AUTO_RESEARCH_RUNTIME_DIR", "~/.auto_research")).expanduser()
 
 
 def cost_ledger_path(data_dir: str | Path | None = None) -> Path:

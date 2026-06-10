@@ -81,6 +81,7 @@ class AgentRole:
         images=(),
         documents=(),
         action: str = "call",
+        overrides: dict | None = None,
     ) -> T:
         await self._record(
             f"{self.role}.{action}.input",
@@ -103,7 +104,7 @@ class AgentRole:
                 documents=documents,
             )
             self.last_response = response
-            parsed = _parse_json_response(response.content, output)
+            parsed = _parse_json_response(response.content, output, overrides=overrides)
         except Exception as exc:
             await self._record(
                 f"{self.role}.{action}.error",
@@ -213,15 +214,18 @@ class ReviewerAgent(AgentRole):
             TypeAdapter(ResearchReport),
             images=report.figures,
             action="compose_machine_report",
+            overrides={
+                "run_id": run_id,
+                "request_question": request.question,
+                "verdict_rationale": verdict.rationale,
+                "created_at": datetime.now(UTC),
+            },
         )
         return result.model_copy(
             update={
                 "run_id": run_id,
-                "request_question": request.question,
                 "figures": report.figures,
                 "references": references,
-                "verdict_rationale": verdict.rationale,
-                "created_at": datetime.now(UTC),
             }
         )
 
@@ -809,25 +813,35 @@ def _payload_text(payload: Mapping[str, Any], output: TypeAdapter[Any]) -> str:
     )
 
 
-def _parse_json_response(content: str, output: TypeAdapter[T]) -> T:
+def _parse_json_response(
+    content: str,
+    output: TypeAdapter[T],
+    *,
+    overrides: dict | None = None,
+) -> T:
     text = _strip_json_fence(content)
-    try:
-        return output.validate_json(text)
-    except ValidationError:
-        pass
+    if not overrides:
+        # Fast path: validate the raw JSON string directly when no injection needed.
+        try:
+            return output.validate_json(text)
+        except ValidationError:
+            pass
     try:
         value = _extract_json_value(text)
+        if overrides and isinstance(value, dict):
+            value = {**value, **overrides}
         return output.validate_python(value)
     except (json.JSONDecodeError, ValidationError):
         pass
-    # Last resort: if the model returned a single dict but a list was expected,
-    # wrap it (happens when a JSON array is truncated mid-write).
-    try:
-        value = _extract_json_value(text)
-        if isinstance(value, dict):
-            return output.validate_python([value])
-    except (json.JSONDecodeError, ValidationError):
-        pass
+    if not overrides:
+        # Last resort: if the model returned a single dict but a list was expected,
+        # wrap it (happens when a JSON array is truncated mid-write).
+        try:
+            value = _extract_json_value(text)
+            if isinstance(value, dict):
+                return output.validate_python([value])
+        except (json.JSONDecodeError, ValidationError):
+            pass
     raise ValueError("model response did not match the expected schema")
 
 

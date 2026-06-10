@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import os
 import re
 import sqlite3
 from datetime import UTC, datetime
@@ -10,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from auto_research.env import runtime_data_dir
 
 
 DB_FILENAME = "auto_research.sqlite3"
@@ -108,12 +109,6 @@ class QueryLogRecord(BaseModel):
     source: str = Field(min_length=1)
     n_results: int = Field(ge=0)
     latency_ms: float = Field(ge=0)
-
-
-def runtime_data_dir() -> Path:
-    """Return the runtime data directory."""
-
-    return Path(os.getenv("AUTO_RESEARCH_RUNTIME_DIR", "~/.auto_research")).expanduser()
 
 
 def database_path(data_dir: str | Path | None = None) -> Path:

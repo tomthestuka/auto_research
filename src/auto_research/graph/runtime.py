@@ -219,7 +219,7 @@ async def run_research(
     agent/tool/consensus narrative.
 
     A per-run workspace is created under
-    ``$AUTO_RESEARCH_RUNTIME_DIR/runs/{run_id}/`` for each agent.  One
+    ``<runtime_dir>/runs/{run_id}/`` (``runtime_dir`` from ``config/orchestration.yaml``) for each agent.  One
     ``PersistentSandbox`` is spawned per analyst worker; all sandboxes are torn
     down after the graph completes or raises.
     """

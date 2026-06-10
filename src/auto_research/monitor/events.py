@@ -7,7 +7,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 import json
-import os
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -38,9 +37,10 @@ def validate_chatter(chatter: int) -> int:
 def default_monitor_jsonl_path(stem: str = "run") -> Path:
     """Return a timestamped monitor JSONL path in the runtime data dir."""
 
-    root = Path(os.getenv("AUTO_RESEARCH_RUNTIME_DIR", "~/.auto_research")).expanduser()
+    from auto_research.env import runtime_data_dir  # local import avoids circularity at module load
+
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    return root / "monitors" / f"{timestamp}_{stem}.jsonl"
+    return runtime_data_dir() / "monitors" / f"{timestamp}_{stem}.jsonl"
 
 
 class MonitorEvent(BaseModel):
@@ -96,11 +96,13 @@ class RunMonitor:
         actor: str | None = None,
         data: Mapping[str, Any] | None = None,
     ) -> MonitorEvent | None:
-        """Record an event if its level is within the configured chatter."""
+        """Record an event.
 
+        Always streams to JSONL at full fidelity (level 1–10).
+        Only stores in memory and returns the event when level <= chatter,
+        so chatter controls terminal/notebook output without affecting the log.
+        """
         validate_chatter(level)
-        if level > self.chatter:
-            return None
         with self._lock:
             self._sequence += 1
             monitor_event = MonitorEvent(
@@ -113,12 +115,14 @@ class RunMonitor:
                 actor=actor,
                 data=_jsonable_dict(data or {}),
             )
-            self._events.append(monitor_event)
             if self.jsonl_path is not None:
                 with self.jsonl_path.open("a", encoding="utf-8") as stream:
                     stream.write(json.dumps(monitor_event.model_dump(mode="json"), sort_keys=True))
                     stream.write("\n")
-            return monitor_event
+            if level > self.chatter:
+                return None
+            self._events.append(monitor_event)
+        return monitor_event
 
     def events_by_team(self) -> OrderedDict[str, list[MonitorEvent]]:
         """Return events grouped by team, in report order."""

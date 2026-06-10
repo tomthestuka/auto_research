@@ -92,7 +92,7 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
   Pydantic v2 inter-agent protocol and schema validation tests pass.
 - 2026-05-26 — Package seeded with submodule folders (each with its own `DOCS.md`)
   during step 0. No code beyond the version constant.
-- 2026-06-09 — Added `auto_research.env` (`check_required_env()`): crashes at launch when any required env var is missing; called in `cli/main.py` after `load_dotenv()` and at the top of `graph/runtime.run_research()`. `sandbox/runner._source_ini_env` now raises `RuntimeError` on failure instead of falling back to `os.environ`.
+- 2026-06-09 — Added `auto_research.env` (`check_required_env()`, `runtime_data_dir()`): crashes at launch when any required env var is missing; called in `cli/main.py` after `load_dotenv()` and at the top of `graph/runtime.run_research()`. Runtime data directory moved from `AUTO_RESEARCH_RUNTIME_DIR` env var to `config/orchestration.yaml::runtime_dir`; all four callers (`workspace`, `monitor`, `observability`, `storage`) now use `env.runtime_data_dir()`. `sandbox/runner._source_ini_env` now raises `RuntimeError` on failure instead of falling back to `os.environ`.
 - 2026-05-28 — Step 12: added `auto_research.monitor`, exported
   `run_research()` / `ResearchRun` / `RunMonitor`, and kept `run_request()` as
   the verdict-only compatibility entry.

@@ -18,7 +18,7 @@ slot in without migrations: embedding space is reserved both as nullable
 backend is `sqlite-vec`, which co-exists in the same DB file.
 
 Runtime DB path:
-- `AUTO_RESEARCH_RUNTIME_DIR/auto_research.sqlite3`
+- `<runtime_dir>/auto_research.sqlite3` (`runtime_dir` from `config/orchestration.yaml`)
 - default when unset: `~/.auto_research/auto_research.sqlite3`
 
 Local development ingestion logs are written under `logs/dev/step-4/`.
@@ -67,8 +67,8 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   column.
 - `QueryLogRecord(role: str, query: str, source: str, n_results: int,
   latency_ms: float)` — query log input model.
-- `runtime_data_dir() -> Path` — returns `AUTO_RESEARCH_RUNTIME_DIR` or
-  `~/.auto_research`.
+- `runtime_data_dir() -> Path` — re-exported from `auto_research.env`; reads
+  `config/orchestration.yaml::runtime_dir` (defaults to `~/.auto_research`).
 - `database_path(data_dir: str | Path | None = None) -> Path` — returns the
   SQLite DB path for a runtime data dir.
 - `sha256_file(path: str | Path) -> str` — returns a file digest.
@@ -96,4 +96,5 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   local paper ingestion utility.
 
 ## Changelog
+- 2026-06-09 — `runtime_data_dir()` now delegates to `auto_research.env.runtime_data_dir()`; runtime dir moved from `AUTO_RESEARCH_RUNTIME_DIR` env var to `config/orchestration.yaml::runtime_dir`.
 - 2026-05-26/27 — Step 4 built: SQLite schema (papers, memory with `mem_abbrev`, query_log; embedding column reserved for Phase 2), paper upsert/read/list, memory insert, `replace_memory_for_paper()`, `paper_record_from_result()` for no-PDF metadata ingestion, local PDF ingestion, deterministic storage tests.

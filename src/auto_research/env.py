@@ -1,12 +1,19 @@
-"""Launch-time environment validation.
+"""Launch-time environment validation and config-derived paths.
 
-Called at startup before any SDK clients are constructed.  Derives required
-keys from the shape documented in .env.example — never reads .env itself.
+``check_required_env()`` is called at startup before any SDK clients are
+constructed.  Required keys are derived from .env.example shape — never reads
+.env itself.
+
+``runtime_data_dir()`` reads the runtime data directory from
+config/orchestration.yaml so the path is not duplicated across env and config.
 """
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+_ORCH_CONFIG = Path(__file__).resolve().parents[2] / "config" / "orchestration.yaml"
 
 # Each tuple is a group of aliases; at least one must be set.
 # Derived from .env.example; optional vars (LangSmith, runtime dir) are excluded.
@@ -37,3 +44,18 @@ def check_required_env() -> None:
             "Copy .env.example to .env and fill in the values.\n"
             "Missing: " + ", ".join(missing)
         )
+
+
+def runtime_data_dir() -> Path:
+    """Return the runtime data directory from config/orchestration.yaml.
+
+    Key: ``runtime_dir``.  Defaults to ``~/.auto_research`` when absent.
+    """
+    import yaml  # local import — yaml not needed at module load time
+
+    try:
+        with _ORCH_CONFIG.open("r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        config = {}
+    return Path(config.get("runtime_dir", "~/.auto_research")).expanduser()
