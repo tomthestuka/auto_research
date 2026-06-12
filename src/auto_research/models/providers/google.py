@@ -7,7 +7,16 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from auto_research.models.types import ModelMessage, ModelResponse, ModelUsage, RoleModelConfig, ToolCall
+from auto_research.models.types import (
+    AssistantToolUse,
+    ConversationMessage,
+    ModelMessage,
+    ModelResponse,
+    ModelUsage,
+    RoleModelConfig,
+    ToolCall,
+    ToolResultMessage,
+)
 from auto_research.schemas import DocumentRef, FigureRef
 
 # String `format` values Gemini's response schema accepts (others are stripped).
@@ -76,17 +85,52 @@ def _clean_gemini(node: Any) -> None:
             _clean_gemini(item)
 
 
+def _to_gemini_contents(messages: Sequence[ConversationMessage], types: Any) -> tuple[str | None, list]:
+    """Split system text out and translate the rest into Gemini ``Content`` turns.
+
+    ``AssistantToolUse`` → a ``model`` turn with ``function_call`` parts;
+    ``ToolResultMessage`` → a ``user`` turn with ``function_response`` parts
+    (keyed by tool name); plain ``ModelMessage`` → a text turn.
+    """
+    system_texts: list[str] = []
+    contents: list = []
+    for message in messages:
+        if isinstance(message, AssistantToolUse):
+            parts = []
+            if message.content:
+                parts.append(types.Part.from_text(text=message.content))
+            for call in message.tool_calls:
+                parts.append(types.Part.from_function_call(name=call.name, args=call.arguments))
+            contents.append(types.Content(role="model", parts=parts))
+        elif isinstance(message, ToolResultMessage):
+            parts = [
+                types.Part.from_function_response(name=part.name, response={"result": part.content})
+                for part in message.results
+            ]
+            contents.append(types.Content(role="user", parts=parts))
+        elif message.role == "system":
+            system_texts.append(message.content)
+        else:
+            role = "model" if message.role == "assistant" else "user"
+            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=message.content)]))
+    return ("\n".join(system_texts) or None), contents
+
+
 class GoogleProvider:
     """Thin adapter around Google Gen AI models.
 
     Native structured output uses ``response_mime_type="application/json"`` plus
     a ``response_schema`` (the Pydantic model). Function calling passes
     ``FunctionDeclaration``s and reads ``response.function_calls``.
+    ``AssistantToolUse`` / ``ToolResultMessage`` turns are replayed as
+    ``function_call`` / ``function_response`` parts (Google correlates results to
+    calls by tool name). Implicit context caching is on by default for current
+    Gemini, so ``cache_prefix`` is accepted as a no-op.
     """
 
     async def call(
         self,
-        messages: Sequence[ModelMessage],
+        messages: Sequence[ConversationMessage],
         config: RoleModelConfig,
         *,
         schema: type[BaseModel] | None = None,
@@ -94,6 +138,7 @@ class GoogleProvider:
         tool_choice: str = "auto",
         images: Sequence[FigureRef] = (),
         documents: Sequence[DocumentRef] = (),
+        cache_prefix: bool = False,
     ) -> ModelResponse:
         """Call Google and normalize the response."""
 
@@ -103,15 +148,20 @@ class GoogleProvider:
         if schema is not None and tools is not None:
             raise ValueError("schema and tools are mutually exclusive")
 
-        contents: list[Any] = [
-            "\n\n".join(f"{message.role}: {message.content}" for message in messages)
-        ]
+        system, contents = _to_gemini_contents(messages, types)
+        extra_parts: list[Any] = []
         for document in documents:
-            contents.append(types.Part.from_bytes(data=document.path.read_bytes(), mime_type=document.mime_type))
-        if images:
-            contents.append("\n".join(f"Figure reference: {figure.path}" for figure in images))
+            extra_parts.append(
+                types.Part.from_bytes(data=document.path.read_bytes(), mime_type=document.mime_type)
+            )
+        for figure in images:
+            extra_parts.append(types.Part.from_text(text=f"Figure reference: {figure.path}"))
+        if extra_parts:
+            contents.append(types.Content(role="user", parts=extra_parts))
 
         params = dict(config.parameters)
+        if system is not None:
+            params["system_instruction"] = system
         if "thinking_config" in params:
             params["thinking_config"] = types.ThinkingConfig(**params["thinking_config"])
 
@@ -159,7 +209,13 @@ class GoogleProvider:
         tool_calls = []
         if tools is not None:
             for fc in getattr(response, "function_calls", None) or []:
-                tool_calls.append(ToolCall(name=fc.name, arguments=dict(fc.args or {})))
+                tool_calls.append(
+                    ToolCall(
+                        id=getattr(fc, "id", "") or fc.name,
+                        name=fc.name,
+                        arguments=dict(fc.args or {}),
+                    )
+                )
 
         usage = getattr(response, "usage_metadata", None)
         return ModelResponse(

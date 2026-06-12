@@ -107,18 +107,33 @@ def _make_fig(name: str) -> FigureRef:
 
 
 class FakeWorkerWithTools(FakeWorker):
-    """Worker that also exposes execute_tools, returning a fixed figure per call."""
+    """Worker whose analyze() returns a report carrying tool figures.
+
+    Mirrors the ReAct shape: the worker runs its own tool loop inside analyze(),
+    attaches the loop's figures to its report, and exposes last_tool_results for
+    the consensus peer summary.
+    """
 
     def __init__(self, name: str, figures: list[FigureRef]):
         super().__init__(name)
         self._figures = figures
         self.is_alive = True
+        self.last_tool_results: list = []
 
-    async def execute_tools(self, task, registry, *, tool_retry_cap=3):
+    async def analyze(self, task: AnalysisTask, *, peer_reports=()):
         from auto_research.schemas import ToolResult
-        return [
-            ToolResult(tool_name="fake_plot", stdout="", stderr="", exit_code=0, elapsed_s=0.0, figures=self._figures)
+
+        self.calls += 1
+        self.peer_counts.append(len(peer_reports))
+        self.last_tool_results = [
+            ToolResult(tool_name="fake_plot", stdout="", stderr="", exit_code=0,
+                       elapsed_s=0.0, figures=self._figures)
         ]
+        return AnalystReport(
+            summary=f"{self.name} round {self.calls}: {task.question}",
+            findings=[f"{self.name} finding {self.calls}"],
+            figures=list(self._figures),
+        )
 
 
 class FakeRegistry:

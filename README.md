@@ -75,14 +75,18 @@ planning teams may also route requests through the same reviewer gate.
 ```
 
 Structured agent messages use **provider-native structured output** (OpenAI Responses
-`text.format`, Google `response_schema`, Anthropic `messages.parse(output_format=)`);
-analyst tool calls use **provider-native function calling**, where each toolkit/MCP tool
-is a function constrained by its own argument schema. There is no prompt-injected JSON
-schema and no salvage JSON parsing — results are Pydantic-validated and fail loudly; a
-structured call that comes back off-schema is re-issued a few times (`structured_retry_cap`)
-with the error fed back before raising. Runtime prompts
-carry role and scope only; tool names, arguments, and descriptions reach the model through
-tool loading, not the prompt.
+`text.format`, Google `response_schema`, Anthropic `messages.parse(output_format=)`).
+Every agent runs an **inner ReAct loop**: it calls tools via provider-native function
+calling, sees each result in-context, and chains dependent calls to completion (e.g. the
+analyst's load → fit → run → plot in one pass), then emits its structured result grounded
+in those results. Each role's tool surface is a uniform `ToolProvider` — the analyst's
+science sandbox, the reviewer/lead's read-only inspection tools, the librarian's literature
+sources. The loop is bounded by `react_loop_cap`; prompt caching is a uniform `cache_prefix`
+knob each provider realizes natively. There is no prompt-injected JSON schema and no salvage
+parsing — results are Pydantic-validated and fail loudly; an off-schema structured call is
+re-issued a few times (`structured_retry_cap`) with the error fed back before raising.
+Runtime prompts carry role and scope only; tool names, arguments, and descriptions reach
+the model through tool loading, not the prompt.
 
 Model groups are **config-driven** (`config/models.yaml`), spanning OpenAI, Anthropic,
 and Google. No model identifier is hardcoded. Defaults: reviewer group = Opus 4.8,
@@ -137,7 +141,7 @@ discipline as `DOCS.md`). Phase 2 items remain documented as deferred stubs in
 | 8 | Done | Agent roles: reviewer, librarian I/O, analyst worker, and analyst lead wrappers; local retrieval is pure Python. |
 | 9 | Done | Consensus: debate-to-converge strategy with cap 3 and lead adjudication. |
 | 10 | Done | Orchestration: LangGraph graph with capped paper-search and analysis-result feedback edges. |
-| 11 | Done | Sandbox & tool execution: `ToolkitRegistry` (manifest-based discovery + `tool_definitions()` for native function calling), persistent per-worker `PersistentSandbox` with non-interactive XSPEC boot policy and timeout/death restart, built-in MCP tools, and tool execution inside analyst consensus with capped error-feedback retries. Workers elicit tool calls via provider-native function calling (arguments constrained by each tool's schema). `merge_flow.py` stub (Phase 2 → Claude Agent SDK). LangGraph Studio: `langgraph dev` exposes live graph state per node. |
+| 11 | Done | Sandbox & tool execution: `ToolkitRegistry` (manifest-based discovery + `tool_definitions()` for native function calling), persistent per-worker `PersistentSandbox` with non-interactive XSPEC boot policy and timeout/death restart, built-in MCP tools. Every agent runs an **inner ReAct loop** (`AgentRole._react` over a uniform `ToolProvider`): the analyst chains its science tools to completion in one pass, the reviewer/lead inspect artifacts via read-only tools, the librarian iterates over its literature sources. `merge_flow.py` stub (Phase 2 → Claude Agent SDK). LangGraph Studio: `langgraph dev` exposes live graph state per node. |
 | 12 | Done | Entry points & tests: importable monitored library entry, CLI, inspection notebook, and deterministic pytest coverage. |
 
 See `CLAUDE.md` §14 for checkpoints and deferred Phase 2 stubs.
@@ -150,8 +154,8 @@ not mean each role can complete its full real-world job yet.
 |---|---|---|
 | Librarian I/O | Yes — step 5 built arXiv / ADS / Tavily, and document attachments are wired through the model boundary. | Real source/document input can produce structured search results or memory abstractions. |
 | Local retrieval | Yes — step 6 built `text_search()` over SQLite. | Pure-Python retrieval returns local paper paths from the DB; no runtime LLM role. |
-| Analyst worker | Yes — step 11 wired `ToolkitRegistry` + subprocess sandbox. Workers call `request_tools()`, tools execute via sandbox, errors trigger LLM self-correction loop. | Tool-catalogue-aware analysis; `xspec_utils` and any registered research_toolkit tools. |
-| Analyst lead | N/A — pure adjudication. | Given worker reports or tool requests, produce structured adjudication/review. |
+| Analyst worker | Yes — step 11 wired `ToolkitRegistry` + subprocess sandbox. `analyze()` runs an inner ReAct loop in the sandbox (chaining load→fit→run→plot, self-correcting on errors in-loop), then reports grounded in real results. | Tool-catalogue-aware analysis; `xspec_utils` and any registered research_toolkit tools. |
+| Analyst lead | Adjudication + a read-only inspection loop (artifacts/figures/memory) before synthesis. | Given worker reports, inspect evidence and produce a structured adjudication/review. |
 | Reviewer | N/A — pure dispatch + review. | Given a request or stub results, produce a structured dispatch/review decision. |
 
 ---

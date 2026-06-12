@@ -17,6 +17,21 @@ Each role is a small async class:
 3. Tool access (sources, retrieval, sandboxed toolkit calls) is injected — not
    imported globally — so swap-outs in tests are trivial.
 
+**Inner ReAct loop (every role).** `AgentRole._react(seed_messages, tools, action,
+cap, images)` drives a provider-agnostic loop: call the model with
+`tools.tool_definitions()`; if it emits tool calls, execute each via
+`tools.execute(name, args)`, append the assistant `tool_use` turn + the
+`tool_result` turn, and re-call so the model sees its own results in-context and
+chains dependent calls; stop when it emits no calls or `react_loop_cap`
+(`orchestration.yaml`, default 12) is hit. A terminal `_call_over_messages(...)`
+then produces the role's structured output grounded in the trajectory (both reuse
+`_structured_loop`, the shared off-schema-retry core). Tool surfaces live behind
+the `ToolProvider` protocol in `react.py`: `SandboxToolProvider` (analyst science
+tools in the `PersistentSandbox`), `ReadOnlyToolProvider` (reviewer/lead — in-process
+`read_file`/`list_dir`/`text_search`, confined to the run + papers dirs),
+`SourceToolProvider` (librarian — arXiv/ADS/web + local `text_search`). A role with
+`tools=None` falls back to a plain single structured call.
+
 When a `RunMonitor` is injected, role wrappers record high-chatter input,
 parsed output, raw model content, attachment counts, and errors. These records
 are for human inspection only and are never fed back into runtime prompts.
@@ -51,9 +66,11 @@ Prompt loading:
 
 Role wrappers:
 - `ReviewerAgent.review(request, *, literature=(), report=None) ->
-  ReviewVerdict`. `literature` is now `Sequence[Path]` — local PDF paths returned
-  by `text_search_paths()`. Each existing path is loaded as a `DocumentRef`
-  attachment so the model reads the full paper.
+  ReviewVerdict`. `literature` is `Sequence[Path]` — local PDF paths loaded as
+  `DocumentRef` attachments. When a `ReadOnlyToolProvider` is attached (`tools`),
+  the reviewer first investigates run artifacts/figures/memory via a ReAct loop,
+  then issues the verdict grounded in that investigation plus the papers; with no
+  `tools` it makes a single structured call.
 - `LibrarianIOAgent(sources, storage, ...) -> LibrarianIOAgent`. Constructor
   now accepts a `storage: Storage | None` (defaults to `Storage()`). The IO
   agent satisfies both `IOAbstractionWorkerLike` and `IOAbstractionLeadLike`
@@ -65,6 +82,12 @@ Role wrappers:
 - `LibrarianIOAgent.search(request) -> list[SearchResult]` — no LLM call.
   Queries external sources and returns raw results. Intent-blind: does not
   filter or rank.
+- `LibrarianIOAgent.gather_literature(request, *, follow_up=None) ->
+  list[SearchResult]` — ReAct loop over a `SourceToolProvider` (arXiv/ADS/web +
+  local `text_search`): the model searches, reads results, refines its query, and
+  searches again until it has a focused set; returns de-duplicated results. Falls
+  back to `compose_search_strategy`→`search` when no sources are configured. The
+  graph `literature_node` prefers this over the single-shot path.
 - `LibrarianIOAgent.ingest_document(document, *, peer_abstracts=(), paper_id=None,
   instructions=None) -> MemoryRecord` — LLM call. Passes a `DocumentRef`
   attachment to the configured I/O model and returns one memory abstraction.
@@ -84,15 +107,17 @@ Role wrappers:
   metadata only with `result.abstract` as `mem_abbrev` (no LLM call).
 - `LibrarianIOAgent.evaluate_search_results(request, results) -> ReviewVerdict`
   — Phase 1 stub returning `accepted=True`. See CLAUDE.md §13.
-- `AnalystWorkerAgent.analyze(task, *, peer_reports=()) -> AnalystReport`.
-- `AnalystWorkerAgent.request_tools(task, registry) -> list[ToolCallRequest]`
-  elicits tool calls via provider-native **function calling**: every toolkit/MCP
-  tool is offered to the model as a function constrained by its own `args_schema`
-  (`registry.tool_definitions()`), and the model's native tool calls are mapped
-  back to `ToolCallRequest` objects whose `arguments` are real, per-tool-validated
-  values (never a hand-serialized JSON string). An empty result means "no tools
-  needed". Does not execute the calls.
-- `AnalystLeadAgent.adjudicate(task, reports) -> AnalystReport`.
+- `AnalystWorkerAgent(*, sandbox=None, registry=None, memory_path=None, ...)`.
+  `AnalystWorkerAgent.analyze(task, *, peer_reports=()) -> AnalystReport` runs the
+  inner ReAct loop over a `SandboxToolProvider` (when `sandbox`+`registry` are
+  attached) — chaining toolkit/MCP calls to completion — then composes the report
+  grounded in the tool results, with the loop's figures attached. `last_tool_results`
+  exposes the loop's `ToolResult`s for the consensus peer summary. With no
+  sandbox/registry it falls back to a plain structured call. (`request_tools`/
+  `execute_tools` were removed; the loop subsumes them.)
+- `AnalystLeadAgent.adjudicate(task, reports) -> AnalystReport` — uses a
+  `ReadOnlyToolProvider` loop to inspect run artifacts/figures/memory before
+  synthesizing when `tools` is attached; plain structured call otherwise.
 - `AnalystLeadAgent.judge_convergence(task, reports, *, round_index,
   max_rounds) -> ReviewVerdict` judges whether worker reports have converged
   enough for final synthesis.
@@ -170,3 +195,4 @@ Role wrappers:
 - 2026-06-03 — `execute_tools()` auto-injects `cwd=memory_path.parent` into `mcp.builtin.bash_exec` when the model omits `cwd`, so `python -c "..."` output lands in the analyst's workspace folder. Fixed `FakeStorage` test stub missing `get_memory_for_paper`.
 - 2026-06-09 — Native structured output + function calling (P0). `_call()` rewritten: it passes the output Pydantic model to `model.call(schema=...)`, takes `ModelResponse.parsed`, applies `overrides`, and validates strictly with `model_validate` — **no salvage parsing**; a missing/off-schema result raises loudly. Deleted `_payload_text`'s schema-in-prompt body (now just task data), `_parse_json_response`, `_strip_json_fence`, `_extract_json_value`. Call sites pass a `type[BaseModel]` (no more `TypeAdapter`). `request_tools(task, registry)` rewritten to native function calling over `registry.tool_definitions()`; its arguments arrive as real per-tool-validated values, fixing the hand-serialized-`indices` truncation crash. Deleted the unused `AnalystLeadAgent.review_tool_requests` (the only bare-`list[...]` structured output). Prompts no longer carry tool-specific instructions — tool names/args/usage flow through tool loading (function definitions + manifest descriptions); `analyst_worker.md` trimmed accordingly.
 - 2026-06-11 — `_call()` gains a **bounded off-schema retry** (`_structured_retry_cap()` ← `orchestration.yaml::structured_retry_cap`, default 2). On a `ValidationError`/`ValueError` (off-schema or missing structured output) it re-issues the structured call, injecting a `_retry_feedback` note into the payload, mirroring the tool-call error-feedback loop; cap exhaustion still raises (fail-loud preserved). Other exceptions (auth/network — already retried by the SDK) propagate immediately. Motivated by the `analyst_lead.judge_convergence` run-killer where the Anthropic adapter's unenforced forced-tool returned a nested `{"parameter": {...}}` `ReviewVerdict`; the real fix is the adapter's switch to native `messages.parse` (see `models/DOCS.md`), with this retry as defense in depth across all providers.
+- 2026-06-11 — **Inner ReAct loop for every agent + `react.py`.** Added `AgentRole._react` (message-accumulating tool loop), `_call_over_messages` (terminal structured output over a trajectory), and `_structured_loop` (shared retry core for both `_call` and `_call_over_messages`); `AgentRole` gained an optional `tools` ToolProvider. New `agents/react.py`: `ToolProvider` protocol, `ToolOutcome`, and three providers — `SandboxToolProvider` (wraps `ToolkitRegistry` + `PersistentSandbox`; moved `_normalize_tool_raw`/`_observation_path_args` here), `ReadOnlyToolProvider` (in-process read_file/list_dir/text_search, path-confined), `SourceToolProvider` (QuerySources + local text_search). **`AnalystWorkerAgent` rewritten**: `analyze()` now runs the ReAct loop (load→fit→run→plot chained in one call, seeing each result in-context) then reports grounded in real results, with the loop's figures attached; `request_tools`/`execute_tools` removed; `memory_path` is now the durable cross-round store and `last_tool_results` feeds the consensus peer summary; falls back to a plain call with no sandbox/registry. `ReviewerAgent.review` and `AnalystLeadAgent.adjudicate` use a `ReadOnlyToolProvider` loop (wired in `graph/runtime`) to inspect artifacts/figures/memory before deciding; `judge_convergence` stays a plain call. `LibrarianIOAgent.gather_literature` runs a `SourceToolProvider` loop (iterative search/refine) and returns de-duplicated results; the graph `literature_node` prefers it, falling back to `compose_search_strategy`→`search`. Fixes the run where analysts only ever explored/loaded and never fit (the tool-selection call was blind to its own prior results and one debate round gated each dependent step).

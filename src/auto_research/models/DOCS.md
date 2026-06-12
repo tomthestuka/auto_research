@@ -59,8 +59,18 @@ Google by editing YAML alone
   message. Unknown fields are forbidden.
 - `ModelUsage(input_tokens: int = 0, output_tokens: int = 0)` — normalized token
   usage.
-- `ToolCall(name: str, arguments: dict[str, Any] = {})` — one provider-native
-  tool/function call extracted from a model response.
+- `ToolCall(id: str = "", name: str, arguments: dict[str, Any] = {})` — one
+  provider-native tool/function call extracted from a model response. ``id`` is the
+  provider tool-call id, used to correlate a result back to the call when replaying
+  a ReAct trajectory.
+- `ToolResultPart(tool_call_id: str = "", name: str = "", content: str = "",
+  is_error: bool = False)` — one tool result fed back to the model. Carries both
+  ``tool_call_id`` (Anthropic/OpenAI) and ``name`` (Google) so every adapter can
+  build its native shape.
+- `AssistantToolUse(role="assistant", content: str = "", tool_calls: list[ToolCall])`
+  and `ToolResultMessage(role="tool", results: list[ToolResultPart])` — neutral
+  conversation turns for ReAct-loop replay. `ConversationMessage = ModelMessage |
+  AssistantToolUse | ToolResultMessage`; `call(messages=…)` accepts the union.
 - `ModelResponse(content: str = "", parsed: Any | None = None,
   tool_calls: list[ToolCall] = [], usage: ModelUsage = ModelUsage(),
   raw: Any = None)` — normalized provider output. `parsed` carries native
@@ -74,7 +84,12 @@ Google by editing YAML alone
   `config/models.yaml` shape.
 - `ModelProvider` — async protocol implemented by provider adapters:
   `call(messages, config, *, schema=None, tools=None, tool_choice="auto",
-  images=(), documents=()) -> ModelResponse`.
+  images=(), documents=(), cache_prefix=False) -> ModelResponse`. `cache_prefix`
+  asks the adapter to cache the stable prefix (system + tool defs) via its native
+  mechanism: Anthropic sets a `cache_control: ephemeral` breakpoint; OpenAI sets a
+  `prompt_cache_key` (prefix caching is automatic); Google relies on implicit
+  caching (no-op). `messages` may include `AssistantToolUse`/`ToolResultMessage`
+  turns, which each adapter translates to native tool_use/tool_result blocks.
 - `ModelHandle(role: str, config: RoleModelConfig, provider: ModelProvider)` —
   resolved callable handle for one role member. Method:
   `async call(messages, *, schema=None, tools=None, tool_choice="auto",
@@ -102,4 +117,5 @@ Google by editing YAML alone
 - 2026-05-26/27 — Steps 2–3 built: `config/models.yaml`, validated role registry (four roles: `reviewer`, `analyst_lead`, `analyst_worker`, `librarian_io`), role-level model groups, OpenAI/Anthropic/Google adapters, `ModelHandle.call()` wired through observability, `priceMTk` per-million-token pricing, `vision`/`documents` capability flags for PDF-attaching librarian I/O members.
 - 2026-06-09 — Native structured output + function calling (P0). The three provider adapters now implement the `schema=`/`tools=` contract instead of raising `NotImplementedError`: OpenAI uses Responses `text.format` json_schema for structured output and Responses `function` tools for function calling; Google uses `response_mime_type`+`response_schema` and `FunctionDeclaration`s; Anthropic uses a forced single synthetic tool for structured output and native `tools`+`tool_choice` for function calling. `ModelResponse` gained `parsed` and `tool_calls`; `ToolCall` added. `call()` accepts `tools`/`tool_choice`; `schema` and `tools` are mutually exclusive. This replaces the prompt-injected-JSON-schema + salvage-parser path that crashed on hand-serialized nested arguments (the `plot_fit`/`plot_iqu` `indices` truncation bug).
 - 2026-06-09 — Provider schema sanitizers (follow-up). OpenAI/Google structured output accept only restricted JSON-Schema dialects, so the rich Pydantic schemas (`AnalystReport`/`ResearchReport`/… embedding `Path`/`HttpUrl`/`$ref`/`extra="forbid"`) are sanitized per provider before sending: OpenAI (`_strict_json_schema_format`) strips unsupported `format` (`path`/`uri`) and `default`, then strict-ifies (`additionalProperties:false`, all-`required`) and sends via `responses.create(text={"format":{"type":"json_schema",...}})` — replacing `responses.parse`, which 400'd on `format:path`. Google (`_to_gemini_schema`) inlines `$ref`/`$defs` and strips `additionalProperties`/`default`/`title`/unsupported `format`. Both sanitizers are **properties-aware** — they strip JSON-Schema keyword *annotations* but never a property whose field name happens to be `title`/`default`/`format` (regression: `ResearchReport.title`). Verified live: all six message schemas pass structured output on OpenAI and Google.
+- 2026-06-11 — **Uniform prefix caching + provider tool-turn round-trip (ReAct enabler).** `call()` gained `cache_prefix: bool` (a uniform knob; each adapter realizes it natively — Anthropic `cache_control` breakpoint on system/tools, OpenAI `prompt_cache_key`, Google implicit/no-op). `ToolCall` gained `id`; added `ToolResultPart`, `AssistantToolUse`, `ToolResultMessage`, and the `ConversationMessage` union so a ReAct loop can replay assistant `tool_use` + `tool_result` turns. Each adapter translates these to native blocks (Anthropic tool_use/tool_result, OpenAI function_call/function_call_output, Google function_call/function_response, correlating by id or — for Google — by tool name) and the function-calling paths now populate `ToolCall.id`. No prior structured/function-calling behavior changed.
 - 2026-06-11 — Anthropic structured output now uses the SDK-native `messages.parse(output_format=schema)` instead of the hand-rolled forced-single-tool workaround. The SDK's `transform_schema` strict-ifies the Pydantic model (drops unsupported string `format`s like `path`, folds numeric/length constraints into descriptions, inlines `$defs`, forces `additionalProperties:false`) and the API constrains decoding, then validates into an instance — returned as a dict (`.model_dump(mode="json")`) in `ModelResponse.parsed` for parity with the OpenAI/Google adapters. This fixes the `judge_convergence` crash where Opus, under the unenforced forced tool, nested the result as `{"parameter": {...}}` and failed Pydantic validation. The `tools=` (function-calling) path is unchanged (`messages.create`). No `AnthropicProvider`-specific schema sanitizer is needed — the SDK owns it.

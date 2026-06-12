@@ -17,7 +17,8 @@ runtime_dir: /data/fzhou/ar_runtime/test_runtime
 max_iterations: 3
 debate_max_rounds: 3
 io_search_max_iterations: 1  # Phase 2 stub — evaluate_search_results() currently returns accepted=True
-tool_retry_cap: 3            # inner retry cap for tool execution error-feedback loop
+tool_retry_cap: 3            # (legacy) accepted by DebateToConverge, now unused — the react loop self-corrects
+react_loop_cap: 12           # max tool iterations per agent inner ReAct loop before it must report
 structured_retry_cap: 2      # attempts for a structured _call (off-schema feedback loop) before raising
 toolkit_root: /data/fzhou/research_toolkit
 # Python environment used for sandbox tool execution.

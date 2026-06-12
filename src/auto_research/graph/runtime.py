@@ -26,7 +26,8 @@ from auto_research.retrieval import RetrievalBackend, SqliteRetrievalBackend
 from auto_research.sandbox.mcp_client import MCPToolClient
 from auto_research.sandbox.persistent import PersistentSandbox
 from auto_research.sandbox.registry import ToolkitRegistry
-from auto_research.sandbox.workspace import create_run_workspace, memory_path
+from auto_research.agents.react import ReadOnlyToolProvider
+from auto_research.sandbox.workspace import create_run_workspace, memory_path, run_dir
 from auto_research.schemas import ResearchRequest, ReviewVerdict
 from auto_research.storage import Storage
 
@@ -271,6 +272,22 @@ async def run_research(
         if isinstance(worker, AnalystWorkerAgent):
             worker.memory_path = memory_path(run_id, analyst_keys[i])
 
+    # Give the reviewer and lead a read-only inspection loop (run artifacts +
+    # knowledge base), unless a caller pre-wired their own tools.
+    from auto_research.sources.downloads import papers_dir
+
+    readonly_roots = [run_dir(run_id), papers_dir()]
+    if getattr(reviewer, "tools", None) is None:
+        try:
+            reviewer.tools = ReadOnlyToolProvider(roots=readonly_roots, retrieval=retrieval)
+        except Exception:  # noqa: BLE001 - tools are optional; never block the run
+            pass
+    if getattr(lead, "tools", None) is None:
+        try:
+            lead.tools = ReadOnlyToolProvider(roots=readonly_roots, retrieval=retrieval)
+        except Exception:  # noqa: BLE001
+            pass
+
     _attach_monitor(reviewer, run_monitor)
     _attach_monitor(io_agent, run_monitor)
     _attach_monitor(lead, run_monitor)
@@ -297,7 +314,8 @@ async def run_research(
             tool_retry_cap=tool_retry_cap,
         )
 
-    # Spawn one persistent sandbox per AnalystWorkerAgent
+    # Spawn one persistent sandbox per AnalystWorkerAgent and give it the registry
+    # so its analyze() can run the inner ReAct tool loop (SandboxToolProvider).
     sandboxes: list[PersistentSandbox] = []
     for i, worker in enumerate(workers):
         if isinstance(worker, AnalystWorkerAgent):
@@ -309,6 +327,7 @@ async def run_research(
                 mcp_client=mcp_client,
             )
             worker.sandbox = sandbox
+            worker.registry = registry
             sandboxes.append(sandbox)
 
     await run_monitor.record(

@@ -157,18 +157,28 @@ def build_graph(
         )
         prior = _latest_verdict(state)
         follow_up = prior.follow_up if prior and prior.needs_more_literature else None
-        search_request = await io_agent.compose_search_strategy(
-            state["request"], follow_up=follow_up
-        )
-        await _record(
-            monitor,
-            "librarian.search.strategy",
-            level=5,
-            summary="Librarian IO composed search strategy",
-            actor="librarian_io",
-            data={"search_request": search_request, "follow_up": follow_up},
-        )
-        raw = await io_agent.search(search_request)
+
+        # Prefer the ReAct librarian (iterative search/refine over its sources);
+        # fall back to the single-shot compose→search path when unavailable.
+        if hasattr(io_agent, "gather_literature"):
+            raw = await io_agent.gather_literature(state["request"], follow_up=follow_up)  # type: ignore[attr-defined]
+            local_query = state["request"].question
+            local_limit = 10
+        else:
+            search_request = await io_agent.compose_search_strategy(
+                state["request"], follow_up=follow_up
+            )
+            await _record(
+                monitor,
+                "librarian.search.strategy",
+                level=5,
+                summary="Librarian IO composed search strategy",
+                actor="librarian_io",
+                data={"search_request": search_request, "follow_up": follow_up},
+            )
+            raw = await io_agent.search(search_request)
+            local_query = search_request.query
+            local_limit = search_request.max_results
         await _record(
             monitor,
             "librarian.search.results",
@@ -179,8 +189,8 @@ def build_graph(
         )
         await io_agent.ingest_results(raw)
         paths = await text_search_paths(
-            search_request.query,
-            limit=search_request.max_results,
+            local_query,
+            limit=local_limit,
             backend=_retrieval,
         )
         await _record(

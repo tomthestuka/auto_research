@@ -61,19 +61,19 @@ class ConsensusStrategy(Protocol):
 class DebateToConverge:
     """Bounded analyst debate with lead convergence checks.
 
-    When ``registry`` is supplied, a tool-execution phase runs after each round
-    of ``analyze()`` calls (initial and revision).  Workers with an attached
-    ``PersistentSandbox`` call ``execute_tools()``, which appends a bare
-    terminal recording to their private ``memory_path``.  Truncated tool
-    summaries from all workers are then injected into the shared task
-    instructions for the next round so workers can reason from each other's
-    results.
+    Each worker's ``analyze()`` now runs its own inner ReAct tool loop and returns
+    a report grounded in real tool results (with the loop's figures attached), so
+    this strategy no longer executes tools itself. Between rounds it injects a
+    truncated cross-worker summary built from each worker's ``last_tool_results``
+    into the shared task instructions, so workers can reason from each other's
+    results. ``registry``/``tool_retry_cap`` are accepted for call-site
+    compatibility but unused (the worker owns its sandbox + react loop).
     """
 
     max_rounds: int = 3
     monitor: RunMonitor | None = None
-    registry: Any | None = None  # ToolkitRegistry | None — avoids circular import
-    tool_retry_cap: int = 3
+    registry: Any | None = None  # ToolkitRegistry | None — accepted, unused
+    tool_retry_cap: int = 3  # accepted, unused (the worker's react loop self-corrects)
 
     async def run(
         self,
@@ -83,10 +83,9 @@ class DebateToConverge:
     ) -> AnalystReport:
         """Run worker debate until convergence or the hard round cap.
 
-        Tool execution (when ``registry`` is set) runs after each set of
-        ``analyze()`` calls.  Per-worker results are appended to each worker's
-        private ``memory_path`` and a truncated shared summary is injected into
-        task instructions before the next round.
+        Workers gather evidence via their own tool loops inside ``analyze()``; a
+        truncated shared summary of each worker's last tool results is injected
+        into task instructions before each subsequent round.
         """
 
         if not workers:
@@ -102,7 +101,7 @@ class DebateToConverge:
             data={"task": task, "worker_count": len(workers), "max_rounds": self.max_rounds},
         )
 
-        # --- initial reports ---
+        # --- initial reports (each worker runs its own tool loop internally) ---
         reports: list[AnalystReport] = []
         for index, worker in enumerate(workers):
             report = await worker.analyze(task)
@@ -116,9 +115,7 @@ class DebateToConverge:
                 data={"report": report},
             )
 
-        # --- tool execution after initial reports ---
-        task, tool_figures = await self._run_tools(workers, task)
-        reports = _merge_figures(reports, tool_figures)
+        task = self._augment_with_peer_tools(workers, task)
 
         for round_index in range(1, self.max_rounds + 1):
             verdict = await lead.judge_convergence(
@@ -166,70 +163,32 @@ class DebateToConverge:
                     data={"round_index": round_index, "report": report},
                 )
             reports = revised
-
-            # --- tool execution after revision ---
-            task, tool_figures = await self._run_tools(workers, task)
-            reports = _merge_figures(reports, tool_figures)
+            task = self._augment_with_peer_tools(workers, task)
 
         raise RuntimeError("unreachable consensus loop exit")
 
-    async def _run_tools(
+    def _augment_with_peer_tools(
         self,
         workers: Sequence[WorkerLike],
         task: AnalysisTask,
-    ) -> tuple[AnalysisTask, list[list[FigureRef]]]:
-        """Execute tools for each capable worker; return augmented task and per-worker figures.
+    ) -> AnalysisTask:
+        """Inject a truncated cross-worker tool-result summary into the task.
 
-        Workers that expose ``execute_tools()`` and are alive call their sandbox.
-        Results are appended to each worker's private memory and a truncated
-        shared summary is added to ``task.instructions`` for the next round.
-        Returns the original task and empty figure lists when ``registry`` is ``None``.
+        Reads each worker's ``last_tool_results`` (populated by its ReAct loop).
+        Returns the task unchanged when no worker produced any results.
         """
-        empty: list[list[FigureRef]] = [[] for _ in workers]
-        if self.registry is None:
-            return task, empty
-
-        all_results: list[list[ToolResult]] = []
-        for index, worker in enumerate(workers):
-            if not hasattr(worker, "execute_tools"):
-                all_results.append([])
-                continue
-            alive = getattr(worker, "is_alive", True)
-            sandbox = getattr(worker, "sandbox", None)
-            if not alive and sandbox is None:
-                all_results.append([])
-                continue
-            results: list[ToolResult] = await worker.execute_tools(  # type: ignore[attr-defined]
-                task,
-                self.registry,
-                tool_retry_cap=self.tool_retry_cap,
-            )
-            all_results.append(results)
-            await _record(
-                self.monitor,
-                "analyst.tools.executed",
-                level=6,
-                summary=f"Worker {index + 1} executed {len(results)} tool result(s)",
-                actor=f"worker-{index + 1}",
-                data={"results": [r.model_dump(mode="json") for r in results]},
-            )
-
-        per_worker_figures: list[list[FigureRef]] = [
-            [f for r in results for f in r.figures] for results in all_results
+        all_results: list[list[ToolResult]] = [
+            list(getattr(worker, "last_tool_results", []) or []) for worker in workers
         ]
-
         summary = _peer_tool_summary(all_results)
         if not summary:
-            return task, per_worker_figures
-
-        new_instructions = "\n\n".join(
-            filter(None, [task.instructions, summary])
-        )
+            return task
+        new_instructions = "\n\n".join(filter(None, [task.instructions, summary]))
         return AnalysisTask(
             question=task.question,
             instructions=new_instructions,
             previous_report=task.previous_report,
-        ), per_worker_figures
+        )
 
 
 def _deduplicated(figures: list[FigureRef]) -> list[FigureRef]:
@@ -242,21 +201,6 @@ def _deduplicated(figures: list[FigureRef]) -> list[FigureRef]:
             seen.add(key)
             out.append(f)
     return out
-
-
-def _merge_figures(
-    reports: list[AnalystReport],
-    per_worker_figures: list[list[FigureRef]],
-) -> list[AnalystReport]:
-    """Return reports with tool figures merged in, deduped by path."""
-    merged = []
-    for report, figs in zip(reports, per_worker_figures):
-        if figs:
-            report = report.model_copy(
-                update={"figures": _deduplicated(list(report.figures) + figs)}
-            )
-        merged.append(report)
-    return merged
 
 
 def _peers_for(reports: Sequence[AnalystReport], index: int) -> list[AnalystReport]:

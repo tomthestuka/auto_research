@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from pathlib import Path
@@ -13,10 +12,19 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ValidationError
 
 from auto_research.agents.prompts import PromptRole, load_prompt
+from auto_research.agents.react import SandboxToolProvider, SourceToolProvider
 from auto_research.consensus import IODebateToConverge
-from auto_research.observations import load_observations_config
 from auto_research.monitor import RunMonitor
-from auto_research.models import ModelGroupHandle, ModelHandle, ModelMessage, ModelResponse, resolve
+from auto_research.models import (
+    AssistantToolUse,
+    ModelGroupHandle,
+    ModelHandle,
+    ModelMessage,
+    ModelResponse,
+    ToolResultMessage,
+    ToolResultPart,
+    resolve,
+)
 from auto_research.sandbox.workspace import append_memory, read_memory
 from auto_research.schemas import (
     AnalysisTask,
@@ -27,7 +35,6 @@ from auto_research.schemas import (
     ReviewVerdict,
     SearchRequest,
     SearchResult,
-    ToolCallRequest,
     ToolResult,
     document_from_file,
 )
@@ -41,13 +48,14 @@ class CallableModel(Protocol):
 
     async def call(
         self,
-        messages: Sequence[ModelMessage | Mapping[str, str]],
+        messages: Sequence[Any],
         *,
         schema: type[BaseModel] | None = None,
         tools: Sequence[Mapping[str, Any]] | None = None,
         tool_choice: str = "auto",
         images: Sequence[FigureRef] = (),
         documents: Sequence[DocumentRef] = (),
+        cache_prefix: bool = False,
     ) -> ModelResponse:
         """Call the model; return structured output and/or tool calls."""
 
@@ -65,11 +73,15 @@ class AgentRole:
         model_name: str | None = None,
         prompt: str | None = None,
         monitor: RunMonitor | None = None,
+        tools: Any | None = None,
     ):
         self.prompt = prompt or load_prompt(self.role)
         self.model = model or _select_model(model_group or resolve(self.role), model_name)
         self.last_response: ModelResponse | None = None
         self.monitor = monitor
+        # Optional ToolProvider for an inner ReAct loop (reviewer/lead read-only,
+        # librarian sources). When None, the role makes plain structured calls.
+        self.tools = tools
 
     async def _call(
         self,
@@ -101,33 +113,95 @@ class AgentRole:
                 "documents": [doc.model_dump(mode="json") for doc in documents],
             },
         )
-        # Native structured output enforces the schema at the provider, so a bad
-        # shape is rare — but a transient off-schema result must not kill the run
-        # the way a single tool-call error doesn't. Re-issue the structured call a
-        # few times, feeding the validation error back, mirroring the tool-call
-        # feedback loop. Cap exhaustion still raises (fail-loud is preserved).
+
+        def make_messages(feedback: str | None) -> list:
+            call_payload: Mapping[str, Any] = payload if feedback is None else {**payload, "_retry_feedback": feedback}
+            return [
+                ModelMessage(role="system", content=self.prompt),
+                ModelMessage(role="user", content=_payload_text(call_payload)),
+            ]
+
+        return await self._structured_loop(
+            make_messages, output_model, action=action, images=images,
+            documents=documents, overrides=overrides,
+        )
+
+    async def _call_over_messages(
+        self,
+        base_messages: Sequence[Any],
+        output_model: type[BaseModel],
+        *,
+        action: str,
+        images=(),
+        documents=(),
+        overrides: dict | None = None,
+        decide_instruction: str | None = None,
+    ) -> Any:
+        """Produce a terminal structured ``output_model`` over a ReAct trajectory.
+
+        ``base_messages`` is the conversation gathered by :meth:`_react` (system +
+        interleaved ``AssistantToolUse``/``ToolResultMessage`` turns). A final user
+        turn instructs the model to emit the structured result grounded in the
+        tool outputs above. Same fail-loud retry as :meth:`_call`; ``cache_prefix``
+        is on because the trajectory prefix is large and reused across retries.
+        """
+        instruction = decide_instruction or (
+            f"You have finished using tools. Now produce the final {output_model.__name__} "
+            "as your response, grounded only in the tool results above. Report what the "
+            "tools actually returned — do not describe intentions or plans."
+        )
+        await self._record(
+            f"{self.role}.{action}.input",
+            level=10,
+            summary=f"{self.role} composing {action} over {len(base_messages)} message(s)",
+            data={"message_count": len(base_messages)},
+        )
+
+        def make_messages(feedback: str | None) -> list:
+            text = instruction if feedback is None else f"{instruction}\n\n{feedback}"
+            return list(base_messages) + [ModelMessage(role="user", content=text)]
+
+        return await self._structured_loop(
+            make_messages, output_model, action=action, images=images,
+            documents=documents, overrides=overrides, cache_prefix=True,
+        )
+
+    async def _structured_loop(
+        self,
+        make_messages,
+        output_model: type[BaseModel],
+        *,
+        action: str,
+        images=(),
+        documents=(),
+        overrides: dict | None = None,
+        cache_prefix: bool = False,
+    ) -> Any:
+        """Shared structured-output call with a bounded off-schema retry.
+
+        ``make_messages(feedback)`` returns the conversation for one attempt;
+        ``feedback`` is ``None`` on the first try and the prior validation error
+        thereafter. Native structured output enforces the schema at the provider,
+        so a bad shape is rare — but a transient off-schema result must not kill
+        the run. Cap (``structured_retry_cap``) exhaustion still raises loudly.
+        """
         cap = max(1, _structured_retry_cap())
         last_exc: Exception | None = None
         for attempt in range(cap):
-            call_payload: Mapping[str, Any] = payload
+            feedback: str | None = None
             if attempt > 0:
-                call_payload = {
-                    **payload,
-                    "_retry_feedback": (
-                        f"Your previous response was not a valid {output_model.__name__}: "
-                        f"{last_exc}. Return a valid {output_model.__name__} matching the "
-                        "schema exactly — do not wrap or nest the fields."
-                    ),
-                }
+                feedback = (
+                    f"Your previous response was not a valid {output_model.__name__}: "
+                    f"{last_exc}. Return a valid {output_model.__name__} matching the "
+                    "schema exactly — do not wrap or nest the fields."
+                )
             try:
                 response = await self.model.call(
-                    [
-                        ModelMessage(role="system", content=self.prompt),
-                        ModelMessage(role="user", content=_payload_text(call_payload)),
-                    ],
+                    make_messages(feedback),
                     schema=output_model,
                     images=images,
                     documents=documents,
+                    cache_prefix=cache_prefix,
                 )
                 self.last_response = response
                 value = response.parsed
@@ -182,6 +256,75 @@ class AgentRole:
             )
             return parsed
 
+    async def _react(
+        self,
+        *,
+        seed_messages: Sequence[Any],
+        tools: Any,  # ToolProvider — duck-typed to avoid import cycle
+        action: str,
+        cap: int,
+        images: Sequence[FigureRef] = (),
+        on_result=None,
+    ) -> tuple[list, list[FigureRef]]:
+        """Run an inner ReAct loop: gather evidence by calling tools to completion.
+
+        Each iteration calls the model with ``tools.tool_definitions()`` and a
+        growing conversation. If the model emits tool calls, each is executed via
+        ``tools.execute(name, arguments)``; the assistant ``tool_use`` turn and the
+        ``tool_result`` turn are appended so the model sees its own results
+        in-context and can chain dependent calls. The loop ends when the model
+        emits no tool calls (it's done) or ``cap`` iterations are reached.
+
+        Returns ``(messages, figures)``: the full trajectory (seed + all turns) for
+        a terminal :meth:`_call_over_messages`, and the figures produced by tools.
+        ``on_result(call, outcome)`` is an optional async hook (monitor/memory).
+        """
+        messages: list = list(seed_messages)
+        figures: list[FigureRef] = []
+        for iteration in range(max(1, cap)):
+            response = await self.model.call(
+                messages,
+                tools=tools.tool_definitions(),
+                tool_choice="auto",
+                images=images if iteration == 0 else (),
+                cache_prefix=True,
+            )
+            self.last_response = response
+            if not response.tool_calls:
+                break
+            messages.append(
+                AssistantToolUse(content=response.content, tool_calls=response.tool_calls)
+            )
+            result_parts: list[ToolResultPart] = []
+            for call in response.tool_calls:
+                outcome = await tools.execute(call.name, dict(call.arguments))
+                result_parts.append(
+                    ToolResultPart(
+                        tool_call_id=call.id,
+                        name=call.name,
+                        content=outcome.text,
+                        is_error=outcome.is_error,
+                    )
+                )
+                figures.extend(outcome.figures)
+                if on_result is not None:
+                    await on_result(call, outcome)
+            messages.append(ToolResultMessage(results=result_parts))
+            await self._record(
+                f"{self.role}.{action}.tools",
+                level=7,
+                summary=f"{self.role} ran {len(result_parts)} tool(s) (iteration {iteration + 1})",
+                data={
+                    "iteration": iteration + 1,
+                    "cap": cap,
+                    "calls": [
+                        {"name": p.name, "is_error": p.is_error, "chars": len(p.content)}
+                        for p in result_parts
+                    ],
+                },
+            )
+        return messages, figures
+
     async def _record(
         self,
         event: str,
@@ -226,12 +369,26 @@ class ReviewerAgent(AgentRole):
             "analysis_report": report.model_dump(mode="json") if report else None,
         }
         docs = [document_from_file(p) for p in literature if p.exists()]
-        return await self._call(
-            payload,
-            ReviewVerdict,
-            images=report.figures if report else (),
-            documents=docs,
-            action="review",
+        images = report.figures if report else ()
+
+        if self.tools is None:
+            return await self._call(
+                payload, ReviewVerdict, images=images, documents=docs, action="review"
+            )
+
+        # Investigate run artifacts / the knowledge base via read-only tools (seeing
+        # the analysis figures from the first turn), then issue the verdict grounded
+        # in that investigation plus the source papers.
+        seed = [
+            ModelMessage(role="system", content=self.prompt),
+            ModelMessage(role="user", content=_payload_text(payload)),
+        ]
+        messages, _ = await self._react(
+            seed_messages=seed, tools=self.tools, action="review",
+            cap=_react_loop_cap(), images=images,
+        )
+        return await self._call_over_messages(
+            messages, ReviewVerdict, action="review", images=images, documents=docs,
         )
 
     async def compose_machine_report(
@@ -384,6 +541,42 @@ class LibrarianIOAgent(AgentRole):
             "follow_up": follow_up,
         }
         return await self._call(payload, SearchRequest, action="compose_search_strategy")
+
+    async def gather_literature(
+        self,
+        request: ResearchRequest,
+        *,
+        follow_up: str | None = None,
+    ) -> list[SearchResult]:
+        """ReAct over literature sources: search, read results, refine, repeat.
+
+        Runs an inner loop over a :class:`SourceToolProvider` (arxiv/ADS/web +
+        local text_search), letting the model iteratively refine its queries until
+        it has a focused set, then returns the de-duplicated accumulated results.
+        Falls back to the single-shot compose→search path when no sources are
+        configured.
+        """
+        if not self.sources:
+            return await self.search(await self.compose_search_strategy(request, follow_up=follow_up))
+
+        provider = SourceToolProvider(self.sources)
+        payload = {
+            "research_request": request.model_dump(mode="json"),
+            "follow_up": follow_up,
+            "instruction": (
+                "Search the literature sources for papers relevant to this request. "
+                "Read each batch of results, refine your query, and search again as "
+                "needed across sources. Stop when you have a focused, relevant set."
+            ),
+        }
+        seed = [
+            ModelMessage(role="system", content=self.prompt),
+            ModelMessage(role="user", content=_payload_text(payload)),
+        ]
+        await self._react(
+            seed_messages=seed, tools=provider, action="gather_literature", cap=_react_loop_cap(),
+        )
+        return _dedup_results(provider.results)
 
     async def search(self, request: SearchRequest) -> list[SearchResult]:
         """Query external sources and return raw results.
@@ -550,17 +743,18 @@ class LibrarianIOAgent(AgentRole):
 
 
 class AnalystWorkerAgent(AgentRole):
-    """Analyst worker role: produce one analysis report.
+    """Analyst worker role: investigate with tools, then produce one report.
 
-    When a ``PersistentSandbox`` is attached (via ``sandbox``) and a
-    ``memory_path`` is given, this worker:
-    - Reads ``memory_path`` at the start of every ``analyze()`` call and injects
-      the contents into the payload (private, full history).
-    - Exposes ``execute_tools()`` which calls ``request_tools()``, runs each
-      request through the sandbox, appends results to ``memory_path``, and
-      returns the list of ``ToolResult`` objects.
-    - Exposes ``is_alive`` which is ``False`` if the sandbox subprocess has died;
-      once dead the worker stops calling tools for the session.
+    Each ``analyze()`` runs an inner ReAct loop (:meth:`AgentRole._react`) over a
+    ``SandboxToolProvider`` — calling toolkit/MCP tools in the attached
+    ``PersistentSandbox``, seeing each result in-context, and chaining dependent
+    calls (load → fit → run → plot) to completion — then emits an ``AnalystReport``
+    grounded in those results (:meth:`AgentRole._call_over_messages`). The live
+    conversation is the within-call working memory; ``memory_path`` is the durable
+    cross-round/cross-worker store (prior results are read in and new results
+    appended). ``last_tool_results`` exposes the loop's results for the consensus
+    peer summary. With no sandbox/registry (e.g. Studio), it falls back to a plain
+    tool-less structured call.
     """
 
     role = "analyst_worker"
@@ -570,6 +764,7 @@ class AnalystWorkerAgent(AgentRole):
         *,
         available_toolkits: Sequence[str] = ("research_toolkit.xspec_utils",),
         sandbox: Any | None = None,  # PersistentSandbox | None — avoid circular import
+        registry: Any | None = None,  # ToolkitRegistry | None
         memory_path: Path | None = None,
         worker_index: int = 0,
         model: CallableModel | None = None,
@@ -587,8 +782,10 @@ class AnalystWorkerAgent(AgentRole):
         )
         self.available_toolkits = tuple(available_toolkits)
         self.sandbox = sandbox
+        self.registry = registry
         self.memory_path = memory_path
         self.worker_index = worker_index
+        self.last_tool_results: list[ToolResult] = []
 
     @property
     def is_alive(self) -> bool:
@@ -598,11 +795,14 @@ class AnalystWorkerAgent(AgentRole):
         return bool(self.sandbox.is_alive)
 
     async def analyze(self, task: AnalysisTask, *, peer_reports: Sequence[AnalystReport] = ()) -> AnalystReport:
-        """Analyze a task, optionally with peer reports from a debate round.
+        """Investigate the task with tools (ReAct), then produce an AnalystReport.
 
-        Injects private ``memory`` from ``memory_path`` into the payload so the
-        worker can reason from its own tool-call history.
+        Reads private ``memory`` (durable prior results) into the seed; runs the
+        ReAct loop to gather evidence; then composes the report over the gathered
+        trajectory, with the loop's real figures attached. Falls back to a plain
+        structured call when no sandbox+registry is attached.
         """
+        self.last_tool_results = []
         memory = read_memory(self.memory_path) if self.memory_path else ""
         payload = {
             "task": task.model_dump(mode="json"),
@@ -610,195 +810,37 @@ class AnalystWorkerAgent(AgentRole):
             "available_toolkits": list(self.available_toolkits),
             "memory": memory or None,
         }
-        figures = [figure for report in peer_reports for figure in report.figures]
-        return await self._call(
-            payload,
-            AnalystReport,
-            images=figures,
-            action="analyze",
-        )
+        peer_figures = [figure for report in peer_reports for figure in report.figures]
 
-    async def request_tools(
-        self, task: AnalysisTask, registry: Any
-    ) -> list[ToolCallRequest]:
-        """Elicit tool calls via provider-native function calling.
+        # No tool surface (e.g. Studio): plain tool-less structured report.
+        if self.sandbox is None or self.registry is None:
+            return await self._call(payload, AnalystReport, images=peer_figures, action="analyze")
 
-        Every toolkit/MCP tool is offered to the model as a function constrained
-        by its own ``args_schema`` (``registry.tool_definitions()``). The model's
-        native tool calls are mapped back to ``ToolCallRequest`` objects whose
-        ``arguments`` are real, per-tool-schema-validated values — never a
-        hand-serialized JSON string. An empty result means "no tools needed".
-        """
-        payload = {
-            "task": task.model_dump(mode="json"),
-            "available_toolkits": list(self.available_toolkits),
-            "execution_policy": "Call the tools you need; do not claim a tool has run.",
-        }
-        await self._record(
-            "analyst_worker.request_tools.input",
-            level=10,
-            summary=f"{self.role} received request_tools input",
-            data={"payload": payload},
-        )
-        try:
-            response = await self.model.call(
-                [
-                    ModelMessage(role="system", content=self.prompt),
-                    ModelMessage(role="user", content=_payload_text(payload)),
-                ],
-                tools=registry.tool_definitions(),
-                tool_choice="auto",
-            )
-            self.last_response = response
-            requests = [
-                ToolCallRequest(
-                    requested_by=self.role,
-                    kind=registry.kind_for_function(call.name),
-                    arguments=dict(call.arguments),
-                )
-                for call in response.tool_calls
-            ]
-        except Exception as exc:
-            await self._record(
-                "analyst_worker.request_tools.error",
-                level=2,
-                summary=f"{self.role} failed during request_tools",
-                data={"error": repr(exc)},
-            )
-            raise
-        await self._record(
-            "analyst_worker.request_tools.output",
-            level=10,
-            summary=f"{self.role} requested {len(requests)} tool call(s)",
-            data={
-                "output": [r.model_dump(mode="json") for r in requests],
-                "usage": response.usage,
-            },
-        )
-        return requests
-
-    async def execute_tools(
-        self,
-        task: AnalysisTask,
-        registry: Any,  # ToolkitRegistry — avoid circular import
-        *,
-        tool_retry_cap: int = 3,
-    ) -> list[ToolResult]:
-        """Request tools from self then execute them through the persistent sandbox.
-
-        Results are appended to ``memory_path`` as a bare terminal recording.
-        Returns an empty list when the sandbox is dead or not configured.
-        """
-        if self.sandbox is None:
-            return []
         if not self.sandbox.is_alive:
             await self.sandbox.start()
 
-        requests: list[ToolCallRequest] = await self.request_tools(task, registry)
-        if not requests:
-            return []
-
-        await self._record(
-            "analyst_worker.tools.request",
-            level=7,
-            summary=f"Worker {self.worker_index + 1} requested {len(requests)} tool(s)",
-            data={"requests": [r.model_dump(mode="json") for r in requests]},
+        cwd = self.memory_path.parent if self.memory_path is not None else None
+        provider = SandboxToolProvider(self.registry, self.sandbox, cwd=cwd)
+        seed = [
+            ModelMessage(role="system", content=self.prompt),
+            ModelMessage(role="user", content=_payload_text(payload)),
+        ]
+        messages, react_figures = await self._react(
+            seed_messages=seed,
+            tools=provider,
+            action="analyze",
+            cap=_react_loop_cap(),
+            images=peer_figures,
         )
+        self.last_tool_results = provider.results
+        if self.memory_path and provider.results:
+            _append_tool_results_to_memory(self.memory_path, provider.results)
 
-        from auto_research.schemas.figures import FigureRef  # local to avoid circularity
-
-        results: list[ToolResult] = []
-        for req in requests:
-            # Routing and argument resolution are recomputed every attempt from
-            # `current_req`, because the self-correction retry may return a request
-            # with a different kind that must route differently.
-            current_req = req
-            for attempt in range(tool_retry_cap):
-                kind = current_req.kind
-                # Merge the dedicated `command` field into the args so shell tools
-                # (e.g. mcp.builtin.bash_exec) receive it; the model puts shell
-                # commands there rather than in `arguments`.
-                args = dict(current_req.arguments)
-                if current_req.command and "command" not in args:
-                    args["command"] = current_req.command
-                # Auto-inject the analyst's working directory into bash_exec so
-                # files written by `python -c "..."` land in the worker's folder
-                # rather than the MCP server's launch cwd.
-                if (
-                    kind == "mcp.builtin.bash_exec"
-                    and "cwd" not in args
-                    and self.memory_path is not None
-                ):
-                    args["cwd"] = str(self.memory_path.parent)
-
-                t0 = time.monotonic()
-                if not registry.is_known(kind):
-                    raw = {
-                        "exit_code": 127,
-                        "stderr": f"Tool not registered in ToolkitRegistry: {kind}",
-                        "stdout": "",
-                    }
-                elif registry.is_mcp(kind):
-                    raw = await self.sandbox.call_mcp_tool(
-                        kind, args, timeout_s=current_req.timeout_s
-                    )
-                else:
-                    spec = registry.spec(kind)
-                    # Auto-fill instrument data paths (ixpe_path/nicer_path/…) from
-                    # observations.yaml when the tool declares them and the model
-                    # omitted them, so a path is always supplied from config.
-                    schema_props = (spec.get("args_schema") or {}).get("properties", {})
-                    for arg_name, path in _observation_path_args().items():
-                        if arg_name in schema_props and not args.get(arg_name):
-                            args[arg_name] = path
-                    raw = await self.sandbox.call_tool(
-                        spec["module"], spec["fn"], args, timeout_s=current_req.timeout_s
-                    )
-                elapsed = time.monotonic() - t0
-
-                raw = _normalize_tool_raw(raw)
-                figures = [FigureRef.model_validate(f) for f in raw.get("figures", [])]
-                r = ToolResult(
-                    tool_name=kind,
-                    stdout=raw.get("stdout", ""),
-                    stderr=raw.get("stderr", ""),
-                    exit_code=raw.get("exit_code", 1),
-                    figures=figures,
-                    elapsed_s=elapsed,
-                )
-                results.append(r)
-
-                await self._record(
-                    "analyst_worker.tools.result",
-                    level=7,
-                    summary=f"Worker {self.worker_index + 1}: {kind} exit={r.exit_code} ({elapsed:.1f}s)",
-                    data={"result": r.model_dump(mode="json"), "attempt": attempt + 1},
-                )
-
-                if r.exit_code == 0:
-                    break
-
-                # LLM self-correction retry: feed the failure back and let the
-                # model re-issue a native tool call with corrected arguments.
-                if attempt < tool_retry_cap - 1 and self.is_alive:
-                    error_detail = r.stderr or r.stdout or "(no error detail)"
-                    error_task = AnalysisTask(
-                        question=task.question,
-                        instructions=(
-                            f"Tool {kind} failed (attempt {attempt + 1}/{tool_retry_cap}).\n"
-                            f"Error: {error_detail}\n"
-                            "Re-issue the tool call with corrected arguments."
-                        ),
-                    )
-                    revised = await self.request_tools(error_task, registry)
-                    if revised:
-                        current_req = revised[0]
-
-        # Append bare terminal recording to memory
-        if self.memory_path and results:
-            _append_tool_results_to_memory(self.memory_path, results)
-
-        return results
+        report = await self._call_over_messages(messages, AnalystReport, action="analyze")
+        # The model can't reliably reproduce FigureRefs; attach the loop's real ones.
+        if react_figures:
+            report = report.model_copy(update={"figures": _dedup_figures(react_figures)})
+        return report
 
 
 class AnalystLeadAgent(AgentRole):
@@ -826,7 +868,12 @@ class AnalystLeadAgent(AgentRole):
         self.available_toolkits = tuple(available_toolkits)
 
     async def adjudicate(self, task: AnalysisTask, reports: Sequence[AnalystReport]) -> AnalystReport:
-        """Synthesize a final analysis report from worker reports."""
+        """Synthesize a final analysis report from worker reports.
+
+        When a read-only ToolProvider is attached, the lead may first inspect the
+        run artifacts / knowledge base (seeing the workers' figures) before
+        synthesizing; otherwise it makes a plain structured call.
+        """
 
         payload = {
             "task": task.model_dump(mode="json"),
@@ -834,11 +881,19 @@ class AnalystLeadAgent(AgentRole):
             "available_toolkits": list(self.available_toolkits),
         }
         figures = [figure for report in reports for figure in report.figures]
-        return await self._call(
-            payload,
-            AnalystReport,
-            images=figures,
-            action="adjudicate",
+        if self.tools is None:
+            return await self._call(payload, AnalystReport, images=figures, action="adjudicate")
+
+        seed = [
+            ModelMessage(role="system", content=self.prompt),
+            ModelMessage(role="user", content=_payload_text(payload)),
+        ]
+        messages, _ = await self._react(
+            seed_messages=seed, tools=self.tools, action="adjudicate",
+            cap=_react_loop_cap(), images=figures,
+        )
+        return await self._call_over_messages(
+            messages, AnalystReport, action="adjudicate", images=figures,
         )
 
     async def judge_convergence(
@@ -876,19 +931,51 @@ def _select_model(group: ModelGroupHandle, model_name: str | None) -> ModelHandl
     return group.handles[0]
 
 
-@lru_cache(maxsize=1)
-def _observation_path_args() -> dict[str, str]:
-    """Map tool path-args to configured observation roots, e.g. ``ixpe_path`` →
-    the IXPE ``obs_db_path`` from ``config/observations.yaml``.
+def _dedup_figures(figures: Sequence[FigureRef]) -> list[FigureRef]:
+    """Deduplicate figures by path, preserving first-seen order."""
+    seen: set[str] = set()
+    out: list[FigureRef] = []
+    for figure in figures:
+        key = str(figure.path)
+        if key not in seen:
+            seen.add(key)
+            out.append(figure)
+    return out
 
-    Convention: mission ``<m>`` in observations.yaml fills a tool argument named
-    ``<m>_path``.  Used to auto-supply instrument data paths so the model need not.
+
+def _dedup_results(results: Sequence[SearchResult]) -> list[SearchResult]:
+    """Deduplicate search results by URL (falling back to title), first-seen order."""
+    seen: set[str] = set()
+    out: list[SearchResult] = []
+    for result in results:
+        key = str(result.url or result.title)
+        if key not in seen:
+            seen.add(key)
+            out.append(result)
+    return out
+
+
+@lru_cache(maxsize=1)
+def _react_loop_cap() -> int:
+    """Max tool iterations per agent ReAct loop (orchestration.yaml).
+
+    Key: ``react_loop_cap``. Defaults to 12. The inner-loop backstop — distinct
+    from ``debate_max_rounds`` (outer debate) and ``structured_retry_cap``.
     """
+    return int(_orchestration_config().get("react_loop_cap", 12))
+
+
+@lru_cache(maxsize=1)
+def _orchestration_config() -> dict:
+    """Load and cache ``config/orchestration.yaml`` (best-effort)."""
+    import yaml
+
+    config_path = Path(__file__).resolve().parents[3] / "config" / "orchestration.yaml"
     try:
-        cfg = load_observations_config()
-    except Exception:  # noqa: BLE001
+        with config_path.open("r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except FileNotFoundError:
         return {}
-    return {f"{mission}_path": str(c.obs_db_path) for mission, c in cfg.missions.items()}
 
 
 @lru_cache(maxsize=1)
@@ -899,15 +986,7 @@ def _structured_retry_cap() -> int:
     the tool-call loop — a small bound so a transient off-schema result doesn't
     end a run, while cap exhaustion still fails loudly.
     """
-    import yaml
-
-    config_path = Path(__file__).resolve().parents[3] / "config" / "orchestration.yaml"
-    try:
-        with config_path.open("r", encoding="utf-8") as f:
-            config = yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        config = {}
-    return int(config.get("structured_retry_cap", 2))
+    return int(_orchestration_config().get("structured_retry_cap", 2))
 
 
 def _payload_text(payload: Mapping[str, Any]) -> str:
@@ -937,38 +1016,9 @@ def _default_sources() -> dict[str, QuerySource]:
 
 
 # Keys that belong to the transport protocol — not serialized as tool payload.
-_PROTOCOL_KEYS: frozenset[str] = frozenset(
-    {"stdout", "stderr", "exit_code", "figures", "console_tail"}
-)
-
 # Per-field character caps written to memory.md (crash-prevention).
 _STDOUT_MEM_CAP = 8_000
 _STDERR_MEM_CAP = 2_000
-
-
-def _normalize_tool_raw(raw: dict) -> dict:
-    """Ensure every tool result has a non-empty ``stdout`` for the model to read.
-
-    Tools that return structured payloads without a ``stdout`` key (e.g.
-    ``list_dir`` → ``{path, entries}``, ``load_data`` → nested indices dict)
-    are invisible to the model otherwise.  When ``stdout`` is absent or empty,
-    serialize the non-protocol payload keys as compact JSON.
-
-    Also folds any captured ``console_tail`` (XSPEC/C-level prints) into
-    ``stdout`` so the model sees count-rate and fit-convergence logs.
-    """
-    stdout = raw.get("stdout") or ""
-    if not stdout:
-        extra = {k: v for k, v in raw.items() if k not in _PROTOCOL_KEYS}
-        if extra:
-            stdout = json.dumps(extra, indent=2, default=str)
-
-    console = raw.get("console_tail") or ""
-    if console:
-        sep = "\n--- console ---\n"
-        stdout = (stdout + sep + console) if stdout else (sep.lstrip() + console)
-
-    return {**raw, "stdout": stdout}
 
 
 def _append_tool_results_to_memory(path: Path, results: Sequence[ToolResult]) -> None:

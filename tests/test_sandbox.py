@@ -251,220 +251,135 @@ class _FakeRegistry:
     def is_mcp(self, k): return k in self._mcp
     def spec(self, k): return {"module": "mod", "fn": "fn", "args_schema": self._schema}
     def tool_catalogue(self): return "(catalogue)"
+    def kind_for_function(self, name): return name
+    def tool_definitions(self):
+        return [{"name": k, "description": "d", "input_schema": {"type": "object"}} for k in self._known]
 
 
-def _worker(sandbox):
-    from auto_research.agents.roles import AnalystWorkerAgent
-    w = AnalystWorkerAgent(model=object(), available_toolkits=[])
-    w.sandbox = sandbox
-    w.memory_path = None
-    return w
+class TestSandboxToolProvider:
+    """SandboxToolProvider.execute() routing + argument resolution (no LLM)."""
 
-
-def _script_requests(worker, batches: list[list[ToolCallRequest]]) -> None:
-    """Make worker.request_tools() yield successive batches, then []."""
-    state = {"i": 0}
-
-    async def rt(task, registry=None):
-        i = state["i"]
-        state["i"] += 1
-        return list(batches[i]) if i < len(batches) else []
-
-    worker.request_tools = rt
-
-
-class TestExecuteToolsDispatch:
-    """Routing/retry behavior of AnalystWorkerAgent.execute_tools()."""
-
-    def test_command_field_forwarded(self, tmp_path: Path) -> None:
-        """The ToolCallRequest.command field is merged into args for shell tools."""
-        def mcp_fn(kind, args):
-            ok = "command" in args
-            return {"exit_code": 0 if ok else 1,
-                    "stdout": args.get("command", ""),
-                    "stderr": "" if ok else "command Field required"}
-
-        sb = _FakeSandbox(mcp_fn=mcp_fn)
-        w = _worker(sb)
-        reqs = [ToolCallRequest(requested_by="w", kind="mcp.builtin.bash_exec",
-                                purpose="p", command="echo hi", arguments={})]
-        _script_requests(w, [reqs])
-        reg = _FakeRegistry(known={"mcp.builtin.bash_exec"}, mcp={"mcp.builtin.bash_exec"})
-
-        results = asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=3))
-        assert sb.mcp_calls[0][1] == {"command": "echo hi"}
-        assert results[-1].exit_code == 0
-
-    def test_retry_reroutes_on_kind_change(self, tmp_path: Path) -> None:
-        """A retry returning a different kind is routed (and labelled) by that kind."""
-        sb = _FakeSandbox(
-            mcp_fn=lambda k, a: {"exit_code": 1, "stdout": "", "stderr": "fail"},
-            tool_fn=lambda m, f, a: {"exit_code": 0, "stdout": "loaded", "stderr": ""},
-        )
-        w = _worker(sb)
-        first = [ToolCallRequest(requested_by="w", kind="mcp.builtin.bash_exec",
-                                 purpose="p", arguments={})]
-        revised = [ToolCallRequest(requested_by="w", kind="tk.load_data",
-                                   purpose="p", arguments={"x": "1"})]
-        _script_requests(w, [first, revised])
-        reg = _FakeRegistry(known={"mcp.builtin.bash_exec", "tk.load_data"},
-                            mcp={"mcp.builtin.bash_exec"})
-
-        results = asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=3))
-        # The retried toolkit kind went to call_tool, never to the MCP transport.
-        assert len(sb.tool_calls) == 1
-        assert all(kind != "tk.load_data" for kind, _ in sb.mcp_calls)
-        assert any(r.tool_name == "tk.load_data" and r.exit_code == 0 for r in results)
-
-    def test_unknown_tool_returns_127(self, tmp_path: Path) -> None:
-        """An unknown kind yields exit_code 127 and is never dispatched to the sandbox."""
+    def test_unknown_tool_returns_127(self) -> None:
+        from auto_research.agents.react import SandboxToolProvider
         sb = _FakeSandbox()
-        w = _worker(sb)
-        reqs = [ToolCallRequest(requested_by="w", kind="nope_tool", purpose="p")]
-        _script_requests(w, [reqs])
-        reg = _FakeRegistry(known=set(), mcp=set())
-
-        results = asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=1))
-        assert len(results) == 1
-        assert results[0].exit_code == 127
-        assert "nope_tool" in results[0].tool_name
+        prov = SandboxToolProvider(_FakeRegistry(known=set(), mcp=set()), sb)
+        out = asyncio.run(prov.execute("nope_tool", {}))
+        assert out.is_error and out.result.exit_code == 127
         assert sb.mcp_calls == [] and sb.tool_calls == []
 
-    def test_retry_cap_stops_loop(self, tmp_path: Path) -> None:
-        """A persistently failing tool is attempted exactly tool_retry_cap times."""
-        sb = _FakeSandbox(mcp_fn=lambda k, a: {"exit_code": 1, "stdout": "", "stderr": "fail"})
-        w = _worker(sb)
-        failing = [ToolCallRequest(requested_by="w", kind="mcp.builtin.bash_exec",
-                                   purpose="p", command="x")]
-
-        # Worker re-requests the same failing tool on every retry.
-        async def rt(task, registry=None):
-            return list(failing)
-
-        w.request_tools = rt
+    def test_bash_exec_cwd_injected(self, tmp_path: Path) -> None:
+        from auto_research.agents.react import SandboxToolProvider
+        sb = _FakeSandbox(mcp_fn=lambda k, a: {"exit_code": 0, "stdout": a.get("command", ""), "stderr": ""})
         reg = _FakeRegistry(known={"mcp.builtin.bash_exec"}, mcp={"mcp.builtin.bash_exec"})
+        prov = SandboxToolProvider(reg, sb, cwd=tmp_path)
+        out = asyncio.run(prov.execute("mcp.builtin.bash_exec", {"command": "echo hi"}))
+        assert sb.mcp_calls[0][1] == {"command": "echo hi", "cwd": str(tmp_path)}
+        assert not out.is_error and "echo hi" in out.text
 
-        cap = 2
-        results = asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=cap))
-        assert len(sb.mcp_calls) == cap
-        assert all(r.exit_code == 1 for r in results)
+    def test_error_outcome_surfaces_stderr(self) -> None:
+        from auto_research.agents.react import SandboxToolProvider
+        sb = _FakeSandbox(mcp_fn=lambda k, a: {"exit_code": 1, "stdout": "", "stderr": "boom"})
+        reg = _FakeRegistry(known={"mcp.builtin.bash_exec"}, mcp={"mcp.builtin.bash_exec"})
+        prov = SandboxToolProvider(reg, sb)
+        out = asyncio.run(prov.execute("mcp.builtin.bash_exec", {"command": "x"}))
+        assert out.is_error and "boom" in out.text
+        assert prov.results[-1].exit_code == 1
 
-    def test_instrument_paths_autofilled_from_config(self, tmp_path: Path, monkeypatch) -> None:
-        """ixpe_path declared by the tool but omitted by the model is filled from config."""
-        import auto_research.agents.roles as roles
-        monkeypatch.setattr(roles, "_observation_path_args",
+    def test_instrument_paths_autofilled_from_config(self, monkeypatch) -> None:
+        import auto_research.agents.react as react
+        from auto_research.agents.react import SandboxToolProvider
+        monkeypatch.setattr(react, "_observation_path_args",
                             lambda: {"ixpe_path": "/cfg/IXPE", "nustar_path": "/cfg/NuSTAR"})
-
         sb = _FakeSandbox()
-        w = _worker(sb)
-        reqs = [ToolCallRequest(requested_by="w", kind="tk.load_data",
-                                purpose="p", arguments={"epoch": "{}"})]  # no ixpe_path
-        _script_requests(w, [reqs])
-        # tool declares ixpe_path (and not nustar_path) in its schema
-        schema = {"properties": {"epoch": {}, "ixpe_path": {}}}
-        reg = _FakeRegistry(known={"tk.load_data"}, mcp=set(), schema=schema)
-
-        asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=1))
+        reg = _FakeRegistry(known={"tk.load_data"}, mcp=set(),
+                            schema={"properties": {"epoch": {}, "ixpe_path": {}}})
+        prov = SandboxToolProvider(reg, sb)
+        asyncio.run(prov.execute("tk.load_data", {"epoch": "{}"}))
         _, _, args = sb.tool_calls[0]
         assert args["ixpe_path"] == "/cfg/IXPE"   # injected from config
         assert "nustar_path" not in args           # not declared by tool → not injected
 
-    def test_model_supplied_path_not_overridden(self, tmp_path: Path, monkeypatch) -> None:
-        """A path the model explicitly supplies is respected (config only fills gaps)."""
-        import auto_research.agents.roles as roles
-        monkeypatch.setattr(roles, "_observation_path_args",
-                            lambda: {"ixpe_path": "/cfg/IXPE"})
-
+    def test_model_supplied_path_not_overridden(self, monkeypatch) -> None:
+        import auto_research.agents.react as react
+        from auto_research.agents.react import SandboxToolProvider
+        monkeypatch.setattr(react, "_observation_path_args", lambda: {"ixpe_path": "/cfg/IXPE"})
         sb = _FakeSandbox()
-        w = _worker(sb)
-        reqs = [ToolCallRequest(requested_by="w", kind="tk.load_data",
-                                purpose="p", arguments={"ixpe_path": "/custom/IXPE"})]
-        _script_requests(w, [reqs])
         reg = _FakeRegistry(known={"tk.load_data"}, mcp=set(),
                             schema={"properties": {"ixpe_path": {}}})
-
-        asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=1))
+        prov = SandboxToolProvider(reg, sb)
+        asyncio.run(prov.execute("tk.load_data", {"ixpe_path": "/custom/IXPE"}))
         _, _, args = sb.tool_calls[0]
         assert args["ixpe_path"] == "/custom/IXPE"
 
-    def test_dead_sandbox_is_started_before_tool_execution(self, tmp_path: Path) -> None:
-        """A rebootable dead sandbox is restarted instead of making tools a no-op."""
-        sb = _RestartableFakeSandbox()
-        w = _worker(sb)
-        reqs = [ToolCallRequest(requested_by="w", kind="tk.echo",
-                                purpose="p", arguments={"x": "1"})]
-        _script_requests(w, [reqs])
-        reg = _FakeRegistry(known={"tk.echo"}, mcp=set())
 
-        results = asyncio.run(w.execute_tools(AnalysisTask(question="q"), reg, tool_retry_cap=1))
+def _script_model():
+    """A model that emits one tool call, then stops, then returns a report."""
+    from auto_research.models.types import ModelResponse, ToolCall
 
-        assert sb.starts == 1
-        assert len(sb.tool_calls) == 1
-        assert results[0].exit_code == 0
+    class _ScriptModel:
+        def __init__(self):
+            self.tool_iterations = 0
+
+        async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
+                       images=(), documents=(), cache_prefix=False):
+            if schema is not None:  # terminal structured report
+                return ModelResponse(parsed={
+                    "summary": "did the fit", "findings": ["chi2/dof=1.0"],
+                    "figures": [], "uncertainty": None,
+                })
+            self.tool_iterations += 1
+            if self.tool_iterations == 1:
+                return ModelResponse(content="loading",
+                                     tool_calls=[ToolCall(id="c1", name="tk_load", arguments={})])
+            return ModelResponse(tool_calls=[])  # no more calls → loop ends
+
+    return _ScriptModel()
 
 
-class TestRequestToolsFunctionCalling:
-    """request_tools() maps native tool calls to ToolCallRequest with real args."""
+class TestWorkerReactLoop:
+    """AnalystWorkerAgent.analyze() runs the inner ReAct loop, then reports."""
 
-    def test_nested_arguments_preserved_as_object(self) -> None:
-        """The regression that motivated the refactor: indices is a real nested
-        dict, never a hand-serialized (and truncatable) JSON string."""
+    def test_loop_runs_tools_then_grounds_report(self) -> None:
+        from datetime import UTC, datetime
+
         from auto_research.agents.roles import AnalystWorkerAgent
-        from auto_research.models.types import ModelResponse, ToolCall
+        fig = {
+            "path": "/tmp/fit.png", "caption": "fit", "mime_type": "image/png",
+            "produced_by": "tk_load", "created_at": datetime.now(UTC).isoformat(), "sha256": "a" * 64,
+        }
+        # Tool returns a figure → exercises figure propagation onto the report.
+        sb = _FakeSandbox(tool_fn=lambda m, f, a: {"exit_code": 0, "stdout": "loaded indices", "figures": [fig]})
+        reg = _FakeRegistry(known={"tk_load"}, mcp=set())
+        w = AnalystWorkerAgent(model=_script_model(), available_toolkits=[], sandbox=sb, registry=reg)
+        report = asyncio.run(w.analyze(AnalysisTask(question="q")))
+        assert sb.tool_calls  # a tool actually ran inside the loop
+        assert report.summary == "did the fit"
+        assert [str(f.path) for f in report.figures] == ["/tmp/fit.png"]  # real figure attached
+        assert w.last_tool_results and w.last_tool_results[0].exit_code == 0
 
-        nested = {"IXPE": {"02008401": {"DU1": [1, 2, 3]}}, "NICER": {"6643010101": {"mpu7": [10]}}}
+    def test_starts_dead_sandbox(self) -> None:
+        from auto_research.agents.roles import AnalystWorkerAgent
+        sb = _RestartableFakeSandbox()
+        reg = _FakeRegistry(known={"tk_load"}, mcp=set())
+        w = AnalystWorkerAgent(model=_script_model(), available_toolkits=[], sandbox=sb, registry=reg)
+        asyncio.run(w.analyze(AnalysisTask(question="q")))
+        assert sb.starts == 1
 
-        class _FCModel:
-            async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
-                           images=(), documents=()):
-                assert schema is None and tools is not None  # function-calling path
-                assert tool_choice == "auto"
-                return ModelResponse(
-                    tool_calls=[
-                        ToolCall(
-                            name="research_toolkit_xspec_utils_plot_fit",
-                            arguments={"indices": nested, "xlim": [1, 79]},
-                        )
-                    ]
-                )
-
-        class _Reg:
-            def tool_definitions(self):
-                return [{"name": "research_toolkit_xspec_utils_plot_fit",
-                         "description": "d", "input_schema": {"type": "object"}}]
-
-            def kind_for_function(self, name):
-                return name.replace("research_toolkit_xspec_utils_", "research_toolkit.xspec_utils.")
-
-        w = AnalystWorkerAgent(model=_FCModel(), available_toolkits=[])
-        reqs = asyncio.run(w.request_tools(AnalysisTask(question="q"), _Reg()))
-
-        assert len(reqs) == 1
-        assert reqs[0].kind == "research_toolkit.xspec_utils.plot_fit"
-        # Arguments are real typed values, not strings.
-        assert reqs[0].arguments["indices"] == nested
-        assert isinstance(reqs[0].arguments["indices"], dict)
-        assert reqs[0].arguments["xlim"] == [1, 79]
-
-    def test_no_tool_calls_means_done(self) -> None:
+    def test_no_sandbox_falls_back_to_plain_call(self) -> None:
         from auto_research.agents.roles import AnalystWorkerAgent
         from auto_research.models.types import ModelResponse
 
-        class _FCModel:
+        class _PlainModel:
             async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
-                           images=(), documents=()):
-                return ModelResponse(tool_calls=[])
+                           images=(), documents=(), cache_prefix=False):
+                assert tools is None  # no tool loop without a sandbox+registry
+                return ModelResponse(parsed={
+                    "summary": "no tools", "findings": [], "figures": [], "uncertainty": None,
+                })
 
-        class _Reg:
-            def tool_definitions(self):
-                return []
-
-            def kind_for_function(self, name):
-                return name
-
-        w = AnalystWorkerAgent(model=_FCModel(), available_toolkits=[])
-        reqs = asyncio.run(w.request_tools(AnalysisTask(question="q"), _Reg()))
-        assert reqs == []
+        w = AnalystWorkerAgent(model=_PlainModel(), available_toolkits=[])  # no sandbox/registry
+        report = asyncio.run(w.analyze(AnalysisTask(question="q")))
+        assert report.summary == "no tools"
 
 
 # ---------------------------------------------------------------------------
@@ -476,14 +391,14 @@ class TestNormalizeToolRaw:
 
     def test_bash_exec_passthrough(self) -> None:
         """A result that already has stdout is returned unchanged."""
-        from auto_research.agents.roles import _normalize_tool_raw
+        from auto_research.agents.react import _normalize_tool_raw
         raw = {"stdout": "hello", "stderr": "", "exit_code": 0}
         result = _normalize_tool_raw(raw)
         assert result["stdout"] == "hello"
 
     def test_list_dir_entries_serialized(self) -> None:
         """list_dir's {path, entries} payload is serialized into stdout."""
-        from auto_research.agents.roles import _normalize_tool_raw
+        from auto_research.agents.react import _normalize_tool_raw
         raw = {"path": "/foo", "entries": ["a", "b", "c"], "exit_code": 0}
         result = _normalize_tool_raw(raw)
         assert result["stdout"]
@@ -492,7 +407,7 @@ class TestNormalizeToolRaw:
 
     def test_load_data_indices_dict_serialized(self) -> None:
         """load_data's nested indices dict is serialized into stdout as JSON."""
-        from auto_research.agents.roles import _normalize_tool_raw
+        from auto_research.agents.react import _normalize_tool_raw
         indices = {"IXPE": {"02008401": {"DU1": [1, 2, 3]}}, "NICER": {}}
         raw = {**indices, "exit_code": 0}
         result = _normalize_tool_raw(raw)
@@ -500,14 +415,14 @@ class TestNormalizeToolRaw:
 
     def test_none_return_coerced(self) -> None:
         """A tool returning None (fit_tbabs_hss) produces no extra stdout."""
-        from auto_research.agents.roles import _normalize_tool_raw
+        from auto_research.agents.react import _normalize_tool_raw
         raw = {"stdout": "None", "exit_code": 0}
         result = _normalize_tool_raw(raw)
         assert result["stdout"] == "None"
 
     def test_console_tail_folded_into_stdout(self) -> None:
         """console_tail is appended to stdout so model sees XSPEC console prints."""
-        from auto_research.agents.roles import _normalize_tool_raw
+        from auto_research.agents.react import _normalize_tool_raw
         raw = {"stdout": "fit done", "console_tail": "XSPEC: stat=1.23", "exit_code": 0}
         result = _normalize_tool_raw(raw)
         assert "fit done" in result["stdout"]
@@ -515,14 +430,14 @@ class TestNormalizeToolRaw:
 
     def test_console_tail_only(self) -> None:
         """console_tail alone (no stdout) is surfaced without a leading separator."""
-        from auto_research.agents.roles import _normalize_tool_raw
+        from auto_research.agents.react import _normalize_tool_raw
         raw = {"console_tail": "loading spectra", "exit_code": 0}
         result = _normalize_tool_raw(raw)
         assert "loading spectra" in result["stdout"]
 
     def test_protocol_keys_excluded_from_serialization(self) -> None:
         """exit_code/stderr/figures/console_tail are not re-serialized into stdout."""
-        from auto_research.agents.roles import _normalize_tool_raw
+        from auto_research.agents.react import _normalize_tool_raw
         raw = {"exit_code": 0, "stderr": "warn", "figures": [], "console_tail": "log"}
         result = _normalize_tool_raw(raw)
         # Only console_tail → stdout; stderr/figures/exit_code must not appear as JSON keys

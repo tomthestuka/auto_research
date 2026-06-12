@@ -36,8 +36,48 @@ class ToolCall(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    id: str = ""
     name: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolResultPart(BaseModel):
+    """One tool result, correlated to a prior :class:`ToolCall`.
+
+    Anthropic/OpenAI correlate by ``tool_call_id``; Google correlates by tool
+    ``name``, so both are carried (the ReAct loop fills them from the originating
+    ``ToolCall``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_call_id: str = ""
+    name: str = ""
+    content: str = ""
+    is_error: bool = False
+
+
+class AssistantToolUse(BaseModel):
+    """An assistant conversation turn carrying native tool calls (for ReAct replay)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["assistant"] = "assistant"
+    content: str = ""
+    tool_calls: list[ToolCall] = Field(default_factory=list)
+
+
+class ToolResultMessage(BaseModel):
+    """A tool-result conversation turn fed back to the model (for ReAct replay)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["tool"] = "tool"
+    results: list[ToolResultPart] = Field(default_factory=list)
+
+
+# Any turn that may appear in a ReAct conversation passed to ``call(messages=…)``.
+ConversationMessage = ModelMessage | AssistantToolUse | ToolResultMessage
 
 
 class ModelResponse(BaseModel):
@@ -92,7 +132,7 @@ class ModelProvider(Protocol):
 
     async def call(
         self,
-        messages: Sequence[ModelMessage],
+        messages: Sequence[ConversationMessage],
         config: RoleModelConfig,
         *,
         schema: type[BaseModel] | None = None,
@@ -100,6 +140,7 @@ class ModelProvider(Protocol):
         tool_choice: str = "auto",
         images: Sequence[FigureRef] = (),
         documents: Sequence[DocumentRef] = (),
+        cache_prefix: bool = False,
     ) -> ModelResponse:
         """Call a provider model and return normalized output.
 
@@ -107,7 +148,10 @@ class ModelProvider(Protocol):
         native structured output (result in ``ModelResponse.parsed``); ``tools``
         requests native function calling (result in ``ModelResponse.tool_calls``).
         Each tool is a neutral dict ``{"name", "description", "input_schema"}``.
-        ``tool_choice`` is ``"auto"`` or ``"required"``.
+        ``tool_choice`` is ``"auto"`` or ``"required"``. ``messages`` may include
+        ``AssistantToolUse`` / ``ToolResultMessage`` turns for ReAct-loop replay.
+        ``cache_prefix`` asks the adapter to cache the stable prefix (system +
+        tool defs) using its provider-native mechanism.
         """
 
 
@@ -121,24 +165,29 @@ class ModelHandle:
 
     async def call(
         self,
-        messages: Sequence[ModelMessage | Mapping[str, str]],
+        messages: Sequence[ConversationMessage | Mapping[str, str]],
         *,
         schema: type[BaseModel] | None = None,
         tools: Sequence[Mapping[str, Any]] | None = None,
         tool_choice: str = "auto",
         images: Sequence[FigureRef] = (),
         documents: Sequence[DocumentRef] = (),
+        cache_prefix: bool = False,
     ) -> ModelResponse:
         """Call the configured provider for this role.
 
         ``schema`` (structured output) and ``tools`` (function calling) are
-        mutually exclusive.
+        mutually exclusive. ``messages`` may include ``AssistantToolUse`` /
+        ``ToolResultMessage`` turns for ReAct-loop replay; ``cache_prefix``
+        requests provider-native caching of the stable prefix.
         """
 
         if schema is not None and tools is not None:
             raise ValueError("schema and tools are mutually exclusive in one call")
         normalized = [
-            message if isinstance(message, ModelMessage) else ModelMessage.model_validate(message)
+            message
+            if isinstance(message, (ModelMessage, AssistantToolUse, ToolResultMessage))
+            else ModelMessage.model_validate(message)
             for message in messages
         ]
         if images and not self.config.vision:
@@ -162,6 +211,7 @@ class ModelHandle:
                 tool_choice=tool_choice,
                 images=images,
                 documents=documents,
+                cache_prefix=cache_prefix,
             ),
         )
 

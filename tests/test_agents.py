@@ -32,7 +32,7 @@ class FakeModel:
         self.images = None
         self.schema = None
 
-    async def call(self, messages, *, schema=None, tools=None, tool_choice="auto", images=(), documents=()):
+    async def call(self, messages, *, schema=None, tools=None, tool_choice="auto", images=(), documents=(), cache_prefix=False):
         self.messages = messages
         self.images = images
         self.documents = documents
@@ -76,7 +76,7 @@ def test_call_fails_loudly_when_no_structured_output():
 
     class _NullModel:
         async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
-                       images=(), documents=()):
+                       images=(), documents=(), cache_prefix=False):
             return ModelResponse(parsed=None)
 
     agent = ReviewerAgent(model=_NullModel(), prompt="p")
@@ -89,7 +89,7 @@ def test_call_fails_loudly_on_schema_mismatch():
 
     class _BadModel:
         async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
-                       images=(), documents=()):
+                       images=(), documents=(), cache_prefix=False):
             return ModelResponse(parsed={"unexpected": "shape"})
 
     agent = ReviewerAgent(model=_BadModel(), prompt="p")

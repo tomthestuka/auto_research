@@ -6,7 +6,16 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from auto_research.models.types import ModelMessage, ModelResponse, ModelUsage, RoleModelConfig, ToolCall
+from auto_research.models.types import (
+    AssistantToolUse,
+    ConversationMessage,
+    ModelMessage,
+    ModelResponse,
+    ModelUsage,
+    RoleModelConfig,
+    ToolCall,
+    ToolResultMessage,
+)
 from auto_research.schemas import DocumentRef, FigureRef
 
 
@@ -19,15 +28,20 @@ class AnthropicProvider:
     keywords, inlining ``$defs``, forcing ``additionalProperties:false``) and
     constrains the model to emit conforming JSON, then validates it into an
     instance. We return that instance as a plain dict in ``ModelResponse.parsed``
-    for parity with the OpenAI/Google adapters. This replaces the older
-    forced-single-tool workaround, which did not enforce the schema and let the
-    model nest the result one level deep (``{"parameter": {...}}``).
+    for parity with the OpenAI/Google adapters.
+
     A ``tools`` request is native function calling via ``messages.create``.
+    ``messages`` may interleave ``AssistantToolUse`` / ``ToolResultMessage`` turns
+    (translated to native ``tool_use`` / ``tool_result`` content blocks) so a
+    ReAct loop can replay its trajectory. ``cache_prefix`` sets a single
+    ``cache_control: ephemeral`` breakpoint on the stable prefix (the last system
+    block, which also caches the tool defs that render before it; or the last tool
+    when there is no system).
     """
 
     async def call(
         self,
-        messages: Sequence[ModelMessage],
+        messages: Sequence[ConversationMessage],
         config: RoleModelConfig,
         *,
         schema: type[BaseModel] | None = None,
@@ -35,6 +49,7 @@ class AnthropicProvider:
         tool_choice: str = "auto",
         images: Sequence[FigureRef] = (),
         documents: Sequence[DocumentRef] = (),
+        cache_prefix: bool = False,
     ) -> ModelResponse:
         """Call Anthropic and normalize the response."""
 
@@ -45,12 +60,8 @@ class AnthropicProvider:
 
         params = dict(config.parameters)
         max_tokens = params.pop("max_tokens", 1024)
-        system = "\n".join(message.content for message in messages if message.role == "system") or None
-        provider_messages = [
-            {"role": message.role, "content": message.content}
-            for message in messages
-            if message.role != "system"
-        ]
+        system, provider_messages = _to_anthropic_messages(messages)
+
         attachment_content = []
         for document in documents:
             attachment_content.append(
@@ -68,6 +79,7 @@ class AnthropicProvider:
         if attachment_content:
             provider_messages.append({"role": "user", "content": attachment_content})
 
+        system_param = _system_param(system, cache_prefix)
         client = AsyncAnthropic()
 
         if schema is not None:
@@ -76,7 +88,7 @@ class AnthropicProvider:
                 max_tokens=max_tokens,
                 messages=provider_messages,
                 output_format=schema,
-                **({"system": system} if system is not None else {}),
+                **({"system": system_param} if system is not None else {}),
                 **params,
             )
             parsed_obj = response.parsed_output
@@ -101,9 +113,9 @@ class AnthropicProvider:
             **params,
         }
         if system is not None:
-            request["system"] = system
+            request["system"] = system_param
         if tools is not None:
-            request["tools"] = [
+            tool_defs = [
                 {
                     "name": tool["name"],
                     "description": tool.get("description", ""),
@@ -111,6 +123,11 @@ class AnthropicProvider:
                 }
                 for tool in tools
             ]
+            # When there is no system block to carry the breakpoint, cache the tool
+            # defs directly (they render first, so this caches the whole prefix).
+            if cache_prefix and system is None and tool_defs:
+                tool_defs[-1]["cache_control"] = {"type": "ephemeral"}
+            request["tools"] = tool_defs
             request["tool_choice"] = {"type": "any"} if tool_choice == "required" else {"type": "auto"}
 
         response = await client.messages.create(**request)
@@ -122,7 +139,9 @@ class AnthropicProvider:
             if btype == "text":
                 text_parts.append(block.text)
             elif btype == "tool_use":
-                tool_calls.append(ToolCall(name=block.name, arguments=dict(block.input or {})))
+                tool_calls.append(
+                    ToolCall(id=block.id, name=block.name, arguments=dict(block.input or {}))
+                )
 
         usage = getattr(response, "usage", None)
         return ModelResponse(
@@ -134,3 +153,55 @@ class AnthropicProvider:
             ),
             raw=response,
         )
+
+
+def _to_anthropic_messages(
+    messages: Sequence[ConversationMessage],
+) -> tuple[str | None, list[dict]]:
+    """Split system text out and translate the rest into Anthropic message dicts.
+
+    ``AssistantToolUse`` → an assistant message with ``tool_use`` blocks;
+    ``ToolResultMessage`` → a user message with ``tool_result`` blocks; plain
+    ``ModelMessage`` → a text message (system text is joined and returned).
+    """
+    system_texts: list[str] = []
+    provider_messages: list[dict] = []
+    for message in messages:
+        if isinstance(message, AssistantToolUse):
+            blocks: list[dict] = []
+            if message.content:
+                blocks.append({"type": "text", "text": message.content})
+            for call in message.tool_calls:
+                blocks.append(
+                    {"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments}
+                )
+            provider_messages.append({"role": "assistant", "content": blocks})
+        elif isinstance(message, ToolResultMessage):
+            provider_messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": part.tool_call_id,
+                            "content": part.content,
+                            "is_error": part.is_error,
+                        }
+                        for part in message.results
+                    ],
+                }
+            )
+        elif message.role == "system":
+            system_texts.append(message.content)
+        else:
+            provider_messages.append({"role": message.role, "content": message.content})
+    return ("\n".join(system_texts) or None), provider_messages
+
+
+def _system_param(system: str | None, cache_prefix: bool) -> Any:
+    """Return the ``system`` request value, marking it cacheable when requested."""
+    if system is None:
+        return None
+    if cache_prefix:
+        return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    return system

@@ -33,9 +33,14 @@ def _messages():
 
 
 class _FakeAnthropic:
-    """Stand-in for anthropic.AsyncAnthropic; records the last request."""
+    """Stand-in for anthropic.AsyncAnthropic; records the last request.
+
+    ``parse`` serves the native-structured-output path; ``create`` serves the
+    function-calling path (echoing a ``tool_use`` block, now with an ``id``).
+    """
 
     last_request: dict | None = None
+    last_parse: dict | None = None
 
     def __init__(self, *args, **kwargs):
         pass
@@ -44,36 +49,45 @@ class _FakeAnthropic:
     def messages(self):
         return self
 
+    async def parse(self, **request):
+        _FakeAnthropic.last_parse = request
+        instance = request["output_format"](accepted=True, rationale="ok")
+        content = [SimpleNamespace(type="text", text='{"accepted": true, "rationale": "ok"}')]
+        return SimpleNamespace(
+            parsed_output=instance,
+            content=content,
+            usage=SimpleNamespace(input_tokens=11, output_tokens=7),
+        )
+
     async def create(self, **request):
         _FakeAnthropic.last_request = request
-        # Echo a tool_use block matching whichever tool was forced/declared.
-        tool = request["tools"][0]
-        name = tool["name"]
-        if name.startswith("emit_"):
-            inp = {"accepted": True, "rationale": "ok"}
-        else:
-            inp = {"command": "echo hi"}
+        name = request["tools"][0]["name"]
         content = [
             SimpleNamespace(type="text", text="thinking"),
-            SimpleNamespace(type="tool_use", name=name, input=inp),
+            SimpleNamespace(type="tool_use", id="tu_1", name=name, input={"command": "echo hi"}),
         ]
         return SimpleNamespace(content=content, usage=SimpleNamespace(input_tokens=11, output_tokens=7))
 
 
-def test_anthropic_structured_output_forced_tool(monkeypatch):
+def test_anthropic_structured_output_uses_parse(monkeypatch):
     monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
     provider = AnthropicProvider()
     resp = asyncio.run(provider.call(_messages(), _cfg(), schema=_Verdict))
 
-    # Forced single-tool use with tool_choice pinned to the emit tool.
-    req = _FakeAnthropic.last_request
-    assert req["tool_choice"] == {"type": "tool", "name": "emit__Verdict"}
-    assert req["tools"][0]["input_schema"]["type"] == "object"
-    # Parsed structured object surfaced; validates against the model.
+    # Native structured output via messages.parse(output_format=schema).
+    assert _FakeAnthropic.last_parse["output_format"] is _Verdict
     assert resp.parsed == {"accepted": True, "rationale": "ok"}
     assert _Verdict.model_validate(resp.parsed).accepted is True
     assert resp.tool_calls == []
     assert resp.usage.input_tokens == 11
+
+
+def test_anthropic_cache_prefix_marks_system(monkeypatch):
+    monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
+    tools = [{"name": "t", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
+    asyncio.run(AnthropicProvider().call(_messages(), _cfg(), tools=tools, cache_prefix=True))
+    system = _FakeAnthropic.last_request["system"]
+    assert isinstance(system, list) and system[-1]["cache_control"] == {"type": "ephemeral"}
 
 
 def test_anthropic_function_calling(monkeypatch):
@@ -92,6 +106,7 @@ def test_anthropic_function_calling(monkeypatch):
     assert req["tool_choice"] == {"type": "auto"}
     assert resp.parsed is None
     assert len(resp.tool_calls) == 1
+    assert resp.tool_calls[0].id == "tu_1"
     assert resp.tool_calls[0].name == "mcp_builtin_bash_exec"
     assert resp.tool_calls[0].arguments == {"command": "echo hi"}
     assert resp.content == "thinking"
@@ -103,6 +118,28 @@ def test_anthropic_required_maps_to_any(monkeypatch):
     tools = [{"name": "t", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
     asyncio.run(provider.call(_messages(), _cfg(), tools=tools, tool_choice="required"))
     assert _FakeAnthropic.last_request["tool_choice"] == {"type": "any"}
+
+
+def test_providers_roundtrip_tool_turns():
+    """AssistantToolUse/ToolResultMessage translate to each provider's native shape."""
+    from auto_research.models.providers.anthropic import _to_anthropic_messages
+    from auto_research.models.providers.openai import _to_openai_input
+    from auto_research.models.types import AssistantToolUse, ToolCall, ToolResultMessage, ToolResultPart
+
+    convo = [
+        ModelMessage(role="system", content="s"),
+        ModelMessage(role="user", content="u"),
+        AssistantToolUse(tool_calls=[ToolCall(id="c1", name="foo", arguments={"a": 1})]),
+        ToolResultMessage(results=[ToolResultPart(tool_call_id="c1", name="foo", content="ok")]),
+    ]
+    system, msgs = _to_anthropic_messages(convo)
+    assert system == "s"
+    assert msgs[1]["content"][0] == {"type": "tool_use", "id": "c1", "name": "foo", "input": {"a": 1}}
+    assert msgs[2]["content"][0]["tool_use_id"] == "c1"
+
+    items = _to_openai_input(convo)
+    assert {"type": "function_call", "call_id": "c1", "name": "foo", "arguments": '{"a": 1}'} in items
+    assert any(i.get("type") == "function_call_output" and i["call_id"] == "c1" for i in items)
 
 
 # --- OpenAI ----------------------------------------------------------------

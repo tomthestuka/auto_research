@@ -7,7 +7,16 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from auto_research.models.types import ModelMessage, ModelResponse, ModelUsage, RoleModelConfig, ToolCall
+from auto_research.models.types import (
+    AssistantToolUse,
+    ConversationMessage,
+    ModelMessage,
+    ModelResponse,
+    ModelUsage,
+    RoleModelConfig,
+    ToolCall,
+    ToolResultMessage,
+)
 from auto_research.schemas import DocumentRef, FigureRef
 
 
@@ -17,12 +26,16 @@ class OpenAIProvider:
     Native structured output uses ``responses.parse(text_format=schema)`` (the
     SDK converts the Pydantic model to a strict JSON schema and deserializes the
     result). Function calling passes per-tool function definitions and reads
-    ``function_call`` items from the response output.
+    ``function_call`` items from the response output. ``AssistantToolUse`` /
+    ``ToolResultMessage`` turns are replayed as ``function_call`` /
+    ``function_call_output`` input items so a ReAct loop can carry its trajectory.
+    Prefix caching is automatic on the Responses API; ``cache_prefix`` additionally
+    sets a stable ``prompt_cache_key`` to improve hit routing.
     """
 
     async def call(
         self,
-        messages: Sequence[ModelMessage],
+        messages: Sequence[ConversationMessage],
         config: RoleModelConfig,
         *,
         schema: type[BaseModel] | None = None,
@@ -30,6 +43,7 @@ class OpenAIProvider:
         tool_choice: str = "auto",
         images: Sequence[FigureRef] = (),
         documents: Sequence[DocumentRef] = (),
+        cache_prefix: bool = False,
     ) -> ModelResponse:
         """Call OpenAI and normalize the response."""
 
@@ -38,13 +52,8 @@ class OpenAIProvider:
         if schema is not None and tools is not None:
             raise ValueError("schema and tools are mutually exclusive")
 
-        input_items = [
-            {
-                "role": message.role,
-                "content": [{"type": "input_text", "text": message.content}],
-            }
-            for message in messages
-        ]
+        input_items = _to_openai_input(messages)
+        cache_kwargs = {"prompt_cache_key": config.name} if cache_prefix else {}
         attachment_content = []
         for document in documents:
             data = base64.b64encode(document.path.read_bytes()).decode("ascii")
@@ -72,6 +81,7 @@ class OpenAIProvider:
                 model=config.model,
                 input=input_items,
                 text={"format": _strict_json_schema_format(schema)},
+                **cache_kwargs,
                 **config.parameters,
             )
             text = getattr(response, "output_text", "") or ""
@@ -94,6 +104,7 @@ class OpenAIProvider:
                 input=input_items,
                 tools=function_tools,
                 tool_choice="required" if tool_choice == "required" else "auto",
+                **cache_kwargs,
                 **config.parameters,
             )
             tool_calls = []
@@ -103,7 +114,9 @@ class OpenAIProvider:
                         args = json.loads(item.arguments) if item.arguments else {}
                     except (json.JSONDecodeError, TypeError):
                         args = {}
-                    tool_calls.append(ToolCall(name=item.name, arguments=args))
+                    tool_calls.append(
+                        ToolCall(id=getattr(item, "call_id", "") or "", name=item.name, arguments=args)
+                    )
             return _response(
                 content=getattr(response, "output_text", ""), tool_calls=tool_calls, raw=response
             )
@@ -111,9 +124,46 @@ class OpenAIProvider:
         response = await client.responses.create(
             model=config.model,
             input=input_items,
+            **cache_kwargs,
             **config.parameters,
         )
         return _response(content=getattr(response, "output_text", ""), raw=response)
+
+
+def _to_openai_input(messages: Sequence[ConversationMessage]) -> list[dict]:
+    """Translate neutral conversation turns into Responses-API input items.
+
+    ``AssistantToolUse`` → ``function_call`` items; ``ToolResultMessage`` →
+    ``function_call_output`` items; plain ``ModelMessage`` → a text message
+    (assistant turns use ``output_text``, others ``input_text``).
+    """
+    items: list[dict] = []
+    for message in messages:
+        if isinstance(message, AssistantToolUse):
+            for call in message.tool_calls:
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": call.id,
+                        "name": call.name,
+                        "arguments": json.dumps(call.arguments),
+                    }
+                )
+        elif isinstance(message, ToolResultMessage):
+            for part in message.results:
+                items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": part.tool_call_id,
+                        "output": part.content,
+                    }
+                )
+        else:
+            content_type = "output_text" if message.role == "assistant" else "input_text"
+            items.append(
+                {"role": message.role, "content": [{"type": content_type, "text": message.content}]}
+            )
+    return items
 
 
 # JSON Schema string `format` values OpenAI structured outputs accepts. Pydantic
