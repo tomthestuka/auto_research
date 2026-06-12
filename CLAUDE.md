@@ -104,7 +104,7 @@ Consequences:
   be loaded into a runtime LLM's context — not as a system prompt, tool input, retrieved
   document, or otherwise. Runtime prompts come *only* from `prompts/` (see
   [§4](#4-claudemd-and-docsmd-are-build-time-only)). This includes the Phase-2 tool
-  author: its conventions live in `prompts/tool_author.md`, never in a `DOCS.md`.
+  author: its conventions live in `prompts/coder.md`, never in a `DOCS.md`.
 - **Never hardcode model identifiers.** All model strings live in config
   ([§6](#6-config-driven-model-registry)).
 - **Never commit secrets.** API keys live in `.env` (gitignored); ship a `.env.example`.
@@ -123,14 +123,14 @@ configured exclusively from:
 
 - `prompts/` — one system-prompt file per role (e.g. `prompts/reviewer.md`,
   `prompts/librarian_io.md`, `prompts/analyst_worker.md`, `prompts/analyst_lead.md`, and
-  the Phase-2 `prompts/tool_author.md`). The runtime loads these; nothing else.
+  the Phase-2 `prompts/coder.md`). The runtime loads these; nothing else.
 
 When implementing any agent, load its prompt from `prompts/` and pass only task data and
 schemas into the model. If you ever feel tempted to give a runtime agent "context about
 the project," that is a signal you are about to violate this rule — put the needed
 information into its `prompts/` file or its task schema instead. **In particular, the tool
 author's "local structure context" ([§9.3](#93-actors-and-the-propose--author--review-flow))
-is assembled from runtime-safe sources — real toolkit source, `prompts/tool_author.md`,
+is assembled from runtime-safe sources — real toolkit source, `prompts/coder.md`,
 and config — never from a `DOCS.md`.**
 
 ---
@@ -314,7 +314,7 @@ the *composition* ([§9.5](#95-no-fabrication-is-absolute--synthetic-data-is-dat
 
 All domain capability lives in `research_toolkit` as **uniform packages**. `xspec_utils` is
 the template every new toolkit mirrors **exactly** — this is the layout a build-time coding
-agent scaffolds and what `prompts/tool_author.md` instructs the runtime author to produce:
+agent scaffolds and what `prompts/coder.md` instructs the runtime author to produce:
 
 ```
 <domain>_utils/
@@ -382,7 +382,7 @@ toolkit.**
    is the **Claude Agent SDK** harness seeded with the `ToolSpec`. The
    harness injects **local structure context** (the `xspec_utils` template, conventions,
    obs-db paths, existing primitives) from **runtime-safe sources only** — real toolkit
-   source, `prompts/tool_author.md`, and config — **never `DOCS.md`/`CLAUDE.md`**
+   source, `prompts/coder.md`, and config — **never `DOCS.md`/`CLAUDE.md`**
    ([§4](#4-claudemd-and-docsmd-are-build-time-only)). The `ToolSpec` is small (~2–4K
    tokens) and *is* the context-control mechanism — no special token machinery needed.
 3. The **deterministic gate** ([§9.4](#94-the-mergeability-gate-deterministic--the-real-trust-boundary))
@@ -555,7 +555,7 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
 |---|---|---|---|
 | 0 | Done | **Relocate the sandbox scratch** — worker `cwd` → per-worker scratch under the runtime data dir; `PYTHONPATH` stays limited to `research_toolkit`; neither repo is ever the cwd. | `bash_exec` cannot write into either repo; figures/scratch land under the data dir. |
 | 1 | Done | **`ToolSpec` + two-halves contract** — schema a worker emits (science context, expected behavior, validation ObsID, proposed checks) + the human-half/ai-half + tolerance contract. | Schema validates; a sample `ToolSpec` round-trips; documented in `schemas/DOCS.md`. |
-| 2 | Todo | **merge_flow harness** — `merge_flow.propose_and_pr()` invokes the Claude Agent SDK to write human-half, ai-half (`TOOL_MANIFEST` entry), and tests in an isolated worktree, structure-context injected from runtime-safe sources (`xspec_utils` + `prompts/tool_author.md` + config). | From a `ToolSpec`, the agent produces a branch with both halves and tests; nothing touches master. |
+| 2 | Done | **merge_flow harness + rework-loop scaffold** — `merge_flow.propose_and_pr()` invokes the Claude Agent SDK to write human-half, ai-half (`TOOL_MANIFEST` entry), and tests in an isolated worktree, structure-context injected from runtime-safe sources (`xspec_utils` + `prompts/coder.md` + config). Built with the L2/L3/L4 rework loop around **injectable gate/review hooks** (stub-PASS now; steps 3/4 drop in), the `ask_lead`/`ask_human` escalation tools, and the `coder` model role. | From a `ToolSpec`, the agent produces a branch with both halves and tests; gate/review rejections re-drive the warm session; cap exhaustion returns a no-commit failure for the lead to raise to the human; nothing touches master. |
 | 3 | Todo | **The deterministic gate** — generic Layer-A checks + a Layer-B tool-local test runner + provenance wiring + the no-fabrication scan. | A good tool passes; one that fabricates, fails replication, or breaks a declared check is rejected with a specific machine-readable reason. |
 | 4 | Todo | **Provider-decorrelated review** — a **GPT analyst co-lead** (provider ≠ the Claude author, routed from config) reviews the diff + gate result and judges the Layer-B checks; code-review only. Its pass + the gate authorizes the commit. | Review runs on a different provider than the author; a planted subtle bug is caught or escalated, not rubber-stamped. |
 | 5 | Todo | **Raise-to-human (clarification)** — `HumanQuery`/`HumanResponse` schema; LangGraph `interrupt()` + `ask_human` tool; handler-injection with the `slack.py` reference connector; `FAILED`/`NEEDS_HUMAN` + failure classification. | A blocked role raises and the run pauses for a human; an honest FAILED is accepted with no penalty; no fabrication on cap exhaustion. |
@@ -690,3 +690,29 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   `toolkit_root` (reviewer's do not), so the lead reads the full `lib/` to decide `disposition` —
   read-only/path-confined, no shell, per §2/§12. `prompts/analyst_lead.md` updated. Next: step 2
   (the `merge_flow` harness — lead spawns the Sonnet author in an isolated worktree).
+- 2026-06-12 — **Phase 2 step 2 done — `merge_flow` author harness + rework-loop scaffold.**
+  Designed the whole propose→author→gate→review→commit flow as **five bounded rework loops**
+  before building, then built step 2's share: `merge_flow.propose_and_pr()` (rewritten from the
+  `NotImplementedError` stub) creates an isolated git worktree, assembles runtime-safe structure
+  context (`xspec_utils` source + `prompts/coder.md` + obs-paths), builds the `ask_lead`/`ask_human`
+  in-process MCP tools, and drives a warm `ClaudeSDKClient` (Claude Agent SDK 0.2.99) through the
+  **L2 gate-rework / L3 review-rework / L4 honest-termination** loop around **injectable
+  gate/review hooks** that stub-PASS now (real gate = step 3, real review = step 4). New schemas
+  (`schemas/merge.py`): `CheckResult`, `GateReport`, `ToolReviewVerdict`, `MergeFlowResult`; plus
+  `AnalystReport.status` (`ok|failed|needs_human`, §9.6) and `ToolSpec.request_kind`/`observed_issue`
+  (the L5 in-use `fix_existing` report path). **Escalation ladder (L1):** the author reaches web
+  docs (SDK `WebSearch`/`WebFetch`), the lead (`ask_lead` → `AnalystLeadAgent.clarify_for_author`),
+  **and the human directly** (`ask_human` → injected `human_handler`; headless+none → typed
+  `HumanInputRequired`) — so the lead is never the sole oracle. The analyst lead also gains a
+  `web_search` tool (`ReadOnlyToolProvider`, reusing the Tavily `web` source) to consult
+  authoritative docs while triaging. **Config:** two new `models.yaml` roles — `coder` (Sonnet,
+  Anthropic) and `analyst_colead` (GPT-5.5 xhigh, **must stay non-Anthropic** for §9.3
+  decorrelation since the coder is Claude); three `orchestration.yaml` caps
+  (`tool_author_max_turns`/`gate_rework_cap`/`review_rework_cap`). **Naming hygiene:** the author's
+  prompt role is now `coder` (matching `models.yaml`), file `prompts/coder.md` (was the planned
+  `tool_author.md`); `PromptRole` names mirror `models.yaml` keys. Deterministic loop coverage in
+  `test_merge_flow.py` (fake SDK client + fake lead + stub hooks: happy path, N-rework-then-pass for
+  both gate and review, cap-exhaustion → failed, escalation routing, headless fail-safe); the old
+  `TestMergeFlowStub` removed. 178 non-live tests pass (the same 4 pre-existing failures untouched).
+  The runtime performs no real commit yet (`approve_edit` = step 6; placeholder `commit_sha`).
+  Next: step 3 (the deterministic gate).

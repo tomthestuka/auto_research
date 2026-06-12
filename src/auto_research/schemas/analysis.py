@@ -1,6 +1,6 @@
 """Analysis task and report messages."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field
 
@@ -23,6 +23,10 @@ class AnalystReport(MessageModel):
     # Phase 2: set when the worker hits a capability the toolkit lacks and proposes a
     # new/extended tool (CLAUDE.md §9.3). A brief the analyst lead routes to the author.
     tool_request: ToolSpec | None = None
+    # Phase 2 (§9.6): a first-class terminal state so an honest failure (tool authoring
+    # exhausted its rework caps, blocked on a human, etc.) is a *correct* outcome with no
+    # quality penalty — never a reason to fabricate a result on the last retry.
+    status: Literal["ok", "failed", "needs_human"] = "ok"
 
 
 class AnalysisTask(MessageModel):

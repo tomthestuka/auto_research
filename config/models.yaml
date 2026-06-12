@@ -67,6 +67,36 @@ roles:
           max_output_tokens: 16384
           reasoning:
             effort: medium
+  # Phase 2 tool-authoring roles (CLAUDE.md §6/§9.3).
+  # coder: the Sonnet-tier Claude author the analyst lead spawns (Claude Agent SDK).
+  # analyst_colead: the provider-decorrelated tool reviewer. MUST stay non-Anthropic
+  #   because the coder is Claude — two independent checks, not one provider checking its
+  #   own family. Backed by GPT-5.5 reasoning xhigh (cheapest eligible, capable enough).
+  coder:
+    members:
+      - name: claude_sonnet_4_6
+        provider: anthropic
+        model: claude-sonnet-4-6
+        vision: true
+        priceMTk:
+          input: 3.0
+          output: 15.0
+        parameters:
+          max_tokens: 16384
+  analyst_colead:
+    members:
+      - name: gpt_5_5_xhigh
+        provider: openai
+        model: gpt-5.5
+        vision: true
+        documents: true
+        priceMTk:
+          input: 5.0
+          output: 30.0
+        parameters:
+          max_output_tokens: 16384
+          reasoning:
+            effort: xhigh
   librarian_io:
     members:
       - name: claude_sonnet_4_6

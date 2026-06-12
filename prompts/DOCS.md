@@ -30,7 +30,13 @@ Runtime prompt files:
   summaries.
 - `analyst_worker.md` — task analysis, debate revisions, assumptions, figure
   reference handling, and the two-call analyze/request_tools protocol.
-- `analyst_lead.md` — convergence judgment, adjudication, and synthesis.
+- `analyst_lead.md` — convergence judgment, adjudication, synthesis, **tool-request
+  triage** (new-capability disposition + `fix_existing` wrongly-called vs buggy),
+  authoritative-doc consultation (`web_search`), and raise-to-human on authoring failure.
+- `coder.md` — the Phase-2 tool author's system prompt (loaded by `merge_flow` and passed
+  to the Claude Agent SDK): the two-halves layout, no-fabrication rules, the
+  web/`ask_lead`/`ask_human` escalation ladder, and the committed-tests requirement. The
+  role name `coder` mirrors `config/models.yaml`.
 
 Each file is the complete system prompt for that role: identity, responsibilities,
 output expectations, and scope/escalation rules. **Prompts do not enumerate tools
@@ -49,6 +55,7 @@ logic here.
 - `librarian_io.md` — system prompt for the librarian I/O role.
 - `analyst_worker.md` — system prompt for analyst worker roles.
 - `analyst_lead.md` — system prompt for the analyst lead role.
+- `coder.md` — system prompt for the Phase-2 tool author (Claude Agent SDK).
 
 ## Changelog
 - 2026-05-26 → 2026-06-12 — Four runtime prompts (reviewer, librarian_io, analyst_worker,
@@ -57,3 +64,9 @@ logic here.
   `save_path`/`save_path_prefix` (redirected by `SandboxToolProvider`). `analyst_lead.md`:
   toolkit inspection paragraph added (browse full `research_toolkit` via `list_dir`/`read_file`
   to decide disposition before authoring). `tool_author.md` deferred to Phase 2 step 2.
+- 2026-06-12 — Phase 2 step 2: added `coder.md` (the tool author's runtime-safe system
+  prompt; role named `coder` to mirror `config/models.yaml`). `analyst_worker.md` gains the
+  `tool_request` submit/report guidance (new-capability vs `fix_existing` defect report, no
+  fabrication around broken tools). `analyst_lead.md` gains tool-request triage, `web_search`
+  doc consultation, and raise-to-human on authoring failure. `PromptRole` now includes
+  `coder` and its names mirror `models.yaml` keys.

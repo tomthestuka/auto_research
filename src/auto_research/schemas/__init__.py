@@ -3,6 +3,12 @@
 from auto_research.schemas.analysis import AnalysisTask, AnalystReport
 from auto_research.schemas.base import MessageModel
 from auto_research.schemas.figures import DocumentRef, FigureRef, document_from_file
+from auto_research.schemas.merge import (
+    CheckResult,
+    GateReport,
+    MergeFlowResult,
+    ToolReviewVerdict,
+)
 from auto_research.schemas.report import LatexReport, Reference, ReportSection, ResearchReport
 from auto_research.schemas.requests import ResearchRequest
 from auto_research.schemas.review import ReviewVerdict
@@ -13,10 +19,13 @@ from auto_research.schemas.toolspec import ProposedCheck, ToolSpec, ValidationDa
 __all__ = [
     "AnalysisTask",
     "AnalystReport",
+    "CheckResult",
     "FigureRef",
     "DocumentRef",
     "FullTextLink",
+    "GateReport",
     "LatexReport",
+    "MergeFlowResult",
     "MessageModel",
     "Reference",
     "ReportSection",
@@ -30,6 +39,7 @@ __all__ = [
     "ToolCallReview",
     "ToolKind",
     "ToolResult",
+    "ToolReviewVerdict",
     "ToolSpec",
     "ProposedCheck",
     "ValidationDataset",

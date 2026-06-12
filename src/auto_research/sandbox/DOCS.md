@@ -272,25 +272,54 @@ starts two configured analyst subprocesses in the live HEASoft/PyXSPEC
 environment and verifies both boot with `Fit.query == "no"` and
 `Xset.allowPrompting is False`.
 
-### `propose_and_pr` (Phase 2 stub)
+### `propose_and_pr` (Phase 2 step 2 — author harness + rework loop)
 
 ```python
 async def propose_and_pr(
-    request: ToolCallRequest,
+    tool_spec: ToolSpec,
     *,
-    lead: object,
-    toolkit_repo: str = "tomthestuka/research_toolkit",
-) -> str  # PR URL
+    lead,                       # AnalystLeadAgent — ask_lead handler (clarify_for_author)
+    toolkit_root: Path,
+    worktree_base: Path,        # isolated worktree location (under the runtime data dir)
+    human_handler=None,         # §9.8 injected (HumanQuery-ish dict) -> str; None+headless → HumanInputRequired
+    coder_model: str | None = None,   # resolved from the `coder` role in models.yaml
+    run_gate=None,              # injectable hook; step-2 stub → GateReport(passed=True)
+    run_review=None,            # injectable hook; step-2 stub → ToolReviewVerdict(approved=True)
+    gate_rework_cap=None, review_rework_cap=None, max_turns=None,  # from orchestration.yaml
+    worktree_factory=None, sdk_client_factory=None,  # seams for deterministic tests
+) -> MergeFlowResult
 ```
 
-Always raises `NotImplementedError` in Phase 1. Phase 2: Claude Agent SDK
-writes the tool, lead reviews, human approves merge on GitHub.
+Spawns the Sonnet author (Claude Agent SDK) in an isolated git **worktree/branch** on
+`research_toolkit`, seeds it with the `ToolSpec` + runtime-safe structure context
+(`xspec_utils` source + `prompts/coder.md` + obs paths — never `DOCS.md`/`CLAUDE.md`), and
+drives the bounded rework loop:
+
+- **L0** author self-correction inside the SDK session (`max_turns`).
+- **L1** escalation: SDK `WebSearch`/`WebFetch`, plus two in-process MCP tools — `ask_lead`
+  (→ `lead.clarify_for_author`) and `ask_human` (→ injected `human_handler`; none + headless
+  → typed `HumanInputRequired`), so the lead is never the sole oracle.
+- **L2** gate rejection → `GateReport` fed back into the warm session (`gate_rework_cap`).
+- **L3** co-lead review rejection → `ToolReviewVerdict` fed back; a code change re-runs the
+  gate before re-review (`review_rework_cap`).
+- **L4** cap exhausted → `MergeFlowResult(status="failed")`, **no commit**, for the lead to
+  raise to the human (§9.6/§9.7).
+
+The orchestration is **code, never the LLM**. The gate/review are **injectable hooks** that
+stub-PASS in step 2 (real gate = step 3, real review = step 4). A successful run returns
+`status="committed"` with a placeholder `commit_sha` — the real atomic commit is
+`approve_edit()` in step 6; the runtime never touches master. `HumanInputRequired` is the
+typed headless fail-safe (a run never silently hangs). Deterministic loop coverage is in
+`tests/test_merge_flow.py` (fake SDK client + fake lead + stub hooks).
 
 ## Dependencies
 
 - External: stdlib (`asyncio`, `subprocess`, `importlib`, `sys`, `json`);
   `mcp` (FastMCP server + ClientSession for `builtin_server.py` and `mcp_client.py`).
-- Internal: `auto_research.schemas` (`ToolCallRequest`, `ToolResult`, `FigureRef`).
+- Internal: `auto_research.schemas` (`ToolCallRequest`, `ToolResult`, `FigureRef`;
+  `ToolSpec`, `GateReport`, `ToolReviewVerdict`, `MergeFlowResult` for `merge_flow`);
+  `auto_research.agents.prompts.load_prompt` (the `coder` prompt); `claude_agent_sdk`
+  (the author harness).
 - Depended on by: `auto_research.agents.roles` (`AnalystWorkerAgent.execute_tools()`);
   `auto_research.graph.runtime` (sandbox lifecycle); `auto_research.consensus`
   (tool execution inside `DebateToConverge._run_tools()`).
@@ -344,8 +373,12 @@ writes the tool, lead reviews, human approves merge on GitHub.
   forward one MCP call; returns error dict if no client attached.
 - `ToolkitRegistry.load_mcp(client)` — index MCP tools from a started client.
 - `ToolkitRegistry.is_mcp(kind)` → `bool` — True if kind is an MCP tool.
-- `propose_and_pr(request, *, lead, toolkit_repo)` → `str` — Phase 2 stub;
-  raises `NotImplementedError`.
+- `propose_and_pr(tool_spec, *, lead, toolkit_root, worktree_base, human_handler=None,
+  coder_model=None, run_gate=None, run_review=None, …)` → `MergeFlowResult` — Phase 2
+  step-2 author harness: spawns the Sonnet Claude-SDK author in an isolated worktree and
+  drives the L0–L4 bounded rework loop around injectable stub gate/review hooks.
+- `HumanInputRequired(RuntimeError)` — typed headless fail-safe raised when the author
+  needs a human but no `human_handler` is wired (§9.8).
 
 ## Changelog
 - 2026-05-26 → 2026-06-09 — **Phase 1 sandbox built and hardened.** `ToolkitRegistry`
@@ -361,3 +394,11 @@ writes the tool, lead reviews, human approves merge on GitHub.
   server process is now pinned to `run_dir(run_id)` — a by-construction backstop so nothing
   it does relative to its cwd can touch a repo. Per-call `bash_exec` cwd injection is
   unchanged.
+- 2026-06-12 — Phase 2 step 2: `merge_flow.py` rewritten from the `NotImplementedError`
+  stub into the **author harness + rework-loop scaffold**. `propose_and_pr(tool_spec, …)`
+  → `MergeFlowResult` creates an isolated git worktree, assembles runtime-safe structure
+  context, builds the `ask_lead`/`ask_human` in-process MCP tools, and drives a warm
+  `ClaudeSDKClient` (SDK 0.2.99) through the L2 gate-rework / L3 review-rework / L4
+  honest-termination loop around **injectable gate/review hooks** (stub-PASS now; real gate
+  = step 3, real review = step 4). Adds `HumanInputRequired` (headless fail-safe). No real
+  commit yet (`approve_edit` = step 6). Deterministic coverage in `tests/test_merge_flow.py`.

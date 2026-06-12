@@ -15,6 +15,9 @@ One module per logical message family:
 - `search.py` — literature search messages.
 - `analysis.py` — analyst task/report messages.
 - `review.py` — reviewer verdicts.
+- `toolspec.py` — Phase-2 tool-authoring brief (`ToolSpec`).
+- `merge.py` — Phase-2 tool-authoring flow results (gate report, co-lead review,
+  `propose_and_pr` outcome).
 
 All public models are re-exported from `auto_research.schemas`. Figures are
 carried by **reference** (`FigureRef`), never embedded
@@ -54,7 +57,19 @@ carried by **reference** (`FigureRef`), never embedded
   ObsID), advisory `proposed_checks: list[ProposedCheck]` (open-ended `kind` hint, not an
   enum), optional `replication_tolerance`, auto `id`/`created_at`. The **committed tests,
   not the spec, are authoritative**; tolerances are lead-finalised, hence optional.
-  `AnalystReport.tool_request: ToolSpec | None` is how a worker raises it.
+  `AnalystReport.tool_request: ToolSpec | None` is how a worker raises it. `ToolSpec` also
+  carries `request_kind` (`"new_capability"`|`"fix_existing"`) and `observed_issue`: a
+  worker raises `fix_existing` to report an in-use defect (CLAUDE.md §9.3 L5) — the lead
+  triages wrongly-called vs genuinely-buggy. `AnalystReport.status`
+  (`"ok"`|`"failed"`|`"needs_human"`, default `"ok"`) is the §9.6 terminal state so an
+  honest authoring failure is a correct outcome, never a trigger to fabricate.
+- The Phase-2 **tool-authoring flow** types (`merge.py`): `GateReport` (the deterministic
+  gate's verdict — `layer_a`/`layer_b: list[CheckResult]`, `passed`, `report_hash`),
+  `ToolReviewVerdict` (the provider-decorrelated co-lead's code-review verdict —
+  `approved`, `issues`, `checks_adequate`), and `MergeFlowResult` (what
+  `merge_flow.propose_and_pr` returns — `status` ∈ `committed|failed|needs_human`,
+  `branch`, `commit_sha`, `gate_report`, `review`). These make the rework loop legible
+  end-to-end; step 2 fills them via stub gate/review (steps 3/4 implement the real ones).
 
 ## Dependencies
 - External: `pydantic>=2`.
@@ -135,6 +150,22 @@ carried by **reference** (`FigureRef`), never embedded
   notes: str | None = None)` — Phase-2 tool-authoring brief (CLAUDE.md §9.3). `disposition`
   is the proposer/lead's call; `proposed_checks`/tolerances are advisory and lead-finalised
   (the committed tests are authoritative). `id` auto-generates (`toolspec-<hex>`) when omitted.
+  Adds `request_kind: "new_capability"|"fix_existing"` (default `new_capability`) and
+  `observed_issue: str | None` (the symptom, for `fix_existing` defect reports — §9.3 L5).
+- `CheckResult(name: str, layer: "A"|"B", passed: bool, detail: str = "")` — one gate
+  check; `detail` is the machine-readable reason fed back to the author on failure.
+- `GateReport(passed: bool, layer_a: list[CheckResult] = [], layer_b: list[CheckResult] = [],
+  reason: str = "", report_hash: str = "")` — the deterministic gate's verdict (§9.4);
+  `report_hash` seeds the §9.9 atomic-commit message. Step-2 stub returns `passed=True`.
+- `ToolReviewVerdict(approved: bool, rationale: str, issues: list[str] = [],
+  checks_adequate: bool = True)` — the provider-decorrelated co-lead's code-review verdict
+  (§9.3 step 4); distinct from the research `ReviewVerdict`.
+- `MergeFlowResult(tool_spec_id: str, status: "committed"|"failed"|"needs_human",
+  branch: str | None = None, commit_sha: str | None = None, gate_report: GateReport | None = None,
+  review: ToolReviewVerdict | None = None, reason: str = "")` — return type of
+  `merge_flow.propose_and_pr`. `committed` ⇔ gate-pass ∧ co-lead review-pass.
+- `AnalystReport.status: "ok"|"failed"|"needs_human"` (default `"ok"`) — §9.6 terminal
+  state; an honest failure is a correct outcome, never a reason to fabricate.
 
 ## Changelog
 - 2026-05-26 → 2026-06-09 — **Full Pydantic v2 protocol built.** `ResearchRequest`,
@@ -148,3 +179,8 @@ carried by **reference** (`FigureRef`), never embedded
   `\\` in truncation errors is correct single JSON escaping. Phase 2 step 1: `ToolSpec`
   brief (`schemas/toolspec.py`) — `ToolSpec` + `ValidationDataset` + `ProposedCheck`;
   `AnalystReport.tool_request: ToolSpec | None`; round-trip + validation tests added.
+- 2026-06-12 — Phase 2 step 2: `schemas/merge.py` — `CheckResult`, `GateReport`,
+  `ToolReviewVerdict`, `MergeFlowResult` (the tool-authoring flow protocol; all exported).
+  `AnalystReport.status` (`ok|failed|needs_human`, §9.6) added. `ToolSpec` extended with
+  `request_kind` + `observed_issue` for the L5 `fix_existing` defect-report path. Round-trip
+  + validation tests in `test_schemas.py`.

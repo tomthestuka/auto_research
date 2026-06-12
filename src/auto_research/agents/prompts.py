@@ -5,11 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
+# Role names here MUST mirror the role keys in config/models.yaml (one name per role,
+# no divergent aliases) so the two configs stay maintainable together. Not every model
+# role needs a prompt (e.g. analyst_colead's reviewer prompt arrives in Phase 2 step 4).
 PromptRole = Literal[
     "reviewer",
     "librarian_io",
     "analyst_worker",
     "analyst_lead",
+    "coder",
 ]
 
 PROMPT_FILENAMES: dict[PromptRole, str] = {
@@ -17,6 +21,9 @@ PROMPT_FILENAMES: dict[PromptRole, str] = {
     "librarian_io": "librarian_io.md",
     "analyst_worker": "analyst_worker.md",
     "analyst_lead": "analyst_lead.md",
+    # Phase 2: the Sonnet author's system prompt (CLAUDE.md §9.3). Loaded by merge_flow
+    # and passed to the Claude Agent SDK; same governance check as the other prompts.
+    "coder": "coder.md",
 }
 
 FORBIDDEN_RUNTIME_REFERENCES = ("CLAUDE.md", "DOCS.md", "AGENTS.md")

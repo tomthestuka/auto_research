@@ -218,13 +218,25 @@ class ReadOnlyToolProvider:
     the local knowledge base via the retrieval backend. No science sandbox is involved.
     """
 
-    def __init__(self, *, roots: Sequence[Path], retrieval: Any | None = None, max_chars: int = 8000) -> None:
+    def __init__(
+        self,
+        *,
+        roots: Sequence[Path],
+        retrieval: Any | None = None,
+        web_source: Any | None = None,
+        max_chars: int = 8000,
+    ) -> None:
         self.roots = [Path(r).resolve() for r in roots]
         self.retrieval = retrieval
+        # Optional Tavily/web QuerySource — when supplied (analyst lead), exposes a
+        # web_search tool so the lead can consult authoritative documentation (mission
+        # threads, calibration memos) before triaging a tool request or answering the
+        # author, rather than guessing (CLAUDE.md §9.3 escalation ladder).
+        self.web_source = web_source
         self.max_chars = max_chars
 
     def tool_definitions(self) -> list[dict]:
-        return [
+        definitions = [
             {
                 "name": "read_file",
                 "description": "Read a UTF-8 text file under the run/artifacts or papers directories.",
@@ -253,6 +265,23 @@ class ReadOnlyToolProvider:
                 },
             },
         ]
+        if self.web_source is not None:
+            definitions.append(
+                {
+                    "name": "web_search",
+                    "description": (
+                        "Search the web for authoritative documentation (mission analysis "
+                        "threads, calibration memos, official references). Use before "
+                        "answering an uncertain science/code question rather than guessing."
+                    ),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+                        "required": ["query"],
+                    },
+                }
+            )
+        return definitions
 
     def _allowed(self, path: Path) -> bool:
         resolved = path.resolve()
@@ -282,6 +311,15 @@ class ReadOnlyToolProvider:
             )
             text = "\n".join(str(p) for p in paths) or "(no local matches)"
             return ToolOutcome(text=text)
+
+        if name == "web_search":
+            if self.web_source is None:
+                return ToolOutcome(text="web_search not available", is_error=True)
+            results = await self.web_source.search(
+                str(arguments.get("query", "")), limit=int(arguments.get("limit", 5))
+            )
+            lines = [f"- {r.title} {r.url}\n  {(r.abstract or '')[:300]}" for r in results]
+            return ToolOutcome(text="\n".join(lines)[: self.max_chars] or "(no results)")
 
         return ToolOutcome(text=f"unknown tool: {name}", is_error=True)
 

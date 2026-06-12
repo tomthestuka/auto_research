@@ -25,7 +25,11 @@ role or swapping a provider is a YAML edit; no Python change.
   `reviewer`, `analyst_lead`, `analyst_worker`, and `librarian_io`. Reviewer and
   analyst-tier models **must** be marked `vision: true` so figure references can
   be passed at the multimodal boundary (see
-  [§7](../CLAUDE.md#7-schemas--protocols)).
+  [§7](../CLAUDE.md#7-schemas--protocols)). Phase-2 tool-authoring roles (optional, not
+  in the required set): `coder` — the Sonnet Claude author (`merge_flow` resolves its
+  model id here); `analyst_colead` — the tool reviewer, which **must stay non-Anthropic**
+  because the coder is Claude (the §6/§9.3 provider-decorrelation invariant), backed by
+  GPT-5.5 reasoning xhigh.
 - `observations.yaml` — mission name → `obs_db_path`, a generic path to that
   mission's observation database or archive root. Loaded by
   `auto_research.observations`; mission names are data, not special cases in
@@ -66,6 +70,13 @@ role or swapping a provider is a YAML edit; no Python change.
   `evaluate_search_results()` is a stub.
 - `orchestration.yaml.tool_retry_cap` — inner retry cap for
   `AnalystWorkerAgent.execute_tools()` error feedback.
+- `orchestration.yaml.tool_author_max_turns` — Phase-2 cap on the Sonnet author's own
+  self-correction loop (L0, Claude-SDK turns). Consumed by `merge_flow.propose_and_pr`.
+- `orchestration.yaml.tool_author_gate_rework_cap` — how many times the author is
+  re-driven after a deterministic-gate rejection (L2) before honest termination.
+- `orchestration.yaml.tool_author_review_rework_cap` — how many times the author is
+  re-driven after a co-lead review rejection (L3). All three are *pathology backstops*,
+  not workflow budgets (like the ReAct caps).
 - `orchestration.yaml.toolkit_root` — path to the sibling `research_toolkit`
   repository used by `ToolkitRegistry` and `PersistentSandbox`.
 - `orchestration.yaml.analyze_ini_sh` — path to the dedicated headless analyst
@@ -85,3 +96,7 @@ role or swapping a provider is a YAML edit; no Python change.
   (mission obs DB paths), `orchestration.yaml` (`disabled_tools`, `react_loop_cap` default
   12, `librarian_react_loop_cap` default 3 with MEMO on deferred token-budget guard,
   `structured_retry_cap` default 2).
+- 2026-06-12 — Phase 2 step 2: `models.yaml` gains the `coder` (Sonnet/Anthropic) and
+  `analyst_colead` (GPT-5.5 xhigh, non-Anthropic for decorrelation) roles; `orchestration.yaml`
+  gains `tool_author_max_turns` (50), `tool_author_gate_rework_cap` (3),
+  `tool_author_review_rework_cap` (2) — the tool-authoring rework backstops.

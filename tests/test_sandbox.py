@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from auto_research.sandbox.merge_flow import propose_and_pr
 from auto_research.sandbox.persistent import PersistentSandbox
 from auto_research.sandbox.registry import ToolkitRegistry
 from auto_research.sandbox.runner import run_tool
@@ -193,18 +192,10 @@ class TestRunner:
 
 
 # ---------------------------------------------------------------------------
-# merge_flow — Phase 2 stub
+# merge_flow — Phase 2 step 2 harness
 # ---------------------------------------------------------------------------
-
-class TestMergeFlowStub:
-    def test_raises_not_implemented(self) -> None:
-        req = ToolCallRequest(
-            requested_by="worker",
-            kind="heasarc_retrieve",
-            purpose="retrieve NICER obs",
-        )
-        with pytest.raises(NotImplementedError, match="Phase 2"):
-            asyncio.run(propose_and_pr(req, lead=object()))
+# `propose_and_pr` is now the real author harness (no longer a NotImplementedError
+# stub). Its bounded rework loop is covered deterministically in test_merge_flow.py.
 
 
 # ---------------------------------------------------------------------------

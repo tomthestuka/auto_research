@@ -898,6 +898,43 @@ class AnalystLeadAgent(AgentRole):
             messages, AnalystReport, action="adjudicate", images=figures,
         )
 
+    async def clarify_for_author(
+        self, question: str, *, kind: str = "clarify_code", context: str = ""
+    ) -> str:
+        """Answer a tool author's clarification question (the lead↔author channel, §9.3).
+
+        The Sonnet author calls this via the ``ask_lead`` in-process tool when it hits a
+        code/convention/which-``lib/``-function question. When a read-only ToolProvider is
+        attached (with ``web_search``), the lead may consult authoritative documentation
+        before answering rather than guessing.
+        """
+
+        payload = {
+            "request": "A tool author is asking you a clarification question while writing toolkit code.",
+            "kind": kind,
+            "question": question,
+            "context": context,
+            "answer_semantics": (
+                "Answer concisely and concretely. If you are unsure of an expert science "
+                "point, consult authoritative documentation (web_search) before answering; "
+                "do not give a confident wrong answer."
+            ),
+        }
+        if self.tools is None:
+            reply = await self._call(payload, _ClarifyReply, action="clarify_for_author")
+            return reply.answer
+
+        seed = [
+            ModelMessage(role="system", content=self.prompt),
+            ModelMessage(role="user", content=_payload_text(payload)),
+        ]
+        messages, _ = await self._react(
+            seed_messages=seed, tools=self.tools, action="clarify_for_author",
+            cap=_react_loop_cap(),
+        )
+        reply = await self._call_over_messages(messages, _ClarifyReply, action="clarify_for_author")
+        return reply.answer
+
     async def judge_convergence(
         self,
         task: AnalysisTask,
@@ -925,6 +962,16 @@ class AnalystLeadAgent(AgentRole):
             images=figures,
             action="judge_convergence",
         )
+
+
+class _ClarifyReply(BaseModel):
+    """Minimal structured reply for ``AnalystLeadAgent.clarify_for_author``.
+
+    A lightweight internal helper, not a broad protocol message; the §9.7
+    ``HumanQuery``/``HumanResponse`` schema is formalised in Phase 2 step 5.
+    """
+
+    answer: str
 
 
 def _select_model(group: ModelGroupHandle, model_name: str | None) -> ModelHandle:

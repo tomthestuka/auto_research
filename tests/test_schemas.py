@@ -11,12 +11,15 @@ from auto_research.schemas import (
     AnalystReport,
     DocumentRef,
     FigureRef,
+    GateReport,
+    MergeFlowResult,
     ResearchRequest,
     ReviewVerdict,
     SearchRequest,
     SearchResult,
     ToolCallRequest,
     ToolCallReview,
+    ToolReviewVerdict,
     ToolSpec,
     document_from_file,
 )
@@ -217,3 +220,107 @@ def test_analyst_report_carries_tool_request():
 
     assert isinstance(report.tool_request, ToolSpec)
     assert AnalystReport(summary="No tool needed.").tool_request is None
+
+
+def test_analyst_report_status_defaults_ok_and_accepts_terminal_states():
+    assert AnalystReport(summary="done").status == "ok"
+    assert AnalystReport(summary="gave up honestly", status="failed").status == "failed"
+    assert AnalystReport(summary="blocked", status="needs_human").status == "needs_human"
+    with pytest.raises(ValidationError):
+        AnalystReport(summary="x", status="vibes")
+
+
+def test_tool_spec_fix_existing_round_trips():
+    spec = ToolSpec(
+        request_kind="fix_existing",
+        science_context="add_retbb mis-tied the gain across data groups.",
+        expected_behavior="add_retbb(indices) should leave gain untied unless asked.",
+        proposed_tool_name="fit_retbb_hss",
+        target_domain="xspec_utils",
+        disposition="extend_existing",
+        observed_issue="On obsid 02008401 the gain came back tied; chi2/dof inflated.",
+        validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+    )
+
+    restored = ToolSpec.model_validate(spec.model_dump(mode="json"))
+    assert restored == spec
+    assert restored.request_kind == "fix_existing"
+    assert restored.observed_issue is not None
+    # default path stays new_capability with no observed_issue
+    nc = ToolSpec(
+        science_context="x",
+        expected_behavior="y",
+        proposed_tool_name="z",
+        target_domain="xspec_utils",
+        disposition="new_package",
+        validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+    )
+    assert nc.request_kind == "new_capability"
+    assert nc.observed_issue is None
+
+
+def test_tool_spec_rejects_unknown_request_kind():
+    with pytest.raises(ValidationError):
+        ToolSpec(
+            request_kind="please_fix",
+            science_context="x",
+            expected_behavior="y",
+            proposed_tool_name="z",
+            target_domain="xspec_utils",
+            disposition="extend_existing",
+            validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+        )
+
+
+def test_gate_report_round_trips_with_check_results():
+    report = GateReport(
+        passed=False,
+        layer_a=[{"name": "no_fabrication", "layer": "A", "passed": True}],
+        layer_b=[
+            {
+                "name": "injection_recovery",
+                "layer": "B",
+                "passed": False,
+                "detail": "recovered pol 0.07 > tol 0.02",
+            }
+        ],
+        reason="Layer-B injection-recovery failed.",
+        report_hash="deadbeef",
+    )
+
+    restored = GateReport.model_validate(report.model_dump(mode="json"))
+    assert restored == report
+    assert restored.passed is False
+    assert restored.layer_b[0].detail.startswith("recovered pol")
+    # check layer is constrained to A/B
+    with pytest.raises(ValidationError):
+        GateReport(passed=True, layer_a=[{"name": "x", "layer": "C", "passed": True}])
+
+
+def test_tool_review_verdict_defaults_and_validation():
+    verdict = ToolReviewVerdict(approved=False, rationale="metamorphic check too loose")
+    assert verdict.issues == []
+    assert verdict.checks_adequate is True
+    with pytest.raises(ValidationError):
+        ToolReviewVerdict(approved=True, rationale="")  # rationale must be non-empty
+
+
+def test_merge_flow_result_round_trips_each_status():
+    committed = MergeFlowResult(
+        tool_spec_id="toolspec-abc123",
+        status="committed",
+        branch="tool/fit_retbb_hss",
+        commit_sha="placeholder",
+    )
+    restored = MergeFlowResult.model_validate(committed.model_dump(mode="json"))
+    assert restored == committed
+
+    failed = MergeFlowResult(
+        tool_spec_id="toolspec-abc123",
+        status="failed",
+        reason="gate rework cap exhausted on injection-recovery",
+    )
+    assert failed.branch is None and failed.commit_sha is None
+
+    with pytest.raises(ValidationError):
+        MergeFlowResult(tool_spec_id="toolspec-abc123", status="merged_to_master")

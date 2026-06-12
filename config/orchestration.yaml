@@ -54,3 +54,12 @@ disabled_tools: []
 # report_retry_cap: max LaTeX compile+ref-check iterations before accepting residual errors.
 report_formats: [jsonl, tex]
 report_retry_cap: 2
+# Phase 2 tool-authoring (merge_flow.propose_and_pr) caps. Like the ReAct caps above,
+# these are BACKSTOPS AGAINST PATHOLOGY, not workflow budgets — a healthy authoring run
+# finishes well under them. tool_author_max_turns bounds the Sonnet author's own
+# self-correction loop (L0, SDK turns); the two rework caps bound how many times the
+# author is re-driven after a gate rejection (L2) or a co-lead review rejection (L3)
+# before the lead raises the failure to the human (§9.6/§9.7).
+tool_author_max_turns: 50
+tool_author_gate_rework_cap: 3
+tool_author_review_rework_cap: 2

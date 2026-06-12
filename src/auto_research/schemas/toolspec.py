@@ -25,6 +25,12 @@ NonEmptyStr = Annotated[str, Field(min_length=1)]
 # brand-new one. The proposer/lead decides this (not the weaker Sonnet coder, §6/§9.3).
 Disposition = Literal["extend_existing", "new_package"]
 
+# Why the brief is raised (CLAUDE.md §9.3 / L5):
+# - ``new_capability`` — the toolkit lacks something the analysis needs.
+# - ``fix_existing``   — an already-merged tool gave wrong/surprising output in use; the
+#   analyst *reports* it (the lead later triages "wrongly-called" vs "genuinely buggy").
+RequestKind = Literal["new_capability", "fix_existing"]
+
 
 class ValidationDataset(MessageModel):
     """A real (or marked-synthetic) input the tool's checks run against.
@@ -59,9 +65,18 @@ class ToolSpec(MessageModel):
     id: NonEmptyStr = Field(default_factory=lambda: f"toolspec-{uuid4().hex[:12]}")
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
+    # Why this brief exists. ``fix_existing`` reports an in-use defect (L5); the lead
+    # triages wrongly-called vs genuinely-buggy. ``new_capability`` is the default.
+    request_kind: RequestKind = "new_capability"
+
     science_context: NonEmptyStr  # what is being measured; why the toolkit can't do it
     expected_behavior: NonEmptyStr  # prose signature + I/O the tool should provide
-    proposed_tool_name: NonEmptyStr  # the tool/function name to author
+    proposed_tool_name: NonEmptyStr  # the tool/function name to author (or fix)
+
+    # For ``fix_existing``: the wrong/surprising behaviour the analyst observed (the
+    # symptom). The ObsID that exposed it goes in ``validation_data`` — it becomes the
+    # regression input. The analyst only reports; the lead classifies the cause.
+    observed_issue: str | None = None
 
     # Where the two halves land. ``target_domain`` is an existing ``<domain>_utils``
     # package (extend) or the proposed new package name (new). ``disposition`` is the

@@ -28,7 +28,9 @@ then produces the role's structured output grounded in the trajectory (both reus
 `_structured_loop`, the shared off-schema-retry core). Tool surfaces live behind
 the `ToolProvider` protocol in `react.py`: `SandboxToolProvider` (analyst science
 tools in the `PersistentSandbox`), `ReadOnlyToolProvider` (reviewer/lead — in-process
-`read_file`/`list_dir`/`text_search`, confined to the run + papers dirs),
+`read_file`/`list_dir`/`text_search`, confined to the run + papers dirs, plus an optional
+`web_search` tool when a `web_source` is supplied — the analyst lead uses it to consult
+authoritative docs while triaging tool requests, §9.3),
 `SourceToolProvider` (librarian — arXiv/ADS/web + local `text_search`). A role with
 `tools=None` falls back to a plain single structured call.
 
@@ -121,6 +123,10 @@ Role wrappers:
 - `AnalystLeadAgent.judge_convergence(task, reports, *, round_index,
   max_rounds) -> ReviewVerdict` judges whether worker reports have converged
   enough for final synthesis.
+- `AnalystLeadAgent.clarify_for_author(question, *, kind, context) -> str` — answers a
+  tool author's `ask_lead` clarification (the lead↔author channel, §9.3); consults
+  `web_search` (when a `ReadOnlyToolProvider` with a `web_source` is attached) before
+  answering rather than guessing. Used by `merge_flow.propose_and_pr`.
 - All wrappers accept an injected `model`; otherwise they resolve their role
   from `config/models.yaml` and use the first configured group member unless
   `model_name` is supplied.
@@ -138,8 +144,9 @@ Role wrappers:
   `auto_research.observability`.
 
 ## Dictionary-level reference
-- `PromptRole` — literal type for the four Phase 1 runtime roles:
-  `reviewer`, `librarian_io`, `analyst_worker`, `analyst_lead`.
+- `PromptRole` — literal type for the runtime roles, mirroring `config/models.yaml` role
+  keys: `reviewer`, `librarian_io`, `analyst_worker`, `analyst_lead`, and the Phase-2
+  `coder` (the tool author).
 - `PROMPT_FILENAMES` — role-to-filename mapping used by the loader.
 - `FORBIDDEN_RUNTIME_REFERENCES` — tuple of build-time governance filenames that
   runtime prompts must not reference.
@@ -185,7 +192,7 @@ Role wrappers:
   - `is_alive` → `bool` — `True` when no sandbox attached; delegates to
     `sandbox.is_alive` otherwise.
 - `AnalystLeadAgent` — analyst lead wrapper.
-  Methods: `adjudicate()`, `judge_convergence()`.
+  Methods: `adjudicate()`, `judge_convergence()`, `clarify_for_author()`.
 
 ## Changelog
 - 2026-05-26 → 2026-06-11 — **Phase 1 built and ReAct-wired.** Four agent roles (reviewer,
@@ -207,3 +214,7 @@ Role wrappers:
   gains `figures_dir` (`<worker cwd>/figures`) and `_redirect_figure_args()` keyed on
   `_FIGURE_PATH_ARGS = {save_path, save_path_prefix}` arg-name convention; workers now omit
   those args.
+- 2026-06-12 — Phase 2 step 2: `AnalystLeadAgent.clarify_for_author()` added (the lead↔author
+  `ask_lead` channel, used by `merge_flow`). `ReadOnlyToolProvider` gains an optional
+  `web_source` → a `web_search` tool so the lead consults authoritative docs while triaging.
+  `PromptRole` gains `coder` (the tool author's prompt), mirroring `config/models.yaml` keys.
