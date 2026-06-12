@@ -51,8 +51,11 @@ class ResearchReport(MessageModel):
 class LatexReport(MessageModel):
     """Human-handle research report: LLM-authored LaTeX source.
 
-    The model emits {"latex": "..."} with backslashes escaped as required by
-    JSON (each LaTeX backslash becomes \\\\ in the JSON string literal).
+    The ``latex`` field carries the complete LaTeX document as a single string;
+    JSON/backslash encoding is owned by the provider's native structured-output
+    path. The whole document is emitted in one call, so the composing model's
+    ``max_tokens`` must be large enough to hold it — too small a budget truncates
+    the JSON string mid-value and the native parse fails with EOF-in-string.
     """
 
     latex: NonEmptyStr

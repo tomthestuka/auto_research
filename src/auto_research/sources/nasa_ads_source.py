@@ -3,6 +3,7 @@
 import os
 import json
 from datetime import date
+from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -78,14 +79,26 @@ def _ads_date(item) -> date | None:
 
 
 def resolve_ads_full_text(bibcode: str | None, token: str | None) -> list[FullTextLink]:
-    """Resolve ADS full-text source buttons for a bibcode."""
+    """Resolve ADS full-text source buttons for a bibcode.
+
+    A bibcode with no electronic-source links is a normal outcome, and ADS
+    reports it inconsistently: usually ``200`` with an empty ``records`` list,
+    but sometimes ``404`` (``{"error": "did not find any records"}``). Treat the
+    404 the same as the empty case — return ``[]`` rather than propagating, so a
+    single link-less paper cannot crash the literature node.
+    """
 
     if not bibcode or not token:
         return []
     url = f"https://api.adsabs.harvard.edu/v1/resolver/{quote(bibcode, safe='')}/esource"
     request = Request(url, headers={"Authorization": f"Bearer {token}"})
-    with urlopen(request, timeout=30) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        if exc.code == 404:
+            return []
+        raise
     records = payload.get("links", {}).get("records", [])
     links = []
     for record in records:

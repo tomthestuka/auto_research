@@ -81,7 +81,8 @@ calling, sees each result in-context, and chains dependent calls to completion (
 analyst's load → fit → run → plot in one pass), then emits its structured result grounded
 in those results. Each role's tool surface is a uniform `ToolProvider` — the analyst's
 science sandbox, the reviewer/lead's read-only inspection tools, the librarian's literature
-sources. The loop is bounded by `react_loop_cap`; prompt caching is a uniform `cache_prefix`
+sources. The loop is bounded by `react_loop_cap` (and a tighter `librarian_react_loop_cap`
+for the literature search, whose growing per-search context dominates token cost); prompt caching is a uniform `cache_prefix`
 knob each provider realizes natively. There is no prompt-injected JSON schema and no salvage
 parsing — results are Pydantic-validated and fail loudly; an off-schema structured call is
 re-issued a few times (`structured_retry_cap`) with the error fed back before raising.

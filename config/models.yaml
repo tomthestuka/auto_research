@@ -10,7 +10,7 @@ roles:
           input: 5.0
           output: 25.0
         parameters:
-          max_tokens: 4096
+          max_tokens: 16384  # reviewer composes the full LaTeX report in one call; 4096 truncated it
       - name: gpt_5_5_high
         provider: openai
         model: gpt-5.5

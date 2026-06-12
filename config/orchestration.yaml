@@ -18,7 +18,9 @@ max_iterations: 3
 debate_max_rounds: 3
 io_search_max_iterations: 1  # Phase 2 stub — evaluate_search_results() currently returns accepted=True
 tool_retry_cap: 3            # (legacy) accepted by DebateToConverge, now unused — the react loop self-corrects
-react_loop_cap: 12           # max tool iterations per agent inner ReAct loop before it must report
+react_loop_cap: 30           # max tool iterations per agent inner ReAct loop before it must report
+librarian_react_loop_cap: 1  # tighter cap for the librarian literature loop — each search re-sends the
+                             # growing 20-paper abstract context, so unbounded refinement is costly
 structured_retry_cap: 2      # attempts for a structured _call (off-schema feedback loop) before raising
 toolkit_root: /data/fzhou/research_toolkit
 # Python environment used for sandbox tool execution.

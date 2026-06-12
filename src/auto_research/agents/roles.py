@@ -473,14 +473,15 @@ class ReviewerAgent(AgentRole):
         payload = {
             "output_format": "tex",
             "output_format_instructions": (
-                "You are composing a LaTeX research report. "
-                "Return a JSON object with a single key 'latex' whose value is the complete "
-                "LaTeX document as a string. In JSON strings, every backslash must be escaped "
-                "as \\\\ (e.g. \\\\section{}, \\\\includegraphics{}). "
+                "You are composing a LaTeX research report. Provide the complete LaTeX "
+                "document as the 'latex' field, written as ordinary LaTeX source "
+                "(e.g. \\section{}, \\includegraphics{}). Do NOT add any JSON or backslash "
+                "escaping — the response encoding is handled for you, so a single backslash "
+                "is a single backslash. "
                 "Use only the exact figure relpaths and cite keys supplied below. "
-                "Use \\\\includegraphics{<relpath>} verbatim for each figure. "
-                "Define a self-contained \\\\begin{thebibliography} block; do not use an "
-                "external .bib file. Cite only the provided keys with \\\\cite{<key>}."
+                "Use \\includegraphics{<relpath>} verbatim for each figure. "
+                "Define a self-contained \\begin{thebibliography} block; do not use an "
+                "external .bib file. Cite only the provided keys with \\cite{<key>}."
             ),
             "request": request.model_dump(mode="json"),
             "analysis_report": report.model_dump(mode="json"),
@@ -574,7 +575,8 @@ class LibrarianIOAgent(AgentRole):
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
         await self._react(
-            seed_messages=seed, tools=provider, action="gather_literature", cap=_react_loop_cap(),
+            seed_messages=seed, tools=provider, action="gather_literature",
+            cap=_librarian_react_loop_cap(),
         )
         return _dedup_results(provider.results)
 
@@ -963,6 +965,18 @@ def _react_loop_cap() -> int:
     from ``debate_max_rounds`` (outer debate) and ``structured_retry_cap``.
     """
     return int(_orchestration_config().get("react_loop_cap", 12))
+
+
+def _librarian_react_loop_cap() -> int:
+    """Max tool iterations for the librarian literature ReAct loop.
+
+    Key: ``librarian_react_loop_cap``. Defaults to 3 (falling back to
+    ``react_loop_cap``). Tighter than the generic cap because each librarian
+    search re-sends the growing 20-paper abstract context, so unbounded query
+    refinement is the dominant token-cost driver of a run.
+    """
+    cfg = _orchestration_config()
+    return int(cfg.get("librarian_react_loop_cap", cfg.get("react_loop_cap", 12)))
 
 
 @lru_cache(maxsize=1)
