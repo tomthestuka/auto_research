@@ -25,9 +25,7 @@ class ArxivSource:
             sort_by=arxiv.SortCriterion.Relevance,
             sort_order=arxiv.SortOrder.Descending,
         )
-        # Use page_size=limit so the API request fetches only what we need.
-        client = arxiv.Client(page_size=limit)
-        return [_result_from_arxiv(item) for item in client.results(search)]
+        return [_result_from_arxiv(item) for item in self.client.results(search)]
 
 
 def _result_from_arxiv(item) -> SearchResult:

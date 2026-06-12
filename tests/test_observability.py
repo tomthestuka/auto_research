@@ -28,7 +28,7 @@ def test_cost_entry_uses_configured_token_rates():
 
 
 class FakeProvider:
-    async def call(self, messages, config, *, schema=None, tools=None, tool_choice="auto", images=(), documents=()):
+    async def call(self, messages, config, *, schema=None, tools=None, tool_choice="auto", images=(), documents=(), cache_prefix=False):
         return ModelResponse(
             content="done",
             usage=ModelUsage(input_tokens=100, output_tokens=25),
@@ -36,7 +36,7 @@ class FakeProvider:
 
 
 def test_model_handle_appends_cost_ledger_row(tmp_path, monkeypatch):
-    monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr("auto_research.observability.costs.runtime_data_dir", lambda: tmp_path)
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
     handle = ModelHandle(
         role="analyst_worker",

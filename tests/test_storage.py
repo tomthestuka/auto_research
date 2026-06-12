@@ -16,7 +16,7 @@ from auto_research.storage import (
 
 
 def test_database_path_uses_runtime_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr("auto_research.storage.database.runtime_data_dir", lambda: tmp_path)
 
     assert database_path() == tmp_path / "auto_research.sqlite3"
 
