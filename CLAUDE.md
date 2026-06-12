@@ -554,7 +554,7 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
 | # | Status | What is being built | Checkpoint (what works after) |
 |---|---|---|---|
 | 0 | Done | **Relocate the sandbox scratch** — worker `cwd` → per-worker scratch under the runtime data dir; `PYTHONPATH` stays limited to `research_toolkit`; neither repo is ever the cwd. | `bash_exec` cannot write into either repo; figures/scratch land under the data dir. |
-| 1 | Todo | **`ToolSpec` + two-halves contract** — schema a worker emits (science context, expected behavior, validation ObsID, proposed checks) + the human-half/ai-half + tolerance contract. | Schema validates; a sample `ToolSpec` round-trips; documented in `schemas/DOCS.md`. |
+| 1 | Done | **`ToolSpec` + two-halves contract** — schema a worker emits (science context, expected behavior, validation ObsID, proposed checks) + the human-half/ai-half + tolerance contract. | Schema validates; a sample `ToolSpec` round-trips; documented in `schemas/DOCS.md`. |
 | 2 | Todo | **merge_flow harness** — `merge_flow.propose_and_pr()` invokes the Claude Agent SDK to write human-half, ai-half (`TOOL_MANIFEST` entry), and tests in an isolated worktree, structure-context injected from runtime-safe sources (`xspec_utils` + `prompts/tool_author.md` + config). | From a `ToolSpec`, the agent produces a branch with both halves and tests; nothing touches master. |
 | 3 | Todo | **The deterministic gate** — generic Layer-A checks + a Layer-B tool-local test runner + provenance wiring + the no-fabrication scan. | A good tool passes; one that fabricates, fails replication, or breaks a declared check is rejected with a specific machine-readable reason. |
 | 4 | Todo | **Provider-decorrelated review** — a **GPT analyst co-lead** (provider ≠ the Claude author, routed from config) reviews the diff + gate result and judges the Layer-B checks; code-review only. Its pass + the gate authorizes the commit. | Review runs on a different provider than the author; a planted subtle bug is caught or escalated, not rubber-stamped. |
@@ -626,61 +626,14 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
 
 ## Changelog
 
-- 2026-05-27 → 2026-06-03 — **Phase 1 built and hardened (skeleton complete).** Full
-  LangGraph team end-to-end: Pydantic `schemas` (incl. `FigureRef`); config/model registry
-  (OpenAI/Anthropic/Google); LangSmith + cost logging; SQLite `storage` (embedding space
-  reserved); librarian `sources` (arXiv/NASA ADS/Tavily); `retrieval` (`text_search()`;
-  `vector_search()` stub); runtime `prompts/`; four agent roles; `DebateToConverge` (cap-3
-  + lead adjudication) with tool-figure propagation to the reviewer; the graph with two
-  capped feedback edges + Studio wiring; monitored `run_research()` / chatter / CLI /
-  notebook; persistent per-worker REPL sandbox + `ToolkitRegistry` (`TOOL_MANIFEST`
-  discovery, `disabled_tools`) + error-feedback retries (`tool_retry_cap`); `report/`
-  module (machine JSONL + human LaTeX, in-graph `compose_report` node). Sandbox/XSPEC
-  hardening: fd-redirect console capture, non-interactive boot policy (incl.
-  `Plot.xAxis="keV"`), subprocess auto-restart, IO truncation, env from `_source_ini_env`.
-  Domain rule captured in `prompts/` + toolkit: IXPE-first data-group order for polarized
-  joint fits (validated Cyg X-1 fit stat/dof ≈ 1.8). `merge_flow.propose_and_pr()` left as
-  the Phase-2 stub. Deterministic `pytest` covers the deterministic parts; end-to-end
-  `run_research()` behavior is observed via `test_full_suite.py` (live), not asserted by the
-  deterministic suite.
-- 2026-06-08 — **Reframed `CLAUDE.md` for Phase 2.** Marked Phase 1 done; replaced the
-  Phase-1 build-order/TODO sections with a retrospective
-  ([§8](#8-what-phase-1-built-the-system-as-it-stands)) and a tool-authoring spec
-  ([§9](#9-phase-2--tool-authoring-the-active-phase)). Compacted the changelog.
-- 2026-06-09 — **Specified Phase 2 end to end after design debate.** `research_toolkit` =
-  uniform `<domain>_utils/` packages (strategy modules + abstracted human-interface +
-  `skills/TOOL_MANIFEST` ai-interface), `xspec_utils` the template; planned `heasarc_utils`,
-  `lib_utils` (literature search relocates out of `auto_research/sources`); librarians never
-  author, analysts author all toolkits. Two-halves = human-interface (replicable by import)
-  \+ ai-interface. Mergeability gate reframed for the frontier: a domain-blind Layer-A
-  generic gate (determinism / no-fabrication / structural / provenance) + Layer-B tool-local
-  tests authored with the tool from an **open menu** of patterns (known-input, differential,
-  metamorphic, injection-recovery, cross-computation, sanity bounds — reviewer may invent new
-  ones). **Replicability and golden-regression are human merge scope, not the runtime gate.**
-  §9.2 states the exact `xspec_utils` template (`lib/` human-half + pure-data
-  `skills/TOOL_MANIFEST` + `session.py`); the no-fabrication scan runs twice (deterministic
-  harness + GPT co-lead review). No-fabrication is absolute: zero data-writing code in the toolkit; synthetic data
-  lives under the mission `obs_db_path` as a marked `synth…` ObsID, lead-reviewed, with
-  provenance flagging synth-derived results. Author = Claude Agent SDK seeded with the
-  analyst's `ToolSpec`; reviewer = a **GPT analyst co-lead** (provider ≠ author), code-review
-  only; the Claude lead keeps science adjudication. Raise-to-human is a
-  cross-cutting **clarification** channel (`HumanQuery`/`HumanResponse`, LangGraph
-  `interrupt()` + `ask_human`), fully decoupled from merging; handler-injection with
-  community connectors (`slack.py`→`slack_bolt`, `telegram.py`→`python-telegram-bot`,
-  `whatsapp.py`→Twilio; email deferred); durable checkpointer deferred. `FAILED`/
-  `NEEDS_HUMAN` is a first-class outcome. Git: `approve_edit()` lands one atomic commit per
-  tool on a branch on gate-pass + lead-approve; the runtime is **master-blind** — humans
-  merge manually, out of band. Added build-order step 0 (relocate sandbox scratch off the
-  repo root). No source changes.
-- 2026-06-11 — **Clarified "minimal" ([§1](#1-project-overview)): use community/official
-  wheels for solved interfaces.** Hand-rolling a stable, widely-used primitive (provider
-  API, structured-output enforcement, retry/backoff, HITL connector) is not "minimal" —
-  prefer the official SDK's native feature. Prompted by replacing the Anthropic
-  forced-single-tool structured-output workaround (which let Opus nest the result as
-  `{"parameter": {...}}` and crashed `judge_convergence`) with the SDK-native
-  `messages.parse(output_format=schema)`, plus a bounded off-schema retry in
-  `AgentRole._call` (`structured_retry_cap`, default 2). Config default reviewer/analyst-lead
-  model bumped `claude-opus-4-7` → `claude-opus-4-8` (documented structured-outputs model).
+- 2026-05-27 → 2026-06-11 — **Phase 1 built, hardened, and closed out.** Full LangGraph
+  team end-to-end (Pydantic schemas, config registry, observability, SQLite storage, sources,
+  retrieval, four agent roles, `DebateToConverge`, two capped feedback edges, Studio wiring,
+  report module, sandbox + ToolkitRegistry, CLI/notebook). Inner ReAct loops wired across
+  all roles. Native structured output + function calling (provider adapters, schema
+  sanitizers, `messages.parse`). Provider caching + tool-turn round-trip. Phase 2 spec
+  written (§9): uniform toolkit layout, mergeability gate, actor flow, build order. "Minimal"
+  clarified: use community wheels for solved interfaces. No source changes after 2026-06-11.
 - 2026-06-12 — **Phase 1 closed out — verified end-to-end; Phase 2 now active.** A live
   Cyg X-1 soft-state joint-fit run completed the full graph and produced both report
   handles (machine JSONL + compiled LaTeX/PDF). Three run-blocking defects found and fixed
@@ -726,3 +679,14 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   analysts propose/author; librarians never do. **Step 1 deliverable updated:** `ToolSpec` (with
   `disposition`, `validation_data`, advisory `proposed_checks`, optional lead-finalized tolerances)
   **plus an `AnalystReport.tool_request` hook**; lead↔author message schema deferred to step 2.
+- 2026-06-12 — **Phase 2 step 1 done — `ToolSpec` brief.** `schemas/toolspec.py`: `ToolSpec` +
+  `ValidationDataset` + `ProposedCheck` (exported), per the clarified §9.3 design — `science_context`/
+  `expected_behavior` prose, `proposed_tool_name`, `target_domain` + `disposition`, ≥1
+  `validation_data`, advisory open-`kind` `proposed_checks`, optional `replication_tolerance`, auto
+  `id`/`created_at`. `AnalystReport.tool_request: ToolSpec | None` added. Round-trip + validation tests
+  in `test_schemas.py` (163 pass; the 4 pre-existing failures — `FakeProvider` missing `cache_prefix`,
+  two env-var/live-source tests — are untouched test-debt from the ReAct refactor). Also wired the
+  **analyst lead's read-only toolkit access**: its `ReadOnlyToolProvider` roots now include
+  `toolkit_root` (reviewer's do not), so the lead reads the full `lib/` to decide `disposition` —
+  read-only/path-confined, no shell, per §2/§12. `prompts/analyst_lead.md` updated. Next: step 2
+  (the `merge_flow` harness — lead spawns the Sonnet author in an isolated worktree).

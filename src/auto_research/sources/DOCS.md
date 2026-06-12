@@ -64,5 +64,6 @@ Each module is independent; no source imports another.
   metadata, and returns the stored row.
 
 ## Changelog
-- 2026-05-26/27 — Step 5 built: `QuerySource` interface, arXiv adapter, NASA ADS adapter (with Full Text Sources resolver for PDF download), Tavily web adapter. PDF download/ingest hooks. Deterministic normalization tests; opt-in live tests under `AUTO_RESEARCH_LIVE_SOURCES_TESTS=1`.
-- 2026-06-12 — `resolve_ads_full_text()` now degrades a `404` from the ADS `/resolver/<bibcode>/esource` endpoint to `[]` instead of letting the `HTTPError` propagate. A bibcode with no electronic-source links is a normal outcome that ADS reports inconsistently — usually `200` + empty `records`, but sometimes `404` ("did not find any records", observed for `2023eas..conf.1592B`). Unguarded, a single link-less paper crashed the whole run at the `literature` node once the ReAct `gather_literature` path began resolving full-text per result. Non-404 HTTP errors still propagate.
+- 2026-05-26 → 2026-06-12 — `QuerySource` interface; arXiv, NASA ADS, and Tavily adapters.
+  `resolve_ads_full_text()` degrades ADS `404` to `[]` (bibcodes with no esource records are
+  a normal outcome ADS reports inconsistently; non-404 errors still propagate).

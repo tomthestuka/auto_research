@@ -90,6 +90,8 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `run(workers, lead, document)`.
 
 ## Changelog
-- 2026-05-26/28 — Steps 9–12 built: `ConsensusStrategy`, `DebateToConverge` (cap-3 debate, lead adjudication, `RunMonitor` recording, `registry`/`tool_retry_cap` for in-loop tool execution via `_run_tools()`), `IODebateToConverge` (IO-team abstraction debate over `MemoryRecord`). `_run_tools()` calls `execute_tools()` per worker after each round, appends results to private `memory_path`, injects a shared summary into the next round. Workers with dead sandboxes are restarted before tool calls.
-- 2026-06-03 — Figure propagation fix. `_run_tools()` now returns `(AnalysisTask, list[list[FigureRef]])`. New `_merge_figures()` merges per-worker tool figures onto `AnalystReport.figures` (deduped by path via `_deduplicated()`). `run()` applies this after each tool phase and copies all accumulated figures onto the final adjudicated report, so `ReviewerAgent.review(images=report.figures)` receives real `FigureRef`s.
-- 2026-06-11 — **Tool execution moved into the worker's ReAct loop.** `DebateToConverge` no longer executes tools: each `worker.analyze()` now runs its own inner tool loop and returns a report already grounded in real results (with the loop's figures attached). `run()` calls `analyze()` only; `_run_tools`/`_merge_figures` removed and replaced by `_augment_with_peer_tools(workers, task)`, which builds the truncated cross-worker summary from each worker's `last_tool_results` and injects it into task instructions between rounds. The `registry`/`tool_retry_cap` constructor fields are accepted for call-site compatibility but unused (the worker owns its sandbox + loop). Outer caps (`debate_max_rounds`) and final figure dedup at adjudication are unchanged.
+- 2026-05-26 → 2026-06-11 — `DebateToConverge` (cap-3 debate, lead adjudication,
+  `IODebateToConverge`) built. Tool execution moved into each worker's ReAct loop
+  (2026-06-11): `_run_tools`/`_merge_figures` removed; `run()` calls `analyze()` only;
+  `_augment_with_peer_tools()` injects cross-worker tool summaries between rounds.
+  `registry`/`tool_retry_cap` kept for call-site compat but unused.

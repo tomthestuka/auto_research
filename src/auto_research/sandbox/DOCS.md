@@ -348,12 +348,16 @@ writes the tool, lead reviews, human approves merge on GitHub.
   raises `NotImplementedError`.
 
 ## Changelog
-
-- 2026-05-26/28 — Step 11 built: `ToolkitRegistry` (manifest-based discovery), `PersistentSandbox` (long-lived JSON-line REPL subprocess per worker; `is_alive`; auto-restart on timeout/death), `workspace.py` (per-run/agent folder layout, `memory_path`, `append_memory`), `builtin_server.py` (MCP stdio: `bash_exec`, `list_dir`, `read_file`), `mcp_client.py` (`MCPToolClient`; `load_mcp`/`is_mcp` on registry), `analyst_env.sh` (headless HEASoft/CALDB init), `merge_flow.py` Phase 2 stub. Tool execution wired into `DebateToConverge._run_tools()`. `run_tool()` retained for ad-hoc use.
-- 2026-06-01 — Sandbox hardening. REPL: fd-redirect prevents C-level console output from corrupting the JSON protocol; `console_tail` captured and attached to results. XSPEC configured once at boot (`Fit.query='no'`, `Xset.allowPrompting=False`, `Xset.chatter=5`). MCP builtin server spawned in astropy env via `_builtin_server_config` (explicit python path; env from `_source_ini_env`; PYTHONPATH=toolkit_root). Isolation test (`test_sandbox_isolation.py`) and policy tests (`test_live_sandbox_policy.py`) added.
-- 2026-06-03 — `workspace.py` gains `report_dir(run_id) -> Path` — returns `agent_dir(run_id, "reviewer") / "report"` and ensures `figures/` subdir exists.
-- 2026-06-03 — `_configure_xspec_once()` boot policy now also sets `Plot.xAxis = "keV"`. PyXSPEC defaults `xAxis` to `"channel"`, which made `plot_fit` residual panels render against channel number (starting at 0) and misalign with the energy-axis spectrum panel. Setting it once at REPL boot fixes all plots and also makes energy-based ignore/notice ranges interpreted consistently.
-- 2026-06-09 — Runtime dir moved from `AUTO_RESEARCH_RUNTIME_DIR` env var to `config/orchestration.yaml::runtime_dir`; `workspace.py` now calls `auto_research.env.runtime_data_dir()`. `_source_ini_env()` now raises `RuntimeError` on any failure (subprocess exception, non-zero exit, or empty result) instead of falling back to `os.environ`. No env fallback for the analyst subprocess.
-- 2026-06-03 — `ToolkitRegistry` gains `disabled_tools` constructor param: named tools are stripped from `self._tools` at load time, making them absent from `tool_catalogue()` and `is_known()`. `_builtin_server_config()` and `PersistentSandbox._spawn()` raise `ValueError` if `analyze_ini_sh` is missing — no `os.environ` fallback; env is always `_source_ini_env(analyze_ini_sh)`. PYTHONPATH now covers both `toolkit_root` and `toolkit_root.parent`. Sandbox/policy tests migrated to real HEASoft env; `test_mcp_bash_env_xspec_and_toolkit` live test confirms `import xspec`, `import xspec_utils`, and `from research_toolkit import xspec_utils` all succeed.
-- 2026-06-09 — Native function-calling support (P0). `ToolkitRegistry.tool_definitions()` returns provider-neutral function defs (`{name, description, input_schema}`) for all toolkit + MCP tools, with `kind_for_function()` reversing the dotted-kind → provider-safe-name sanitization. `MCPToolClient` now captures each tool's `inputSchema` and exposes `schema(kind)`. The REPL `_coerce` is demoted to a back-compat guard: it only parses strings that are clearly JSON containers (`{`/`[`), leaving scalar strings untouched so correctly-typed function-call arguments pass through unmodified. `bash_exec`'s docstring (its tool description) now carries the inline-`python -c` usage guidance that previously lived in `prompts/analyst_worker.md`.
-- 2026-06-12 — Phase 2 step 0: `MCPToolClient` now forwards a per-server `cwd` to `StdioServerParameters`, so the builtin MCP server process can be pinned off both repos (`runtime._builtin_server_config(..., cwd=run_dir(run_id))`). The server dict gains an optional `cwd` key; omitted → inherit (back-compat). Per-call `bash_exec` cwd injection (the worker scratch dir) is unchanged; this is a by-construction backstop for anything the server does relative to its own cwd.
+- 2026-05-26 → 2026-06-09 — **Phase 1 sandbox built and hardened.** `ToolkitRegistry`
+  (manifest discovery, `disabled_tools`, `tool_definitions()` for native function calling,
+  `kind_for_function()`), `PersistentSandbox` (JSON-line REPL, fd-redirect, XSPEC
+  non-interactive boot + `Plot.xAxis="keV"`, auto-restart, `_source_ini_env`),
+  `workspace.py` (per-run/agent layout, `memory_path`, `report_dir`), `builtin_server.py`
+  (MCP stdio: `bash_exec`/`list_dir`/`read_file`; `bash_exec` carries inline-`python -c`
+  guidance), `mcp_client.py` (`MCPToolClient`, `inputSchema` capture), `merge_flow.py`
+  Phase 2 stub. Runtime dir from `orchestration.yaml`; no `os.environ` env fallback.
+- 2026-06-12 — Phase 2 step 0: `MCPToolClient` forwards a per-server `cwd` to
+  `StdioServerParameters` (optional key in server dict; omitted → inherit); the builtin MCP
+  server process is now pinned to `run_dir(run_id)` — a by-construction backstop so nothing
+  it does relative to its cwd can touch a repo. Per-call `bash_exec` cwd injection is
+  unchanged.

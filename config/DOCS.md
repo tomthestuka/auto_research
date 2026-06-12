@@ -80,5 +80,8 @@ role or swapping a provider is a YAML edit; no Python change.
   server (`bash_exec`, `list_dir`, `read_file` at present).
 
 ## Changelog
-- 2026-05-26/27 — Steps 0–5 built: `models.yaml` (role groups, `priceMTk` pricing, `vision`/`documents` flags), `observations.yaml` (mission obs DB paths), `orchestration.yaml` (iteration caps, `toolkit_root`, `analyze_env`, `analyze_ini_sh`, `mcp_servers`). Librarian I/O output cap raised for full PDF ingestion.
-- 2026-06-03 — Added `orchestration.yaml::disabled_tools`: list of tool names stripped from `ToolkitRegistry` at load time, independent of what research_toolkit exposes.
+- 2026-05-26 → 2026-06-12 — `models.yaml` (role groups, pricing, vision/documents flags;
+  reviewer Claude `max_tokens` raised 4096→16384 for LaTeX step), `observations.yaml`
+  (mission obs DB paths), `orchestration.yaml` (`disabled_tools`, `react_loop_cap` default
+  12, `librarian_react_loop_cap` default 3 with MEMO on deferred token-budget guard,
+  `structured_retry_cap` default 2).

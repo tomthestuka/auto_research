@@ -137,8 +137,14 @@ carried by **reference** (`FigureRef`), never embedded
   (the committed tests are authoritative). `id` auto-generates (`toolspec-<hex>`) when omitted.
 
 ## Changelog
-- 2026-06-03 — Added report schemas (`schemas/report.py`): `ReportSection`, `Reference`, `ResearchReport` (machine handle), `LatexReport` (human handle). Exported from `schemas/__init__.py`.
-- 2026-06-09 — Native function-calling refactor (P0). `ToolCallRequest.arguments` widened `dict[str, str]` → `dict[str, Any]`: tool requests are now built from provider-native tool calls whose arguments are constrained by each tool's own `args_schema`, so nested structures (e.g. `indices`) arrive as real objects, never hand-serialized JSON strings (which previously truncated mid-write and crashed `plot_fit`/`plot_iqu`). `requested_by` and `purpose` gained defaults (the model authors the native tool call, not the envelope metadata). `Any` here is the genuine open tool-arg map only — message schemas remain strictly closed and strictly validated.
-- 2026-05-26/28 — Steps 1–11 built: full Pydantic v2 protocol (`ResearchRequest`, `SearchResult` with `pdf_url`/`full_text_links`/`local_path`, `AnalysisTask`/`AnalystReport`, `ReviewVerdict`, `FigureRef`, `DocumentRef`, `ToolCallRequest`/`ToolResult`). `ToolResult.exit_code=127` convention for unknown tools. Tool results live in worker memory files, not in `ResearchState`.
-- 2026-06-12 — Clarified the `LatexReport` docstring: the `latex` field is the whole document emitted in one structured call, so the composing model's `max_tokens` must be large enough to hold it; too small a budget truncates the JSON string mid-value and native `messages.parse` fails with EOF-in-string. JSON/backslash encoding is owned by the provider's native structured-output path (the `\\` seen in the truncation error is correct single JSON escaping, not double-escaping). Real fix was raising the reviewer `max_tokens` (see `agents/DOCS.md` 2026-06-12); an earlier docstring revision that blamed backslash escaping was inaccurate and is superseded here.
-- 2026-06-12 — **Phase 2 step 1: `ToolSpec` tool-authoring brief** (`schemas/toolspec.py`). New `ToolSpec` + `ValidationDataset` + `ProposedCheck`, exported from `schemas/__init__.py`. A *brief, not a frozen contract* (CLAUDE.md §9.3): science/behavior prose, `proposed_tool_name`, `target_domain` + `disposition` (`extend_existing`|`new_package`, proposer/lead's call), ≥1 `validation_data` (real/marked-synth ObsID), advisory open-`kind` `proposed_checks`, optional lead-finalised `replication_tolerance`, auto `id`/`created_at`. Added `AnalystReport.tool_request: ToolSpec | None` so a worker raises it on its report. Round-trip + validation tests in `test_schemas.py`. Lead↔author message schema deferred to step 2.
+- 2026-05-26 → 2026-06-09 — **Full Pydantic v2 protocol built.** `ResearchRequest`,
+  `SearchResult` (`pdf_url`/`full_text_links`/`local_path`), `AnalysisTask`/`AnalystReport`,
+  `ReviewVerdict`, `FigureRef`/`DocumentRef`, `ToolCallRequest` (`arguments: dict[str,Any]`
+  for native function-call values; `requested_by`/`purpose` defaulted), `ToolResult`
+  (exit_code 127 = unknown tool), report schemas (`ReportSection`, `Reference`,
+  `ResearchReport`, `LatexReport`).
+- 2026-06-12 — Clarified `LatexReport` docstring: `latex` is a full document in one
+  structured call; `max_tokens` must hold it (raised to 16384 in `config/models.yaml`).
+  `\\` in truncation errors is correct single JSON escaping. Phase 2 step 1: `ToolSpec`
+  brief (`schemas/toolspec.py`) — `ToolSpec` + `ValidationDataset` + `ProposedCheck`;
+  `AnalystReport.tool_request: ToolSpec | None`; round-trip + validation tests added.

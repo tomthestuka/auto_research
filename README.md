@@ -152,7 +152,24 @@ discipline as `DOCS.md`). Phase 2 items remain documented as deferred stubs in
 | 11 | Done | Sandbox & tool execution: `ToolkitRegistry` (manifest-based discovery + `tool_definitions()` for native function calling), persistent per-worker `PersistentSandbox` with non-interactive XSPEC boot policy and timeout/death restart, built-in MCP tools. Every agent runs an **inner ReAct loop** (`AgentRole._react` over a uniform `ToolProvider`): the analyst chains its science tools to completion in one pass, the reviewer/lead inspect artifacts via read-only tools, the librarian iterates over its literature sources. `merge_flow.py` stub (Phase 2 → Claude Agent SDK). LangGraph Studio: `langgraph dev` exposes live graph state per node. |
 | 12 | Done | Entry points & tests: importable monitored library entry, CLI, inspection notebook, and deterministic pytest coverage. |
 
-See `CLAUDE.md` §14 for checkpoints and deferred Phase 2 stubs.
+See `CLAUDE.md` §9 for the full Phase 2 spec and §12 for deferred stubs.
+
+---
+
+## Build status (Phase 2 — active)
+
+Statuses: **Done** = built & documented · **Todo** = in scope, not yet built.
+
+| # | Status | What is being built | Checkpoint |
+|---|---|---|---|
+| 0 | Done | **Relocate sandbox scratch** — worker `cwd` + MCP server process cwd pinned under runtime data dir; figure outputs redirected into `<worker scratch>/figures`. | `bash_exec` cannot write into either repo; figures land under the data dir. |
+| 1 | Done | **`ToolSpec` brief** — schema a worker emits when the toolkit lacks a capability; `AnalystReport.tool_request` hook; analyst lead's `ReadOnlyToolProvider` includes `toolkit_root`. | Schema validates; sample round-trips; lead can browse full `research_toolkit`. |
+| 2 | Todo | **`merge_flow` harness** — `propose_and_pr()` drives a Claude Agent SDK Sonnet author in an isolated git worktree; `ask_human` in-process MCP tool for the lead↔author channel; structure context assembled from runtime-safe sources. | From a `ToolSpec`, the agent produces a branch with both halves and tests. |
+| 3 | Todo | **Deterministic gate** — Layer-A checks (determinism, no-fabrication scan, structural, provenance) + Layer-B tool-local test runner. | Good tool passes; fabricating/failing tool is rejected with a machine-readable reason. |
+| 4 | Todo | **Provider-decorrelated review** — GPT analyst co-lead reviews diff + gate result (provider ≠ Claude author). | Review runs on a different provider; a planted subtle bug is caught or escalated. |
+| 5 | Todo | **Raise-to-human** — `HumanQuery`/`HumanResponse`; LangGraph `interrupt()` + `ask_human`; `FAILED`/`NEEDS_HUMAN` terminal state; `slack.py` reference connector. | A blocked role raises and the run pauses; an honest FAILED carries no penalty. |
+| 6 | Todo | **`approve_edit()` atomic commit** — gate-pass + co-lead review-pass → one atomic commit per tool on the branch; runtime never merges. | Approved tool lands as one commit; human reruns the human-half and merges/reverts cleanly. |
+| 7 | Todo | **End-to-end** — missing-capability question triggers authoring through the full flow; tool lands on a branch; human merges; analysis re-runs. | Full Phase 2 flow exercised live via a `test_full_suite.py` sibling. |
 
 Step 8 validates per-role plumbing: prompt loading, config-driven model
 resolution, structured Pydantic input/output, and trace/cost logging. It does
@@ -186,9 +203,12 @@ XSPEC tools:
 
 ```bash
 conda env create -f environment.yml      # creates the `auto_research` env (Python 3.13)
-conda activate auto_research             # `pip install -e .` + langgraph-cli run automatically
+conda activate auto_research             # pip section installs -e ., langgraph-cli, claude-agent-sdk
 cp .env.example .env                     # then fill in your keys (see Configuration)
 ```
+
+> `claude-agent-sdk` (Phase 2 — tool authoring) and `langgraph-cli` (Studio) are pip-only;
+> they are installed automatically from the `pip:` block in `environment.yml`.
 
 Verify it imports and the deterministic tests pass (these need **no** API keys, no XSPEC):
 
@@ -332,8 +352,10 @@ consensus, tool, and reviewer narrative as JSONL plus a grouped Markdown report.
 
 ---
 
-## Phase 2 roadmap (deferred)
+## Beyond Phase 2 (deferred stubs)
 
-Vector retrieval (sqlite-vec) · autonomous tool-merge toggle · deeper sandbox hardening ·
-`bash_exec` figure capture (diff worker cwd for new images → `FigureRef`s) ·
-the lead-scientist group that mines the knowledge base to generate new research ideas.
+Vector retrieval (sqlite-vec, embedding column reserved) · durable HITL suspend/resume
+(LangGraph checkpointer) · OS-level sandbox jailing (bind-mounts / seccomp) ·
+`bash_exec` figure capture (diff worker cwd → `FigureRef`s) · librarian IO ingest
+consensus (activate `IODebateToConverge`, replace `accepted=True` stub) ·
+the lead-scientist group that mines the knowledge base to propose new research requests.

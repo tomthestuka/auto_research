@@ -23,7 +23,8 @@ dependencies:
   - mcp>=1.27
   # tests
   - pytest>=8
-  # langgraph-cli is not on conda-forge; everything else above is.
+  # langgraph-cli and claude-agent-sdk are not on conda-forge.
   - pip:
       - -e .
       - langgraph-cli[inmem]
+      - claude-agent-sdk==0.2.99

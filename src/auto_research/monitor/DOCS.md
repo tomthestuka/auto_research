@@ -58,6 +58,6 @@ output is filtered by `chatter`.
 - `RunMonitor` - lock-protected event collector and Markdown/JSONL renderer.
 
 ## Changelog
-- 2026-05-28 — Step 12 built: `RunMonitor` (1–10 chatter scale, async-safe event collection, optional JSONL streaming, team-block Markdown reports via `write_markdown(grouped=True)`). `from_jsonl()` for offline rendering.
-- 2026-06-09 — `default_monitor_jsonl_path()` now reads runtime dir from `auto_research.env.runtime_data_dir()` (`config/orchestration.yaml::runtime_dir`) instead of `AUTO_RESEARCH_RUNTIME_DIR` env var.
-- 2026-06-09 — `record()` now always streams to JSONL at full fidelity (levels 1–10); in-memory storage and return value are still filtered by `chatter`. JSONL is always a complete diagnostic log; `chatter` only affects terminal/notebook output.
+- 2026-05-28 → 2026-06-09 — `RunMonitor` (1–10 chatter scale, async-safe JSONL streaming,
+  grouped Markdown reports). `record()` always streams at full fidelity; `chatter` filters
+  in-memory only. Runtime dir from `orchestration.yaml::runtime_dir`.

@@ -62,37 +62,8 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
   `auto_research.monitor`.
 
 ## Changelog
-- 2026-05-27 — Step 8 completed: `auto_research.agents` now exposes async
-  role wrappers for reviewer, librarian I/O, librarian searcher, analyst
-  worker, and analyst lead.
-- 2026-05-27 — Step 9 completed: `auto_research.consensus` now exposes a
-  bounded debate-to-converge strategy for analyst workers and lead synthesis.
-- 2026-05-27 — Clarified that step 8 validates role plumbing rather than full
-  production capability for roles whose tools are still deferred.
-- 2026-05-27 — Added generic observation-location config loading and document
-  attachment support for librarian I/O ingestion.
-- 2026-05-27 — Step 7 completed: runtime prompts now exist for all Phase 1 roles,
-  with a guarded loader in `auto_research.agents`.
-- 2026-05-27 — Step 6 completed: `auto_research.retrieval` now exposes SQLite
-  text search over papers/memory and a `vector_search()` Phase 2 stub.
-- 2026-05-27 — Step 5 completed: `auto_research.sources` now exposes the shared
-  `QuerySource` protocol plus arXiv, NASA ADS, and Tavily source adapters.
-- 2026-05-27 — Step 4 completed: `auto_research.storage` now provides SQLite
-  schema initialization, paper/memory/query-log writes, local PDF ingestion, and
-  reserved embedding space.
-- 2026-05-27 — Step 3 completed: provider calls now flow through
-  `auto_research.observability` for optional LangSmith tracing and JSONL cost
-  ledger logging.
-- 2026-05-27 — Corrected step 2 so model roles resolve to groups instead of
-  single handles; `auto_research.models` now exposes `ModelGroupHandle`.
-- 2026-05-27 — Step 2 completed: `auto_research.models` now loads
-  `config/models.yaml`, resolves roles to provider handles, and exposes
-  provider-neutral call/usage types.
-- 2026-05-27 — Step 1 completed: `auto_research.schemas` now exports the
-  Pydantic v2 inter-agent protocol and schema validation tests pass.
-- 2026-05-26 — Package seeded with submodule folders (each with its own `DOCS.md`)
-  during step 0. No code beyond the version constant.
-- 2026-06-09 — Added `auto_research.env` (`check_required_env()`, `runtime_data_dir()`): crashes at launch when any required env var is missing; called in `cli/main.py` after `load_dotenv()` and at the top of `graph/runtime.run_research()`. Runtime data directory moved from `AUTO_RESEARCH_RUNTIME_DIR` env var to `config/orchestration.yaml::runtime_dir`; all four callers (`workspace`, `monitor`, `observability`, `storage`) now use `env.runtime_data_dir()`. `sandbox/runner._source_ini_env` now raises `RuntimeError` on failure instead of falling back to `os.environ`.
-- 2026-05-28 — Step 12: added `auto_research.monitor`, exported
-  `run_research()` / `ResearchRun` / `RunMonitor`, and kept `run_request()` as
-  the verdict-only compatibility entry.
+- 2026-05-26 → 2026-06-09 — Phase 1 complete: all submodules built (schemas,
+  models/registry, observability, storage, sources, retrieval, prompts, agents, consensus,
+  graph/runtime, sandbox, report, CLI, notebook). `auto_research.env` added
+  (`check_required_env()`, `runtime_data_dir()`); runtime dir moved from env var to
+  `orchestration.yaml::runtime_dir`. Phase 2 active.
