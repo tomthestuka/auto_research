@@ -1,9 +1,9 @@
 roles:
   reviewer:
     members:
-      - name: claude_opus_4_7
+      - name: claude_opus_4_8
         provider: anthropic
-        model: claude-opus-4-7
+        model: claude-opus-4-8
         vision: true
         documents: true
         priceMTk:
@@ -36,9 +36,9 @@ roles:
             thinking_level: high
   analyst_lead:
     members:
-      - name: claude_opus_4_7
+      - name: claude_opus_4_8
         provider: anthropic
-        model: claude-opus-4-7
+        model: claude-opus-4-8
         vision: true
         priceMTk:
           input: 5.0

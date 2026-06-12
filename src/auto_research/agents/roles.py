@@ -10,7 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from auto_research.agents.prompts import PromptRole, load_prompt
 from auto_research.consensus import IODebateToConverge
@@ -101,49 +101,86 @@ class AgentRole:
                 "documents": [doc.model_dump(mode="json") for doc in documents],
             },
         )
-        try:
-            response = await self.model.call(
-                [
-                    ModelMessage(role="system", content=self.prompt),
-                    ModelMessage(role="user", content=_payload_text(payload)),
-                ],
-                schema=output_model,
-                images=images,
-                documents=documents,
-            )
-            self.last_response = response
-            value = response.parsed
-            if value is None:
-                raise ValueError(
-                    f"{self.role}.{action}: provider returned no structured output for "
-                    f"{output_model.__name__}"
+        # Native structured output enforces the schema at the provider, so a bad
+        # shape is rare — but a transient off-schema result must not kill the run
+        # the way a single tool-call error doesn't. Re-issue the structured call a
+        # few times, feeding the validation error back, mirroring the tool-call
+        # feedback loop. Cap exhaustion still raises (fail-loud is preserved).
+        cap = max(1, _structured_retry_cap())
+        last_exc: Exception | None = None
+        for attempt in range(cap):
+            call_payload: Mapping[str, Any] = payload
+            if attempt > 0:
+                call_payload = {
+                    **payload,
+                    "_retry_feedback": (
+                        f"Your previous response was not a valid {output_model.__name__}: "
+                        f"{last_exc}. Return a valid {output_model.__name__} matching the "
+                        "schema exactly — do not wrap or nest the fields."
+                    ),
+                }
+            try:
+                response = await self.model.call(
+                    [
+                        ModelMessage(role="system", content=self.prompt),
+                        ModelMessage(role="user", content=_payload_text(call_payload)),
+                    ],
+                    schema=output_model,
+                    images=images,
+                    documents=documents,
                 )
-            if overrides:
-                if not isinstance(value, dict):
+                self.last_response = response
+                value = response.parsed
+                if value is None:
                     raise ValueError(
-                        f"{self.role}.{action}: cannot apply overrides to non-object output"
+                        f"{self.role}.{action}: provider returned no structured output for "
+                        f"{output_model.__name__}"
                     )
-                value = {**value, **overrides}
-            parsed = output_model.model_validate(value)
-        except Exception as exc:
+                if overrides:
+                    if not isinstance(value, dict):
+                        raise ValueError(
+                            f"{self.role}.{action}: cannot apply overrides to non-object output"
+                        )
+                    value = {**value, **overrides}
+                parsed = output_model.model_validate(value)
+            except (ValidationError, ValueError) as exc:
+                # Shape problems are retryable; everything else (auth, network,
+                # rate limits — already retried by the SDK) propagates at once.
+                last_exc = exc
+                if attempt < cap - 1:
+                    await self._record(
+                        f"{self.role}.{action}.retry",
+                        level=4,
+                        summary=f"{self.role} got an off-schema {action} result; retrying",
+                        data={"attempt": attempt + 1, "cap": cap, "error": repr(exc)},
+                    )
+                    continue
+                await self._record(
+                    f"{self.role}.{action}.error",
+                    level=2,
+                    summary=f"{self.role} failed during {action}",
+                    data={"error": repr(exc)},
+                )
+                raise
+            except Exception as exc:
+                await self._record(
+                    f"{self.role}.{action}.error",
+                    level=2,
+                    summary=f"{self.role} failed during {action}",
+                    data={"error": repr(exc)},
+                )
+                raise
             await self._record(
-                f"{self.role}.{action}.error",
-                level=2,
-                summary=f"{self.role} failed during {action}",
-                data={"error": repr(exc)},
+                f"{self.role}.{action}.output",
+                level=10,
+                summary=f"{self.role} returned {action} output",
+                data={
+                    "output": parsed,
+                    "usage": response.usage,
+                    "raw_content": response.content,
+                },
             )
-            raise
-        await self._record(
-            f"{self.role}.{action}.output",
-            level=10,
-            summary=f"{self.role} returned {action} output",
-            data={
-                "output": parsed,
-                "usage": response.usage,
-                "raw_content": response.content,
-            },
-        )
-        return parsed
+            return parsed
 
     async def _record(
         self,
@@ -852,6 +889,25 @@ def _observation_path_args() -> dict[str, str]:
     except Exception:  # noqa: BLE001
         return {}
     return {f"{mission}_path": str(c.obs_db_path) for mission, c in cfg.missions.items()}
+
+
+@lru_cache(maxsize=1)
+def _structured_retry_cap() -> int:
+    """Max attempts for a structured ``_call`` before raising (orchestration.yaml).
+
+    Key: ``structured_retry_cap``. Defaults to 2. Mirrors ``tool_retry_cap`` for
+    the tool-call loop — a small bound so a transient off-schema result doesn't
+    end a run, while cap exhaustion still fails loudly.
+    """
+    import yaml
+
+    config_path = Path(__file__).resolve().parents[3] / "config" / "orchestration.yaml"
+    try:
+        with config_path.open("r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        config = {}
+    return int(config.get("structured_retry_cap", 2))
 
 
 def _payload_text(payload: Mapping[str, Any]) -> str:

@@ -74,17 +74,19 @@ planning teams may also route requests through the same reviewer gate.
         * vector search = Phase 2 stub (raises NotImplementedError)
 ```
 
-Structured agent messages use **provider-native structured output** (OpenAI
-`responses.parse`, Google `response_schema`, Anthropic forced tool-use); analyst tool
-calls use **provider-native function calling**, where each toolkit/MCP tool is a function
-constrained by its own argument schema. There is no prompt-injected JSON schema and no
-salvage JSON parsing — results are Pydantic-validated and fail loudly. Runtime prompts
+Structured agent messages use **provider-native structured output** (OpenAI Responses
+`text.format`, Google `response_schema`, Anthropic `messages.parse(output_format=)`);
+analyst tool calls use **provider-native function calling**, where each toolkit/MCP tool
+is a function constrained by its own argument schema. There is no prompt-injected JSON
+schema and no salvage JSON parsing — results are Pydantic-validated and fail loudly; a
+structured call that comes back off-schema is re-issued a few times (`structured_retry_cap`)
+with the error fed back before raising. Runtime prompts
 carry role and scope only; tool names, arguments, and descriptions reach the model through
 tool loading, not the prompt.
 
 Model groups are **config-driven** (`config/models.yaml`), spanning OpenAI, Anthropic,
-and Google. No model identifier is hardcoded. Defaults: reviewer group = Opus 4.7,
-GPT-5.5 high effort, and Gemini 3.5 Flash high thinking; analyst lead = Opus 4.7;
+and Google. No model identifier is hardcoded. Defaults: reviewer group = Opus 4.8,
+GPT-5.5 high effort, and Gemini 3.5 Flash high thinking; analyst lead = Opus 4.8;
 analyst worker group = Sonnet 4.6 and GPT-5.5 medium effort; librarian I/O group =
 Sonnet 4.6, GPT-5.5 medium effort, and Gemini 3.5 Flash thinking; librarian searcher group =
 GPT-5.4-nano.

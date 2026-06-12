@@ -40,6 +40,14 @@ satisfy the interface. Do not add configuration knobs, abstraction layers, retri
 caching, or features that were not requested. When in doubt, write less and document the
 extension point in `DOCS.md`.
 
+"Minimal" governs **code we author**, not interfaces the community has already solved.
+When a capability is a common, well-trodden interface — a provider API, structured-output
+enforcement, retry/backoff, a HITL connector — and a latest-stable, clean
+community/official wheel exists, **use the wheel**: prefer the official SDK's native
+feature over a hand-rolled equivalent. Hand-rolling a stable, widely-used primitive is
+*not* "minimal"; it is extra surface to maintain and a source of bugs the wheel already
+fixed. Reserve custom code for the orchestration logic that is genuinely ours.
+
 ---
 
 ## 2. The two-repository trust boundary
@@ -644,3 +652,12 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   tool on a branch on gate-pass + lead-approve; the runtime is **master-blind** — humans
   merge manually, out of band. Added build-order step 0 (relocate sandbox scratch off the
   repo root). No source changes.
+- 2026-06-11 — **Clarified "minimal" ([§1](#1-project-overview)): use community/official
+  wheels for solved interfaces.** Hand-rolling a stable, widely-used primitive (provider
+  API, structured-output enforcement, retry/backoff, HITL connector) is not "minimal" —
+  prefer the official SDK's native feature. Prompted by replacing the Anthropic
+  forced-single-tool structured-output workaround (which let Opus nest the result as
+  `{"parameter": {...}}` and crashed `judge_convergence`) with the SDK-native
+  `messages.parse(output_format=schema)`, plus a bounded off-schema retry in
+  `AgentRole._call` (`structured_retry_cap`, default 2). Config default reviewer/analyst-lead
+  model bumped `claude-opus-4-7` → `claude-opus-4-8` (documented structured-outputs model).

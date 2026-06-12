@@ -18,6 +18,7 @@ max_iterations: 3
 debate_max_rounds: 3
 io_search_max_iterations: 1  # Phase 2 stub — evaluate_search_results() currently returns accepted=True
 tool_retry_cap: 3            # inner retry cap for tool execution error-feedback loop
+structured_retry_cap: 2      # attempts for a structured _call (off-schema feedback loop) before raising
 toolkit_root: /data/fzhou/research_toolkit
 # Python environment used for sandbox tool execution.
 # Must be a conda/venv prefix whose Python has the analysis stack (XSPEC, HEASoft, ixpeobssim, etc.).
