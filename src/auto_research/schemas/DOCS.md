@@ -46,6 +46,15 @@ carried by **reference** (`FigureRef`), never embedded
 - `ReviewVerdict.needs_more_literature` and
   `ReviewVerdict.needs_analysis_rework` are the schema-level flags used by the
   Phase 1 feedback edges.
+- `ToolSpec` (Phase 2) is the **tool-authoring brief** an analyst worker emits when the
+  toolkit lacks a capability (CLAUDE.md §9.3). It is a *brief, not a frozen contract*:
+  `science_context`/`expected_behavior` (prose), `proposed_tool_name`, `target_domain`
+  + `disposition` (`"extend_existing"`|`"new_package"`, the proposer/lead's call),
+  `validation_data: list[ValidationDataset]` (≥1 required — a real or marked-synthetic
+  ObsID), advisory `proposed_checks: list[ProposedCheck]` (open-ended `kind` hint, not an
+  enum), optional `replication_tolerance`, auto `id`/`created_at`. The **committed tests,
+  not the spec, are authoritative**; tolerances are lead-finalised, hence optional.
+  `AnalystReport.tool_request: ToolSpec | None` is how a worker raises it.
 
 ## Dependencies
 - External: `pydantic>=2`.
@@ -86,8 +95,9 @@ carried by **reference** (`FigureRef`), never embedded
   previous_report: AnalystReport | None = None)` — work item sent to analyst
   workers. `previous_report` carries the prior round's result on rework iterations.
 - `AnalystReport(summary: str, findings: list[str] = [],
-  figures: list[FigureRef] = [], uncertainty: str | None = None)` — worker or
-  lead output, including figure references.
+  figures: list[FigureRef] = [], uncertainty: str | None = None,
+  tool_request: ToolSpec | None = None)` — worker or lead output, including figure
+  references. `tool_request` (Phase 2) is set when the worker proposes a new/extended tool.
 - `ReviewVerdict(accepted: bool, rationale: str,
   needs_more_literature: bool = False, needs_analysis_rework: bool = False,
   follow_up: str | None = None)` — reviewer decision and optional feedback
@@ -113,9 +123,22 @@ carried by **reference** (`FigureRef`), never embedded
   the worker's private `memory.md`, and summarized into subsequent analyst task
   instructions by the consensus layer. Figures are `FigureRef` objects parsed
   from tool stdout. `exit_code=127` indicates "tool unavailable" (Phase 2 stub).
+- `ValidationDataset(mission: str, obsid: str, synthetic: bool = False)` — one real
+  (or marked-synthetic, §9.5) input a `ToolSpec`'s checks run against.
+- `ProposedCheck(kind: str, description: str, params: dict[str, Any] = {},
+  tolerance: float | None = None)` — one *advisory* verification check; `kind` is an
+  open free-text hint (§9.4 open menu), not an enum.
+- `ToolSpec(id: str = auto, created_at: datetime = now, science_context: str,
+  expected_behavior: str, proposed_tool_name: str, target_domain: str,
+  disposition: "extend_existing"|"new_package", validation_data: list[ValidationDataset]
+  (≥1), proposed_checks: list[ProposedCheck] = [], replication_tolerance: float | None = None,
+  notes: str | None = None)` — Phase-2 tool-authoring brief (CLAUDE.md §9.3). `disposition`
+  is the proposer/lead's call; `proposed_checks`/tolerances are advisory and lead-finalised
+  (the committed tests are authoritative). `id` auto-generates (`toolspec-<hex>`) when omitted.
 
 ## Changelog
 - 2026-06-03 — Added report schemas (`schemas/report.py`): `ReportSection`, `Reference`, `ResearchReport` (machine handle), `LatexReport` (human handle). Exported from `schemas/__init__.py`.
 - 2026-06-09 — Native function-calling refactor (P0). `ToolCallRequest.arguments` widened `dict[str, str]` → `dict[str, Any]`: tool requests are now built from provider-native tool calls whose arguments are constrained by each tool's own `args_schema`, so nested structures (e.g. `indices`) arrive as real objects, never hand-serialized JSON strings (which previously truncated mid-write and crashed `plot_fit`/`plot_iqu`). `requested_by` and `purpose` gained defaults (the model authors the native tool call, not the envelope metadata). `Any` here is the genuine open tool-arg map only — message schemas remain strictly closed and strictly validated.
 - 2026-05-26/28 — Steps 1–11 built: full Pydantic v2 protocol (`ResearchRequest`, `SearchResult` with `pdf_url`/`full_text_links`/`local_path`, `AnalysisTask`/`AnalystReport`, `ReviewVerdict`, `FigureRef`, `DocumentRef`, `ToolCallRequest`/`ToolResult`). `ToolResult.exit_code=127` convention for unknown tools. Tool results live in worker memory files, not in `ResearchState`.
 - 2026-06-12 — Clarified the `LatexReport` docstring: the `latex` field is the whole document emitted in one structured call, so the composing model's `max_tokens` must be large enough to hold it; too small a budget truncates the JSON string mid-value and native `messages.parse` fails with EOF-in-string. JSON/backslash encoding is owned by the provider's native structured-output path (the `\\` seen in the truncation error is correct single JSON escaping, not double-escaping). Real fix was raising the reviewer `max_tokens` (see `agents/DOCS.md` 2026-06-12); an earlier docstring revision that blamed backslash escaping was inaccurate and is superseded here.
+- 2026-06-12 — **Phase 2 step 1: `ToolSpec` tool-authoring brief** (`schemas/toolspec.py`). New `ToolSpec` + `ValidationDataset` + `ProposedCheck`, exported from `schemas/__init__.py`. A *brief, not a frozen contract* (CLAUDE.md §9.3): science/behavior prose, `proposed_tool_name`, `target_domain` + `disposition` (`extend_existing`|`new_package`, proposer/lead's call), ≥1 `validation_data` (real/marked-synth ObsID), advisory open-`kind` `proposed_checks`, optional lead-finalised `replication_tolerance`, auto `id`/`created_at`. Added `AnalystReport.tool_request: ToolSpec | None` so a worker raises it on its report. Round-trip + validation tests in `test_schemas.py`. Lead↔author message schema deferred to step 2.

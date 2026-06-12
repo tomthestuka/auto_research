@@ -17,6 +17,7 @@ from auto_research.schemas import (
     SearchResult,
     ToolCallRequest,
     ToolCallReview,
+    ToolSpec,
     document_from_file,
 )
 
@@ -151,3 +152,68 @@ def test_tool_call_request_is_report_independent():
     assert request.kind == "bash"
     assert request.network_required is False
     assert review.approved is False
+
+
+def test_tool_spec_round_trips_and_auto_ids():
+    spec = ToolSpec(
+        science_context="Need a returning-radiation disk model; xspec_utils lacks retBB.",
+        expected_behavior="add_retbb(indices) -> sets retBB component; returns fit handle.",
+        proposed_tool_name="fit_retbb_hss",
+        target_domain="xspec_utils",
+        disposition="extend_existing",
+        validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+        proposed_checks=[
+            {"kind": "metamorphic", "description": "Load-order independent", "tolerance": 0.01},
+            {"kind": "sanity-bound", "description": "pol <= 1; chi2/dof finite"},
+        ],
+    )
+
+    dumped = spec.model_dump(mode="json")
+    restored = ToolSpec.model_validate(dumped)
+
+    assert restored == spec
+    assert restored.id.startswith("toolspec-")  # auto-generated when omitted
+    assert restored.disposition == "extend_existing"
+    assert restored.validation_data[0].synthetic is False
+    assert restored.replication_tolerance is None  # optional, lead-finalised
+
+
+def test_tool_spec_requires_a_validation_dataset():
+    with pytest.raises(ValidationError):
+        ToolSpec(
+            science_context="x",
+            expected_behavior="y",
+            proposed_tool_name="z",
+            target_domain="xspec_utils",
+            disposition="new_package",
+            validation_data=[],
+        )
+
+
+def test_tool_spec_rejects_unknown_disposition():
+    with pytest.raises(ValidationError):
+        ToolSpec(
+            science_context="x",
+            expected_behavior="y",
+            proposed_tool_name="z",
+            target_domain="xspec_utils",
+            disposition="rewrite_everything",
+            validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+        )
+
+
+def test_analyst_report_carries_tool_request():
+    report = AnalystReport(
+        summary="Blocked: toolkit lacks retBB.",
+        tool_request={
+            "science_context": "Need retBB.",
+            "expected_behavior": "add_retbb(indices).",
+            "proposed_tool_name": "fit_retbb_hss",
+            "target_domain": "xspec_utils",
+            "disposition": "extend_existing",
+            "validation_data": [{"mission": "IXPE", "obsid": "02008401"}],
+        },
+    )
+
+    assert isinstance(report.tool_request, ToolSpec)
+    assert AnalystReport(summary="No tool needed.").tool_request is None

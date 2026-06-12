@@ -11,6 +11,7 @@ reviewer/lead read-only tools and the librarian's sources are added alongside.
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -19,6 +20,14 @@ from typing import Any, Protocol
 
 from auto_research.observations import load_observations_config
 from auto_research.schemas import FigureRef, ToolResult
+
+
+# Figure-output arguments, by naming convention → the extension the toolkit expects.
+# A toolkit tool exposing one of these args has its figure written under the worker's
+# figures_dir (see SandboxToolProvider._redirect_figure_args). ``""`` = base/prefix path
+# (the tool appends its own suffix, e.g. ``_DU1.png``); ``.png`` = full file path.
+# Convention-keyed (not tool-keyed) so new toolkits inherit it for free.
+_FIGURE_PATH_ARGS: dict[str, str] = {"save_path": ".png", "save_path_prefix": ""}
 
 
 @dataclass
@@ -113,6 +122,10 @@ class SandboxToolProvider:
         self.registry = registry
         self.sandbox = sandbox
         self.cwd = cwd
+        # Figures land in <worker scratch>/figures (under the runtime data dir),
+        # never in /tmp or a repo. See _redirect_figure_args.
+        self.figures_dir = (Path(cwd) / "figures") if cwd is not None else None
+        self._figures_dir_ready = False
         self.timeout_s = timeout_s
         self.results: list[ToolResult] = []
 
@@ -136,6 +149,7 @@ class SandboxToolProvider:
             for arg_name, path in _observation_path_args().items():
                 if arg_name in schema_props and not args.get(arg_name):
                     args[arg_name] = path
+            self._redirect_figure_args(spec["fn"], args, schema_props)
             raw = await self.sandbox.call_tool(
                 spec["module"], spec["fn"], args, timeout_s=self.timeout_s
             )
@@ -157,6 +171,38 @@ class SandboxToolProvider:
         else:
             text = f"[exit {result.exit_code}]\n{result.stderr or result.stdout or '(no error detail)'}"
         return ToolOutcome(text=text, is_error=result.exit_code != 0, figures=figures, result=result)
+
+    def _redirect_figure_args(self, fn: str, args: dict, schema_props: Mapping) -> None:
+        """Force figure-output paths under the worker's ``figures_dir``.
+
+        Keyed on the **arg-name convention** (``_FIGURE_PATH_ARGS``), not on specific
+        tool kinds, so any toolkit tool that follows the convention places its PNGs
+        under the run's figures dir (inside the runtime data dir) instead of /tmp,
+        the repo, or wherever the model happened to name. The model's chosen basename
+        is preserved — only the directory and the extension convention are enforced —
+        so captions/provenance stay meaningful. A no-op when no ``cwd`` is attached
+        (e.g. Studio) or the tool exposes no figure arg.
+        """
+        if self.figures_dir is None:
+            return
+        touched = False
+        for arg_name, ext in _FIGURE_PATH_ARGS.items():
+            if arg_name not in schema_props:
+                continue
+            value = args.get(arg_name)
+            base = os.path.basename(value.strip()) if isinstance(value, str) and value.strip() else ""
+            if not base:
+                base = f"{fn}_{int(time.time() * 1000)}"
+            low = base.lower()
+            for known in (".png", ".pdf", ".jpg", ".jpeg", ".svg"):
+                if low.endswith(known):
+                    base = base[: -len(known)]
+                    break
+            args[arg_name] = str(self.figures_dir / f"{base}{ext}")
+            touched = True
+        if touched and not self._figures_dir_ready:
+            self.figures_dir.mkdir(parents=True, exist_ok=True)
+            self._figures_dir_ready = True
 
 
 # ----------------------------------------------------------------------------

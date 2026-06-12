@@ -18,6 +18,14 @@ max_iterations: 3
 debate_max_rounds: 3
 io_search_max_iterations: 1  # Phase 2 stub — evaluate_search_results() currently returns accepted=True
 tool_retry_cap: 3            # (legacy) accepted by DebateToConverge, now unused — the react loop self-corrects
+# MEMO (deferred, not a Phase-2 task): these ReAct caps are *backstops against
+# pathology*, not workflow budgets — p95 of legitimate runs should finish well
+# under them. Lesson from the 2026-06-12 Cyg X-1 run: a single global cap is the
+# anti-pattern — at 12 it both burned ~$20 on the librarian loop (each search
+# re-bills a growing 20-paper context) AND truncated an analyst worker's output
+# (worker 2 hit 12/12 and never reached plot_iqu). Now split per-role. Future
+# hardening: make a token/cost/wall-clock BUDGET the primary guard and keep these
+# step counts as the secondary backstop (the industry trend, e.g. Claude Agent SDK).
 react_loop_cap: 30           # max tool iterations per agent inner ReAct loop before it must report
 librarian_react_loop_cap: 1  # tighter cap for the librarian literature loop — each search re-sends the
                              # growing 20-paper abstract context, so unbounded refinement is costly

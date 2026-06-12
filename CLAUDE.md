@@ -173,6 +173,10 @@ author and review tools. The tool **author and reviewer must be different provid
 (e.g. author Claude / reviewer GPT) so a merge candidate gets two *independent* checks,
 not one model checking itself ([§9.3](#93-actors-and-the-propose--author--review-flow)).
 Gemini may back cheaper, non-gating roles but stays off the critical author/review path.
+The **coding/author agent is Sonnet-tier** (medium), spawned by the Opus analyst lead.
+Because the coder is the weaker model, *architectural* decisions — extend an existing
+toolkit vs. author a new one ([§9.3](#93-actors-and-the-propose--author--review-flow)) —
+stay with the more-capable proposer/lead; the Sonnet author executes them.
 
 Default tier mapping (a *config default*, edit freely — not code):
 
@@ -355,14 +359,27 @@ toolkit.**
 
 ### 9.3 Actors and the propose → author → review flow
 
-1. An **analyst worker** hits a missing capability and emits a `ToolSpec`: the **science
-   context** (what is being measured, why the toolkit can't do it), the **expected
-   behavior** (signature, I/O), a **real validation dataset** (an ObsID), and **proposed
-   verification checks** ([§9.4](#94-the-mergeability-gate-deterministic--the-real-trust-boundary)).
-2. The **author** writes both halves + tests in an **isolated git worktree/branch** on
-   `research_toolkit`, using `xspec_utils` as the template. The author is the **Claude
-   Agent SDK** harness seeded with the `ToolSpec`; if the discovering analyst is the Claude
-   member it is literally itself, otherwise its Claude teammate writes from the spec. The
+1. An **analyst worker** hits a missing capability and raises it on its `AnalystReport`
+   (`tool_request`), carrying a `ToolSpec`. The `ToolSpec` is a **brief, not a frozen
+   contract**: the **science context** (what is being measured, why the toolkit can't do
+   it), the **expected behavior** (signature, I/O), a **real validation dataset** (an
+   ObsID), a **disposition** (`extend_existing` an existing toolkit vs `new_package`), and
+   **proposed verification checks** ([§9.4](#94-the-mergeability-gate-deterministic--the-real-trust-boundary))
+   that are explicitly *advisory and revisable* — the worker sees only the minimal `skills/`
+   stubs and is not the domain expert, so the authoritative checks (and final tolerances)
+   are finalized with the tool and committed beside it. The **disposition is the
+   proposer/lead's call, not the coding agent's**: because the coding sub-agent is the weaker
+   Sonnet ([§6](#6-config-driven-model-registry)), the architectural "edit existing vs author
+   new" decision stays with the more-capable proposer (the lead, who reads the full `lib/`
+   source), and the Sonnet author executes it.
+2. The **analyst lead spawns a Sonnet-tier Claude coding sub-agent** (the **author**) and
+   stays in an **interactive channel** with it during authoring — to clarify science/code as
+   it goes (this lead↔author loop is built in step 2 of [§9.10](#910-build-order-phase-2)).
+   The author writes both halves + tests in an **isolated git worktree/branch** on
+   `research_toolkit`, using `xspec_utils` as the template, and — reading the **full `lib/`
+   source**, not just the minimal `skills/` stubs — either **edits existing files to build on
+   current capability or scaffolds a new package**, per the `ToolSpec` disposition. The author
+   is the **Claude Agent SDK** harness seeded with the `ToolSpec`. The
    harness injects **local structure context** (the `xspec_utils` template, conventions,
    obs-db paths, existing primitives) from **runtime-safe sources only** — real toolkit
    source, `prompts/tool_author.md`, and config — **never `DOCS.md`/`CLAUDE.md`**
@@ -407,7 +424,10 @@ itself implements):
   downstream result from a failed/synthetic upstream step" mechanically detectable.
 
 **Layer B — the tool's own tests**, authored *with* the tool, committed beside it (as
-`xspec_utils` already carries its tests), declared in the `ToolSpec`, and *run* by the gate.
+`xspec_utils` already carries its tests), and *run* by the gate. The `ToolSpec`'s checks are
+only a **proposal** — the author and lead, with full `lib/` sight and knowledge of the real
+library's limits, may revise or drop checks the worker proposed (it isn't the domain expert);
+the **committed tests, not the `ToolSpec`, are authoritative**.
 There is **no central per-tool framework** and **no universal invariant list** (physics
 checks like `pol ≤ 1` belong to spectral fitting, not to data acquisition or literature
 search). The author picks from an **open menu** of verification patterns; for genuinely
@@ -533,7 +553,7 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
 
 | # | Status | What is being built | Checkpoint (what works after) |
 |---|---|---|---|
-| 0 | Todo | **Relocate the sandbox scratch** — worker `cwd` → per-worker scratch under the runtime data dir; `PYTHONPATH` stays limited to `research_toolkit`; neither repo is ever the cwd. | `bash_exec` cannot write into either repo; figures/scratch land under the data dir. |
+| 0 | Done | **Relocate the sandbox scratch** — worker `cwd` → per-worker scratch under the runtime data dir; `PYTHONPATH` stays limited to `research_toolkit`; neither repo is ever the cwd. | `bash_exec` cannot write into either repo; figures/scratch land under the data dir. |
 | 1 | Todo | **`ToolSpec` + two-halves contract** — schema a worker emits (science context, expected behavior, validation ObsID, proposed checks) + the human-half/ai-half + tolerance contract. | Schema validates; a sample `ToolSpec` round-trips; documented in `schemas/DOCS.md`. |
 | 2 | Todo | **merge_flow harness** — `merge_flow.propose_and_pr()` invokes the Claude Agent SDK to write human-half, ai-half (`TOOL_MANIFEST` entry), and tests in an isolated worktree, structure-context injected from runtime-safe sources (`xspec_utils` + `prompts/tool_author.md` + config). | From a `ToolSpec`, the agent produces a branch with both halves and tests; nothing touches master. |
 | 3 | Todo | **The deterministic gate** — generic Layer-A checks + a Layer-B tool-local test runner + provenance wiring + the no-fabrication scan. | A good tool passes; one that fabricates, fails replication, or breaks a declared check is rejected with a specific machine-readable reason. |
@@ -661,3 +681,48 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   `messages.parse(output_format=schema)`, plus a bounded off-schema retry in
   `AgentRole._call` (`structured_retry_cap`, default 2). Config default reviewer/analyst-lead
   model bumped `claude-opus-4-7` → `claude-opus-4-8` (documented structured-outputs model).
+- 2026-06-12 — **Phase 1 closed out — verified end-to-end; Phase 2 now active.** A live
+  Cyg X-1 soft-state joint-fit run completed the full graph and produced both report
+  handles (machine JSONL + compiled LaTeX/PDF). Three run-blocking defects found and fixed
+  along the way (all in `auto_research`, none in the toolkit): (1) the human-LaTeX step
+  truncated because the reviewer composes the whole document as one structured-output string
+  and `max_tokens: 4096` cut it off mid-JSON-string (native `messages.parse` → `EOF while
+  parsing a string`) — raised the reviewer Claude member to `max_tokens: 16384`; (2)
+  `nasa_ads_source.resolve_ads_full_text()` let an ADS `404` ("no esource records", a normal
+  outcome ADS reports inconsistently) propagate and kill the run — now degrades to `[]`; (3)
+  the single global `react_loop_cap` was simultaneously too high for the librarian (each
+  search re-bills a growing 20-paper context → ~$20) and too low for analyst workers (a
+  worker hit 12/12 and never reached `plot_iqu`) — split into per-role caps
+  (`react_loop_cap`, `librarian_react_loop_cap`); a `config/orchestration.yaml` MEMO records
+  the deferred recommendation to make a token/cost budget the primary guard. README + module
+  `DOCS.md` synced. Next: Phase 2 build order ([§9.10](#910-build-order-phase-2)) starting at
+  step 0 (relocate the sandbox scratch off the repo root).
+- 2026-06-12 — **Phase 2 step 0 done — sandbox scratch fully off both repos.** The
+  ReAct refactor had already moved the worker `bash_exec` cwd and `PersistentSandbox`
+  workdir to `agent_dir` under the runtime data dir, so the §8 "cwd defaults into the repo
+  root" defect was effectively resolved; this step closes the two residual gaps and checks
+  the box. (1) The shared builtin MCP server process cwd is now pinned to `run_dir(run_id)`
+  (`_builtin_server_config(..., cwd=)` → server dict `cwd` → `StdioServerParameters.cwd`),
+  so nothing it does relative to its own cwd can reach a repo — a by-construction backstop
+  on top of the per-call injected worker cwd. (2) Figure-output paths are redirected into
+  `<worker scratch>/figures` by an **arg-name convention** (`SandboxToolProvider._redirect_figure_args`,
+  `_FIGURE_PATH_ARGS = {save_path, save_path_prefix}`), keyed on arg name not tool kind so new
+  toolkits inherit it; the model's basename is preserved, only the directory/extension are
+  enforced. Fixes figures landing in `/tmp` (the prior run symlinked report figures to ephemeral
+  `/tmp/*.png`). `analyst_worker.md` now tells workers to omit figure paths. `PYTHONPATH` was
+  already limited to `research_toolkit` — unchanged. Next: step 1 (`ToolSpec` + two-halves contract).
+- 2026-06-12 — **Clarified the propose→author→review actor flow ([§9.3](#93-actors-and-the-propose--author--review-flow), [§6](#6-config-driven-model-registry), [§9.4](#94-the-mergeability-gate-deterministic--the-real-trust-boundary)) before building step 1.**
+  (1) `ToolSpec` is a **brief, not a frozen contract**: a worker raises it on its `AnalystReport`
+  (`tool_request`); its `proposed_checks` and tolerances are *advisory and revisable*, since the
+  worker sees only the minimal `skills/` stubs and isn't the domain expert — the **committed tests
+  are authoritative**, finalized by the author+lead with full `lib/` sight. (2) The **coding/author
+  agent is Sonnet-tier**, spawned by the Opus analyst lead, which stays in an **interactive
+  channel** with it during authoring (the lead↔author loop is step-2 scope). (3) Because the coder
+  is the weaker model, the **`disposition` (edit an existing toolkit vs author a new package) is the
+  proposer/lead's call, not the coder's**; the author reads the full `lib/` source and **edits
+  existing files or scaffolds a new package** accordingly — which is why one-tool-one-atomic-commit
+  must span a coherent multi-file edit ([§9.9](#99-git-discipline--the-runtime-is-master-blind)).
+  Authorization is unchanged ([§9.2](#92-toolkit-architecture--the-uniform-module-structure)): only
+  analysts propose/author; librarians never do. **Step 1 deliverable updated:** `ToolSpec` (with
+  `disposition`, `validation_data`, advisory `proposed_checks`, optional lead-finalized tolerances)
+  **plus an `AnalystReport.tool_request` hook**; lead↔author message schema deferred to step 2.

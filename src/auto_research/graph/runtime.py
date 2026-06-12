@@ -65,6 +65,7 @@ def _builtin_server_config(
     analyze_env: Path | None,
     analyze_ini_sh: str | None,
     toolkit_root: Path,
+    cwd: Path | None = None,
 ) -> dict:
     """Build the default builtin-MCP-server config dict.
 
@@ -105,6 +106,10 @@ def _builtin_server_config(
         "command": python,
         "args": [builtin_path],
         "env": env,
+        # Pin the server process cwd under the runtime data dir so nothing it does
+        # relative to its own cwd can touch either repo (per-call bash_exec still
+        # gets its own injected worker cwd; this is the by-construction backstop).
+        **({"cwd": str(cwd)} if cwd is not None else {}),
     }
 
 
@@ -277,6 +282,12 @@ async def run_research(
     from auto_research.sources.downloads import papers_dir
 
     readonly_roots = [run_dir(run_id), papers_dir()]
+    # The analyst lead additionally browses the whole research_toolkit read-only, so it
+    # can decide a tool proposal's disposition (extend an existing package vs author a new
+    # one) by reading the full lib/ source — not just the minimal skills/ stubs the workers
+    # see (CLAUDE.md §9.3). Read-only/path-confined, no shell: the runtime never writes the
+    # toolkit (§2) and this matches the §12 "read-only file-tree exploration" posture.
+    lead_roots = [*readonly_roots, toolkit_root]
     if getattr(reviewer, "tools", None) is None:
         try:
             reviewer.tools = ReadOnlyToolProvider(roots=readonly_roots, retrieval=retrieval)
@@ -284,7 +295,7 @@ async def run_research(
             pass
     if getattr(lead, "tools", None) is None:
         try:
-            lead.tools = ReadOnlyToolProvider(roots=readonly_roots, retrieval=retrieval)
+            lead.tools = ReadOnlyToolProvider(roots=lead_roots, retrieval=retrieval)
         except Exception:  # noqa: BLE001
             pass
 
@@ -301,7 +312,9 @@ async def run_research(
     # using the analysis env python so bash_exec can import astropy/xspec_utils.
     mcp_server_configs: list[dict] | None = orch.get("mcp_servers") or None
     if not mcp_server_configs:
-        mcp_server_configs = [_builtin_server_config(analyze_env, analyze_ini_sh, toolkit_root)]
+        mcp_server_configs = [
+            _builtin_server_config(analyze_env, analyze_ini_sh, toolkit_root, cwd=run_dir(run_id))
+        ]
     mcp_client = MCPToolClient(servers=mcp_server_configs)
     await mcp_client.start()
     registry.load_mcp(mcp_client)

@@ -4,10 +4,13 @@ An automated research assistant: a team of LLM agents — orchestrated with **La
 that takes a research request, searches the literature, runs analyses, and reviews the
 results against prior work.
 
-> **Status: Phase 1 — minimal modular skeleton (in progress).**
-> Phase 1 delivers a full agent team running real LLM calls end-to-end, with vector
-> retrieval, autonomous tool-merge, and the lead-scientist idea-generation group left as
-> documented stubs for Phase 2.
+> **Status: Phase 1 — COMPLETE. Phase 2 (tool authoring) — active.**
+> Phase 1 delivers a full agent team running real LLM calls end-to-end; verified
+> 2026-06-12 by a live Cyg X-1 joint-fit run that produced both report handles
+> (machine JSONL + compiled LaTeX/PDF). Vector retrieval, autonomous tool-merge, and
+> the lead-scientist idea-generation group remain documented stubs. Phase 2 — the
+> gated, verifiable tool-authoring flow into `research_toolkit` — is now the active
+> phase; see `CLAUDE.md` §9.
 
 Coding agents: read **`CLAUDE.md`** before doing anything. It is the single source of
 truth for how this project is built.
@@ -122,7 +125,11 @@ system performs on `research_toolkit`; it is not a coding agent committing.)
 
 ---
 
-## Build status (Phase 1)
+## Build status (Phase 1 — COMPLETE)
+
+**All Phase 1 steps are Done; the skeleton is closed out (verified end-to-end on
+2026-06-12).** Active work has moved to **Phase 2 (tool authoring)** — see the
+Phase-2 spec and build order in `CLAUDE.md` §9.
 
 Statuses: **Todo** = in Phase 1 scope, not yet built · **Done** = built & documented.
 Coding agents flip `Todo → Done` as work lands and keep this table synced (same

@@ -7,6 +7,7 @@ from pydantic import Field
 from auto_research.schemas.base import MessageModel
 from auto_research.schemas.figures import FigureRef
 from auto_research.schemas.search import SearchResult
+from auto_research.schemas.toolspec import ToolSpec
 
 
 NonEmptyStr = Annotated[str, Field(min_length=1)]
@@ -19,6 +20,9 @@ class AnalystReport(MessageModel):
     findings: list[str] = Field(default_factory=list)
     figures: list[FigureRef] = Field(default_factory=list)
     uncertainty: str | None = None
+    # Phase 2: set when the worker hits a capability the toolkit lacks and proposes a
+    # new/extended tool (CLAUDE.md §9.3). A brief the analyst lead routes to the author.
+    tool_request: ToolSpec | None = None
 
 
 class AnalysisTask(MessageModel):

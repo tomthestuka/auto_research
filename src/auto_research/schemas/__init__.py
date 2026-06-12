@@ -8,6 +8,7 @@ from auto_research.schemas.requests import ResearchRequest
 from auto_research.schemas.review import ReviewVerdict
 from auto_research.schemas.search import FullTextLink, SearchRequest, SearchResult, SearchSource
 from auto_research.schemas.tools import ToolCallRequest, ToolCallReview, ToolKind, ToolResult
+from auto_research.schemas.toolspec import ProposedCheck, ToolSpec, ValidationDataset
 
 __all__ = [
     "AnalysisTask",
@@ -29,5 +30,8 @@ __all__ = [
     "ToolCallReview",
     "ToolKind",
     "ToolResult",
+    "ToolSpec",
+    "ProposedCheck",
+    "ValidationDataset",
     "document_from_file",
 ]
