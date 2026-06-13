@@ -58,10 +58,18 @@ class _FakeLead:
         return f"lead-answer:{question}"
 
 
+async def _pass_gate(worktree, spec):
+    # Default gate for the loop-orchestration tests: the real gate (gate.run_gate) needs
+    # a git worktree + science stack — out of scope here, covered by tests/test_gate.py.
+    # Tests exercising gate behaviour inject their own run_gate, overriding this default.
+    return GateReport(passed=True)
+
+
 def _run(spec, **kwargs):
     client = _FakeClient()
     kwargs.setdefault("lead", _FakeLead())
     kwargs.setdefault("coder_model", "fake-model")
+    kwargs.setdefault("run_gate", _pass_gate)
     kwargs.setdefault("worktree_factory", lambda root, base, branch: base / branch.replace("/", "_"))
     kwargs.setdefault("sdk_client_factory", lambda options: client)
     result = asyncio.run(propose_and_pr(spec, **kwargs))

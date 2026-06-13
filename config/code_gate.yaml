@@ -1,0 +1,112 @@
+# code_gate.yaml — the no-fabrication scan lists for the Phase-2 deterministic gate
+# (CLAUDE.md §9.4/§9.5). Loaded by src/auto_research/sandbox/gate.py.
+#
+# This file is the SINGLE place a human tunes what the mechanical gate rejects vs.
+# flags. Same config-driven philosophy as the model registry (§6): no scan vocabulary
+# or pattern lives in source code. Edit freely — no Python change needed.
+#
+# Precision tiers (see gate.py / plan):
+#   Tier 1 HARD-FAIL  — flips GateReport.passed=False. High precision, low false-positive.
+#   Tier 3 FINDING    — recorded on the GateReport but does NOT fail it; the step-4
+#                       co-lead reviewer judges intent (the literal-array landmine).
+#
+# Matching: vocabulary is matched case-insensitively as whole words / phrases (not bare
+# substrings) inside COMMENTS, DOCSTRINGS, and STRING LITERALS of added/new lines only.
+# Code patterns are matched on the AST of added/new .py files.
+
+# ── Tier 1: banned vocabulary (hard-fail) ──────────────────────────────────────────
+# Fabrication words, hand-waving/deferral phrases, and incompleteness markers. Phrases
+# are preferred over bare words where a legitimate collision exists (e.g. "dummy data"
+# not "dummy", so the statistics term "dummy variable" survives; "toy data" not "toy",
+# so "toy model" survives). Banning the whole word "synthetic" does NOT catch a
+# `synth240611-<sha>` ObsID token, so §9.5 fixtures stay legal by referencing the ObsID.
+hard_fail_vocabulary:
+  # fabrication words
+  - synthetic
+  - synthesized
+  - synthesised
+  - example data
+  - sample data
+  - fake data
+  - fake value
+  - fake result
+  - mock data
+  - dummy data
+  - made up
+  - made-up
+  - fabricated
+  - fabricate
+  - fictional
+  - fictitious
+  - hardcoded result
+  - hard-coded result
+  - canned
+  - pretend
+  - bogus
+  - toy data
+  # hand-waving / deferral
+  - representative data
+  - representative value
+  - representative result
+  - illustrative
+  - for now
+  - in operational mode this would
+  - in production this would
+  - in practice this would
+  - would actually
+  - would normally
+  - for demonstration
+  - for illustration
+  - placeholder
+  # incompleteness markers
+  - TODO
+  - FIXME
+  - XXX
+  - HACK
+  - stub
+  - stubbed
+  - not implemented
+  - to be implemented
+
+# ── Tier 1: code patterns (hard-fail) — randomness, seeded or not ───────────────────
+# Any RNG in toolkit code is fabrication-shaped and rejected: the toolkit computes
+# deterministic transforms of real data; synthetic data is DATA (a marked ObsID), never
+# code (§9.5, made absolute). A genuine stochastic need surfaces as a gate rejection the
+# lead/human handles. Matched as dotted-attribute call prefixes / module references on
+# the AST.
+hard_fail_code_patterns:
+  - np.random
+  - numpy.random
+  - random.random
+  - random.randint
+  - random.uniform
+  - random.normalvariate
+  - random.gauss
+  - random.choice
+  - random.shuffle
+  - random.sample
+  - random.seed
+  - default_rng
+  - .rvs            # scipy.stats.<dist>.rvs
+  - torch.rand
+  - torch.randn
+  - torch.randint
+  - tf.random
+
+# ── Tier 3: code patterns (FINDINGS, routed to co-lead review — NOT hard-fail) ──────
+# Numeric-literal arrays passed directly to return / a plotting call / a DataFrame
+# constructor. These are the XSPEC param-vector / energy-bin landmine: usually
+# legitimate parameters, occasionally a fabricated result. The mechanical gate records
+# the location; the step-4 reviewer judges intent. Attribute assignments
+# (`m.par.values = [...]`) are deliberately excluded — they are never findings.
+finding_code_patterns:
+  - literal_array_return       # `return [<numeric literals>]`
+  - literal_array_plot         # `plt.plot([...], [...])`, scatter, errorbar
+  - literal_array_dataframe    # `pd.DataFrame({<hardcoded numbers>})`
+
+# ── Allowlist: ObsID/path tokens exempt from the vocabulary scan ────────────────────
+# Defensive belt-and-suspenders: a line containing one of these tokens can never trip
+# the vocabulary scan even if a future obs_db_path embeds a banned substring. Marked
+# synthetic ObsIDs (§9.5) are `synth<YYMMDD>-<sha>`. Regex, matched per line.
+allowlist_obsid_tokens:
+  - 'synth\d{6}'

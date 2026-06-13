@@ -3,13 +3,15 @@
 ## Purpose
 Drives analyst workers to agreement through bounded debate. Behind a swappable
 `ConsensusStrategy` interface so the policy can be replaced without touching
-agent or graph code ([CLAUDE.md §11](../../../CLAUDE.md#11-consensus-debate-to-converge)).
+agent or graph code ([CLAUDE.md §8](../../../CLAUDE.md#8-what-phase-1-built-the-system-as-it-stands)).
 
 ## Architecture
 Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
 
 **Analyst debate** (`DebateToConverge`):
 - Each worker produces an analysis.
+- Each worker's `analyze()` owns its own ReAct tool loop; consensus reads the
+  resulting report, figures, and `last_tool_results` rather than executing tools itself.
 - Each round, workers see peers' analyses (and figures, by `FigureRef`) and
   critique/revise.
 - After each round, the **analyst lead** judges convergence and summarizes
@@ -29,9 +31,11 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
 - `DebateToConverge(max_rounds=3)` implements the Phase 1 analyst policy.
   It requires at least one worker, asks all workers for initial reports, checks
   convergence through the lead after each round, requests revisions with peer
-  reports when not converged, and returns a lead-adjudicated final report.
+  reports when not converged, injects a truncated cross-worker tool-result
+  summary from `last_tool_results`, and returns a lead-adjudicated final report.
   Optional `monitor` records worker reports, convergence verdicts, revisions,
-  and lead adjudication.
+  and lead adjudication. `registry` and `tool_retry_cap` are accepted for
+  call-site compatibility but unused by the strategy.
 - `IOAbstractionStrategy` protocol:
   `async run(workers, lead, document) -> MemoryRecord`.
 - `IODebateToConverge(max_rounds=3)` implements the IO abstraction policy.
@@ -65,19 +69,12 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
 - `ConsensusStrategy` — protocol for swappable analyst consensus policies. Method:
   `run()`.
 - `DebateToConverge(max_rounds=3, monitor=None, registry=None, tool_retry_cap=3)` —
-  bounded analyst debate strategy.  When `registry` is supplied, runs tool
-  execution after each round of `analyze()` calls via
-  `AnalystWorkerAgent.execute_tools()`.  Per-worker results are appended to
-  `memory_path`; a truncated shared summary is injected into task instructions;
-  and `FigureRef`s from each worker's tool results are merged (deduped by path)
-  onto the matching `AnalystReport.figures` so they flow through
-  `lead.adjudicate()` → `lead.judge_convergence()` → final report → reviewer.
-  Workers with an attached restartable sandbox are allowed through to
-  `execute_tools()` even if the previous subprocess died; the worker/sandbox
-  layer starts a clean replacement.
+  bounded analyst debate strategy. Each worker gathers evidence inside
+  `AnalystWorkerAgent.analyze()`; the strategy injects a truncated shared summary
+  from each worker's `last_tool_results` before later rounds and deduplicates
+  figures onto the lead's final report so they flow to the reviewer.
   Method: `run(workers, lead, task)` → `AnalystReport`.
-  Internals: `_run_tools(workers, task)` → `(AnalysisTask, list[list[FigureRef]])`;
-  `_merge_figures(reports, per_worker_figures)` → updated reports;
+  Internals: `_augment_with_peer_tools(workers, task)` → updated `AnalysisTask`;
   `_deduplicated(figures)` → deduped by path.
 - `IOAbstractionWorkerLike` — protocol for IO abstraction workers. Method:
   `abstract_document()`.
@@ -90,8 +87,8 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `run(workers, lead, document)`.
 
 ## Changelog
-- 2026-05-26 → 2026-06-11 — `DebateToConverge` (cap-3 debate, lead adjudication,
-  `IODebateToConverge`) built. Tool execution moved into each worker's ReAct loop
-  (2026-06-11): `_run_tools`/`_merge_figures` removed; `run()` calls `analyze()` only;
-  `_augment_with_peer_tools()` injects cross-worker tool summaries between rounds.
-  `registry`/`tool_retry_cap` kept for call-site compat but unused.
+- 2026-05-26 -> 2026-06-12 — Consensus strategies built and ReAct-aligned:
+  `DebateToConverge` cap-3 analyst debate with lead adjudication, cross-worker
+  `last_tool_results` summaries, final figure propagation, and `IODebateToConverge` for
+  PDF memory abstraction. `registry`/`tool_retry_cap` remain accepted but unused.
+- 2026-06-12 — Compacted changelog and removed stale consensus-owned tool-execution text.

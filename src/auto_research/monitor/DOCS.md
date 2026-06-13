@@ -58,6 +58,7 @@ output is filtered by `chatter`.
 - `RunMonitor` - lock-protected event collector and Markdown/JSONL renderer.
 
 ## Changelog
-- 2026-05-28 → 2026-06-09 — `RunMonitor` (1–10 chatter scale, async-safe JSONL streaming,
-  grouped Markdown reports). `record()` always streams at full fidelity; `chatter` filters
-  in-memory only. Runtime dir from `orchestration.yaml::runtime_dir`.
+- 2026-05-28 -> 2026-06-12 — `RunMonitor` provides async-safe, full-fidelity JSONL
+  streaming, chatter-filtered in-memory events, grouped Markdown rendering, offline JSONL
+  reconstruction, and config-driven runtime paths.
+- 2026-06-12 — Compacted changelog; no monitor behavior changes.

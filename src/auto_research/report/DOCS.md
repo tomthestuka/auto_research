@@ -58,5 +58,7 @@ The `compose_report` graph node (in `builder.py`) orchestrates these utilities:
   `report_dir`. Sets `report.pdf` on success.
 
 ## Changelog
-- 2026-06-03 — Module created. `references.py`, `figures.py`, `writers.py`.
-  Deterministic tests in `tests/test_report.py`.
+- 2026-06-03 -> 2026-06-12 — Report composition module created and kept stable:
+  references, figure staging, JSONL/LaTeX writers, ref validation, pdflatex compile loop,
+  and deterministic tests.
+- 2026-06-12 — Compacted changelog; no report behavior changes.

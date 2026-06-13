@@ -12,11 +12,12 @@ an **isolated git worktree** on ``research_toolkit``, then drives the bounded re
     L4  cap exhausted → no commit; return failed/needs_human so the lead raises to the
         human for instructions (§9.6/§9.7) — never fabricate.
 
-The orchestration is **code, never the LLM**. In step 2 the gate and review are injectable
-stubs that pass (steps 3/4 implement them); the loop structure is real. ``approve_edit`` —
-the only place git commits — is step 6; here a successful run returns a placeholder
-``commit_sha`` and lands nothing. The runtime never touches master; a human merges out of
-band.
+The orchestration is **code, never the LLM**. The deterministic gate is real as of step 3
+(``gate.run_gate``, the default ``run_gate`` hook); the co-lead review is still an
+injectable stub that passes (step 4). Both remain injectable so the loop is exercised
+deterministically in tests. ``approve_edit`` — the only place git commits — is step 6; here
+a successful run returns a placeholder ``commit_sha`` and lands nothing. The runtime never
+touches master; a human merges out of band.
 """
 
 from __future__ import annotations
@@ -259,12 +260,8 @@ async def _drive_author(client: Any, message: str) -> str:
 
 
 # ----------------------------------------------------------------------------
-# Default stub gate/review (step 2) — replaced by the real gate (step 3) / review (step 4)
+# Default gate (step 3, real) / review (step 4, still a stub)
 # ----------------------------------------------------------------------------
-
-
-async def _stub_gate(worktree: Path, tool_spec: ToolSpec) -> GateReport:
-    return GateReport(passed=True, reason="stub gate (step 3 not yet implemented)")
 
 
 async def _stub_review(worktree: Path, tool_spec: ToolSpec, gate: GateReport) -> ToolReviewVerdict:
@@ -335,7 +332,10 @@ async def propose_and_pr(
     toolkit_root = Path(toolkit_root)
     worktree_base = Path(worktree_base)
     coder_model = coder_model or _resolve_coder_model()
-    run_gate = run_gate or _stub_gate
+    if run_gate is None:
+        from auto_research.sandbox.gate import run_gate as _real_gate
+
+        run_gate = _real_gate
     run_review = run_review or _stub_review
     gate_rework_cap = gate_rework_cap if gate_rework_cap is not None else _cap("tool_author_gate_rework_cap", 3)
     review_rework_cap = review_rework_cap if review_rework_cap is not None else _cap("tool_author_review_rework_cap", 2)

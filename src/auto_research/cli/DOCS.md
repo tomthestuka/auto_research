@@ -37,6 +37,7 @@ a grouped Markdown report, and prints the final `ReviewVerdict`.
 - `auto_research.__main__` — module entry point for `python -m auto_research`.
 
 ## Changelog
-- 2026-05-26/28 — Step 12 built: CLI entry (`python -m auto_research`) with `--chatter` flag, JSON/text final output, monitor JSONL/Markdown artifact paths.
-- 2026-06-03 — Added `--report-format {jsonl,tex}` (repeatable; default both via config). Report artifact paths printed in text mode; included in `--format json` object when present.
-- 2026-06-09 — `main()` now calls `check_required_env()` after `load_dotenv()`; crashes immediately if any required API key is missing.
+- 2026-05-26 -> 2026-06-12 — CLI supports `python -m auto_research`, chatter control,
+  JSON/text output, monitor JSONL/Markdown paths, repeatable report formats, report artifact
+  printing, `.env` loading, and required-key validation before the run starts.
+- 2026-06-12 — Compacted changelog; no CLI behavior changes.

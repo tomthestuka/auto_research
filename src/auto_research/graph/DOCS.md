@@ -1,15 +1,16 @@
 # `auto_research.graph` — LangGraph orchestration
 
 ## Purpose
-Assembles the agents into the process loop described in
-[CLAUDE.md §10](../../../CLAUDE.md#10-agent-architecture--process-loop) and
-exposes a single async entry point that takes a `ResearchRequest` and returns a
-`ReviewVerdict`.
+Assembles the agents into the process loop described in the Phase 1 system tour
+([CLAUDE.md §8](../../../CLAUDE.md#8-what-phase-1-built-the-system-as-it-stands)) and
+exposes async entry points for both monitored runs (`ResearchRun`) and verdict-only
+compatibility (`ReviewVerdict`).
 
 ## Architecture
-A LangGraph `StateGraph` with five nodes and two outer feedback edges (each
-capped at `max_iterations`, default 3).  Tool execution is handled inside
-`DebateToConverge` via persistent per-worker sandboxes — not via graph nodes.
+A LangGraph `StateGraph` with six nodes and two outer feedback edges (each
+capped at `max_iterations`, default 3). Tool execution is owned by analyst
+workers inside their `analyze()` ReAct loop via persistent per-worker sandboxes —
+not by graph nodes.
 
 ```
 START → literature → review_literature
@@ -22,24 +23,25 @@ START → literature → review_literature
                                   ▼─────────────► analysis  (loop ②)
                                   │
                                   ▼
-                             finalize_run → END
+                             finalize_run
+                                  │ accepted + report formats
+                                  ▼
+                             compose_report → END
 ```
 
 Reviewer nodes return state updates containing the newest `ReviewVerdict`.
 `add_conditional_edges()` then routes from `review_literature` back to
 `literature` or onward to `analysis`, and from `review_analysis` back to
 `analysis` or onward to `finalize_run`. `finalize_run` copies the latest
-accumulated verdict into `state["verdict"]`, then exits via a static edge to
-`END`.
+accumulated verdict into `state["verdict"]`, then either routes to `compose_report`
+on an accepted verdict with requested report formats or exits to `END`.
 
 **Tool execution inside `analysis_node`:** `analysis_node` calls
-`consensus_strategy.run(workers, lead, task)`. `DebateToConverge.run()` now
-includes a tool-execution phase after each round of `analyze()` calls.  Each
-worker with an attached `PersistentSandbox` calls `execute_tools()`, which
-calls `request_tools()`, executes via the sandbox, and appends results to the
-worker's private `memory_path`.  A truncated shared summary is injected into
-`task.instructions` for the next round.  Error-feedback retry is inside
-`AnalystWorkerAgent.execute_tools()`, capped at `tool_retry_cap`.
+`consensus_strategy.run(workers, lead, task)`. Each worker's
+`AnalystWorkerAgent.analyze()` runs the inner ReAct loop over `SandboxToolProvider`
+when sandbox + registry are attached, writes real `ToolResult`s to its private
+`memory_path`, and exposes `last_tool_results`. `DebateToConverge` injects a
+truncated cross-worker summary into `task.instructions` for the next round.
 
 The literature node follows a four-step pipeline:
 1. **IO agent composes search strategy** — `io_agent.compose_search_strategy()`
@@ -76,7 +78,7 @@ iteration counters, and the cap.
   monitor=None, monitor_jsonl=None) -> ReviewVerdict` — compatibility entry.
   Runs `run_research()` and returns only the final reviewer verdict.
 - `async run_research(request, *, ..., chatter=10, monitor=None,
-  monitor_jsonl=None) -> ResearchRun` — high-level monitored entry. Calls
+  monitor_jsonl=None, report_formats=None) -> ResearchRun` — high-level monitored entry. Calls
   `check_required_env()` immediately (crashes if any required API key is absent).
   Missing dependencies are constructed from `config/models.yaml`. Reads
   `tool_retry_cap`, `toolkit_root`, `analyze_env`, and `analyze_ini_sh` from
@@ -92,7 +94,8 @@ iteration counters, and the cap.
   worker's `memory_path` file and embedded in the final `AnalystReport`.
 - Monitor events are optional. When a monitor is supplied, graph nodes record
   node starts, search strategy/results, local retrieval paths, analyst reports,
-  tool execution attempts and results (via consensus), and reviewer verdicts.
+  worker tool-result summaries (via consensus/agents), reviewer verdicts, and report
+  composition events.
 - `IOAgentLike` / `ReviewerLike` — minimal protocols for dependency injection.
   `ToolWorkerLike` protocol removed from `builder.py` (tool execution moved to
   consensus/roles layers).
@@ -123,13 +126,13 @@ iteration counters, and the cap.
 ## Dictionary-level reference
 - `ResearchState` — TypedDict for the graph state; `literature` is `list[Path]`;
   `verdicts` is an accumulated list of reviewer decisions. Tool queues/results
-  are not graph state; tool calls run inside analyst consensus and are recorded
-  in per-worker `memory.md` files.
+  are not graph state; tool calls run inside analyst workers and are recorded in
+  per-worker `memory.md` files.
 - `IOAgentLike` — protocol with `compose_search_strategy()`, `search()`, `ingest_results()`.
 - `ReviewerLike` — protocol with `async review(request, *, literature, report)`.
-- `build_graph(...)` — constructs and compiles the five-node state graph
+- `build_graph(...)` — constructs and compiles the six-node state graph
   (`literature`, `review_literature`, `analysis`, `review_analysis`,
-  `finalize_run`).
+  `finalize_run`, `compose_report`).
 - `run_request(request, ...)` — compatibility entry point; delegates to
   `run_research()` and returns the final `ReviewVerdict`.
 - `run_research(request, ...)` — monitored high-level entry point; returns
@@ -147,14 +150,11 @@ iteration counters, and the cap.
 - `DEFAULT_WORKER_COUNT` — default analyst worker count (currently 2).
 
 ## Changelog
-- 2026-05-26 → 2026-06-11 — **Graph built, hardened, and ReAct-wired.** Five-node
-  LangGraph (`literature`, `review_literature`, `analysis`, `review_analysis`,
-  `finalize_run`, `compose_report`), two capped feedback edges, Studio wiring.
-  `run_research()`: per-run workspace, one `PersistentSandbox` per worker, `MCPToolClient`
-  lifecycle, `ReadOnlyToolProvider` for reviewer + lead, `check_required_env()` at entry,
-  `react_loop_cap` (default 12), report formats. `literature_node` prefers
-  `gather_literature()` ReAct loop.
-- 2026-06-12 — Phase 2 step 0: `_builtin_server_config()` gains optional `cwd`; `run_research`
-  pins the MCP server process to `run_dir(run_id)`. Lead's `ReadOnlyToolProvider` roots now
-  include `toolkit_root` (`lead_roots = [run_dir, papers_dir, toolkit_root]`). Per-role caps:
-  `librarian_react_loop_cap` added alongside the general `react_loop_cap`.
+- 2026-05-26 -> 2026-06-12 — Graph/runtime built and ReAct-wired: six-node LangGraph
+  including `compose_report`, two capped feedback edges, Studio wiring, per-run workspace,
+  one persistent sandbox per worker, MCP client lifecycle, read-only reviewer/lead tools,
+  required-env checks, role-specific ReAct caps, report formats, and ReAct literature
+  gathering.
+- 2026-06-12 — Phase 2 step 0 added off-repo MCP server cwd pinning and lead read-only
+  `toolkit_root` access; graph docs now reflect worker-owned tool execution.
+- 2026-06-12 — Compacted changelog and refreshed the graph diagram/interfaces.

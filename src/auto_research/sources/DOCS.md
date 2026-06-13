@@ -3,7 +3,7 @@
 ## Purpose
 Provides the librarian I/O sub-team with read access to external literature and
 the web, behind a single shared interface so new sources drop in cleanly
-([CLAUDE.md §10](../../../CLAUDE.md#10-agent-architecture--process-loop)).
+([CLAUDE.md §8](../../../CLAUDE.md#8-what-phase-1-built-the-system-as-it-stands)).
 
 ## Architecture
 - `base.py` — the `QuerySource` Protocol/ABC.
@@ -64,6 +64,7 @@ Each module is independent; no source imports another.
   metadata, and returns the stored row.
 
 ## Changelog
-- 2026-05-26 → 2026-06-12 — `QuerySource` interface; arXiv, NASA ADS, and Tavily adapters.
-  `resolve_ads_full_text()` degrades ADS `404` to `[]` (bibcodes with no esource records are
-  a normal outcome ADS reports inconsistently; non-404 errors still propagate).
+- 2026-05-26 -> 2026-06-12 — Source layer built and stabilized: `QuerySource`,
+  arXiv/NASA ADS/Tavily adapters, PDF download/ingest helpers, ADS full-text resolver, and
+  ADS 404 degradation for normal no-esource records.
+- 2026-06-12 — Compacted changelog and refreshed CLAUDE section link.

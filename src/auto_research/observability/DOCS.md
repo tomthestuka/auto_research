@@ -56,6 +56,7 @@ standalone CLI visualiser for monitor JSONL files.
   ledger logging.
 
 ## Changelog
-- 2026-05-26/27 — Step 3 built: LangSmith tracing hook, JSONL cost ledger (`priceMTk` per-call costing), runtime data-dir helper, deterministic observability tests. Opt-in live LangSmith test under `AUTO_RESEARCH_LIVE_LANGSMITH_TESTS=1`.
-- 2026-06-09 — `runtime_data_dir()` in `costs.py` replaced by re-export from `auto_research.env`; runtime dir now configured via `config/orchestration.yaml::runtime_dir` instead of `AUTO_RESEARCH_RUNTIME_DIR` env var.
-- 2026-06-09 — `plot_run.py` added (moved from repo root): Gantt + cost-pie visualiser for monitor JSONL files. Pricing and model assignment now read from `config/models.yaml` instead of being hardcoded. Usage: `python -m auto_research.observability.plot_run <monitor.jsonl> [output.png]`.
+- 2026-05-26 -> 2026-06-12 — LangSmith tracing, JSONL cost ledger, config-priced
+  per-call costing, config-driven runtime data dir, deterministic tests, opt-in live
+  LangSmith verification, and `plot_run.py` for monitor Gantt/cost visualization.
+- 2026-06-12 — Compacted changelog; no observability behavior changes.

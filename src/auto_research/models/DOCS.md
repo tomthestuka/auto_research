@@ -114,13 +114,8 @@ Google by editing YAML alone
   decoding); `tools=` uses `messages.create`.
 
 ## Changelog
-- 2026-05-26 → 2026-06-11 — **Provider abstraction built and fully native.** Three
-  adapters (OpenAI/Anthropic/Google) implementing `schema=`/`tools=`/`cache_prefix=`
-  contracts. Structured output: OpenAI via `responses.create(text.format=json_schema)` +
-  `_strict_json_schema_format` sanitizer; Google via `response_schema` + `_to_gemini_schema`
-  sanitizer; Anthropic via SDK-native `messages.parse(output_format=schema)` (replaces
-  hand-rolled forced-tool workaround that let Opus nest the result and crash
-  `judge_convergence`). Provider tool-turn round-trip for ReAct: `ToolCall.id`,
-  `AssistantToolUse`, `ToolResultMessage`, `ConversationMessage` union; adapters translate to
-  native blocks. Prefix caching: `cache_prefix=True` knob (Anthropic `cache_control`,
-  OpenAI `prompt_cache_key`, Google no-op). `priceMTk` pricing; vision/documents flags.
+- 2026-05-26 -> 2026-06-12 — Provider abstraction built and made fully native across
+  OpenAI, Anthropic, and Google: config-driven role groups, structured output, function
+  calling, ReAct tool-turn replay, prefix caching, vision/document gates, usage normalization,
+  and `priceMTk` cost metadata.
+- 2026-06-12 — Compacted changelog; no provider behavior changes.

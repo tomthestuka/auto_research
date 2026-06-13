@@ -28,4 +28,7 @@ runtime data directory or `logs/dev/step-N/`.
   logs and live run reports.
 
 ## Changelog
-- 2026-05-28 - Added the Step 12 monitor inspection notebook.
+- 2026-05-28 -> 2026-06-12 — Added and retained the Step 12 monitor inspection notebook
+  for live-run and monitor-artifact review; notebooks remain human-only and never runtime
+  prompt context.
+- 2026-06-12 — Compacted changelog; no notebook behavior changes.

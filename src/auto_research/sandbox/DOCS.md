@@ -13,10 +13,10 @@ Three tightly coupled responsibilities:
    `<runtime_dir>/runs/{run_id}/` (`runtime_dir` from `config/orchestration.yaml`); per-agent `memory.md` files
    record tool call history as bare terminal recordings.
 
-Tool-authoring (propose → branch → lead-review → human-approve → merge) is a
-**Phase 2 stub** in `merge_flow.py`. Phase 2 implementation: Claude Agent SDK.
-See [CLAUDE.md §8](../../../CLAUDE.md#8-runtime-tool-authoring--sandbox) and
-[§13](../../../CLAUDE.md#13-phase-2-readiness).
+Tool-authoring (propose → branch → gate → review → human-merge) lives in `merge_flow.py`
+(author harness + rework loop, step 2) and `gate.py` (the deterministic mergeability gate,
+step 3). The co-lead review (step 4) and the atomic commit (step 6) are still stubs.
+See [CLAUDE.md §9](../../../CLAUDE.md#9-phase-2--tool-authoring-the-active-phase).
 
 ## Architecture
 
@@ -29,7 +29,8 @@ sandbox/
 ├── analyst_env.sh    # dedicated headless analyst env (HEADAS, CALDB, no cruft)
 ├── builtin_server.py # MCP stdio server: bash_exec, list_dir, read_file
 ├── mcp_client.py     # MCPToolClient — manages stdio MCP server sessions
-└── merge_flow.py     # propose_and_pr() — Phase 2 stub (NotImplementedError)
+├── merge_flow.py     # propose_and_pr() — author harness + rework loop (step 2)
+└── gate.py           # run_gate() — deterministic mergeability gate (step 3)
 ```
 
 **`TOOL_MANIFEST` convention:** each research_toolkit package exposes a
@@ -38,15 +39,13 @@ module-level dict `TOOL_MANIFEST: dict[str, ToolSpec]` at its top level.
 a new tool to research_toolkit requires only adding it to `TOOL_MANIFEST` — no
 changes to `auto_research`.
 
-**Tool execution wiring:** Tool execution now lives inside `DebateToConverge`
-rather than in graph nodes.  After each round of `analyze()` calls, each
-worker with an attached `PersistentSandbox` calls `execute_tools()`, which
-calls `request_tools()` (LLM), runs each request through the sandbox, and
-appends a bare terminal recording to the worker's private `memory.md`.
-Truncated per-worker summaries are then injected into `task.instructions` for
-the next debate round so workers can reason from each other's results.  The
-error-feedback retry loop (up to `tool_retry_cap` attempts) lives inside
-`AnalystWorkerAgent.execute_tools()`.
+**Tool execution wiring:** Tool execution lives inside each
+`AnalystWorkerAgent.analyze()` call. The worker's inner ReAct loop uses
+`SandboxToolProvider`, which exposes `ToolkitRegistry.tool_definitions()` and MCP
+tool schemas to provider-native function calling, dispatches returned calls into
+`PersistentSandbox`, and appends bare terminal recordings to the worker's private
+`memory.md`. `DebateToConverge` reads each worker's `last_tool_results` and injects
+truncated peer summaries into later rounds.
 
 **`is_alive` flag and recovery:** if a worker's subprocess exits unexpectedly
 or times out, the failing `call_tool()` returns a non-zero result and
@@ -55,16 +54,16 @@ process has a clean XSPEC session, so analysts must reload any state they need.
 
 **MCP tool path:** alongside `TOOL_MANIFEST` tools, analyst workers may call
 tools served by stdio MCP servers.  `builtin_server.py` runs as a subprocess
-and currently exposes `bash_exec`, `list_dir`, and `read_file`.  The P2
-hardening task will restrict this path to read-only file-tree traversal.
+and currently exposes `bash_exec`, `list_dir`, and `read_file`. Restricting MCP to
+read-only file-tree exploration is deferred beyond Phase 2.
 `MCPToolClient`
 manages the server sessions and exposes tools to the registry under the naming
 convention `mcp.<server_name>.<tool_name>` (e.g. `mcp.builtin.list_dir`).
 `PersistentSandbox.call_mcp_tool()` forwards calls through the attached client.
 `ToolkitRegistry.load_mcp(client)` indexes MCP tools alongside manifest tools
 so the single `tool_catalogue()` string given to workers describes both.
-MCP tools dispatch through `execute_tools()` via `registry.is_mcp(kind)` —
-the same retry loop and memory-recording path as manifest tools.
+`SandboxToolProvider` dispatches MCP tools via `registry.is_mcp(kind)`, so they use
+the same ReAct and memory-recording path as manifest tools.
 
 **Analyst env script:** `analyst_env.sh` is a minimal bash script sourced by
 `_source_ini_env()` before each persistent subprocess is spawned.  It sets only
@@ -101,7 +100,7 @@ class ToolkitRegistry:
 
 `tool_definitions()` returns `{"name", "description", "input_schema"}` for every
 toolkit tool (its `args_schema`) and MCP tool (its `inputSchema`), for
-provider-native **function calling** (`AnalystWorkerAgent.request_tools`).
+provider-native **function calling** in `AgentRole._react`.
 Because provider function names must match `^[A-Za-z0-9_-]{1,64}$`, the dotted
 `kind` is sanitized (dots → `_`) for `name`; `kind_for_function()` maps a
 returned tool-call name back to the canonical `kind` the sandbox routes on.
@@ -236,7 +235,7 @@ def is_mcp(self, kind: str) -> bool                # True if kind is an MCP tool
 
 Call `load_mcp(client)` after `client.start()` to merge MCP kinds into the registry.
 `tool_catalogue()` includes both manifest and MCP tools in one string.
-`is_mcp()` is used by `execute_tools()` to route dispatch to `call_mcp_tool()`.
+`is_mcp()` is used by `SandboxToolProvider` to route dispatch to `call_mcp_tool()`.
 
 ### `run_tool` (one-shot, kept for ad-hoc use)
 
@@ -283,8 +282,8 @@ async def propose_and_pr(
     worktree_base: Path,        # isolated worktree location (under the runtime data dir)
     human_handler=None,         # §9.8 injected (HumanQuery-ish dict) -> str; None+headless → HumanInputRequired
     coder_model: str | None = None,   # resolved from the `coder` role in models.yaml
-    run_gate=None,              # injectable hook; step-2 stub → GateReport(passed=True)
-    run_review=None,            # injectable hook; step-2 stub → ToolReviewVerdict(approved=True)
+    run_gate=None,              # injectable hook; defaults to the REAL gate (gate.run_gate, step 3)
+    run_review=None,            # injectable hook; step-4 stub → ToolReviewVerdict(approved=True)
     gate_rework_cap=None, review_rework_cap=None, max_turns=None,  # from orchestration.yaml
     worktree_factory=None, sdk_client_factory=None,  # seams for deterministic tests
 ) -> MergeFlowResult
@@ -305,12 +304,48 @@ drives the bounded rework loop:
 - **L4** cap exhausted → `MergeFlowResult(status="failed")`, **no commit**, for the lead to
   raise to the human (§9.6/§9.7).
 
-The orchestration is **code, never the LLM**. The gate/review are **injectable hooks** that
-stub-PASS in step 2 (real gate = step 3, real review = step 4). A successful run returns
-`status="committed"` with a placeholder `commit_sha` — the real atomic commit is
-`approve_edit()` in step 6; the runtime never touches master. `HumanInputRequired` is the
-typed headless fail-safe (a run never silently hangs). Deterministic loop coverage is in
-`tests/test_merge_flow.py` (fake SDK client + fake lead + stub hooks).
+The orchestration is **code, never the LLM**. The gate/review are **injectable hooks**: the
+gate defaults to the **real deterministic gate** (`gate.run_gate`, step 3); the co-lead
+review is still a stub-PASS (step 4). Both stay injectable so the loop is exercised
+deterministically in `tests/test_merge_flow.py` (which injects a passing gate — the real
+gate needs a git worktree + science stack and is covered by `tests/test_gate.py`). A
+successful run returns `status="committed"` with a placeholder `commit_sha` — the real
+atomic commit is `approve_edit()` in step 6; the runtime never touches master.
+`HumanInputRequired` is the typed headless fail-safe (a run never silently hangs).
+
+### `gate.run_gate` (Phase 2 step 3 — the deterministic mergeability gate)
+
+```python
+async def run_gate(worktree: Path, tool_spec: ToolSpec, *,
+                   test_runner=None, config=None) -> GateReport
+```
+
+The **trust boundary** (§9.4) — code, not an LLM opinion. Two layers:
+
+- **Layer A (generic, domain-blind):** the **no-fabrication scan**, **structural** checks,
+  **determinism**, **provenance** — all over the worktree's added/new `*_utils` `.py` lines
+  (enumerated by `collect_targets` via `git status -uall` + per-file `git diff`).
+- **Layer B (the tool's own tests):** `pytest` in the worktree (via the injectable
+  `test_runner`; the default runs the analyst interpreter twice for determinism).
+
+The **no-fabrication scan** (`scan_python_source`, pure over source text) is split into
+precision tiers so it stays clean on real toolkit code (full of legitimate hardcoded
+numeric arrays — XSPEC param vectors, energy bins):
+
+- **Tier 1 HARD-FAIL** — banned **vocabulary** in comments/docstrings/strings
+  (`synthetic`, `example data`, `placeholder`, `TODO`, … whole-word/phrase matched);
+  **any RNG**, seeded or not (`np.random`, `default_rng`, `.rvs`, …) — §9.5 made absolute;
+  **placeholder function bodies** (`pass`/`...`/`raise NotImplementedError`).
+- **Tier 3 FINDING** — numeric-literal arrays `return`ed / plotted / framed: recorded on
+  `GateReport.findings` (does **not** flip `passed`); the step-4 co-lead judges intent.
+
+All scan lists live in **`config/code_gate.yaml`** (tunable without a code edit). A line
+referencing a marked `synth…` ObsID is allowlisted so §9.5 fixtures stay legal.
+`GateReport.passed ⇔ all Layer-A hard checks pass ∧ ≥1 Layer-B test ran ∧ all pass`
+(an untested tool is never mergeable). `report_hash` seeds the §9.9 commit message.
+Provenance: a `FigureRef(...)` the tool constructs must pass `sha256` + `produced_by`.
+Deterministic coverage in `tests/test_gate.py` (pure scanners + a throwaway git worktree
+with an injected Layer-B runner — no live science stack).
 
 ## Dependencies
 
@@ -320,9 +355,9 @@ typed headless fail-safe (a run never silently hangs). Deterministic loop covera
   `ToolSpec`, `GateReport`, `ToolReviewVerdict`, `MergeFlowResult` for `merge_flow`);
   `auto_research.agents.prompts.load_prompt` (the `coder` prompt); `claude_agent_sdk`
   (the author harness).
-- Depended on by: `auto_research.agents.roles` (`AnalystWorkerAgent.execute_tools()`);
-  `auto_research.graph.runtime` (sandbox lifecycle); `auto_research.consensus`
-  (tool execution inside `DebateToConverge._run_tools()`).
+- Depended on by: `auto_research.agents.react` / `auto_research.agents.roles`
+  (`SandboxToolProvider` and `AnalystWorkerAgent.analyze()`); `auto_research.graph.runtime`
+  (sandbox lifecycle); `auto_research.consensus` (peer tool-result summaries).
 
 ## Dictionary-level reference
 
@@ -376,29 +411,31 @@ typed headless fail-safe (a run never silently hangs). Deterministic loop covera
 - `propose_and_pr(tool_spec, *, lead, toolkit_root, worktree_base, human_handler=None,
   coder_model=None, run_gate=None, run_review=None, …)` → `MergeFlowResult` — Phase 2
   step-2 author harness: spawns the Sonnet Claude-SDK author in an isolated worktree and
-  drives the L0–L4 bounded rework loop around injectable stub gate/review hooks.
+  drives the L0–L4 bounded rework loop. `run_gate` defaults to the real `gate.run_gate`;
+  `run_review` is still a stub-PASS; both stay injectable.
 - `HumanInputRequired(RuntimeError)` — typed headless fail-safe raised when the author
   needs a human but no `human_handler` is wired (§9.8).
+- `gate.run_gate(worktree, tool_spec, *, test_runner=None, config=None)` → `GateReport` —
+  the deterministic gate (§9.4). Runs the no-fabrication scan + structural + determinism +
+  provenance (Layer A) and the tool's tests (Layer B); records Tier-3 findings without
+  failing. `scan_python_source(rel, source, *, added=None, config=None)` → `(hard_fails,
+  findings)` is the pure, unit-testable scan core; `scan_provenance`, `check_structural`,
+  `collect_targets`, and `_manifest_keys` are its helpers. Scan lists load from
+  `config/code_gate.yaml`.
 
 ## Changelog
-- 2026-05-26 → 2026-06-09 — **Phase 1 sandbox built and hardened.** `ToolkitRegistry`
-  (manifest discovery, `disabled_tools`, `tool_definitions()` for native function calling,
-  `kind_for_function()`), `PersistentSandbox` (JSON-line REPL, fd-redirect, XSPEC
-  non-interactive boot + `Plot.xAxis="keV"`, auto-restart, `_source_ini_env`),
-  `workspace.py` (per-run/agent layout, `memory_path`, `report_dir`), `builtin_server.py`
-  (MCP stdio: `bash_exec`/`list_dir`/`read_file`; `bash_exec` carries inline-`python -c`
-  guidance), `mcp_client.py` (`MCPToolClient`, `inputSchema` capture), `merge_flow.py`
-  Phase 2 stub. Runtime dir from `orchestration.yaml`; no `os.environ` env fallback.
-- 2026-06-12 — Phase 2 step 0: `MCPToolClient` forwards a per-server `cwd` to
-  `StdioServerParameters` (optional key in server dict; omitted → inherit); the builtin MCP
-  server process is now pinned to `run_dir(run_id)` — a by-construction backstop so nothing
-  it does relative to its cwd can touch a repo. Per-call `bash_exec` cwd injection is
-  unchanged.
-- 2026-06-12 — Phase 2 step 2: `merge_flow.py` rewritten from the `NotImplementedError`
-  stub into the **author harness + rework-loop scaffold**. `propose_and_pr(tool_spec, …)`
-  → `MergeFlowResult` creates an isolated git worktree, assembles runtime-safe structure
-  context, builds the `ask_lead`/`ask_human` in-process MCP tools, and drives a warm
-  `ClaudeSDKClient` (SDK 0.2.99) through the L2 gate-rework / L3 review-rework / L4
-  honest-termination loop around **injectable gate/review hooks** (stub-PASS now; real gate
-  = step 3, real review = step 4). Adds `HumanInputRequired` (headless fail-safe). No real
-  commit yet (`approve_edit` = step 6). Deterministic coverage in `tests/test_merge_flow.py`.
+- 2026-05-26 -> 2026-06-12 — Phase 1 sandbox/tooling built and hardened:
+  manifest-based `ToolkitRegistry`, disabled-tool filtering, provider-native tool
+  definitions, persistent JSON-line sandbox with fd capture and XSPEC non-interactive boot,
+  per-run workspace/memory/figures layout, built-in MCP server/client, and config-driven
+  runtime paths.
+- 2026-06-12 — Phase 2 step 0 pinned worker scratch, figure outputs, and builtin MCP server
+  cwd under the runtime data dir so runtime writes stay outside both repos.
+- 2026-06-12 — Phase 2 step 2 added `merge_flow.propose_and_pr()`: isolated toolkit
+  worktree authoring, runtime-safe structure context, `ask_lead`/`ask_human`, bounded
+  gate/review rework loops, and typed no-commit failure.
+- 2026-06-12 — Phase 2 step 3 added `gate.py::run_gate`: structural/provenance/
+  determinism checks, configurable no-fabrication scan, Layer-B test runner, non-failing
+  findings, and deterministic tests.
+- 2026-06-12 — Compacted changelog and updated tool-execution wording to the current
+  worker-owned ReAct path.

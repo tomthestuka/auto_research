@@ -41,11 +41,9 @@ carried by **reference** (`FigureRef`), never embedded
   offer a direct paper PDF download.
 - `SearchResult.full_text_links` carries resolver/source-button candidates such
   as ADS `esource` links; `pdf_url` is the selected PDF-like download target.
-- `SearchResult.local_path` (`Path | None`) is populated by
-  `LibrarianSearcherAgent` for results that have a downloaded PDF in the local
-  papers directory. It stays `None` for online/external results returned by
-  `LibrarianIOAgent`. The reviewer loads these PDFs as `DocumentRef` attachments
-  at the model-call boundary.
+- `SearchResult.local_path` (`Path | None`) is set only for records with a downloaded
+  local file. Online/external search results usually leave it `None`; local retrieval
+  returns stored PDF paths separately for reviewer `DocumentRef` attachments.
 - `ReviewVerdict.needs_more_literature` and
   `ReviewVerdict.needs_analysis_rework` are the schema-level flags used by the
   Phase 1 feedback edges.
@@ -69,7 +67,8 @@ carried by **reference** (`FigureRef`), never embedded
   `approved`, `issues`, `checks_adequate`), and `MergeFlowResult` (what
   `merge_flow.propose_and_pr` returns — `status` ∈ `committed|failed|needs_human`,
   `branch`, `commit_sha`, `gate_report`, `review`). These make the rework loop legible
-  end-to-end; step 2 fills them via stub gate/review (steps 3/4 implement the real ones).
+  end-to-end; step 3 now supplies the real deterministic gate, while provider-decorrelated
+  review remains step-4 scope.
 
 ## Dependencies
 - External: `pydantic>=2`.
@@ -103,8 +102,8 @@ carried by **reference** (`FigureRef`), never embedded
   keywords: list[str] = [], pdf_url: HttpUrl | None = None,
   full_text_links: list[FullTextLink] = [],
   local_path: Path | None = None)` — normalized metadata for one paper or
-  authoritative web result. `local_path` is set by `LibrarianSearcherAgent`
-  for locally stored papers.
+  authoritative web result. `local_path` is present only when a result has a stored local
+  file.
 - `AnalysisTask(question: str, instructions: str | None = None,
   literature: list[SearchResult] = [],
   previous_report: AnalystReport | None = None)` — work item sent to analyst
@@ -134,10 +133,10 @@ carried by **reference** (`FigureRef`), never embedded
   ToolCallRequest | None = None)` — lead review of a proposed tool action.
 - `ToolResult(tool_name: str, stdout: str, stderr: str, exit_code: int,
   figures: list[FigureRef] = [], elapsed_s: float)` — result of a sandboxed
-  tool execution. Produced by `AnalystWorkerAgent.execute_tools()`, written to
+  tool execution. Produced by the analyst worker's `SandboxToolProvider` loop, written to
   the worker's private `memory.md`, and summarized into subsequent analyst task
-  instructions by the consensus layer. Figures are `FigureRef` objects parsed
-  from tool stdout. `exit_code=127` indicates "tool unavailable" (Phase 2 stub).
+  instructions by the consensus layer. Figures are `FigureRef` objects returned by tools.
+  `exit_code=127` indicates "tool unavailable".
 - `ValidationDataset(mission: str, obsid: str, synthetic: bool = False)` — one real
   (or marked-synthetic, §9.5) input a `ToolSpec`'s checks run against.
 - `ProposedCheck(kind: str, description: str, params: dict[str, Any] = {},
@@ -155,8 +154,11 @@ carried by **reference** (`FigureRef`), never embedded
 - `CheckResult(name: str, layer: "A"|"B", passed: bool, detail: str = "")` — one gate
   check; `detail` is the machine-readable reason fed back to the author on failure.
 - `GateReport(passed: bool, layer_a: list[CheckResult] = [], layer_b: list[CheckResult] = [],
-  reason: str = "", report_hash: str = "")` — the deterministic gate's verdict (§9.4);
-  `report_hash` seeds the §9.9 atomic-commit message. Step-2 stub returns `passed=True`.
+  findings: list[CheckResult] = [], reason: str = "", report_hash: str = "")` — the
+  deterministic gate's verdict (§9.4); `report_hash` seeds the §9.9 atomic-commit message.
+  `findings` are **non-failing** observations (the literal-array landmine) the mechanical
+  gate records for the step-4 co-lead to judge — they never flip `passed`. Produced by
+  `gate.run_gate` (step 3).
 - `ToolReviewVerdict(approved: bool, rationale: str, issues: list[str] = [],
   checks_adequate: bool = True)` — the provider-decorrelated co-lead's code-review verdict
   (§9.3 step 4); distinct from the research `ReviewVerdict`.
@@ -168,19 +170,13 @@ carried by **reference** (`FigureRef`), never embedded
   state; an honest failure is a correct outcome, never a reason to fabricate.
 
 ## Changelog
-- 2026-05-26 → 2026-06-09 — **Full Pydantic v2 protocol built.** `ResearchRequest`,
-  `SearchResult` (`pdf_url`/`full_text_links`/`local_path`), `AnalysisTask`/`AnalystReport`,
-  `ReviewVerdict`, `FigureRef`/`DocumentRef`, `ToolCallRequest` (`arguments: dict[str,Any]`
-  for native function-call values; `requested_by`/`purpose` defaulted), `ToolResult`
-  (exit_code 127 = unknown tool), report schemas (`ReportSection`, `Reference`,
-  `ResearchReport`, `LatexReport`).
-- 2026-06-12 — Clarified `LatexReport` docstring: `latex` is a full document in one
-  structured call; `max_tokens` must hold it (raised to 16384 in `config/models.yaml`).
-  `\\` in truncation errors is correct single JSON escaping. Phase 2 step 1: `ToolSpec`
-  brief (`schemas/toolspec.py`) — `ToolSpec` + `ValidationDataset` + `ProposedCheck`;
-  `AnalystReport.tool_request: ToolSpec | None`; round-trip + validation tests added.
-- 2026-06-12 — Phase 2 step 2: `schemas/merge.py` — `CheckResult`, `GateReport`,
-  `ToolReviewVerdict`, `MergeFlowResult` (the tool-authoring flow protocol; all exported).
-  `AnalystReport.status` (`ok|failed|needs_human`, §9.6) added. `ToolSpec` extended with
-  `request_kind` + `observed_issue` for the L5 `fix_existing` defect-report path. Round-trip
-  + validation tests in `test_schemas.py`.
+- 2026-05-26 -> 2026-06-12 — Full Pydantic v2 protocol built: research/search/analysis/
+  review messages, `FigureRef`/`DocumentRef`, native function-call tool envelopes, sandbox
+  results, report schemas, LaTeX report schema, and strict JSON-serializable boundaries.
+- 2026-06-12 — Phase 2 schemas added and evolved: `ToolSpec`, `ValidationDataset`,
+  `ProposedCheck`, `AnalystReport.tool_request`, `AnalystReport.status`,
+  `ToolSpec.request_kind`/`observed_issue`, and merge-flow types (`CheckResult`,
+  `GateReport`, `ToolReviewVerdict`, `MergeFlowResult`).
+- 2026-06-12 — Phase 2 step 3 added `GateReport.findings` for non-failing gate observations
+  consumed by future co-lead review.
+- 2026-06-12 — Compacted changelog and updated stale local-path/tool-result wording.

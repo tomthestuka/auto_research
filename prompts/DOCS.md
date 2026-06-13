@@ -29,7 +29,8 @@ Runtime prompt files:
   attachment reading, download and ingest reporting, and bibliographic
   summaries.
 - `analyst_worker.md` — task analysis, debate revisions, assumptions, figure
-  reference handling, and the two-call analyze/request_tools protocol.
+  reference handling, ReAct tool use, and `tool_request` reporting for missing or
+  broken toolkit capabilities.
 - `analyst_lead.md` — convergence judgment, adjudication, synthesis, **tool-request
   triage** (new-capability disposition + `fix_existing` wrongly-called vs buggy),
   authoritative-doc consultation (`web_search`), and raise-to-human on authoring failure.
@@ -58,15 +59,10 @@ logic here.
 - `coder.md` — system prompt for the Phase-2 tool author (Claude Agent SDK).
 
 ## Changelog
-- 2026-05-26 → 2026-06-12 — Four runtime prompts (reviewer, librarian_io, analyst_worker,
-  analyst_lead). Tool-specific guidance moved into manifest descriptions (native function
-  calling); prompts carry role/scope only. `analyst_worker.md`: workers omit
-  `save_path`/`save_path_prefix` (redirected by `SandboxToolProvider`). `analyst_lead.md`:
-  toolkit inspection paragraph added (browse full `research_toolkit` via `list_dir`/`read_file`
-  to decide disposition before authoring). `tool_author.md` deferred to Phase 2 step 2.
-- 2026-06-12 — Phase 2 step 2: added `coder.md` (the tool author's runtime-safe system
-  prompt; role named `coder` to mirror `config/models.yaml`). `analyst_worker.md` gains the
-  `tool_request` submit/report guidance (new-capability vs `fix_existing` defect report, no
-  fabrication around broken tools). `analyst_lead.md` gains tool-request triage, `web_search`
-  doc consultation, and raise-to-human on authoring failure. `PromptRole` now includes
-  `coder` and its names mirror `models.yaml` keys.
+- 2026-05-26 -> 2026-06-12 — Runtime prompts now cover reviewer, librarian I/O,
+  analyst worker, analyst lead, and Phase 2 `coder`. Tool-specific argument guidance lives
+  in manifests/tool schemas; prompts carry role scope, ReAct discipline, figure-path
+  omission, toolkit-inspection triage, web/lead/human escalation, no-fabrication rules, and
+  `tool_request` reporting.
+- 2026-06-12 — Compacted changelog and updated the analyst-worker contract wording to match
+  the current ReAct/tool-request flow.

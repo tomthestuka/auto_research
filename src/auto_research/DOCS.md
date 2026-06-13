@@ -5,11 +5,13 @@ Top-level Python package for the orchestration half of the system: the LangGraph
 graph, agent role wrappers, schemas, storage, providers, and the literature
 sources. The system's runtime **cannot** modify this code; new domain tools land
 in the sibling `research_toolkit` package via the gated flow in
-[CLAUDE.md §8](../../CLAUDE.md#8-runtime-tool-authoring--sandbox).
+[CLAUDE.md §9](../../CLAUDE.md#9-phase-2--tool-authoring-the-active-phase).
 
 ## Architecture
-A src-layout package. Submodules are added in the order set by
-[CLAUDE.md §14](../../CLAUDE.md#14-build-order-phase-1):
+A src-layout package. Submodules are organized around the Phase 1 system tour
+in [CLAUDE.md §8](../../CLAUDE.md#8-what-phase-1-built-the-system-as-it-stands)
+and the active Phase 2 build order in
+[CLAUDE.md §9.10](../../CLAUDE.md#910-build-order-phase-2):
 
 | Submodule | Step | Role |
 |---|---|---|
@@ -24,11 +26,11 @@ A src-layout package. Submodules are added in the order set by
 | `agents` | 7-8 | Runtime prompt loader plus thin per-role wrappers that load `prompts/<role>.md`, call configured model groups, and validate schema JSON. |
 | `consensus` | 9 | `ConsensusStrategy` — debate-to-converge with lead convergence checks and adjudication. |
 | `graph` | 10 | LangGraph assembly + the two capped feedback edges. |
-| `sandbox` | 11 | Subprocess sandbox + `research_toolkit` propose/branch/review/merge flow. |
+| `sandbox` | 11 + Phase 2 | Subprocess sandbox, `research_toolkit` invocation, and the propose/branch/gate authoring flow. |
 | `monitor` | 12 | Async-safe run monitor with 1-10 chatter, JSONL logs, and team-block Markdown reports. |
 | `cli` | 12 | `python -m auto_research "..."` entry point. |
 
-Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--conventions)).
+Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventions)).
 
 ## Interfaces / Contracts
 - Package exports its version as `auto_research.__version__`.
@@ -52,7 +54,7 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
 ## Dictionary-level reference
 - `__version__: str` — package version. `"0.0.0"` until the first non-skeleton
   release.
-- `run_research(request, ..., chatter=10, monitor_jsonl=None) -> ResearchRun` —
+- `run_research(request, ..., chatter=10, monitor_jsonl=None, report_formats=None) -> ResearchRun` —
   monitored library entry for CLI/notebook use.
 - `run_request(request, ...) -> ReviewVerdict` — compatibility wrapper returning
   only the final verdict.
@@ -62,8 +64,10 @@ Async-first throughout ([CLAUDE.md §9](../../CLAUDE.md#9-tech-stack--convention
   `auto_research.monitor`.
 
 ## Changelog
-- 2026-05-26 → 2026-06-09 — Phase 1 complete: all submodules built (schemas,
-  models/registry, observability, storage, sources, retrieval, prompts, agents, consensus,
-  graph/runtime, sandbox, report, CLI, notebook). `auto_research.env` added
-  (`check_required_env()`, `runtime_data_dir()`); runtime dir moved from env var to
-  `orchestration.yaml::runtime_dir`. Phase 2 active.
+- 2026-05-26 -> 2026-06-12 — Phase 1 completed and verified: schemas, providers,
+  observability, storage/retrieval, sources, prompts, agents, consensus, graph/runtime,
+  sandbox, report, CLI, notebook, environment checks, and config-driven `runtime_dir`.
+  Phase 2 is active: sandbox scratch is off-repo, `ToolSpec`/merge-flow/gate scaffolding
+  exists, and `research_toolkit` remains the only runtime-authored repo.
+- 2026-06-12 — Compacted changelog and refreshed stale CLAUDE section links; no code
+  changes.

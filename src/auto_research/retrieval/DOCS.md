@@ -58,4 +58,7 @@ Live retrieval verification is opt-in:
   tool; Phase 2 stub.
 
 ## Changelog
-- 2026-05-26/27 — Step 6 built: `RetrievalBackend` interface, `SqliteRetrievalBackend.text_search()` (searches `summary`, `tags_json`, `mem_abbrev`), `vector_search()` Phase 2 stub. Pure-Python path — no LLM call. Deterministic tests; opt-in live retrieval test.
+- 2026-05-26 -> 2026-06-12 — Pure-Python local retrieval built: backend protocol,
+  SQLite text search over papers/memory/`mem_abbrev`, deterministic ordering/tests, opt-in
+  live test, and `vector_search()` retained as a deferred stub.
+- 2026-06-12 — Compacted changelog; no retrieval behavior changes.

@@ -3,7 +3,7 @@
 ## Purpose
 Persists everything durable: paper metadata + abstracts + keywords, memory items
 (librarian abstractions), and a query log. Lives in the runtime data dir
-([CLAUDE.md §9](../../../CLAUDE.md#9-tech-stack--conventions)), not in the repo.
+([CLAUDE.md §10](../../../CLAUDE.md#10-tech-stack--conventions)), not in the repo.
 
 ## Architecture
 A small set of tables, accessed through an async-signature wrapper around the
@@ -14,8 +14,8 @@ does not change boundaries.
 Schema definition is centralized in `database.py` so Phase 2 vector retrieval can
 slot in without migrations: embedding space is reserved both as nullable
 `embedding` columns and an `embeddings` table
-([CLAUDE.md §13](../../../CLAUDE.md#13-phase-2-readiness)). The intended Phase 2
-backend is `sqlite-vec`, which co-exists in the same DB file.
+([CLAUDE.md §12](../../../CLAUDE.md#12-deferred-beyond-phase-2)). The intended
+deferred backend is `sqlite-vec`, which co-exists in the same DB file.
 
 Runtime DB path:
 - `<runtime_dir>/auto_research.sqlite3` (`runtime_dir` from `config/orchestration.yaml`)
@@ -96,5 +96,8 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   local paper ingestion utility.
 
 ## Changelog
-- 2026-06-09 — `runtime_data_dir()` now delegates to `auto_research.env.runtime_data_dir()`; runtime dir moved from `AUTO_RESEARCH_RUNTIME_DIR` env var to `config/orchestration.yaml::runtime_dir`.
-- 2026-05-26/27 — Step 4 built: SQLite schema (papers, memory with `mem_abbrev`, query_log; embedding column reserved for Phase 2), paper upsert/read/list, memory insert, `replace_memory_for_paper()`, `paper_record_from_result()` for no-PDF metadata ingestion, local PDF ingestion, deterministic storage tests.
+- 2026-05-26 -> 2026-06-12 — SQLite storage built and kept stable: papers, memory with
+  `mem_abbrev`, query log, reserved embedding columns/table, paper ingestion/upserts,
+  no-PDF metadata records, memory replacement, local PDF ingestion, deterministic tests, and
+  config-driven runtime DB path.
+- 2026-06-12 — Compacted changelog and refreshed deferred vector-search references.

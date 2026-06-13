@@ -34,11 +34,19 @@ class GateReport(MessageModel):
 
     ``report_hash`` seeds the §9.9 atomic-commit message (`ToolSpec` id + gate-report
     hash). The step-2 stub returns ``passed=True`` with empty layers.
+
+    ``findings`` are *non-failing* observations the mechanical gate records but cannot
+    decide on its own — the literal-data-array / ebin landmine and other intent-laden
+    code patterns (§9.4). They do **not** flip ``passed``; the provider-decorrelated
+    co-lead reviewer (step 4) judges their intent. Keeping them off ``passed`` is what
+    makes the gate high-precision: it auto-fails only the unambiguous, and defers the
+    rest to the second, independent check.
     """
 
     passed: bool
     layer_a: list[CheckResult] = Field(default_factory=list)
     layer_b: list[CheckResult] = Field(default_factory=list)
+    findings: list[CheckResult] = Field(default_factory=list)
     reason: str = ""
     report_hash: str = ""
 
