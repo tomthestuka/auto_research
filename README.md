@@ -38,41 +38,57 @@ beyond Phase 2 and will route requests through the same reviewer gate when built
 ## LLM architecture
 
 ```
-HUMAN
-  |
-  v
-REVIEWER group (top): triage -> dispatch -> digest -> cross-check -> final verdict/report
-  |                                                        ^
-  | literature tasks                                      | results + capped feedback
-  v                                                        |
-LIBRARIAN I/O group (medium)                              |
-  SourceToolProvider: arXiv, NASA ADS, Tavily web, local text_search
-  published literature only; local retrieval is pure Python over SQLite
-  |
-  v
-SQLite papers + memory DB --------------------------------+
-
-REVIEWER
-  |
-  | analysis tasks
-  v
-ANALYST workers (medium) <-> debate-to-converge, <= 3 rounds
-  |
-  | SandboxToolProvider -> PersistentSandbox per worker
-  | PYTHONPATH limited to sibling research_toolkit
-  v
-research_toolkit manifests (read-only invocation): xspec_utils today, more *_utils later
-  |
-  v
-ANALYST lead (top): convergence, adjudication, toolkit discipline
-  ReadOnlyToolProvider: run artifacts + papers + full research_toolkit source; optional web_search
-
-Missing or broken capability:
-  worker AnalystReport.tool_request / ToolSpec
-    -> lead triages disposition from research_toolkit lib/
-    -> merge_flow spawns Claude SDK coder in isolated research_toolkit worktree/branch
-    -> deterministic gate (built) -> GPT co-lead review (Todo) -> approve_edit commit (Todo)
-    -> human reruns human-half checks and manually merges to master out of band
+      ╔════════════════════════════════════════════════════════════════════╗
+      ║ auto_research repo                                                ║
+      ║ graph · agents · prompts · schemas · providers · sandbox/gate      ║
+      ║ runtime agents read this repo only; build-time commits are human   ║
+      ╚═══════════════════════════════╤════════════════════════════════════╝
+                                      │ config + prompts + tool surfaces
+                                      ▼
+      ┌────────────────────────────────────────────────────────────────────┐
+      │                               HUMAN                                │
+      │                    research request · report review                 │
+      └───────────────────────────────┬────────────────────────────────────┘
+                                      │ request
+                                      ▼
+      ┌────────────────────────────────────────────────────────────────────┐
+      │                        REVIEWER group (top)                        │
+      │              triage · dispatch · digest · cross-check               │
+      └───────────────┬────────────────────────────────────┬───────────────┘
+                      │ literature tasks                    │ analysis tasks
+                      ▼                                     ▼
+      ┌──────────────────────────────┐       ┌──────────────────────────────┐
+      │        LIBRARIAN I/O         │       │           ANALYSTS           │
+      │ medium group · ReAct sources │       │ workers debate · lead judges │
+      │ arXiv · ADS · web · local DB │       │ data work · figures · tools  │
+      └───────────────┬──────────────┘       └───────┬──────────────┬───────┘
+                      │ papers + memory              │ read-only     │ ToolSpec
+                      ▼                              │ tool calls    │ missing/fix
+      ┌──────────────────────────────┐               ▼               ▼
+      │      SQLite papers/memory    │       ╔══════════════════════╗ ┌──────────────────────┐
+      │      text search now         │       ║ research_toolkit repo║ │ CODER + GATE flow    │
+      │      vector search Todo      │       ║ xspec_utils today    ║ │ Claude author · gate │
+      └───────────────┬──────────────┘       ║ future *_utils       ║ │ GPT review Todo      │
+                      │ literature results   ║ TOOL_MANIFEST        ║◄┤ isolated branch Todo │
+                      │                      ╚══════════╤═══════════╝ └──────────────────────┘
+                      │                                 │ tool results + figs
+                      │                                 ▼
+                      │                      ┌──────────────────────────────┐
+                      │                      │      ANALYST reports         │
+                      │                      │ findings · uncertainty · figs│
+                      │                      └──────────────┬───────────────┘
+                      │                                     │ analysis results
+                      └────────────────────┐                │
+                                           ▼                ▼
+      ┌────────────────────────────────────────────────────────────────────┐
+      │                  REVIEWER receives evidence/results                │
+      │              capped feedback to librarians / analysts              │
+      └───────────────────────────────┬────────────────────────────────────┘
+                                      │ final verdict + report
+                                      ▼
+      ┌────────────────────────────────────────────────────────────────────┐
+      │                               HUMAN                                │
+      └────────────────────────────────────────────────────────────────────┘
 ```
 
 Structured agent messages use **provider-native structured output** (OpenAI Responses
