@@ -15,6 +15,10 @@ REQUIRED_ROLES = frozenset(
         "analyst_lead",
         "analyst_worker",
         "librarian_io",
+        # Phase-2 tool-authoring roles — required now that the gated author→review flow is
+        # built. Non-required roles will be re-introduced only as the system grows.
+        "coder",
+        "analyst_colead",
     }
 )
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "models.yaml"

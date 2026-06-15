@@ -63,3 +63,12 @@ report_retry_cap: 2
 tool_author_max_turns: 50
 tool_author_gate_rework_cap: 3
 tool_author_review_rework_cap: 2
+# Raise-to-human channel (§9.8). human_channel: the default connector used when a run is
+# NOT attended (library/notebook/server) and no channel is passed explicitly — one of
+# cli|slack|whatsapp|none. Kept `none` (headless) by default so unattended runs and the test
+# suite never block on a human; set it to `whatsapp`/`slack` to wire a library run, or pass
+# run_research(human_channel=...). An interactive CLI auto-detects the terminal regardless.
+# human_channel_ping_timeout_s: how long the launch-time preflight waits for the channel to
+# reply back before failing the run (green only when a reply arrives).
+human_channel: none
+human_channel_ping_timeout_s: 300

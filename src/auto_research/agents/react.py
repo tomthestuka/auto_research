@@ -55,6 +55,61 @@ class ToolProvider(Protocol):
 
 
 # ----------------------------------------------------------------------------
+# Raise-to-human — one ask_human tool, shared by every ReAct role (§9.7/§9.8).
+# ----------------------------------------------------------------------------
+
+ASK_HUMAN_TOOL = "ask_human"
+_ASK_HUMAN_KINDS = ("clarify_science", "clarify_code", "blocked")
+
+
+def ask_human_tool_def() -> dict:
+    """The provider-neutral definition for the shared ``ask_human`` tool."""
+    return {
+        "name": ASK_HUMAN_TOOL,
+        "description": (
+            "Escalate to a real human when blocked: a genuine expert-science/code question "
+            "or a hard block (missing data, broken dependency, contradictory request) you "
+            "cannot resolve yourself. Blocks until the human replies. Ask early and "
+            "specifically rather than guessing or fabricating."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "kind": {"type": "string", "enum": list(_ASK_HUMAN_KINDS)},
+                "context": {"type": "string"},
+            },
+            "required": ["question"],
+        },
+    }
+
+
+async def execute_ask_human(
+    human_handler: Any, asked_by: str, arguments: Mapping[str, Any]
+) -> ToolOutcome:
+    """Build a ``HumanQuery`` from a tool call and block on the injected handler.
+
+    Routes through ``hitl.resolve_human``, which raises ``HumanInputRequired`` when no
+    handler is wired (the §9.8 headless fail-safe) — propagated to fail the run loudly
+    rather than hang or fabricate.
+    """
+    from auto_research.hitl import resolve_human
+    from auto_research.schemas import HumanQuery
+
+    kind = str(arguments.get("kind") or "blocked")
+    if kind not in _ASK_HUMAN_KINDS:
+        kind = "blocked"
+    query = HumanQuery(
+        kind=kind,
+        question=str(arguments.get("question") or "(no question provided)"),
+        context=str(arguments.get("context") or ""),
+        asked_by=asked_by or "agent",
+    )
+    response = await resolve_human(human_handler, query)
+    return ToolOutcome(text=response.answer or "(human gave no answer)")
+
+
+# ----------------------------------------------------------------------------
 # Analyst science tools — the existing ToolkitRegistry + PersistentSandbox.
 # ----------------------------------------------------------------------------
 
@@ -118,10 +173,15 @@ class SandboxToolProvider:
         *,
         cwd: Path | None = None,
         timeout_s: int = 300,
+        human_handler: Any | None = None,
+        asked_by: str = "analyst_worker",
     ) -> None:
         self.registry = registry
         self.sandbox = sandbox
         self.cwd = cwd
+        # When a human_handler is wired, expose the shared ask_human tool (§9.7).
+        self.human_handler = human_handler
+        self.asked_by = asked_by
         # Figures land in <worker scratch>/figures (under the runtime data dir),
         # never in /tmp or a repo. See _redirect_figure_args.
         self.figures_dir = (Path(cwd) / "figures") if cwd is not None else None
@@ -130,9 +190,14 @@ class SandboxToolProvider:
         self.results: list[ToolResult] = []
 
     def tool_definitions(self) -> list[dict]:
-        return self.registry.tool_definitions()
+        defs = list(self.registry.tool_definitions())
+        if self.human_handler is not None:
+            defs.append(ask_human_tool_def())
+        return defs
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
+        if name == ASK_HUMAN_TOOL:
+            return await execute_ask_human(self.human_handler, self.asked_by, arguments)
         kind = self.registry.kind_for_function(name)
         args = dict(arguments)
         if kind == "mcp.builtin.bash_exec" and "cwd" not in args and self.cwd is not None:
@@ -224,22 +289,31 @@ class ReadOnlyToolProvider:
         roots: Sequence[Path],
         retrieval: Any | None = None,
         web_source: Any | None = None,
+        include_text_search: bool = True,
+        human_handler: Any | None = None,
+        asked_by: str = "agent",
         max_chars: int = 8000,
     ) -> None:
         self.roots = [Path(r).resolve() for r in roots]
         self.retrieval = retrieval
+        # When a human_handler is wired, expose the shared ask_human tool (§9.7).
+        self.human_handler = human_handler
+        self.asked_by = asked_by
         # Optional Tavily/web QuerySource — when supplied (analyst lead), exposes a
         # web_search tool so the lead can consult authoritative documentation (mission
         # threads, calibration memos) before triaging a tool request or answering the
         # author, rather than guessing (CLAUDE.md §9.3 escalation ladder).
         self.web_source = web_source
+        # The papers knowledge base is irrelevant to pure code review, so the §9.3
+        # co-lead reviewer omits text_search (roots = the toolkit worktree instead).
+        self.include_text_search = include_text_search
         self.max_chars = max_chars
 
     def tool_definitions(self) -> list[dict]:
         definitions = [
             {
                 "name": "read_file",
-                "description": "Read a UTF-8 text file under the run/artifacts or papers directories.",
+                "description": "Read a UTF-8 text file under the permitted root directories.",
                 "input_schema": {
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
@@ -248,23 +322,26 @@ class ReadOnlyToolProvider:
             },
             {
                 "name": "list_dir",
-                "description": "List entries of a directory under the run/artifacts or papers directories.",
+                "description": "List entries of a directory under the permitted root directories.",
                 "input_schema": {
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
                     "required": ["path"],
                 },
             },
-            {
-                "name": "text_search",
-                "description": "Full-text search the local knowledge base; returns matching paper paths.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
-                    "required": ["query"],
-                },
-            },
         ]
+        if self.include_text_search:
+            definitions.append(
+                {
+                    "name": "text_search",
+                    "description": "Full-text search the local knowledge base; returns matching paper paths.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+                        "required": ["query"],
+                    },
+                }
+            )
         if self.web_source is not None:
             definitions.append(
                 {
@@ -281,6 +358,8 @@ class ReadOnlyToolProvider:
                     },
                 }
             )
+        if self.human_handler is not None:
+            definitions.append(ask_human_tool_def())
         return definitions
 
     def _allowed(self, path: Path) -> bool:
@@ -288,6 +367,8 @@ class ReadOnlyToolProvider:
         return any(resolved == root or root in resolved.parents for root in self.roots)
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
+        if name == ASK_HUMAN_TOOL:
+            return await execute_ask_human(self.human_handler, self.asked_by, arguments)
         if name in ("read_file", "list_dir"):
             target = Path(str(arguments.get("path", "")))
             if not self._allowed(target):

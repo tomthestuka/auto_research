@@ -13,11 +13,11 @@ an **isolated git worktree** on ``research_toolkit``, then drives the bounded re
         human for instructions (§9.6/§9.7) — never fabricate.
 
 The orchestration is **code, never the LLM**. The deterministic gate is real as of step 3
-(``gate.run_gate``, the default ``run_gate`` hook); the co-lead review is still an
-injectable stub that passes (step 4). Both remain injectable so the loop is exercised
-deterministically in tests. ``approve_edit`` — the only place git commits — is step 6; here
-a successful run returns a placeholder ``commit_sha`` and lands nothing. The runtime never
-touches master; a human merges out of band.
+(``gate.run_gate``, the default ``run_gate`` hook); the provider-decorrelated co-lead review
+is real as of step 4 (``review.make_review_hook``, the default ``run_review`` hook). Both
+remain injectable so the loop is exercised deterministically in tests. ``approve_edit`` — the
+only place git commits — is step 6; here a successful run returns a placeholder ``commit_sha``
+and lands nothing. The runtime never touches master; a human merges out of band.
 """
 
 from __future__ import annotations
@@ -33,20 +33,16 @@ from typing import Any
 import yaml
 
 from auto_research.agents.prompts import load_prompt
-from auto_research.schemas import GateReport, MergeFlowResult, ToolReviewVerdict, ToolSpec
+from auto_research.hitl import HumanHandler, HumanInputRequired, resolve_human
+from auto_research.schemas import GateReport, HumanQuery, MergeFlowResult, ToolReviewVerdict, ToolSpec
 
 # Type aliases for the injectable hooks (stubs in step 2; real impls in steps 3/4).
 GateHook = Callable[[Path, ToolSpec], Awaitable[GateReport]]
 ReviewHook = Callable[[Path, ToolSpec, GateReport], Awaitable[ToolReviewVerdict]]
-HumanHandler = Callable[[dict[str, Any]], Any]  # (HumanQuery-ish dict) -> str | Awaitable[str]
 
-
-class HumanInputRequired(RuntimeError):
-    """Raised when the author needs a human but no ``human_handler`` is available (§9.8).
-
-    The headless fail-safe: a run never silently hangs or fabricates when the only
-    remaining resource — a real human — cannot be reached.
-    """
+# ``HumanInputRequired`` and ``HumanHandler`` are the §9.8 raise-to-human types — now owned
+# by ``auto_research.hitl`` and re-exported here for back-compat (the author's ask_human
+# path used them first; ``tests/test_merge_flow.py`` imports the name from here).
 
 
 # ----------------------------------------------------------------------------
@@ -73,6 +69,17 @@ def _resolve_coder_model() -> str:
     from auto_research.models import resolve
 
     return resolve("coder").handles[0].config.model
+
+
+def _resolve_coder_provider() -> str:
+    """Resolve the ``coder`` (author) provider from config — the decorrelation key (§9.3).
+
+    The co-lead reviewer is routed to a member whose provider differs from this, so the
+    author's own model family never approves the merge candidate. No hardcoded string (§6).
+    """
+    from auto_research.models import resolve
+
+    return resolve("coder").handles[0].config.provider
 
 
 # ----------------------------------------------------------------------------
@@ -138,12 +145,14 @@ def _make_ask_lead_handler(lead: Any) -> Callable[..., Awaitable[str]]:
 
 def _make_ask_human_handler(human_handler: HumanHandler | None) -> Callable[..., Awaitable[str]]:
     async def handler(question: str, *, kind: str = "blocked", context: str = "") -> str:
-        if human_handler is None:
-            raise HumanInputRequired(question)
-        response = human_handler({"kind": kind, "question": question, "context": context})
-        if inspect.isawaitable(response):
-            response = await response
-        return str(response)
+        query = HumanQuery(
+            kind=kind if kind in ("clarify_science", "clarify_code", "blocked") else "blocked",
+            question=question or "(no question provided)",
+            context=context,
+            asked_by="coder",
+        )
+        response = await resolve_human(human_handler, query)  # raises HumanInputRequired if None
+        return response.answer
 
     return handler
 
@@ -260,15 +269,6 @@ async def _drive_author(client: Any, message: str) -> str:
 
 
 # ----------------------------------------------------------------------------
-# Default gate (step 3, real) / review (step 4, still a stub)
-# ----------------------------------------------------------------------------
-
-
-async def _stub_review(worktree: Path, tool_spec: ToolSpec, gate: GateReport) -> ToolReviewVerdict:
-    return ToolReviewVerdict(approved=True, rationale="stub review (step 4 not yet implemented)")
-
-
-# ----------------------------------------------------------------------------
 # Author seed / feedback messages
 # ----------------------------------------------------------------------------
 
@@ -310,6 +310,7 @@ async def propose_and_pr(
     lead: Any,
     toolkit_root: Path,
     worktree_base: Path,
+    colead: Any | None = None,
     human_handler: HumanHandler | None = None,
     coder_model: str | None = None,
     run_gate: GateHook | None = None,
@@ -326,8 +327,13 @@ async def propose_and_pr(
     (the commit itself is step 6 — here ``commit_sha`` is a placeholder). ``failed`` /
     ``needs_human`` ⇒ no commit and the lead raises to the human (§9.7). Raises
     :class:`HumanInputRequired` if the author needs a human and none is wired (headless
-    fail-safe). Injectable seams (``run_gate``/``run_review``/``worktree_factory``/
-    ``sdk_client_factory``) let the loop be exercised deterministically without a live LLM.
+    fail-safe).
+
+    ``colead`` is the GPT co-lead reviewer (an ``AnalystColeadAgent``); when ``None`` the
+    default ``run_review`` builds one from config, routed to a member whose provider differs
+    from the Claude author's (``review.make_review_hook``). Injectable seams
+    (``run_gate``/``run_review``/``worktree_factory``/``sdk_client_factory``) let the loop be
+    exercised deterministically without a live LLM.
     """
     toolkit_root = Path(toolkit_root)
     worktree_base = Path(worktree_base)
@@ -336,7 +342,10 @@ async def propose_and_pr(
         from auto_research.sandbox.gate import run_gate as _real_gate
 
         run_gate = _real_gate
-    run_review = run_review or _stub_review
+    if run_review is None:
+        from auto_research.sandbox.review import make_review_hook
+
+        run_review = make_review_hook(colead=colead, author_provider=_resolve_coder_provider())
     gate_rework_cap = gate_rework_cap if gate_rework_cap is not None else _cap("tool_author_gate_rework_cap", 3)
     review_rework_cap = review_rework_cap if review_rework_cap is not None else _cap("tool_author_review_rework_cap", 2)
     max_turns = max_turns if max_turns is not None else _cap("tool_author_max_turns", 50)

@@ -31,11 +31,14 @@ from auto_research.schemas import (
     AnalystReport,
     DocumentRef,
     FigureRef,
+    GateReport,
     ResearchRequest,
     ReviewVerdict,
     SearchRequest,
     SearchResult,
     ToolResult,
+    ToolReviewVerdict,
+    ToolSpec,
     document_from_file,
 )
 from auto_research.sources import ArxivSource, NasaAdsSource, QuerySource, WebSource
@@ -788,6 +791,7 @@ class AnalystWorkerAgent(AgentRole):
         registry: Any | None = None,  # ToolkitRegistry | None
         memory_path: Path | None = None,
         worker_index: int = 0,
+        human_handler: Any | None = None,
         model: CallableModel | None = None,
         model_group: ModelGroupHandle | None = None,
         model_name: str | None = None,
@@ -806,6 +810,8 @@ class AnalystWorkerAgent(AgentRole):
         self.registry = registry
         self.memory_path = memory_path
         self.worker_index = worker_index
+        # When wired, the worker can raise a clarification to a human via ask_human (§9.7).
+        self.human_handler = human_handler
         self.last_tool_results: list[ToolResult] = []
 
     @property
@@ -841,7 +847,10 @@ class AnalystWorkerAgent(AgentRole):
             await self.sandbox.start()
 
         cwd = self.memory_path.parent if self.memory_path is not None else None
-        provider = SandboxToolProvider(self.registry, self.sandbox, cwd=cwd)
+        provider = SandboxToolProvider(
+            self.registry, self.sandbox, cwd=cwd,
+            human_handler=self.human_handler, asked_by="analyst_worker",
+        )
         seed = [
             ModelMessage(role="system", content=self.prompt),
             ModelMessage(role="user", content=_payload_text(payload)),
@@ -981,6 +990,67 @@ class AnalystLeadAgent(AgentRole):
             images=figures,
             action="judge_convergence",
         )
+
+
+class AnalystColeadAgent(AgentRole):
+    """Analyst co-lead role: provider-decorrelated code review of an authored tool (§9.3).
+
+    The §9.3 analyst lead is a *group*: the Claude science lead (adjudication, library
+    discipline) and this GPT co-lead, whose Phase-2 job is **tool-code review only** —
+    never the science finding, never a merge. It is the *second, independent* check on a
+    merge candidate: the deterministic gate is the door, this review is the pre-filter the
+    door also requires (commit ⇔ gate-pass ∧ co-lead review-pass). Routed to a model whose
+    provider differs from the Claude author's, so a tool is not approved by its own model
+    family (see ``review.select_decorrelated_member``).
+    """
+
+    role = "analyst_colead"
+
+    async def review_tool(
+        self,
+        tool_spec: ToolSpec,
+        *,
+        diff: str,
+        gate: GateReport,
+        tools: Any | None = None,
+    ) -> ToolReviewVerdict:
+        """Review an authored tool's diff against its brief and the gate report.
+
+        ``diff`` is the bundle of new/changed ``*_utils`` source the author wrote;
+        ``gate`` is the (already-passed) deterministic report — its ``findings`` are the
+        literal-array intent calls the co-lead adjudicates (§9.4). When a read-only
+        ``ToolProvider`` (the worktree + web) is supplied, the co-lead first investigates
+        the surrounding code/conventions, then issues the verdict grounded in that
+        investigation; otherwise it makes a plain structured call.
+        """
+        payload = {
+            "tool_spec": tool_spec.model_dump(mode="json"),
+            "diff": diff,
+            "gate_report": {
+                "passed": gate.passed,
+                "layer_a": [c.model_dump(mode="json") for c in gate.layer_a],
+                "layer_b": [c.model_dump(mode="json") for c in gate.layer_b],
+                "findings": [c.model_dump(mode="json") for c in gate.findings],
+            },
+            "review_semantics": (
+                "Code review only — judge the tool code and its committed Layer-B tests, "
+                "not the research finding. approved=true only if the code matches the brief, "
+                "the tests are the right ones and strict enough, there is no fabrication, and "
+                "no blocking bug remains. Otherwise approved=false with specific, actionable "
+                "issues; set checks_adequate=false when the weakness is in the verification."
+            ),
+        }
+        if tools is None:
+            return await self._call(payload, ToolReviewVerdict, action="review_tool")
+
+        seed = [
+            ModelMessage(role="system", content=self.prompt),
+            ModelMessage(role="user", content=_payload_text(payload)),
+        ]
+        messages, _ = await self._react(
+            seed_messages=seed, tools=tools, action="review_tool", cap=_react_loop_cap(),
+        )
+        return await self._call_over_messages(messages, ToolReviewVerdict, action="review_tool")
 
 
 class _ClarifyReply(BaseModel):

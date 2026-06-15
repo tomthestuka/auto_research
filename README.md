@@ -7,10 +7,12 @@ results against prior work.
 > **Status: Phase 1 — COMPLETE. Phase 2 (tool authoring) — active.**
 > Phase 1 delivers a full agent team running real LLM calls end-to-end; verified
 > 2026-06-12 by a live Cyg X-1 joint-fit run that produced both report handles
-> (machine JSONL + compiled LaTeX/PDF). Phase 2 steps 0-3 are built: off-repo
-> sandbox scratch, `ToolSpec`, the `merge_flow` author harness, and the deterministic
-> gate. Provider-decorrelated review, raise-to-human, runtime atomic commits, vector
-> retrieval, and the lead-scientist idea-generation group remain documented stubs.
+> (machine JSONL + compiled LaTeX/PDF). Phase 2 steps 0-5 are built: off-repo
+> sandbox scratch, `ToolSpec`, the `merge_flow` author harness, the deterministic
+> gate, the provider-decorrelated GPT co-lead review, and the raise-to-human channel
+> (CLI/Slack/WhatsApp connectors + honest-failure handling). Runtime atomic commits, vector
+> retrieval, durable HITL suspend/resume, and the lead-scientist idea-generation group remain
+> documented stubs.
 
 Coding agents: read **`CLAUDE.md`** before doing anything. It is the single source of
 truth for how this project is built.
@@ -68,7 +70,7 @@ beyond Phase 2 and will route requests through the same reviewer gate when built
       │      SQLite papers/memory    │       ╔══════════════════════╗ ┌──────────────────────┐
       │      text search now         │       ║ research_toolkit repo║ │ CODER + GATE flow    │
       │      vector search Todo      │       ║ xspec_utils today    ║ │ Claude author · gate │
-      └───────────────┬──────────────┘       ║ future *_utils       ║ │ GPT review Todo      │
+      └───────────────┬──────────────┘       ║ future *_utils       ║ │ GPT co-lead review   │
                       │ literature results   ║ TOOL_MANIFEST        ║◄┤ isolated branch Todo │
                       │                      ╚══════════╤═══════════╝ └──────────────────────┘
                       │                                 │ tool results + figs
@@ -133,15 +135,15 @@ repo it cannot write to, so it cannot modify itself — only extend the tool lib
   │  (cannot modify its own code)        │      │  via TOOL_MANIFEST+sandbox   │
   │                                      │      │                              │
   │  Phase 2 authoring code              │ ───► │  isolated worktree/branch    │
-  │  can create gated toolkit branches   │      │  gate built; review/commit   │
-  │  but never merges master             │      │  still Todo                  │
+  │  can create gated toolkit branches   │      │  gate + co-lead review built;│
+  │  but never merges master             │      │  atomic commit still Todo    │
   └──────────────────────────────────────┘      └──────────────────────────────┘
 ```
 
 **Build-time coding agents never run git** — staging, commits, and pushes are the human's
 job. Separately, the runtime toolkit-branch flow is application behavior inside
-`merge_flow`: the author harness and deterministic gate exist now; GPT co-lead review and
-`approve_edit()` atomic branch commits are still Phase 2 Todo; merges to
+`merge_flow`: the author harness, deterministic gate, and provider-decorrelated GPT co-lead
+review exist now; `approve_edit()` atomic branch commits are still Phase 2 Todo; merges to
 `research_toolkit` master remain manual and out of band.
 
 ---
@@ -185,10 +187,10 @@ Statuses: **Done** = built & documented · **Todo** = in scope, not yet built.
 |---|---|---|---|
 | 0 | Done | **Relocate sandbox scratch** — worker `cwd` + MCP server process cwd pinned under runtime data dir; figure outputs redirected into `<worker scratch>/figures`. | `bash_exec` cannot write into either repo; figures land under the data dir. |
 | 1 | Done | **`ToolSpec` brief** — schema a worker emits when the toolkit lacks a capability; `AnalystReport.tool_request` hook; analyst lead's `ReadOnlyToolProvider` includes `toolkit_root`. | Schema validates; sample round-trips; lead can browse full `research_toolkit`. |
-| 2 | Done | **`merge_flow` harness + rework-loop scaffold** — `propose_and_pr()` drives a Claude Agent SDK `coder` (Sonnet) author in an isolated git worktree, with the L2 gate-rework / L3 review-rework / L4 honest-termination loop around injectable gate/review hooks. The gate hook is now real (step 3); review remains stubbed until step 4. Escalation ladder: web search · `ask_lead` · `ask_human`. New schemas `GateReport`/`ToolReviewVerdict`/`MergeFlowResult` + `AnalystReport.status` + `ToolSpec.request_kind`. `coder`/`analyst_colead` model roles. | From a `ToolSpec`, the agent produces a branch with both halves and tests; gate/review rejections re-drive the warm session; cap exhaustion → no-commit failure raised to the human. |
+| 2 | Done | **`merge_flow` harness + rework-loop scaffold** — `propose_and_pr()` drives a Claude Agent SDK `coder` (Sonnet) author in an isolated git worktree, with the L2 gate-rework / L3 review-rework / L4 honest-termination loop around injectable gate/review hooks. Both hooks are now real (gate = step 3, review = step 4). Escalation ladder: web search · `ask_lead` · `ask_human`. New schemas `GateReport`/`ToolReviewVerdict`/`MergeFlowResult` + `AnalystReport.status` + `ToolSpec.request_kind`. `coder`/`analyst_colead` model roles. | From a `ToolSpec`, the agent produces a branch with both halves and tests; gate/review rejections re-drive the warm session; cap exhaustion → no-commit failure raised to the human. |
 | 3 | Done | **Deterministic gate** (`sandbox/gate.py::run_gate`, now the default `run_gate` hook) — Layer A (no-fabrication scan, structural, determinism, provenance) + Layer B (the tool's pytest, injectable runner). The no-fabrication scan is two precision tiers, designed against real `xspec_utils` (full of legitimate hardcoded arrays): **hard-fail** banned vocabulary / any RNG (seeded or not) / placeholder bodies; **finding** (review-only) literal arrays. Scan lists live in the new `config/code_gate.yaml`; marked `synth…` ObsIDs allowlisted. `GateReport` gains `findings`. | Good tool passes; a fabricating/RNG/untested tool is rejected with a machine-readable reason; XSPEC param-vector / energy-bin literals never false-fail. |
-| 4 | Todo | **Provider-decorrelated review** — GPT analyst co-lead reviews diff + gate result (provider ≠ Claude author). | Review runs on a different provider; a planted subtle bug is caught or escalated. |
-| 5 | Todo | **Raise-to-human** — `HumanQuery`/`HumanResponse`; LangGraph `interrupt()` + `ask_human`; `FAILED`/`NEEDS_HUMAN` terminal state; `slack.py` reference connector. | A blocked role raises and the run pauses; an honest FAILED carries no penalty. |
+| 4 | Done | **Provider-decorrelated review** (`sandbox/review.py::make_review_hook`, now the default `run_review` hook) — the GPT `analyst_colead` reviews the authored diff bundle + gate report and judges the Layer-B checks (code-review only), routed by `select_decorrelated_member` to a provider ≠ the Claude author's (raises if none); investigates the worktree/web via a read-only provider before its `ToolReviewVerdict`. `propose_and_pr` gains a `colead` param. | Review runs on a different provider; a planted subtle bug is caught (rejected → L3 rework) or escalated, not rubber-stamped. |
+| 5 | Done | **Raise-to-human** — `HumanQuery`/`HumanResponse` + the injectable `human_handler` (`auto_research.hitl`); a shared `ask_human` tool for every ReAct role + the author (blocking direct-handler; durable `interrupt()`/checkpointer deferred §12); CLI/Slack/WhatsApp connectors with an auto-detecting CLI-vs-library resolver; a launch-time channel ping in the preflight; and `failed`/`needs_human` routed around the reviewer to a no-fabrication finalize. | A blocked role raises and the run blocks for a human; an honest FAILED carries no penalty; headless raises `HumanInputRequired`. |
 | 6 | Todo | **`approve_edit()` atomic commit** — gate-pass + co-lead review-pass → one atomic commit per tool on the branch; runtime never merges. | Approved tool lands as one commit; human reruns the human-half and merges/reverts cleanly. |
 | 7 | Todo | **End-to-end** — missing-capability question triggers authoring through the full flow; tool lands on a branch; human merges; analysis re-runs. | Full Phase 2 flow exercised live via a `test_full_suite.py` sibling. |
 
@@ -200,6 +202,7 @@ Current role/tool surfaces:
 | Local retrieval | Pure-Python `text_search()` over SQLite; `vector_search()` remains a stub. | Returns local paper paths from the DB; no runtime LLM role. |
 | Analyst worker | `SandboxToolProvider`: `research_toolkit` manifest tools + MCP tools in a persistent sandbox. | `analyze()` chains load→fit→run→plot or other tools, self-corrects in-loop, and reports grounded results. |
 | Analyst lead | `ReadOnlyToolProvider`: run artifacts, figures, memory, papers, full `research_toolkit` source, optional web search. | Adjudicates debate, triages `ToolSpec`, and answers author clarifications. |
+| Analyst co-lead | `ReadOnlyToolProvider`: the authored toolkit worktree + optional web search (`include_text_search=False`). | Provider-decorrelated **code review** of one authored tool — brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs → `ToolReviewVerdict`. |
 | Reviewer | `ReadOnlyToolProvider`: run artifacts, figures, papers, and memory. | Dispatches/reviews work, requests capped rework, and composes final report handles. |
 
 ---
@@ -289,7 +292,10 @@ tools simply won't be available.
 
 **Keys** (the provider SDKs read these directly; see `.env.example` for the full template):
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `ADS_DEV_KEY` (NASA ADS),
-`TAVILY_API_KEY`; optional LangSmith tracing (`LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`).
+`TAVILY_API_KEY`; optional LangSmith tracing (`LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`);
+optional raise-to-human connectors (only when selected) — Twilio WhatsApp
+(`TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`/`TWILIO_WHATSAPP_FROM`/`WHATSAPP_TO`) or Slack
+(`SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN`/`SLACK_HUMAN_CHANNEL`); the terminal (`cli`) channel needs none.
 
 **Runtime data dir** (`config/orchestration.yaml::runtime_dir`, defaults to
 `~/.auto_research` if omitted) lives **outside both repos** and is not committed. It holds

@@ -3,6 +3,7 @@
 from auto_research.schemas.analysis import AnalysisTask, AnalystReport
 from auto_research.schemas.base import MessageModel
 from auto_research.schemas.figures import DocumentRef, FigureRef, document_from_file
+from auto_research.schemas.hitl import HumanQuery, HumanQueryKind, HumanResponse
 from auto_research.schemas.merge import (
     CheckResult,
     GateReport,
@@ -24,6 +25,9 @@ __all__ = [
     "DocumentRef",
     "FullTextLink",
     "GateReport",
+    "HumanQuery",
+    "HumanQueryKind",
+    "HumanResponse",
     "LatexReport",
     "MergeFlowResult",
     "MessageModel",

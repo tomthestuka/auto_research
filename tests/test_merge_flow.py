@@ -65,11 +65,19 @@ async def _pass_gate(worktree, spec):
     return GateReport(passed=True)
 
 
+async def _pass_review(worktree, spec, gate):
+    # Default review for the loop-orchestration tests: the real co-lead review
+    # (review.make_review_hook) needs a worktree + a live GPT call — out of scope here,
+    # covered by tests/test_review.py. Tests exercising review behaviour inject their own.
+    return ToolReviewVerdict(approved=True, rationale="ok")
+
+
 def _run(spec, **kwargs):
     client = _FakeClient()
     kwargs.setdefault("lead", _FakeLead())
     kwargs.setdefault("coder_model", "fake-model")
     kwargs.setdefault("run_gate", _pass_gate)
+    kwargs.setdefault("run_review", _pass_review)
     kwargs.setdefault("worktree_factory", lambda root, base, branch: base / branch.replace("/", "_"))
     kwargs.setdefault("sdk_client_factory", lambda options: client)
     result = asyncio.run(propose_and_pr(spec, **kwargs))
@@ -168,14 +176,17 @@ def test_ask_lead_handler_routes_to_lead():
 def test_ask_human_handler_routes_to_injected_handler():
     seen = {}
 
-    def human(query):
-        seen.update(query)
+    def human(query):  # query is a HumanQuery (typed §9.8 contract)
+        seen["kind"] = query.kind
+        seen["question"] = query.question
+        seen["asked_by"] = query.asked_by
         return "human-says-go"
 
     handler = _make_ask_human_handler(human)
     answer = asyncio.run(handler("response convention?", context="expert"))
     assert answer == "human-says-go"
     assert seen["kind"] == "blocked" and seen["question"] == "response convention?"
+    assert seen["asked_by"] == "coder"
 
 
 def test_ask_human_handler_without_handler_raises_fail_safe():

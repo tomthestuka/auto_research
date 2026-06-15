@@ -16,6 +16,8 @@ and the active Phase 2 build order in
 | Submodule | Step | Role |
 |---|---|---|
 | `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`). |
+| `preflight.py` | — | Launch-time deterministic **checklist** (`Preflight` / async `run_preflight()`): runs every no-LLM precondition (`.env` shape, author↔reviewer decorrelation, human-channel ping) before any model client is built. |
+| `hitl` | 5 | Raise-to-human clarification channel: the injectable `HumanHandler`, the CLI/Slack/WhatsApp connectors, the CLI-vs-library resolver, and the launch-time channel ping. |
 | `schemas` | 1 | Pydantic v2 message protocol between agents. |
 | `models` | 2 | Provider abstraction + role→model registry from `config/models.yaml`. |
 | `observability` | 3 | LangSmith tracing + per-call cost logging hooked into the provider layer. |
@@ -43,6 +45,13 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - `auto_research.env.check_required_env()` loads the repo-root `.env` with
   `override=False` and validates required provider/source keys before SDK clients
   are constructed.
+- `auto_research.preflight.run_preflight(*, human_handler=None)` (async) is the launch-time
+  entry that runs the whole deterministic checklist (registered via
+  `build_default_preflight(human_handler)`): `check_required_env`,
+  `sandbox.review.check_author_reviewer_decorrelation`, and — when a channel is resolved —
+  `hitl.make_human_channel_check` (pings the channel, green only on a reply). `run_research()`
+  resolves the handler then awaits this before any LLM; aggregates every failure into one
+  `PreflightError`.
 - `auto_research.observations.load_observations_config()` loads generic
   mission observation locations from config; mission names are not hardcoded in
   agent wrappers.
@@ -67,6 +76,11 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `auto_research.monitor`.
 - `check_required_env()` — loads `.env` without overriding existing process
   environment variables, then raises a clear error if any required key group is absent.
+- `preflight.Preflight` — an ordered registry of launch-time checks. `.register(name, fn)`
+  (also usable as a decorator), `.names()`, async `.run_checklist()` (runs all — sync or async
+  checks — and aggregates failures into `PreflightError`). `build_default_preflight(human_handler=None)`
+  assembles the project checklist; async `run_preflight(*, human_handler=None)` builds and runs
+  it. Each check is a zero-arg fn that raises on failure and lives in its own module.
 
 ## Changelog
 - 2026-05-26 -> 2026-06-12 — Phase 1 completed and verified: schemas, providers,
@@ -78,3 +92,12 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   changes.
 - 2026-06-15 — Centralized project `.env` loading in `check_required_env()` so
   library, CLI, notebook, and test paths validate against the same launch environment.
+- 2026-06-15 — Added `preflight.py`: a `Preflight` checklist class that owns every
+  launch-time deterministic check (each living in its home module, registered centrally,
+  run together by `run_checklist()`). `run_research()` and the CLI now call `run_preflight()`
+  instead of `check_required_env()` directly; the first registered extra check is the Phase-2
+  author↔reviewer provider decorrelation.
+- 2026-06-15 — Phase 2 step 5: added the `hitl` package (raise-to-human channel) and made the
+  preflight **async** with a parameterized `human_channel` ping (green only when the resolved
+  channel replies). `run_research` gained `human_handler`/`human_channel`; the CLI owns the
+  full async preflight.

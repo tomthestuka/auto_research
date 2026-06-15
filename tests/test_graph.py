@@ -225,6 +225,40 @@ def test_graph_respects_custom_max_iterations():
     assert state["lit_iterations"] == 2
 
 
+class FailConsensus:
+    """Consensus that returns an honest-failure report (§9.6)."""
+
+    def __init__(self, status: str = "failed"):
+        self.status = status
+
+    async def run(self, workers, lead, task):
+        return AnalystReport(
+            summary="blocked on missing data", status=self.status, uncertainty="needs ObsID"
+        )
+
+
+def test_graph_routes_honest_failure_around_reviewer_to_end():
+    reviewer = FakeReviewer()
+    graph = build_graph(
+        reviewer=reviewer,
+        io_agent=FakeIOAgent(),
+        retrieval=FakeRetrieval(),
+        workers=[FakeWorker()],
+        lead=FakeLead(),
+        consensus=FailConsensus("failed"),
+        report_formats=["jsonl"],
+    )
+
+    state = _invoke(graph, ResearchRequest(question="What is X?"))
+
+    assert state["report"].status == "failed"
+    # Reviewer never reviewed the analysis (failure routes straight to finalize, §9.6) …
+    assert reviewer.analysis_calls == 0
+    # … the verdict is non-accepted, so no report is composed (no fabrication).
+    assert state["verdict"].accepted is False
+    assert "research_report" not in state
+
+
 def test_build_graph_rejects_zero_max_iterations():
     with pytest.raises(ValueError, match="max_iterations"):
         build_graph(

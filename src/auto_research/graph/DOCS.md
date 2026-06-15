@@ -36,6 +36,13 @@ Reviewer nodes return state updates containing the newest `ReviewVerdict`.
 accumulated verdict into `state["verdict"]`, then either routes to `compose_report`
 on an accepted verdict with requested report formats or exits to `END`.
 
+**Honest-failure routing (§9.6).** `after_analysis` inspects the adjudicated
+`AnalystReport.status`: an `ok` report goes to `review_analysis`; a `failed`/`needs_human`
+report routes **straight to `finalize_run`**, bypassing reviewer rework (an honest failure is
+a *correct* outcome with no penalty). `finalize_run` then emits a non-accepted `ReviewVerdict`
+for those, so `route_after_finalize` exits to `END` — **no report is composed**, never a
+fabricated one.
+
 **Tool execution inside `analysis_node`:** `analysis_node` calls
 `consensus_strategy.run(workers, lead, task)`. Each worker's
 `AnalystWorkerAgent.analyze()` runs the inner ReAct loop over `SandboxToolProvider`
@@ -77,10 +84,15 @@ iteration counters, and the cap.
   workers=None, lead=None, consensus=None, max_iterations=None, chatter=10,
   monitor=None, monitor_jsonl=None) -> ReviewVerdict` — compatibility entry.
   Runs `run_research()` and returns only the final reviewer verdict.
-- `async run_research(request, *, ..., chatter=10, monitor=None,
-  monitor_jsonl=None, report_formats=None) -> ResearchRun` — high-level monitored entry. Calls
-  `check_required_env()` immediately, which loads the repo-root `.env` and crashes
-  if any required API key is absent.
+- `async run_research(request, *, ..., chatter=10, monitor=None, monitor_jsonl=None,
+  report_formats=None, human_handler=None, human_channel=None) -> ResearchRun` — high-level
+  monitored entry. Resolves the raise-to-human channel (`hitl.resolve_handler` — explicit
+  `human_handler` → `human_channel` → auto-detect TTY/library) then `await run_preflight(
+  human_handler=…)` immediately (the launch-time checklist: `.env` + required keys, the
+  author↔reviewer decorrelation, and — when a channel is resolved — a **channel ping** that
+  must reply), so a misconfigured/unreachable-human run crashes before any LLM is constructed.
+  The resolved handler is threaded to the analyst workers and the reviewer/lead tool providers
+  so any role can `ask_human`.
   Missing dependencies are constructed from `config/models.yaml`. Reads
   `tool_retry_cap`, `toolkit_root`, `analyze_env`, and `analyze_ini_sh` from
   `config/orchestration.yaml`.  Creates per-run workspace
@@ -159,3 +171,7 @@ iteration counters, and the cap.
 - 2026-06-12 — Phase 2 step 0 added off-repo MCP server cwd pinning and lead read-only
   `toolkit_root` access; graph docs now reflect worker-owned tool execution.
 - 2026-06-12 — Compacted changelog and refreshed the graph diagram/interfaces.
+- 2026-06-15 — Phase 2 step 5: `run_research` resolves a raise-to-human channel
+  (`human_handler`/`human_channel`), awaits the now-async preflight (incl. the channel ping),
+  and threads the handler to the role tool providers; `after_analysis` routes an honest
+  `failed`/`needs_human` report around the reviewer to `finalize_run` (no fabricated report).

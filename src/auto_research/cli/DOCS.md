@@ -5,9 +5,10 @@ Lets a human run a full research request without writing Python:
 `python -m auto_research "your question here"`.
 
 ## Architecture
-A `__main__.py` delegates to `cli.main`. The CLI parses args, validates the
-launch environment via `check_required_env()` (which loads `.env`), calls
-`auto_research.graph.run_research()`, writes the full monitor JSONL plus a
+A `__main__.py` delegates to `cli.main`. The CLI parses args and calls
+`auto_research.graph.run_research()` (which owns the now-async launch preflight: `.env` +
+keys, author↔reviewer decorrelation, and the human-channel ping), writes the full monitor
+JSONL plus a
 grouped Markdown report, streams compact monitor progress lines to stderr during
 the run, and prints the final `ReviewVerdict`.
 
@@ -24,6 +25,9 @@ the run, and prints the final `ReviewVerdict`.
   the JSONL file.
 - `--format text|json`: print human text or a JSON object with verdict and
   monitor paths. Live progress uses stderr so JSON stdout stays machine-readable.
+- `--human {auto,cli,none,slack,whatsapp}` (default `auto`): the raise-to-human channel a
+  blocked agent uses, passed as `run_research(human_channel=…)`. `auto` picks the terminal
+  (stdin) when interactive, else the configured connector; `none` runs headless.
 
 ## Dependencies
 - External: `python-dotenv`.
@@ -33,9 +37,10 @@ the run, and prints the final `ReviewVerdict`.
 ## Dictionary-level reference
 - `build_parser() -> argparse.ArgumentParser` — constructs the command-line
   parser.
-- `main(argv=None) -> int` — CLI entry. Calls `check_required_env()` (loads `.env`
-  and crashes with a clear message if any required key is absent), runs one monitored
-  request with live stderr progress, writes monitor artifacts, and prints the final verdict.
+- `main(argv=None) -> int` — CLI entry. Parses args (incl. `--human`), runs one monitored
+  request via `run_research(human_channel=args.human)` — which owns the async launch preflight
+  (env + decorrelation + channel ping; crashes with a clear aggregated message on any failure)
+  — with live stderr progress, writes monitor artifacts, and prints the final verdict.
 - `auto_research.__main__` — module entry point for `python -m auto_research`.
 
 ## Changelog
@@ -47,3 +52,8 @@ the run, and prints the final `ReviewVerdict`.
   progress lines to stderr while preserving JSON stdout for `--format json`.
 - 2026-06-15 — Removed duplicate CLI dotenv loading; shared `check_required_env()`
   now loads `.env` for all entry points before validating required keys.
+- 2026-06-15 — CLI now runs the full launch checklist via `run_preflight()` (env + Phase-2
+  author↔reviewer decorrelation) instead of calling `check_required_env()` directly.
+- 2026-06-15 — Phase 2 step 5: added `--human {auto,cli,none,slack,whatsapp}` (→
+  `run_research(human_channel=…)`); the async preflight now lives inside `run_research`, so the
+  CLI no longer calls it directly.

@@ -27,12 +27,23 @@ chains dependent calls; stop when it emits no calls or `react_loop_cap`
 then produces the role's structured output grounded in the trajectory (both reuse
 `_structured_loop`, the shared off-schema-retry core). Tool surfaces live behind
 the `ToolProvider` protocol in `react.py`: `SandboxToolProvider` (analyst science
-tools in the `PersistentSandbox`), `ReadOnlyToolProvider` (reviewer/lead — in-process
-`read_file`/`list_dir`/`text_search`, confined to the run + papers dirs, plus an optional
-`web_search` tool when a `web_source` is supplied — the analyst lead uses it to consult
-authoritative docs while triaging tool requests, §9.3),
+tools in the `PersistentSandbox`), `ReadOnlyToolProvider` (reviewer/lead/co-lead — in-process
+`read_file`/`list_dir` confined to its `roots`, an optional knowledge-base `text_search`
+(`include_text_search`, default on; the §9.3 co-lead omits it and points `roots` at the
+toolkit worktree instead), plus an optional `web_search` tool when a `web_source` is supplied
+— the analyst lead uses it to consult authoritative docs while triaging tool requests, the
+co-lead to check conventions while reviewing, §9.3),
 `SourceToolProvider` (librarian — arXiv/ADS/web + local `text_search`). A role with
 `tools=None` falls back to a plain single structured call.
+
+**Raise-to-human (`ask_human`, §9.7/§9.8).** When a `human_handler` is wired, both
+`SandboxToolProvider` and `ReadOnlyToolProvider` expose one shared `ask_human` tool
+(`ask_human_tool_def`/`execute_ask_human` in `react.py`): the role builds a `HumanQuery` and
+**blocks** on the injected handler (via `hitl.resolve_human`) until the human replies — the
+same model the SDK author uses. With no handler the tool is not offered, and a direct call
+raises `HumanInputRequired` (the headless fail-safe). `run_research` threads the resolved
+handler to the workers (`SandboxToolProvider`) and to the reviewer/lead (`ReadOnlyToolProvider`,
+`asked_by` = the role).
 
 When a `RunMonitor` is injected, role wrappers record high-chatter input,
 parsed output, raw model content, attachment counts, and errors. These records
@@ -53,6 +64,7 @@ Current role capability surfaces:
 | Local retrieval | Pure-Python `text_search_paths()` over SQLite. | No runtime LLM role; returns local paper paths for reviewer attachments. |
 | Analyst worker | `SandboxToolProvider` over `research_toolkit` manifest tools plus MCP tools in a persistent sandbox. | Runs the full analysis tool chain inside `analyze()`, then reports grounded results and figures. |
 | Analyst lead | `ReadOnlyToolProvider` over run artifacts, papers, and `research_toolkit`; optional `web_search`. | Judges convergence, adjudicates, triages `ToolSpec`, and answers author questions. |
+| Analyst co-lead | `ReadOnlyToolProvider` over the **toolkit worktree** (`include_text_search=False`) + optional `web_search`. | Provider-decorrelated **code review** of one authored tool: brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs (§9.3 step 4). |
 | Reviewer | `ReadOnlyToolProvider` over run artifacts, figures, papers, and memory. | Dispatches, reviews, requests capped rework, and composes final report handles. |
 
 ## Interfaces / Contracts
@@ -126,6 +138,13 @@ Role wrappers:
   tool author's `ask_lead` clarification (the lead↔author channel, §9.3); consults
   `web_search` (when a `ReadOnlyToolProvider` with a `web_source` is attached) before
   answering rather than guessing. Used by `merge_flow.propose_and_pr`.
+- `AnalystColeadAgent.review_tool(tool_spec, *, diff, gate, tools=None) -> ToolReviewVerdict`
+  — the Phase-2 step-4 provider-decorrelated **code review** (§9.3). Payload carries the
+  `ToolSpec` brief, the authored `diff` bundle, and the (already-passed) `GateReport`
+  (including its `findings`, the literal-array intent calls the co-lead adjudicates). With a
+  read-only worktree/web `ToolProvider` it investigates the surrounding code first, then
+  issues the verdict; `tools=None` makes a plain structured call. Driven by
+  `sandbox.review.make_review_hook`, routed to a provider ≠ the Claude author's.
 - All wrappers accept an injected `model`; otherwise they resolve their role
   from `config/models.yaml` and use the first configured group member unless
   `model_name` is supplied.
@@ -147,8 +166,8 @@ Role wrappers:
 
 ## Dictionary-level reference
 - `PromptRole` — literal type for the runtime roles, mirroring `config/models.yaml` role
-  keys: `reviewer`, `librarian_io`, `analyst_worker`, `analyst_lead`, and the Phase-2
-  `coder` (the tool author).
+  keys: `reviewer`, `librarian_io`, `analyst_worker`, `analyst_lead`, the Phase-2
+  `analyst_colead` (the co-lead reviewer), and `coder` (the tool author).
 - `PROMPT_FILENAMES` — role-to-filename mapping used by the loader.
 - `FORBIDDEN_RUNTIME_REFERENCES` — tuple of build-time governance filenames that
   runtime prompts must not reference.
@@ -182,6 +201,8 @@ Role wrappers:
     `sandbox.is_alive` otherwise.
 - `AnalystLeadAgent` — analyst lead wrapper.
   Methods: `adjudicate()`, `judge_convergence()`, `clarify_for_author()`.
+- `AnalystColeadAgent` — Phase-2 provider-decorrelated co-lead reviewer wrapper.
+  Method: `review_tool(tool_spec, *, diff, gate, tools=None) -> ToolReviewVerdict`.
 
 ## Changelog
 - 2026-05-26 -> 2026-06-12 — Agent wrappers built and ReAct-wired: reviewer,
@@ -197,3 +218,10 @@ Role wrappers:
 - 2026-06-15 — Monitor hooks now attach configured model strings to role events
   and emit compact per-tool result events from the ReAct loop for live
   terminal/notebook output.
+- 2026-06-15 — Phase 2 step 4: added `AnalystColeadAgent.review_tool()` (provider-
+  decorrelated code review → `ToolReviewVerdict`) and the `analyst_colead` prompt role;
+  `ReadOnlyToolProvider` gained `include_text_search` so the co-lead reviews over the
+  toolkit worktree without the irrelevant papers-KB search.
+- 2026-06-15 — Phase 2 step 5: both tool providers gained a shared `ask_human` tool
+  (`ask_human_tool_def`/`execute_ask_human`) + `human_handler`/`asked_by`; `AnalystWorkerAgent`
+  gained a `human_handler` so its `analyze()` provider can raise to a human.

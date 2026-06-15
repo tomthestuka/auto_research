@@ -29,11 +29,18 @@ Runtime prompt files:
   attachment reading, download and ingest reporting, and bibliographic
   summaries.
 - `analyst_worker.md` — task analysis, debate revisions, assumptions, figure
-  reference handling, ReAct tool use, and `tool_request` reporting for missing or
-  broken toolkit capabilities.
+  reference handling, ReAct tool use, `tool_request` reporting for missing or
+  broken toolkit capabilities, and **§9.6 failure classification** (my-bug → retry;
+  env/data/human-fault → `ask_human` / set `status=failed|needs_human`, never fabricate).
 - `analyst_lead.md` — convergence judgment, adjudication, synthesis, **tool-request
   triage** (new-capability disposition + `fix_existing` wrongly-called vs buggy),
-  authoritative-doc consultation (`web_search`), and raise-to-human on authoring failure.
+  authoritative-doc consultation (`web_search`), and **raise-to-human** (`ask_human` / final
+  report `status`) on an honest failure or authoring exhaustion.
+- `analyst_colead.md` — the Phase-2 provider-decorrelated **co-lead code reviewer** (loaded
+  by the `review` hook for the structured `ToolReviewVerdict`): code-review-only scope (never
+  the science finding, never a merge), brief-match + Layer-B check-adequacy judgment, the
+  independent no-fabrication second pass, subtle-bug hunting, and read-only worktree/web
+  investigation. The role name `analyst_colead` mirrors `config/models.yaml`.
 - `coder.md` — the Phase-2 tool author's system prompt (loaded by `merge_flow` and passed
   to the Claude Agent SDK): the two-halves layout, no-fabrication rules, the
   web/`ask_lead`/`ask_human` escalation ladder, and the committed-tests requirement. The
@@ -56,6 +63,7 @@ logic here.
 - `librarian_io.md` — system prompt for the librarian I/O role.
 - `analyst_worker.md` — system prompt for analyst worker roles.
 - `analyst_lead.md` — system prompt for the analyst lead role.
+- `analyst_colead.md` — system prompt for the Phase-2 provider-decorrelated co-lead reviewer.
 - `coder.md` — system prompt for the Phase-2 tool author (Claude Agent SDK).
 
 ## Changelog
@@ -66,3 +74,8 @@ logic here.
   `tool_request` reporting.
 - 2026-06-12 — Compacted changelog and updated the analyst-worker contract wording to match
   the current ReAct/tool-request flow.
+- 2026-06-15 — Added `analyst_colead.md`, the Phase-2 step-4 provider-decorrelated co-lead
+  code-review prompt (code-review-only; brief-match, Layer-B check adequacy, independent
+  no-fabrication pass, subtle-bug hunting, read-only worktree/web investigation).
+- 2026-06-15 — Phase 2 step 5: analyst worker/lead prompts gained §9.6 failure classification
+  and the `ask_human` raise-to-human path (set `status`, never fabricate on exhaustion).

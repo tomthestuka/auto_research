@@ -7,12 +7,13 @@ from typing import Literal
 
 # Role names here MUST mirror the role keys in config/models.yaml (one name per role,
 # no divergent aliases) so the two configs stay maintainable together. Not every model
-# role needs a prompt (e.g. analyst_colead's reviewer prompt arrives in Phase 2 step 4).
+# role needs a prompt.
 PromptRole = Literal[
     "reviewer",
     "librarian_io",
     "analyst_worker",
     "analyst_lead",
+    "analyst_colead",
     "coder",
 ]
 
@@ -21,6 +22,9 @@ PROMPT_FILENAMES: dict[PromptRole, str] = {
     "librarian_io": "librarian_io.md",
     "analyst_worker": "analyst_worker.md",
     "analyst_lead": "analyst_lead.md",
+    # Phase 2: the provider-decorrelated GPT co-lead's code-review system prompt
+    # (CLAUDE.md §9.3 step 4). Loaded by the review hook for the structured verdict.
+    "analyst_colead": "analyst_colead.md",
     # Phase 2: the Sonnet author's system prompt (CLAUDE.md §9.3). Loaded by merge_flow
     # and passed to the Claude Agent SDK; same governance check as the other prompts.
     "coder": "coder.md",

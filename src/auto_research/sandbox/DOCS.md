@@ -14,8 +14,9 @@ Three tightly coupled responsibilities:
    record tool call history as bare terminal recordings.
 
 Tool-authoring (propose → branch → gate → review → human-merge) lives in `merge_flow.py`
-(author harness + rework loop, step 2) and `gate.py` (the deterministic mergeability gate,
-step 3). The co-lead review (step 4) and the atomic commit (step 6) are still stubs.
+(author harness + rework loop, step 2), `gate.py` (the deterministic mergeability gate,
+step 3), and `review.py` (the provider-decorrelated co-lead review, step 4). The atomic
+commit (step 6) is still a stub.
 See [CLAUDE.md §9](../../../CLAUDE.md#9-phase-2--tool-authoring-the-active-phase).
 
 ## Architecture
@@ -30,7 +31,8 @@ sandbox/
 ├── builtin_server.py # MCP stdio server: bash_exec, list_dir, read_file
 ├── mcp_client.py     # MCPToolClient — manages stdio MCP server sessions
 ├── merge_flow.py     # propose_and_pr() — author harness + rework loop (step 2)
-└── gate.py           # run_gate() — deterministic mergeability gate (step 3)
+├── gate.py           # run_gate() — deterministic mergeability gate (step 3)
+└── review.py         # make_review_hook() — provider-decorrelated co-lead review (step 4)
 ```
 
 **`TOOL_MANIFEST` convention:** each research_toolkit package exposes a
@@ -280,10 +282,11 @@ async def propose_and_pr(
     lead,                       # AnalystLeadAgent — ask_lead handler (clarify_for_author)
     toolkit_root: Path,
     worktree_base: Path,        # isolated worktree location (under the runtime data dir)
-    human_handler=None,         # §9.8 injected (HumanQuery-ish dict) -> str; None+headless → HumanInputRequired
+    colead=None,                # AnalystColeadAgent — the GPT co-lead reviewer (step 4); built from config if None
+    human_handler=None,         # §9.8 injected (HumanQuery)->HumanResponse (auto_research.hitl); None+headless → HumanInputRequired
     coder_model: str | None = None,   # resolved from the `coder` role in models.yaml
     run_gate=None,              # injectable hook; defaults to the REAL gate (gate.run_gate, step 3)
-    run_review=None,            # injectable hook; step-4 stub → ToolReviewVerdict(approved=True)
+    run_review=None,            # injectable hook; defaults to the REAL review (review.make_review_hook, step 4)
     gate_rework_cap=None, review_rework_cap=None, max_turns=None,  # from orchestration.yaml
     worktree_factory=None, sdk_client_factory=None,  # seams for deterministic tests
 ) -> MergeFlowResult
@@ -305,13 +308,14 @@ drives the bounded rework loop:
   raise to the human (§9.6/§9.7).
 
 The orchestration is **code, never the LLM**. The gate/review are **injectable hooks**: the
-gate defaults to the **real deterministic gate** (`gate.run_gate`, step 3); the co-lead
-review is still a stub-PASS (step 4). Both stay injectable so the loop is exercised
-deterministically in `tests/test_merge_flow.py` (which injects a passing gate — the real
-gate needs a git worktree + science stack and is covered by `tests/test_gate.py`). A
-successful run returns `status="committed"` with a placeholder `commit_sha` — the real
-atomic commit is `approve_edit()` in step 6; the runtime never touches master.
-`HumanInputRequired` is the typed headless fail-safe (a run never silently hangs).
+gate defaults to the **real deterministic gate** (`gate.run_gate`, step 3); the review
+defaults to the **real provider-decorrelated co-lead** (`review.make_review_hook`, step 4).
+Both stay injectable so the loop is exercised deterministically in `tests/test_merge_flow.py`
+(which injects a passing gate and review — the real gate/review need a git worktree + a live
+model and are covered by `tests/test_gate.py` / `tests/test_review.py`). A successful run
+returns `status="committed"` with a placeholder `commit_sha` — the real atomic commit is
+`approve_edit()` in step 6; the runtime never touches master. `HumanInputRequired` is the
+typed headless fail-safe (a run never silently hangs).
 
 ### `gate.run_gate` (Phase 2 step 3 — the deterministic mergeability gate)
 
@@ -347,6 +351,35 @@ Provenance: a `FigureRef(...)` the tool constructs must pass `sha256` + `produce
 Deterministic coverage in `tests/test_gate.py` (pure scanners + a throwaway git worktree
 with an injected Layer-B runner — no live science stack).
 
+### `review.make_review_hook` (Phase 2 step 4 — provider-decorrelated co-lead review)
+
+```python
+def make_review_hook(colead=None, *, author_provider: str,
+                     web_source=None, monitor=None) -> ReviewHook
+def select_decorrelated_member(group, author_provider: str) -> ModelHandle
+def build_diff_bundle(worktree: Path) -> str
+```
+
+The **second, independent** check on a merge candidate (§9.3 step 4): the gate is the door,
+the co-lead review is the pre-filter the door also requires (`committed ⇔ gate-pass ∧
+review-pass`). `make_review_hook` returns the default `run_review` hook (signature
+`(worktree, tool_spec, gate) -> ToolReviewVerdict`):
+
+- **Decorrelation** (`select_decorrelated_member`): routes to an `analyst_colead` member whose
+  `provider != author_provider` (the author is the Claude SDK, so the reviewer is GPT). Raises
+  `ValueError` when no eligible member exists — a co-lead sharing the author's provider is a
+  broken trust boundary and fails loudly. An injected `colead` is asserted decorrelated too.
+- **Diff bundle** (`build_diff_bundle`): reuses `gate.collect_targets` for the file set — new
+  files in full, modified files as unified `git diff` (per-file capped, `_DIFF_FILE_CAP`).
+- **The call**: `AnalystColeadAgent.review_tool(tool_spec, diff=…, gate=…, tools=…)`, with a
+  `ReadOnlyToolProvider` scoped to the **worktree** (`include_text_search=False`) + optional
+  `web_search`, so the co-lead investigates surrounding code/conventions before its verdict.
+
+Heavy agent/source imports are deferred into the functions (mirroring `merge_flow`), so
+importing the sandbox package never pulls the agent stack. Deterministic coverage in
+`tests/test_review.py` (decorrelation routing, the diff bundle over a throwaway git repo, and
+the hook mapping a fake-model verdict — no live LLM).
+
 ## Dependencies
 
 - External: stdlib (`asyncio`, `subprocess`, `importlib`, `sys`, `json`);
@@ -354,7 +387,9 @@ with an injected Layer-B runner — no live science stack).
 - Internal: `auto_research.schemas` (`ToolCallRequest`, `ToolResult`, `FigureRef`;
   `ToolSpec`, `GateReport`, `ToolReviewVerdict`, `MergeFlowResult` for `merge_flow`);
   `auto_research.agents.prompts.load_prompt` (the `coder` prompt); `claude_agent_sdk`
-  (the author harness).
+  (the author harness); for `review.py` (deferred imports): `auto_research.agents`
+  (`AnalystColeadAgent`, `ReadOnlyToolProvider`), `auto_research.models.resolve`,
+  `auto_research.sources.WebSource`, and `gate.collect_targets`.
 - Depended on by: `auto_research.agents.react` / `auto_research.agents.roles`
   (`SandboxToolProvider` and `AnalystWorkerAgent.analyze()`); `auto_research.graph.runtime`
   (sandbox lifecycle); `auto_research.consensus` (peer tool-result summaries).
@@ -414,7 +449,9 @@ with an injected Layer-B runner — no live science stack).
   drives the L0–L4 bounded rework loop. `run_gate` defaults to the real `gate.run_gate`;
   `run_review` is still a stub-PASS; both stay injectable.
 - `HumanInputRequired(RuntimeError)` — typed headless fail-safe raised when the author
-  needs a human but no `human_handler` is wired (§9.8).
+  needs a human but no `human_handler` is wired (§9.8). Now defined in `auto_research.hitl`
+  and re-exported here for back-compat; the author's `ask_human` builds a typed `HumanQuery`
+  and routes through `hitl.resolve_human` (the same channel every in-graph role uses).
 - `gate.run_gate(worktree, tool_spec, *, test_runner=None, config=None)` → `GateReport` —
   the deterministic gate (§9.4). Runs the no-fabrication scan + structural + determinism +
   provenance (Layer A) and the tool's tests (Layer B); records Tier-3 findings without
@@ -422,6 +459,15 @@ with an injected Layer-B runner — no live science stack).
   findings)` is the pure, unit-testable scan core; `scan_provenance`, `check_structural`,
   `collect_targets`, and `_manifest_keys` are its helpers. Scan lists load from
   `config/code_gate.yaml`.
+- `review.make_review_hook(colead=None, *, author_provider, web_source=None, monitor=None)` →
+  the default `run_review` hook (§9.3 step 4); the provider-decorrelated co-lead review.
+  - `review.select_decorrelated_member(group, author_provider)` → `ModelHandle` — picks the
+    `analyst_colead` member with `provider != author_provider`; raises if none exists.
+  - `review.build_diff_bundle(worktree)` → `str` — new files in full + modified files as
+    unified diffs (reuses `gate.collect_targets`; per-file capped).
+  - `review.check_author_reviewer_decorrelation()` — launch-time preflight assertion (no LLM)
+    that the `coder` author and `analyst_colead` reviewer are provider-decorrelated; raises
+    via `select_decorrelated_member`. Registered in `auto_research.preflight`.
 
 ## Changelog
 - 2026-05-26 -> 2026-06-12 — Phase 1 sandbox/tooling built and hardened:
@@ -439,3 +485,14 @@ with an injected Layer-B runner — no live science stack).
   findings, and deterministic tests.
 - 2026-06-12 — Compacted changelog and updated tool-execution wording to the current
   worker-owned ReAct path.
+- 2026-06-15 — Phase 2 step 4 added `review.py::make_review_hook`: the provider-decorrelated
+  co-lead review now backs the default `run_review` hook (decorrelation routing, the diff
+  bundle, and the `AnalystColeadAgent` call over a worktree-scoped `ReadOnlyToolProvider`).
+  `propose_and_pr` gained a `colead` param; the step-2 review stub is gone.
+- 2026-06-15 — Added `review.check_author_reviewer_decorrelation()`, the launch-time preflight
+  assertion of author↔reviewer provider decorrelation (registered in `auto_research.preflight`,
+  run before any LLM is constructed).
+- 2026-06-15 — Phase 2 step 5: `merge_flow`'s `HumanInputRequired`/`HumanHandler` moved to
+  `auto_research.hitl` (re-exported here); the author's `ask_human` now builds a typed
+  `HumanQuery` and routes through `hitl.resolve_human` — one channel for the author and every
+  in-graph role.

@@ -9,7 +9,6 @@ from pathlib import Path
 import sys
 from typing import Sequence
 
-from auto_research.env import check_required_env
 from auto_research.graph import run_research
 from auto_research.monitor import RunMonitor, default_monitor_jsonl_path, validate_chatter
 from auto_research.schemas import ResearchRequest
@@ -50,6 +49,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format for the final verdict.",
     )
     parser.add_argument(
+        "--human",
+        choices=("auto", "cli", "none", "slack", "whatsapp"),
+        default="auto",
+        help=(
+            "Channel a blocked agent uses to reach you. 'auto' (default) picks the terminal "
+            "(stdin) when interactive, else the configured connector. 'none' runs headless."
+        ),
+    )
+    parser.add_argument(
         "--report-format",
         action="append",
         choices=("jsonl", "tex"),
@@ -67,7 +75,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one research request from the command line."""
 
-    check_required_env()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -89,6 +96,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             request,
             monitor=monitor,
             report_formats=args.report_formats,
+            human_channel=args.human,
         )
     )
     run.monitor.write_markdown(md_path)

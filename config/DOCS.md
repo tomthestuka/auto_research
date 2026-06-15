@@ -36,7 +36,8 @@ role or swapping a provider is a YAML edit; no Python change.
   code.
 - `orchestration.yaml` — runtime data dir, graph iteration caps, debate round cap,
   ReAct/structured retry caps, toolkit root, analyst sandbox environment, report settings,
-  Phase-2 authoring caps, and MCP server configuration.
+  Phase-2 authoring caps, the raise-to-human channel default + ping timeout, and MCP server
+  configuration.
 - `code_gate.yaml` — the no-fabrication scan lists for the Phase-2 deterministic gate
   (`sandbox/gate.py`, §9.4/§9.5): `hard_fail_vocabulary`, `hard_fail_code_patterns` (RNG),
   `finding_code_patterns` (literal arrays → review, not fail), `allowlist_obsid_tokens`.
@@ -90,6 +91,12 @@ role or swapping a provider is a YAML edit; no Python change.
 - `orchestration.yaml.tool_author_review_rework_cap` — how many times the author is
   re-driven after a co-lead review rejection (L3). All three are *pathology backstops*,
   not workflow budgets (like the ReAct caps).
+- `orchestration.yaml.human_channel` — default raise-to-human connector for an unattended
+  (library/non-TTY) run with no explicit channel: `cli|slack|whatsapp|none`. Default `none`
+  (headless) so unattended runs and tests never block; an interactive CLI auto-detects the
+  terminal regardless. Consumed by `hitl.resolve_handler` (§9.8).
+- `orchestration.yaml.human_channel_ping_timeout_s` — how long the launch-time preflight
+  channel ping waits for a reply before failing the run (green only when a reply arrives).
 - `code_gate.yaml.hard_fail_vocabulary` — phrases that, in a comment/docstring/string
   literal of an added line, fail the gate (`synthetic`, `example data`, `placeholder`,
   `TODO`, …). Whole-word/phrase matched, case-insensitive.
@@ -122,3 +129,5 @@ role or swapping a provider is a YAML edit; no Python change.
   marked synthetic-ObsID allowlists.
 - 2026-06-12 — Compacted changelog and documented `runtime_dir` plus current ReAct cap
   semantics.
+- 2026-06-15 — Phase 2 step 5 added `human_channel` + `human_channel_ping_timeout_s` to
+  `orchestration.yaml` (the raise-to-human default channel and launch-ping timeout).

@@ -168,6 +168,11 @@ carried by **reference** (`FigureRef`), never embedded
   `merge_flow.propose_and_pr`. `committed` ⇔ gate-pass ∧ co-lead review-pass.
 - `AnalystReport.status: "ok"|"failed"|"needs_human"` (default `"ok"`) — §9.6 terminal
   state; an honest failure is a correct outcome, never a reason to fabricate.
+- `HumanQuery(id, kind: "clarify_science"|"clarify_code"|"blocked", question: str,
+  context: str = "", asked_by: str, created_at)` — a blocked role's raise-to-human
+  clarification (§9.7); no `approve` kind (the runtime never asks a human to merge).
+- `HumanResponse(query_id: str, answer: str, created_at)` — the human's reply. Both are the
+  typed contract behind the injectable `human_handler` and the `ask_human` tools.
 
 ## Changelog
 - 2026-05-26 -> 2026-06-12 — Full Pydantic v2 protocol built: research/search/analysis/
@@ -180,3 +185,5 @@ carried by **reference** (`FigureRef`), never embedded
 - 2026-06-12 — Phase 2 step 3 added `GateReport.findings` for non-failing gate observations
   consumed by future co-lead review.
 - 2026-06-12 — Compacted changelog and updated stale local-path/tool-result wording.
+- 2026-06-15 — Phase 2 step 5 added `HumanQuery`/`HumanResponse` (the raise-to-human
+  clarification protocol, §9.7).

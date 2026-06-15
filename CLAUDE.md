@@ -557,8 +557,8 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
 | 1 | Done | **`ToolSpec` + two-halves contract** — schema a worker emits (science context, expected behavior, validation ObsID, proposed checks) + the human-half/ai-half + tolerance contract. | Schema validates; a sample `ToolSpec` round-trips; documented in `schemas/DOCS.md`. |
 | 2 | Done | **merge_flow harness + rework-loop scaffold** — `merge_flow.propose_and_pr()` invokes the Claude Agent SDK to write human-half, ai-half (`TOOL_MANIFEST` entry), and tests in an isolated worktree, structure-context injected from runtime-safe sources (`xspec_utils` + `prompts/coder.md` + config). Built with the L2/L3/L4 rework loop around **injectable gate/review hooks** (stub-PASS now; steps 3/4 drop in), the `ask_lead`/`ask_human` escalation tools, and the `coder` model role. | From a `ToolSpec`, the agent produces a branch with both halves and tests; gate/review rejections re-drive the warm session; cap exhaustion returns a no-commit failure for the lead to raise to the human; nothing touches master. |
 | 3 | Done | **The deterministic gate** — generic Layer-A checks + a Layer-B tool-local test runner + provenance wiring + the no-fabrication scan. | A good tool passes; one that fabricates, fails replication, or breaks a declared check is rejected with a specific machine-readable reason. |
-| 4 | Todo | **Provider-decorrelated review** — a **GPT analyst co-lead** (provider ≠ the Claude author, routed from config) reviews the diff + gate result and judges the Layer-B checks; code-review only. Its pass + the gate authorizes the commit. | Review runs on a different provider than the author; a planted subtle bug is caught or escalated, not rubber-stamped. |
-| 5 | Todo | **Raise-to-human (clarification)** — `HumanQuery`/`HumanResponse` schema; LangGraph `interrupt()` + `ask_human` tool; handler-injection with the `slack.py` reference connector; `FAILED`/`NEEDS_HUMAN` + failure classification. | A blocked role raises and the run pauses for a human; an honest FAILED is accepted with no penalty; no fabrication on cap exhaustion. |
+| 4 | Done | **Provider-decorrelated review** — a **GPT analyst co-lead** (provider ≠ the Claude author, routed from config) reviews the diff + gate result and judges the Layer-B checks; code-review only. Its pass + the gate authorizes the commit. | Review runs on a different provider than the author; a planted subtle bug is caught or escalated, not rubber-stamped. |
+| 5 | Done | **Raise-to-human (clarification)** — `HumanQuery`/`HumanResponse` schema; the injectable `human_handler` + a shared `ask_human` tool for every ReAct role and the author (blocking direct-handler; LangGraph `interrupt()`+checkpointer durable suspend/resume deferred to §12); handler-injection with CLI/`slack.py`/`whatsapp.py` connectors behind an auto-detecting resolver; `FAILED`/`NEEDS_HUMAN` routing + failure classification. | A blocked role raises and the run blocks for a human; an honest FAILED is accepted with no penalty; no fabrication on cap exhaustion. |
 | 6 | Todo | **`approve_edit()` atomic commit** — on gate-pass + co-lead review-pass, one atomic commit per tool to the branch; the runtime never merges; replicability + golden-regression happen at the human merge, not the gate. | An approved tool lands as one commit on a branch; a human reruns the human-half, checks regression, and merges/reverts cleanly. |
 | 7 | Todo | **End-to-end** — a sibling of `test_full_suite.py` poses a question requiring a missing capability; an analyst authors a tool through the whole flow; it lands on a branch; a human merges; the analysis re-runs on the new tool. | The missing-capability analysis completes using a freshly authored, gated tool. (Phase-2 end-to-end testing is observational/live via `test_full_suite.py` siblings — not deterministic assertions.) |
 
@@ -660,3 +660,29 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   invocation is read-only through manifests/sandbox, authoring happens in isolated toolkit
   branches, the deterministic gate is built, and provider-decorrelated review plus atomic
   commits are still pending.
+- 2026-06-15 — **Phase 2 step 4 done.** `sandbox/review.py::make_review_hook` is the default
+  `run_review` hook: the provider-decorrelated GPT co-lead (`AnalystColeadAgent` +
+  `prompts/analyst_colead.md`) reviews the authored diff bundle + gate report and judges the
+  Layer-B checks (code-review only), routed by `select_decorrelated_member` to a member whose
+  provider ≠ the Claude author's (raises if none). It investigates the worktree/web via a
+  read-only `ReadOnlyToolProvider` (`include_text_search=False`) before its `ToolReviewVerdict`.
+  `propose_and_pr` gained a `colead` param; commit ⇔ gate-pass ∧ review-pass still lands as a
+  placeholder pending the step-6 `approve_edit()`. Deterministic coverage in
+  `tests/test_review.py`; the non-live suite is green.
+- 2026-06-15 — **Launch preflight + all roles required.** New `auto_research.preflight`
+  (`Preflight` / `run_preflight()`) owns the launch-time deterministic checklist: every
+  no-LLM precondition runs once, before any model client is built, with each check living in
+  its home module and registered centrally (`env.check_required_env` +
+  `sandbox.review.check_author_reviewer_decorrelation`; extendable by one `register(...)`).
+  `run_research()` and the CLI now call `run_preflight()`. `models` `REQUIRED_ROLES` now
+  includes `coder` and `analyst_colead` — all configured roles are required for now.
+- 2026-06-15 — **Phase 2 step 5 done.** New `auto_research.hitl` package: `HumanQuery`/
+  `HumanResponse`, the injectable `HumanHandler` + `resolve_human` fail-safe
+  (`HumanInputRequired`), the CLI-vs-library auto-detecting `resolve_handler`, and CLI/Slack/
+  WhatsApp connectors (Slack Socket Mode build-only; WhatsApp Twilio send+poll, live-tested
+  opt-in). Every ReAct role and the author share one `ask_human` tool (blocking direct-handler;
+  durable LangGraph `interrupt()`/checkpointer stays the §12 TODO). `run_research` gained
+  `human_handler`/`human_channel`; the graph routes `failed`/`needs_human` around the reviewer
+  to a no-fabrication finalize; the preflight became async and pings the resolved channel
+  (green only on a reply). Analyst prompts gained §9.6 failure classification. The non-live
+  suite is green (`tests/test_hitl.py`, `tests/test_preflight.py`, graph routing).

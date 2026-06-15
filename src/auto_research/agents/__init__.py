@@ -9,6 +9,7 @@ from auto_research.agents.prompts import (
 )
 from auto_research.agents.roles import (
     AgentRole,
+    AnalystColeadAgent,
     AnalystLeadAgent,
     AnalystWorkerAgent,
     CallableModel,
@@ -18,6 +19,7 @@ from auto_research.agents.roles import (
 
 __all__ = [
     "AgentRole",
+    "AnalystColeadAgent",
     "AnalystLeadAgent",
     "AnalystWorkerAgent",
     "CallableModel",

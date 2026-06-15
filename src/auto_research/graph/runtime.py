@@ -11,7 +11,8 @@ from typing import Any
 
 import yaml
 
-from auto_research.env import check_required_env
+from auto_research.preflight import run_preflight
+from auto_research.hitl import HumanHandler, resolve_handler
 from auto_research.agents import (
     AnalystLeadAgent,
     AnalystWorkerAgent,
@@ -213,6 +214,8 @@ async def run_research(
     monitor: RunMonitor | None = None,
     monitor_jsonl: str | Path | None = None,
     report_formats: str | list[str] | None = None,
+    human_handler: HumanHandler | None = None,
+    human_channel: str | None = None,
 ) -> ResearchRun:
     """Run the graph and return the verdict, final state, and monitor.
 
@@ -230,7 +233,10 @@ async def run_research(
     down after the graph completes or raises.
     """
 
-    check_required_env()
+    # Resolve the human-in-the-loop channel (explicit handler → channel → auto-detect),
+    # then run the full launch checklist — which pings the channel — before any LLM (§9.8).
+    human_handler = resolve_handler(human_handler, human_channel)
+    await run_preflight(human_handler=human_handler)
 
     if isinstance(request, str):
         request = ResearchRequest(question=request)
@@ -263,9 +269,20 @@ async def run_research(
         worker_group = resolve("analyst_worker")
         worker_handles = worker_group.handles[:DEFAULT_WORKER_COUNT]
         workers = [
-            AnalystWorkerAgent(model=handle, monitor=run_monitor, worker_index=i)
+            AnalystWorkerAgent(
+                model=handle, monitor=run_monitor, worker_index=i,
+                human_handler=human_handler,
+            )
             for i, handle in enumerate(worker_handles)
         ]
+    else:
+        # Caller-supplied workers still get the resolved raise-to-human channel.
+        for worker in workers:
+            if getattr(worker, "human_handler", None) is None:
+                try:
+                    worker.human_handler = human_handler
+                except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it
+                    pass
 
     # Create per-agent workspace folders
     analyst_keys = [f"analyst_worker_{i}" for i in range(len(workers))]
@@ -290,12 +307,18 @@ async def run_research(
     lead_roots = [*readonly_roots, toolkit_root]
     if getattr(reviewer, "tools", None) is None:
         try:
-            reviewer.tools = ReadOnlyToolProvider(roots=readonly_roots, retrieval=retrieval)
+            reviewer.tools = ReadOnlyToolProvider(
+                roots=readonly_roots, retrieval=retrieval,
+                human_handler=human_handler, asked_by="reviewer",
+            )
         except Exception:  # noqa: BLE001 - tools are optional; never block the run
             pass
     if getattr(lead, "tools", None) is None:
         try:
-            lead.tools = ReadOnlyToolProvider(roots=lead_roots, retrieval=retrieval)
+            lead.tools = ReadOnlyToolProvider(
+                roots=lead_roots, retrieval=retrieval,
+                human_handler=human_handler, asked_by="analyst_lead",
+            )
         except Exception:  # noqa: BLE001
             pass
 

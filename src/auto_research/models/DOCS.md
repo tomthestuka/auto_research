@@ -20,8 +20,10 @@ Google by editing YAML alone
 
 ## Interfaces / Contracts
 - `config/models.yaml` must define all required roles: `reviewer`,
-  `analyst_lead`, `analyst_worker`, and `librarian_io`. Each role maps to
-  `members`, a non-empty list of model configs.
+  `analyst_lead`, `analyst_worker`, `librarian_io`, and the Phase-2 authoring roles
+  `coder` and `analyst_colead`. Each role maps to `members`, a non-empty list of model
+  configs. (All roles are currently required; non-required roles return only as the system
+  grows.)
 - Model identifiers and per-role parameters live in YAML, not Python source.
 - `ModelHandle.call()` accepts text messages and optional `FigureRef` images.
   If images are passed to a role member whose config has `vision: false`, it
@@ -97,7 +99,8 @@ Google by editing YAML alone
   `schema` and `tools` are passed.
 - `ModelGroupHandle(role: str, handles: tuple[ModelHandle, ...])` — resolved
   model group. Method: `member(name: str) -> ModelHandle`.
-- `REQUIRED_ROLES` — required role names that must appear in config.
+- `REQUIRED_ROLES` — required role names that must appear in config: `reviewer`,
+  `analyst_lead`, `analyst_worker`, `librarian_io`, `coder`, `analyst_colead`.
 - `DEFAULT_CONFIG_PATH` — default path to `config/models.yaml`.
 - `ModelRegistry(config: ModelsConfig)` — loaded registry. Method:
   `resolve(role: str) -> ModelGroupHandle`.
@@ -119,3 +122,6 @@ Google by editing YAML alone
   calling, ReAct tool-turn replay, prefix caching, vision/document gates, usage normalization,
   and `priceMTk` cost metadata.
 - 2026-06-12 — Compacted changelog; no provider behavior changes.
+- 2026-06-15 — `REQUIRED_ROLES` now includes the Phase-2 authoring roles `coder` and
+  `analyst_colead`; all configured roles are required (validated at registry load, and
+  early via the launch preflight).

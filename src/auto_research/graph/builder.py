@@ -302,7 +302,33 @@ def build_graph(
             return "analysis"
         return "finalize_run"
 
+    def after_analysis(state: ResearchState) -> str:
+        """Route an honest analysis failure straight to finalize (§9.6): a ``failed`` /
+        ``needs_human`` report is a *correct* outcome with no penalty — never reviewer rework
+        and never a fabricated report. Only an ``ok`` report goes to analysis review."""
+        report = state.get("report")
+        status = getattr(report, "status", "ok") if report is not None else "ok"
+        return "finalize_run" if status in ("failed", "needs_human") else "review_analysis"
+
     async def finalize_run_node(state: ResearchState) -> dict[str, Any]:
+        report = state.get("report")
+        status = getattr(report, "status", "ok") if report is not None else "ok"
+        if status in ("failed", "needs_human"):
+            # Honest failure: surface it as a non-accepted verdict so no report is composed
+            # (route_after_finalize → END). No fabrication, no quality penalty (§9.6).
+            detail = (report.uncertainty or report.summary) if report is not None else ""
+            verdict = ReviewVerdict(
+                accepted=False,
+                rationale=f"Run terminated with honest status '{status}': {detail}".strip(),
+            )
+            await _record(
+                monitor,
+                "run.honest_failure",
+                level=1,
+                summary=f"Analysis ended with status '{status}' — accepted as a correct outcome",
+                data={"status": status, "report": report},
+            )
+            return {"verdict": verdict}
         return {"verdict": _latest_verdict(state)}
 
     _run_id = run_id or uuid.uuid4().hex
@@ -402,7 +428,11 @@ def build_graph(
 
     builder.add_edge(START, "literature")
     builder.add_edge("literature", "review_literature")
-    builder.add_edge("analysis", "review_analysis")
+    builder.add_conditional_edges(
+        "analysis",
+        after_analysis,
+        {"review_analysis": "review_analysis", "finalize_run": "finalize_run"},
+    )
     builder.add_conditional_edges(
         "review_literature",
         after_review_literature,
