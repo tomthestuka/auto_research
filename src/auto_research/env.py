@@ -1,8 +1,8 @@
 """Launch-time environment validation and config-derived paths.
 
 ``check_required_env()`` is called at startup before any SDK clients are
-constructed.  Required keys are derived from .env.example shape — never reads
-.env itself.
+constructed. It loads the project ``.env`` via python-dotenv, then validates
+required keys derived from .env.example shape.
 
 ``runtime_data_dir()`` reads the runtime data directory from
 config/orchestration.yaml so the path is not duplicated across env and config.
@@ -13,7 +13,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-_ORCH_CONFIG = Path(__file__).resolve().parents[2] / "config" / "orchestration.yaml"
+from dotenv import load_dotenv
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_ENV_FILE = _REPO_ROOT / ".env"
+_ORCH_CONFIG = _REPO_ROOT / "config" / "orchestration.yaml"
 
 # Each tuple is a group of aliases; at least one must be set.
 # Derived from .env.example; optional vars (LangSmith, runtime dir) are excluded.
@@ -33,6 +37,7 @@ def check_required_env() -> None:
     Raises on the first call if anything is missing so the process dies before
     constructing any SDK client.
     """
+    load_dotenv(_ENV_FILE, override=False)
     missing: list[str] = []
     for group in _REQUIRED:
         if not any(os.environ.get(k) for k in group):

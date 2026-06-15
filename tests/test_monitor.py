@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -66,6 +67,60 @@ def test_monitor_records_async_events_in_sequence(tmp_path: Path) -> None:
     sequences = [event.sequence for event in monitor.events]
     assert sequences == list(range(1, 21))
     assert (tmp_path / "async.jsonl").read_text(encoding="utf-8").count("\n") == 20
+
+
+def test_monitor_streams_visible_event_summaries(tmp_path: Path) -> None:
+    stream = StringIO()
+    monitor = RunMonitor(chatter=7, jsonl_path=tmp_path / "stream.jsonl", stream=stream)
+
+    asyncio.run(
+        monitor.record(
+            "analyst",
+            "analyst.analyze.tools",
+            level=7,
+            summary="Analyst worker ran tools",
+            actor="analyst_worker",
+            data={
+                "model": "claude-sonnet-4-6",
+                "calls": [
+                    {"name": "load_data", "is_error": False},
+                    {"name": "run_fit", "is_error": True},
+                ],
+            },
+        )
+    )
+    asyncio.run(
+        monitor.record(
+            "analyst",
+            "analyst.analyze.output",
+            level=10,
+            summary="Hidden full model output",
+        )
+    )
+    asyncio.run(
+        monitor.record(
+            "analyst",
+            "analyst.analyze.tool_result",
+            level=7,
+            summary="analyst_worker tool run_fit returned",
+            actor="analyst_worker",
+            data={
+                "model": "claude-sonnet-4-6",
+                "tool": "run_fit",
+                "is_error": False,
+                "chars": 4321,
+                "figure_count": 1,
+            },
+        )
+    )
+
+    text = stream.getvalue()
+    assert "#0001 analyst(claude-sonnet-4-6) L7" in text
+    assert "analyst.analyze.tools" in text
+    assert "tools=load_data,run_fit!" in text
+    assert "tool=run_fit status=ok chars=4321 figures=1" in text
+    assert "Hidden full model output" not in text
+    assert (tmp_path / "stream.jsonl").read_text(encoding="utf-8").count("\n") == 3
 
 
 def test_consensus_records_worker_and_lead_events() -> None:

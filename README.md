@@ -311,6 +311,10 @@ python -m auto_research "your research question" --chatter 10
 #          --report-format {jsonl,tex} (repeatable; default both)
 #          --format {text,json}  --monitor-jsonl PATH  --monitor-md PATH
 ```
+The CLI prints compact live monitor summaries to stderr during the run, with
+model-backed agent lines prefixed as `team(model)` and compact per-tool result
+lines, then prints the final verdict/artifact paths to stdout. `--format json`
+keeps stdout machine-readable.
 
 **Library** — monitored run from Python / a notebook:
 
@@ -329,8 +333,9 @@ run.report_pdf       # path to the compiled report (if accepted + tex requested)
 langgraph dev        # reads .env, serves the `research` graph in Studio
 ```
 
-**Notebook** — `notebooks/step12_monitor_inspection.ipynb` reconstructs and inspects a
-run from its monitor JSONL.
+**Notebook** — `notebooks/step12_monitor_inspection.ipynb` can run with live
+`team(model)` monitor summaries and compact tool-result lines in the cell output,
+or reconstruct and inspect a run from its monitor JSONL.
 
 **Run visualiser** — Gantt timeline + cost pie from any monitor JSONL:
 
@@ -344,8 +349,9 @@ python -m auto_research.observability.plot_run <monitor.jsonl> [output.png]
 env flags (e.g. `AUTO_RESEARCH_LIVE_FULL_SUITE_TESTS=1`) and write logs under
 `logs/dev/step-N/`.
 
-`--chatter` follows an XSPEC-style 1-10 verbosity scale; `10` records the full agent,
-consensus, tool, and reviewer narrative as JSONL plus a grouped Markdown report.
+`--chatter` follows an XSPEC-style 1-10 verbosity scale; it filters live summaries and
+grouped Markdown, while the monitor JSONL still records the full agent, consensus, tool,
+and reviewer narrative.
 
 ---
 

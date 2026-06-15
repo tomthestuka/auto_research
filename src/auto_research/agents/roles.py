@@ -309,6 +309,21 @@ class AgentRole:
                 figures.extend(outcome.figures)
                 if on_result is not None:
                     await on_result(call, outcome)
+                await self._record(
+                    f"{self.role}.{action}.tool_result",
+                    level=7,
+                    summary=(
+                        f"{self.role} tool {call.name} "
+                        f"{'failed' if outcome.is_error else 'returned'}"
+                    ),
+                    data={
+                        "iteration": iteration + 1,
+                        "tool": call.name,
+                        "is_error": outcome.is_error,
+                        "chars": len(outcome.text),
+                        "figure_count": len(outcome.figures),
+                    },
+                )
             messages.append(ToolResultMessage(results=result_parts))
             await self._record(
                 f"{self.role}.{action}.tools",
@@ -334,13 +349,17 @@ class AgentRole:
         data: Mapping[str, Any] | None = None,
     ) -> None:
         if self.monitor is not None:
+            record_data = dict(data or {})
+            model_label = _model_label(self.model)
+            if model_label:
+                record_data.setdefault("model", model_label)
             await self.monitor.record(
                 _team_for_role(self.role),
                 event,
                 level=level,
                 summary=summary,
                 actor=self.role,
-                data=data,
+                data=record_data,
             )
 
 
@@ -978,6 +997,14 @@ def _select_model(group: ModelGroupHandle, model_name: str | None) -> ModelHandl
     if model_name is not None:
         return group.member(model_name)
     return group.handles[0]
+
+
+def _model_label(model: CallableModel) -> str | None:
+    config = getattr(model, "config", None)
+    label = getattr(config, "model", None)
+    if isinstance(label, str) and label:
+        return label
+    return None
 
 
 def _dedup_figures(figures: Sequence[FigureRef]) -> list[FigureRef]:

@@ -6,13 +6,12 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
+import sys
 from typing import Sequence
-
-from dotenv import load_dotenv
 
 from auto_research.env import check_required_env
 from auto_research.graph import run_research
-from auto_research.monitor import default_monitor_jsonl_path, validate_chatter
+from auto_research.monitor import RunMonitor, default_monitor_jsonl_path, validate_chatter
 from auto_research.schemas import ResearchRequest
 
 
@@ -68,7 +67,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one research request from the command line."""
 
-    load_dotenv()
     check_required_env()
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -79,6 +77,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     jsonl_path = args.monitor_jsonl or default_monitor_jsonl_path("cli_run")
     md_path = args.monitor_md or jsonl_path.with_suffix(".md")
+    monitor = RunMonitor(chatter=chatter, jsonl_path=jsonl_path, stream=sys.stderr)
     request = ResearchRequest(
         question=args.request,
         context=args.context,
@@ -88,8 +87,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     run = asyncio.run(
         run_research(
             request,
-            chatter=chatter,
-            monitor_jsonl=jsonl_path,
+            monitor=monitor,
             report_formats=args.report_formats,
         )
     )

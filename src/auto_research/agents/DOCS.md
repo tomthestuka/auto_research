@@ -36,7 +36,10 @@ authoritative docs while triaging tool requests, §9.3),
 
 When a `RunMonitor` is injected, role wrappers record high-chatter input,
 parsed output, raw model content, attachment counts, and errors. These records
-are for human inspection only and are never fed back into runtime prompts.
+are for human inspection only and are never fed back into runtime prompts. Model-backed
+role events include the configured model string in monitor payloads, and each
+ReAct tool result gets a compact monitor event (tool name, ok/error status,
+result character count, and figure count) before the iteration summary.
 
 Critical: **runtime LLMs never see `CLAUDE.md` or any `DOCS.md`**
 ([CLAUDE.md §4](../../../CLAUDE.md#4-claudemd-and-docsmd-are-build-time-only)).
@@ -129,6 +132,9 @@ Role wrappers:
 - All wrappers accept an optional `monitor: RunMonitor | None`. At
   `chatter=10`, each model-backed public method records its structured input and
   parsed output. Errors are recorded at low chatter before being re-raised.
+  Role-originated monitor events include the configured model string when the
+  backing model exposes it; ReAct loops additionally emit visible per-tool
+  result summaries at `chatter=7`.
 - Live role verification is opt-in:
   `AUTO_RESEARCH_LIVE_AGENT_TESTS=1 pytest tests/test_live_agents.py -s`.
   It runs one real model call for each role and writes JSONL plus Markdown logs
@@ -188,3 +194,6 @@ Role wrappers:
   current docs for `AnalystWorkerAgent.analyze()` as the owner of tool execution.
 - 2026-06-12 — Compacted changelog and removed stale `request_tools`/`execute_tools`
   dictionary entries.
+- 2026-06-15 — Monitor hooks now attach configured model strings to role events
+  and emit compact per-tool result events from the ReAct loop for live
+  terminal/notebook output.

@@ -305,11 +305,14 @@ class TestSandboxToolProvider:
 
 def _script_model():
     """A model that emits one tool call, then stops, then returns a report."""
+    from types import SimpleNamespace
+
     from auto_research.models.types import ModelResponse, ToolCall
 
     class _ScriptModel:
         def __init__(self):
             self.tool_iterations = 0
+            self.config = SimpleNamespace(model="fake-tool-model")
 
         async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
                        images=(), documents=(), cache_prefix=False):
@@ -334,6 +337,7 @@ class TestWorkerReactLoop:
         from datetime import UTC, datetime
 
         from auto_research.agents.roles import AnalystWorkerAgent
+        from auto_research.monitor import RunMonitor
         fig = {
             "path": "/tmp/fit.png", "caption": "fit", "mime_type": "image/png",
             "produced_by": "tk_load", "created_at": datetime.now(UTC).isoformat(), "sha256": "a" * 64,
@@ -341,12 +345,23 @@ class TestWorkerReactLoop:
         # Tool returns a figure → exercises figure propagation onto the report.
         sb = _FakeSandbox(tool_fn=lambda m, f, a: {"exit_code": 0, "stdout": "loaded indices", "figures": [fig]})
         reg = _FakeRegistry(known={"tk_load"}, mcp=set())
-        w = AnalystWorkerAgent(model=_script_model(), available_toolkits=[], sandbox=sb, registry=reg)
+        monitor = RunMonitor(chatter=7)
+        w = AnalystWorkerAgent(
+            model=_script_model(),
+            available_toolkits=[],
+            sandbox=sb,
+            registry=reg,
+            monitor=monitor,
+        )
         report = asyncio.run(w.analyze(AnalysisTask(question="q")))
         assert sb.tool_calls  # a tool actually ran inside the loop
         assert report.summary == "did the fit"
         assert [str(f.path) for f in report.figures] == ["/tmp/fit.png"]  # real figure attached
         assert w.last_tool_results and w.last_tool_results[0].exit_code == 0
+        events = {event.event: event for event in monitor.events}
+        assert "analyst_worker.analyze.tool_result" in events
+        assert events["analyst_worker.analyze.tool_result"].data["model"] == "fake-tool-model"
+        assert events["analyst_worker.analyze.tool_result"].data["figure_count"] == 1
 
     def test_starts_dead_sandbox(self) -> None:
         from auto_research.agents.roles import AnalystWorkerAgent

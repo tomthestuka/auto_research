@@ -15,7 +15,7 @@ and the active Phase 2 build order in
 
 | Submodule | Step | Role |
 |---|---|---|
-| `env.py` | — | Launch-time required-env check (`check_required_env()`). |
+| `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`). |
 | `schemas` | 1 | Pydantic v2 message protocol between agents. |
 | `models` | 2 | Provider abstraction + role→model registry from `config/models.yaml`. |
 | `observability` | 3 | LangSmith tracing + per-call cost logging hooked into the provider layer. |
@@ -40,6 +40,9 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - Package exports `RunMonitor` for notebook and test instrumentation.
 - Each submodule documents its own interface in its `DOCS.md`. Cross-module
   contracts go through `auto_research.schemas`.
+- `auto_research.env.check_required_env()` loads the repo-root `.env` with
+  `override=False` and validates required provider/source keys before SDK clients
+  are constructed.
 - `auto_research.observations.load_observations_config()` loads generic
   mission observation locations from config; mission names are not hardcoded in
   agent wrappers.
@@ -62,6 +65,8 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   and monitor.
 - `RunMonitor` — async-safe event collector and renderer from
   `auto_research.monitor`.
+- `check_required_env()` — loads `.env` without overriding existing process
+  environment variables, then raises a clear error if any required key group is absent.
 
 ## Changelog
 - 2026-05-26 -> 2026-06-12 — Phase 1 completed and verified: schemas, providers,
@@ -71,3 +76,5 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   exists, and `research_toolkit` remains the only runtime-authored repo.
 - 2026-06-12 — Compacted changelog and refreshed stale CLAUDE section links; no code
   changes.
+- 2026-06-15 — Centralized project `.env` loading in `check_required_env()` so
+  library, CLI, notebook, and test paths validate against the same launch environment.

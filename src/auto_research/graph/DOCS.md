@@ -79,7 +79,8 @@ iteration counters, and the cap.
   Runs `run_research()` and returns only the final reviewer verdict.
 - `async run_research(request, *, ..., chatter=10, monitor=None,
   monitor_jsonl=None, report_formats=None) -> ResearchRun` — high-level monitored entry. Calls
-  `check_required_env()` immediately (crashes if any required API key is absent).
+  `check_required_env()` immediately, which loads the repo-root `.env` and crashes
+  if any required API key is absent.
   Missing dependencies are constructed from `config/models.yaml`. Reads
   `tool_retry_cap`, `toolkit_root`, `analyze_env`, and `analyze_ini_sh` from
   `config/orchestration.yaml`.  Creates per-run workspace

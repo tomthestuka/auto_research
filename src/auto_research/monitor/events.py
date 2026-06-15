@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 import json
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, TextIO
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -68,10 +68,12 @@ class RunMonitor:
         chatter: int = 10,
         run_id: str | None = None,
         jsonl_path: str | Path | None = None,
+        stream: TextIO | None = None,
     ) -> None:
         self.chatter = validate_chatter(chatter)
         self.run_id = run_id or uuid4().hex
         self.jsonl_path = Path(jsonl_path).expanduser() if jsonl_path is not None else None
+        self.stream = stream
         self._events: list[MonitorEvent] = []
         self._sequence = 0
         self._lock = Lock()
@@ -122,6 +124,8 @@ class RunMonitor:
             if level > self.chatter:
                 return None
             self._events.append(monitor_event)
+            if self.stream is not None:
+                _write_stream_event(self.stream, monitor_event)
         return monitor_event
 
     def events_by_team(self) -> OrderedDict[str, list[MonitorEvent]]:
@@ -194,6 +198,7 @@ class RunMonitor:
         monitor.chatter = validate_chatter(chatter)
         monitor.run_id = run_id
         monitor.jsonl_path = None
+        monitor.stream = None
         monitor._events = events
         monitor._sequence = len(events)
         monitor._lock = Lock()
@@ -226,6 +231,112 @@ def _render_events(events: Sequence[MonitorEvent]) -> list[str]:
                 ]
             )
     return lines
+
+
+def _write_stream_event(stream: TextIO, event: MonitorEvent) -> None:
+    """Write one concise, live-friendly monitor line."""
+
+    try:
+        stream.write(_format_stream_event(event))
+        stream.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def _format_stream_event(event: MonitorEvent) -> str:
+    timestamp = event.created_at.strftime("%H:%M:%S")
+    subject = _stream_subject(event)
+    actor = f" {event.actor}" if event.actor else ""
+    detail = _stream_detail(event.data)
+    suffix = f" | {detail}" if detail else ""
+    return (
+        f"[{timestamp}] #{event.sequence:04d} {subject} L{event.level} "
+        f"{event.event}{actor}: {event.summary}{suffix}\n"
+    )
+
+
+def _stream_subject(event: MonitorEvent) -> str:
+    model = event.data.get("model")
+    if isinstance(model, str) and model:
+        return f"{event.team}({model})"
+    return event.team
+
+
+def _stream_detail(data: Mapping[str, Any]) -> str:
+    parts: list[str] = []
+    if not data:
+        return ""
+
+    run_id = data.get("run_id")
+    if isinstance(run_id, str):
+        parts.append(f"run_id={run_id[:12]}")
+
+    search_request = data.get("search_request")
+    if isinstance(search_request, Mapping):
+        query = search_request.get("query")
+        sources = search_request.get("sources")
+        if query:
+            parts.append(f"query={_short(query)}")
+        if sources:
+            parts.append(f"sources={','.join(str(s) for s in sources)}")
+
+    for key in ("results", "paths"):
+        value = data.get(key)
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            parts.append(f"{key}={len(value)}")
+
+    calls = data.get("calls")
+    if isinstance(calls, Sequence) and not isinstance(calls, str | bytes | bytearray):
+        names: list[str] = []
+        for call in calls[:5]:
+            if isinstance(call, Mapping):
+                name = str(call.get("name", "tool"))
+                if call.get("is_error"):
+                    name += "!"
+                names.append(name)
+        if len(calls) > 5:
+            names.append(f"+{len(calls) - 5}")
+        if names:
+            parts.append(f"tools={','.join(names)}")
+
+    tool = data.get("tool")
+    if isinstance(tool, str) and tool:
+        parts.append(f"tool={tool}")
+        parts.append(f"status={'error' if data.get('is_error') else 'ok'}")
+
+    chars = data.get("chars")
+    if isinstance(chars, int):
+        parts.append(f"chars={chars}")
+
+    figure_count = data.get("figure_count")
+    if isinstance(figure_count, int):
+        parts.append(f"figures={figure_count}")
+
+    verdict = data.get("verdict")
+    if isinstance(verdict, Mapping):
+        flags = [
+            f"accepted={verdict.get('accepted')}",
+            f"more_lit={verdict.get('needs_more_literature')}",
+            f"analysis_rework={verdict.get('needs_analysis_rework')}",
+        ]
+        parts.append(" ".join(flags))
+
+    path = data.get("path")
+    if path:
+        parts.append(f"path={_short(path, limit=120)}")
+
+    error = data.get("error")
+    if error:
+        parts.append(f"error={_short(error, limit=160)}")
+
+    return " ".join(parts)
+
+
+def _short(value: Any, *, limit: int = 80) -> str:
+    text = " ".join(str(value).split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "~"
 
 
 def _jsonable_dict(data: Mapping[str, Any]) -> dict[str, Any]:
