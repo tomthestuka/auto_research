@@ -73,5 +73,11 @@ tool_author_review_rework_cap: 2
 # run_research(human_channel=...). An interactive CLI auto-detects the terminal regardless.
 # human_channel_ping_timeout_s: how long the launch-time preflight waits for the channel to
 # reply back before failing the run (green only when a reply arrives).
+# human_response_timeout_s: how long a blocked role waits for a human reply mid-run before
+# failing, shared by EVERY channel (cli/slack/whatsapp). A suspend is in-process blocking, so
+# this caps how long the run holds the process on a person. Default 3600s (1h) is a humane
+# window; it is deliberately NOT tied to the LLM prompt-cache TTL (the default cache is only
+# ~5min and exceeding it just costs one cheap cold prefix re-prefill on resume, not a re-run).
 human_channel: none
 human_channel_ping_timeout_s: 300
+human_response_timeout_s: 3600

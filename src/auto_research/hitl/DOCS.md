@@ -50,12 +50,15 @@ directly) so the preflight can import it without pulling the graph/LLM stack.
   timeout; raises otherwise. Registered by `auto_research.preflight` only when a handler is
   resolved.
 - `cli_stdin_handler(query) -> HumanResponse` — attended-terminal handler (prints to stderr,
-  reads stdin off-thread).
-- `SlackHandler(*, app=None, socket_handler=None, channel=None, timeout_s=1800)` — Socket
+  reads stdin off-thread). Waits at most `response_timeout_s()` then raises `TimeoutError` — an
+  attended terminal no longer hangs the run forever.
+- `SlackHandler(*, app=None, socket_handler=None, channel=None, timeout_s=None)` — Socket
   Mode; posts to `SLACK_HUMAN_CHANNEL`, awaits a threaded reply via a Future resolved by
-  `on_message`. `start()`/`aclose()` manage the socket. Built per spec; **not live-tested**.
-- `WhatsAppHandler(*, client=None, from_number=None, to_number=None, timeout_s=1800,
-  poll_interval_s=5)` — Twilio: sends, then **polls** `messages.list` for the inbound reply
+  `on_message`. `start()`/`aclose()` manage the socket. `timeout_s` defaults to the shared
+  `response_timeout_s()` when unset. Built per spec; **not live-tested**.
+- `WhatsAppHandler(*, client=None, from_number=None, to_number=None, timeout_s=None,
+  poll_interval_s=5)` — `timeout_s` defaults to the shared `response_timeout_s()` when unset.
+  Twilio: sends, then **polls** `messages.list` for the inbound reply
   (no public webhook). Auth is via a Twilio **API key** (`TWILIO_ACCOUNT_SID` +
   `TWILIO_API_KEY_SID` + `TWILIO_API_KEY_SECRET`), not the root Auth Token, so a leaked key is
   revoked on its own. Live-tested via `tests/test_live_whatsapp.py` (opt-in).
@@ -81,6 +84,11 @@ live in `auto_research.schemas` (the protocol, §7).
 - `resolve_handler(human_handler, human_channel)` — precedence resolver / auto-detect.
 - `build_human_handler(name, **cfg)` — name→connector factory.
 - `ping_timeout_s()` — preflight ping timeout from `orchestration.yaml`.
+- `response_timeout_s()` — the shared mid-run human-response window from `orchestration.yaml`
+  (`human_response_timeout_s`, default 3600s/1h); every channel (CLI/Slack/WhatsApp) waits at
+  most this long for a reply before raising. Decoupled from the LLM prompt-cache TTL on purpose
+  (the default cache is ~5min — far too short to govern a human deadline, and overshooting it
+  only costs one cheap cold prefix re-prefill on resume).
 - `make_human_channel_check(handler, *, timeout_s=None)` — preflight ping check factory.
 - `cli_stdin_handler(query)` — attended-terminal handler.
 - `SlackHandler` / `WhatsAppHandler` — connector classes (see contracts above).
@@ -96,3 +104,9 @@ live in `auto_research.schemas` (the protocol, §7).
   README, and the live-test docstring updated to match.
 - 2026-06-16 — all three connector bodies (CLI/Slack/WhatsApp) now render the sender via
   `HumanQuery.sender_label` → `"<role> (<model>)"` so the human sees which model is asking.
+- 2026-06-16 — added `response_timeout_s()` (`orchestration.yaml: human_response_timeout_s`,
+  default 3600s/1h): one shared mid-run human-response window read by every channel. Slack and
+  WhatsApp `timeout_s` now default to it (was a hardcoded 1800s); the CLI handler, previously an
+  indefinite block, now waits at most this long then raises `TimeoutError`. Deliberately
+  decoupled from the LLM prompt-cache TTL (default ~5min is too short to govern a human deadline;
+  overshooting only costs one cheap cold prefix re-prefill).

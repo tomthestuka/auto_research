@@ -15,6 +15,7 @@ import asyncio
 import os
 from typing import Any
 
+from auto_research.hitl.resolve import response_timeout_s
 from auto_research.schemas import HumanQuery, HumanResponse
 
 
@@ -27,12 +28,13 @@ class SlackHandler:
         app: Any | None = None,
         socket_handler: Any | None = None,
         channel: str | None = None,
-        timeout_s: float = 1800.0,
+        timeout_s: float | None = None,
     ) -> None:
         self.channel = channel or os.environ.get("SLACK_HUMAN_CHANNEL")
         if not self.channel:
             raise RuntimeError("Slack connector needs SLACK_HUMAN_CHANNEL.")
-        self.timeout_s = timeout_s
+        # Default to the shared cross-channel human-response window (orchestration.yaml).
+        self.timeout_s = timeout_s if timeout_s is not None else response_timeout_s()
         self._started = False
         # Map a posted message thread ts -> the Future awaiting its reply.
         self._pending: dict[str, asyncio.Future[str]] = {}

@@ -33,10 +33,10 @@ class AnthropicProvider:
     A ``tools`` request is native function calling via ``messages.create``.
     ``messages`` may interleave ``AssistantToolUse`` / ``ToolResultMessage`` turns
     (translated to native ``tool_use`` / ``tool_result`` content blocks) so a
-    ReAct loop can replay its trajectory. ``cache_prefix`` sets a single
-    ``cache_control: ephemeral`` breakpoint on the stable prefix (the last system
+    ReAct loop can replay its trajectory. ``cache_prefix`` sets Anthropic-native
+    ``cache_control: ephemeral`` breakpoints on the stable prefix (the last system
     block, which also caches the tool defs that render before it; or the last tool
-    when there is no system).
+    when there is no system) and on the rolling conversation tail.
     """
 
     async def call(
@@ -80,6 +80,8 @@ class AnthropicProvider:
             provider_messages.append({"role": "user", "content": attachment_content})
 
         system_param = _system_param(system, cache_prefix)
+        if cache_prefix:
+            _mark_last_block_cacheable(provider_messages)
         client = AsyncAnthropic()
 
         if schema is not None:
@@ -205,3 +207,17 @@ def _system_param(system: str | None, cache_prefix: bool) -> Any:
     if cache_prefix:
         return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
     return system
+
+
+def _mark_last_block_cacheable(provider_messages: list[dict]) -> None:
+    """Mark the current Anthropic conversation tail as a prompt-cache breakpoint."""
+    if not provider_messages:
+        return
+    content = provider_messages[-1].get("content")
+    cache_control = {"type": "ephemeral"}
+    if isinstance(content, str):
+        provider_messages[-1]["content"] = [
+            {"type": "text", "text": content, "cache_control": cache_control}
+        ]
+    elif isinstance(content, list) and content and isinstance(content[-1], dict):
+        content[-1]["cache_control"] = cache_control

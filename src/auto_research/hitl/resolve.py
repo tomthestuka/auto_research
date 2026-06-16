@@ -92,6 +92,19 @@ def ping_timeout_s() -> float:
     return float(_orchestration_config().get("human_channel_ping_timeout_s", 300))
 
 
+def response_timeout_s() -> float:
+    """How long a blocked role waits for a human reply before failing, shared by every HITL
+    channel (``orchestration.yaml: human_response_timeout_s``, default 3600s = 1h).
+
+    A suspend is in-process blocking (§9.8), so this caps how long the run holds the process
+    waiting on a person. Default 1h is a humane response window; it is deliberately *not* tied
+    to the LLM prompt-cache TTL — the default cache (5 min on Anthropic, 5-10 min on OpenAI) is
+    far too short to govern a human deadline, and exceeding it only costs one cheap cold prefix
+    re-prefill on resume, not a re-run.
+    """
+    return float(_orchestration_config().get("human_response_timeout_s", 3600))
+
+
 def make_human_channel_check(
     handler: HumanHandler, *, timeout_s: float | None = None
 ) -> Callable[[], Awaitable[None]]:

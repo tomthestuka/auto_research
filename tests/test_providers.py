@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 from pydantic import BaseModel
 
-from auto_research.models.providers.anthropic import AnthropicProvider
+from auto_research.models.providers.anthropic import AnthropicProvider, _mark_last_block_cacheable
 from auto_research.models.providers.google import GoogleProvider
 from auto_research.models.providers.openai import OpenAIProvider
 from auto_research.models.types import ModelMessage, RoleModelConfig
@@ -82,12 +82,55 @@ def test_anthropic_structured_output_uses_parse(monkeypatch):
     assert resp.usage.input_tokens == 11
 
 
+def test_anthropic_mark_last_block_cacheable_helper():
+    text_message = [{"role": "user", "content": "hi"}]
+    _mark_last_block_cacheable(text_message)
+    assert text_message[-1]["content"] == [
+        {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}
+    ]
+
+    block_message = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "tool_result", "tool_use_id": "tu_1", "content": "ok"},
+            ],
+        }
+    ]
+    _mark_last_block_cacheable(block_message)
+    blocks = block_message[-1]["content"]
+    assert "cache_control" not in blocks[0]
+    assert blocks[-1]["cache_control"] == {"type": "ephemeral"}
+
+    _mark_last_block_cacheable([])
+
+
 def test_anthropic_cache_prefix_marks_system(monkeypatch):
     monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
     tools = [{"name": "t", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
     asyncio.run(AnthropicProvider().call(_messages(), _cfg(), tools=tools, cache_prefix=True))
     system = _FakeAnthropic.last_request["system"]
     assert isinstance(system, list) and system[-1]["cache_control"] == {"type": "ephemeral"}
+    tail = _FakeAnthropic.last_request["messages"][-1]["content"][-1]
+    assert tail["cache_control"] == {"type": "ephemeral"}
+
+
+def test_anthropic_cache_prefix_off_leaves_messages_unmarked(monkeypatch):
+    monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
+    tools = [{"name": "t", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
+    asyncio.run(AnthropicProvider().call(_messages(), _cfg(), tools=tools, cache_prefix=False))
+    req = _FakeAnthropic.last_request
+    assert req["system"] == "sys"
+    assert req["messages"][-1]["content"] == "hi"
+    assert "cache_control" not in req["tools"][0]
+
+
+def test_anthropic_cache_prefix_marks_schema_tail(monkeypatch):
+    monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
+    asyncio.run(AnthropicProvider().call(_messages(), _cfg(), schema=_Verdict, cache_prefix=True))
+    tail = _FakeAnthropic.last_parse["messages"][-1]["content"][-1]
+    assert tail["cache_control"] == {"type": "ephemeral"}
 
 
 def test_anthropic_function_calling(monkeypatch):

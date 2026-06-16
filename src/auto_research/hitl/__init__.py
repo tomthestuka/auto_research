@@ -11,6 +11,7 @@ from auto_research.hitl.resolve import (
     make_human_channel_check,
     ping_timeout_s,
     resolve_handler,
+    response_timeout_s,
 )
 from auto_research.hitl.slack import SlackHandler
 from auto_research.hitl.whatsapp import WhatsAppHandler
@@ -26,4 +27,5 @@ __all__ = [
     "ping_timeout_s",
     "resolve_handler",
     "resolve_human",
+    "response_timeout_s",
 ]

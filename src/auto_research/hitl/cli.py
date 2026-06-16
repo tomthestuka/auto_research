@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
+from auto_research.hitl.resolve import response_timeout_s
 from auto_research.schemas import HumanQuery, HumanResponse
 
 
@@ -27,7 +28,11 @@ def _format(query: HumanQuery) -> str:
 
 
 async def cli_stdin_handler(query: HumanQuery) -> HumanResponse:
-    """Prompt the attended terminal for an answer and return it (blocking, off-thread)."""
+    """Prompt the attended terminal for an answer and return it (blocking, off-thread).
+
+    Waits at most ``response_timeout_s()`` (shared across all HITL channels) before raising
+    ``TimeoutError`` — so even an attended terminal no longer hangs the run forever.
+    """
     print(_format(query), end="", file=sys.stderr, flush=True)
-    answer = await asyncio.to_thread(input)
+    answer = await asyncio.wait_for(asyncio.to_thread(input), timeout=response_timeout_s())
     return HumanResponse(query_id=query.id, answer=answer.strip())

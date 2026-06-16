@@ -103,7 +103,9 @@ in those results. Each role's tool surface is a uniform `ToolProvider`: the anal
 science sandbox, the reviewer/lead's read-only inspection tools, and the librarian's
 literature sources. The loop is bounded by `react_loop_cap`, with
 `librarian_react_loop_cap` kept tighter because repeated searches re-send a growing paper
-context. Prompt caching is a uniform `cache_prefix` knob each provider realizes natively.
+context. Prompt caching is a uniform `cache_prefix` knob each provider realizes natively
+(Anthropic explicit stable-prefix + rolling-tail `cache_control`; OpenAI/Google native
+automatic caching).
 There is no prompt-injected JSON schema and no salvage parsing: results are
 Pydantic-validated and fail loudly, with bounded `structured_retry_cap` retries. Runtime
 prompts carry role and scope only; tool names, arguments, and descriptions reach the model

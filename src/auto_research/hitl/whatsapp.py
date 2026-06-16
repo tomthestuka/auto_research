@@ -15,6 +15,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from auto_research.hitl.resolve import response_timeout_s
 from auto_research.schemas import HumanQuery, HumanResponse
 
 
@@ -33,7 +34,7 @@ class WhatsAppHandler:
         client: Any | None = None,
         from_number: str | None = None,
         to_number: str | None = None,
-        timeout_s: float = 1800.0,
+        timeout_s: float | None = None,
         poll_interval_s: float = 5.0,
     ) -> None:
         from_number = from_number or os.environ.get("TWILIO_WHATSAPP_FROM")
@@ -45,7 +46,8 @@ class WhatsAppHandler:
             )
         self.from_number = _wa(from_number)
         self.to_number = _wa(to_number)
-        self.timeout_s = timeout_s
+        # Default to the shared cross-channel human-response window (orchestration.yaml).
+        self.timeout_s = timeout_s if timeout_s is not None else response_timeout_s()
         self.poll_interval_s = poll_interval_s
         self.client = client if client is not None else _build_twilio_client()
 

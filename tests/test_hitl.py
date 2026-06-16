@@ -137,6 +137,38 @@ def test_cli_stdin_handler_reads_input(monkeypatch):
     assert resp.answer == "use IXPE-first load order"
 
 
+# ── shared human-response timeout (orchestration.yaml) ───────────────────────
+
+
+def test_response_timeout_s_default_is_one_hour():
+    from auto_research.hitl import response_timeout_s
+
+    assert response_timeout_s() == 3600.0
+
+
+def test_channels_default_to_shared_response_timeout(monkeypatch):
+    # All channels read the shared window when no explicit timeout_s is passed.
+    monkeypatch.setattr("auto_research.hitl.slack.response_timeout_s", lambda: 1234.0)
+    monkeypatch.setattr("auto_research.hitl.whatsapp.response_timeout_s", lambda: 1234.0)
+    slack = SlackHandler(app=_FakeSlackApp(), socket_handler=None, channel="C0")
+    wa = WhatsAppHandler(client=_FakeTwilio(), from_number="+1", to_number="+2")
+    assert slack.timeout_s == 1234.0 and wa.timeout_s == 1234.0
+    # An explicit value still overrides the shared default.
+    slack2 = SlackHandler(app=_FakeSlackApp(), socket_handler=None, channel="C0", timeout_s=7.0)
+    assert slack2.timeout_s == 7.0
+
+
+def test_cli_stdin_handler_times_out(monkeypatch):
+    monkeypatch.setattr("auto_research.hitl.cli.response_timeout_s", lambda: 0.05)
+
+    async def _never():
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(asyncio, "to_thread", lambda *a, **k: _never())
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(cli_stdin_handler(_query()))
+
+
 # ── resolve_handler auto-detect ──────────────────────────────────────────────
 
 

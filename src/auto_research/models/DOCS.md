@@ -87,11 +87,12 @@ Google by editing YAML alone
 - `ModelProvider` — async protocol implemented by provider adapters:
   `call(messages, config, *, schema=None, tools=None, tool_choice="auto",
   images=(), documents=(), cache_prefix=False) -> ModelResponse`. `cache_prefix`
-  asks the adapter to cache the stable prefix (system + tool defs) via its native
-  mechanism: Anthropic sets a `cache_control: ephemeral` breakpoint; OpenAI sets a
-  `prompt_cache_key` (prefix caching is automatic); Google relies on implicit
-  caching (no-op). `messages` may include `AssistantToolUse`/`ToolResultMessage`
-  turns, which each adapter translates to native tool_use/tool_result blocks.
+  asks the adapter to use the provider's native prompt-cache mechanism: Anthropic
+  sets `cache_control: ephemeral` breakpoints on the stable prefix (system + tool defs)
+  and the rolling conversation tail; OpenAI sets a `prompt_cache_key` (prefix caching is
+  automatic); Google relies on implicit caching (no-op). `messages` may include
+  `AssistantToolUse`/`ToolResultMessage` turns, which each adapter translates to native
+  tool_use/tool_result blocks.
 - `ModelHandle(role: str, config: RoleModelConfig, provider: ModelProvider)` —
   resolved callable handle for one role member. Method:
   `async call(messages, *, schema=None, tools=None, tool_choice="auto",
@@ -125,3 +126,7 @@ Google by editing YAML alone
 - 2026-06-15 — `REQUIRED_ROLES` now includes the Phase-2 authoring roles `coder` and
   `analyst_colead`; all configured roles are required (validated at registry load, and
   early via the launch preflight).
+- 2026-06-16 — Anthropic `cache_prefix` now marks both the stable prefix and the rolling
+  conversation tail with native `cache_control: ephemeral`, so ReAct/structured-loop turns can
+  read prior history from Anthropic's server-side prompt cache instead of re-prefilling it at
+  full price.
