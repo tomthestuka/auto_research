@@ -1,17 +1,11 @@
 """Download source papers into the runtime paper directory."""
 
-import os
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+from auto_research.env import papers_dir
 from auto_research.schemas import SearchResult
 from auto_research.storage import Storage, StoredPaper, paper_from_search_result, safe_filename
-
-
-def papers_dir() -> Path:
-    """Return the local paper artifact directory."""
-
-    return Path(os.getenv("AUTO_RESEARCH_PAPERS_DIR", "/data/fzhou/ar_runtime/papers")).expanduser()
 
 
 def download_pdf(url: str, destination: Path) -> Path:

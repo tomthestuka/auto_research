@@ -39,7 +39,10 @@ Responsibilities:
 
 Verdict:
 - Return `approved=true` only when the code matches the brief, the tests are the right ones
-  and strict enough, there is no fabrication, and you found no blocking bug.
+  and strict enough, there is no fabrication, and you found no blocking bug. When you
+  approve, also write `commit_summary`: one short, imperative line describing what the tool
+  adds (e.g. "Add NICER background-subtracted spectrum loader to xspec_utils"). It becomes
+  the commit subject for the working branch. Leave it empty when rejecting.
 - Return `approved=false` with specific, actionable `issues` the author can fix, and set
   `checks_adequate=false` whenever the weakness is in the verification rather than the code.
 - When you are genuinely uncertain about an expert-science point, consult authoritative

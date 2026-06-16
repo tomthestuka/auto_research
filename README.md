@@ -7,10 +7,11 @@ results against prior work.
 > **Status: Phase 1 — COMPLETE. Phase 2 (tool authoring) — active.**
 > Phase 1 delivers a full agent team running real LLM calls end-to-end; verified
 > 2026-06-12 by a live Cyg X-1 joint-fit run that produced both report handles
-> (machine JSONL + compiled LaTeX/PDF). Phase 2 steps 0-5 are built: off-repo
+> (machine JSONL + compiled LaTeX/PDF). Phase 2 steps 0-6 are built: off-repo
 > sandbox scratch, `ToolSpec`, the `merge_flow` author harness, the deterministic
-> gate, the provider-decorrelated GPT co-lead review, and the raise-to-human channel
-> (CLI/Slack/WhatsApp connectors + honest-failure handling). Runtime atomic commits, vector
+> gate, the provider-decorrelated GPT co-lead review, the raise-to-human channel
+> (CLI/Slack/WhatsApp connectors + honest-failure handling), and the `approve_edit` atomic
+> commit (one gated commit per tool on a branch; the runtime never merges). Vector
 > retrieval, durable HITL suspend/resume, and the lead-scientist idea-generation group remain
 > documented stubs.
 
@@ -135,15 +136,15 @@ repo it cannot write to, so it cannot modify itself — only extend the tool lib
   │  (cannot modify its own code)        │      │  via TOOL_MANIFEST+sandbox   │
   │                                      │      │                              │
   │  Phase 2 authoring code              │ ───► │  isolated worktree/branch    │
-  │  can create gated toolkit branches   │      │  gate + co-lead review built;│
-  │  but never merges master             │      │  atomic commit still Todo    │
+  │  can create gated toolkit branches   │      │  gate + co-lead review +     │
+  │  but never merges master             │      │  atomic commit built         │
   └──────────────────────────────────────┘      └──────────────────────────────┘
 ```
 
 **Build-time coding agents never run git** — staging, commits, and pushes are the human's
 job. Separately, the runtime toolkit-branch flow is application behavior inside
-`merge_flow`: the author harness, deterministic gate, and provider-decorrelated GPT co-lead
-review exist now; `approve_edit()` atomic branch commits are still Phase 2 Todo; merges to
+`merge_flow`: the author harness, deterministic gate, provider-decorrelated GPT co-lead
+review, and the `approve_edit()` atomic branch commit all exist now; merges to
 `research_toolkit` master remain manual and out of band.
 
 ---
@@ -191,7 +192,7 @@ Statuses: **Done** = built & documented · **Todo** = in scope, not yet built.
 | 3 | Done | **Deterministic gate** (`sandbox/gate.py::run_gate`, now the default `run_gate` hook) — Layer A (no-fabrication scan, structural, determinism, provenance) + Layer B (the tool's pytest, injectable runner). The no-fabrication scan is two precision tiers, designed against real `xspec_utils` (full of legitimate hardcoded arrays): **hard-fail** banned vocabulary / any RNG (seeded or not) / placeholder bodies; **finding** (review-only) literal arrays. Scan lists live in the new `config/code_gate.yaml`; marked `synth…` ObsIDs allowlisted. `GateReport` gains `findings`. | Good tool passes; a fabricating/RNG/untested tool is rejected with a machine-readable reason; XSPEC param-vector / energy-bin literals never false-fail. |
 | 4 | Done | **Provider-decorrelated review** (`sandbox/review.py::make_review_hook`, now the default `run_review` hook) — the GPT `analyst_colead` reviews the authored diff bundle + gate report and judges the Layer-B checks (code-review only), routed by `select_decorrelated_member` to a provider ≠ the Claude author's (raises if none); investigates the worktree/web via a read-only provider before its `ToolReviewVerdict`. `propose_and_pr` gains a `colead` param. | Review runs on a different provider; a planted subtle bug is caught (rejected → L3 rework) or escalated, not rubber-stamped. |
 | 5 | Done | **Raise-to-human** — `HumanQuery`/`HumanResponse` + the injectable `human_handler` (`auto_research.hitl`); a shared `ask_human` tool for every ReAct role + the author (blocking direct-handler; durable `interrupt()`/checkpointer deferred §12); CLI/Slack/WhatsApp connectors with an auto-detecting CLI-vs-library resolver; a launch-time channel ping in the preflight; and `failed`/`needs_human` routed around the reviewer to a no-fabrication finalize. | A blocked role raises and the run blocks for a human; an honest FAILED carries no penalty; headless raises `HumanInputRequired`. |
-| 6 | Todo | **`approve_edit()` atomic commit** — gate-pass + co-lead review-pass → one atomic commit per tool on the branch; runtime never merges. | Approved tool lands as one commit; human reruns the human-half and merges/reverts cleanly. |
+| 6 | Done | **`approve_edit()` atomic commit** (`sandbox/merge_flow.py`) — gate-pass ∧ co-lead review-pass → one atomic commit per tool on the branch; stages **exactly** `gate.collect_targets` (explicit-path, never `git add -A`); commit subject = the co-lead's `commit_summary` (fallback: tool name); `propose_and_pr` returns the real `commit_sha`. The gate now tracks non-`.py` files under a `*_utils` package (shell scripts get a vocabulary scan; binaries hard-fail, §9.5). New preflight `check_toolkit_git_identity`. Runtime never merges. | Approved tool lands as one commit; only gated files are staged; human reruns the human-half and merges/reverts cleanly. |
 | 7 | Todo | **End-to-end** — missing-capability question triggers authoring through the full flow; tool lands on a branch; human merges; analysis re-runs. | Full Phase 2 flow exercised live via a `test_full_suite.py` sibling. |
 
 Current role/tool surfaces:

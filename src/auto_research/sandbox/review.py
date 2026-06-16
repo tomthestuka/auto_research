@@ -92,10 +92,11 @@ def _truncate(text: str) -> str:
 
 
 def build_diff_bundle(worktree: Path) -> str:
-    """Render the new/changed ``*_utils`` ``.py`` files as a single review artifact.
+    """Render the new/changed ``*_utils`` files as a single review artifact.
 
-    Reuses ``gate.collect_targets`` for the file set: a new (untracked) file is shown in
-    full; a modified file is shown as its unified ``git diff``. Mirrors the gate's view, so
+    Reuses ``gate.collect_targets`` for the file set (every changed file under a ``*_utils``
+    package — ``.py`` and other text such as shell scripts): a new (untracked) file is shown
+    in full; a modified file is shown as its unified ``git diff``. Mirrors the gate's view, so
     the co-lead judges exactly the lines the gate scanned.
     """
     worktree = Path(worktree)
@@ -112,7 +113,8 @@ def build_diff_bundle(worktree: Path) -> str:
                 body = path.read_text(encoding="utf-8")
             except OSError as exc:
                 body = f"<unreadable: {exc}>"
-            parts.append(f"### NEW FILE: {rel}\n```python\n{_truncate(body)}\n```")
+            lang = "python" if rel.endswith(".py") else ("bash" if rel.endswith(".sh") else "")
+            parts.append(f"### NEW FILE: {rel}\n```{lang}\n{_truncate(body)}\n```")
         else:  # modified tracked file → unified diff
             diff = _git(worktree, "diff", "--unified=3", "--", rel).strip()
             parts.append(f"### MODIFIED: {rel}\n```diff\n{_truncate(diff)}\n```")

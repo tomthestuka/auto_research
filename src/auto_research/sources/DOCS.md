@@ -34,8 +34,8 @@ Each module is independent; no source imports another.
   equivalent of the UI's "Full Text Sources" buttons. Resolved source buttons are
   stored in `SearchResult.full_text_links`; the best PDF-like link is selected
   from `eprint_pdf`, `pub_pdf`, `ads_pdf`, or `author_pdf` candidates.
-- Source PDF downloads default to `AUTO_RESEARCH_PAPERS_DIR` or
-  `/data/fzhou/ar_runtime/papers`.
+- Source PDF downloads default to the `papers_dir` key in `config/orchestration.yaml`,
+  which itself defaults to `<runtime_dir>/papers`.
 
 ## Dependencies
 - External: `arxiv`, `ads`, `tavily-python`.
@@ -54,8 +54,9 @@ Each module is independent; no source imports another.
   the available full-text source buttons for a record.
 - `WebSource.search(query: str, *, limit: int = 10) -> list[SearchResult]` —
   returns normalized Tavily web results.
-- `papers_dir() -> Path` — returns the configured source-paper artifact
-  directory.
+- `papers_dir() -> Path` — re-exported from `auto_research.env`; returns the configured
+  source-paper artifact directory (`orchestration.yaml: papers_dir`, defaulting to
+  `<runtime_dir>/papers`).
 - `download_pdf(url: str, destination: Path) -> Path` — downloads a PDF unless
   the target already exists.
 - `download_and_ingest_result(storage: Storage, result: SearchResult, *,

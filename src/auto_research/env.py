@@ -51,16 +51,30 @@ def check_required_env() -> None:
         )
 
 
+def _orch_config() -> dict:
+    import yaml  # local import — yaml not needed at module load time
+
+    try:
+        with _ORCH_CONFIG.open("r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
+
+
 def runtime_data_dir() -> Path:
     """Return the runtime data directory from config/orchestration.yaml.
 
     Key: ``runtime_dir``.  Defaults to ``~/.auto_research`` when absent.
     """
-    import yaml  # local import — yaml not needed at module load time
+    return Path(_orch_config().get("runtime_dir", "~/.auto_research")).expanduser()
 
-    try:
-        with _ORCH_CONFIG.open("r", encoding="utf-8") as f:
-            config = yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        config = {}
-    return Path(config.get("runtime_dir", "~/.auto_research")).expanduser()
+
+def papers_dir() -> Path:
+    """Return the paper artifact directory from config/orchestration.yaml.
+
+    Key: ``papers_dir``.  Defaults to ``<runtime_dir>/papers`` when absent.
+    """
+    cfg = _orch_config()
+    if "papers_dir" in cfg:
+        return Path(cfg["papers_dir"]).expanduser()
+    return runtime_data_dir() / "papers"

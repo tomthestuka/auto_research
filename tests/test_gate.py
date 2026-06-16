@@ -17,6 +17,7 @@ from auto_research.sandbox.gate import (
     run_gate,
     scan_provenance,
     scan_python_source,
+    scan_text_source,
 )
 from auto_research.schemas import CheckResult, ToolSpec, ValidationDataset
 
@@ -168,6 +169,27 @@ def test_only_added_lines_are_scanned():
     details = [c.detail for c in hard]
     assert any("representative data" in d for d in details)
     assert not any("synthetic" in d for d in details)
+
+
+# ── scan_text_source: non-Python text files (e.g. shell reduction scripts) ──────
+
+
+def test_text_scan_clean_shell_passes():
+    src = "#!/bin/bash\nnicerl2 indir=$1 clobber=yes\necho done\n"
+    hard, finds = scan_text_source("lib/reduce.sh", src)
+    assert hard == [] and finds == []
+
+
+def test_text_scan_banned_vocabulary_hard_fails():
+    src = "#!/bin/bash\n# generate synthetic data for now\necho fake\n"
+    hard, _ = scan_text_source("lib/reduce.sh", src)
+    assert any(c.name == "no_fabrication.vocabulary" and not c.passed for c in hard)
+
+
+def test_text_scan_synth_obsid_line_allowlisted():
+    src = "#!/bin/bash\n# load synth240611-abcdef (synthetic fixture)\ncp data $OUT\n"
+    hard, _ = scan_text_source("lib/reduce.sh", src)
+    assert hard == []
 
 
 # ── structural checks ───────────────────────────────────────────────────────────
@@ -329,3 +351,34 @@ def test_run_gate_nondeterministic_fails(tmp_path):
     report = asyncio.run(run_gate(repo, _spec(), test_runner=flaky))
     assert not report.passed
     assert any(c.name == "determinism" and not c.passed for c in report.layer_a)
+
+
+# ── non-Python files in the toolkit diff (shell scripts, binaries) ──────────────
+
+
+def test_run_gate_tracks_and_passes_clean_shell_script(tmp_path):
+    repo = _make_repo(tmp_path)
+    pkg = _write_pkg(repo)
+    (pkg / "lib" / "reduce.sh").write_text("#!/bin/bash\nnicerl2 indir=$1 clobber=yes\n")
+    # collect_targets now tracks the .sh too (not only .py).
+    assert any(str(p).endswith("reduce.sh") for p in collect_targets(repo))
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert report.passed, report.reason
+
+
+def test_run_gate_shell_script_fabrication_fails(tmp_path):
+    repo = _make_repo(tmp_path)
+    pkg = _write_pkg(repo)
+    (pkg / "lib" / "reduce.sh").write_text("#!/bin/bash\n# placeholder: synthetic data for now\n")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert not report.passed
+    assert any(c.name == "no_fabrication.vocabulary" and not c.passed for c in report.layer_a)
+
+
+def test_run_gate_binary_file_hard_fails(tmp_path):
+    repo = _make_repo(tmp_path)
+    pkg = _write_pkg(repo)
+    (pkg / "lib" / "blob.dat").write_bytes(b"\x00\x01\x02real\x00bytes")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert not report.passed
+    assert any(c.name == "no_fabrication.binary" and not c.passed for c in report.layer_a)

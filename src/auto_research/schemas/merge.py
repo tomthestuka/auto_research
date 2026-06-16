@@ -57,13 +57,16 @@ class ToolReviewVerdict(MessageModel):
     Distinct from the research :class:`~auto_research.schemas.review.ReviewVerdict`: this
     is code review only. ``checks_adequate`` is the co-lead's most leveraged judgement —
     are the Layer-B checks the right ones and strict enough (§9.4). ``issues`` are the
-    specific fixes fed back to the author on rejection.
+    specific fixes fed back to the author on rejection. ``commit_summary`` is the one-line,
+    imperative commit subject the co-lead drafts when approving — it becomes the §9.9 atomic
+    commit message (``approve_edit`` falls back to the tool name if it is empty).
     """
 
     approved: bool
     rationale: NonEmptyStr
     issues: list[str] = Field(default_factory=list)
     checks_adequate: bool = True
+    commit_summary: str = ""  # one-line imperative commit subject, set when approving (§9.9)
 
 
 class MergeFlowResult(MessageModel):

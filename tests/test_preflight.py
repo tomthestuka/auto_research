@@ -75,6 +75,7 @@ def test_build_default_preflight_registers_known_checks():
     names = build_default_preflight().names()
     assert "required_env" in names
     assert "author_reviewer_decorrelation" in names
+    assert "toolkit_git_identity" in names
     # The human-channel ping is only registered when a handler is resolved.
     assert "human_channel" not in names
 
@@ -113,3 +114,34 @@ def test_human_channel_check_green_only_when_reply_returns():
 def test_author_reviewer_decorrelation_passes_on_project_config():
     # Project config: coder = anthropic, analyst_colead = openai → decorrelated. No LLM call.
     check_author_reviewer_decorrelation()
+
+
+def test_toolkit_git_identity_passes_when_set(tmp_path, monkeypatch):
+    import subprocess
+
+    from auto_research.sandbox import merge_flow
+
+    repo = tmp_path / "research_toolkit"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "auto_research"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "auto-research@localhost"], cwd=repo, check=True)
+    monkeypatch.setattr(merge_flow, "_resolve_toolkit_root", lambda: repo)
+    merge_flow.check_toolkit_git_identity()  # no raise
+
+
+def test_toolkit_git_identity_raises_when_unset(tmp_path, monkeypatch):
+    import subprocess
+
+    from auto_research.sandbox import merge_flow
+
+    repo = tmp_path / "research_toolkit"
+    repo.mkdir()
+    # A repo-local config with no identity; global/system config redirected to empty files
+    # so an ambient identity on the test host can't satisfy the check.
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "empty_global"))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(tmp_path / "empty_system"))
+    monkeypatch.setattr(merge_flow, "_resolve_toolkit_root", lambda: repo)
+    with pytest.raises(RuntimeError, match="no git commit identity"):
+        merge_flow.check_toolkit_git_identity()

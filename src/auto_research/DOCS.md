@@ -48,8 +48,10 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - `auto_research.preflight.run_preflight(*, human_handler=None)` (async) is the launch-time
   entry that runs the whole deterministic checklist (registered via
   `build_default_preflight(human_handler)`): `check_required_env`,
-  `sandbox.review.check_author_reviewer_decorrelation`, and — when a channel is resolved —
-  `hitl.make_human_channel_check` (pings the channel, green only on a reply). `run_research()`
+  `sandbox.review.check_author_reviewer_decorrelation`,
+  `sandbox.merge_flow.check_toolkit_git_identity` (the `research_toolkit` checkout has a git
+  commit identity, so a runtime tool commit can't fail mid-flow), and — when a channel is
+  resolved — `hitl.make_human_channel_check` (pings the channel, green only on a reply). `run_research()`
   resolves the handler then awaits this before any LLM; aggregates every failure into one
   `PreflightError`.
 - `auto_research.observations.load_observations_config()` loads generic
@@ -76,6 +78,10 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `auto_research.monitor`.
 - `check_required_env()` — loads `.env` without overriding existing process
   environment variables, then raises a clear error if any required key group is absent.
+- `runtime_data_dir() -> Path` — resolves `runtime_dir` from `orchestration.yaml`
+  (default `~/.auto_research`).
+- `papers_dir() -> Path` — resolves `papers_dir` from `orchestration.yaml`
+  (default `<runtime_dir>/papers`); re-exported through `auto_research.sources`.
 - `preflight.Preflight` — an ordered registry of launch-time checks. `.register(name, fn)`
   (also usable as a decorator), `.names()`, async `.run_checklist()` (runs all — sync or async
   checks — and aggregates failures into `PreflightError`). `build_default_preflight(human_handler=None)`
@@ -101,3 +107,9 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   preflight **async** with a parameterized `human_channel` ping (green only when the resolved
   channel replies). `run_research` gained `human_handler`/`human_channel`; the CLI owns the
   full async preflight.
+- 2026-06-16 — `papers_dir()` moved from an env-var override in `sources/downloads.py` to a
+  first-class `env.py` helper reading `orchestration.yaml: papers_dir` (default
+  `<runtime_dir>/papers`); `AUTO_RESEARCH_PAPERS_DIR` removed from `.env.example`.
+- 2026-06-16 — Phase 2 step 6: registered `sandbox.merge_flow.check_toolkit_git_identity` in
+  the default preflight, so a missing git commit identity in `research_toolkit` is caught at
+  launch rather than failing the runtime's atomic commit mid-flow.

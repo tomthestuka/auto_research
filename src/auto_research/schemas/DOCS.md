@@ -64,11 +64,11 @@ carried by **reference** (`FigureRef`), never embedded
 - The Phase-2 **tool-authoring flow** types (`merge.py`): `GateReport` (the deterministic
   gate's verdict — `layer_a`/`layer_b: list[CheckResult]`, `passed`, `report_hash`),
   `ToolReviewVerdict` (the provider-decorrelated co-lead's code-review verdict —
-  `approved`, `issues`, `checks_adequate`), and `MergeFlowResult` (what
+  `approved`, `issues`, `checks_adequate`, `commit_summary`), and `MergeFlowResult` (what
   `merge_flow.propose_and_pr` returns — `status` ∈ `committed|failed|needs_human`,
   `branch`, `commit_sha`, `gate_report`, `review`). These make the rework loop legible
-  end-to-end; step 3 now supplies the real deterministic gate, while provider-decorrelated
-  review remains step-4 scope.
+  end-to-end through the gate (step 3), provider-decorrelated review (step 4), and the
+  `approve_edit` atomic commit (step 6).
 
 ## Dependencies
 - External: `pydantic>=2`.
@@ -160,8 +160,11 @@ carried by **reference** (`FigureRef`), never embedded
   gate records for the step-4 co-lead to judge — they never flip `passed`. Produced by
   `gate.run_gate` (step 3).
 - `ToolReviewVerdict(approved: bool, rationale: str, issues: list[str] = [],
-  checks_adequate: bool = True)` — the provider-decorrelated co-lead's code-review verdict
-  (§9.3 step 4); distinct from the research `ReviewVerdict`.
+  checks_adequate: bool = True, commit_summary: str = "")` — the provider-decorrelated
+  co-lead's code-review verdict (§9.3 step 4); distinct from the research `ReviewVerdict`.
+  `commit_summary` is the one-line imperative commit subject the co-lead drafts when
+  approving; it becomes the §9.9 atomic-commit message (`approve_edit` falls back to the tool
+  name if empty).
 - `MergeFlowResult(tool_spec_id: str, status: "committed"|"failed"|"needs_human",
   branch: str | None = None, commit_sha: str | None = None, gate_report: GateReport | None = None,
   review: ToolReviewVerdict | None = None, reason: str = "")` — return type of
@@ -192,3 +195,5 @@ carried by **reference** (`FigureRef`), never embedded
   clarification protocol, §9.7).
 - 2026-06-16 — `HumanQuery` gained a `model` field + `sender_label` property so connector
   message bodies identify the sender as `"<asked_by> (<model>)"`.
+- 2026-06-16 — Phase 2 step 6: `ToolReviewVerdict` gained `commit_summary` — the co-lead's
+  one-line commit subject used by `merge_flow.approve_edit` (fallback: tool name).

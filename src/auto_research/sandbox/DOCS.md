@@ -13,10 +13,11 @@ Three tightly coupled responsibilities:
    `<runtime_dir>/runs/{run_id}/` (`runtime_dir` from `config/orchestration.yaml`); per-agent `memory.md` files
    record tool call history as bare terminal recordings.
 
-Tool-authoring (propose → branch → gate → review → human-merge) lives in `merge_flow.py`
-(author harness + rework loop, step 2), `gate.py` (the deterministic mergeability gate,
-step 3), and `review.py` (the provider-decorrelated co-lead review, step 4). The atomic
-commit (step 6) is still a stub.
+Tool-authoring (propose → branch → gate → review → commit → human-merge) lives in
+`merge_flow.py` (author harness + rework loop, step 2; **`approve_edit` atomic commit, step
+6**), `gate.py` (the deterministic mergeability gate, step 3), and `review.py` (the
+provider-decorrelated co-lead review, step 4). On gate-pass ∧ review-pass, `approve_edit`
+lands one atomic commit on the working branch; the runtime never merges to master.
 See [CLAUDE.md §9](../../../CLAUDE.md#9-phase-2--tool-authoring-the-active-phase).
 
 ## Architecture
@@ -30,7 +31,8 @@ sandbox/
 ├── analyst_env.sh    # dedicated headless analyst env (HEADAS, CALDB, no cruft)
 ├── builtin_server.py # MCP stdio server: bash_exec, list_dir, read_file
 ├── mcp_client.py     # MCPToolClient — manages stdio MCP server sessions
-├── merge_flow.py     # propose_and_pr() — author harness + rework loop (step 2)
+├── merge_flow.py     # propose_and_pr() — author harness + rework loop (step 2);
+│                     #   approve_edit() — atomic commit (step 6); git-identity preflight
 ├── gate.py           # run_gate() — deterministic mergeability gate (step 3)
 └── review.py         # make_review_hook() — provider-decorrelated co-lead review (step 4)
 ```
@@ -310,12 +312,14 @@ drives the bounded rework loop:
 The orchestration is **code, never the LLM**. The gate/review are **injectable hooks**: the
 gate defaults to the **real deterministic gate** (`gate.run_gate`, step 3); the review
 defaults to the **real provider-decorrelated co-lead** (`review.make_review_hook`, step 4).
-Both stay injectable so the loop is exercised deterministically in `tests/test_merge_flow.py`
-(which injects a passing gate and review — the real gate/review need a git worktree + a live
-model and are covered by `tests/test_gate.py` / `tests/test_review.py`). A successful run
-returns `status="committed"` with a placeholder `commit_sha` — the real atomic commit is
-`approve_edit()` in step 6; the runtime never touches master. `HumanInputRequired` is the
-typed headless fail-safe (a run never silently hangs).
+All hooks stay injectable so the loop is exercised deterministically in
+`tests/test_merge_flow.py` (which injects a passing gate, review, and `approve_edit` — the
+real gate/review/commit need a git worktree + a live model and are covered by
+`tests/test_gate.py` / `tests/test_review.py` / the real-git `approve_edit` test in
+`tests/test_merge_flow.py`). On gate-pass ∧ co-lead review-pass a successful run lands one
+atomic commit via `approve_edit` (step 6) and returns `status="committed"` with the real
+`commit_sha`; the runtime never touches master. `HumanInputRequired` is the typed headless
+fail-safe (a run never silently hangs).
 
 ### `gate.run_gate` (Phase 2 step 3 — the deterministic mergeability gate)
 
@@ -327,8 +331,15 @@ async def run_gate(worktree: Path, tool_spec: ToolSpec, *,
 The **trust boundary** (§9.4) — code, not an LLM opinion. Two layers:
 
 - **Layer A (generic, domain-blind):** the **no-fabrication scan**, **structural** checks,
-  **determinism**, **provenance** — all over the worktree's added/new `*_utils` `.py` lines
-  (enumerated by `collect_targets` via `git status -uall` + per-file `git diff`).
+  **determinism**, **provenance** — all over the worktree's added/new files under a `*_utils`
+  package (enumerated by `collect_targets` via `git status -uall` + per-file `git diff`).
+  `collect_targets` tracks **every** changed file under a `*_utils` package, not only `.py`
+  (shell reduction scripts and other text artifacts are part of the tool and must be gated
+  and staged too, §9.2). Each target is dispatched by type: `.py` → the full AST scan
+  (`scan_python_source`) + provenance; other **text** (e.g. `.sh`) → `scan_text_source` (the
+  banned-vocabulary scan only — RNG/placeholder/provenance are Python-AST concepts);
+  **binary / undecodable** → a `no_fabrication.binary` hard-fail (data never belongs in the
+  toolkit, §9.5) that is fed back to the author through the rework loop, never an exception.
 - **Layer B (the tool's own tests):** `pytest` in the worktree (via the injectable
   `test_runner`; the default runs the analyst interpreter twice for determinism).
 
@@ -443,11 +454,28 @@ the hook mapping a fake-model verdict — no live LLM).
   forward one MCP call; returns error dict if no client attached.
 - `ToolkitRegistry.load_mcp(client)` — index MCP tools from a started client.
 - `ToolkitRegistry.is_mcp(kind)` → `bool` — True if kind is an MCP tool.
-- `propose_and_pr(tool_spec, *, lead, toolkit_root, worktree_base, human_handler=None,
-  coder_model=None, run_gate=None, run_review=None, …)` → `MergeFlowResult` — Phase 2
-  step-2 author harness: spawns the Sonnet Claude-SDK author in an isolated worktree and
-  drives the L0–L4 bounded rework loop. `run_gate` defaults to the real `gate.run_gate`;
-  `run_review` is still a stub-PASS; both stay injectable.
+- `propose_and_pr(tool_spec, *, lead, toolkit_root, worktree_base, colead=None,
+  human_handler=None, coder_model=None, run_gate=None, run_review=None, approve_edit=None, …)`
+  → `MergeFlowResult` — the author harness: spawns the Sonnet Claude-SDK author in an
+  isolated worktree and drives the L0–L4 bounded rework loop. `run_gate` defaults to the real
+  `gate.run_gate`; `run_review` to the real `review.make_review_hook`; `approve_edit` to the
+  real atomic commit. On gate-pass ∧ review-pass it sets the commit subject to
+  `review.commit_summary` (falling back to `tool_spec.proposed_tool_name`), calls
+  `approve_edit`, and returns `status="committed"` with the real `commit_sha`. All hooks stay
+  injectable for deterministic tests.
+- `approve_edit(worktree, *, message)` → `str` — Phase 2 step 6, the **only** place the
+  runtime commits (§9.9). Stages **exactly** `gate.collect_targets(worktree)`'s paths
+  (explicit-path `git add -- …`, never `git add -A`, so scratch outside a `*_utils` package
+  can't leak), commits with `message` on the branch the worktree is already on, and returns
+  the new commit sha (`git rev-parse HEAD`). Pure git mechanics — it does not re-assert
+  gate-/review-pass (the pipeline guarantees it). The runtime never merges/touches master.
+- `check_toolkit_git_identity()` — launch-time preflight (no LLM): asserts the
+  `toolkit_root` checkout (`config/orchestration.yaml`) has both `user.name` and `user.email`
+  set, so the runtime's atomic commit can't fail mid-flow on a missing ambient git identity.
+  Registered in `auto_research.preflight`.
+- `scan_text_source(rel, source, *, added=None, config=None)` → `(hard_fails, findings)` —
+  the banned-vocabulary no-fabrication scan for a **non-Python text** file (e.g. a shell
+  script); no AST, so RNG/placeholder/provenance do not apply and `findings` is always empty.
 - `HumanInputRequired(RuntimeError)` — typed headless fail-safe raised when the author
   needs a human but no `human_handler` is wired (§9.8). Now defined in `auto_research.hitl`
   and re-exported here for back-compat; the author's `ask_human` builds a typed `HumanQuery`
@@ -456,8 +484,10 @@ the hook mapping a fake-model verdict — no live LLM).
   the deterministic gate (§9.4). Runs the no-fabrication scan + structural + determinism +
   provenance (Layer A) and the tool's tests (Layer B); records Tier-3 findings without
   failing. `scan_python_source(rel, source, *, added=None, config=None)` → `(hard_fails,
-  findings)` is the pure, unit-testable scan core; `scan_provenance`, `check_structural`,
-  `collect_targets`, and `_manifest_keys` are its helpers. Scan lists load from
+  findings)` is the pure, unit-testable `.py` scan core; `scan_text_source` is its non-`.py`
+  text counterpart (vocabulary only); binary/undecodable targets hard-fail without scanning.
+  `scan_provenance`, `check_structural`, `collect_targets` (now extension-agnostic under a
+  `*_utils` package), and `_manifest_keys` are its helpers. Scan lists load from
   `config/code_gate.yaml`.
 - `review.make_review_hook(colead=None, *, author_provider, web_source=None, monitor=None)` →
   the default `run_review` hook (§9.3 step 4); the provider-decorrelated co-lead review.
@@ -496,3 +526,12 @@ the hook mapping a fake-model verdict — no live LLM).
   `auto_research.hitl` (re-exported here); the author's `ask_human` now builds a typed
   `HumanQuery` and routes through `hitl.resolve_human` — one channel for the author and every
   in-graph role.
+- 2026-06-16 — Phase 2 step 6: `merge_flow.approve_edit(worktree, *, message)` lands the one
+  atomic commit per tool (explicit-path staging of exactly `gate.collect_targets`, never `git
+  add -A`); `propose_and_pr` gained an injectable `approve_edit` seam and now returns a real
+  `commit_sha`, with the commit subject taken from the co-lead's `commit_summary` (fallback:
+  tool name). Added `check_toolkit_git_identity()` (registered in `auto_research.preflight`).
+  The gate was broadened to track non-`.py` files under a `*_utils` package: `collect_targets`
+  is extension-agnostic, `scan_text_source` runs the vocabulary scan on text files (e.g. shell
+  scripts), and binary/undecodable files hard-fail (§9.5) through the rework loop. Deterministic
+  coverage added in `tests/test_merge_flow.py`, `tests/test_gate.py`, `tests/test_preflight.py`.

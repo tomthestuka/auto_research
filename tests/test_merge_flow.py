@@ -72,6 +72,19 @@ async def _pass_review(worktree, spec, gate):
     return ToolReviewVerdict(approved=True, rationale="ok")
 
 
+class _RecordingApproveEdit:
+    """Fake ``approve_edit`` seam — records the commit subject, returns a fixed sha. The
+    real git commit is covered by ``test_approve_edit_*`` below (throwaway repo)."""
+
+    def __init__(self, sha="fakesha123"):
+        self.sha = sha
+        self.messages: list[str] = []
+
+    def __call__(self, worktree, *, message):
+        self.messages.append(message)
+        return self.sha
+
+
 def _run(spec, **kwargs):
     client = _FakeClient()
     kwargs.setdefault("lead", _FakeLead())
@@ -80,6 +93,7 @@ def _run(spec, **kwargs):
     kwargs.setdefault("run_review", _pass_review)
     kwargs.setdefault("worktree_factory", lambda root, base, branch: base / branch.replace("/", "_"))
     kwargs.setdefault("sdk_client_factory", lambda options: client)
+    kwargs.setdefault("approve_edit", _RecordingApproveEdit())
     result = asyncio.run(propose_and_pr(spec, **kwargs))
     return result, client
 
@@ -87,10 +101,29 @@ def _run(spec, **kwargs):
 def test_happy_path_returns_committed(tmp_path):
     result, client = _run(_spec(), toolkit_root=tmp_path, worktree_base=tmp_path / "wt")
     assert result.status == "committed"
+    assert result.commit_sha == "fakesha123"  # the seam's sha, via approve_edit
     assert result.branch and result.branch.startswith("tool/fit_retbb_hss-")
     assert result.gate_report.passed and result.review.approved
     assert client.connected is False  # disconnected in finally
     assert len(client.queries) == 1  # one initial author turn, no rework
+
+
+def test_commit_subject_uses_colead_summary(tmp_path):
+    approve = _RecordingApproveEdit()
+
+    async def review_with_summary(worktree, spec, gate):
+        return ToolReviewVerdict(approved=True, rationale="ok", commit_summary="Add retBB HSS fit")
+
+    _run(_spec(), toolkit_root=tmp_path, worktree_base=tmp_path / "wt",
+         run_review=review_with_summary, approve_edit=approve)
+    assert approve.messages == ["Add retBB HSS fit"]
+
+
+def test_commit_subject_falls_back_to_tool_name(tmp_path):
+    approve = _RecordingApproveEdit()
+    # default _pass_review leaves commit_summary="" → fall back to proposed_tool_name.
+    _run(_spec(), toolkit_root=tmp_path, worktree_base=tmp_path / "wt", approve_edit=approve)
+    assert approve.messages == ["fit_retbb_hss"]
 
 
 def test_gate_failures_drive_exactly_n_reworks_then_succeed(tmp_path):
@@ -193,3 +226,56 @@ def test_ask_human_handler_without_handler_raises_fail_safe():
     handler = _make_ask_human_handler(None)
     with pytest.raises(HumanInputRequired):
         asyncio.run(handler("need an expert"))
+
+
+# ── approve_edit — the real atomic commit (throwaway git repo, no LLM) ───────────
+
+
+def _git(repo, *args):
+    import subprocess
+    subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True, text=True)
+
+
+def _git_out(repo, *args):
+    import subprocess
+    return subprocess.run(
+        ["git", *args], cwd=str(repo), check=True, capture_output=True, text=True
+    ).stdout
+
+
+def _toolkit_repo(tmp_path):
+    repo = tmp_path / "research_toolkit"
+    (repo / "demo_utils" / "lib").mkdir(parents=True)
+    (repo / "demo_utils" / "skills").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "README.md").write_text("base\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    return repo
+
+
+def test_approve_edit_stages_exactly_gated_files_and_returns_sha(tmp_path):
+    from auto_research.sandbox.gate import collect_targets
+    from auto_research.sandbox.merge_flow import approve_edit
+
+    repo = _toolkit_repo(tmp_path)
+    # Tool files under a *_utils package — these are what the gate verified.
+    (repo / "demo_utils" / "lib" / "demo_help.py").write_text("def my_tool(o):\n    return o\n")
+    (repo / "demo_utils" / "lib" / "reduce.sh").write_text("#!/bin/bash\nnicerl2 indir=$1\n")
+    # Scratch OUTSIDE any *_utils package must never be staged (§9.9 explicit-path).
+    (repo / "scratch.txt").write_text("worker scratch — must not leak\n")
+
+    gated = {str(p.relative_to(repo)) for p in collect_targets(repo)}
+    assert gated == {"demo_utils/lib/demo_help.py", "demo_utils/lib/reduce.sh"}
+
+    sha = approve_edit(repo, message="Add my_tool to demo_utils")
+    assert sha and sha == _git_out(repo, "rev-parse", "HEAD").strip()
+
+    # Exactly the gated files landed in the commit; scratch.txt did not.
+    committed = set(_git_out(repo, "show", "--name-only", "--pretty=format:", "HEAD").split())
+    assert committed == gated
+    assert _git_out(repo, "log", "-1", "--pretty=%s").strip() == "Add my_tool to demo_utils"
+    # scratch.txt is still untracked — it was neither staged nor committed.
+    assert "scratch.txt" in _git_out(repo, "status", "--porcelain")

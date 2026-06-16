@@ -40,7 +40,9 @@ Runtime prompt files:
   by the `review` hook for the structured `ToolReviewVerdict`): code-review-only scope (never
   the science finding, never a merge), brief-match + Layer-B check-adequacy judgment, the
   independent no-fabrication second pass, subtle-bug hunting, and read-only worktree/web
-  investigation. The role name `analyst_colead` mirrors `config/models.yaml`.
+  investigation. On approval it also drafts `commit_summary` — the one-line commit subject
+  `merge_flow.approve_edit` uses for the working-branch commit (step 6). The role name
+  `analyst_colead` mirrors `config/models.yaml`.
 - `coder.md` — the Phase-2 tool author's system prompt (loaded by `merge_flow` and passed
   to the Claude Agent SDK): the two-halves layout, no-fabrication rules, the
   web/`ask_lead`/`ask_human` escalation ladder, and the committed-tests requirement. The
@@ -79,3 +81,5 @@ logic here.
   no-fabrication pass, subtle-bug hunting, read-only worktree/web investigation).
 - 2026-06-15 — Phase 2 step 5: analyst worker/lead prompts gained §9.6 failure classification
   and the `ask_human` raise-to-human path (set `status`, never fabricate on exhaustion).
+- 2026-06-16 — Phase 2 step 6: `analyst_colead.md` now asks for a one-line `commit_summary`
+  on approval — the commit subject `merge_flow.approve_edit` lands on the working branch.

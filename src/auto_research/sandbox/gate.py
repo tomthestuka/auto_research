@@ -86,7 +86,11 @@ def collect_targets(worktree: Path) -> dict[Path, set[int] | None]:
             continue
         code, _, rel = line[:2], line[2], line[3:].strip()
         rel = rel.split(" -> ")[-1]  # renames
-        if not rel.endswith(".py") or not _TOOLKIT_PKG_RE.search(rel):
+        # Track every changed/new file under a ``*_utils`` package — not only ``.py``.
+        # Shell reduction scripts and other text artifacts are part of the tool and must
+        # be gated and staged too (§9.2). The package filter keeps scratch outside a
+        # ``*_utils`` package invisible, so explicit-path staging never leaks it (§9.9).
+        if not _TOOLKIT_PKG_RE.search(rel):
             continue
         path = worktree / rel
         if not path.is_file():
@@ -124,6 +128,15 @@ def _added_lines(worktree: Path, rel: str) -> set[int]:
 
 def _in_scope(lineno: int, added: set[int] | None) -> bool:
     return added is None or lineno in added
+
+
+def _match_vocabulary(text_low: str, vocab: list[str]) -> list[str]:
+    """Banned phrases present in ``text_low`` (already lowercased), whole-word matched."""
+    return [
+        phrase
+        for phrase in vocab
+        if re.search(r"(?<![A-Za-z0-9])" + re.escape(phrase) + r"(?![A-Za-z0-9])", text_low)
+    ]
 
 
 def _dotted_name(node: ast.AST) -> str:
@@ -246,13 +259,11 @@ def scan_python_source(
             lineno = base_line + offset
             if not _in_scope(lineno, added) or lineno in allow_lines:
                 continue
-            low = raw.lower()
-            for phrase in vocab:
-                if re.search(r"(?<![A-Za-z0-9])" + re.escape(phrase) + r"(?![A-Za-z0-9])", low):
-                    key = (lineno, phrase)
-                    if key not in seen_vocab:
-                        seen_vocab.add(key)
-                        _hard("no_fabrication.vocabulary", lineno, f"banned phrase {phrase!r}")
+            for phrase in _match_vocabulary(raw.lower(), vocab):
+                key = (lineno, phrase)
+                if key not in seen_vocab:
+                    seen_vocab.add(key)
+                    _hard("no_fabrication.vocabulary", lineno, f"banned phrase {phrase!r}")
 
     try:
         tree = ast.parse(source)
@@ -306,6 +317,41 @@ def scan_python_source(
                         _find("finding.literal_array_dataframe", lineno, "DataFrame built from numeric literals")
 
     return hard, findings
+
+
+def scan_text_source(
+    rel_path: str,
+    source: str,
+    *,
+    added: set[int] | None = None,
+    config: dict | None = None,
+) -> tuple[list[CheckResult], list[CheckResult]]:
+    """Vocabulary-only no-fabrication scan for a **non-Python text** file (e.g. a shell
+    reduction script). Returns ``(hard_fails, findings)`` with ``findings`` always empty.
+
+    There is no AST, so the RNG / placeholder-body / literal-array / provenance checks
+    (all Python concepts) do not apply; the banned-vocabulary scan does, run over every
+    physical line (a shell file has no cheap comment/string boundary to narrow to). The
+    ObsID allowlist and ``added`` scoping match :func:`scan_python_source`. Pure.
+    """
+    cfg = config if config is not None else _code_gate_config()
+    vocab = [v.lower() for v in cfg.get("hard_fail_vocabulary", [])]
+    allow_res = [re.compile(p) for p in cfg.get("allowlist_obsid_tokens", [])]
+
+    hard: list[CheckResult] = []
+    seen: set[tuple[int, str]] = set()
+    for lineno, raw in enumerate(source.splitlines(), 1):
+        if not _in_scope(lineno, added) or any(rx.search(raw) for rx in allow_res):
+            continue
+        for phrase in _match_vocabulary(raw.lower(), vocab):
+            key = (lineno, phrase)
+            if key not in seen:
+                seen.add(key)
+                hard.append(CheckResult(
+                    name="no_fabrication.vocabulary", layer="A", passed=False,
+                    detail=f"{rel_path}:{lineno} — banned phrase {phrase!r}",
+                ))
+    return hard, []
 
 
 # ----------------------------------------------------------------------------
@@ -496,11 +542,33 @@ async def run_gate(
     # A.1 no-fabrication + A.2 provenance, per changed file.
     for path, added in targets.items():
         rel = str(path.relative_to(worktree))
-        source = path.read_text(encoding="utf-8")
-        hard, finds = scan_python_source(rel, source, added=added, config=cfg)
-        layer_a.extend(hard)
-        findings.extend(finds)
-        layer_a.extend(scan_provenance(rel, source, added=added))
+        raw_bytes = path.read_bytes()
+        # Binary / undecodable files in a toolkit diff are data, which never belongs in
+        # the toolkit (§9.5). Hard-fail to the author (it flows through the L2 rework loop
+        # like any other gate failure) — never an exception that breaks the pipeline.
+        if b"\x00" in raw_bytes:
+            layer_a.append(CheckResult(
+                name="no_fabrication.binary", layer="A", passed=False,
+                detail=f"{rel} — binary file in toolkit diff; data must not live in the toolkit (§9.5)",
+            ))
+            continue
+        try:
+            source = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            layer_a.append(CheckResult(
+                name="no_fabrication.binary", layer="A", passed=False,
+                detail=f"{rel} — undecodable (non-UTF-8) file in toolkit diff; data must not live in the toolkit (§9.5)",
+            ))
+            continue
+        if rel.endswith(".py"):
+            hard, finds = scan_python_source(rel, source, added=added, config=cfg)
+            layer_a.extend(hard)
+            findings.extend(finds)
+            layer_a.extend(scan_provenance(rel, source, added=added))
+        else:
+            hard, finds = scan_text_source(rel, source, added=added, config=cfg)
+            layer_a.extend(hard)
+            findings.extend(finds)
 
     # A.3 structural.
     structural = check_structural(worktree, tool_spec, targets)

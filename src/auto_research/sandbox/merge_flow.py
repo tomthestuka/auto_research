@@ -14,10 +14,12 @@ an **isolated git worktree** on ``research_toolkit``, then drives the bounded re
 
 The orchestration is **code, never the LLM**. The deterministic gate is real as of step 3
 (``gate.run_gate``, the default ``run_gate`` hook); the provider-decorrelated co-lead review
-is real as of step 4 (``review.make_review_hook``, the default ``run_review`` hook). Both
-remain injectable so the loop is exercised deterministically in tests. ``approve_edit`` — the
-only place git commits — is step 6; here a successful run returns a placeholder ``commit_sha``
-and lands nothing. The runtime never touches master; a human merges out of band.
+is real as of step 4 (``review.make_review_hook``, the default ``run_review`` hook). All
+hooks remain injectable so the loop is exercised deterministically in tests. ``approve_edit``
+— the only place git commits — is real as of step 6: on gate-pass ∧ review-pass it stages
+**exactly** the files the gate verified (``gate.collect_targets``, explicit-path, never
+``git add -A``) and lands one atomic commit on the working branch, whose subject is the
+co-lead's ``commit_summary``. The runtime never touches master; a human merges out of band.
 """
 
 from __future__ import annotations
@@ -62,6 +64,42 @@ def _orchestration_config() -> dict:
 
 def _cap(key: str, default: int) -> int:
     return int(_orchestration_config().get(key, default))
+
+
+def _resolve_toolkit_root() -> Path:
+    """The ``research_toolkit`` checkout the runtime commits authored tools into (§9.9)."""
+    return Path(_orchestration_config().get("toolkit_root", "")).expanduser()
+
+
+def check_toolkit_git_identity() -> None:
+    """Launch-time preflight (no LLM): assert ``research_toolkit`` has a git commit identity.
+
+    ``approve_edit`` relies on the **ambient** git identity (CLAUDE.md §9.9). If ``user.name``
+    or ``user.email`` is unset there, the runtime's atomic commit would fail mid-flow — so we
+    fail loudly at launch with a precise remediation instead. Registered in
+    ``auto_research.preflight``.
+    """
+    root = _resolve_toolkit_root()
+    if not (root / ".git").exists() and not root.is_dir():
+        raise RuntimeError(
+            f"toolkit_root {root!r} (config/orchestration.yaml) is not a git checkout; "
+            "the runtime cannot commit authored tools there."
+        )
+    missing = [
+        key
+        for key in ("user.name", "user.email")
+        if not subprocess.run(
+            ["git", "-C", str(root), "config", "--get", key],
+            capture_output=True, text=True,
+        ).stdout.strip()
+    ]
+    if missing:
+        raise RuntimeError(
+            f"research_toolkit ({root}) has no git commit identity ({', '.join(missing)} unset). "
+            f"Set it so runtime tool commits don't fail, e.g.:\n"
+            f"  git -C {root} config user.name 'auto_research'\n"
+            f"  git -C {root} config user.email 'auto-research@localhost'"
+        )
 
 
 def _resolve_coder_model() -> str:
@@ -208,6 +246,45 @@ def _create_worktree(toolkit_root: Path, worktree_base: Path, branch: str) -> Pa
     return worktree_path
 
 
+def _git_in(worktree: Path, *args: str) -> str:
+    """Run one git command inside ``worktree`` (runtime git — §9.9, not §3). Raises on
+    non-zero exit with stderr in the message."""
+    out = subprocess.run(
+        ["git", *args], cwd=str(worktree), capture_output=True, text=True
+    )
+    if out.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed in {worktree}: {out.stderr.strip()}")
+    return out.stdout
+
+
+def approve_edit(worktree: Path, *, message: str) -> str:
+    """Land one atomic commit per tool on the worktree's branch (CLAUDE.md §9.9, step 6).
+
+    The **only** place the runtime commits. Stages **exactly** the files the gate verified
+    (``gate.collect_targets`` — every changed/new file under a ``*_utils`` package),
+    explicit-path (``git add -- <paths>``, never ``git add -A``), so worker scratch outside a
+    ``*_utils`` package can never leak into the commit. Commits with ``message`` as the
+    subject on the branch the worktree is already checked out on, and returns the new commit
+    sha.
+
+    Pure git mechanics: it does **not** re-assert gate-/review-pass — the commit pipeline in
+    ``propose_and_pr`` only reaches here on gate-pass ∧ review-pass (§9.9: commit ⇔ gate-pass
+    ∧ co-lead review-pass). The runtime never merges and never touches master.
+    """
+    from auto_research.sandbox.gate import collect_targets
+
+    worktree = Path(worktree)
+    rels = sorted(str(p.relative_to(worktree)) for p in collect_targets(worktree))
+    _git_in(worktree, "add", "--", *rels)
+    _git_in(worktree, "commit", "-m", message)
+    return _git_in(worktree, "rev-parse", "HEAD").strip()
+
+
+# Captured so ``propose_and_pr``'s ``approve_edit`` parameter (a test seam) can default to
+# the real implementation without the local name shadowing the module-level function.
+_DEFAULT_APPROVE_EDIT = approve_edit
+
+
 def _make_path_confiner(worktree: Path):
     """A ``can_use_tool`` callback denying file writes outside the worktree (best-effort).
 
@@ -323,20 +400,21 @@ async def propose_and_pr(
     max_turns: int | None = None,
     worktree_factory: Callable[[Path, Path, str], Path] | None = None,
     sdk_client_factory: Callable[[Any], Any] | None = None,
+    approve_edit: Callable[..., str] | None = None,
 ) -> MergeFlowResult:
     """Author a tool from a ``ToolSpec`` and drive the bounded rework loop (§9.3).
 
-    Returns a :class:`MergeFlowResult`. ``committed`` ⇔ gate-pass ∧ co-lead review-pass
-    (the commit itself is step 6 — here ``commit_sha`` is a placeholder). ``failed`` /
-    ``needs_human`` ⇒ no commit and the lead raises to the human (§9.7). Raises
-    :class:`HumanInputRequired` if the author needs a human and none is wired (headless
-    fail-safe).
+    Returns a :class:`MergeFlowResult`. ``committed`` ⇔ gate-pass ∧ co-lead review-pass — one
+    atomic commit landed on ``branch`` via ``approve_edit`` (step 6), and ``commit_sha`` is
+    its real sha. ``failed`` / ``needs_human`` ⇒ no commit and the lead raises to the human
+    (§9.7). Raises :class:`HumanInputRequired` if the author needs a human and none is wired
+    (headless fail-safe).
 
     ``colead`` is the GPT co-lead reviewer (an ``AnalystColeadAgent``); when ``None`` the
     default ``run_review`` builds one from config, routed to a member whose provider differs
     from the Claude author's (``review.make_review_hook``). Injectable seams
-    (``run_gate``/``run_review``/``worktree_factory``/``sdk_client_factory``) let the loop be
-    exercised deterministically without a live LLM.
+    (``run_gate``/``run_review``/``worktree_factory``/``sdk_client_factory``/``approve_edit``)
+    let the loop and the commit be exercised deterministically without a live LLM or git.
     """
     toolkit_root = Path(toolkit_root)
     worktree_base = Path(worktree_base)
@@ -354,6 +432,7 @@ async def propose_and_pr(
     max_turns = max_turns if max_turns is not None else _cap("tool_author_max_turns", 50)
     worktree_factory = worktree_factory or _create_worktree
     sdk_client_factory = sdk_client_factory or _default_sdk_client_factory
+    approve_edit = approve_edit or _DEFAULT_APPROVE_EDIT
 
     branch = f"tool/{tool_spec.proposed_tool_name}-{uuid.uuid4().hex[:8]}"
     worktree = worktree_factory(toolkit_root, worktree_base, branch)
@@ -402,10 +481,13 @@ async def propose_and_pr(
                 gate = await run_gate(worktree, tool_spec)
                 continue
 
+            # Commit ⇔ gate-pass ∧ co-lead review-pass (§9.9). The co-lead drafts the commit
+            # subject; fall back to the tool name if it left it empty.
+            message = review.commit_summary.strip() or tool_spec.proposed_tool_name
+            commit_sha = approve_edit(worktree, message=message)
             return MergeFlowResult(
                 tool_spec_id=tool_spec.id, status="committed", branch=branch,
-                commit_sha="<placeholder: approve_edit lands the commit in step 6>",
-                gate_report=gate, review=review,
+                commit_sha=commit_sha, gate_report=gate, review=review,
                 reason="gate-pass and co-lead review-pass",
             )
     finally:

@@ -559,7 +559,7 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
 | 3 | Done | **The deterministic gate** — generic Layer-A checks + a Layer-B tool-local test runner + provenance wiring + the no-fabrication scan. | A good tool passes; one that fabricates, fails replication, or breaks a declared check is rejected with a specific machine-readable reason. |
 | 4 | Done | **Provider-decorrelated review** — a **GPT analyst co-lead** (provider ≠ the Claude author, routed from config) reviews the diff + gate result and judges the Layer-B checks; code-review only. Its pass + the gate authorizes the commit. | Review runs on a different provider than the author; a planted subtle bug is caught or escalated, not rubber-stamped. |
 | 5 | Done | **Raise-to-human (clarification)** — `HumanQuery`/`HumanResponse` schema; the injectable `human_handler` + a shared `ask_human` tool for every ReAct role and the author (blocking direct-handler; LangGraph `interrupt()`+checkpointer durable suspend/resume deferred to §12); handler-injection with CLI/`slack.py`/`whatsapp.py` connectors behind an auto-detecting resolver; `FAILED`/`NEEDS_HUMAN` routing + failure classification. | A blocked role raises and the run blocks for a human; an honest FAILED is accepted with no penalty; no fabrication on cap exhaustion. |
-| 6 | Todo | **`approve_edit()` atomic commit** — on gate-pass + co-lead review-pass, one atomic commit per tool to the branch; the runtime never merges; replicability + golden-regression happen at the human merge, not the gate. | An approved tool lands as one commit on a branch; a human reruns the human-half, checks regression, and merges/reverts cleanly. |
+| 6 | Done | **`approve_edit()` atomic commit** — on gate-pass + co-lead review-pass, one atomic commit per tool to the branch; the runtime never merges; replicability + golden-regression happen at the human merge, not the gate. | An approved tool lands as one commit on a branch; a human reruns the human-half, checks regression, and merges/reverts cleanly. |
 | 7 | Todo | **End-to-end** — a sibling of `test_full_suite.py` poses a question requiring a missing capability; an analyst authors a tool through the whole flow; it lands on a branch; a human merges; the analysis re-runs on the new tool. | The missing-capability analysis completes using a freshly authored, gated tool. (Phase-2 end-to-end testing is observational/live via `test_full_suite.py` siblings — not deterministic assertions.) |
 
 ---
@@ -686,3 +686,16 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   to a no-fabrication finalize; the preflight became async and pings the resolved channel
   (green only on a reply). Analyst prompts gained §9.6 failure classification. The non-live
   suite is green (`tests/test_hitl.py`, `tests/test_preflight.py`, graph routing).
+- 2026-06-16 — **Phase 2 step 6 done.** `sandbox/merge_flow.approve_edit(worktree, *, message)`
+  lands the one atomic commit per tool (§9.9): explicit-path staging of **exactly**
+  `gate.collect_targets` (never `git add -A`, so scratch outside a `*_utils` package can't
+  leak), commit on the worktree's branch, real `commit_sha` returned. `propose_and_pr` gained
+  an injectable `approve_edit` seam and now commits on gate-pass ∧ review-pass, with the
+  subject from the co-lead's new `ToolReviewVerdict.commit_summary` (fallback: tool name); the
+  runtime still never merges to master. The gate was broadened to track non-`.py` files under
+  a `*_utils` package — `collect_targets` is extension-agnostic, `scan_text_source` runs the
+  vocabulary scan on text (e.g. shell reduction scripts), and binary/undecodable files hard-fail
+  (§9.5) through the rework loop — so a tool's full file set is both gated and staged. New
+  launch preflight `check_toolkit_git_identity` (ambient git identity in `research_toolkit`).
+  The non-live suite is green (`tests/test_merge_flow.py` incl. a real-git `approve_edit` test,
+  `tests/test_gate.py`, `tests/test_preflight.py`).
