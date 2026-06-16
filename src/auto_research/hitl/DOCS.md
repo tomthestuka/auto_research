@@ -56,7 +56,9 @@ directly) so the preflight can import it without pulling the graph/LLM stack.
   `on_message`. `start()`/`aclose()` manage the socket. Built per spec; **not live-tested**.
 - `WhatsAppHandler(*, client=None, from_number=None, to_number=None, timeout_s=1800,
   poll_interval_s=5)` — Twilio: sends, then **polls** `messages.list` for the inbound reply
-  (no public webhook). Live-tested via `tests/test_live_whatsapp.py` (opt-in).
+  (no public webhook). Auth is via a Twilio **API key** (`TWILIO_ACCOUNT_SID` +
+  `TWILIO_API_KEY_SID` + `TWILIO_API_KEY_SECRET`), not the root Auth Token, so a leaked key is
+  revoked on its own. Live-tested via `tests/test_live_whatsapp.py` (opt-in).
 
 The schemas `HumanQuery` (`id`, `kind ∈ {clarify_science, clarify_code, blocked}`, `question`,
 `context`, `asked_by`, `created_at`) and `HumanResponse` (`query_id`, `answer`, `created_at`)
@@ -88,3 +90,9 @@ live in `auto_research.schemas` (the protocol, §7).
 - 2026-06-15 — Phase 2 step 5: package created. `HumanQuery`/`HumanResponse` protocol; the
   injectable `HumanHandler` + `resolve_human` fail-safe; the `resolve_handler` CLI-vs-library
   auto-detect; CLI/Slack/WhatsApp connectors; and the `make_human_channel_check` launch ping.
+- 2026-06-16 — `WhatsAppHandler` now authenticates with a Twilio **API key**
+  (`TWILIO_API_KEY_SID` / `TWILIO_API_KEY_SECRET` + `TWILIO_ACCOUNT_SID`) instead of the root
+  Auth Token, so a leaked credential is revoked without rotating the account. `.env.example`,
+  README, and the live-test docstring updated to match.
+- 2026-06-16 — all three connector bodies (CLI/Slack/WhatsApp) now render the sender via
+  `HumanQuery.sender_label` → `"<role> (<model>)"` so the human sees which model is asking.

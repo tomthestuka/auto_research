@@ -294,7 +294,7 @@ tools simply won't be available.
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `ADS_DEV_KEY` (NASA ADS),
 `TAVILY_API_KEY`; optional LangSmith tracing (`LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`);
 optional raise-to-human connectors (only when selected) — Twilio WhatsApp
-(`TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`/`TWILIO_WHATSAPP_FROM`/`WHATSAPP_TO`) or Slack
+(`TWILIO_ACCOUNT_SID`/`TWILIO_API_KEY_SID`/`TWILIO_API_KEY_SECRET`/`TWILIO_WHATSAPP_FROM`/`WHATSAPP_TO`) or Slack
 (`SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN`/`SLACK_HUMAN_CHANNEL`); the terminal (`cli`) channel needs none.
 
 **Runtime data dir** (`config/orchestration.yaml::runtime_dir`, defaults to

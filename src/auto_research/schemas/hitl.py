@@ -32,7 +32,14 @@ class HumanQuery(MessageModel):
     question: NonEmptyStr
     context: str = ""
     asked_by: NonEmptyStr  # the role raising it: "analyst_worker", "analyst_lead", "coder", …
+    model: str = ""  # the model backing that role, e.g. "claude-sonnet-4-6" (blank if unknown)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @property
+    def sender_label(self) -> str:
+        """Human-readable sender: ``"analyst_worker (claude-sonnet-4-6)"`` when the model
+        is known, else just the role. Used by every connector's message body."""
+        return f"{self.asked_by} ({self.model})" if self.model else self.asked_by
 
 
 class HumanResponse(MessageModel):

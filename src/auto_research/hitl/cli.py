@@ -16,7 +16,7 @@ def _format(query: HumanQuery) -> str:
     lines = [
         "",
         "──────────────────────────────────────────────",
-        f"  HUMAN INPUT NEEDED  ({query.kind} · from {query.asked_by})",
+        f"  HUMAN INPUT NEEDED  ({query.kind} · from {query.sender_label})",
         f"  {query.question}",
     ]
     if query.context:

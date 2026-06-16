@@ -28,6 +28,7 @@ from auto_research.sandbox.mcp_client import MCPToolClient
 from auto_research.sandbox.persistent import PersistentSandbox
 from auto_research.sandbox.registry import ToolkitRegistry
 from auto_research.agents.react import ReadOnlyToolProvider
+from auto_research.agents.roles import _model_label
 from auto_research.sandbox.workspace import create_run_workspace, memory_path, run_dir
 from auto_research.schemas import ResearchRequest, ReviewVerdict
 from auto_research.storage import Storage
@@ -310,6 +311,7 @@ async def run_research(
             reviewer.tools = ReadOnlyToolProvider(
                 roots=readonly_roots, retrieval=retrieval,
                 human_handler=human_handler, asked_by="reviewer",
+                model=_model_label(reviewer.model) or "",
             )
         except Exception:  # noqa: BLE001 - tools are optional; never block the run
             pass
@@ -318,6 +320,7 @@ async def run_research(
             lead.tools = ReadOnlyToolProvider(
                 roots=lead_roots, retrieval=retrieval,
                 human_handler=human_handler, asked_by="analyst_lead",
+                model=_model_label(lead.model) or "",
             )
         except Exception:  # noqa: BLE001
             pass

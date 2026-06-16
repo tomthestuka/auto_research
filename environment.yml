@@ -1,4 +1,4 @@
-name: auto_research
+1name: auto_research
 channels:
   - conda-forge
 dependencies:

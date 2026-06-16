@@ -4,7 +4,8 @@
 
 Sends a real ``HumanQuery`` to your WhatsApp via Twilio and **blocks for your reply**, then
 records the exchange under ``logs/dev/``. Requires the Twilio WhatsApp env keys
-(TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM / WHATSAPP_TO) and that you have
+(TWILIO_ACCOUNT_SID / TWILIO_API_KEY_SID / TWILIO_API_KEY_SECRET / TWILIO_WHATSAPP_FROM /
+WHATSAPP_TO) and that you have
 joined the Twilio WhatsApp sandbox (or own the number). Never runs in the default suite.
 """
 
@@ -30,9 +31,15 @@ def test_live_whatsapp_round_trip():
     from auto_research.hitl import WhatsAppHandler
 
     handler = WhatsAppHandler(timeout_s=600, poll_interval_s=5)
+    # Tag the real configured analyst-worker model so the message header demonstrates the
+    # "<role> (<model>)" sender label a live run would show.
+    from auto_research.models import resolve
+
+    worker_model = resolve("analyst_worker").handles[0].config.model
     query = HumanQuery(
         kind="clarify_science",
         asked_by="analyst_worker",
+        model=worker_model,
         question="auto_research live test — reply with any text to confirm the channel.",
         context="tests/test_live_whatsapp.py",
     )

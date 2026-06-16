@@ -50,7 +50,7 @@ class WhatsAppHandler:
         self.client = client if client is not None else _build_twilio_client()
 
     def _body(self, query: HumanQuery) -> str:
-        head = f"[auto_research · {query.kind} · {query.asked_by}]"
+        head = f"[auto_research · {query.kind} · {query.sender_label}]"
         ctx = f"\n\ncontext: {query.context}" if query.context else ""
         return f"{head}\n\n{query.question}{ctx}\n\n(reply to this message)"
 
@@ -99,8 +99,14 @@ class WhatsAppHandler:
 def _build_twilio_client() -> Any:
     from twilio.rest import Client  # imported lazily — optional dependency
 
-    sid = os.environ.get("TWILIO_ACCOUNT_SID")
-    token = os.environ.get("TWILIO_AUTH_TOKEN")
-    if not sid or not token:
-        raise RuntimeError("WhatsApp connector needs TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN.")
-    return Client(sid, token)
+    # API-key auth (preferred over the root Auth Token): a leaked key is revoked on its own
+    # without rotating the account credential. The key still needs its owning Account SID.
+    account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
+    key_sid = os.environ.get("TWILIO_API_KEY_SID")
+    key_secret = os.environ.get("TWILIO_API_KEY_SECRET")
+    if not account_sid or not key_sid or not key_secret:
+        raise RuntimeError(
+            "WhatsApp connector needs TWILIO_ACCOUNT_SID, TWILIO_API_KEY_SID and "
+            "TWILIO_API_KEY_SECRET."
+        )
+    return Client(key_sid, key_secret, account_sid)

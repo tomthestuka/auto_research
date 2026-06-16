@@ -850,6 +850,7 @@ class AnalystWorkerAgent(AgentRole):
         provider = SandboxToolProvider(
             self.registry, self.sandbox, cwd=cwd,
             human_handler=self.human_handler, asked_by="analyst_worker",
+            model=_model_label(self.model) or "",
         )
         seed = [
             ModelMessage(role="system", content=self.prompt),

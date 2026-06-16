@@ -143,13 +143,16 @@ def _make_ask_lead_handler(lead: Any) -> Callable[..., Awaitable[str]]:
     return handler
 
 
-def _make_ask_human_handler(human_handler: HumanHandler | None) -> Callable[..., Awaitable[str]]:
+def _make_ask_human_handler(
+    human_handler: HumanHandler | None, *, model: str = ""
+) -> Callable[..., Awaitable[str]]:
     async def handler(question: str, *, kind: str = "blocked", context: str = "") -> str:
         query = HumanQuery(
             kind=kind if kind in ("clarify_science", "clarify_code", "blocked") else "blocked",
             question=question or "(no question provided)",
             context=context,
             asked_by="coder",
+            model=model or "",
         )
         response = await resolve_human(human_handler, query)  # raises HumanInputRequired if None
         return response.answer
@@ -358,7 +361,7 @@ async def propose_and_pr(
     structure_context = _build_structure_context(toolkit_root)
     system_prompt = load_prompt("coder")
     escalation_server = _make_escalation_server(
-        _make_ask_lead_handler(lead), _make_ask_human_handler(human_handler)
+        _make_ask_lead_handler(lead), _make_ask_human_handler(human_handler, model=coder_model)
     )
     options = _build_options(
         worktree=worktree, coder_model=coder_model, system_prompt=system_prompt,

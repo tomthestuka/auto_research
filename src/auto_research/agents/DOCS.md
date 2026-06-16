@@ -43,7 +43,9 @@ co-lead to check conventions while reviewing, §9.3),
 same model the SDK author uses. With no handler the tool is not offered, and a direct call
 raises `HumanInputRequired` (the headless fail-safe). `run_research` threads the resolved
 handler to the workers (`SandboxToolProvider`) and to the reviewer/lead (`ReadOnlyToolProvider`,
-`asked_by` = the role).
+`asked_by` = the role). Each provider also carries the backing `model` id (resolved via
+`_model_label`), set on the `HumanQuery` so connector message bodies identify the sender as
+`"<role> (<model>)"`.
 
 When a `RunMonitor` is injected, role wrappers record high-chatter input,
 parsed output, raw model content, attachment counts, and errors. These records
@@ -225,3 +227,6 @@ Role wrappers:
 - 2026-06-15 — Phase 2 step 5: both tool providers gained a shared `ask_human` tool
   (`ask_human_tool_def`/`execute_ask_human`) + `human_handler`/`asked_by`; `AnalystWorkerAgent`
   gained a `human_handler` so its `analyze()` provider can raise to a human.
+- 2026-06-16 — both tool providers and `execute_ask_human` gained a `model` param, set on the
+  emitted `HumanQuery` so connector bodies show the sender as `"<role> (<model>)"`; call sites
+  pass `_model_label(...)` (worker, reviewer, lead).

@@ -169,8 +169,11 @@ carried by **reference** (`FigureRef`), never embedded
 - `AnalystReport.status: "ok"|"failed"|"needs_human"` (default `"ok"`) — §9.6 terminal
   state; an honest failure is a correct outcome, never a reason to fabricate.
 - `HumanQuery(id, kind: "clarify_science"|"clarify_code"|"blocked", question: str,
-  context: str = "", asked_by: str, created_at)` — a blocked role's raise-to-human
-  clarification (§9.7); no `approve` kind (the runtime never asks a human to merge).
+  context: str = "", asked_by: str, model: str = "", created_at)` — a blocked role's
+  raise-to-human clarification (§9.7); no `approve` kind (the runtime never asks a human to
+  merge). `model` is the backing model id (e.g. `claude-sonnet-4-6`); the `sender_label`
+  property renders `"<asked_by> (<model>)"` for connector message bodies, or just the role
+  when `model` is blank.
 - `HumanResponse(query_id: str, answer: str, created_at)` — the human's reply. Both are the
   typed contract behind the injectable `human_handler` and the `ask_human` tools.
 
@@ -187,3 +190,5 @@ carried by **reference** (`FigureRef`), never embedded
 - 2026-06-12 — Compacted changelog and updated stale local-path/tool-result wording.
 - 2026-06-15 — Phase 2 step 5 added `HumanQuery`/`HumanResponse` (the raise-to-human
   clarification protocol, §9.7).
+- 2026-06-16 — `HumanQuery` gained a `model` field + `sender_label` property so connector
+  message bodies identify the sender as `"<asked_by> (<model>)"`.

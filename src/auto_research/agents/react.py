@@ -85,7 +85,7 @@ def ask_human_tool_def() -> dict:
 
 
 async def execute_ask_human(
-    human_handler: Any, asked_by: str, arguments: Mapping[str, Any]
+    human_handler: Any, asked_by: str, arguments: Mapping[str, Any], *, model: str = ""
 ) -> ToolOutcome:
     """Build a ``HumanQuery`` from a tool call and block on the injected handler.
 
@@ -104,6 +104,7 @@ async def execute_ask_human(
         question=str(arguments.get("question") or "(no question provided)"),
         context=str(arguments.get("context") or ""),
         asked_by=asked_by or "agent",
+        model=model or "",
     )
     response = await resolve_human(human_handler, query)
     return ToolOutcome(text=response.answer or "(human gave no answer)")
@@ -175,6 +176,7 @@ class SandboxToolProvider:
         timeout_s: int = 300,
         human_handler: Any | None = None,
         asked_by: str = "analyst_worker",
+        model: str = "",
     ) -> None:
         self.registry = registry
         self.sandbox = sandbox
@@ -182,6 +184,7 @@ class SandboxToolProvider:
         # When a human_handler is wired, expose the shared ask_human tool (§9.7).
         self.human_handler = human_handler
         self.asked_by = asked_by
+        self.model = model
         # Figures land in <worker scratch>/figures (under the runtime data dir),
         # never in /tmp or a repo. See _redirect_figure_args.
         self.figures_dir = (Path(cwd) / "figures") if cwd is not None else None
@@ -197,7 +200,9 @@ class SandboxToolProvider:
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
         if name == ASK_HUMAN_TOOL:
-            return await execute_ask_human(self.human_handler, self.asked_by, arguments)
+            return await execute_ask_human(
+                self.human_handler, self.asked_by, arguments, model=self.model
+            )
         kind = self.registry.kind_for_function(name)
         args = dict(arguments)
         if kind == "mcp.builtin.bash_exec" and "cwd" not in args and self.cwd is not None:
@@ -292,6 +297,7 @@ class ReadOnlyToolProvider:
         include_text_search: bool = True,
         human_handler: Any | None = None,
         asked_by: str = "agent",
+        model: str = "",
         max_chars: int = 8000,
     ) -> None:
         self.roots = [Path(r).resolve() for r in roots]
@@ -299,6 +305,7 @@ class ReadOnlyToolProvider:
         # When a human_handler is wired, expose the shared ask_human tool (§9.7).
         self.human_handler = human_handler
         self.asked_by = asked_by
+        self.model = model
         # Optional Tavily/web QuerySource — when supplied (analyst lead), exposes a
         # web_search tool so the lead can consult authoritative documentation (mission
         # threads, calibration memos) before triaging a tool request or answering the
@@ -368,7 +375,9 @@ class ReadOnlyToolProvider:
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
         if name == ASK_HUMAN_TOOL:
-            return await execute_ask_human(self.human_handler, self.asked_by, arguments)
+            return await execute_ask_human(
+                self.human_handler, self.asked_by, arguments, model=self.model
+            )
         if name in ("read_file", "list_dir"):
             target = Path(str(arguments.get("path", "")))
             if not self._allowed(target):

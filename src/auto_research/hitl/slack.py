@@ -74,7 +74,7 @@ class SlackHandler:
 
     async def __call__(self, query: HumanQuery) -> HumanResponse:
         await self.start()
-        body = f"*[auto_research · {query.kind} · {query.asked_by}]*\n{query.question}"
+        body = f"*[auto_research · {query.kind} · {query.sender_label}]*\n{query.question}"
         if query.context:
             body += f"\n_context: {query.context}_"
         posted = await self.app.client.chat_postMessage(channel=self.channel, text=body)
