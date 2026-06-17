@@ -29,6 +29,7 @@ from auto_research.sandbox.workspace import append_memory, read_memory
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
+    AuthoringDecision,
     DocumentRef,
     FigureRef,
     GateReport,
@@ -991,6 +992,50 @@ class AnalystLeadAgent(AgentRole):
             images=figures,
             action="judge_convergence",
         )
+
+    async def decide_authoring(
+        self, reports: Sequence[AnalystReport]
+    ) -> AuthoringDecision:
+        """Decide whether to author a tool now for the workers' ``tool_request``s (§9.3, §9.10).
+
+        Called by ``DebateToConverge`` when ≥1 worker report carries a ``tool_request``. The
+        lead browses the **full** ``lib/`` source read-only (its ``ReadOnlyToolProvider`` is
+        rooted at ``toolkit_root``) to set the architectural disposition — *capability exists
+        but is unexposed* (``extend_existing``) vs *genuinely absent* (``new_package``) — and
+        to refine the worker's advisory spec. It returns **one** ``ToolSpec`` to author this
+        cycle (dependency-ordered), or ``should_author=false`` when the "gap" was really a
+        mis-called existing tool. Consensus — not this method — issues the
+        ``merge_flow.propose_and_pr`` call (§9.9: code issues git, never the model).
+        """
+        requests = [r.tool_request for r in reports if r.tool_request is not None]
+        payload = {
+            "request": (
+                "Analyst workers report the toolkit lacks a capability the analysis needs. "
+                "Decide whether to author a tool now, and if so, finalise ONE ToolSpec."
+            ),
+            "tool_requests": [spec.model_dump(mode="json") for spec in requests],
+            "worker_reports": [report.model_dump(mode="json") for report in reports],
+            "decision_semantics": (
+                "Browse the toolkit's lib/ source (read_file/list_dir) before deciding. Set "
+                "disposition='extend_existing' when the capability already exists in lib/ and "
+                "only needs surfacing as a skills/ tool; 'new_package' when it is genuinely "
+                "absent. Author ONE tool this cycle in dependency order (acquire before reduce "
+                "before analyse). should_author=false when the worker simply mis-called an "
+                "existing tool. Never fabricate; escalate via ask_human if blocked."
+            ),
+        }
+        if self.tools is None:
+            return await self._call(payload, AuthoringDecision, action="decide_authoring")
+
+        seed = [
+            ModelMessage(role="system", content=self.prompt),
+            ModelMessage(role="user", content=_payload_text(payload)),
+        ]
+        messages, _ = await self._react(
+            seed_messages=seed, tools=self.tools, action="decide_authoring",
+            cap=_react_loop_cap(),
+        )
+        return await self._call_over_messages(messages, AuthoringDecision, action="decide_authoring")
 
 
 class AnalystColeadAgent(AgentRole):

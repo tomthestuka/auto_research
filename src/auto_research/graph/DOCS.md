@@ -175,3 +175,8 @@ iteration counters, and the cap.
   (`human_handler`/`human_channel`), awaits the now-async preflight (incl. the channel ping),
   and threads the handler to the role tool providers; `after_analysis` routes an honest
   `failed`/`needs_human` report around the reviewer to `finalize_run` (no fabricated report).
+- 2026-06-16 — Phase 2 step 7: `runtime.py` wires the consensus authoring/resume path —
+  `DebateToConverge` now receives `tool_author_cap`, `toolkit_root`, `worktree_base`
+  (`<run_dir>/authoring`), `direct_branch` (`orchestration.yaml: tool_author_branch`, default
+  `ai`), and `human_handler`, so the lead authors missing capability into `research_toolkit` and
+  workers rerun on it. The lead keeps its read-only `toolkit_root` browse root.

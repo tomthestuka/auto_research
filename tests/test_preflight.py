@@ -76,6 +76,7 @@ def test_build_default_preflight_registers_known_checks():
     assert "required_env" in names
     assert "author_reviewer_decorrelation" in names
     assert "toolkit_git_identity" in names
+    assert "toolkit_branch_clean" in names
     # The human-channel ping is only registered when a handler is resolved.
     assert "human_channel" not in names
 

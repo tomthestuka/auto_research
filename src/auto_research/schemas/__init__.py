@@ -15,11 +15,17 @@ from auto_research.schemas.requests import ResearchRequest
 from auto_research.schemas.review import ReviewVerdict
 from auto_research.schemas.search import FullTextLink, SearchRequest, SearchResult, SearchSource
 from auto_research.schemas.tools import ToolCallRequest, ToolCallReview, ToolKind, ToolResult
-from auto_research.schemas.toolspec import ProposedCheck, ToolSpec, ValidationDataset
+from auto_research.schemas.toolspec import (
+    AuthoringDecision,
+    ProposedCheck,
+    ToolSpec,
+    ValidationDataset,
+)
 
 __all__ = [
     "AnalysisTask",
     "AnalystReport",
+    "AuthoringDecision",
     "CheckResult",
     "FigureRef",
     "DocumentRef",

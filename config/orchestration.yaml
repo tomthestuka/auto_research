@@ -66,6 +66,14 @@ report_retry_cap: 2
 tool_author_max_turns: 50
 tool_author_gate_rework_cap: 3
 tool_author_review_rework_cap: 2
+# Phase 2 step-7 runtime authoring/resume (consensus → merge_flow). tool_author_branch: the
+# branch in toolkit_root the runtime commits authored tools onto DIRECTLY (it never merges to
+# master — §9.9); the launch preflight asserts research_toolkit is on this branch with a clean
+# tree (a dirty tree means a prior terminal authoring failure left edits to inspect). The
+# human swaps to this branch and merges out of band. tool_author_cap: max authoring attempts
+# per analysis — a BACKSTOP bounding the acquire→reduce→analyse dependency chain, not a budget.
+tool_author_branch: ai
+tool_author_cap: 3
 # Raise-to-human channel (§9.8). human_channel: the default connector used when a run is
 # NOT attended (library/notebook/server) and no channel is passed explicitly — one of
 # cli|slack|whatsapp|none. Kept `none` (headless) by default so unattended runs and the test

@@ -560,7 +560,7 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
 | 4 | Done | **Provider-decorrelated review** — a **GPT analyst co-lead** (provider ≠ the Claude author, routed from config) reviews the diff + gate result and judges the Layer-B checks; code-review only. Its pass + the gate authorizes the commit. | Review runs on a different provider than the author; a planted subtle bug is caught or escalated, not rubber-stamped. |
 | 5 | Done | **Raise-to-human (clarification)** — `HumanQuery`/`HumanResponse` schema; the injectable `human_handler` + a shared `ask_human` tool for every ReAct role and the author (blocking direct-handler; LangGraph `interrupt()`+checkpointer durable suspend/resume deferred to §12); handler-injection with CLI/`slack.py`/`whatsapp.py` connectors behind an auto-detecting resolver; `FAILED`/`NEEDS_HUMAN` routing + failure classification. | A blocked role raises and the run blocks for a human; an honest FAILED is accepted with no penalty; no fabrication on cap exhaustion. |
 | 6 | Done | **`approve_edit()` atomic commit** — on gate-pass + co-lead review-pass, one atomic commit per tool to the branch; the runtime never merges; replicability + golden-regression happen at the human merge, not the gate. | An approved tool lands as one commit on a branch; a human reruns the human-half, checks regression, and merges/reverts cleanly. |
-| 7 | Todo | **End-to-end** — a sibling of `test_full_suite.py` poses a question requiring a missing capability; an analyst authors a tool through the whole flow; it lands on a branch; a human merges; the analysis re-runs on the new tool. | The missing-capability analysis completes using a freshly authored, gated tool. (Phase-2 end-to-end testing is observational/live via `test_full_suite.py` siblings — not deterministic assertions.) |
+| 7 | Done | **End-to-end** — a sibling of `test_full_suite.py` poses a question requiring a missing capability; an analyst authors a tool through the whole flow; it lands on a branch; a human merges; the analysis re-runs on the new tool. | The missing-capability analysis completes using a freshly authored, gated tool. (Phase-2 end-to-end testing is observational/live — here the `notebooks/usage_example.ipynb` "test code authoring" run, IXPE P1 — not deterministic assertions.) |
 
 ---
 
@@ -699,3 +699,22 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   launch preflight `check_toolkit_git_identity` (ambient git identity in `research_toolkit`).
   The non-live suite is green (`tests/test_merge_flow.py` incl. a real-git `approve_edit` test,
   `tests/test_gate.py`, `tests/test_preflight.py`).
+- 2026-06-16 — **Phase 2 step 7 done.** Lead-driven tool authoring/resume now connects the
+  step 0-6 pieces. A worker's `tool_request` drives the analyst lead's new
+  `decide_authoring(reports) -> AuthoringDecision` (it browses `lib/` read-only, sets
+  disposition, returns one finalised `ToolSpec` or declines); **`DebateToConverge` itself**
+  then calls `merge_flow.propose_and_pr(direct_branch="ai")` (the LLM never issues git — §9.9).
+  On a committed tool it reloads the registry (`ToolkitRegistry` now discovers `*_utils`
+  dynamically + `reload()`), restarts per-worker sandboxes, augments the task with provenance,
+  and reruns workers — a *resume* bounded by `tool_author_cap`, not counted against
+  `debate_max_rounds`; `should_author=false` / non-committed results fall through to honest
+  debate (no fabrication). New: `AuthoringDecision` schema; `propose_and_pr(direct_branch=…)`
+  direct-branch mode (works in `toolkit_root` on the ambient `ai` branch, leaves a dirty tree
+  on terminal failure for the human) + `check_toolkit_branch_clean` registered in the preflight;
+  config `tool_author_branch`/`tool_author_cap`; the per-mission **data catalog** read side
+  (`observations.read_catalog`/`local_obsids`, contract written by authored tools, documented in
+  `prompts/coder.md`); `prompts/coder.md` now instructs surfacing existing `lib/`/scripts, a
+  package `README.md`, and the catalog. The live end-to-end is the
+  `notebooks/usage_example.ipynb` "test code authoring" run (IXPE P1). Non-live suite green
+  (`tests/test_consensus_authoring.py`, `tests/test_registry.py`, `tests/test_merge_flow.py`,
+  `tests/test_observations.py`, `tests/test_schemas.py`, `tests/test_preflight.py`).

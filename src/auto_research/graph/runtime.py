@@ -351,6 +351,13 @@ async def run_research(
             monitor=run_monitor,
             registry=registry,
             tool_retry_cap=tool_retry_cap,
+            # Phase-2 step-7 authoring/resume: the lead authors missing capability into
+            # research_toolkit on the ambient `ai` branch, then workers rerun (§9.10).
+            tool_author_cap=int(orch.get("tool_author_cap", 3)),
+            toolkit_root=toolkit_root,
+            worktree_base=run_dir(run_id) / "authoring",
+            direct_branch=str(orch.get("tool_author_branch", "ai")),
+            human_handler=human_handler,
         )
 
     # Spawn one persistent sandbox per AnalystWorkerAgent and give it the registry

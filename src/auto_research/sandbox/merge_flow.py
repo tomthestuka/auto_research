@@ -102,6 +102,59 @@ def check_toolkit_git_identity() -> None:
         )
 
 
+def _resolve_tool_author_branch() -> str:
+    """The branch the runtime authors tools on directly (CLAUDE.md §9.9; default ``ai``)."""
+    return str(_orchestration_config().get("tool_author_branch", "ai"))
+
+
+def _current_branch(root: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def _is_dirty(root: Path) -> bool:
+    return bool(
+        subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+    )
+
+
+def check_toolkit_branch_clean(root: Path | None = None, branch: str | None = None) -> None:
+    """Launch-time preflight (no LLM): assert ``research_toolkit`` is on the authoring branch
+    and has a clean working tree (CLAUDE.md §9.9, step 7).
+
+    Direct-branch authoring commits straight onto ``branch`` (default ``ai``) in
+    ``toolkit_root``. A wrong branch would commit authored tools to the wrong place; a dirty
+    tree means a **terminal** authoring failure left edits behind (we never reset — §9.4) and
+    the human must inspect/clean before the next run, lest unrelated changes get swept into the
+    next atomic commit. Tolerant when ``root`` isn't a git checkout (mirrors
+    :func:`check_toolkit_git_identity`) so it only bites a real configured run. Prints precise
+    remediation so the aggregated preflight error is actionable.
+    """
+    root = Path(root) if root is not None else _resolve_toolkit_root()
+    branch = branch or _resolve_tool_author_branch()
+    if not (root / ".git").exists():
+        return  # not a git checkout — check_toolkit_git_identity already reports this
+    current = _current_branch(root)
+    if current != branch:
+        raise RuntimeError(
+            f"research_toolkit ({root}) is on branch {current!r}, not the authoring branch "
+            f"{branch!r}. Switch before running, e.g.:\n  git -C {root} checkout {branch}"
+        )
+    if _is_dirty(root):
+        raise RuntimeError(
+            f"research_toolkit ({root}) has uncommitted changes on {branch!r}. A prior tool "
+            f"authoring may have failed terminally and left edits for you to inspect (§9.9). "
+            f"Review and clean before the next run:\n"
+            f"  git -C {root} status\n"
+            f"  git -C {root} restore . && git -C {root} clean -fd   # discard, if appropriate"
+        )
+
+
 def _resolve_coder_model() -> str:
     """Resolve the model id for the ``coder`` role from config (no hardcoded id, §6)."""
     from auto_research.models import resolve
@@ -398,6 +451,7 @@ async def propose_and_pr(
     gate_rework_cap: int | None = None,
     review_rework_cap: int | None = None,
     max_turns: int | None = None,
+    direct_branch: str | None = None,
     worktree_factory: Callable[[Path, Path, str], Path] | None = None,
     sdk_client_factory: Callable[[Any], Any] | None = None,
     approve_edit: Callable[..., str] | None = None,
@@ -409,6 +463,11 @@ async def propose_and_pr(
     its real sha. ``failed`` / ``needs_human`` ⇒ no commit and the lead raises to the human
     (§9.7). Raises :class:`HumanInputRequired` if the author needs a human and none is wired
     (headless fail-safe).
+
+    ``direct_branch`` selects runtime authoring mode (§9.9): when set, the author works in
+    ``toolkit_root`` on that ambient branch (default ``ai``, asserted clean) instead of an
+    isolated worktree, and a terminal failure leaves the tree dirty for the human. ``None``
+    keeps the isolated-worktree behaviour (tests/future use).
 
     ``colead`` is the GPT co-lead reviewer (an ``AnalystColeadAgent``); when ``None`` the
     default ``run_review`` builds one from config, routed to a member whose provider differs
@@ -434,8 +493,18 @@ async def propose_and_pr(
     sdk_client_factory = sdk_client_factory or _default_sdk_client_factory
     approve_edit = approve_edit or _DEFAULT_APPROVE_EDIT
 
-    branch = f"tool/{tool_spec.proposed_tool_name}-{uuid.uuid4().hex[:8]}"
-    worktree = worktree_factory(toolkit_root, worktree_base, branch)
+    # Direct-branch mode (runtime authoring, §9.9): the author works in ``toolkit_root`` on the
+    # ambient ``ai`` branch instead of an isolated worktree. The runtime is passive about
+    # checkout — it asserts the precondition (also enforced at launch by the preflight) and
+    # never switches branches. On terminal failure the dirty tree is left for the human (no
+    # reset). The isolated-worktree path stays the default for tests + future use.
+    if direct_branch is not None:
+        check_toolkit_branch_clean(toolkit_root, direct_branch)
+        branch = direct_branch
+        worktree = toolkit_root
+    else:
+        branch = f"tool/{tool_spec.proposed_tool_name}-{uuid.uuid4().hex[:8]}"
+        worktree = worktree_factory(toolkit_root, worktree_base, branch)
 
     structure_context = _build_structure_context(toolkit_root)
     system_prompt = load_prompt("coder")

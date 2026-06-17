@@ -15,7 +15,8 @@ One module per logical message family:
 - `search.py` — literature search messages.
 - `analysis.py` — analyst task/report messages.
 - `review.py` — reviewer verdicts.
-- `toolspec.py` — Phase-2 tool-authoring brief (`ToolSpec`).
+- `toolspec.py` — Phase-2 tool-authoring brief (`ToolSpec`) + the lead's
+  `AuthoringDecision`.
 - `merge.py` — Phase-2 tool-authoring flow results (gate report, co-lead review,
   `propose_and_pr` outcome).
 
@@ -197,3 +198,6 @@ carried by **reference** (`FigureRef`), never embedded
   message bodies identify the sender as `"<asked_by> (<model>)"`.
 - 2026-06-16 — Phase 2 step 6: `ToolReviewVerdict` gained `commit_summary` — the co-lead's
   one-line commit subject used by `merge_flow.approve_edit` (fallback: tool name).
+- 2026-06-16 — Phase 2 step 7: added `AuthoringDecision` (`should_author`, `tool_spec`,
+  `rationale`) in `toolspec.py` — the analyst lead's structured decision over a worker's
+  `tool_request`; consensus (not the LLM) acts on it via `merge_flow.propose_and_pr`.

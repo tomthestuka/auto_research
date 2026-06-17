@@ -279,3 +279,66 @@ def test_approve_edit_stages_exactly_gated_files_and_returns_sha(tmp_path):
     assert _git_out(repo, "log", "-1", "--pretty=%s").strip() == "Add my_tool to demo_utils"
     # scratch.txt is still untracked — it was neither staged nor committed.
     assert "scratch.txt" in _git_out(repo, "status", "--porcelain")
+
+
+# ── direct-branch authoring mode + the branch/clean preflight (§9.9, step 7) ──────
+
+
+def test_check_toolkit_branch_clean_passes_on_correct_clean_branch(tmp_path):
+    from auto_research.sandbox.merge_flow import check_toolkit_branch_clean
+
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    check_toolkit_branch_clean(repo, "ai")  # no raise
+
+
+def test_check_toolkit_branch_clean_rejects_wrong_branch(tmp_path):
+    from auto_research.sandbox.merge_flow import check_toolkit_branch_clean
+
+    repo = _toolkit_repo(tmp_path)  # on the default branch, not "ai"
+    with pytest.raises(RuntimeError, match="not the authoring branch"):
+        check_toolkit_branch_clean(repo, "ai")
+
+
+def test_check_toolkit_branch_clean_rejects_dirty_tree(tmp_path):
+    from auto_research.sandbox.merge_flow import check_toolkit_branch_clean
+
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    (repo / "demo_utils" / "lib" / "leftover.py").write_text("x = 1\n")  # terminal-failure leftover
+    with pytest.raises(RuntimeError, match="uncommitted changes"):
+        check_toolkit_branch_clean(repo, "ai")
+
+
+def test_check_toolkit_branch_clean_tolerant_when_not_a_repo(tmp_path):
+    from auto_research.sandbox.merge_flow import check_toolkit_branch_clean
+
+    check_toolkit_branch_clean(tmp_path / "nope", "ai")  # not a git checkout → no raise
+
+
+def test_direct_branch_mode_uses_toolkit_root_as_worktree(tmp_path):
+    """In direct mode the author works in toolkit_root on `ai`; approve_edit sees toolkit_root."""
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    seen = {}
+
+    def approve(worktree, *, message):
+        seen["worktree"] = worktree
+        seen["message"] = message
+        return "directsha"
+
+    result, _ = _run(
+        _spec(), toolkit_root=repo, worktree_base=tmp_path / "unused",
+        direct_branch="ai", approve_edit=approve,
+    )
+
+    assert result.status == "committed"
+    assert result.branch == "ai"
+    assert result.commit_sha == "directsha"
+    assert seen["worktree"] == repo  # not an isolated worktree
+
+
+def test_direct_branch_mode_rejects_wrong_branch(tmp_path):
+    repo = _toolkit_repo(tmp_path)  # still on the default branch, not "ai"
+    with pytest.raises(RuntimeError, match="not the authoring branch"):
+        _run(_spec(), toolkit_root=repo, worktree_base=tmp_path / "unused", direct_branch="ai")

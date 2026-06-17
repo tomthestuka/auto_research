@@ -56,7 +56,9 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `PreflightError`.
 - `auto_research.observations.load_observations_config()` loads generic
   mission observation locations from config; mission names are not hardcoded in
-  agent wrappers.
+  agent wrappers. `read_catalog(mission)` / `local_obsids(mission, min_level=…)` read the
+  per-mission data catalog (`<obs_db_path>/catalog.json`, a `DataCatalog`/`CatalogEntry`/
+  `DataProduct` model) — the read side of the data inventory the authored toolkit tools write.
 
 ## Dependencies
 - External: `pydantic`, `langgraph`, `langsmith`, provider SDKs (`anthropic`,
@@ -113,3 +115,9 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - 2026-06-16 — Phase 2 step 6: registered `sandbox.merge_flow.check_toolkit_git_identity` in
   the default preflight, so a missing git commit identity in `research_toolkit` is caught at
   launch rather than failing the runtime's atomic commit mid-flow.
+- 2026-06-16 — Phase 2 step 7: `observations.py` gained the read-side data catalog
+  (`DataCatalog`/`CatalogEntry`/`DataProduct`, `read_catalog`, `local_obsids`,
+  `catalog_path`) for `<obs_db_path>/catalog.json` — what's local, processing level, and
+  product provenance (params used to obtain level-3 products). Authored toolkit tools write it;
+  the JSON contract is documented in `prompts/coder.md`. Also registered
+  `check_toolkit_branch_clean` in the default preflight (branch `ai` + clean tree).

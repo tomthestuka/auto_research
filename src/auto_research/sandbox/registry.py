@@ -31,10 +31,20 @@ class ToolSpec(TypedDict):
     args_schema: dict
 
 
-# Names of top-level packages in research_toolkit that expose TOOL_MANIFEST.
-_MANIFEST_MODULES: list[str] = [
-    "xspec_utils",
-]
+def _discover_manifest_packages(root: Path) -> list[str]:
+    """Find every ``<domain>_utils`` package under ``root`` that could expose TOOL_MANIFEST.
+
+    Convention (CLAUDE.md §9.2): each toolkit is a top-level ``*_utils`` package directory
+    with an ``__init__.py``. Discovered dynamically so a newly authored toolkit (e.g.
+    ``heasarc_utils``) is picked up on :meth:`ToolkitRegistry.reload` with no code change.
+    """
+    if not root.is_dir():
+        return []
+    return sorted(
+        p.name
+        for p in root.iterdir()
+        if p.is_dir() and p.name.endswith("_utils") and (p / "__init__.py").exists()
+    )
 
 
 class ToolkitRegistry:
@@ -46,6 +56,8 @@ class ToolkitRegistry:
         self._mcp_tools: dict[str, str] = {}  # kind -> description
         self._mcp_schemas: dict[str, dict] = {}  # kind -> input JSON schema
         self._disabled: set[str] = set(disabled_tools or [])
+        # The manifest packages imported on the last load() — reused by reload().
+        self._manifest_packages: list[str] = []
         self._loaded = False
 
     # ------------------------------------------------------------------
@@ -53,7 +65,7 @@ class ToolkitRegistry:
     # ------------------------------------------------------------------
 
     def load(self) -> None:
-        """Import TOOL_MANIFEST from every known package. Idempotent."""
+        """Import TOOL_MANIFEST from every discovered ``*_utils`` package. Idempotent."""
         if self._loaded:
             return
         root_str = str(self._root)
@@ -61,7 +73,8 @@ class ToolkitRegistry:
         if inserted:
             sys.path.insert(0, root_str)
         try:
-            for pkg in _MANIFEST_MODULES:
+            self._manifest_packages = _discover_manifest_packages(self._root)
+            for pkg in self._manifest_packages:
                 try:
                     mod = importlib.import_module(pkg)
                     manifest: dict[str, ToolSpec] = getattr(mod, "TOOL_MANIFEST", {})
@@ -87,6 +100,42 @@ class ToolkitRegistry:
         for name in self._disabled:
             self._tools.pop(name, None)
         self._loaded = True
+
+    def reload(self) -> None:
+        """Re-import toolkit manifests to pick up newly committed/authored tools (§9.10 step 7).
+
+        Used after the runtime authors a tool (``merge_flow`` commits to branch ``ai``): the
+        manifest is pure data discovered in the orchestration env, so reloading it surfaces a
+        new ``extend_existing`` entry or a brand-new ``*_utils`` package to analyst workers.
+        Drops the toolkit tool index and re-runs :meth:`load`, force-reimporting any already
+        cached manifest modules (Python would otherwise serve the stale ``skills/__init__``).
+        The MCP index and the ``disabled`` filter are preserved.
+        """
+        import importlib
+
+        importlib.invalidate_caches()
+        # Force a fresh import of every cached manifest package + its skills submodule, so an
+        # edited TOOL_MANIFEST is re-read rather than served from sys.modules.
+        candidates = set(self._manifest_packages) | set(_discover_manifest_packages(self._root))
+        root_str = str(self._root)
+        inserted = root_str not in sys.path
+        if inserted:
+            sys.path.insert(0, root_str)
+        try:
+            for pkg in candidates:
+                for mod_name in (f"{pkg}.skills", pkg):
+                    mod = sys.modules.get(mod_name)
+                    if mod is not None:
+                        try:
+                            importlib.reload(mod)
+                        except Exception:  # noqa: BLE001 — a broken in-progress edit must not crash discovery
+                            pass
+        finally:
+            if inserted:
+                sys.path.remove(root_str)
+        self._tools = {}
+        self._loaded = False
+        self.load()
 
     def load_mcp(self, client: Any) -> None:
         """Index tools from a started MCPToolClient into the registry."""

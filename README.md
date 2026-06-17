@@ -7,13 +7,15 @@ results against prior work.
 > **Status: Phase 1 — COMPLETE. Phase 2 (tool authoring) — active.**
 > Phase 1 delivers a full agent team running real LLM calls end-to-end; verified
 > 2026-06-12 by a live Cyg X-1 joint-fit run that produced both report handles
-> (machine JSONL + compiled LaTeX/PDF). Phase 2 steps 0-6 are built: off-repo
+> (machine JSONL + compiled LaTeX/PDF). Phase 2 steps 0-7 are built: off-repo
 > sandbox scratch, `ToolSpec`, the `merge_flow` author harness, the deterministic
 > gate, the provider-decorrelated GPT co-lead review, the raise-to-human channel
-> (CLI/Slack/WhatsApp connectors + honest-failure handling), and the `approve_edit` atomic
-> commit (one gated commit per tool on a branch; the runtime never merges). Vector
-> retrieval, durable HITL suspend/resume, and the lead-scientist idea-generation group remain
-> documented stubs.
+> (CLI/Slack/WhatsApp connectors + honest-failure handling), the `approve_edit` atomic
+> commit (one gated commit per tool on a branch; the runtime never merges), and the
+> lead-driven authoring/resume loop (a worker's `tool_request` → the lead's `decide_authoring`
+> → an atomic commit on branch `ai` → registry reload + sandbox restart → workers rerun on the
+> new tool). Vector retrieval, durable HITL suspend/resume, and the lead-scientist
+> idea-generation group remain documented stubs.
 
 Coding agents: read **`CLAUDE.md`** before doing anything. It is the single source of
 truth for how this project is built.
@@ -195,7 +197,7 @@ Statuses: **Done** = built & documented · **Todo** = in scope, not yet built.
 | 4 | Done | **Provider-decorrelated review** (`sandbox/review.py::make_review_hook`, now the default `run_review` hook) — the GPT `analyst_colead` reviews the authored diff bundle + gate report and judges the Layer-B checks (code-review only), routed by `select_decorrelated_member` to a provider ≠ the Claude author's (raises if none); investigates the worktree/web via a read-only provider before its `ToolReviewVerdict`. `propose_and_pr` gains a `colead` param. | Review runs on a different provider; a planted subtle bug is caught (rejected → L3 rework) or escalated, not rubber-stamped. |
 | 5 | Done | **Raise-to-human** — `HumanQuery`/`HumanResponse` + the injectable `human_handler` (`auto_research.hitl`); a shared `ask_human` tool for every ReAct role + the author (blocking direct-handler; durable `interrupt()`/checkpointer deferred §12); CLI/Slack/WhatsApp connectors with an auto-detecting CLI-vs-library resolver; a launch-time channel ping in the preflight; and `failed`/`needs_human` routed around the reviewer to a no-fabrication finalize. | A blocked role raises and the run blocks for a human; an honest FAILED carries no penalty; headless raises `HumanInputRequired`. |
 | 6 | Done | **`approve_edit()` atomic commit** (`sandbox/merge_flow.py`) — gate-pass ∧ co-lead review-pass → one atomic commit per tool on the branch; stages **exactly** `gate.collect_targets` (explicit-path, never `git add -A`); commit subject = the co-lead's `commit_summary` (fallback: tool name); `propose_and_pr` returns the real `commit_sha`. The gate now tracks non-`.py` files under a `*_utils` package (shell scripts get a vocabulary scan; binaries hard-fail, §9.5). New preflight `check_toolkit_git_identity`. Runtime never merges. | Approved tool lands as one commit; only gated files are staged; human reruns the human-half and merges/reverts cleanly. |
-| 7 | Todo | **End-to-end** — missing-capability question triggers authoring through the full flow; tool lands on a branch; human merges; analysis re-runs. | Full Phase 2 flow exercised live via a `test_full_suite.py` sibling. |
+| 7 | Done | **Lead-driven authoring/resume** — a worker's `tool_request` drives the lead's `decide_authoring()` (browse `lib/` read-only → one finalised `ToolSpec`); consensus (`DebateToConverge`) issues `merge_flow.propose_and_pr(direct_branch="ai")` itself (the LLM never issues git), then on a committed tool reloads the registry (dynamic `*_utils` discovery + `reload()`), restarts sandboxes, augments the task with provenance, and reruns workers — bounded by `tool_author_cap`, not `max_rounds`. New `AuthoringDecision` schema; direct-branch `ai` mode + `check_toolkit_branch_clean` preflight; per-mission data catalog read side (`observations.read_catalog`); `prompts/coder.md` instructs a package `README.md` + the catalog contract. | Missing-capability analysis authors the tool it needs on branch `ai` and finishes on it; exercised live via the `usage_example.ipynb` "test code authoring" run (IXPE P1). |
 
 Current role/tool surfaces:
 
@@ -204,7 +206,7 @@ Current role/tool surfaces:
 | Librarian I/O | `SourceToolProvider`: arXiv, ADS, Tavily web, and local text search. | Real source/document input can produce structured search results or memory abstractions. |
 | Local retrieval | Pure-Python `text_search()` over SQLite; `vector_search()` remains a stub. | Returns local paper paths from the DB; no runtime LLM role. |
 | Analyst worker | `SandboxToolProvider`: `research_toolkit` manifest tools + MCP tools in a persistent sandbox. | `analyze()` chains load→fit→run→plot or other tools, self-corrects in-loop, and reports grounded results. |
-| Analyst lead | `ReadOnlyToolProvider`: run artifacts, figures, memory, papers, full `research_toolkit` source, optional web search. | Adjudicates debate, triages `ToolSpec`, and answers author clarifications. |
+| Analyst lead | `ReadOnlyToolProvider`: run artifacts, figures, memory, papers, full `research_toolkit` source, optional web search. | Adjudicates debate, triages `ToolSpec`, decides authoring (`decide_authoring`), and answers author clarifications. |
 | Analyst co-lead | `ReadOnlyToolProvider`: the authored toolkit worktree + optional web search (`include_text_search=False`). | Provider-decorrelated **code review** of one authored tool — brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs → `ToolReviewVerdict`. |
 | Reviewer | `ReadOnlyToolProvider`: run artifacts, figures, papers, and memory. | Dispatches/reviews work, requests capped rework, and composes final report handles. |
 

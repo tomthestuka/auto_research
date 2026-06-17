@@ -181,6 +181,27 @@ def test_tool_spec_round_trips_and_auto_ids():
     assert restored.replication_tolerance is None  # optional, lead-finalised
 
 
+def test_authoring_decision_round_trips():
+    from auto_research.schemas import AuthoringDecision
+
+    spec = ToolSpec(
+        science_context="need a PCUBE polarization tool",
+        expected_behavior="run xpbin PCUBE and return the Stokes table",
+        proposed_tool_name="pcube",
+        target_domain="xspec_utils",
+        disposition="extend_existing",
+        validation_data=[{"mission": "IXPE", "obsid": "01002901"}],
+    )
+    decision = AuthoringDecision(should_author=True, tool_spec=spec, rationale="exists in lib/, surface it")
+    restored = AuthoringDecision.model_validate(decision.model_dump(mode="json"))
+    assert restored.should_author is True
+    assert restored.tool_spec is not None and restored.tool_spec.proposed_tool_name == "pcube"
+
+    # Declining to author needs no tool_spec.
+    no = AuthoringDecision(should_author=False, rationale="worker mis-called an existing tool")
+    assert no.tool_spec is None
+
+
 def test_tool_spec_requires_a_validation_dataset():
     with pytest.raises(ValidationError):
         ToolSpec(

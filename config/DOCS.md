@@ -91,6 +91,13 @@ role or swapping a provider is a YAML edit; no Python change.
 - `orchestration.yaml.tool_author_review_rework_cap` — how many times the author is
   re-driven after a co-lead review rejection (L3). All three are *pathology backstops*,
   not workflow budgets (like the ReAct caps).
+- `orchestration.yaml.tool_author_branch` — the branch in `toolkit_root` the runtime commits
+  authored tools onto directly (default `ai`; it never merges to master — §9.9). The launch
+  preflight (`check_toolkit_branch_clean`) asserts `research_toolkit` is on this branch with a
+  clean tree. Consumed by `graph.runtime` → `DebateToConverge` → `merge_flow.propose_and_pr`.
+- `orchestration.yaml.tool_author_cap` — max tool-authoring attempts per analysis (default 3),
+  bounding the acquire→reduce→analyse dependency chain; a pathology backstop, not a budget.
+  Consumed by `DebateToConverge`.
 - `orchestration.yaml.human_channel` — default raise-to-human connector for an unattended
   (library/non-TTY) run with no explicit channel: `cli|slack|whatsapp|none`. Default `none`
   (headless) so unattended runs and tests never block; an interactive CLI auto-detects the
@@ -131,3 +138,5 @@ role or swapping a provider is a YAML edit; no Python change.
   semantics.
 - 2026-06-15 — Phase 2 step 5 added `human_channel` + `human_channel_ping_timeout_s` to
   `orchestration.yaml` (the raise-to-human default channel and launch-ping timeout).
+- 2026-06-16 — Phase 2 step 7 added `tool_author_branch` (default `ai`) and `tool_author_cap`
+  (default 3) to `orchestration.yaml` for runtime tool authoring/resume.

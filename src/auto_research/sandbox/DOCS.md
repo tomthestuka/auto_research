@@ -535,3 +535,12 @@ the hook mapping a fake-model verdict — no live LLM).
   is extension-agnostic, `scan_text_source` runs the vocabulary scan on text files (e.g. shell
   scripts), and binary/undecodable files hard-fail (§9.5) through the rework loop. Deterministic
   coverage added in `tests/test_merge_flow.py`, `tests/test_gate.py`, `tests/test_preflight.py`.
+- 2026-06-16 — Phase 2 step 7: `ToolkitRegistry` now discovers `*_utils` packages dynamically
+  (`_discover_manifest_packages`, replacing the hardcoded list) and gained `reload()`
+  (`importlib.invalidate_caches` + reload each `<pkg>.skills`/`<pkg>`, preserving the MCP index
+  and `disabled` filter) so a newly committed/authored tool is surfaced to workers.
+  `merge_flow.propose_and_pr` gained `direct_branch`: runtime authoring works in `toolkit_root`
+  on the ambient branch (default `ai`, asserted clean) instead of an isolated worktree, leaving
+  a dirty tree on terminal failure for the human; new `check_toolkit_branch_clean` (registered
+  in the preflight) enforces branch+clean at launch with remediation. Coverage:
+  `tests/test_registry.py`, `tests/test_merge_flow.py`, `tests/test_preflight.py`.

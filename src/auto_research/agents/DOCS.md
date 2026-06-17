@@ -230,3 +230,8 @@ Role wrappers:
 - 2026-06-16 — both tool providers and `execute_ask_human` gained a `model` param, set on the
   emitted `HumanQuery` so connector bodies show the sender as `"<role> (<model>)"`; call sites
   pass `_model_label(...)` (worker, reviewer, lead).
+- 2026-06-16 — Phase 2 step 7: `AnalystLeadAgent` gained `decide_authoring(reports) ->
+  AuthoringDecision` — using its read-only `toolkit_root` browse loop, it sets disposition
+  (extend-vs-new) and returns one finalised `ToolSpec` to author (or declines). Consensus, not
+  the lead, then issues `merge_flow.propose_and_pr` (§9.9). `judge_convergence`/`adjudicate`/
+  `clarify_for_author` are unchanged and cannot author.

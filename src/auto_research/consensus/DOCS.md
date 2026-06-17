@@ -46,7 +46,15 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `analyze(task, *, peer_reports=()) -> AnalystReport`.
 - Lead objects for analyst debate must provide
   `judge_convergence(task, reports, *, round_index, max_rounds) ->
-  ReviewVerdict` and `adjudicate(task, reports) -> AnalystReport`.
+  ReviewVerdict`, `adjudicate(task, reports) -> AnalystReport`, and (for the
+  authoring path) `decide_authoring(reports) -> AuthoringDecision`.
+- Authoring/resume (Phase 2 step 7): when ≥1 worker report carries a `tool_request` and
+  authoring is wired (`toolkit_root` set, with `direct_branch`), the strategy asks the lead
+  to `decide_authoring`; on `should_author` it calls `merge_flow.propose_and_pr(direct_branch=…)`
+  itself (the LLM never issues git — §9.9). A committed tool triggers `registry.reload()` +
+  per-worker `sandbox.restart()` + a provenance-augmented task + a worker rerun (a *resume*,
+  bounded by `tool_author_cap`, not counted against `max_rounds`); `should_author=false` and
+  non-committed results fall through to ordinary debate (honest failure, no fabrication).
 - Worker objects for IO debate (`IOAbstractionWorkerLike`) must provide
   `abstract_document(document, *, peer_abstracts=()) -> MemoryRecord`.
 - Lead objects for IO debate (`IOAbstractionLeadLike`) must provide
@@ -65,17 +73,19 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
 - `WorkerLike` — protocol for analyst workers used by `DebateToConverge`. Method:
   `analyze()`.
 - `LeadLike` — protocol for analyst lead used by `DebateToConverge`. Methods:
-  `judge_convergence()` and `adjudicate()`.
+  `judge_convergence()`, `adjudicate()`, and `decide_authoring()`.
 - `ConsensusStrategy` — protocol for swappable analyst consensus policies. Method:
   `run()`.
-- `DebateToConverge(max_rounds=3, monitor=None, registry=None, tool_retry_cap=3)` —
-  bounded analyst debate strategy. Each worker gathers evidence inside
-  `AnalystWorkerAgent.analyze()`; the strategy injects a truncated shared summary
-  from each worker's `last_tool_results` before later rounds and deduplicates
-  figures onto the lead's final report so they flow to the reviewer.
-  Method: `run(workers, lead, task)` → `AnalystReport`.
-  Internals: `_augment_with_peer_tools(workers, task)` → updated `AnalysisTask`;
-  `_deduplicated(figures)` → deduped by path.
+- `DebateToConverge(max_rounds=3, monitor=None, registry=None, tool_retry_cap=3,
+  tool_author_cap=3, toolkit_root=None, worktree_base=None, direct_branch=None,
+  human_handler=None, colead=None)` — bounded analyst debate strategy. Each worker gathers
+  evidence inside `AnalystWorkerAgent.analyze()`; the strategy injects a truncated shared
+  summary from each worker's `last_tool_results` before later rounds and deduplicates figures
+  onto the lead's final report so they flow to the reviewer. When `toolkit_root` is set it also
+  runs the authoring/resume path (above). Method: `run(workers, lead, task)` → `AnalystReport`.
+  Internals: `_initial_reports(workers, task)`; `_maybe_author_and_resume(...)` →
+  `(resumed, reports, task, author_budget)`; `_augment_with_peer_tools(workers, task)`;
+  module-level `_augment_with_authored_tool(task, tool_spec, result)`; `_deduplicated(figures)`.
 - `IOAbstractionWorkerLike` — protocol for IO abstraction workers. Method:
   `abstract_document()`.
 - `IOAbstractionLeadLike` — protocol for IO abstraction lead. Methods:
@@ -92,3 +102,10 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `last_tool_results` summaries, final figure propagation, and `IODebateToConverge` for
   PDF memory abstraction. `registry`/`tool_retry_cap` remain accepted but unused.
 - 2026-06-12 — Compacted changelog and removed stale consensus-owned tool-execution text.
+- 2026-06-16 — Phase 2 step 7: `DebateToConverge` drives lead-driven tool authoring/resume.
+  New optional fields (`tool_author_cap`, `toolkit_root`, `worktree_base`, `direct_branch`,
+  `human_handler`, `colead`); `LeadLike` gained `decide_authoring`; `run()` restructured with a
+  separate `debate_round`/`author_budget` and a `_maybe_author_and_resume` helper. A committed
+  tool reloads the registry, restarts sandboxes, augments the task with provenance, and reruns
+  workers — bounded by `tool_author_cap`, not counted against `max_rounds`. Phase-1 behaviour is
+  unchanged when `toolkit_root` is unset. Coverage: `tests/test_consensus_authoring.py`.

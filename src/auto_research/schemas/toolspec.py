@@ -95,3 +95,20 @@ class ToolSpec(MessageModel):
     replication_tolerance: float | None = None
 
     notes: str | None = None
+
+
+class AuthoringDecision(MessageModel):
+    """The analyst lead's structured decision on whether to author a tool now (§9.3).
+
+    Returned by ``AnalystLeadAgent.decide_authoring`` after the lead browses the full
+    ``lib/`` source (read-only) for the gap(s) a worker raised. The lead — not the weaker
+    Sonnet coder — owns the architectural call, so the ``tool_spec`` it returns carries the
+    finalised ``disposition``/``target_domain`` (extend an existing package vs scaffold a new
+    one) and any tightened checks. Consensus (``DebateToConverge``), not the LLM, then issues
+    the actual ``merge_flow.propose_and_pr`` call (CLAUDE.md §9.9: code issues git, never the
+    model). One tool per resume cycle — dependency-ordered (acquire → reduce → analyse).
+    """
+
+    should_author: bool  # False when the "gap" was really a mis-called existing tool
+    tool_spec: ToolSpec | None = None  # the single refined brief to author; None iff not authoring
+    rationale: str = ""
