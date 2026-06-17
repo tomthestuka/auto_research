@@ -84,6 +84,74 @@ def ask_human_tool_def() -> dict:
     }
 
 
+# ----------------------------------------------------------------------------
+# Local data catalog — a read-only tool for the analyst worker + lead (§9.10 step 7).
+# ----------------------------------------------------------------------------
+
+DATA_CATALOG_TOOL = "data_catalog"
+
+
+def data_catalog_tool_def() -> dict:
+    """The provider-neutral definition for the shared read-only ``data_catalog`` tool."""
+    return {
+        "name": DATA_CATALOG_TOOL,
+        "description": (
+            "List locally-available observation data for a mission — which ObsIDs are already "
+            "on disk, their processing level (HEASARC supplies up to level 2), and the data "
+            "products produced from them — read from the mission data catalog. Use this BEFORE "
+            "requesting data acquisition so you only acquire what is genuinely missing. Omit "
+            "'mission' to list the configured missions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mission": {
+                    "type": "string",
+                    "description": "Mission key, e.g. 'ixpe', 'nicer', 'nustar'.",
+                },
+                "min_level": {
+                    "type": "integer",
+                    "description": "Only count ObsIDs available at or above this processing level.",
+                },
+            },
+        },
+    }
+
+
+async def execute_data_catalog(arguments: Mapping[str, Any]) -> ToolOutcome:
+    """Read the per-mission local data catalog (``<obs_db_path>/catalog.json``).
+
+    A read-only window onto what is already local so a role requests *acquire* only for
+    genuinely-missing data (CLAUDE.md §9.10). Absent catalog ⇒ "(no local data catalogued)".
+    """
+    from auto_research.observations import load_observations_config, read_catalog
+
+    mission = str(arguments.get("mission") or "").strip()
+    if not mission:
+        try:
+            cfg = load_observations_config()
+        except Exception as exc:  # noqa: BLE001
+            return ToolOutcome(text=f"could not load observations config: {exc}", is_error=True)
+        return ToolOutcome(text="configured missions: " + (", ".join(cfg.missions) or "(none)"))
+
+    try:
+        catalog = read_catalog(mission)
+    except Exception as exc:  # noqa: BLE001 — unknown mission / malformed catalog
+        return ToolOutcome(text=f"{type(exc).__name__}: {exc}", is_error=True)
+
+    raw_min = arguments.get("min_level")
+    min_level = int(raw_min) if raw_min is not None else None
+    lines: list[str] = []
+    for obsid in catalog.obsids():
+        if min_level is not None and not catalog.has(obsid, min_level=min_level):
+            continue
+        entry = catalog.entries[obsid]
+        products = ", ".join(sorted({p.kind for p in entry.products})) or "(none)"
+        lines.append(f"- {obsid}: max_level={entry.max_level}, products=[{products}]")
+    body = "\n".join(lines) or "(no local data catalogued)"
+    return ToolOutcome(text=f"Local {mission} data ({len(lines)} ObsIDs):\n{body}")
+
+
 async def execute_ask_human(
     human_handler: Any, asked_by: str, arguments: Mapping[str, Any], *, model: str = ""
 ) -> ToolOutcome:
@@ -194,11 +262,14 @@ class SandboxToolProvider:
 
     def tool_definitions(self) -> list[dict]:
         defs = list(self.registry.tool_definitions())
+        defs.append(data_catalog_tool_def())
         if self.human_handler is not None:
             defs.append(ask_human_tool_def())
         return defs
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
+        if name == DATA_CATALOG_TOOL:
+            return await execute_data_catalog(arguments)
         if name == ASK_HUMAN_TOOL:
             return await execute_ask_human(
                 self.human_handler, self.asked_by, arguments, model=self.model
@@ -295,6 +366,7 @@ class ReadOnlyToolProvider:
         retrieval: Any | None = None,
         web_source: Any | None = None,
         include_text_search: bool = True,
+        include_data_catalog: bool = False,
         human_handler: Any | None = None,
         asked_by: str = "agent",
         model: str = "",
@@ -302,6 +374,9 @@ class ReadOnlyToolProvider:
     ) -> None:
         self.roots = [Path(r).resolve() for r in roots]
         self.retrieval = retrieval
+        # The analyst lead (not the reviewer) gets the read-only data_catalog tool so it can
+        # check local data availability before deciding to author an acquire tool (§9.10).
+        self.include_data_catalog = include_data_catalog
         # When a human_handler is wired, expose the shared ask_human tool (§9.7).
         self.human_handler = human_handler
         self.asked_by = asked_by
@@ -365,6 +440,8 @@ class ReadOnlyToolProvider:
                     },
                 }
             )
+        if self.include_data_catalog:
+            definitions.append(data_catalog_tool_def())
         if self.human_handler is not None:
             definitions.append(ask_human_tool_def())
         return definitions
@@ -374,6 +451,8 @@ class ReadOnlyToolProvider:
         return any(resolved == root or root in resolved.parents for root in self.roots)
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
+        if name == DATA_CATALOG_TOOL:
+            return await execute_data_catalog(arguments)
         if name == ASK_HUMAN_TOOL:
             return await execute_ask_human(
                 self.human_handler, self.asked_by, arguments, model=self.model

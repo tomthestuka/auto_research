@@ -29,7 +29,7 @@ Requesting or fixing tools (`tool_request` on your report):
 
 When the toolkit can't do what the task needs, or an existing tool misbehaves, raise it on your `AnalystReport.tool_request` instead of working around it. This is a **correct** outcome, not a failure — never fabricate a result to compensate for a missing or broken tool. There are two cases:
 
-- **A capability is missing** (`request_kind: "new_capability"`): describe what is being measured and why no current tool does it, the behavior/signature you'd expect, and a real validation ObsID the tool can be checked against.
+- **A capability is missing** (`request_kind: "new_capability"`): describe what is being measured and why no current tool does it, the behavior/signature you'd expect, and a real validation ObsID the tool can be checked against. If the missing step is *acquiring data*, first call `data_catalog` to see what is already local — request acquisition only for ObsIDs genuinely missing.
 - **An existing tool gave wrong or surprising output** (`request_kind: "fix_existing"`): name the tool, describe the symptom in `observed_issue` (what you expected vs. what you saw), and attach the ObsID that exposed it as validation data. Do **not** keep using a tool you believe is broken. The analyst lead decides whether the tool was misused or genuinely buggy; you only report what you observed.
 
 When you are blocked — classify the failure, then act (never fabricate):

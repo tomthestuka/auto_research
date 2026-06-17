@@ -80,3 +80,47 @@ def test_read_catalog_malformed_raises(tmp_path):
     (obs_db / "catalog.json").write_text("{ not valid json")
     with pytest.raises(ValueError, match="malformed data catalog"):
         read_catalog("ixpe", config_path=cfg)
+
+
+# ── data_catalog ReAct tool (worker + lead) ─────────────────────────────────
+
+
+def test_data_catalog_tool_lists_local_obsids(monkeypatch):
+    import asyncio
+
+    from auto_research.agents import react
+    from auto_research.observations import CatalogEntry, DataCatalog, DataProduct
+
+    fake = DataCatalog(mission="ixpe", entries={
+        "01002901": CatalogEntry(
+            obsid="01002901", max_level=3, levels_present=[1, 2, 3],
+            products=[DataProduct(kind="level2_evt", path="x"), DataProduct(kind="pcube", path="y")],
+        ),
+    })
+    monkeypatch.setattr("auto_research.observations.read_catalog", lambda mission: fake)
+
+    out = asyncio.run(react.execute_data_catalog({"mission": "ixpe"}))
+    assert not out.is_error
+    assert "01002901" in out.text
+    assert "pcube" in out.text
+
+
+def test_data_catalog_tool_exposed_on_worker_and_lead_only():
+    from auto_research.agents.react import (
+        DATA_CATALOG_TOOL,
+        ReadOnlyToolProvider,
+        SandboxToolProvider,
+    )
+
+    class _Reg:
+        def tool_definitions(self):
+            return []
+
+    worker_defs = SandboxToolProvider(_Reg(), object()).tool_definitions()
+    assert DATA_CATALOG_TOOL in {d["name"] for d in worker_defs}
+
+    lead = ReadOnlyToolProvider(roots=[], include_data_catalog=True)
+    assert DATA_CATALOG_TOOL in {d["name"] for d in lead.tool_definitions()}
+
+    reviewer = ReadOnlyToolProvider(roots=[])  # default: no catalog tool
+    assert DATA_CATALOG_TOOL not in {d["name"] for d in reviewer.tool_definitions()}

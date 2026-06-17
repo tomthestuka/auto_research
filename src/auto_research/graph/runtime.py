@@ -319,6 +319,7 @@ async def run_research(
         try:
             lead.tools = ReadOnlyToolProvider(
                 roots=lead_roots, retrieval=retrieval,
+                include_data_catalog=True,
                 human_handler=human_handler, asked_by="analyst_lead",
                 model=_model_label(lead.model) or "",
             )

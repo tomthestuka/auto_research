@@ -205,8 +205,8 @@ Current role/tool surfaces:
 |---|---|---|
 | Librarian I/O | `SourceToolProvider`: arXiv, ADS, Tavily web, and local text search. | Real source/document input can produce structured search results or memory abstractions. |
 | Local retrieval | Pure-Python `text_search()` over SQLite; `vector_search()` remains a stub. | Returns local paper paths from the DB; no runtime LLM role. |
-| Analyst worker | `SandboxToolProvider`: `research_toolkit` manifest tools + MCP tools in a persistent sandbox. | `analyze()` chains load→fit→run→plot or other tools, self-corrects in-loop, and reports grounded results. |
-| Analyst lead | `ReadOnlyToolProvider`: run artifacts, figures, memory, papers, full `research_toolkit` source, optional web search. | Adjudicates debate, triages `ToolSpec`, decides authoring (`decide_authoring`), and answers author clarifications. |
+| Analyst worker | `SandboxToolProvider`: `research_toolkit` manifest tools + MCP tools in a persistent sandbox, plus the read-only `data_catalog` tool. | `analyze()` chains load→fit→run→plot or other tools, self-corrects in-loop, and reports grounded results. |
+| Analyst lead | `ReadOnlyToolProvider`: run artifacts, figures, memory, papers, full `research_toolkit` source, the `data_catalog` tool, optional web search. | Adjudicates debate, triages `ToolSpec`, decides authoring (`decide_authoring`), and answers author clarifications. |
 | Analyst co-lead | `ReadOnlyToolProvider`: the authored toolkit worktree + optional web search (`include_text_search=False`). | Provider-decorrelated **code review** of one authored tool — brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs → `ToolReviewVerdict`. |
 | Reviewer | `ReadOnlyToolProvider`: run artifacts, figures, papers, and memory. | Dispatches/reviews work, requests capped rework, and composes final report handles. |
 

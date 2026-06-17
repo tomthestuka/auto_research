@@ -73,7 +73,7 @@ tool_author_review_rework_cap: 2
 # human swaps to this branch and merges out of band. tool_author_cap: max authoring attempts
 # per analysis — a BACKSTOP bounding the acquire→reduce→analyse dependency chain, not a budget.
 tool_author_branch: ai
-tool_author_cap: 3
+tool_author_cap: 6
 # Raise-to-human channel (§9.8). human_channel: the default connector used when a run is
 # NOT attended (library/notebook/server) and no channel is passed explicitly — one of
 # cli|slack|whatsapp|none. Kept `none` (headless) by default so unattended runs and the test

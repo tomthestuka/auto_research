@@ -234,4 +234,8 @@ Role wrappers:
   AuthoringDecision` — using its read-only `toolkit_root` browse loop, it sets disposition
   (extend-vs-new) and returns one finalised `ToolSpec` to author (or declines). Consensus, not
   the lead, then issues `merge_flow.propose_and_pr` (§9.9). `judge_convergence`/`adjudicate`/
-  `clarify_for_author` are unchanged and cannot author.
+  `clarify_for_author` are unchanged and cannot author. Added a shared read-only `data_catalog`
+  tool (`react.data_catalog_tool_def`/`execute_data_catalog`, reading
+  `observations.read_catalog`) — exposed on `SandboxToolProvider` (worker, always) and on
+  `ReadOnlyToolProvider` only when `include_data_catalog=True` (the lead, not the reviewer) — so
+  a role checks what data is already local before requesting an acquire tool.
