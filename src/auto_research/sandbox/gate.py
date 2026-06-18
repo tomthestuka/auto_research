@@ -466,10 +466,16 @@ async def _default_test_runner(worktree: Path, test_paths: list[str]) -> dict:
     env = {**base_env, "PYTHONPATH": str(worktree) + (":" + existing if existing else "")}
 
     def _run() -> tuple[int, str]:
-        proc = subprocess.run(
-            [python_exec, "-m", "pytest", "-p", "no:cacheprovider", "-q", *test_paths],
-            cwd=str(worktree), capture_output=True, text=True, env=env, timeout=900,
-        )
+        try:
+            proc = subprocess.run(
+                [python_exec, "-m", "pytest", "-p", "no:cacheprovider", "-q", *test_paths],
+                cwd=str(worktree), capture_output=True, text=True, env=env, timeout=900,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # A test that runs longer than the cap is a Layer-B *failure* (rework, then honest
+            # failure), never an exception that aborts the whole run. Keep any partial output.
+            partial = "".join(p for p in (exc.stdout, exc.stderr) if isinstance(p, str))
+            return 124, f"pytest timed out after {exc.timeout:.0f}s\n{partial}".strip()
         return proc.returncode, (proc.stdout + proc.stderr).strip()
 
     rc1, out1 = _run()

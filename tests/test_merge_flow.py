@@ -164,6 +164,32 @@ def test_gate_cap_exhaustion_returns_failed_with_reason(tmp_path):
     assert result.branch is not None  # carried for the lead's human summary
 
 
+def test_catch_gate_test_err(tmp_path):
+    """An unexpected error while gating (a git hiccup, a decode error, a library crash, a
+    pytest timeout surfaced as an exception) must degrade to an honest failed result, never
+    propagate and abort the whole run."""
+    async def boom_gate(worktree, spec):
+        raise RuntimeError("subprocess timed out / git hiccup")
+
+    result, client = _run(
+        _spec(), toolkit_root=tmp_path, worktree_base=tmp_path / "wt", run_gate=boom_gate
+    )
+    assert result.status == "failed"
+    assert "unexpected error" in result.reason and "RuntimeError" in result.reason
+    assert client.connected is False  # finally still disconnected the SDK client
+
+
+def test_human_input_required_propagates_through_backstop(tmp_path):
+    """The §9.8 fail-safe must reach the caller — the backstop never swallows it into failed."""
+    from auto_research.hitl import HumanInputRequired
+
+    async def needs_human_gate(worktree, spec):
+        raise HumanInputRequired("no handler in headless mode")
+
+    with pytest.raises(HumanInputRequired):
+        _run(_spec(), toolkit_root=tmp_path, worktree_base=tmp_path / "wt", run_gate=needs_human_gate)
+
+
 def test_review_rejection_reworks_then_passes(tmp_path):
     review_calls = {"n": 0}
 

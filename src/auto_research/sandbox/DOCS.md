@@ -544,3 +544,18 @@ the hook mapping a fake-model verdict — no live LLM).
   a dirty tree on terminal failure for the human; new `check_toolkit_branch_clean` (registered
   in the preflight) enforces branch+clean at launch with remediation. Coverage:
   `tests/test_registry.py`, `tests/test_merge_flow.py`, `tests/test_preflight.py`.
+- 2026-06-18 — Hardened the gate/authoring path against a slow or erroring test crashing the
+  whole run (step-7 live-test robustness). `gate._default_test_runner` now catches
+  `subprocess.TimeoutExpired` and returns it as a Layer-B failure (rc 124) instead of letting it
+  propagate — a test over the 900 s cap becomes a normal gate rejection (rework → honest
+  failure). `merge_flow.propose_and_pr` gained an exception backstop: any unexpected
+  gate/author/review error becomes `MergeFlowResult(status="failed")` rather than aborting the
+  run, while `HumanInputRequired` (the §9.8 fail-safe) is re-raised to the caller. Determinism
+  is still a console-output proxy (`_strip_volatile` over two pytest runs) by design.
+- 2026-06-18 — The SDK author's `Bash` now runs in the **analyst code-execution env**, not the
+  orchestration env. New `merge_flow._author_env(toolkit_root)` builds it (analyst conda
+  interpreter first on `PATH` + HEASoft/CALDB sourced from `analyze_ini_sh` + `toolkit_root` on
+  `PYTHONPATH`) and `_build_options` passes it as `ClaudeAgentOptions.env`. So the author can run
+  the real science tests it authors (matching the gate's interpreter) and see import-time failures
+  itself, instead of being blind to the science stack. Best-effort: falls back to inheriting the
+  parent env when the analyst env isn't configured/sourceable (unit tests unaffected).

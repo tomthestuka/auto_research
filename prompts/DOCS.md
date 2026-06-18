@@ -106,3 +106,7 @@ logic here.
   the `TOOL_MANIFEST` `description`/`args_schema`) and a "design for extension" note (per-mission
   strategy modules + thin `<domain>_help.py` dispatch, so a new mission is a module + one manifest
   entry).
+- 2026-06-18 — `coder.md` tests section gained a "keep each test fast and quiet" note: the gate
+  runs tests twice under a time cap, so validate on a small local ObsID + smallest slice, assert
+  stable quantities, and keep stdout quiet (sort globs, silence warnings) so the determinism
+  check holds. Pairs with the gate timeout→Layer-B-failure hardening (see `sandbox/DOCS.md`).

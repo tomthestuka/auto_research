@@ -361,10 +361,43 @@ def _make_path_confiner(worktree: Path):
     return can_use_tool
 
 
-def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, escalation_server, max_turns: int):
+def _author_env(toolkit_root: Path) -> dict[str, str] | None:
+    """The environment the SDK author's ``Bash`` runs in — **identical to how the analyst
+    sandbox and the gate execute toolkit code** (CLAUDE.md §9.4): the analyst conda interpreter
+    first on ``PATH`` (so ``python``/``pytest`` carry the full science stack — ``xspec`` via the
+    sourced HEASoft env, ``ixpeobssim`` from the conda env), HEASoft/CALDB sourced from
+    ``analyze_ini_sh``, and ``toolkit_root`` on ``PYTHONPATH``. Without this the author would run
+    in the orchestration env (no science stack) and could not run the real tests it authors —
+    only the gate could — so it would be blind to import-time failures (§9.4 the author and the
+    analysts are the only code-runners; both must share the analyst env).
+
+    Best-effort: returns ``None`` (inherit the parent env) when the analyst env isn't configured
+    or can't be sourced, so unit tests and science-stack-free setups still build options.
+    """
+    import os
+
+    cfg = _orchestration_config()
+    analyze_env = cfg.get("analyze_env")
+    ini_sh = cfg.get("analyze_ini_sh")
+    if not analyze_env and not ini_sh:
+        return None
+    try:
+        from auto_research.sandbox.runner import _source_ini_env
+
+        env = dict(_source_ini_env(ini_sh)) if ini_sh else dict(os.environ)
+    except Exception:  # noqa: BLE001 — inherit rather than fail the whole options build
+        return None
+    if analyze_env:
+        env["PATH"] = f"{Path(analyze_env) / 'bin'}:" + env.get("PATH", "")
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(toolkit_root) + (":" + existing_pp if existing_pp else "")
+    return env
+
+
+def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, escalation_server, max_turns: int, env: dict[str, str] | None = None):
     from claude_agent_sdk import ClaudeAgentOptions
 
-    return ClaudeAgentOptions(
+    kwargs: dict[str, Any] = dict(
         cwd=str(worktree),
         model=coder_model,
         system_prompt=system_prompt,
@@ -379,6 +412,9 @@ def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, esca
         ],
         max_turns=max_turns,
     )
+    if env:  # full sourced env (analyst conda + HEASoft); omit when unset so the SDK inherits.
+        kwargs["env"] = env
+    return ClaudeAgentOptions(**kwargs)
 
 
 def _default_sdk_client_factory(options):
@@ -514,6 +550,7 @@ async def propose_and_pr(
     options = _build_options(
         worktree=worktree, coder_model=coder_model, system_prompt=system_prompt,
         escalation_server=escalation_server, max_turns=max_turns,
+        env=_author_env(toolkit_root),  # author's Bash == analyst/gate code-execution env
     )
     client = sdk_client_factory(options)
 
@@ -559,5 +596,14 @@ async def propose_and_pr(
                 commit_sha=commit_sha, gate_report=gate, review=review,
                 reason="gate-pass and co-lead review-pass",
             )
+    except HumanInputRequired:
+        raise  # §9.8 fail-safe must reach the caller — never silently become a "failed".
+    except Exception as exc:  # noqa: BLE001
+        # A gate/author/review error (e.g. a git hiccup, a decode error) is an honest failure,
+        # not a reason to crash the whole research run. The lead surfaces it per §9.6/§9.7.
+        return MergeFlowResult(
+            tool_spec_id=tool_spec.id, status="failed", branch=branch,
+            reason=f"authoring aborted by unexpected error: {type(exc).__name__}: {exc}",
+        )
     finally:
         await client.disconnect()

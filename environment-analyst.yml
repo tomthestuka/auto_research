@@ -31,6 +31,9 @@ dependencies:
   - matplotlib=3.10.6
   - requests=2.34.2
   - keyring=25.7.0         # astroquery dependency
+  - pytest                 # REQUIRED: the Phase-2 gate runs authored tools' Layer-B tests with
+                           # THIS interpreter (sandbox/gate.py); the SDK tool author also self-tests
+                           # here. Without it, every authored tool fails the gate on a pytest import.
   - pip
   - pip:
       - ixpeobssim==33.0.0   # IXPE reduction/response; PyPI-only (not packaged on conda)

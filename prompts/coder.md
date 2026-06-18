@@ -144,7 +144,16 @@ differential agreement with a trusted primitive, metamorphic invariants (e.g. or
 independence), injection–recovery, cross-computation agreement, and declared sanity bounds.
 A check that references synthetic data references it by its marked ObsID (a data input) — the
 test never generates data itself. Run `pytest` in the worktree and make it green **before**
-you declare done.
+you declare done — your `Bash` runs in the analysis environment, so `python`/`pytest` carry the
+full science stack (the same interpreter that gates your tool), and import-time failures surface
+to you directly rather than only at the gate.
+
+**Keep each test fast and quiet.** The gate runs your tests **twice** (a determinism check) with
+a per-run time limit, so a test that reduces a whole observation can blow the budget. Validate on
+a **small, already-local ObsID** and the **smallest slice that exercises the logic** (e.g. one or
+two segments, not a full GTI). Assert on **stable quantities** (values within a tolerance, shapes,
+monotonicity, sanity bounds) and keep stdout quiet — sort any globbed file lists and silence noisy
+library warnings, so the two runs produce identical output and the determinism check holds.
 
 ## When you are unsure — escalate, never guess
 
