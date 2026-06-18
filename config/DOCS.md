@@ -34,6 +34,15 @@ role or swapping a provider is a YAML edit; no Python change.
   mission's observation database or archive root. Loaded by
   `auto_research.observations`; mission names are data, not special cases in
   code.
+  > **NOTE (pending restructure, 2026-06-17):** the obs database is to become **one
+  > folder**, no longer configured per mission. Replace the per-mission `obs_db_path`
+  > map with a single obs-db **root**, and derive each mission's `obs_db_path` as
+  > `<root>/<MISSION>` (e.g. `<root>/IXPE`, `<root>/NICER`) in `observations.py` when
+  > calling `research_toolkit` tools (`xspec_utils.load_data`, `heasarc_utils.acquire`)
+  > and reading catalogs. The mission subdir's basename lowercases to the mission name
+  > (`research_toolkit` derives it that way), and each mission's `catalog.json` stays
+  > under its subdir. This is config + `observations.py` work on the `auto_research`
+  > side; `research_toolkit` tools already take a per-mission directory and need no change.
 - `orchestration.yaml` — runtime data dir, graph iteration caps, debate round cap,
   ReAct/structured retry caps, toolkit root, analyst sandbox environment, report settings,
   Phase-2 authoring caps, the raise-to-human channel default + ping timeout, and MCP server
@@ -121,7 +130,8 @@ role or swapping a provider is a YAML edit; no Python change.
   is spawned. Sets HEADAS, CALDB, CALDBCONFIG, CALDBALIAS, GEOMAG_PATH. No SSH
   agent, no conda activation (the sandbox invokes `analyze_env/bin/python` directly).
 - `orchestration.yaml.analyze_env` — conda/venv prefix whose `bin/python` is used
-  for analyst sandbox subprocesses (must have PyXSPEC + analysis stack installed).
+  for analyst sandbox subprocesses (must have PyXSPEC + analysis stack installed,
+  including `astroquery` for `heasarc_utils` HEASARC downloads).
 - `orchestration.yaml.mcp_servers` — optional stdio MCP server configs exposed
   alongside manifest tools. Empty or omitted means use only the built-in MCP
   server (`bash_exec`, `list_dir`, `read_file` at present).
@@ -140,3 +150,9 @@ role or swapping a provider is a YAML edit; no Python change.
   `orchestration.yaml` (the raise-to-human default channel and launch-ping timeout).
 - 2026-06-16 — Phase 2 step 7 added `tool_author_branch` (default `ai`) and `tool_author_cap`
   (default 3) to `orchestration.yaml` for runtime tool authoring/resume.
+- 2026-06-17 — NOTE added on `observations.yaml`: the obs database is to become **one folder**
+  (a single obs-db root), no longer a per-mission `obs_db_path` map; derive `<root>/<MISSION>`
+  in `observations.py`. Pending restructure on the `auto_research` side — see the note above.
+- 2026-06-17 — Documented that `analyze_env` must include **`astroquery`** (for the new
+  `research_toolkit/heasarc_utils` acquire/download tool); also reflected in `README.md` and
+  the `analyze_env` comment in `orchestration.yaml`.

@@ -1,3 +1,9 @@
+# NOTE (pending restructure, 2026-06-17): the obs database is to become ONE folder,
+# no longer configured per mission. Replace this per-mission `obs_db_path` map with a
+# single obs-db root, and derive each mission's path as <root>/<MISSION> (e.g.
+# <root>/IXPE) in observations.py. research_toolkit tools already take a per-mission
+# directory and need no change; each mission's catalog.json stays under its subdir.
+# See config/DOCS.md (observations.yaml note).
 missions:
   ixpe:
     obs_db_path: /data/fzhou/XSPEC/Cyg_X-1/IXPE

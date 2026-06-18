@@ -83,3 +83,8 @@ logic here.
   and the `ask_human` raise-to-human path (set `status`, never fabricate on exhaustion).
 - 2026-06-16 — Phase 2 step 6: `analyst_colead.md` now asks for a one-line `commit_summary`
   on approval — the commit subject `merge_flow.approve_edit` lands on the working branch.
+- 2026-06-17 — `coder.md` data-catalog section now conveys the convention only: record
+  acquired/produced data through the single trusted writer `obsdb_manager` (call its upsert
+  helper, read the real signature from live toolkit source), never read/write/hand-roll
+  `catalog.json`. Replaces the prior inline JSON-shape + read/update/write instructions; the
+  catalog write path is prisoned to `obsdb_manager` + a sudo human.

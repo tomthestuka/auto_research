@@ -71,31 +71,20 @@ points + `TOOL_MANIFEST` tools, with signatures), **Dependencies**, **Changelog*
 entries appended at the bottom). This is the tool's own product documentation — describe what
 the tool does and how to reproduce its result; it is not project governance.
 
-## Data catalog — record acquired/produced data under the mission obs_db
+## Data catalog — record acquired/produced data via `obsdb_manager`
 
 When your tool acquires or produces data for an ObsID (download, reduction, polarization
 cube, PHA, …), record it in the mission's data catalog so the rest of the system knows what
-is local and how it was produced. The catalog is a JSON file at `<obs_db_path>/catalog.json`
-(the mission `obs_db_path` is the data-path argument the runtime already auto-fills). Read it
-if present, update the entry for the ObsID, write it back. Shape:
+is local and how it was produced. **Never touch the catalog file yourself** — do not read,
+write, or hand-roll its JSON. The catalog has exactly one trusted writer, the `obsdb_manager`
+module; record every product by calling its upsert helper at the point the product lands on
+disk (read its real signature from the live toolkit source — existing reduction/download
+modules already call it; follow that pattern). The mission `obs_db_path` is the data-path
+argument the runtime already auto-fills.
 
-```
-{ "mission": "<m>",
-  "entries": {
-    "<obsid>": {
-      "obsid": "<obsid>",
-      "max_level": 2,                       // HEASARC supplies up to level 2
-      "levels_present": [1, 2],
-      "products": [
-        { "kind": "level2_evt"|"pcube"|"pha"|..., "path": "<path under obs_db>",
-          "params": { ... },                // the parameters used to obtain a level-3 product
-          "produced_by": "<tool/commit>", "created_at": "<iso8601>", "sha256": "<optional>" }
-      ] } } }
-```
-
-A level-3 product (pcube/pha/…) **must** record under `params` the parameters used to obtain
-it, so it is reproducible. This is data provenance, not fabrication — never invent entries for
-data you did not actually produce.
+A level-3 product (pcube/pha/…) **must** record the real parameters used to obtain it, so it
+is reproducible. This is data provenance, not fabrication — record only data that is actually
+on disk; never invent an entry for data you did not produce.
 
 ## What the brief tells you, and what is yours to decide
 

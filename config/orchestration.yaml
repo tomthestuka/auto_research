@@ -35,7 +35,8 @@ librarian_react_loop_cap: 1  # tighter cap for the librarian literature loop —
 structured_retry_cap: 2      # attempts for a structured _call (off-schema feedback loop) before raising
 toolkit_root: /data/fzhou/research_toolkit
 # Python environment used for sandbox tool execution.
-# Must be a conda/venv prefix whose Python has the analysis stack (XSPEC, HEASoft, ixpeobssim, etc.).
+# Must be a conda/venv prefix whose Python has the analysis stack (XSPEC, HEASoft, ixpeobssim,
+# astroquery for heasarc_utils downloads, etc.).
 # The subprocess inherits the parent process environment so HEADAS/CALDB/LD_LIBRARY_PATH are available.
 analyze_env: /grad/fzhou/.conda/envs/astropy
 # Dedicated headless analyst env script sourced before each tool subprocess.

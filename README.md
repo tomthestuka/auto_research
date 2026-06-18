@@ -197,7 +197,7 @@ Statuses: **Done** = built & documented · **Todo** = in scope, not yet built.
 | 4 | Done | **Provider-decorrelated review** (`sandbox/review.py::make_review_hook`, now the default `run_review` hook) — the GPT `analyst_colead` reviews the authored diff bundle + gate report and judges the Layer-B checks (code-review only), routed by `select_decorrelated_member` to a provider ≠ the Claude author's (raises if none); investigates the worktree/web via a read-only provider before its `ToolReviewVerdict`. `propose_and_pr` gains a `colead` param. | Review runs on a different provider; a planted subtle bug is caught (rejected → L3 rework) or escalated, not rubber-stamped. |
 | 5 | Done | **Raise-to-human** — `HumanQuery`/`HumanResponse` + the injectable `human_handler` (`auto_research.hitl`); a shared `ask_human` tool for every ReAct role + the author (blocking direct-handler; durable `interrupt()`/checkpointer deferred §12); CLI/Slack/WhatsApp connectors with an auto-detecting CLI-vs-library resolver; a launch-time channel ping in the preflight; and `failed`/`needs_human` routed around the reviewer to a no-fabrication finalize. | A blocked role raises and the run blocks for a human; an honest FAILED carries no penalty; headless raises `HumanInputRequired`. |
 | 6 | Done | **`approve_edit()` atomic commit** (`sandbox/merge_flow.py`) — gate-pass ∧ co-lead review-pass → one atomic commit per tool on the branch; stages **exactly** `gate.collect_targets` (explicit-path, never `git add -A`); commit subject = the co-lead's `commit_summary` (fallback: tool name); `propose_and_pr` returns the real `commit_sha`. The gate now tracks non-`.py` files under a `*_utils` package (shell scripts get a vocabulary scan; binaries hard-fail, §9.5). New preflight `check_toolkit_git_identity`. Runtime never merges. | Approved tool lands as one commit; only gated files are staged; human reruns the human-half and merges/reverts cleanly. |
-| 7 | Done | **Lead-driven authoring/resume** — a worker's `tool_request` drives the lead's `decide_authoring()` (browse `lib/` read-only → one finalised `ToolSpec`); consensus (`DebateToConverge`) issues `merge_flow.propose_and_pr(direct_branch="ai")` itself (the LLM never issues git), then on a committed tool reloads the registry (dynamic `*_utils` discovery + `reload()`), restarts sandboxes, augments the task with provenance, and reruns workers — bounded by `tool_author_cap`, not `max_rounds`. New `AuthoringDecision` schema; direct-branch `ai` mode + `check_toolkit_branch_clean` preflight; per-mission data catalog read side (`observations.read_catalog`); `prompts/coder.md` instructs a package `README.md` + the catalog contract. | Missing-capability analysis authors the tool it needs on branch `ai` and finishes on it; exercised live via the `usage_example.ipynb` "test code authoring" run (IXPE P1). |
+| 7 | Done | **Lead-driven authoring/resume** — a worker's `tool_request` drives the lead's `decide_authoring()` (browse `lib/` read-only → one finalised `ToolSpec`); consensus (`DebateToConverge`) issues `merge_flow.propose_and_pr(direct_branch="ai")` itself (the LLM never issues git), then on a committed tool reloads the registry (dynamic `*_utils` discovery + `reload()`), restarts sandboxes, augments the task with provenance, and reruns workers — bounded by `tool_author_cap`, not `max_rounds`. New `AuthoringDecision` schema; direct-branch `ai` mode + `check_toolkit_branch_clean` preflight; per-mission data catalog read side (`observations.read_catalog`); `prompts/coder.md` instructs a package `README.md` + recording produced data through the trusted `obsdb_manager` writer (never hand-rolling `catalog.json`). | Missing-capability analysis authors the tool it needs on branch `ai` and finishes on it; exercised live via the `usage_example.ipynb` "test code authoring" run (IXPE P1). |
 
 Current role/tool surfaces:
 
@@ -221,10 +221,12 @@ XSPEC tools:
    LangGraph graph, LLM calls, librarians, reviewer, report composition. Pure Python +
    API keys.
 2. **Analysis sandbox env** — required only so analyst workers can execute the
-   `research_toolkit` XSPEC tools (`load_data`, `fit_*`, `plot_*`). This is HEASoft /
-   PyXSPEC / `ixpeobssim` / `relxill` plus the `research_toolkit` repo and the observation
-   data. Heavy and host-specific. **Without it the graph still runs end-to-end** — only
-   the analyst tool calls fail (caught by the error-feedback loop).
+   `research_toolkit` tools: the XSPEC tools (`xspec_utils.load_data`, `fit_*`, `plot_*`) and
+   the archive **acquire** tool (`heasarc_utils.acquire`). This is HEASoft / PyXSPEC /
+   `ixpeobssim` / `relxill` / `astroquery` (for `heasarc_utils` HEASARC downloads) plus the
+   `research_toolkit` repo and the observation data. Heavy and host-specific. **Without it
+   the graph still runs end-to-end** — only the analyst tool calls fail (caught by the
+   error-feedback loop).
 
 ### 1. Orchestration env (everyone)
 
@@ -251,7 +253,7 @@ reference these paths:
 
 | What | Path (already present on the cluster) |
 |---|---|
-| Analysis Python env (PyXSPEC, ixpeobssim) | `/grad/fzhou/.conda/envs/astropy` |
+| Analysis Python env (PyXSPEC, ixpeobssim, astroquery) | `/grad/fzhou/.conda/envs/astropy` |
 | HEASoft/CALDB init script | `src/auto_research/sandbox/analyst_env.sh` (HEASoft 6.34) |
 | `research_toolkit` repo (`toolkit_root`) | `/data/fzhou/research_toolkit` |
 | `relxill` model tables | `/data/fzhou/XSPEC/relxill/` |
@@ -270,8 +272,9 @@ repoint the config. Roughly:
    works under its Python. Edit `src/auto_research/sandbox/analyst_env.sh` so `HEADAS`,
    `CALDB`, etc. point at your install.
 2. **Analysis Python env** — a conda/venv whose Python has PyXSPEC on the path plus
-   `ixpeobssim` (for IXPE reduction/response). Set `analyze_env` in
-   `config/orchestration.yaml` to its prefix.
+   `ixpeobssim` (for IXPE reduction/response) and `astroquery` (for `heasarc_utils` HEASARC
+   downloads; `pip install astroquery`). Set `analyze_env` in `config/orchestration.yaml` to
+   its prefix.
 3. **`relxill`** — install the model tables; the boot policy loads them from
    `/data/fzhou/XSPEC/relxill/` in `src/auto_research/sandbox/persistent.py` — change that
    path to yours.
