@@ -128,3 +128,10 @@ live in `auto_research.schemas` (the protocol, §7).
   unambiguous) is required. The orchestration is sequential today (≤1 question ever open), so this
   is future-proofing. Both the in-thread and channel-reply round-trips were live-verified 2026-06-18
   (`test_slack_channel_reply_ambiguous_when_multiple_pending` covers the guard).
+- 2026-06-18 — Fixed `SlackHandler` crashing with `RuntimeError: no running event loop` at
+  construction: `AsyncSocketModeHandler` builds an aiohttp session that needs a *running* loop,
+  but `resolve_handler` constructs the handler synchronously (before the loop). slack_bolt
+  construction (app + socket + listener) is now **deferred to `async start()`** for the real path;
+  an injected app (tests) is still wired in `__init__`. `make_human_channel_check` also now prints
+  a "reply to the ping to start the run" line to stdout so a blocking launch ping isn't silent;
+  `human_channel_ping_timeout_s` lowered 300→60 in `orchestration.yaml`.

@@ -39,12 +39,14 @@ class SlackHandler:
         # Map a posted message thread ts -> the Future awaiting its reply.
         self._pending: dict[str, asyncio.Future[str]] = {}
 
-        if app is not None:
-            self.app = app
-            self._socket = socket_handler
-        else:
-            self.app, self._socket = _build_slack_app()
-        self._register_listener()
+        # Defer slack_bolt construction to start(): AsyncSocketModeHandler builds an aiohttp
+        # session that needs a *running* event loop, but the handler is constructed
+        # synchronously (resolve_handler, before the loop runs). An injected app (tests) is
+        # wired immediately; the real app/socket are built lazily inside start().
+        self.app = app
+        self._socket = socket_handler
+        if self.app is not None:
+            self._register_listener()
 
     def _register_listener(self) -> None:
         @self.app.event("message")
@@ -83,9 +85,14 @@ class SlackHandler:
             fut.set_result(text)
 
     async def start(self) -> None:
-        if not self._started and self._socket is not None:
+        if self._started:
+            return
+        if self.app is None:  # real connector: build slack_bolt now, inside the running loop
+            self.app, self._socket = _build_slack_app()
+            self._register_listener()
+        if self._socket is not None:
             await self._socket.connect_async()
-            self._started = True
+        self._started = True
 
     async def aclose(self) -> None:
         if self._started and self._socket is not None:

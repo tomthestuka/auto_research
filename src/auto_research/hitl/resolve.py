@@ -122,6 +122,11 @@ def make_human_channel_check(
             asked_by="preflight",
             question="Reply to confirm this run's human-response channel is live.",
         )
+        print(
+            f"⏳ Launch preflight: a confirmation ping was sent to your human channel — "
+            f"reply to it to start the run (waiting up to {limit:.0f}s).",
+            flush=True,
+        )
         try:
             response = await asyncio.wait_for(resolve_human(handler, query), timeout=limit)
         except TimeoutError as exc:

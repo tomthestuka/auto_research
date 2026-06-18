@@ -88,5 +88,5 @@ tool_author_cap: 6
 # window; it is deliberately NOT tied to the LLM prompt-cache TTL (the default cache is only
 # ~5min and exceeding it just costs one cheap cold prefix re-prefill on resume, not a re-run).
 human_channel: none
-human_channel_ping_timeout_s: 300
+human_channel_ping_timeout_s: 60
 human_response_timeout_s: 3600

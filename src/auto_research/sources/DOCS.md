@@ -57,15 +57,26 @@ Each module is independent; no source imports another.
 - `papers_dir() -> Path` — re-exported from `auto_research.env`; returns the configured
   source-paper artifact directory (`orchestration.yaml: papers_dir`, defaulting to
   `<runtime_dir>/papers`).
-- `download_pdf(url: str, destination: Path) -> Path` — downloads a PDF unless
-  the target already exists.
+- `download_pdf(url: str, destination: Path) -> Path | None` — downloads a PDF
+  unless the target already exists. Transient fetch failures (a momentary 404, a
+  network blip, a timeout) are retried with linear backoff (`_DOWNLOAD_ATTEMPTS`
+  tries); returns `None` when the download ultimately fails so callers degrade to
+  metadata-only ingest instead of raising.
 - `download_and_ingest_result(storage: Storage, result: SearchResult, *,
   target_dir: str | Path | None = None) -> StoredPaper | None` — downloads a
   source PDF when `result.pdf_url` exists, upserts it into storage with source
-  metadata, and returns the stored row.
+  metadata, and returns the stored row. Returns `None` when `result.pdf_url` is
+  absent **or** the download fails, so a single bad/transient PDF URL never aborts
+  ingest (the caller falls back to metadata-only).
 
 ## Changelog
 - 2026-05-26 -> 2026-06-12 — Source layer built and stabilized: `QuerySource`,
   arXiv/NASA ADS/Tavily adapters, PDF download/ingest helpers, ADS full-text resolver, and
   ADS 404 degradation for normal no-esource records.
 - 2026-06-12 — Compacted changelog and refreshed CLAUDE section link.
+- 2026-06-18 — `download_pdf` now retries transient fetch failures and returns
+  `None` (instead of raising `HTTPError`/`URLError`) when a download ultimately
+  fails; `download_and_ingest_result` propagates that `None`. Previously a single
+  PDF-download 404 (seen transiently from arxiv) escaped `_ingest_one`'s
+  `asyncio.gather`, crashed the `literature` graph node, and aborted the whole
+  run before analysis began.

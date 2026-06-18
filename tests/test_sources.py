@@ -143,3 +143,20 @@ def test_download_and_ingest_result_uses_source_metadata(tmp_path, monkeypatch):
     assert paper.title == "Binary Paper"
     assert paper.local_path is not None
     assert paper.local_path.name == "arxiv_1234.5678.pdf"
+
+
+def test_download_and_ingest_result_returns_none_on_failed_download(tmp_path, monkeypatch):
+    from auto_research.sources import downloads
+
+    def failing_download(url, destination):
+        return None
+
+    monkeypatch.setattr(downloads, "download_pdf", failing_download)
+    db = Storage(tmp_path / "test.sqlite3")
+    result = asyncio.run(ArxivSource(client=FakeArxivClient()).search("black hole binary", limit=1))[0]
+
+    async def run():
+        await db.initialize()
+        return await download_and_ingest_result(db, result, target_dir=tmp_path / "papers")
+
+    assert asyncio.run(run()) is None
