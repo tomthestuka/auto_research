@@ -559,3 +559,6 @@ the hook mapping a fake-model verdict — no live LLM).
   the real science tests it authors (matching the gate's interpreter) and see import-time failures
   itself, instead of being blind to the science stack. Best-effort: falls back to inheriting the
   parent env when the analyst env isn't configured/sourceable (unit tests unaffected).
+- 2026-06-18 — `review.select_decorrelated_member`'s "no decorrelated co-lead" error now ends
+  with the fix: add a member whose provider differs from the author to the `analyst_colead`
+  role in `config/models.yaml` (preflight error-message polish).

@@ -42,7 +42,8 @@ class WhatsAppHandler:
         if not from_number or not to_number:
             raise RuntimeError(
                 "WhatsApp connector needs TWILIO_WHATSAPP_FROM and WHATSAPP_TO "
-                "(and TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN for the Twilio client)."
+                "(and TWILIO_ACCOUNT_SID / TWILIO_API_KEY_SID / TWILIO_API_KEY_SECRET for the "
+                "Twilio client — API-key auth, not the root Auth Token)."
             )
         self.from_number = _wa(from_number)
         self.to_number = _wa(to_number)
@@ -59,12 +60,31 @@ class WhatsAppHandler:
     async def __call__(self, query: HumanQuery) -> HumanResponse:
         # A small back-dated cutoff avoids clock-skew dropping a fast reply.
         sent_at = datetime.now(UTC) - timedelta(seconds=2)
-        await asyncio.to_thread(
-            self.client.messages.create,
-            from_=self.from_number,
-            to=self.to_number,
-            body=self._body(query),
-        )
+        try:
+            await asyncio.to_thread(
+                self.client.messages.create,
+                from_=self.from_number,
+                to=self.to_number,
+                body=self._body(query),
+            )
+        except Exception as exc:  # noqa: BLE001 — translate Twilio/transport errors into a directive
+            status = getattr(exc, "status", None) or getattr(exc, "code", None)
+            if status == 401:
+                fix = (
+                    "Twilio rejected the credentials (HTTP 401). The Twilio API Key SID is sent as "
+                    "the auth username — verify TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET and "
+                    "TWILIO_ACCOUNT_SID in .env (a present-but-wrong value still 401s)"
+                )
+            else:
+                fix = (
+                    f"verify the Twilio credentials and that TWILIO_WHATSAPP_FROM "
+                    f"({self.from_number!r}) and WHATSAPP_TO ({self.to_number!r}) are valid "
+                    "WhatsApp-enabled numbers, plus network connectivity"
+                )
+            raise RuntimeError(
+                f"WhatsApp message could not be sent via Twilio: {fix}. Or run without WhatsApp: "
+                "human_channel='cli' (attended terminal) or 'none' (headless)."
+            ) from exc
 
         deadline = asyncio.get_event_loop().time() + self.timeout_s
         while asyncio.get_event_loop().time() < deadline:

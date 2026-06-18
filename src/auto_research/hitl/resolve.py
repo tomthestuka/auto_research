@@ -126,9 +126,19 @@ def make_human_channel_check(
             response = await asyncio.wait_for(resolve_human(handler, query), timeout=limit)
         except TimeoutError as exc:
             raise RuntimeError(
-                f"human-response channel did not reply within {limit:.0f}s"
+                f"the human-response channel did not reply within {limit:.0f}s. Confirm the "
+                "channel is reachable and someone replies to the launch ping; or set "
+                "human_channel='none' (headless) to skip the channel."
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 — keep the connector's directive, add an escape hatch
+            raise RuntimeError(
+                f"the human-response channel ping failed: {exc} "
+                "(or set human_channel='none' for a headless run, 'cli' for an attended terminal)."
             ) from exc
         if not response.answer.strip():
-            raise RuntimeError("human-response channel returned an empty reply")
+            raise RuntimeError(
+                "the human-response channel returned an empty reply; reply with any text to "
+                "confirm it is live, or set human_channel='none' to skip the channel."
+            )
 
     return check

@@ -56,7 +56,9 @@ def select_decorrelated_member(group: "ModelGroupHandle", author_provider: str) 
             return handle
     raise ValueError(
         f"analyst_colead has no member with provider != author provider {author_provider!r}; "
-        "the co-lead review must be provider-decorrelated from the author (CLAUDE.md §9.3)."
+        "the co-lead review must be provider-decorrelated from the author (CLAUDE.md §9.3). "
+        f"Fix: add a member whose provider is not {author_provider!r} to the analyst_colead role "
+        "in config/models.yaml (e.g. a GPT member when the author/coder is Anthropic)."
     )
 
 

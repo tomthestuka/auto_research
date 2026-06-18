@@ -110,3 +110,21 @@ live in `auto_research.schemas` (the protocol, §7).
   indefinite block, now waits at most this long then raises `TimeoutError`. Deliberately
   decoupled from the LLM prompt-cache TTL (default ~5min is too short to govern a human deadline;
   overshooting only costs one cheap cold prefix re-prefill).
+- 2026-06-18 — Polished the channel-ping preflight error into an actionable directive. The
+  WhatsApp connector now catches a failed Twilio send and translates it: an HTTP-401 names the
+  exact creds to check (`TWILIO_API_KEY_SID`/`TWILIO_API_KEY_SECRET`/`TWILIO_ACCOUNT_SID` — the
+  API Key SID is the basic-auth username, so "invalid username" is a credential fault), other
+  failures point at the from/to numbers + connectivity, and both offer the escape hatch
+  (`human_channel='cli'`/`'none'`). `make_human_channel_check` now wraps any non-timeout ping
+  failure and the timeout/empty-reply cases with the same escape-hatch directive.
+- 2026-06-18 — `SlackHandler.on_message` no longer requires the reply to be **in-thread**: a
+  plain channel reply (no `thread_ts`) now resolves the most recent pending question (the common
+  case — people reply in the channel, not the message thread). Still ignores our own posts,
+  events with a `subtype` (joins/edits), empty text, and other channels. Threaded replies match
+  their own thread as before. Covered by `tests/test_hitl.py`
+  (`test_slack_resolves_plain_channel_reply`, `test_slack_on_message_ignores_other_channel_and_subtype`).
+  Concurrency guard: a bare channel reply is only auto-attributed when **exactly one** question
+  is open; with 2+ pending it's ambiguous, so it's ignored and an in-thread reply (always
+  unambiguous) is required. The orchestration is sequential today (≤1 question ever open), so this
+  is future-proofing. Both the in-thread and channel-reply round-trips were live-verified 2026-06-18
+  (`test_slack_channel_reply_ambiguous_when_multiple_pending` covers the guard).

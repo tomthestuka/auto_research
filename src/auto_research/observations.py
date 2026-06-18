@@ -239,15 +239,18 @@ def check_catalog_health(
     band and reruns. An absent catalog with no local data is healthy (``healthcheck`` returns
     ``True``). Registered in ``auto_research.preflight``.
     """
-    root = Path(toolkit_root).expanduser() if toolkit_root is not None else _toolkit_root()
-    healthcheck = _import_healthcheck(root)
+    tk_root = Path(toolkit_root).expanduser() if toolkit_root is not None else _toolkit_root()
+    healthcheck = _import_healthcheck(tk_root)
+    cfg_all = load_observations_config(config_path)
     problems: dict[str, object] = {}
-    for mission, cfg in load_observations_config(config_path).missions.items():
+    for mission, cfg in cfg_all.missions.items():
         result = healthcheck(str(cfg.obs_db_path))
         if result is not True:
             problems[mission] = result
     if problems:
         raise RuntimeError(
-            "data catalog health drift — run obsdb_catalog.repair(obs_db_path) on each, then "
-            f"rerun:\n{problems}"
+            "data catalog health drift detected. Fix it (the deliberate human write — the "
+            "runtime never repairs), then rerun:\n"
+            f"  PYTHONPATH={tk_root} python -m obsdb_catalog repair_all {cfg_all.obs_db_root}\n"
+            f"drift by mission: {problems}"
         )

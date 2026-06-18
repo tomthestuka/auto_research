@@ -52,16 +52,34 @@ class SlackHandler:
             self.on_message(event)
 
     def on_message(self, event: dict[str, Any]) -> None:
-        """Resolve the pending Future for a human reply in a tracked thread.
+        """Resolve a pending Future from a human reply.
+
+        Matches a **threaded** reply to the question's own thread; **also** accepts a plain
+        **channel** reply (no ``thread_ts``) and resolves the most recent pending question — so
+        a human who replies in the channel instead of the message thread still unblocks the run
+        (the common case). Ignores our own posts, non-message events (joins/edits carry a
+        ``subtype``), empty text, and messages from other channels.
 
         Separated from the decorator so tests can drive it directly without slack_bolt.
         """
-        if event.get("bot_id"):  # ignore our own posts
+        if event.get("bot_id") or event.get("subtype"):  # our own posts / joins / edits
+            return
+        if self.channel and event.get("channel") not in (None, self.channel):
+            return  # only our channel (``None`` channel kept for the direct unit tests)
+        text = (event.get("text") or "").strip()
+        if not text:
             return
         thread = event.get("thread_ts")
-        text = (event.get("text") or "").strip()
-        fut = self._pending.get(thread) if thread else None
-        if fut is not None and not fut.done() and text:
+        if thread:
+            fut = self._pending.get(thread)  # in-thread → always unambiguous
+        else:
+            # Plain channel reply: only attributable when a *single* question is open. With
+            # several pending (concurrent agents) a bare reply can't be matched to one, so we
+            # ignore it and rely on the in-thread match. (Today the orchestration is sequential
+            # so ≤1 is ever open, but this keeps the fallback correct if that changes.)
+            open_futs = [self._pending[ts] for ts in self._pending if not self._pending[ts].done()]
+            fut = open_futs[0] if len(open_futs) == 1 else None
+        if fut is not None and not fut.done():
             fut.set_result(text)
 
     async def start(self) -> None:

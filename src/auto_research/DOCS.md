@@ -136,6 +136,9 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   launch on **any** drift report (incl. `uncatalogued`), aggregating every mission; repair stays
   the human's out-of-band `obsdb_catalog.repair`. Deterministic tests in
   `tests/test_observations.py`.
+- 2026-06-18 — `check_catalog_health()`'s drift error is now an actionable directive: it prints
+  the exact repair command (`PYTHONPATH=<toolkit_root> python -m obsdb_catalog repair_all
+  <obs_db_root>`) plus the per-mission drift, rather than a bare `repair(obs_db_path)` mention.
 - 2026-06-18 — `observations.yaml` restructured to a single `obs_db_root` (per-mission
   `obs_db_path` map removed). `ObservationsConfig` now discovers missions from disk —
   `<root>/<MISSION>` subdirs marked by a `catalog.json` (`.missions` is a discovery property);

@@ -291,3 +291,52 @@ def test_slack_on_message_ignores_untracked_and_bot():
     # No tracked thread / bot echo → no crash, nothing resolved.
     handler.on_message({"thread_ts": "nope", "text": "x"})
     handler.on_message({"bot_id": "B1", "thread_ts": "t1", "text": "x"})
+
+
+def test_slack_resolves_plain_channel_reply():
+    """A human who replies in the channel (no thread_ts) still unblocks the newest question."""
+    handler = SlackHandler(app=_FakeSlackApp(), socket_handler=None, channel="C0")
+
+    async def _run():
+        task = asyncio.create_task(handler(_query(asked_by="reviewer")))
+        for _ in range(200):
+            if "t1" in handler._pending:
+                break
+            await asyncio.sleep(0)
+        # No thread_ts — typed straight into the channel.
+        handler.on_message({"channel": "C0", "text": "reply in channel", "user": "U"})
+        return await task
+
+    assert asyncio.run(_run()).answer == "reply in channel"
+
+
+def test_slack_channel_reply_ambiguous_when_multiple_pending():
+    """With 2+ open questions, a bare channel reply is ambiguous → ignored; an in-thread reply
+    still resolves its own question."""
+    handler = SlackHandler(app=_FakeSlackApp(), socket_handler=None, channel="C0")
+
+    async def _run():
+        loop = asyncio.get_event_loop()
+        a, b = loop.create_future(), loop.create_future()
+        handler._pending["tA"], handler._pending["tB"] = a, b
+        handler.on_message({"channel": "C0", "text": "which one?", "user": "U"})  # no thread → ignored
+        ambiguous = (a.done(), b.done())
+        handler.on_message({"channel": "C0", "thread_ts": "tB", "text": "for B", "user": "U"})  # in-thread
+        return ambiguous, b.done(), (b.result() if b.done() else None), a.done()
+
+    ambiguous, b_done, b_val, a_done = asyncio.run(_run())
+    assert ambiguous == (False, False)  # bare reply attributed to neither
+    assert b_done and b_val == "for B" and not a_done  # in-thread still works, doesn't touch A
+
+
+def test_slack_on_message_ignores_other_channel_and_subtype():
+    handler = SlackHandler(app=_FakeSlackApp(), socket_handler=None, channel="C0")
+
+    async def _run():
+        fut = asyncio.get_event_loop().create_future()
+        handler._pending["t1"] = fut
+        handler.on_message({"channel": "CXX", "text": "elsewhere", "user": "U"})  # wrong channel
+        handler.on_message({"channel": "C0", "subtype": "channel_join", "text": "U joined"})  # not a reply
+        return fut.done()
+
+    assert asyncio.run(_run()) is False
