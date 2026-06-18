@@ -10,6 +10,11 @@ provenance of each product. The **writers** are the runtime's authored toolkit t
 in ``prompts/coder.md``. This module owns only the **read side**, so the orchestration
 can surface "what's already local" to analysts (a worker requests *acquire* only when
 data is genuinely missing) and consume provenance.
+
+The obs database is **one folder** (``obs_db_root`` in ``config/observations.yaml``); each
+mission lives in a subdirectory ``<obs_db_root>/<MISSION>`` and is discovered from disk (a
+subdir is a mission iff it holds a ``catalog.json``), so mission names stay data, never
+special cases in code.
 """
 
 from __future__ import annotations
@@ -36,19 +41,45 @@ class MissionObservationConfig(BaseModel):
 
 
 class ObservationsConfig(BaseModel):
-    """Validated observation configuration for all configured missions."""
+    """Validated observation configuration: a **single obs-db root** whose per-mission
+    subdirectories are discovered from disk (no per-mission map in config anymore).
+
+    Each immediate subdirectory of ``obs_db_root`` that holds a ``catalog.json`` is a
+    mission, keyed by ``basename.lower()`` (``research_toolkit`` derives the mission name the
+    same way). This marker is what separates real mission folders from unrelated working
+    directories that may share the root. ``research_toolkit`` tools are unchanged — they
+    still take a per-mission directory, which is ``<obs_db_root>/<MISSION>``.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    missions: dict[str, MissionObservationConfig] = Field(default_factory=dict)
+    obs_db_root: Path = Field(description="Root folder holding one subdirectory per mission.")
+
+    @property
+    def missions(self) -> dict[str, MissionObservationConfig]:
+        """Discover missions from disk: subdirectories of ``obs_db_root`` with a
+        ``catalog.json``, keyed by ``basename.lower()``. Empty when the root is absent."""
+        result: dict[str, MissionObservationConfig] = {}
+        root = self.obs_db_root
+        if root.is_dir():
+            for sub in sorted(root.iterdir()):
+                if sub.is_dir() and (sub / CATALOG_FILENAME).exists():
+                    result[sub.name.lower()] = MissionObservationConfig(obs_db_path=sub)
+        return result
 
     def mission(self, name: str) -> MissionObservationConfig:
-        """Return one mission config by name."""
+        """Resolve one mission's ``obs_db_path`` (``<obs_db_root>/<MISSION>``) by name.
 
-        try:
-            return self.missions[name]
-        except KeyError as exc:
-            raise KeyError(f"unknown mission observation config: {name}") from exc
+        Matches the on-disk subdirectory case-insensitively (``basename.lower() == name``),
+        so the path resolves even before the mission's ``catalog.json`` exists (e.g. a first
+        acquire). Raises ``KeyError`` if no such subdirectory is present.
+        """
+        root = self.obs_db_root
+        if root.is_dir():
+            for sub in sorted(root.iterdir()):
+                if sub.is_dir() and sub.name.lower() == name.lower():
+                    return MissionObservationConfig(obs_db_path=sub)
+        raise KeyError(f"unknown mission observation config: {name}")
 
 
 def load_observations_config(
@@ -150,3 +181,73 @@ def local_obsids(
     """Return the locally-available ObsIDs for ``mission`` (optionally ``>= min_level``)."""
     catalog = read_catalog(mission, config_path=config_path)
     return [o for o in catalog.obsids() if catalog.has(o, min_level=min_level)]
+
+
+# ---------------------------------------------------------------------------
+# Launch-time catalog health check (preflight; detect-only, never writes).
+# ---------------------------------------------------------------------------
+
+
+def _toolkit_root() -> Path:
+    """``toolkit_root`` from ``config/orchestration.yaml`` — the ``research_toolkit`` checkout."""
+    path = DEFAULT_OBSERVATIONS_CONFIG_PATH.parent / "orchestration.yaml"
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            data = yaml.safe_load(stream) or {}
+    except OSError:
+        data = {}
+    return Path(data.get("toolkit_root", "")).expanduser()
+
+
+def _import_healthcheck(toolkit_root: Path):
+    """Import ``research_toolkit``'s detect-only ``healthcheck`` (pure stdlib, dependency-free).
+
+    ``obsdb_catalog`` ships with ``research_toolkit`` at ``toolkit_root`` and is *not*
+    ``*_utils``-named, so the tool registry ignores it — we import it directly, making
+    ``toolkit_root`` importable the same transient way ``ToolkitRegistry`` does (prepend to
+    ``sys.path`` for the import, then remove; the module stays cached in ``sys.modules``).
+    """
+    import importlib
+    import sys
+
+    root_str = str(toolkit_root)
+    inserted = root_str not in sys.path
+    if inserted:
+        sys.path.insert(0, root_str)
+    try:
+        module = importlib.import_module("obsdb_catalog.healthcheck")
+    finally:
+        if inserted:
+            sys.path.remove(root_str)
+    return module.healthcheck
+
+
+def check_catalog_health(
+    *,
+    config_path: str | Path = DEFAULT_OBSERVATIONS_CONFIG_PATH,
+    toolkit_root: str | Path | None = None,
+) -> None:
+    """Launch-time preflight (no LLM): assert every mission's local data catalog is healthy.
+
+    Delegates to ``research_toolkit``'s detect-only ``obsdb_catalog.healthcheck`` (pure
+    standard library, never writes) over each configured mission's ``obs_db_path``. It flags
+    a malformed/unparseable ``catalog.json``, catalogued-but-missing files,
+    ``levels_present``/``max_level`` inconsistency, a regressed ``max_level``, and
+    on-disk-but-uncatalogued files (CLAUDE.md §9.5 catalog provenance). Every mission's drift
+    report is aggregated so one launch surfaces everything wrong, then raised — this check
+    **never repairs**. On drift the human runs ``obsdb_catalog.repair(obs_db_path)`` out of
+    band and reruns. An absent catalog with no local data is healthy (``healthcheck`` returns
+    ``True``). Registered in ``auto_research.preflight``.
+    """
+    root = Path(toolkit_root).expanduser() if toolkit_root is not None else _toolkit_root()
+    healthcheck = _import_healthcheck(root)
+    problems: dict[str, object] = {}
+    for mission, cfg in load_observations_config(config_path).missions.items():
+        result = healthcheck(str(cfg.obs_db_path))
+        if result is not True:
+            problems[mission] = result
+    if problems:
+        raise RuntimeError(
+            "data catalog health drift — run obsdb_catalog.repair(obs_db_path) on each, then "
+            f"rerun:\n{problems}"
+        )

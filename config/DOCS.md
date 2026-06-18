@@ -30,19 +30,15 @@ role or swapping a provider is a YAML edit; no Python change.
   model id here); `analyst_colead` — the tool reviewer, which **must stay non-Anthropic**
   because the coder is Claude (the §6/§9.3 provider-decorrelation invariant), backed by
   GPT-5.5 reasoning xhigh.
-- `observations.yaml` — mission name → `obs_db_path`, a generic path to that
-  mission's observation database or archive root. Loaded by
-  `auto_research.observations`; mission names are data, not special cases in
-  code.
-  > **NOTE (pending restructure, 2026-06-17):** the obs database is to become **one
-  > folder**, no longer configured per mission. Replace the per-mission `obs_db_path`
-  > map with a single obs-db **root**, and derive each mission's `obs_db_path` as
-  > `<root>/<MISSION>` (e.g. `<root>/IXPE`, `<root>/NICER`) in `observations.py` when
-  > calling `research_toolkit` tools (`xspec_utils.load_data`, `heasarc_utils.acquire`)
-  > and reading catalogs. The mission subdir's basename lowercases to the mission name
-  > (`research_toolkit` derives it that way), and each mission's `catalog.json` stays
-  > under its subdir. This is config + `observations.py` work on the `auto_research`
-  > side; `research_toolkit` tools already take a per-mission directory and need no change.
+- `observations.yaml` — a single `obs_db_root`: the **one folder** the obs database lives
+  in. Loaded by `auto_research.observations`, which discovers missions from disk — a subdir
+  `<obs_db_root>/<MISSION>` is a mission iff it holds a `catalog.json` (the marker that
+  separates real mission folders from unrelated working dirs sharing the root). The subdir
+  basename lowercases to the mission name (`research_toolkit` derives it the same way); a
+  single mission's path is resolved by `mission(name)` (case-insensitive subdir match, so it
+  works before the catalog exists). Mission names are data, not special cases in code.
+  `research_toolkit` tools (`xspec_utils.load_data`, `heasarc_utils.acquire`) already take a
+  per-mission directory and are unchanged.
 - `orchestration.yaml` — runtime data dir, graph iteration caps, debate round cap,
   ReAct/structured retry caps, toolkit root, analyst sandbox environment, report settings,
   Phase-2 authoring caps, the raise-to-human channel default + ping timeout, and MCP server
@@ -75,8 +71,8 @@ role or swapping a provider is a YAML edit; no Python change.
 - `models.yaml.roles.<role>.members[].priceMTk` — optional USD rates per
   million tokens with `input` and `output` keys, consumed by
   `auto_research.observability`.
-- `observations.yaml.missions.<mission>.obs_db_path` — path to one mission's
-  observation database or archive root.
+- `observations.yaml.obs_db_root` — the single root folder; each mission is a subdirectory
+  `<obs_db_root>/<MISSION>` discovered from disk (marked by its `catalog.json`).
 - `orchestration.yaml.runtime_dir` — writable runtime data directory outside both repos.
   Holds SQLite, run workspaces, figures/artifacts, report outputs, logs, and cost ledgers.
 - `orchestration.yaml.max_iterations` — hard cap for each outer reviewer
@@ -156,3 +152,8 @@ role or swapping a provider is a YAML edit; no Python change.
 - 2026-06-17 — Documented that `analyze_env` must include **`astroquery`** (for the new
   `research_toolkit/heasarc_utils` acquire/download tool); also reflected in `README.md` and
   the `analyze_env` comment in `orchestration.yaml`.
+- 2026-06-18 — Restructure done: `observations.yaml` is now a single `obs_db_root` (the
+  per-mission `obs_db_path` map is gone). `observations.py` discovers missions from disk —
+  a `<root>/<MISSION>` subdir is a mission iff it holds a `catalog.json`. The 2026-06-17 NOTE
+  is resolved/removed. Also added `environment-analyst.yml` (the analyst sandbox conda env
+  spec) at the repo root; `README.md` §2b now creates it via `conda env create`.

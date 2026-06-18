@@ -7,10 +7,16 @@ import yaml
 
 from auto_research.observations import (
     DataCatalog,
+    _toolkit_root,
+    check_catalog_health,
     load_observations_config,
     local_obsids,
     read_catalog,
 )
+
+# obsdb_catalog ships with the research_toolkit checkout (pure stdlib); its location is
+# config-driven (orchestration.yaml: toolkit_root), resolved the same way the check does.
+TOOLKIT_ROOT = _toolkit_root()
 
 
 def test_load_observations_config_from_project_file():
@@ -21,8 +27,10 @@ def test_load_observations_config_from_project_file():
 
 
 def test_load_observations_config_rejects_unknown_mission(tmp_path):
+    root = tmp_path / "obsdb"
+    root.mkdir()
     path = tmp_path / "observations.yaml"
-    path.write_text(yaml.safe_dump({"missions": {}}), encoding="utf-8")
+    path.write_text(yaml.safe_dump({"obs_db_root": str(root)}), encoding="utf-8")
 
     config = load_observations_config(path)
 
@@ -34,10 +42,12 @@ def test_load_observations_config_rejects_unknown_mission(tmp_path):
 
 
 def _config_with_obs_db(tmp_path):
-    obs_db = tmp_path / "IXPE"
-    obs_db.mkdir()
+    """A single-root config whose IXPE subdir is the mission (discovered from disk)."""
+    root = tmp_path / "obsdb"
+    obs_db = root / "IXPE"
+    obs_db.mkdir(parents=True)
     cfg = tmp_path / "observations.yaml"
-    cfg.write_text(yaml.safe_dump({"missions": {"ixpe": {"obs_db_path": str(obs_db)}}}))
+    cfg.write_text(yaml.safe_dump({"obs_db_root": str(root)}))
     return cfg, obs_db
 
 
@@ -80,6 +90,66 @@ def test_read_catalog_malformed_raises(tmp_path):
     (obs_db / "catalog.json").write_text("{ not valid json")
     with pytest.raises(ValueError, match="malformed data catalog"):
         read_catalog("ixpe", config_path=cfg)
+
+
+# ── catalog health check (preflight) ────────────────────────────────────────
+
+
+def _health_config(tmp_path, mission="probe"):
+    """A single-root observations.yaml with one mission subdir whose basename has no obsdb
+    scanner.
+
+    ``healthcheck`` derives the mission from the obs_db basename; using one with no
+    registered disk scanner keeps the test isolated to the catalog.json we control (no
+    on-disk ``uncatalogued`` false positives).
+    """
+    root = tmp_path / "obsdb"
+    obs_db = root / mission
+    obs_db.mkdir(parents=True)
+    cfg = tmp_path / "observations.yaml"
+    cfg.write_text(yaml.safe_dump({"obs_db_root": str(root)}))
+    return cfg, obs_db
+
+
+def test_check_catalog_health_absent_catalog_passes(tmp_path):
+    cfg, _ = _health_config(tmp_path)
+    check_catalog_health(config_path=cfg, toolkit_root=TOOLKIT_ROOT)  # no raise
+
+
+def test_check_catalog_health_good_catalog_passes(tmp_path):
+    cfg, obs_db = _health_config(tmp_path)
+    (obs_db / "01" / "evt").mkdir(parents=True)
+    (obs_db / "01" / "evt" / "f.evt").write_text("x")
+    (obs_db / "catalog.json").write_text(json.dumps({
+        "entries": {
+            "01": {
+                "obsid": "01", "max_level": 2, "levels_present": [1, 2],
+                "products": [{"kind": "level2_evt", "path": "01/evt/f.evt"}],
+            },
+        }
+    }))
+    check_catalog_health(config_path=cfg, toolkit_root=TOOLKIT_ROOT)  # no raise
+
+
+def test_check_catalog_health_malformed_raises(tmp_path):
+    cfg, obs_db = _health_config(tmp_path)
+    (obs_db / "catalog.json").write_text("{ not valid json")
+    with pytest.raises(RuntimeError, match="catalog health drift"):
+        check_catalog_health(config_path=cfg, toolkit_root=TOOLKIT_ROOT)
+
+
+def test_check_catalog_health_missing_product_raises(tmp_path):
+    cfg, obs_db = _health_config(tmp_path)
+    (obs_db / "catalog.json").write_text(json.dumps({
+        "entries": {
+            "01": {
+                "obsid": "01", "max_level": 2, "levels_present": [1, 2],
+                "products": [{"kind": "level2_evt", "path": "01/evt/gone.evt"}],
+            },
+        }
+    }))
+    with pytest.raises(RuntimeError, match="catalog health drift"):
+        check_catalog_health(config_path=cfg, toolkit_root=TOOLKIT_ROOT)
 
 
 # ── data_catalog ReAct tool (worker + lead) ─────────────────────────────────

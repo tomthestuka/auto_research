@@ -1,13 +1,11 @@
-# NOTE (pending restructure, 2026-06-17): the obs database is to become ONE folder,
-# no longer configured per mission. Replace this per-mission `obs_db_path` map with a
-# single obs-db root, and derive each mission's path as <root>/<MISSION> (e.g.
-# <root>/IXPE) in observations.py. research_toolkit tools already take a per-mission
-# directory and need no change; each mission's catalog.json stays under its subdir.
-# See config/DOCS.md (observations.yaml note).
-missions:
-  ixpe:
-    obs_db_path: /data/fzhou/XSPEC/Cyg_X-1/IXPE
-  nicer:
-    obs_db_path: /data/fzhou/XSPEC/Cyg_X-1/NICER
-  nustar:
-    obs_db_path: /data/fzhou/XSPEC/Cyg_X-1/NuSTAR
+# Observation database location.
+#
+# The obs database is ONE folder. Set `obs_db_root` to it; each mission lives in a
+# subdirectory `<obs_db_root>/<MISSION>` (e.g. <root>/IXPE, <root>/NICER, <root>/NuSTAR).
+# Missions are discovered from disk by `auto_research.observations`: a subdirectory is a
+# mission iff it contains a `catalog.json` (the marker that distinguishes mission folders
+# from unrelated working dirs sharing the root). The subdir basename lowercases to the
+# mission name (research_toolkit derives it the same way); each mission's catalog.json stays
+# under its own subdir. research_toolkit tools (xspec_utils.load_data, heasarc_utils.acquire)
+# already take a per-mission directory and need no change.
+obs_db_root: /data/fzhou/XSPEC/Cyg_X-1

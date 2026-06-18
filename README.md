@@ -197,7 +197,7 @@ Statuses: **Done** = built & documented · **Todo** = in scope, not yet built.
 | 4 | Done | **Provider-decorrelated review** (`sandbox/review.py::make_review_hook`, now the default `run_review` hook) — the GPT `analyst_colead` reviews the authored diff bundle + gate report and judges the Layer-B checks (code-review only), routed by `select_decorrelated_member` to a provider ≠ the Claude author's (raises if none); investigates the worktree/web via a read-only provider before its `ToolReviewVerdict`. `propose_and_pr` gains a `colead` param. | Review runs on a different provider; a planted subtle bug is caught (rejected → L3 rework) or escalated, not rubber-stamped. |
 | 5 | Done | **Raise-to-human** — `HumanQuery`/`HumanResponse` + the injectable `human_handler` (`auto_research.hitl`); a shared `ask_human` tool for every ReAct role + the author (blocking direct-handler; durable `interrupt()`/checkpointer deferred §12); CLI/Slack/WhatsApp connectors with an auto-detecting CLI-vs-library resolver; a launch-time channel ping in the preflight; and `failed`/`needs_human` routed around the reviewer to a no-fabrication finalize. | A blocked role raises and the run blocks for a human; an honest FAILED carries no penalty; headless raises `HumanInputRequired`. |
 | 6 | Done | **`approve_edit()` atomic commit** (`sandbox/merge_flow.py`) — gate-pass ∧ co-lead review-pass → one atomic commit per tool on the branch; stages **exactly** `gate.collect_targets` (explicit-path, never `git add -A`); commit subject = the co-lead's `commit_summary` (fallback: tool name); `propose_and_pr` returns the real `commit_sha`. The gate now tracks non-`.py` files under a `*_utils` package (shell scripts get a vocabulary scan; binaries hard-fail, §9.5). New preflight `check_toolkit_git_identity`. Runtime never merges. | Approved tool lands as one commit; only gated files are staged; human reruns the human-half and merges/reverts cleanly. |
-| 7 | Done | **Lead-driven authoring/resume** — a worker's `tool_request` drives the lead's `decide_authoring()` (browse `lib/` read-only → one finalised `ToolSpec`); consensus (`DebateToConverge`) issues `merge_flow.propose_and_pr(direct_branch="ai")` itself (the LLM never issues git), then on a committed tool reloads the registry (dynamic `*_utils` discovery + `reload()`), restarts sandboxes, augments the task with provenance, and reruns workers — bounded by `tool_author_cap`, not `max_rounds`. New `AuthoringDecision` schema; direct-branch `ai` mode + `check_toolkit_branch_clean` preflight; per-mission data catalog read side (`observations.read_catalog`); `prompts/coder.md` instructs a package `README.md` + recording produced data through the trusted `obsdb_manager` writer (never hand-rolling `catalog.json`). | Missing-capability analysis authors the tool it needs on branch `ai` and finishes on it; exercised live via the `usage_example.ipynb` "test code authoring" run (IXPE P1). |
+| 7 | Done | **Lead-driven authoring/resume** — a worker's `tool_request` drives the lead's `decide_authoring()` (browse `lib/` read-only → one finalised `ToolSpec`); consensus (`DebateToConverge`) issues `merge_flow.propose_and_pr(direct_branch="ai")` itself (the LLM never issues git), then on a committed tool reloads the registry (dynamic `*_utils` discovery + `reload()`), restarts sandboxes, augments the task with provenance, and reruns workers — bounded by `tool_author_cap`, not `max_rounds`. New `AuthoringDecision` schema; direct-branch `ai` mode + `check_toolkit_branch_clean` preflight; per-mission data catalog read side (`observations.read_catalog`); `prompts/coder.md` instructs a package `README.md` + recording produced data through the trusted `obsdb_catalog` writer (never hand-rolling `catalog.json`). | Missing-capability analysis authors the tool it needs on branch `ai` and finishes on it; exercised live via the `usage_example.ipynb` "test code authoring" run (IXPE P1). |
 
 Current role/tool surfaces:
 
@@ -271,17 +271,24 @@ repoint the config. Roughly:
 1. **HEASoft (incl. PyXSPEC)** — install HEASoft and confirm `python -c "import xspec"`
    works under its Python. Edit `src/auto_research/sandbox/analyst_env.sh` so `HEADAS`,
    `CALDB`, etc. point at your install.
-2. **Analysis Python env** — a conda/venv whose Python has PyXSPEC on the path plus
-   `ixpeobssim` (for IXPE reduction/response) and `astroquery` (for `heasarc_utils` HEASARC
-   downloads; `pip install astroquery`). Set `analyze_env` in `config/orchestration.yaml` to
-   its prefix.
+2. **Analysis Python env** — the pure-Python analysis stack (`ixpeobssim` for IXPE
+   reduction/response, `astroquery` for `heasarc_utils` HEASARC downloads, plus
+   `astropy`/`numpy`/`scipy`/`matplotlib`) is captured in `environment-analyst.yml`:
+   ```bash
+   conda env create -f environment-analyst.yml -p <prefix>
+   ```
+   Then set `analyze_env` in `config/orchestration.yaml` to `<prefix>`. Note: this env does
+   **not** include PyXSPEC/`heasoftpy`/CALDB/`relxill` — those come from the HEASoft build
+   (step 1) and `analyst_env.sh`, not from conda/pip.
 3. **`relxill`** — install the model tables; the boot policy loads them from
    `/data/fzhou/XSPEC/relxill/` in `src/auto_research/sandbox/persistent.py` — change that
    path to yours.
 4. **`research_toolkit`** — clone the sibling repo and set `toolkit_root` in
    `config/orchestration.yaml`.
-5. **Observation data** — put your data somewhere and set the per-mission `obs_db_path`s
-   in `config/observations.yaml`.
+5. **Observation data** — put your data under one folder with a `<MISSION>` subdirectory
+   per mission (e.g. `IXPE/`, `NICER/`, `NuSTAR/`), and set `obs_db_root` to that folder in
+   `config/observations.yaml`. Missions are discovered from disk (a subdir with a
+   `catalog.json` is a mission).
 
 If you only care about the literature/reviewer loop, skip step 2 entirely — the analyst
 tools simply won't be available.
@@ -295,7 +302,7 @@ tools simply won't be available.
 | `.env` | API keys and optional tracing flags. Loaded automatically. Never committed (`cp .env.example .env`). |
 | `config/models.yaml` | Role → model-group mapping (OpenAI/Anthropic/Google). No model IDs in code. |
 | `config/orchestration.yaml` | `runtime_dir`, iteration/ReAct caps, `toolkit_root`, `analyze_env`, `analyze_ini_sh`, `disabled_tools`, report formats, report retry cap, and Phase-2 authoring caps. |
-| `config/observations.yaml` | `missions.<name>.obs_db_path` — local observation locations, treated as data. |
+| `config/observations.yaml` | `obs_db_root` — the single obs-db folder; missions are its `<MISSION>` subdirs (those holding a `catalog.json`), discovered from disk and treated as data. |
 | `config/code_gate.yaml` | The Phase-2 gate's no-fabrication scan lists (banned vocabulary, RNG hard-fails, literal-array findings, ObsID allowlist). Human-tunable; no scan constant in code. |
 
 **Keys** (the provider SDKs read these directly; see `.env.example` for the full template):

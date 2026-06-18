@@ -78,6 +78,7 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     a run starts only if the human-response channel actually replies (§9.8).
     """
     from auto_research.env import check_required_env
+    from auto_research.observations import check_catalog_health
     from auto_research.sandbox.merge_flow import (
         check_toolkit_branch_clean,
         check_toolkit_git_identity,
@@ -89,6 +90,7 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     preflight.register("author_reviewer_decorrelation", check_author_reviewer_decorrelation)
     preflight.register("toolkit_git_identity", check_toolkit_git_identity)
     preflight.register("toolkit_branch_clean", check_toolkit_branch_clean)
+    preflight.register("catalog_health", check_catalog_health)
     if human_handler is not None:
         from auto_research.hitl import make_human_channel_check
 

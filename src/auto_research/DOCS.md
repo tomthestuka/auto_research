@@ -16,7 +16,7 @@ and the active Phase 2 build order in
 | Submodule | Step | Role |
 |---|---|---|
 | `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`). |
-| `preflight.py` | — | Launch-time deterministic **checklist** (`Preflight` / async `run_preflight()`): runs every no-LLM precondition (`.env` shape, author↔reviewer decorrelation, human-channel ping) before any model client is built. |
+| `preflight.py` | — | Launch-time deterministic **checklist** (`Preflight` / async `run_preflight()`): runs every no-LLM precondition (`.env` shape, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, human-channel ping) before any model client is built. |
 | `hitl` | 5 | Raise-to-human clarification channel: the injectable `HumanHandler`, the CLI/Slack/WhatsApp connectors, the CLI-vs-library resolver, and the launch-time channel ping. |
 | `schemas` | 1 | Pydantic v2 message protocol between agents. |
 | `models` | 2 | Provider abstraction + role→model registry from `config/models.yaml`. |
@@ -24,7 +24,7 @@ and the active Phase 2 build order in
 | `storage` | 4 | SQLite layer (papers, memory, query_log; embedding column reserved for Phase 2). |
 | `sources` | 5 | `QuerySource` interface + `arxiv`, `nasa_ads`, `web` (Tavily) modules. |
 | `retrieval` | 6 | `RetrievalBackend` (text search now, vector search stubbed). |
-| `observations.py` | 8 | Generic loader for mission observation database/archive paths from `config/observations.yaml`. |
+| `observations.py` | 8 | Single `obs_db_root` loader (`config/observations.yaml`) that discovers per-mission `<root>/<MISSION>` subdirs from disk, plus the read-side data catalog and the `catalog_health` preflight check. |
 | `agents` | 7-8 | Runtime prompt loader plus thin per-role wrappers that load `prompts/<role>.md`, call configured model groups, and validate schema JSON. |
 | `consensus` | 9 | `ConsensusStrategy` — debate-to-converge with lead convergence checks and adjudication. |
 | `graph` | 10 | LangGraph assembly + the two capped feedback edges. |
@@ -50,15 +50,23 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `build_default_preflight(human_handler)`): `check_required_env`,
   `sandbox.review.check_author_reviewer_decorrelation`,
   `sandbox.merge_flow.check_toolkit_git_identity` (the `research_toolkit` checkout has a git
-  commit identity, so a runtime tool commit can't fail mid-flow), and — when a channel is
+  commit identity, so a runtime tool commit can't fail mid-flow),
+  `observations.check_catalog_health` (every mission's local data catalog is healthy via
+  `research_toolkit`'s detect-only `obsdb_catalog.healthcheck`), and — when a channel is
   resolved — `hitl.make_human_channel_check` (pings the channel, green only on a reply). `run_research()`
   resolves the handler then awaits this before any LLM; aggregates every failure into one
   `PreflightError`.
-- `auto_research.observations.load_observations_config()` loads generic
-  mission observation locations from config; mission names are not hardcoded in
-  agent wrappers. `read_catalog(mission)` / `local_obsids(mission, min_level=…)` read the
+- `auto_research.observations.load_observations_config()` loads the single `obs_db_root`
+  from config and discovers missions from disk (`<root>/<MISSION>` subdirs marked by a
+  `catalog.json`); mission names are not hardcoded in agent wrappers. `config.missions` is
+  the discovered map; `config.mission(name)` resolves one mission's path by case-insensitive
+  subdir match. `read_catalog(mission)` / `local_obsids(mission, min_level=…)` read the
   per-mission data catalog (`<obs_db_path>/catalog.json`, a `DataCatalog`/`CatalogEntry`/
   `DataProduct` model) — the read side of the data inventory the authored toolkit tools write.
+  `check_catalog_health()` is the launch-time preflight check: it runs `research_toolkit`'s
+  detect-only `obsdb_catalog.healthcheck` (pure stdlib, never writes) over every configured
+  mission and raises on any drift (malformed/missing/regressed/level-inconsistent/uncatalogued),
+  aggregating all missions; the human repairs via `obsdb_catalog.repair` out of band.
 
 ## Dependencies
 - External: `pydantic`, `langgraph`, `langsmith`, provider SDKs (`anthropic`,
@@ -121,3 +129,17 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   product provenance (params used to obtain level-3 products). Authored toolkit tools write it;
   the JSON contract is documented in `prompts/coder.md`. Also registered
   `check_toolkit_branch_clean` in the default preflight (branch `ai` + clean tree).
+- 2026-06-18 — Added `observations.check_catalog_health()` and registered it in the default
+  preflight (`catalog_health`). It delegates to `research_toolkit`'s detect-only
+  `obsdb_catalog.healthcheck` (pure stdlib, dependency-free, never writes), imported directly
+  from `toolkit_root` (it is not `*_utils`-named, so tool discovery ignores it). Hard-blocks a
+  launch on **any** drift report (incl. `uncatalogued`), aggregating every mission; repair stays
+  the human's out-of-band `obsdb_catalog.repair`. Deterministic tests in
+  `tests/test_observations.py`.
+- 2026-06-18 — `observations.yaml` restructured to a single `obs_db_root` (per-mission
+  `obs_db_path` map removed). `ObservationsConfig` now discovers missions from disk —
+  `<root>/<MISSION>` subdirs marked by a `catalog.json` (`.missions` is a discovery property);
+  `mission(name)` resolves a single mission's path by case-insensitive subdir match (works
+  before its catalog exists, and reconstructs casing like `NuSTAR`). Downstream
+  `.missions`/`.mission()` consumers are unchanged. Also added the analyst sandbox conda env
+  spec `environment-analyst.yml` (repo root) and pointed `README.md` §2b at it.

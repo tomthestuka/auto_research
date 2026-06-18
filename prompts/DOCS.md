@@ -30,8 +30,10 @@ Runtime prompt files:
   summaries.
 - `analyst_worker.md` — task analysis, debate revisions, assumptions, figure
   reference handling, ReAct tool use, `tool_request` reporting for missing or
-  broken toolkit capabilities, and **§9.6 failure classification** (my-bug → retry;
-  env/data/human-fault → `ask_human` / set `status=failed|needs_human`, never fabricate).
+  broken toolkit capabilities, and **§9.6 failure handling** (wrong call → retry in the loop;
+  broken tool → `fix_existing` request; env/data/human-fault → `ask_human` / set
+  `status=failed|needs_human`, never fabricate). Tool returns are not instantaneous (slow
+  downloads/reductions, human pauses) — wait, never assume an output.
 - `analyst_lead.md` — convergence judgment, adjudication, synthesis, **tool-request
   triage** (new-capability disposition + `fix_existing` wrongly-called vs buggy),
   authoritative-doc consultation (`web_search`), and **raise-to-human** (`ask_human` / final
@@ -44,9 +46,11 @@ Runtime prompt files:
   `merge_flow.approve_edit` uses for the working-branch commit (step 6). The role name
   `analyst_colead` mirrors `config/models.yaml`.
 - `coder.md` — the Phase-2 tool author's system prompt (loaded by `merge_flow` and passed
-  to the Claude Agent SDK): the two-halves layout, no-fabrication rules, the
-  web/`ask_lead`/`ask_human` escalation ladder, and the committed-tests requirement. The
-  role name `coder` mirrors `config/models.yaml`.
+  to the Claude Agent SDK): the real package layout (`lib/` + `skills/` + wrapped-asset subdirs
+  + `tests/` + `README.md`), the two-halves split and design-for-extension principle, the
+  README↔`TOOL_MANIFEST` audience split, `obsdb_catalog` as the sole catalog writer,
+  no-fabrication rules, the web/`ask_lead`/`ask_human` escalation ladder, and the committed-tests
+  requirement. The role name `coder` mirrors `config/models.yaml`.
 
 Each file is the complete system prompt for that role: identity, responsibilities,
 output expectations, and scope/escalation rules. **Prompts do not enumerate tools
@@ -88,3 +92,17 @@ logic here.
   helper, read the real signature from live toolkit source), never read/write/hand-roll
   `catalog.json`. Replaces the prior inline JSON-shape + read/update/write instructions; the
   catalog write path is prisoned to `obsdb_manager` + a sudo human.
+- 2026-06-18 — Prompts synced to the real `research_toolkit` structure and flow. `coder.md`:
+  dropped the "Python toolkit" framing; the template-layout note now lists the actual package
+  shape (`lib/` + `skills/` + wrapped-asset subdirs like `NICER/`/`NuSTAR/`/`IXPE/` + `tests/`
+  + `README.md`); the trusted catalog writer is `obsdb_catalog` (`neutral.new`/`neutral.advance`,
+  with `heasarc_utils/lib/heasarc_help.py` as the wired example); the tests convention points at
+  `heasarc_utils/tests/` (xspec_utils carries none). `analyst_worker.md`: tool returns are no
+  longer described as instantaneous (slow tools + human pauses → wait, never assume); failure
+  handling reframed off "my bug" into wrong-call → retry vs broken-tool → `fix_existing` (the
+  worker never authors tools — a separate coding agent does — so it cannot have a tool-internals
+  bug). README build-status row updated `obsdb_manager` → `obsdb_catalog`. Also added to
+  `coder.md`: the README↔manifest audience split (README for people; the model reads the tool via
+  the `TOOL_MANIFEST` `description`/`args_schema`) and a "design for extension" note (per-mission
+  strategy modules + thin `<domain>_help.py` dispatch, so a new mission is a module + one manifest
+  entry).

@@ -1,0 +1,36 @@
+# Analyst sandbox analysis environment — the `analyze_env` in config/orchestration.yaml.
+#
+# This is the conda env whose bin/python runs every analyst *tool subprocess*
+# (research_toolkit science + acquire tools). Create it, then point `analyze_env` at it:
+#
+#     conda env create -f environment-analyst.yml -p <prefix>
+#     # then set analyze_env: <prefix> in config/orchestration.yaml
+#
+# DISTINCT from environment.yml, which builds the `auto_research` orchestration/graph env.
+# Do not conflate the two — leave environment.yml alone.
+#
+# NOT COVERED HERE — these stay MANUAL prerequisites (not pip/conda packages); see
+# README §2b and src/auto_research/sandbox/analyst_env.sh:
+#   * HEASoft, incl. its bundled PyXSPEC (`import xspec`) and `heasoftpy` — come from the
+#     HEASoft build, put on PATH/PYTHONPATH by analyst_env.sh (HEADAS/CALDB).
+#   * CALDB — external calibration database install.
+#   * relxill — external XSPEC model tables.
+# A conda/pip spec cannot install these; this file must not pretend to.
+#
+# Pure-Python analysis stack captured from /grad/fzhou/.conda/envs/astropy on 2026-06-17.
+name: analyst
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - astropy=7.1.1
+  - astroquery=0.4.11      # heasarc_utils.acquire (HEASARC downloads)
+  - pyvo=1.9.1             # astroquery TAP/datalink dependency
+  - numpy=2.3.4
+  - scipy=1.16.3
+  - matplotlib=3.10.6
+  - requests=2.34.2
+  - keyring=25.7.0         # astroquery dependency
+  - pip
+  - pip:
+      - ixpeobssim==33.0.0   # IXPE reduction/response; PyPI-only (not packaged on conda)
