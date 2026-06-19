@@ -254,8 +254,8 @@ class _FakeSlackClient:
     def __init__(self):
         self.posted = []
 
-    async def chat_postMessage(self, *, channel, text):
-        self.posted.append({"channel": channel, "text": text})
+    async def chat_postMessage(self, *, channel, text, blocks=None):
+        self.posted.append({"channel": channel, "text": text, "blocks": blocks})
         return {"ts": "t1"}
 
 

@@ -101,10 +101,10 @@ class SlackHandler:
 
     async def __call__(self, query: HumanQuery) -> HumanResponse:
         await self.start()
-        body = f"*[auto_research · {query.kind} · {query.sender_label}]*\n{query.question}"
-        if query.context:
-            body += f"\n_context: {query.context}_"
-        posted = await self.app.client.chat_postMessage(channel=self.channel, text=body)
+        summary = f"Human input needed ({query.kind}) from {query.sender_label}"
+        posted = await self.app.client.chat_postMessage(
+            channel=self.channel, text=summary, blocks=_blocks(query)
+        )
         thread_ts = posted["ts"]
 
         loop = asyncio.get_event_loop()
@@ -115,6 +115,51 @@ class SlackHandler:
         finally:
             self._pending.pop(thread_ts, None)
         return HumanResponse(query_id=query.id, answer=answer)
+
+
+_SLACK_TEXT_LIMIT = 2900  # Block Kit caps a section text object at 3000 chars.
+
+
+def _truncate(text: str, limit: int = _SLACK_TEXT_LIMIT) -> str:
+    """Return ``text`` within Slack's per-block character budget, marking any cut."""
+    text = text.strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _blocks(query: HumanQuery) -> list[dict]:
+    """Render a :class:`HumanQuery` as a Block Kit message.
+
+    A header, a sender line, the question, and (when present) the context each get their
+    own block, so the message stays readable in Slack and the reply lands in this thread.
+    """
+    blocks: list[dict] = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"Human input needed · {query.kind}"},
+        },
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"from *{query.sender_label}*"}],
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Question*\n{_truncate(query.question)}"},
+        },
+    ]
+    if query.context:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*Context*\n{_truncate(query.context)}"},
+            }
+        )
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "Reply in this thread to answer."}],
+        }
+    )
+    return blocks
 
 
 def _build_slack_app() -> tuple[Any, Any]:

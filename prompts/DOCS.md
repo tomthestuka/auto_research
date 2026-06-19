@@ -110,3 +110,22 @@ logic here.
   runs tests twice under a time cap, so validate on a small local ObsID + smallest slice, assert
   stable quantities, and keep stdout quiet (sort globs, silence warnings) so the determinism
   check holds. Pairs with the gate timeout→Layer-B-failure hardening (see `sandbox/DOCS.md`).
+- 2026-06-18 — Clarified local-data discovery in `reviewer.md` and `analyst_lead.md`: local
+  observations are **auto-recognised** via each mission's `catalog.json` (surfaced by the
+  `data_catalog` tool; toolkit tools auto-fill the data paths), so no role resolves or is handed
+  an `obs_db_path`. `reviewer.md` no longer tells the reviewer to look for `obs_db_path` "in the
+  task context" (the framing that made a reviewer ask the human for a path that never exists); it
+  now frames "local first" as instructing analysts to consult the data catalog. Also generalised
+  the reviewer's tool section (no hardcoded tool list; tools/`TOOL_MANIFEST` are runtime-loaded)
+  and re-emphasised that the reviewer reviews science vs. literature and does not do discovery/analysis.
+- 2026-06-18 — All six runtime prompts swept to the new **write-only-positive-actions** style
+  (CLAUDE.md §3): prohibitions phrased as the positive action they imply. The one sanctioned
+  exception is the **no-fabrication ban**, kept explicit wherever it appears (analyst worker/lead,
+  librarian, coder, co-lead). `reviewer.md` rewritten so the **dispatch mechanics live in the
+  `ReviewVerdict` schema** rather than the prompt — the model reads where dispatch goes from
+  `follow_up`'s field description (see `schemas/DOCS.md`); the prompt keeps the reviewer's job, the
+  local-first policy, the plain-language capability-request rule (the extend-vs-author choice is the
+  analyst lead's), a one-or-two-sentence `ask_human` scope, and a quick-capability-check-only
+  posture on a fresh request. This fixes the reviewer that paused a fresh request to ask the human
+  for a data path and an extend-vs-new authoring choice. The harness tool descriptions the prompts
+  rely on were enriched in tandem (see `agents/DOCS.md`).

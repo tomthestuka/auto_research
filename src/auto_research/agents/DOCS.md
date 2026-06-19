@@ -28,7 +28,9 @@ then produces the role's structured output grounded in the trajectory (both reus
 `_structured_loop`, the shared off-schema-retry core). Tool surfaces live behind
 the `ToolProvider` protocol in `react.py`: `SandboxToolProvider` (analyst science
 tools in the `PersistentSandbox`), `ReadOnlyToolProvider` (reviewer/lead/co-lead — in-process
-`read_file`/`list_dir` confined to its `roots`, an optional knowledge-base `text_search`
+`read_file`/`list_dir` confined to its `roots` (the permitted roots are named in each tool's
+description and echoed in the `path not permitted` error so the model self-corrects instead of
+guessing), an optional knowledge-base `text_search`
 (`include_text_search`, default on; the §9.3 co-lead omits it and points `roots` at the
 toolkit worktree instead), plus an optional `web_search` tool when a `web_source` is supplied
 — the analyst lead uses it to consult authoritative docs while triaging tool requests, the
@@ -67,7 +69,7 @@ Current role capability surfaces:
 | Analyst worker | `SandboxToolProvider` over `research_toolkit` manifest tools plus MCP tools in a persistent sandbox. | Runs the full analysis tool chain inside `analyze()`, then reports grounded results and figures. |
 | Analyst lead | `ReadOnlyToolProvider` over run artifacts, papers, and `research_toolkit`; optional `web_search`. | Judges convergence, adjudicates, triages `ToolSpec`, and answers author questions. |
 | Analyst co-lead | `ReadOnlyToolProvider` over the **toolkit worktree** (`include_text_search=False`) + optional `web_search`. | Provider-decorrelated **code review** of one authored tool: brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs (§9.3 step 4). |
-| Reviewer | `ReadOnlyToolProvider` over run artifacts, figures, papers, and memory. | Dispatches, reviews, requests capped rework, and composes final report handles. |
+| Reviewer | `ReadOnlyToolProvider` over run artifacts, figures, papers, memory, and `research_toolkit` (to read tool source/`TOOL_MANIFEST` and confirm correct call parameters). | Dispatches, reviews, requests capped rework, and composes final report handles. |
 
 ## Interfaces / Contracts
 Prompt loading:
@@ -239,3 +241,21 @@ Role wrappers:
   `observations.read_catalog`) — exposed on `SandboxToolProvider` (worker, always) and on
   `ReadOnlyToolProvider` only when `include_data_catalog=True` (the lead, not the reviewer) — so
   a role checks what data is already local before requesting an acquire tool.
+- 2026-06-18 — `ReadOnlyToolProvider.read_file`/`list_dir` are now self-describing: the permitted
+  `roots` are named in each tool's description (`_roots_text`) and echoed in the `path not
+  permitted` error, so a role recovers in one step instead of thrashing on forbidden paths (the
+  failure mode that stalled a reviewer triage loop). The reviewer's `roots` now include
+  `research_toolkit`, so it can read tool source/`TOOL_MANIFEST` and confirm results came from
+  correctly-parameterised tool calls.
+- 2026-06-18 — ReAct loops no longer crash on a literature/web provider fault. `SourceToolProvider`
+  (`search_literature`/`text_search`) and `ReadOnlyToolProvider` (`text_search`/`web_search`) now
+  wrap each provider call in try/except and return an `is_error` `ToolOutcome` (mirroring the
+  per-source guard already in `LibrarianIOAgent.search`), so a network/rate-limit/ADS-404/Tavily
+  failure degrades to recoverable model-visible feedback instead of aborting the whole run.
+- 2026-06-18 — Every harness tool in `react.py` now carries manifest-quality descriptions —
+  a positive tool-level line plus per-argument descriptions — matching the `research_toolkit`
+  `TOOL_MANIFEST` standard: `ask_human` (`question` holds the question, `context` a few
+  supporting facts, `kind` the reason — fixing the model dumping its question into `context`),
+  `read_file`/`list_dir` (`path`), `text_search` and `web_search` (`query`/`limit`), and
+  `search_literature` (`source`/`query`/`limit`). The model now reads each tool's contract from
+  the tool itself rather than the prompt.

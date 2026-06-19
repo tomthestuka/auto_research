@@ -135,3 +135,9 @@ live in `auto_research.schemas` (the protocol, §7).
   an injected app (tests) is still wired in `__init__`. `make_human_channel_check` also now prints
   a "reply to the ping to start the run" line to stdout so a blocking launch ping isn't silent;
   `human_channel_ping_timeout_s` lowered 300→60 in `orchestration.yaml`.
+- 2026-06-18 — `slack.py` posts a Block Kit message (`_blocks(query)`): a header (`kind`), a
+  sender context line, a Question section, and a Context section when present, each `_truncate`d
+  to Slack's 2900-char per-block budget; `chat_postMessage` now passes `blocks=` with a plain
+  `text=` summary fallback. Replaces the single italic-wrapped `_context: …_` line, which Slack
+  rendered as literal underscores across newlines (the "gibberish" body). The fake Slack client
+  in `tests/test_hitl.py` accepts the new `blocks` kwarg.

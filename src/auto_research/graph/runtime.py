@@ -299,13 +299,14 @@ async def run_research(
     # knowledge base), unless a caller pre-wired their own tools.
     from auto_research.sources.downloads import papers_dir
 
-    readonly_roots = [run_dir(run_id), papers_dir()]
-    # The analyst lead additionally browses the whole research_toolkit read-only, so it
-    # can decide a tool proposal's disposition (extend an existing package vs author a new
-    # one) by reading the full lib/ source — not just the minimal skills/ stubs the workers
-    # see (CLAUDE.md §9.3). Read-only/path-confined, no shell: the runtime never writes the
-    # toolkit (§2) and this matches the §12 "read-only file-tree exploration" posture.
-    lead_roots = [*readonly_roots, toolkit_root]
+    # The reviewer and analyst lead both browse the whole research_toolkit read-only.
+    # The lead needs it to decide a tool proposal's disposition (extend an existing package
+    # vs author a new one) by reading the full lib/ source — not just the minimal skills/
+    # stubs the workers see (CLAUDE.md §9.3). The reviewer needs it to inspect the same
+    # tool source/manifests and confirm results came from correctly-parameterised tool
+    # calls. Read-only/path-confined, no shell: the runtime never writes the toolkit (§2)
+    # and this matches the §12 "read-only file-tree exploration" posture.
+    readonly_roots = [run_dir(run_id), papers_dir(), toolkit_root]
     if getattr(reviewer, "tools", None) is None:
         try:
             reviewer.tools = ReadOnlyToolProvider(
@@ -318,7 +319,7 @@ async def run_research(
     if getattr(lead, "tools", None) is None:
         try:
             lead.tools = ReadOnlyToolProvider(
-                roots=lead_roots, retrieval=retrieval,
+                roots=readonly_roots, retrieval=retrieval,
                 include_data_catalog=True,
                 human_handler=human_handler, asked_by="analyst_lead",
                 model=_model_label(lead.model) or "",

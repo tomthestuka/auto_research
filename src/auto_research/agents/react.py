@@ -67,17 +67,34 @@ def ask_human_tool_def() -> dict:
     return {
         "name": ASK_HUMAN_TOOL,
         "description": (
-            "Escalate to a real human when blocked: a genuine expert-science/code question "
-            "or a hard block (missing data, broken dependency, contradictory request) you "
-            "cannot resolve yourself. Blocks until the human replies. Ask early and "
-            "specifically rather than guessing or fabricating."
+            "Reach a real human for one clarification: an expert science or code question, "
+            "or a hard block such as missing data, a broken dependency, or a contradictory "
+            "request. Blocks until the human replies, so ask early and specifically. The "
+            "human reads this on a phone — keep it to the one question plus the few facts "
+            "needed to answer it."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "question": {"type": "string"},
-                "kind": {"type": "string", "enum": list(_ASK_HUMAN_KINDS)},
-                "context": {"type": "string"},
+                "question": {
+                    "type": "string",
+                    "description": "The single question for the human, in one or two sentences.",
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": list(_ASK_HUMAN_KINDS),
+                    "description": (
+                        "Why you are asking: 'clarify_science' for an expert science point, "
+                        "'clarify_code' for a code or convention point, 'blocked' for a hard block."
+                    ),
+                },
+                "context": {
+                    "type": "string",
+                    "description": (
+                        "A few sentences of supporting facts the human needs to answer — the "
+                        "situation and what you already tried."
+                    ),
+                },
             },
             "required": ["question"],
         },
@@ -391,23 +408,43 @@ class ReadOnlyToolProvider:
         self.include_text_search = include_text_search
         self.max_chars = max_chars
 
+    def _roots_text(self) -> str:
+        return ", ".join(str(r) for r in self.roots)
+
     def tool_definitions(self) -> list[dict]:
+        roots_text = self._roots_text()
         definitions = [
             {
                 "name": "read_file",
-                "description": "Read a UTF-8 text file under the permitted root directories.",
+                "description": (
+                    "Read a UTF-8 text file. Give an absolute path inside one of the permitted "
+                    f"roots: {roots_text}."
+                ),
                 "input_schema": {
                     "type": "object",
-                    "properties": {"path": {"type": "string"}},
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path to the file, inside a permitted root.",
+                        }
+                    },
                     "required": ["path"],
                 },
             },
             {
                 "name": "list_dir",
-                "description": "List entries of a directory under the permitted root directories.",
+                "description": (
+                    "List the entries of a directory. Give an absolute path inside one of the "
+                    f"permitted roots: {roots_text}."
+                ),
                 "input_schema": {
                     "type": "object",
-                    "properties": {"path": {"type": "string"}},
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path to the directory, inside a permitted root.",
+                        }
+                    },
                     "required": ["path"],
                 },
             },
@@ -416,10 +453,22 @@ class ReadOnlyToolProvider:
             definitions.append(
                 {
                     "name": "text_search",
-                    "description": "Full-text search the local knowledge base; returns matching paper paths.",
+                    "description": (
+                        "Full-text search the local knowledge base of ingested papers; returns "
+                        "the file paths of the best matches."
+                    ),
                     "input_schema": {
                         "type": "object",
-                        "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Keywords or a phrase to match against ingested papers.",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of paper paths to return (default 5).",
+                            },
+                        },
                         "required": ["query"],
                     },
                 }
@@ -429,13 +478,22 @@ class ReadOnlyToolProvider:
                 {
                     "name": "web_search",
                     "description": (
-                        "Search the web for authoritative documentation (mission analysis "
-                        "threads, calibration memos, official references). Use before "
-                        "answering an uncertain science/code question rather than guessing."
+                        "Search the web for authoritative documentation — mission analysis "
+                        "threads, calibration memos, official references. Use it to confirm an "
+                        "uncertain science or code point from a primary source."
                     ),
                     "input_schema": {
                         "type": "object",
-                        "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Keywords describing the documentation you need.",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of results to return (default 5).",
+                            },
+                        },
                         "required": ["query"],
                     },
                 }
@@ -460,7 +518,13 @@ class ReadOnlyToolProvider:
         if name in ("read_file", "list_dir"):
             target = Path(str(arguments.get("path", "")))
             if not self._allowed(target):
-                return ToolOutcome(text=f"path not permitted: {target}", is_error=True)
+                return ToolOutcome(
+                    text=(
+                        f"path not permitted: {target}. Use an absolute path inside one of the "
+                        f"permitted roots: {self._roots_text()}"
+                    ),
+                    is_error=True,
+                )
             try:
                 if name == "read_file":
                     text = target.read_text(encoding="utf-8", errors="replace")[: self.max_chars]
@@ -473,20 +537,32 @@ class ReadOnlyToolProvider:
         if name == "text_search":
             from auto_research.retrieval import text_search_paths
 
-            paths = await text_search_paths(
-                str(arguments.get("query", "")),
-                limit=int(arguments.get("limit", 5)),
-                backend=self.retrieval,
-            )
+            try:
+                paths = await text_search_paths(
+                    str(arguments.get("query", "")),
+                    limit=int(arguments.get("limit", 5)),
+                    backend=self.retrieval,
+                )
+            except Exception as exc:  # noqa: BLE001 — keep the loop alive
+                return ToolOutcome(
+                    text=f"text_search failed: {type(exc).__name__}: {exc}", is_error=True
+                )
             text = "\n".join(str(p) for p in paths) or "(no local matches)"
             return ToolOutcome(text=text)
 
         if name == "web_search":
             if self.web_source is None:
                 return ToolOutcome(text="web_search not available", is_error=True)
-            results = await self.web_source.search(
-                str(arguments.get("query", "")), limit=int(arguments.get("limit", 5))
-            )
+            # Provider faults (rate limit, network, Tavily error) degrade to an
+            # error outcome rather than crashing the reviewer/lead ReAct loop.
+            try:
+                results = await self.web_source.search(
+                    str(arguments.get("query", "")), limit=int(arguments.get("limit", 5))
+                )
+            except Exception as exc:  # noqa: BLE001
+                return ToolOutcome(
+                    text=f"web_search failed: {type(exc).__name__}: {exc}", is_error=True
+                )
             lines = [f"- {r.title} {r.url}\n  {(r.abstract or '')[:300]}" for r in results]
             return ToolOutcome(text="\n".join(lines)[: self.max_chars] or "(no results)")
 
@@ -517,25 +593,50 @@ class SourceToolProvider:
             {
                 "name": "search_literature",
                 "description": (
-                    "Search one external literature source for papers. Sources: "
-                    + ", ".join(self.sources) + "."
+                    "Search one external literature source for papers and add the hits to this "
+                    "run's results. Sources: " + ", ".join(self.sources) + "."
                 ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "source": {"type": "string", "enum": list(self.sources)},
-                        "query": {"type": "string"},
-                        "limit": {"type": "integer"},
+                        "source": {
+                            "type": "string",
+                            "enum": list(self.sources),
+                            "description": "The literature source to query.",
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "A short keyword query of 4–8 terms; arXiv and ADS match on "
+                                "keywords."
+                            ),
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of papers to return (default 10).",
+                        },
                     },
                     "required": ["source", "query"],
                 },
             },
             {
                 "name": "text_search",
-                "description": "Search the local knowledge base of already-ingested papers.",
+                "description": (
+                    "Search the local knowledge base of already-ingested papers; returns "
+                    "matching paper paths."
+                ),
                 "input_schema": {
                     "type": "object",
-                    "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Keywords or a phrase to match against ingested papers.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of paper paths to return (default 5).",
+                        },
+                    },
                     "required": ["query"],
                 },
             },
@@ -546,9 +647,19 @@ class SourceToolProvider:
             source = self.sources.get(str(arguments.get("source", "")))
             if source is None:
                 return ToolOutcome(text=f"unknown source: {arguments.get('source')}", is_error=True)
-            results = await source.search(
-                str(arguments.get("query", "")), limit=int(arguments.get("limit", 10))
-            )
+            # A source provider raising (network, rate limit, ADS 404, malformed
+            # response) must not kill the whole ReAct loop/run — surface it as an
+            # error outcome so the model can retry, switch source, or stop. Mirrors
+            # the per-source guard in LibrarianIOAgent.search().
+            try:
+                results = await source.search(
+                    str(arguments.get("query", "")), limit=int(arguments.get("limit", 10))
+                )
+            except Exception as exc:  # noqa: BLE001 — degrade one source, keep the loop alive
+                return ToolOutcome(
+                    text=f"source '{arguments.get('source')}' failed: {type(exc).__name__}: {exc}",
+                    is_error=True,
+                )
             self.results.extend(results)
             lines = [f"- {r.title} ({r.source}) {r.url}\n  {(r.abstract or '')[:300]}" for r in results]
             return ToolOutcome(text="\n".join(lines)[: self.max_chars] or "(no results)")
@@ -556,11 +667,16 @@ class SourceToolProvider:
         if name == "text_search":
             from auto_research.retrieval import text_search_paths
 
-            paths = await text_search_paths(
-                str(arguments.get("query", "")),
-                limit=int(arguments.get("limit", 5)),
-                backend=self.retrieval,
-            )
+            try:
+                paths = await text_search_paths(
+                    str(arguments.get("query", "")),
+                    limit=int(arguments.get("limit", 5)),
+                    backend=self.retrieval,
+                )
+            except Exception as exc:  # noqa: BLE001 — keep the loop alive
+                return ToolOutcome(
+                    text=f"local text_search failed: {type(exc).__name__}: {exc}", is_error=True
+                )
             return ToolOutcome(text="\n".join(str(p) for p in paths) or "(no local matches)")
 
         return ToolOutcome(text=f"unknown tool: {name}", is_error=True)

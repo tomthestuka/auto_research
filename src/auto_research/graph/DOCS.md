@@ -180,3 +180,8 @@ iteration counters, and the cap.
   (`<run_dir>/authoring`), `direct_branch` (`orchestration.yaml: tool_author_branch`, default
   `ai`), and `human_handler`, so the lead authors missing capability into `research_toolkit` and
   workers rerun on it. The lead keeps its read-only `toolkit_root` browse root.
+- 2026-06-18 — The reviewer's `ReadOnlyToolProvider` `roots` now include `toolkit_root` too
+  (shared `readonly_roots = [run_dir, papers_dir, toolkit_root]` for both reviewer and lead), so
+  the reviewer can read tool source/`TOOL_MANIFEST` and verify analyst results used correct call
+  parameters — paired with self-describing read-only tools (`agents/DOCS.md`) that stopped a
+  reviewer triage loop from stalling on forbidden `list_dir` paths.

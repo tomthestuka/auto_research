@@ -15,7 +15,7 @@ Responsibilities:
 - Add or update the package's `README.md` so the human merge review and future maintenance
   have a current description of the tool (see *Package README* below).
 - Never fabricate data or leave placeholder behavior; fail honestly instead.
-- Escalate when unsure (web/docs → `ask_lead` → `ask_human`) rather than guessing.
+- Escalate when unsure (web/docs → `ask_lead` → `ask_human`) to ground each decision before you act.
 - Make `pytest` green in the worktree before declaring the work done.
 
 ## The two halves — every toolkit package has exactly this shape
@@ -36,8 +36,8 @@ separate; this separation is what makes the tool verifiable.
   level), so the orchestration environment can import it to discover tools. Each entry
   wraps a `lib/` function and looks like:
   `{"module": "<domain>_utils.lib.<help>", "fn": "<callable>", "description": "...",
-  "args_schema": {<JSON Schema>}}`. **Never duplicate domain code into `skills/`** — point
-  at the `lib/` function. Science-stack-dependent wrappers, if any, go in
+  "args_schema": {<JSON Schema>}}`. **Keep domain code in `lib/` only** — point each
+  `skills/` entry at its `lib/` function. Science-stack-dependent wrappers, if any, go in
   `skills/session.py`, imported only inside the analysis subprocess.
 
 The package `__init__.py` re-exports `TOOL_MANIFEST` and puts `lib/` on `sys.path`; it must
@@ -58,7 +58,7 @@ selects among them. Build so the **next** mission or source is a new strategy mo
 helpers small and composable, and push the error-prone per-mission specifics down into the
 strategy module where they are tested once and reused.
 
-## Often the capability already exists — surface or wire it, don't rewrite it
+## Often the capability already exists — surface or wire what is there
 
 Most `extend_existing` briefs are about **exposing capability the toolkit already contains**,
 not inventing science. Before writing anything new:
@@ -66,11 +66,11 @@ not inventing science. Before writing anything new:
 - **Surface an existing `lib/` function.** If the needed behaviour already lives in `lib/`
   (e.g. a reduction or polarization-cube routine), the smallest correct change is often just a
   new `TOOL_MANIFEST` entry pointing at it (plus a thin `skills/session.py` wrapper if the
-  function returns rich objects that must be reduced to a small JSON-able result). Do not copy
-  the science into `skills/`.
+  function returns rich objects that must be reduced to a small JSON-able result). Keep the
+  science in `lib/` and reference it from `skills/`.
 - **Wire an existing asset.** If the capability exists as a shell script or pipeline already
   in the package (e.g. instrument reduction scripts), wrap it from `lib/` (call it via
-  `subprocess`, surface its real inputs/outputs) rather than reimplementing it. The wrapped
+  `subprocess`, surface its real inputs/outputs) and reuse it as it stands. The wrapped
   artifact is part of the tool — commit and let the gate scan it.
 - Only **author genuinely new code** when the capability is truly absent (e.g. a new
   data-acquisition package). Then mirror the template and keep the abstraction in `lib/`.
@@ -94,9 +94,8 @@ human.
 
 When your tool acquires or produces data for an ObsID (download, reduction, polarization
 cube, PHA, …), record it in the mission's data catalog so the rest of the system knows what
-is local and how it was produced. **Never touch the catalog file yourself** — do not read,
-write, or hand-roll its JSON. The catalog has exactly one trusted writer, the `obsdb_catalog`
-package; record every product through its writer (`obsdb_catalog.neutral.new` /
+is local and how it was produced. **Route every catalog read and write through `obsdb_catalog`**,
+the catalog's one trusted writer. Record every product through it (`obsdb_catalog.neutral.new` /
 `obsdb_catalog.neutral.advance`) at the point the product lands on disk. Read the real
 signature from the live toolkit source and follow the producer already wired to it
 (`heasarc_utils/lib/heasarc_help.py` calls `neutral.new` after a download). The mission
@@ -110,8 +109,8 @@ on disk; never invent an entry for data you did not produce.
 
 - The brief's **disposition** — extend an existing package vs. scaffold a new one — and its
   **target package** are already decided for you (by the analyst lead, who read the full
-  `lib/`). Execute that architectural decision; do not relitigate it. If it looks wrong,
-  ask the lead rather than silently diverging.
+  `lib/`). Execute that architectural decision as given. If it looks wrong, ask the lead
+  before diverging.
 - The brief's proposed checks and tolerances are **advisory**. You and the lead, with full
   `lib/` sight, finalize the real checks. **The tests you commit — not the brief — are
   authoritative.**
@@ -120,8 +119,8 @@ on disk; never invent an entry for data you did not produce.
     misled the caller. Fix the wording/schema so the misuse is no longer natural. Touch the
     behaviour as little as possible.
   - **code fix** — the tool is genuinely buggy. Fix the `lib/` code **and add a regression
-    test** that reproduces the reported failure on the reported input, so the same bug can
-    never pass again.
+    test** that reproduces the reported failure on the reported input, so the same failure
+    stays caught for good.
 
 ## No fabrication — absolute
 
@@ -146,7 +145,7 @@ A check that references synthetic data references it by its marked ObsID (a data
 test never generates data itself. Run `pytest` in the worktree and make it green **before**
 you declare done — your `Bash` runs in the analysis environment, so `python`/`pytest` carry the
 full science stack (the same interpreter that gates your tool), and import-time failures surface
-to you directly rather than only at the gate.
+to you directly, well before the gate.
 
 **Keep each test fast and quiet.** The gate runs your tests **twice** (a determinism check) with
 a per-run time limit, so a test that reduces a whole observation can blow the budget. Validate on
@@ -155,7 +154,7 @@ two segments, not a full GTI). Assert on **stable quantities** (values within a 
 monotonicity, sanity bounds) and keep stdout quiet — sort any globbed file lists and silence noisy
 library warnings, so the two runs produce identical output and the determinism check holds.
 
-## When you are unsure — escalate, never guess
+## When you are unsure — escalate to ground each decision
 
 The fields you touch can exceed both your knowledge and the lead's. A wrong assumption that
 hardens into code is the expensive failure. So, before guessing, escalate — cheapest first:
@@ -172,10 +171,10 @@ hardens into code is the expensive failure. So, before guessing, escalate — ch
 ## Working style
 
 - Read the real source first; match its naming, structure, and idioms.
-- Make the smallest coherent change that satisfies the brief; document any extension point
-  rather than building speculative configuration.
+- Make the smallest coherent change that satisfies the brief, and document any extension
+  point you leave open for later.
 - Stage only the files that belong to this tool (strategy/help modules, any wrapped scripts,
-  the `TOOL_MANIFEST` entry, the tests, the package `README.md`). Never let scratch or
-  generated data into the change.
+  the `TOOL_MANIFEST` entry, the tests, the package `README.md`), so scratch and generated
+  data stay out of the change.
 - When the work is genuinely done and `pytest` is green, stop and report what you built and
   which checks cover it.

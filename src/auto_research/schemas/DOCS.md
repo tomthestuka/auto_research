@@ -201,3 +201,8 @@ carried by **reference** (`FigureRef`), never embedded
 - 2026-06-16 — Phase 2 step 7: added `AuthoringDecision` (`should_author`, `tool_spec`,
   `rationale`) in `toolspec.py` — the analyst lead's structured decision over a worker's
   `tool_request`; consensus (not the LLM) acts on it via `merge_flow.propose_and_pr`.
+- 2026-06-18 — `ReviewVerdict` fields now carry `Field(description=…)` (review.py): `follow_up`
+  is described as the dispatch text routed to the flagged team(s) and the two booleans as the
+  team-routing flags. The descriptions reach the provider through `model_json_schema()` (the
+  strict sanitizer keeps `description`), so the reviewer reads its dispatch contract from the
+  schema — the reviewer was asking the human where dispatch goes because these fields were bare.

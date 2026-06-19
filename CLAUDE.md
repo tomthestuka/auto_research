@@ -109,6 +109,13 @@ Consequences:
   ([§6](#6-config-driven-model-registry)).
 - **Never commit secrets.** API keys live in `.env` (gitignored); ship a `.env.example`.
 - **Minimal code** ([§1](#1-project-overview)).
+- **Write only positive actions.** Prompts and the descriptions the model reads
+  (tool descriptions, schema field descriptions) state what to do and what a thing
+  does. Convert every prohibition into the positive action it implies. Never write
+  "do not / never / avoid" — two prohibitions are sanctioned: this rule itself, and
+  the **no-fabrication ban** ("never fabricate data/results/citations", the
+  banned-vocabulary list), which stays an explicit ban wherever it appears because it
+  is safety-critical.
 - **Consult the human before fixing unexpected issues.** When an unexpected failure,
   environment/tooling oddity, ambiguous runtime behavior, or suspected dependency issue
   appears, collect only the minimal facts needed to describe it, then ask the human
@@ -718,3 +725,18 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   `notebooks/usage_example.ipynb` "test code authoring" run (IXPE P1). Non-live suite green
   (`tests/test_consensus_authoring.py`, `tests/test_registry.py`, `tests/test_merge_flow.py`,
   `tests/test_observations.py`, `tests/test_schemas.py`, `tests/test_preflight.py`).
+- 2026-06-18 — **Live-run polish: dispatch contract, tool manifests, Slack, positive-writing
+  rule.** The reviewer was pausing fresh requests to ask the human where dispatch goes and
+  dumping multi-paragraph `ask_human` context. Root cause: the model reads its dispatch
+  contract from the `ReviewVerdict` schema and its action surface from tool descriptions, both
+  of which carried no field/argument descriptions. Fixes: (a) `ReviewVerdict` fields now carry
+  `Field(description=…)` so `follow_up` is identified as the dispatch text and the boolean flags
+  as the team routing; (b) every harness tool in `agents/react.py` (`ask_human`, `read_file`,
+  `list_dir`, `text_search`, `web_search`, `search_literature`, `data_catalog`) gained
+  manifest-quality tool-level and per-argument descriptions — `ask_human.question` now holds the
+  question and `context` the few supporting facts, so the question stops landing in `context`;
+  (c) `hitl/slack.py` posts a structured Block Kit message (header · question · context) in place
+  of the italic-wrapped body that rendered as gibberish; (d) literature/web provider faults in
+  the ReAct loops degrade to recoverable error outcomes instead of aborting the run. New hard
+  rule in §3: **write only positive actions** — all six runtime prompts were swept to positive
+  phrasing (docstrings unchanged; `DOCS.md` stays authoritative). Non-live suite green.
