@@ -89,6 +89,11 @@ role or swapping a provider is a YAML edit; no Python change.
   whose repeated searches re-send a growing paper context.
 - `orchestration.yaml.structured_retry_cap` — bounded off-schema structured-output retry
   count.
+- `orchestration.yaml.sandbox_call_timeout_s` — global default sandbox per-tool-call timeout
+  (seconds, default 300): a tool call is SIGTERM-killed (exit 124) at this many seconds unless its
+  package `<domain>_utils/tool_config.yaml` raises it per tool (`call_timeout_s`), which takes
+  precedence. No upper clamp on the per-tool override (trusted infra). Read by
+  `ToolkitRegistry.call_timeout_ceiling` via `env.sandbox_call_timeout_default`.
 - `orchestration.yaml.tool_author_max_turns` — Phase-2 cap on the Sonnet author's own
   self-correction loop (L0, Claude-SDK turns). Consumed by `merge_flow.propose_and_pr`.
 - `orchestration.yaml.tool_author_gate_rework_cap` — how many times the author is
@@ -150,3 +155,8 @@ role or swapping a provider is a YAML edit; no Python change.
   Documented that `analyze_env` must include **`astroquery`** (for `heasarc_utils` acquire) and
   added `environment-analyst.yml` (the analyst sandbox conda env spec) created via
   `conda env create` per `README.md` §2b.
+- 2026-06-22 — Added `sandbox_call_timeout_s` (default 300): the global sandbox per-tool-call
+  timeout. A live run showed every tool call is SIGTERM-killed at ~300s (exit 124) regardless of
+  the tool's internal timeout, so a slow HEASARC download never completed. A package's
+  `<domain>_utils/tool_config.yaml` (`call_timeout_s` per tool) overrides this, no upper clamp;
+  read by `ToolkitRegistry.call_timeout_ceiling` (see `sandbox/DOCS.md`).

@@ -33,6 +33,12 @@ react_loop_cap: 30           # max tool iterations per agent inner ReAct loop be
 librarian_react_loop_cap: 1  # tighter cap for the librarian literature loop — each search re-sends the
                              # growing 20-paper abstract context, so unbounded refinement is costly
 structured_retry_cap: 2      # attempts for a structured _call (off-schema feedback loop) before raising
+# Global default sandbox per-tool-call timeout (seconds): a tool call is SIGTERM-killed at this
+# many seconds (exit 124) unless its package raises it. This is the protective short cap for quick
+# tools. A genuinely slow tool overrides it per tool in its package <domain>_utils/tool_config.yaml
+# (key call_timeout_s: {<tool>: <seconds>}), which takes precedence over this value. No hard upper
+# bound on the per-tool override — tool_config.yaml is trusted infra, never LLM-set.
+sandbox_call_timeout_s: 300
 toolkit_root: /data/fzhou/research_toolkit
 # Python environment used for sandbox tool execution.
 # Must be a conda/venv prefix whose Python has the analysis stack (XSPEC, HEASoft, ixpeobssim,

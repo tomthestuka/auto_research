@@ -296,11 +296,20 @@ class SandboxToolProvider:
         if kind == "mcp.builtin.bash_exec" and "cwd" not in args and self.cwd is not None:
             args["cwd"] = str(self.cwd)
 
+        # Sandbox call timeout: the tool's declared ceiling (tool_config.yaml; default 300s),
+        # the hard SIGTERM backstop that lets a long-running tool (e.g. a HEASARC download) run
+        # beyond the protective 300s cap (calls over it die with exit 124) — see ToolkitRegistry.
+        # It is fixed per tool, NOT model-tunable: a tool's *own* timeout argument (e.g. acquire's
+        # astroquery timeout_s) is the caller's graceful runtime knob, and the ceiling is set a bit
+        # above it so the tool times out cleanly before this hard kill.
+        ceiling_fn = getattr(self.registry, "call_timeout_ceiling", None)
+        call_timeout = ceiling_fn(kind) if ceiling_fn is not None else self.timeout_s
+
         t0 = time.monotonic()
         if not self.registry.is_known(kind):
             raw = {"exit_code": 127, "stderr": f"Tool not registered: {kind}", "stdout": ""}
         elif self.registry.is_mcp(kind):
-            raw = await self.sandbox.call_mcp_tool(kind, args, timeout_s=self.timeout_s)
+            raw = await self.sandbox.call_mcp_tool(kind, args, timeout_s=call_timeout)
         else:
             spec = self.registry.spec(kind)
             schema_props = (spec.get("args_schema") or {}).get("properties", {})
@@ -309,7 +318,7 @@ class SandboxToolProvider:
                     args[arg_name] = path
             self._redirect_figure_args(spec["fn"], args, schema_props)
             raw = await self.sandbox.call_tool(
-                spec["module"], spec["fn"], args, timeout_s=self.timeout_s
+                spec["module"], spec["fn"], args, timeout_s=call_timeout
             )
         elapsed = time.monotonic() - t0
 

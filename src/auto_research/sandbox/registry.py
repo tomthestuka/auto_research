@@ -13,6 +13,12 @@ where ToolSpec is a TypedDict with keys:
 The registry imports each manifest lazily, so no network activity occurs on
 startup. toolkit_root is prepended to sys.path only during manifest loading,
 then removed.
+
+Each package may also carry an optional, pure-data ``tool_config.yaml`` at its root
+(read here, never imported) declaring per-tool sandbox call-timeout ceilings — see
+``_load_tool_config`` / ``call_timeout_ceiling``. This keeps timeout policy modular
+(it travels with the package; the orchestration layer never names toolkit tools) and
+hand-editable.
 """
 
 from __future__ import annotations
@@ -23,12 +29,23 @@ import sys
 from pathlib import Path
 from typing import Any, TypedDict
 
+import yaml
+
 
 class ToolSpec(TypedDict):
     module: str
     fn: str
     description: str
     args_schema: dict
+
+
+# Sandbox per-tool-call timeout. A tool's call is SIGTERM-killed by the sandbox at this many
+# seconds (exit 124), independent of any timeout inside the tool itself — so a genuinely
+# long-running tool (a large download, a long reduction/fit) must declare a higher ceiling in
+# its package ``tool_config.yaml``. The global default comes from ``orchestration.yaml``
+# (``sandbox_call_timeout_s``); this module constant is only the fallback when that is absent.
+# No hard upper clamp — ``tool_config.yaml`` is trusted human/coder-set infra, never LLM input.
+_CALL_TIMEOUT_FALLBACK_S = 300
 
 
 def _discover_manifest_packages(root: Path) -> list[str]:
@@ -56,6 +73,11 @@ class ToolkitRegistry:
         self._mcp_tools: dict[str, str] = {}  # kind -> description
         self._mcp_schemas: dict[str, dict] = {}  # kind -> input JSON schema
         self._disabled: set[str] = set(disabled_tools or [])
+        # Per-tool sandbox call-timeout ceiling (seconds), from each package's
+        # ``tool_config.yaml``; absent tools fall back to the global default
+        # (``orchestration.yaml: sandbox_call_timeout_s``, resolved lazily in ``load``).
+        self._call_timeout_ceiling: dict[str, int] = {}
+        self._default_call_timeout_s: int = _CALL_TIMEOUT_FALLBACK_S
         # The manifest packages imported on the last load() — reused by reload().
         self._manifest_packages: list[str] = []
         self._loaded = False
@@ -68,6 +90,13 @@ class ToolkitRegistry:
         """Import TOOL_MANIFEST from every discovered ``*_utils`` package. Idempotent."""
         if self._loaded:
             return
+        self._call_timeout_ceiling = {}
+        try:
+            from auto_research.env import sandbox_call_timeout_default
+
+            self._default_call_timeout_s = sandbox_call_timeout_default()
+        except Exception:  # noqa: BLE001 — fall back to the module constant if config is unreadable
+            self._default_call_timeout_s = _CALL_TIMEOUT_FALLBACK_S
         root_str = str(self._root)
         inserted = root_str not in sys.path
         if inserted:
@@ -92,6 +121,7 @@ class ToolkitRegistry:
                         except Exception:  # noqa: BLE001
                             pass
                     self._tools.update(manifest)
+                    self._load_tool_config(pkg, list(manifest.keys()))
                 except Exception:  # noqa: BLE001
                     pass  # package not installed or missing manifest – skip silently
         finally:
@@ -168,6 +198,47 @@ class ToolkitRegistry:
         if tool_name not in self._tools:
             raise KeyError(f"unknown tool: {tool_name!r}")
         return self._tools[tool_name]
+
+    def _load_tool_config(self, pkg: str, tool_names: list[str]) -> None:
+        """Read ``<pkg>/tool_config.yaml`` (optional) for per-tool sandbox call-timeout ceilings.
+
+        Pure data, modular (lives with the package — adding a toolkit never touches
+        orchestration config). Shape::
+
+            call_timeout_s:        # seconds, keyed by the tool's short name (the manifest
+              acquire: 1800        #   key's last segment); a slow download declares a higher ceiling
+            default_call_timeout_s: 300   # optional per-package fallback for tools not listed
+
+        Stored as-is (positive ints) against the full tool name — no upper clamp, since this is
+        trusted human/coder-set infra (never LLM input). Precedence: per-tool ``call_timeout_s``
+        > per-package ``default_call_timeout_s`` > the global ``orchestration.yaml`` default.
+        """
+        cfg_path = self._root / pkg / "tool_config.yaml"
+        if not cfg_path.is_file():
+            return
+        try:
+            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001 — a malformed config must not break discovery
+            return
+        per_tool = cfg.get("call_timeout_s") or {}
+        pkg_default = cfg.get("default_call_timeout_s")
+        for full in tool_names:
+            short = full.split(".")[-1]
+            value = per_tool.get(short, pkg_default)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                self._call_timeout_ceiling[full] = int(value)
+
+    def call_timeout_ceiling(self, tool_name: str) -> int:
+        """The sandbox per-call timeout (seconds) for ``tool_name``.
+
+        Per-tool value from the package ``tool_config.yaml`` if declared, else the global default
+        (``orchestration.yaml: sandbox_call_timeout_s``) — also what MCP/unlisted tools get. This
+        is a fixed hard SIGTERM backstop, not a model knob: set a tool's value a bit above its own
+        graceful timeout so the tool times out cleanly first (``SandboxToolProvider.execute`` uses
+        it directly as the per-call timeout).
+        """
+        self.load()
+        return self._call_timeout_ceiling.get(tool_name, self._default_call_timeout_s)
 
     def tool_definitions(self) -> list[dict]:
         """Return provider-neutral function definitions for every tool.

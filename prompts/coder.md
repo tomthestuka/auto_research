@@ -169,6 +169,30 @@ two segments, not a full GTI). Assert on **stable quantities** (values within a 
 monotonicity, sanity bounds) and keep stdout quiet — sort any globbed file lists and silence noisy
 library warnings, so the two runs produce identical output and the determinism check holds.
 
+## A slow tool must declare its sandbox call-timeout
+
+Every tool call runs under a sandbox timeout that SIGTERM-kills it at ~300s (the analyst sees
+`exit 124` / "Timed out after 300s"), **independent of any timeout inside your code** — so raising
+a timeout argument in the function alone does nothing. There are two timeouts, and you want the
+graceful one to fire first:
+
+- **Your tool's own timeout** (e.g. `acquire`'s astroquery `timeout_s`) — the *graceful* one: it
+  raises a clean, attributable error. This is the caller's per-call runtime knob.
+- **The sandbox call-timeout** — the *hard backstop* (`exit 124`, no message). Declare it per tool
+  in the package's `tool_config.yaml` at the `<domain>_utils/` root, set a bit **above** your
+  tool's own timeout so the tool times out cleanly before the hard kill:
+
+```yaml
+call_timeout_s:
+  acquire: 2100      # seconds; a backstop above acquire's 1800s graceful timeout
+```
+
+Without an entry, a tool gets the global default (`orchestration.yaml: sandbox_call_timeout_s`,
+300s); your `tool_config.yaml` overrides it per tool, with no upper limit. Set the backstop only
+as high as the work honestly needs (it is a protective cap, not a target), and keep it above your
+tool's own graceful timeout. The backstop is fixed infrastructure, not a per-call knob — callers
+tune runtime through your tool's own timeout argument, and this ceiling stays invisible to them.
+
 ## When you are unsure — escalate to ground each decision
 
 The fields you touch can exceed both your knowledge and the lead's. A wrong assumption that

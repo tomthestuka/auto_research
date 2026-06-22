@@ -78,3 +78,16 @@ def papers_dir() -> Path:
     if "papers_dir" in cfg:
         return Path(cfg["papers_dir"]).expanduser()
     return runtime_data_dir() / "papers"
+
+
+def sandbox_call_timeout_default() -> int:
+    """Global default sandbox per-tool-call timeout (seconds) from config/orchestration.yaml.
+
+    Key: ``sandbox_call_timeout_s`` (default 300). This is the protective short cap a tool
+    call is SIGTERM-killed at when nothing else raises it; a package's ``tool_config.yaml``
+    overrides it per tool (see ``auto_research.sandbox.registry``).
+    """
+    try:
+        return int(_orch_config().get("sandbox_call_timeout_s", 300))
+    except (TypeError, ValueError):
+        return 300

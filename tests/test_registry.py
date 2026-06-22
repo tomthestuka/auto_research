@@ -33,6 +33,11 @@ def _write_pkg(root, name, tools: dict[str, str]):
     return pkg
 
 
+def _write_tool_config(root, name, body: str):
+    """Write ``<root>/<name>/tool_config.yaml`` with raw YAML ``body``."""
+    (root / name / "tool_config.yaml").write_text(textwrap.dedent(body))
+
+
 @pytest.fixture
 def cleanup_modules():
     before = set(sys.modules)
@@ -78,6 +83,40 @@ def test_reload_discovers_new_package(tmp_path, cleanup_modules):
     _write_pkg(tmp_path, "delta_utils", {"delta_utils.t1": "d1"})
     reg.reload()
     assert set(reg.list_tools()) == {"gamma_utils.t1", "delta_utils.t1"}
+
+
+def test_call_timeout_ceiling_defaults_to_global(tmp_path, cleanup_modules):
+    from auto_research.env import sandbox_call_timeout_default
+
+    default = sandbox_call_timeout_default()  # from config/orchestration.yaml (ships 300)
+    assert default == 300
+    _write_pkg(tmp_path, "alpha_utils", {"alpha_utils.t1": "first"})  # no tool_config.yaml
+    reg = ToolkitRegistry(tmp_path)
+    reg.load()
+    assert reg.call_timeout_ceiling("alpha_utils.t1") == default
+    assert reg.call_timeout_ceiling("mcp.builtin.bash_exec") == default  # unknown/MCP → default
+    assert reg.call_timeout_ceiling("nope") == default
+
+
+def test_tool_config_sets_per_tool_ceiling(tmp_path, cleanup_modules):
+    _write_pkg(tmp_path, "zeta_utils", {"zeta_utils.acquire": "dl", "zeta_utils.peek": "p"})
+    _write_tool_config(
+        tmp_path,
+        "zeta_utils",
+        """
+        call_timeout_s:
+          acquire: 1800
+        default_call_timeout_s: 120
+        """,
+    )
+    reg = ToolkitRegistry(tmp_path)
+    reg.load()
+    assert reg.call_timeout_ceiling("zeta_utils.acquire") == 1800   # explicit
+    assert reg.call_timeout_ceiling("zeta_utils.peek") == 120        # package default
+    # large values are honored as-is (no hard clamp — trusted infra)
+    _write_tool_config(tmp_path, "zeta_utils", "call_timeout_s:\n  acquire: 21600\n")
+    reg.reload()
+    assert reg.call_timeout_ceiling("zeta_utils.acquire") == 21600   # honored, not clamped
 
 
 def test_reload_preserves_mcp_and_disabled(tmp_path, cleanup_modules):

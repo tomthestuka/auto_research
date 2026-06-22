@@ -55,7 +55,9 @@ Runtime prompt files:
   + `tests/` + `README.md`), the two-halves split and design-for-extension principle, the
   **build-the-general-capability principle** (parameterize the variable axis with sensible
   defaults — a concrete value the brief names becomes an argument default — so the tool serves
-  the class of question, not the one-off), the
+  the class of question, not the one-off), a **slow-tool call-timeout** note (declare
+  `call_timeout_s` in the package `tool_config.yaml` so the sandbox doesn't SIGTERM a legitimately
+  long tool at ~300s), the
   README↔`TOOL_MANIFEST` audience split, `obsdb_catalog` as the sole catalog writer,
   no-fabrication rules, the web/`ask_lead`/`ask_human` escalation ladder, and the committed-tests
   requirement. The role name `coder` mirrors `config/models.yaml`.
@@ -111,3 +113,9 @@ logic here.
   were swept to the **write-only-positive-actions** style (CLAUDE.md §3), the sole exception being the
   explicit no-fabrication ban; the reviewer's dispatch mechanics moved into the `ReviewVerdict` schema
   (`follow_up` field description) rather than the prompt.
+- 2026-06-22 — `coder.md` gained a **slow-tool call-timeout** section: every tool call is
+  SIGTERM-killed by the sandbox at ~300s (`exit 124`) independent of any in-code timeout, so a
+  legitimately slow tool (large download, long reduction) must declare a higher ceiling in its
+  package `tool_config.yaml` (`call_timeout_s`; overrides the `orchestration.yaml`
+  `sandbox_call_timeout_s` default, no upper clamp). Pairs with the auto_research-side mechanism
+  (`ToolkitRegistry.call_timeout_ceiling` + `SandboxToolProvider`, see `sandbox/DOCS.md`).

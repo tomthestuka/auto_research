@@ -43,6 +43,23 @@ module-level dict `TOOL_MANIFEST: dict[str, ToolSpec]` at its top level.
 a new tool to research_toolkit requires only adding it to `TOOL_MANIFEST` — no
 changes to `auto_research`.
 
+**`tool_config.yaml` convention (optional, per package):** a pure-data YAML at a
+`<domain>_utils/` package root, read (never imported) by the registry. Today it declares
+per-tool **sandbox call-timeout ceilings** — the sandbox SIGTERM-kills a tool call at this
+many seconds (exit 124) regardless of any timeout inside the tool, so a genuinely slow tool
+(e.g. a HEASARC download) must raise its ceiling above the global default:
+```yaml
+call_timeout_s:        # seconds, keyed by the tool's short name (manifest key's last segment)
+  acquire: 1800
+default_call_timeout_s: 300   # optional per-package fallback for tools not listed
+```
+Precedence: per-tool `call_timeout_s` > per-package `default_call_timeout_s` > the global
+`orchestration.yaml: sandbox_call_timeout_s` (default 300). No upper clamp — this is trusted
+human/coder-set infra, never LLM input. This keeps timeout policy **modular** (it travels with
+the package; the orchestration layer never names toolkit tools) and **hand-editable** (a YAML
+file, not a Python `TOOL_MANIFEST` dict). A call may request a shorter timeout via a numeric
+`timeout_s` argument, but never one longer than the ceiling (`SandboxToolProvider.execute`).
+
 **Tool execution wiring:** Tool execution lives inside each
 `AnalystWorkerAgent.analyze()` call. The worker's inner ReAct loop uses
 `SandboxToolProvider`, which exposes `ToolkitRegistry.tool_definitions()` and MCP
@@ -97,6 +114,7 @@ class ToolkitRegistry:
     def list_tools(self) -> list[str]
     def describe_tool(self, tool_name: str) -> str
     def spec(self, tool_name: str) -> ToolSpec       # raises KeyError if unknown
+    def call_timeout_ceiling(self, tool_name) -> int # sandbox per-call timeout (tool_config.yaml override, else orchestration.yaml default; no clamp)
     def tool_catalogue(self) -> str                  # multi-line text listing
     def tool_definitions(self) -> list[dict]         # provider-neutral function defs
     def kind_for_function(self, function_name) -> str  # reverse the name sanitization
@@ -538,3 +556,19 @@ the hook mapping a fake-model verdict — no live LLM).
   science tests it authors. `bash_exec`'s model-facing description was rescoped to **read-only
   inspection** (the analyst team authors no analysis code — real steps run through toolkit tools, a
   missing capability becomes a `tool_request`); behavior unchanged.
+- 2026-06-22 — **Per-tool sandbox call-timeout.** A live run exposed that the sandbox
+  SIGTERM-kills every tool call at a flat ~300s (exit 124), so a slow HEASARC download could never
+  complete no matter what timeout the tool set internally. Now layered: the global default lives in
+  `orchestration.yaml: sandbox_call_timeout_s` (default 300, via `env.sandbox_call_timeout_default`);
+  a package's optional `tool_config.yaml` (`call_timeout_s` per tool, `default_call_timeout_s` per
+  package) overrides it. `ToolkitRegistry` reads it (`_load_tool_config`) and exposes
+  `call_timeout_ceiling(tool)` (precedence per-tool > package-default > global; **no upper clamp** —
+  trusted human/coder infra); `SandboxToolProvider.execute` uses it directly as the per-call timeout
+  (falls back to `self.timeout_s` for registries without the method). **Decoupled from the model:**
+  the ceiling is a fixed hard backstop, never surfaced to the LLM and not model-tunable; a tool's
+  *own* timeout arg (e.g. `acquire`'s astroquery `timeout_s`, in its `args_schema`) is the caller's
+  graceful knob, passed through untouched, and the backstop is set above it so the tool times out
+  cleanly first. Chosen over an orchestration→tool-name map (would couple orchestration to toolkit
+  internals) and a `TOOL_MANIFEST` field (hard to hand-edit). `research_toolkit/heasarc_utils/
+  tool_config.yaml` sets `acquire` above its 1800s function timeout. Deterministic tests in
+  `tests/test_registry.py`.

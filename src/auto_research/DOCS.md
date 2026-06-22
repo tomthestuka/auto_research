@@ -92,6 +92,9 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   (default `~/.auto_research`).
 - `papers_dir() -> Path` — resolves `papers_dir` from `orchestration.yaml`
   (default `<runtime_dir>/papers`); re-exported through `auto_research.sources`.
+- `sandbox_call_timeout_default() -> int` — resolves `sandbox_call_timeout_s` from
+  `orchestration.yaml` (default 300): the global sandbox per-tool-call timeout a tool's
+  `tool_config.yaml` overrides per tool (`auto_research.sandbox.registry`).
 - `preflight.Preflight` — an ordered registry of launch-time checks. `.register(name, fn)`
   (also usable as a decorator), `.names()`, async `.run_checklist()` (runs all — sync or async
   checks — and aggregates failures into `PreflightError`). `build_default_preflight(human_handler=None)`
@@ -133,3 +136,6 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   deprecation notices (`PydanticDeprecatedSince20`) and the serializer "Expected X but got Y"
   `UserWarning`s (message-scoped) — narrowly, so all other warnings stay audible. (The filter is
   wrapped so a pydantic-version change can't break import.)
+- 2026-06-22 — `env.sandbox_call_timeout_default()` added: the global default sandbox per-tool-call
+  timeout from `orchestration.yaml: sandbox_call_timeout_s` (default 300), which a package's
+  `tool_config.yaml` overrides per tool (`auto_research.sandbox.registry`).
