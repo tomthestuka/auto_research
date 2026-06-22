@@ -104,45 +104,27 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   sandbox, report, CLI, notebook, environment checks, and config-driven `runtime_dir`.
   Phase 2 is active: sandbox scratch is off-repo, `ToolSpec`/merge-flow/gate scaffolding
   exists, and `research_toolkit` remains the only runtime-authored repo.
-- 2026-06-12 — Compacted changelog and refreshed stale CLAUDE section links; no code
-  changes.
-- 2026-06-15 — Centralized project `.env` loading in `check_required_env()` so
-  library, CLI, notebook, and test paths validate against the same launch environment.
-- 2026-06-15 — Added `preflight.py`: a `Preflight` checklist class that owns every
-  launch-time deterministic check (each living in its home module, registered centrally,
-  run together by `run_checklist()`). `run_research()` and the CLI now call `run_preflight()`
-  instead of `check_required_env()` directly; the first registered extra check is the Phase-2
-  author↔reviewer provider decorrelation.
-- 2026-06-15 — Phase 2 step 5: added the `hitl` package (raise-to-human channel) and made the
-  preflight **async** with a parameterized `human_channel` ping (green only when the resolved
-  channel replies). `run_research` gained `human_handler`/`human_channel`; the CLI owns the
-  full async preflight.
-- 2026-06-16 — `papers_dir()` moved from an env-var override in `sources/downloads.py` to a
-  first-class `env.py` helper reading `orchestration.yaml: papers_dir` (default
-  `<runtime_dir>/papers`); `AUTO_RESEARCH_PAPERS_DIR` removed from `.env.example`.
-- 2026-06-16 — Phase 2 step 6: registered `sandbox.merge_flow.check_toolkit_git_identity` in
-  the default preflight, so a missing git commit identity in `research_toolkit` is caught at
-  launch rather than failing the runtime's atomic commit mid-flow.
-- 2026-06-16 — Phase 2 step 7: `observations.py` gained the read-side data catalog
-  (`DataCatalog`/`CatalogEntry`/`DataProduct`, `read_catalog`, `local_obsids`,
-  `catalog_path`) for `<obs_db_path>/catalog.json` — what's local, processing level, and
-  product provenance (params used to obtain level-3 products). Authored toolkit tools write it;
-  the JSON contract is documented in `prompts/coder.md`. Also registered
-  `check_toolkit_branch_clean` in the default preflight (branch `ai` + clean tree).
-- 2026-06-18 — Added `observations.check_catalog_health()` and registered it in the default
-  preflight (`catalog_health`). It delegates to `research_toolkit`'s detect-only
-  `obsdb_catalog.healthcheck` (pure stdlib, dependency-free, never writes), imported directly
-  from `toolkit_root` (it is not `*_utils`-named, so tool discovery ignores it). Hard-blocks a
-  launch on **any** drift report (incl. `uncatalogued`), aggregating every mission; repair stays
-  the human's out-of-band `obsdb_catalog.repair`. Deterministic tests in
-  `tests/test_observations.py`.
-- 2026-06-18 — `check_catalog_health()`'s drift error is now an actionable directive: it prints
-  the exact repair command (`PYTHONPATH=<toolkit_root> python -m obsdb_catalog repair_all
-  <obs_db_root>`) plus the per-mission drift, rather than a bare `repair(obs_db_path)` mention.
-- 2026-06-18 — `observations.yaml` restructured to a single `obs_db_root` (per-mission
-  `obs_db_path` map removed). `ObservationsConfig` now discovers missions from disk —
-  `<root>/<MISSION>` subdirs marked by a `catalog.json` (`.missions` is a discovery property);
-  `mission(name)` resolves a single mission's path by case-insensitive subdir match (works
-  before its catalog exists, and reconstructs casing like `NuSTAR`). Downstream
-  `.missions`/`.mission()` consumers are unchanged. Also added the analyst sandbox conda env
-  spec `environment-analyst.yml` (repo root) and pointed `README.md` §2b at it.
+- 2026-06-12 -> 2026-06-15 — Launch preflight + the `hitl` package (Phase 2 step 5).
+  Centralized project `.env` loading in `check_required_env()`, then added `preflight.py`: a
+  `Preflight` checklist class owning every launch-time no-LLM check (each in its home module,
+  registered centrally, run by `run_checklist()`); `run_research()`/CLI now call
+  `run_preflight()`, the first extra check being the author↔reviewer provider decorrelation.
+  Added the `hitl` raise-to-human channel and made the preflight **async** with a parameterized
+  `human_channel` ping (green only on a reply); `run_research` gained `human_handler`/
+  `human_channel`.
+- 2026-06-16 -> 2026-06-18 — Phase 2 steps 6-7 + observations restructure. `papers_dir()`
+  became a first-class `env.py` helper reading `orchestration.yaml: papers_dir`. Registered
+  `sandbox.merge_flow.check_toolkit_git_identity` and `check_toolkit_branch_clean` (branch `ai`
+  + clean tree) in the default preflight, so a missing git identity / dirty toolkit is caught at
+  launch, not mid-commit. `observations.py` gained the read-side data catalog
+  (`DataCatalog`/`CatalogEntry`/`DataProduct`, `read_catalog`, `local_obsids`, `catalog_path`)
+  for `<obs_db_path>/catalog.json` — what's local, processing level, and product provenance;
+  authored tools write it (JSON contract in `prompts/coder.md`). Added
+  `check_catalog_health()` (registered `catalog_health`), delegating to `research_toolkit`'s
+  detect-only `obsdb_catalog.healthcheck` (pure stdlib, never writes); hard-blocks launch on any
+  drift, aggregating every mission, and prints the exact repair command (repair stays the
+  human's out-of-band `obsdb_catalog.repair`). `observations.yaml` restructured to a single
+  `obs_db_root` with missions discovered from disk (`<root>/<MISSION>` subdirs marked by a
+  `catalog.json`; `mission(name)` resolves by case-insensitive match, reconstructing casing like
+  `NuSTAR`); downstream `.missions`/`.mission()` unchanged. Added the analyst sandbox conda env
+  spec `environment-analyst.yml`. Deterministic tests in `tests/test_observations.py`.

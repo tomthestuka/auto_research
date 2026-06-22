@@ -507,66 +507,34 @@ the hook mapping a fake-model verdict — no live LLM).
   definitions, persistent JSON-line sandbox with fd capture and XSPEC non-interactive boot,
   per-run workspace/memory/figures layout, built-in MCP server/client, and config-driven
   runtime paths.
-- 2026-06-12 — Phase 2 step 0 pinned worker scratch, figure outputs, and builtin MCP server
-  cwd under the runtime data dir so runtime writes stay outside both repos.
-- 2026-06-12 — Phase 2 step 2 added `merge_flow.propose_and_pr()`: isolated toolkit
-  worktree authoring, runtime-safe structure context, `ask_lead`/`ask_human`, bounded
-  gate/review rework loops, and typed no-commit failure.
-- 2026-06-12 — Phase 2 step 3 added `gate.py::run_gate`: structural/provenance/
-  determinism checks, configurable no-fabrication scan, Layer-B test runner, non-failing
-  findings, and deterministic tests.
-- 2026-06-12 — Compacted changelog and updated tool-execution wording to the current
-  worker-owned ReAct path.
-- 2026-06-15 — Phase 2 step 4 added `review.py::make_review_hook`: the provider-decorrelated
-  co-lead review now backs the default `run_review` hook (decorrelation routing, the diff
-  bundle, and the `AnalystColeadAgent` call over a worktree-scoped `ReadOnlyToolProvider`).
-  `propose_and_pr` gained a `colead` param; the step-2 review stub is gone.
-- 2026-06-15 — Added `review.check_author_reviewer_decorrelation()`, the launch-time preflight
-  assertion of author↔reviewer provider decorrelation (registered in `auto_research.preflight`,
-  run before any LLM is constructed).
-- 2026-06-15 — Phase 2 step 5: `merge_flow`'s `HumanInputRequired`/`HumanHandler` moved to
-  `auto_research.hitl` (re-exported here); the author's `ask_human` now builds a typed
-  `HumanQuery` and routes through `hitl.resolve_human` — one channel for the author and every
-  in-graph role.
-- 2026-06-16 — Phase 2 step 6: `merge_flow.approve_edit(worktree, *, message)` lands the one
-  atomic commit per tool (explicit-path staging of exactly `gate.collect_targets`, never `git
-  add -A`); `propose_and_pr` gained an injectable `approve_edit` seam and now returns a real
-  `commit_sha`, with the commit subject taken from the co-lead's `commit_summary` (fallback:
-  tool name). Added `check_toolkit_git_identity()` (registered in `auto_research.preflight`).
-  The gate was broadened to track non-`.py` files under a `*_utils` package: `collect_targets`
-  is extension-agnostic, `scan_text_source` runs the vocabulary scan on text files (e.g. shell
-  scripts), and binary/undecodable files hard-fail (§9.5) through the rework loop. Deterministic
-  coverage added in `tests/test_merge_flow.py`, `tests/test_gate.py`, `tests/test_preflight.py`.
-- 2026-06-16 — Phase 2 step 7: `ToolkitRegistry` now discovers `*_utils` packages dynamically
-  (`_discover_manifest_packages`, replacing the hardcoded list) and gained `reload()`
-  (`importlib.invalidate_caches` + reload each `<pkg>.skills`/`<pkg>`, preserving the MCP index
-  and `disabled` filter) so a newly committed/authored tool is surfaced to workers.
-  `merge_flow.propose_and_pr` gained `direct_branch`: runtime authoring works in `toolkit_root`
-  on the ambient branch (default `ai`, asserted clean) instead of an isolated worktree, leaving
-  a dirty tree on terminal failure for the human; new `check_toolkit_branch_clean` (registered
-  in the preflight) enforces branch+clean at launch with remediation. Coverage:
-  `tests/test_registry.py`, `tests/test_merge_flow.py`, `tests/test_preflight.py`.
-- 2026-06-18 — Hardened the gate/authoring path against a slow or erroring test crashing the
-  whole run (step-7 live-test robustness). `gate._default_test_runner` now catches
-  `subprocess.TimeoutExpired` and returns it as a Layer-B failure (rc 124) instead of letting it
-  propagate — a test over the 900 s cap becomes a normal gate rejection (rework → honest
-  failure). `merge_flow.propose_and_pr` gained an exception backstop: any unexpected
-  gate/author/review error becomes `MergeFlowResult(status="failed")` rather than aborting the
-  run, while `HumanInputRequired` (the §9.8 fail-safe) is re-raised to the caller. Determinism
-  is still a console-output proxy (`_strip_volatile` over two pytest runs) by design.
-- 2026-06-18 — The SDK author's `Bash` now runs in the **analyst code-execution env**, not the
-  orchestration env. New `merge_flow._author_env(toolkit_root)` builds it (analyst conda
-  interpreter first on `PATH` + HEASoft/CALDB sourced from `analyze_ini_sh` + `toolkit_root` on
-  `PYTHONPATH`) and `_build_options` passes it as `ClaudeAgentOptions.env`. So the author can run
-  the real science tests it authors (matching the gate's interpreter) and see import-time failures
-  itself, instead of being blind to the science stack. Best-effort: falls back to inheriting the
-  parent env when the analyst env isn't configured/sourceable (unit tests unaffected).
-- 2026-06-18 — `review.select_decorrelated_member`'s "no decorrelated co-lead" error now ends
-  with the fix: add a member whose provider differs from the author to the `analyst_colead`
-  role in `config/models.yaml` (preflight error-message polish).
-- 2026-06-22 — `bash_exec`'s tool description (the docstring FastMCP surfaces to the model) was
-  rescoped to **read-only inspection** (listings, headers, shapes, paths, env probes), dropping the
-  prior "inline `python -c` for persistent work" sanction: the analyst team authors no analysis
-  code itself, so real steps/results run through toolkit tools and a missing capability is raised as
-  a `tool_request` (paired with the analyst prompt policy — see `prompts/DOCS.md`). The function's
-  behavior is unchanged; only the model-facing description narrowed.
+- 2026-06-12 -> 2026-06-16 — **Phase 2 steps 0–7 built.** Step 0 pinned worker scratch,
+  figure outputs, and the builtin MCP cwd under the runtime data dir (writes stay outside both
+  repos). The tool-authoring path was assembled: `merge_flow.propose_and_pr()` (isolated-worktree
+  Sonnet author, runtime-safe structure context, `ask_lead`/`ask_human` escalation, bounded L0–L4
+  rework loop, typed no-commit failure); `gate.py::run_gate` (Layer-A structural/provenance/
+  determinism + configurable no-fabrication scan with non-failing Tier-3 findings, Layer-B test
+  runner); `review.py::make_review_hook` (provider-decorrelated GPT co-lead review backing the
+  default `run_review` hook — decorrelation routing, diff bundle, `AnalystColeadAgent` over a
+  worktree-scoped `ReadOnlyToolProvider`); `approve_edit(worktree, *, message)` (the one atomic
+  commit per tool, explicit-path staging of exactly `gate.collect_targets`, never `git add -A`,
+  returns a real `commit_sha`, subject from the co-lead's `commit_summary`). The gate became
+  extension-agnostic under `*_utils` packages (`collect_targets`, `scan_text_source` for non-`.py`
+  text, binary/undecodable hard-fail). Step 5 moved `HumanInputRequired`/`HumanHandler` to
+  `auto_research.hitl` (re-exported; `ask_human` routes through `hitl.resolve_human`). Step 7 made
+  `ToolkitRegistry` discover `*_utils` packages dynamically + `reload()`, and added
+  `propose_and_pr(direct_branch=…)` (author on the ambient `ai` branch in `toolkit_root`). Launch
+  preflights added: `check_author_reviewer_decorrelation`, `check_toolkit_git_identity`,
+  `check_toolkit_branch_clean`. Deterministic coverage in `tests/test_{merge_flow,gate,review,
+  registry,preflight}.py`.
+- 2026-06-18 -> 2026-06-22 — **Authoring-path hardening + analysis-is-tool-driven scoping.** The
+  gate/authoring path survives a slow or erroring test: `gate._default_test_runner` catches
+  `subprocess.TimeoutExpired` as a Layer-B failure (rc 124, over the 900 s cap → normal rejection)
+  and `propose_and_pr` has an exception backstop that turns any unexpected gate/author/review error
+  into `MergeFlowResult(status="failed")` (re-raising only `HumanInputRequired`); determinism stays
+  a console-output proxy (`_strip_volatile` over two pytest runs) by design. The SDK author's `Bash`
+  now runs in the **analyst code-execution env** (`merge_flow._author_env`: analyst conda interpreter
+  + HEASoft/CALDB from `analyze_ini_sh` + `toolkit_root` on `PYTHONPATH`, passed as
+  `ClaudeAgentOptions.env`; falls back to the parent env when unconfigured) so it can run the real
+  science tests it authors. `bash_exec`'s model-facing description was rescoped to **read-only
+  inspection** (the analyst team authors no analysis code — real steps run through toolkit tools, a
+  missing capability becomes a `tool_request`); behavior unchanged.

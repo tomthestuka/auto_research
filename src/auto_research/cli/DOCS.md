@@ -48,12 +48,9 @@ the run, and prints the final `ReviewVerdict`.
   JSON/text output, monitor JSONL/Markdown paths, repeatable report formats, report artifact
   printing, `.env` loading, and required-key validation before the run starts.
 - 2026-06-12 — Compacted changelog; no CLI behavior changes.
-- 2026-06-15 — CLI now constructs a streaming `RunMonitor`, printing concise live
-  progress lines to stderr while preserving JSON stdout for `--format json`.
-- 2026-06-15 — Removed duplicate CLI dotenv loading; shared `check_required_env()`
-  now loads `.env` for all entry points before validating required keys.
-- 2026-06-15 — CLI now runs the full launch checklist via `run_preflight()` (env + Phase-2
-  author↔reviewer decorrelation) instead of calling `check_required_env()` directly.
-- 2026-06-15 — Phase 2 step 5: added `--human {auto,cli,none,slack,whatsapp}` (→
-  `run_research(human_channel=…)`); the async preflight now lives inside `run_research`, so the
-  CLI no longer calls it directly.
+- 2026-06-15 — Streaming + preflight + raise-to-human. CLI now constructs a streaming
+  `RunMonitor` (concise live stderr progress; JSON stdout preserved for `--format json`) and
+  shares dotenv loading via `check_required_env()`. The full launch checklist moved into the
+  now-async preflight owned by `run_research` (env + Phase-2 author↔reviewer decorrelation +
+  channel ping), so the CLI no longer calls it directly. Phase 2 step 5 added
+  `--human {auto,cli,none,slack,whatsapp}` → `run_research(human_channel=…)`.

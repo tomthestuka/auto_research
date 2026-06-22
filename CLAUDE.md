@@ -633,110 +633,44 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
 
 ## Changelog
 
-- 2026-05-27 -> 2026-06-11 — **Phase 1 built, hardened, and closed out.** The full
-  LangGraph team now runs end-to-end: schemas, config-driven provider registry,
-  observability, SQLite storage/retrieval, source adapters, prompts, agent roles,
-  ReAct tool loops, consensus, graph feedback edges, sandbox/tool registry, reports,
-  CLI, Studio, and notebook inspection. Phase 2's trust-boundary spec was written here:
-  uniform `research_toolkit` package layout, no-fabrication policy, deterministic gate,
-  actor flow, runtime git discipline, and build order.
-- 2026-06-12 — **Phase 1 verified live; run blockers fixed.** A Cyg X-1 soft-state
-  joint-fit run completed the graph and produced JSONL + compiled LaTeX/PDF reports.
-  The closeout fixes were reviewer LaTeX token ceiling, ADS 404 degradation for missing
-  esource records, split ReAct caps for expensive librarian loops vs. analyst workers,
-  and follow-on README/DOCS sync.
-- 2026-06-12 — **Phase 2 steps 0-1 done.** Runtime writes are confined under
-  `runtime_dir`: worker scratch, MCP server cwd, and figure outputs all stay outside both
-  repos. `ToolSpec`, `ValidationDataset`, `ProposedCheck`, `AnalystReport.tool_request`,
-  and `AnalystReport.status` establish the missing-capability/failure protocol; the
-  analyst lead has read-only `research_toolkit` access to decide disposition.
-- 2026-06-12 — **Phase 2 step 2 done.** `merge_flow.propose_and_pr()` now drives a
-  Sonnet Claude Agent SDK `coder` in an isolated `research_toolkit` worktree with
-  runtime-safe structure context, `ask_lead`/`ask_human` escalation, bounded gate/review
-  rework loops, typed `GateReport`/`ToolReviewVerdict`/`MergeFlowResult`, and config roles
-  for `coder` + non-Anthropic `analyst_colead`. The co-lead review and atomic commit remain
-  later steps.
-- 2026-06-12 — **Phase 2 step 3 done.** `sandbox/gate.py::run_gate` is the default
-  deterministic gate hook: Layer A structural/provenance/determinism checks plus a
-  configurable no-fabrication scan (`config/code_gate.yaml`), and Layer B tool-local tests.
-  RNG/placeholder/fabrication language hard-fails; literal arrays become non-failing
-  findings for the future GPT co-lead review. The non-live deterministic suite was brought
-  green while leaving the runtime commit path for step 6.
-- 2026-06-12 — **Documentation compaction/sync.** Historical changelogs were compacted and
-  README/module docs were synchronized to the current Phase 2 state: `research_toolkit`
-  invocation is read-only through manifests/sandbox, authoring happens in isolated toolkit
-  branches, the deterministic gate is built, and provider-decorrelated review plus atomic
-  commits are still pending.
-- 2026-06-15 — **Phase 2 step 4 done.** `sandbox/review.py::make_review_hook` is the default
-  `run_review` hook: the provider-decorrelated GPT co-lead (`AnalystColeadAgent` +
-  `prompts/analyst_colead.md`) reviews the authored diff bundle + gate report and judges the
-  Layer-B checks (code-review only), routed by `select_decorrelated_member` to a member whose
-  provider ≠ the Claude author's (raises if none). It investigates the worktree/web via a
-  read-only `ReadOnlyToolProvider` (`include_text_search=False`) before its `ToolReviewVerdict`.
-  `propose_and_pr` gained a `colead` param; commit ⇔ gate-pass ∧ review-pass still lands as a
-  placeholder pending the step-6 `approve_edit()`. Deterministic coverage in
-  `tests/test_review.py`; the non-live suite is green.
-- 2026-06-15 — **Launch preflight + all roles required.** New `auto_research.preflight`
-  (`Preflight` / `run_preflight()`) owns the launch-time deterministic checklist: every
-  no-LLM precondition runs once, before any model client is built, with each check living in
-  its home module and registered centrally (`env.check_required_env` +
-  `sandbox.review.check_author_reviewer_decorrelation`; extendable by one `register(...)`).
-  `run_research()` and the CLI now call `run_preflight()`. `models` `REQUIRED_ROLES` now
-  includes `coder` and `analyst_colead` — all configured roles are required for now.
-- 2026-06-15 — **Phase 2 step 5 done.** New `auto_research.hitl` package: `HumanQuery`/
-  `HumanResponse`, the injectable `HumanHandler` + `resolve_human` fail-safe
-  (`HumanInputRequired`), the CLI-vs-library auto-detecting `resolve_handler`, and CLI/Slack/
-  WhatsApp connectors (Slack Socket Mode build-only; WhatsApp Twilio send+poll, live-tested
-  opt-in). Every ReAct role and the author share one `ask_human` tool (blocking direct-handler;
-  durable LangGraph `interrupt()`/checkpointer stays the §12 TODO). `run_research` gained
-  `human_handler`/`human_channel`; the graph routes `failed`/`needs_human` around the reviewer
-  to a no-fabrication finalize; the preflight became async and pings the resolved channel
-  (green only on a reply). Analyst prompts gained §9.6 failure classification. The non-live
-  suite is green (`tests/test_hitl.py`, `tests/test_preflight.py`, graph routing).
-- 2026-06-16 — **Phase 2 step 6 done.** `sandbox/merge_flow.approve_edit(worktree, *, message)`
-  lands the one atomic commit per tool (§9.9): explicit-path staging of **exactly**
-  `gate.collect_targets` (never `git add -A`, so scratch outside a `*_utils` package can't
-  leak), commit on the worktree's branch, real `commit_sha` returned. `propose_and_pr` gained
-  an injectable `approve_edit` seam and now commits on gate-pass ∧ review-pass, with the
-  subject from the co-lead's new `ToolReviewVerdict.commit_summary` (fallback: tool name); the
-  runtime still never merges to master. The gate was broadened to track non-`.py` files under
-  a `*_utils` package — `collect_targets` is extension-agnostic, `scan_text_source` runs the
-  vocabulary scan on text (e.g. shell reduction scripts), and binary/undecodable files hard-fail
-  (§9.5) through the rework loop — so a tool's full file set is both gated and staged. New
-  launch preflight `check_toolkit_git_identity` (ambient git identity in `research_toolkit`).
-  The non-live suite is green (`tests/test_merge_flow.py` incl. a real-git `approve_edit` test,
-  `tests/test_gate.py`, `tests/test_preflight.py`).
-- 2026-06-16 — **Phase 2 step 7 done.** Lead-driven tool authoring/resume now connects the
-  step 0-6 pieces. A worker's `tool_request` drives the analyst lead's new
-  `decide_authoring(reports) -> AuthoringDecision` (it browses `lib/` read-only, sets
-  disposition, returns one finalised `ToolSpec` or declines); **`DebateToConverge` itself**
-  then calls `merge_flow.propose_and_pr(direct_branch="ai")` (the LLM never issues git — §9.9).
-  On a committed tool it reloads the registry (`ToolkitRegistry` now discovers `*_utils`
-  dynamically + `reload()`), restarts per-worker sandboxes, augments the task with provenance,
-  and reruns workers — a *resume* bounded by `tool_author_cap`, not counted against
-  `debate_max_rounds`; `should_author=false` / non-committed results fall through to honest
-  debate (no fabrication). New: `AuthoringDecision` schema; `propose_and_pr(direct_branch=…)`
-  direct-branch mode (works in `toolkit_root` on the ambient `ai` branch, leaves a dirty tree
-  on terminal failure for the human) + `check_toolkit_branch_clean` registered in the preflight;
-  config `tool_author_branch`/`tool_author_cap`; the per-mission **data catalog** read side
-  (`observations.read_catalog`/`local_obsids`, contract written by authored tools, documented in
-  `prompts/coder.md`); `prompts/coder.md` now instructs surfacing existing `lib/`/scripts, a
-  package `README.md`, and the catalog. The live end-to-end is the
-  `notebooks/usage_example.ipynb` "test code authoring" run (IXPE P1). Non-live suite green
-  (`tests/test_consensus_authoring.py`, `tests/test_registry.py`, `tests/test_merge_flow.py`,
-  `tests/test_observations.py`, `tests/test_schemas.py`, `tests/test_preflight.py`).
-- 2026-06-18 — **Live-run polish: dispatch contract, tool manifests, Slack, positive-writing
-  rule.** The reviewer was pausing fresh requests to ask the human where dispatch goes and
-  dumping multi-paragraph `ask_human` context. Root cause: the model reads its dispatch
-  contract from the `ReviewVerdict` schema and its action surface from tool descriptions, both
-  of which carried no field/argument descriptions. Fixes: (a) `ReviewVerdict` fields now carry
-  `Field(description=…)` so `follow_up` is identified as the dispatch text and the boolean flags
-  as the team routing; (b) every harness tool in `agents/react.py` (`ask_human`, `read_file`,
-  `list_dir`, `text_search`, `web_search`, `search_literature`, `data_catalog`) gained
-  manifest-quality tool-level and per-argument descriptions — `ask_human.question` now holds the
-  question and `context` the few supporting facts, so the question stops landing in `context`;
-  (c) `hitl/slack.py` posts a structured Block Kit message (header · question · context) in place
-  of the italic-wrapped body that rendered as gibberish; (d) literature/web provider faults in
-  the ReAct loops degrade to recoverable error outcomes instead of aborting the run. New hard
-  rule in §3: **write only positive actions** — all six runtime prompts were swept to positive
-  phrasing (docstrings unchanged; `DOCS.md` stays authoritative). Non-live suite green.
+- 2026-05-27 -> 2026-06-12 — **Phase 1 built, hardened, and verified live.** The full
+  LangGraph team runs end-to-end: Pydantic schemas, config-driven provider registry,
+  observability, SQLite storage/retrieval, source adapters, prompts, agent roles, ReAct tool
+  loops, consensus, graph feedback edges, sandbox/tool registry, reports, CLI, Studio, and
+  notebook inspection. A Cyg X-1 soft-state joint-fit run completed the graph and produced
+  JSONL + compiled LaTeX/PDF reports (closeout fixes: reviewer LaTeX token ceiling, ADS 404
+  degradation, split ReAct caps). Phase 2's trust-boundary spec was written here: uniform
+  `research_toolkit` package layout, no-fabrication policy, deterministic gate, actor flow,
+  runtime git discipline, and build order.
+- 2026-06-12 -> 2026-06-16 — **Phase 2 steps 0–7 built (the full author→gate→review→commit
+  flow).** Runtime writes are confined under `runtime_dir` (worker scratch, MCP cwd, figures).
+  The protocol: `ToolSpec`/`ValidationDataset`/`ProposedCheck`/`AuthoringDecision` +
+  `AnalystReport.tool_request`/`status` (missing-capability + §9.6 honest-failure). The flow:
+  `merge_flow.propose_and_pr` drives a Sonnet Claude-SDK `coder` in an isolated worktree
+  (runtime-safe structure context, `ask_lead`/`ask_human` escalation, bounded rework);
+  `gate.run_gate` is the deterministic gate (Layer-A structural/provenance/determinism + the
+  `config/code_gate.yaml` no-fabrication scan; Layer-B tool-local tests); `review.make_review_hook`
+  is the provider-decorrelated GPT co-lead code review (`select_decorrelated_member`, raises if
+  no different-provider member); `merge_flow.approve_edit` lands one atomic commit by explicit-path
+  staging of `gate.collect_targets` (never `git add -A`; commit ⇔ gate-pass ∧ review-pass; the
+  runtime never merges to master). Launch `preflight` runs every no-LLM check before any model
+  client (all configured roles required); the `hitl` package adds the injectable `HumanHandler`
+  + `resolve_human` fail-safe, CLI/Slack/WhatsApp connectors, and the shared `ask_human` tool.
+  Lead-driven authoring/resume wires it together: `decide_authoring` → `DebateToConverge` itself
+  issues `propose_and_pr(direct_branch="ai")` (LLM never issues git), then on a committed tool
+  reloads the registry (dynamic `*_utils` discovery), restarts sandboxes, augments the task, and
+  reruns workers — bounded by `tool_author_cap`. Per-mission data catalog read side
+  (`observations.read_catalog`/`local_obsids`) written by authored tools. Live end-to-end via the
+  `notebooks/usage_example.ipynb` "test code authoring" run (IXPE P1); non-live suite green.
+- 2026-06-18 -> 2026-06-22 — **Live-run polish + hardening.** Dispatch mechanics moved into the
+  `ReviewVerdict` schema (`Field(description=…)` on `follow_up` + the routing flags) and every
+  `agents/react.py` harness tool gained manifest-quality descriptions, so the reviewer stops
+  pausing fresh requests for routing/paths; `hitl/slack.py` posts a Block Kit message; literature/web
+  provider faults degrade to recoverable outcomes. New §3 rule **write only positive actions**
+  (all six runtime prompts swept; the no-fabrication ban is the sanctioned exception). The
+  worker→lead `AnalystToolRequest` was then split from the lead→coder `ToolSpec` and
+  `ProposedCheck.params` dropped, removing the open map that 400'd GPT analyst workers under
+  OpenAI strict structured output (§7). The **analysts-author-no-code / general-capability** prompt
+  policy landed: analysis runs through tools, `bash` is read-only inspection, a missing capability
+  is a `tool_request`, and the coder/lead frame tools as parameterized capabilities, not one-offs.
+  Module and `CLAUDE.md` changelogs compacted. Non-live suite green (298 passed).

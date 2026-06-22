@@ -86,67 +86,28 @@ logic here.
   in manifests/tool schemas; prompts carry role scope, ReAct discipline, figure-path
   omission, toolkit-inspection triage, web/lead/human escalation, no-fabrication rules, and
   `tool_request` reporting.
-- 2026-06-12 — Compacted changelog and updated the analyst-worker contract wording to match
-  the current ReAct/tool-request flow.
-- 2026-06-15 — Added `analyst_colead.md`, the Phase-2 step-4 provider-decorrelated co-lead
-  code-review prompt (code-review-only; brief-match, Layer-B check adequacy, independent
-  no-fabrication pass, subtle-bug hunting, read-only worktree/web investigation).
-- 2026-06-15 — Phase 2 step 5: analyst worker/lead prompts gained §9.6 failure classification
-  and the `ask_human` raise-to-human path (set `status`, never fabricate on exhaustion).
-- 2026-06-16 — Phase 2 step 6: `analyst_colead.md` now asks for a one-line `commit_summary`
-  on approval — the commit subject `merge_flow.approve_edit` lands on the working branch.
-- 2026-06-17 — `coder.md` data-catalog section now conveys the convention only: record
-  acquired/produced data through the single trusted writer `obsdb_manager` (call its upsert
-  helper, read the real signature from live toolkit source), never read/write/hand-roll
-  `catalog.json`. Replaces the prior inline JSON-shape + read/update/write instructions; the
-  catalog write path is prisoned to `obsdb_manager` + a sudo human.
-- 2026-06-18 — Prompts synced to the real `research_toolkit` structure and flow. `coder.md`:
-  dropped the "Python toolkit" framing; the template-layout note now lists the actual package
-  shape (`lib/` + `skills/` + wrapped-asset subdirs like `NICER/`/`NuSTAR/`/`IXPE/` + `tests/`
-  + `README.md`); the trusted catalog writer is `obsdb_catalog` (`neutral.new`/`neutral.advance`,
-  with `heasarc_utils/lib/heasarc_help.py` as the wired example); the tests convention points at
-  `heasarc_utils/tests/` (xspec_utils carries none). `analyst_worker.md`: tool returns are no
-  longer described as instantaneous (slow tools + human pauses → wait, never assume); failure
-  handling reframed off "my bug" into wrong-call → retry vs broken-tool → `fix_existing` (the
-  worker never authors tools — a separate coding agent does — so it cannot have a tool-internals
-  bug). README build-status row updated `obsdb_manager` → `obsdb_catalog`. Also added to
-  `coder.md`: the README↔manifest audience split (README for people; the model reads the tool via
-  the `TOOL_MANIFEST` `description`/`args_schema`) and a "design for extension" note (per-mission
-  strategy modules + thin `<domain>_help.py` dispatch, so a new mission is a module + one manifest
-  entry).
-- 2026-06-18 — `coder.md` tests section gained a "keep each test fast and quiet" note: the gate
-  runs tests twice under a time cap, so validate on a small local ObsID + smallest slice, assert
-  stable quantities, and keep stdout quiet (sort globs, silence warnings) so the determinism
-  check holds. Pairs with the gate timeout→Layer-B-failure hardening (see `sandbox/DOCS.md`).
-- 2026-06-18 — Clarified local-data discovery in `reviewer.md` and `analyst_lead.md`: local
-  observations are **auto-recognised** via each mission's `catalog.json` (surfaced by the
-  `data_catalog` tool; toolkit tools auto-fill the data paths), so no role resolves or is handed
-  an `obs_db_path`. `reviewer.md` no longer tells the reviewer to look for `obs_db_path` "in the
-  task context" (the framing that made a reviewer ask the human for a path that never exists); it
-  now frames "local first" as instructing analysts to consult the data catalog. Also generalised
-  the reviewer's tool section (no hardcoded tool list; tools/`TOOL_MANIFEST` are runtime-loaded)
-  and re-emphasised that the reviewer reviews science vs. literature and does not do discovery/analysis.
-- 2026-06-18 — All six runtime prompts swept to the new **write-only-positive-actions** style
-  (CLAUDE.md §3): prohibitions phrased as the positive action they imply. The one sanctioned
-  exception is the **no-fabrication ban**, kept explicit wherever it appears (analyst worker/lead,
-  librarian, coder, co-lead). `reviewer.md` rewritten so the **dispatch mechanics live in the
-  `ReviewVerdict` schema** rather than the prompt — the model reads where dispatch goes from
-  `follow_up`'s field description (see `schemas/DOCS.md`); the prompt keeps the reviewer's job, the
-  local-first policy, the plain-language capability-request rule (the extend-vs-author choice is the
-  analyst lead's), a one-or-two-sentence `ask_human` scope, and a quick-capability-check-only
-  posture on a fresh request. This fixes the reviewer that paused a fresh request to ask the human
-  for a data path and an extend-vs-new authoring choice. The harness tool descriptions the prompts
-  rely on were enriched in tandem (see `agents/DOCS.md`).
-- 2026-06-22 — **Analysis-is-tool-driven policy + general-capability authoring.** `analyst_worker.md`
-  and `analyst_lead.md` now state the analyst team authors no analysis code itself: every real step
-  (reduction, fitting, computation, figures) runs through tools, `bash`/`python -c` is scoped to
-  read-only inspection (listings, headers, shapes, paths, env probes), and a missing capability is
-  raised as a `tool_request` for the coder to author. The `bash_exec` tool description
-  (`sandbox/builtin_server.py`, surfaced via FastMCP) was rewritten to match — inspection-only,
-  dropping the prior "inline `python -c` for persistent work" sanction (see `sandbox/DOCS.md`).
-  `coder.md` gained a **"Build the general capability, not the one-off"** section (parameterize the
-  variable axis with sensible defaults — a concrete value the brief names becomes an argument
-  default — reconciled with "smallest coherent change": small surface, general capability), and
-  `analyst_lead.md` now instructs phrasing the finalised
-  `ToolSpec.expected_behavior` as a general parameterized capability, keeping the run's target
-  list/ObsIDs out of the brief (they are validation data, not tool design).
+- 2026-06-12 -> 2026-06-16 — **Phase 2 steps 4–6 prompts added.** New `analyst_colead.md`, the
+  provider-decorrelated co-lead **code-review-only** prompt (brief-match, Layer-B check adequacy,
+  the independent no-fabrication second pass, subtle-bug hunting, read-only worktree/web
+  investigation; on approval it drafts the one-line `commit_summary` used as the working-branch
+  commit subject). The analyst worker/lead prompts gained §9.6 failure classification and the
+  `ask_human` raise-to-human path (set `status`, never fabricate on exhaustion). Also compacted the
+  changelog and synced the analyst-worker contract to the ReAct/tool-request flow.
+- 2026-06-17 -> 2026-06-22 — **Prompts synced to the real `research_toolkit` structure + flow.**
+  `coder.md` dropped the "Python toolkit" framing for the actual package shape (`lib/` + `skills/` +
+  wrapped-asset subdirs + `tests/` + `README.md`); the trusted catalog writer is `obsdb_catalog`
+  (call its upsert helper, read the live signature; never hand-roll `catalog.json`); added the
+  README↔`TOOL_MANIFEST` audience split, a design-for-extension note (per-mission strategy modules +
+  thin `<domain>_help.py` dispatch), a fast-and-quiet tests note (the gate runs tests twice under a
+  time cap), and a **"Build the general capability, not the one-off"** section (parameterize the
+  variable axis with sensible defaults). `analyst_worker.md`/`analyst_lead.md` adopted the
+  **analysis-is-tool-driven / authors-no-code** policy (every real step runs through tools;
+  `bash`/`python -c` is read-only inspection; a missing capability is a `tool_request`), tool returns
+  are no longer instantaneous (wait, never assume), failure handling reframed to wrong-call → retry
+  vs broken-tool → `fix_existing`, and the lead phrases `ToolSpec.expected_behavior` as a general
+  parameterized capability (run targets/ObsIDs are validation data, not tool design). Local data is
+  **auto-recognised** via each mission's `catalog.json`/`data_catalog` tool, so no role resolves an
+  `obs_db_path` (`reviewer.md` stopped telling the reviewer to look for one). All six runtime prompts
+  were swept to the **write-only-positive-actions** style (CLAUDE.md §3), the sole exception being the
+  explicit no-fabrication ban; the reviewer's dispatch mechanics moved into the `ReviewVerdict` schema
+  (`follow_up` field description) rather than the prompt.

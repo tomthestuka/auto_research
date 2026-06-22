@@ -202,22 +202,15 @@ carried by **reference** (`FigureRef`), never embedded
 - 2026-05-26 -> 2026-06-12 — Full Pydantic v2 protocol built: research/search/analysis/
   review messages, `FigureRef`/`DocumentRef`, native function-call tool envelopes, sandbox
   results, report schemas, LaTeX report schema, and strict JSON-serializable boundaries.
-- 2026-06-12 — Phase 2 schemas added and evolved: `ToolSpec`, `ValidationDataset`,
-  `ProposedCheck`, `AnalystReport.tool_request`, `AnalystReport.status`,
-  `ToolSpec.request_kind`/`observed_issue`, and merge-flow types (`CheckResult`,
-  `GateReport`, `ToolReviewVerdict`, `MergeFlowResult`).
-- 2026-06-12 — Phase 2 step 3 added `GateReport.findings` for non-failing gate observations
-  consumed by future co-lead review.
-- 2026-06-12 — Compacted changelog and updated stale local-path/tool-result wording.
-- 2026-06-15 — Phase 2 step 5 added `HumanQuery`/`HumanResponse` (the raise-to-human
-  clarification protocol, §9.7).
-- 2026-06-16 — `HumanQuery` gained a `model` field + `sender_label` property so connector
-  message bodies identify the sender as `"<asked_by> (<model>)"`.
-- 2026-06-16 — Phase 2 step 6: `ToolReviewVerdict` gained `commit_summary` — the co-lead's
-  one-line commit subject used by `merge_flow.approve_edit` (fallback: tool name).
-- 2026-06-16 — Phase 2 step 7: added `AuthoringDecision` (`should_author`, `tool_spec`,
-  `rationale`) in `toolspec.py` — the analyst lead's structured decision over a worker's
-  `tool_request`; consensus (not the LLM) acts on it via `merge_flow.propose_and_pr`.
+- 2026-06-12 -> 2026-06-16 — Phase 2 schemas built and evolved (steps 3-7). Added `ToolSpec`,
+  `ValidationDataset`, `ProposedCheck`, `AnalystReport.tool_request`, `AnalystReport.status`,
+  `ToolSpec.request_kind`/`observed_issue`, the merge-flow types (`CheckResult`, `GateReport`
+  incl. `findings` for non-failing gate observations, `ToolReviewVerdict`, `MergeFlowResult`),
+  the raise-to-human `HumanQuery`/`HumanResponse` (§9.7; `HumanQuery.model` + `sender_label`
+  rendering `"<asked_by> (<model>)"`), `ToolReviewVerdict.commit_summary` (the co-lead's
+  one-line commit subject used by `merge_flow.approve_edit`, fallback tool name), and
+  `AuthoringDecision` (`should_author`/`tool_spec`/`rationale` — the lead's decision over a
+  worker `tool_request`, acted on by consensus, not the LLM).
 - 2026-06-18 — `ReviewVerdict` fields now carry `Field(description=…)` (review.py): `follow_up`
   is described as the dispatch text routed to the flagged team(s) and the two booleans as the
   team-routing flags. The descriptions reach the provider through `model_json_schema()` (the

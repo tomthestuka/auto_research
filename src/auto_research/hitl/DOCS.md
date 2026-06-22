@@ -98,46 +98,20 @@ live in `auto_research.schemas` (the protocol, §7).
 - 2026-06-15 — Phase 2 step 5: package created. `HumanQuery`/`HumanResponse` protocol; the
   injectable `HumanHandler` + `resolve_human` fail-safe; the `resolve_handler` CLI-vs-library
   auto-detect; CLI/Slack/WhatsApp connectors; and the `make_human_channel_check` launch ping.
-- 2026-06-16 — `WhatsAppHandler` now authenticates with a Twilio **API key**
-  (`TWILIO_API_KEY_SID` / `TWILIO_API_KEY_SECRET` + `TWILIO_ACCOUNT_SID`) instead of the root
-  Auth Token, so a leaked credential is revoked without rotating the account. `.env.example`,
-  README, and the live-test docstring updated to match.
-- 2026-06-16 — all three connector bodies (CLI/Slack/WhatsApp) now render the sender via
-  `HumanQuery.sender_label` → `"<role> (<model>)"` so the human sees which model is asking.
-- 2026-06-16 — added `response_timeout_s()` (`orchestration.yaml: human_response_timeout_s`,
-  default 3600s/1h): one shared mid-run human-response window read by every channel. Slack and
-  WhatsApp `timeout_s` now default to it (was a hardcoded 1800s); the CLI handler, previously an
-  indefinite block, now waits at most this long then raises `TimeoutError`. Deliberately
-  decoupled from the LLM prompt-cache TTL (default ~5min is too short to govern a human deadline;
-  overshooting only costs one cheap cold prefix re-prefill).
-- 2026-06-18 — Polished the channel-ping preflight error into an actionable directive. The
-  WhatsApp connector now catches a failed Twilio send and translates it: an HTTP-401 names the
-  exact creds to check (`TWILIO_API_KEY_SID`/`TWILIO_API_KEY_SECRET`/`TWILIO_ACCOUNT_SID` — the
-  API Key SID is the basic-auth username, so "invalid username" is a credential fault), other
-  failures point at the from/to numbers + connectivity, and both offer the escape hatch
-  (`human_channel='cli'`/`'none'`). `make_human_channel_check` now wraps any non-timeout ping
-  failure and the timeout/empty-reply cases with the same escape-hatch directive.
-- 2026-06-18 — `SlackHandler.on_message` no longer requires the reply to be **in-thread**: a
-  plain channel reply (no `thread_ts`) now resolves the most recent pending question (the common
-  case — people reply in the channel, not the message thread). Still ignores our own posts,
-  events with a `subtype` (joins/edits), empty text, and other channels. Threaded replies match
-  their own thread as before. Covered by `tests/test_hitl.py`
-  (`test_slack_resolves_plain_channel_reply`, `test_slack_on_message_ignores_other_channel_and_subtype`).
-  Concurrency guard: a bare channel reply is only auto-attributed when **exactly one** question
-  is open; with 2+ pending it's ambiguous, so it's ignored and an in-thread reply (always
-  unambiguous) is required. The orchestration is sequential today (≤1 question ever open), so this
-  is future-proofing. Both the in-thread and channel-reply round-trips were live-verified 2026-06-18
-  (`test_slack_channel_reply_ambiguous_when_multiple_pending` covers the guard).
-- 2026-06-18 — Fixed `SlackHandler` crashing with `RuntimeError: no running event loop` at
-  construction: `AsyncSocketModeHandler` builds an aiohttp session that needs a *running* loop,
-  but `resolve_handler` constructs the handler synchronously (before the loop). slack_bolt
-  construction (app + socket + listener) is now **deferred to `async start()`** for the real path;
-  an injected app (tests) is still wired in `__init__`. `make_human_channel_check` also now prints
-  a "reply to the ping to start the run" line to stdout so a blocking launch ping isn't silent;
-  `human_channel_ping_timeout_s` lowered 300→60 in `orchestration.yaml`.
-- 2026-06-18 — `slack.py` posts a Block Kit message (`_blocks(query)`): a header (`kind`), a
-  sender context line, a Question section, and a Context section when present, each `_truncate`d
-  to Slack's 2900-char per-block budget; `chat_postMessage` now passes `blocks=` with a plain
-  `text=` summary fallback. Replaces the single italic-wrapped `_context: …_` line, which Slack
-  rendered as literal underscores across newlines (the "gibberish" body). The fake Slack client
-  in `tests/test_hitl.py` accepts the new `blocks` kwarg.
+- 2026-06-16 -> 2026-06-18 — Connector hardening and shared timeout. `WhatsAppHandler` moved to
+  Twilio **API-key** auth (`TWILIO_API_KEY_SID`/`TWILIO_API_KEY_SECRET` + `TWILIO_ACCOUNT_SID`)
+  so a leaked key is revoked without rotating the account. All connectors render the sender via
+  `HumanQuery.sender_label` (`"<role> (<model>)"`). Added `response_timeout_s()`
+  (`orchestration.yaml: human_response_timeout_s`, default 3600s/1h): one shared mid-run
+  response window every channel waits at most (CLI no longer blocks indefinitely; Slack/WhatsApp
+  default to it) — deliberately decoupled from the LLM prompt-cache TTL.
+- 2026-06-18 — Slack/preflight robustness. `SlackHandler` construction (app + socket + listener)
+  deferred to `async start()` (avoids `no running event loop` when built synchronously);
+  injected apps still wire in `__init__`. `on_message` now resolves a plain channel reply (no
+  `thread_ts`) when **exactly one** question is open (the common case), keeping in-thread replies
+  unambiguous; both round-trips live-verified. `slack.py` posts a Block Kit message
+  (header/sender/question/context, each `_truncate`d to 2900 chars) replacing the italic-wrapped
+  line Slack rendered as gibberish. WhatsApp/`make_human_channel_check` errors now translate
+  Twilio faults (HTTP-401 → named creds; else from/to + connectivity) and surface the
+  `human_channel='cli'`/`'none'` escape hatch; `human_channel_ping_timeout_s` lowered 300→60.
+  Covered by `tests/test_hitl.py`.

@@ -169,19 +169,16 @@ iteration counters, and the cap.
   required-env checks, role-specific ReAct caps, report formats, and ReAct literature
   gathering.
 - 2026-06-12 — Phase 2 step 0 added off-repo MCP server cwd pinning and lead read-only
-  `toolkit_root` access; graph docs now reflect worker-owned tool execution.
-- 2026-06-12 — Compacted changelog and refreshed the graph diagram/interfaces.
-- 2026-06-15 — Phase 2 step 5: `run_research` resolves a raise-to-human channel
-  (`human_handler`/`human_channel`), awaits the now-async preflight (incl. the channel ping),
-  and threads the handler to the role tool providers; `after_analysis` routes an honest
+  `toolkit_root` access; compacted changelog, refreshed the graph diagram/interfaces, and
+  reflected worker-owned tool execution.
+- 2026-06-15 -> 2026-06-18 — Phase 2 steps 5 and 7. `run_research` resolves a raise-to-human
+  channel (`human_handler`/`human_channel`), awaits the now-async preflight (incl. the channel
+  ping), and threads the handler to the role tool providers; `after_analysis` routes an honest
   `failed`/`needs_human` report around the reviewer to `finalize_run` (no fabricated report).
-- 2026-06-16 — Phase 2 step 7: `runtime.py` wires the consensus authoring/resume path —
-  `DebateToConverge` now receives `tool_author_cap`, `toolkit_root`, `worktree_base`
-  (`<run_dir>/authoring`), `direct_branch` (`orchestration.yaml: tool_author_branch`, default
-  `ai`), and `human_handler`, so the lead authors missing capability into `research_toolkit` and
-  workers rerun on it. The lead keeps its read-only `toolkit_root` browse root.
-- 2026-06-18 — The reviewer's `ReadOnlyToolProvider` `roots` now include `toolkit_root` too
-  (shared `readonly_roots = [run_dir, papers_dir, toolkit_root]` for both reviewer and lead), so
-  the reviewer can read tool source/`TOOL_MANIFEST` and verify analyst results used correct call
-  parameters — paired with self-describing read-only tools (`agents/DOCS.md`) that stopped a
-  reviewer triage loop from stalling on forbidden `list_dir` paths.
+  `runtime.py` wires the consensus authoring/resume path — `DebateToConverge` receives
+  `tool_author_cap`, `toolkit_root`, `worktree_base` (`<run_dir>/authoring`), `direct_branch`
+  (`orchestration.yaml: tool_author_branch`, default `ai`), and `human_handler`, so the lead
+  authors missing capability into `research_toolkit` and workers rerun on it. The reviewer's
+  read-only `roots` now also include `toolkit_root` (shared `readonly_roots = [run_dir,
+  papers_dir, toolkit_root]`), so it can read tool source/`TOOL_MANIFEST` and verify analyst
+  results used correct call parameters.

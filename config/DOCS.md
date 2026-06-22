@@ -139,21 +139,14 @@ role or swapping a provider is a YAML edit; no Python change.
   `analyst_colead` roles with authoring rework caps.
 - 2026-06-12 — Phase 2 step 3 added `code_gate.yaml`, the human-tunable no-fabrication
   gate config for hard-fail vocabulary/RNG patterns, review-only literal-array findings, and
-  marked synthetic-ObsID allowlists.
-- 2026-06-12 — Compacted changelog and documented `runtime_dir` plus current ReAct cap
-  semantics.
-- 2026-06-15 — Phase 2 step 5 added `human_channel` + `human_channel_ping_timeout_s` to
-  `orchestration.yaml` (the raise-to-human default channel and launch-ping timeout).
-- 2026-06-16 — Phase 2 step 7 added `tool_author_branch` (default `ai`) and `tool_author_cap`
-  (default 3) to `orchestration.yaml` for runtime tool authoring/resume.
-- 2026-06-17 — NOTE added on `observations.yaml`: the obs database is to become **one folder**
-  (a single obs-db root), no longer a per-mission `obs_db_path` map; derive `<root>/<MISSION>`
-  in `observations.py`. Pending restructure on the `auto_research` side — see the note above.
-- 2026-06-17 — Documented that `analyze_env` must include **`astroquery`** (for the new
-  `research_toolkit/heasarc_utils` acquire/download tool); also reflected in `README.md` and
-  the `analyze_env` comment in `orchestration.yaml`.
-- 2026-06-18 — Restructure done: `observations.yaml` is now a single `obs_db_root` (the
-  per-mission `obs_db_path` map is gone). `observations.py` discovers missions from disk —
-  a `<root>/<MISSION>` subdir is a mission iff it holds a `catalog.json`. The 2026-06-17 NOTE
-  is resolved/removed. Also added `environment-analyst.yml` (the analyst sandbox conda env
-  spec) at the repo root; `README.md` §2b now creates it via `conda env create`.
+  marked synthetic-ObsID allowlists; compacted changelog and documented `runtime_dir` plus
+  current ReAct cap semantics.
+- 2026-06-15 -> 2026-06-18 — Phase 2 steps 5 and 7 config: `orchestration.yaml` gained
+  `human_channel` + `human_channel_ping_timeout_s` (raise-to-human default channel and
+  launch-ping timeout) and `tool_author_branch` (default `ai`) + `tool_author_cap` (default 3)
+  for runtime tool authoring/resume. `observations.yaml` was restructured to a single
+  `obs_db_root` (the per-mission `obs_db_path` map is gone); `observations.py` now discovers
+  missions from disk — a `<root>/<MISSION>` subdir is a mission iff it holds a `catalog.json`.
+  Documented that `analyze_env` must include **`astroquery`** (for `heasarc_utils` acquire) and
+  added `environment-analyst.yml` (the analyst sandbox conda env spec) created via
+  `conda env create` per `README.md` §2b.

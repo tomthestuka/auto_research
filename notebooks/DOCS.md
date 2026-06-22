@@ -40,11 +40,9 @@ runtime data directory or `logs/dev/step-N/`.
   for live-run and monitor-artifact review; notebooks remain human-only and never runtime
   prompt context.
 - 2026-06-12 — Compacted changelog; no notebook behavior changes.
-- 2026-06-15 — Updated the Step 12 notebook to use live monitor progress lines,
-  `chatter=7` tool/debate summaries, quiet noisy HTTP/source loggers, and cleared stale outputs.
-- 2026-06-15 — Documented that live notebook progress lines include model-prefixed
-  agent events and compact per-tool result summaries.
-- 2026-06-16 — Renamed `step12_monitor_inspection.ipynb` → `usage_example.ipynb`;
-  restructured into a "using existing tools" section (the Cyg X-1 spectral fit) and a new
-  "test code authoring" section (IXPE P1 PA/PD stability, Phase 2 step-7 authoring chain),
-  keeping the monitor-inspection cell.
+- 2026-06-15 -> 2026-06-16 — Reworked into the live `usage_example.ipynb`. The notebook now
+  uses live monitor progress lines (`chatter=7` tool/debate summaries, model-prefixed agent
+  events, compact per-tool result summaries, quiet HTTP/source loggers). Renamed from
+  `step12_monitor_inspection.ipynb` and restructured into a "using existing tools" section
+  (the Cyg X-1 spectral fit) and a new "test code authoring" section (IXPE P1 PA/PD stability,
+  the Phase 2 step-7 authoring chain), keeping the monitor-inspection cell.

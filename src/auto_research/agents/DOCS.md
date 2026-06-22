@@ -214,48 +214,26 @@ Role wrappers:
   bounded schema retries, `SandboxToolProvider`/`ReadOnlyToolProvider`/`SourceToolProvider`,
   report composition, monitor hooks, librarian cap split, reviewer LaTeX token fix, figure
   redirection, and `coder` prompt loading.
-- 2026-06-12 — Phase 2 agent support added: lead read-only toolkit inspection, optional
-  `web_search`, `clarify_for_author()` for `ask_lead`, `tool_request` prompt flow, and
-  current docs for `AnalystWorkerAgent.analyze()` as the owner of tool execution.
-- 2026-06-12 — Compacted changelog and removed stale `request_tools`/`execute_tools`
-  dictionary entries.
-- 2026-06-15 — Monitor hooks now attach configured model strings to role events
-  and emit compact per-tool result events from the ReAct loop for live
-  terminal/notebook output.
-- 2026-06-15 — Phase 2 step 4: added `AnalystColeadAgent.review_tool()` (provider-
-  decorrelated code review → `ToolReviewVerdict`) and the `analyst_colead` prompt role;
-  `ReadOnlyToolProvider` gained `include_text_search` so the co-lead reviews over the
-  toolkit worktree without the irrelevant papers-KB search.
-- 2026-06-15 — Phase 2 step 5: both tool providers gained a shared `ask_human` tool
-  (`ask_human_tool_def`/`execute_ask_human`) + `human_handler`/`asked_by`; `AnalystWorkerAgent`
-  gained a `human_handler` so its `analyze()` provider can raise to a human.
-- 2026-06-16 — both tool providers and `execute_ask_human` gained a `model` param, set on the
-  emitted `HumanQuery` so connector bodies show the sender as `"<role> (<model>)"`; call sites
-  pass `_model_label(...)` (worker, reviewer, lead).
-- 2026-06-16 — Phase 2 step 7: `AnalystLeadAgent` gained `decide_authoring(reports) ->
-  AuthoringDecision` — using its read-only `toolkit_root` browse loop, it sets disposition
-  (extend-vs-new) and returns one finalised `ToolSpec` to author (or declines). Consensus, not
-  the lead, then issues `merge_flow.propose_and_pr` (§9.9). `judge_convergence`/`adjudicate`/
-  `clarify_for_author` are unchanged and cannot author. Added a shared read-only `data_catalog`
-  tool (`react.data_catalog_tool_def`/`execute_data_catalog`, reading
-  `observations.read_catalog`) — exposed on `SandboxToolProvider` (worker, always) and on
-  `ReadOnlyToolProvider` only when `include_data_catalog=True` (the lead, not the reviewer) — so
-  a role checks what data is already local before requesting an acquire tool.
-- 2026-06-18 — `ReadOnlyToolProvider.read_file`/`list_dir` are now self-describing: the permitted
-  `roots` are named in each tool's description (`_roots_text`) and echoed in the `path not
-  permitted` error, so a role recovers in one step instead of thrashing on forbidden paths (the
-  failure mode that stalled a reviewer triage loop). The reviewer's `roots` now include
-  `research_toolkit`, so it can read tool source/`TOOL_MANIFEST` and confirm results came from
-  correctly-parameterised tool calls.
-- 2026-06-18 — ReAct loops no longer crash on a literature/web provider fault. `SourceToolProvider`
-  (`search_literature`/`text_search`) and `ReadOnlyToolProvider` (`text_search`/`web_search`) now
-  wrap each provider call in try/except and return an `is_error` `ToolOutcome` (mirroring the
-  per-source guard already in `LibrarianIOAgent.search`), so a network/rate-limit/ADS-404/Tavily
-  failure degrades to recoverable model-visible feedback instead of aborting the whole run.
-- 2026-06-18 — Every harness tool in `react.py` now carries manifest-quality descriptions —
-  a positive tool-level line plus per-argument descriptions — matching the `research_toolkit`
-  `TOOL_MANIFEST` standard: `ask_human` (`question` holds the question, `context` a few
-  supporting facts, `kind` the reason — fixing the model dumping its question into `context`),
-  `read_file`/`list_dir` (`path`), `text_search` and `web_search` (`query`/`limit`), and
-  `search_literature` (`source`/`query`/`limit`). The model now reads each tool's contract from
-  the tool itself rather than the prompt.
+- 2026-06-12 -> 2026-06-15 — Phase 2 agent support landed (steps 4-5). Lead read-only toolkit
+  inspection + optional `web_search`, `clarify_for_author()` for `ask_lead`, and
+  `AnalystWorkerAgent.analyze()` as the sole owner of tool execution (stale
+  `request_tools`/`execute_tools` removed). Added `AnalystColeadAgent.review_tool()`
+  (provider-decorrelated code review → `ToolReviewVerdict`) + the `analyst_colead` prompt role,
+  with `ReadOnlyToolProvider.include_text_search` so the co-lead reviews the toolkit worktree
+  without the papers KB. Both tool providers gained a shared `ask_human` tool + `human_handler`.
+  Monitor hooks attach configured model strings and emit per-tool ReAct result events.
+- 2026-06-16 -> 2026-06-18 — Phase 2 step 7 + live-run polish. `AnalystLeadAgent` gained
+  `decide_authoring(reports) -> AuthoringDecision` (read-only `toolkit_root` browse sets
+  disposition and returns one finalised `ToolSpec` or declines; consensus, not the LLM, then
+  issues `merge_flow.propose_and_pr`, §9.9). Added a shared read-only `data_catalog` tool
+  (reading `observations.read_catalog`) on `SandboxToolProvider` (worker) and on
+  `ReadOnlyToolProvider` when `include_data_catalog=True` (lead, not reviewer), so a role checks
+  local data before requesting an acquire tool. `HumanQuery` carries a `model` id (sender shown
+  as `"<role> (<model>)"`). `ReadOnlyToolProvider.read_file`/`list_dir` self-describe permitted
+  `roots` in descriptions + errors (the reviewer's `roots` now include `research_toolkit`), so a
+  role recovers in one step instead of thrashing — the failure mode that stalled a reviewer
+  triage loop. Literature/web provider faults in `SourceToolProvider`/`ReadOnlyToolProvider`
+  now degrade to recoverable `is_error` outcomes instead of aborting the run. Every `react.py`
+  harness tool gained manifest-quality tool-level + per-argument descriptions (notably
+  `ask_human` `question`/`context`/`kind`), so the model reads each tool's contract from the
+  tool, not the prompt.
