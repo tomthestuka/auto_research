@@ -248,6 +248,7 @@ class DebateToConverge:
             colead=self.colead,
             human_handler=self.human_handler,
             direct_branch=self.direct_branch,
+            monitor=self.monitor,
         )
         await _record(
             self.monitor,

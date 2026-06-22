@@ -25,6 +25,7 @@ co-lead's ``commit_summary``. The runtime never touches master; a human merges o
 from __future__ import annotations
 
 import inspect
+import json
 import subprocess
 import uuid
 from collections.abc import Awaitable, Callable
@@ -220,22 +221,63 @@ def _observation_paths() -> dict[str, str]:
 
 
 # ----------------------------------------------------------------------------
+# Monitor emit helpers — make the authoring flow (coder stream, escalations, gate/
+# review/commit) legible in the run's JSONL. team="tooling"; no-op when monitor is None.
+# ----------------------------------------------------------------------------
+
+_CODER_TEXT_CAP = 2_000
+
+
+def _cap_text(text: str, limit: int = _CODER_TEXT_CAP) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"… [+{len(text) - limit:,} chars]"
+
+
+async def _emit(
+    monitor: Any | None,
+    event: str,
+    *,
+    level: int,
+    summary: str,
+    data: dict[str, Any] | None = None,
+    actor: str = "coder",
+) -> None:
+    """Record one authoring event; logging must never break the authoring flow."""
+    if monitor is None:
+        return
+    try:
+        await monitor.record(
+            "tooling", event, level=level, summary=summary, actor=actor, data=data or {}
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# ----------------------------------------------------------------------------
 # Escalation handlers (L1) — directly unit-testable, wrapped as MCP tools below
 # ----------------------------------------------------------------------------
 
 
-def _make_ask_lead_handler(lead: Any) -> Callable[..., Awaitable[str]]:
+def _make_ask_lead_handler(lead: Any, *, monitor: Any | None = None) -> Callable[..., Awaitable[str]]:
     async def handler(question: str, *, kind: str = "clarify_code", context: str = "") -> str:
         answer = lead.clarify_for_author(question, kind=kind, context=context)
         if inspect.isawaitable(answer):
             answer = await answer
-        return str(answer)
+        answer = str(answer)
+        await _emit(
+            monitor, "coder.ask_lead", level=4,
+            summary=f"coder asked the lead: {_cap_text(question, 80)}",
+            data={"kind": kind, "question": _cap_text(question), "context": _cap_text(context),
+                  "answer": _cap_text(answer)},
+        )
+        return answer
 
     return handler
 
 
 def _make_ask_human_handler(
-    human_handler: HumanHandler | None, *, model: str = ""
+    human_handler: HumanHandler | None, *, model: str = "", monitor: Any | None = None
 ) -> Callable[..., Awaitable[str]]:
     async def handler(question: str, *, kind: str = "blocked", context: str = "") -> str:
         query = HumanQuery(
@@ -245,7 +287,17 @@ def _make_ask_human_handler(
             asked_by="coder",
             model=model or "",
         )
+        await _emit(
+            monitor, "coder.ask_human", level=3,
+            summary=f"coder raised to the human ({query.kind}): {_cap_text(question, 80)}",
+            data={"kind": query.kind, "question": _cap_text(question), "context": _cap_text(context)},
+        )
         response = await resolve_human(human_handler, query)  # raises HumanInputRequired if None
+        await _emit(
+            monitor, "coder.ask_human.answer", level=3,
+            summary="human answered the coder",
+            data={"answer": _cap_text(response.answer)},
+        )
         return response.answer
 
     return handler
@@ -423,9 +475,21 @@ def _default_sdk_client_factory(options):
     return ClaudeSDKClient(options=options)
 
 
-async def _drive_author(client: Any, message: str) -> str:
-    """Send one turn to the warm author session and drain its response (L0 runs inside)."""
-    from claude_agent_sdk import AssistantMessage, TextBlock
+async def _drive_author(client: Any, message: str, *, monitor: Any | None = None) -> str:
+    """Send one turn to the warm author session and drain its response (L0 runs inside).
+
+    When a ``monitor`` is wired, each streamed block is mirrored to the run's JSONL so the
+    otherwise-opaque SDK author session is legible: tool calls (file edits, bash, ask_*),
+    tool results, narration, and the per-turn end summary. Logging never breaks the drain.
+    """
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ResultMessage,
+        TextBlock,
+        ToolResultBlock,
+        ToolUseBlock,
+        UserMessage,
+    )
 
     await client.query(message)
     chunks: list[str] = []
@@ -434,6 +498,36 @@ async def _drive_author(client: Any, message: str) -> str:
             for block in getattr(msg, "content", []) or []:
                 if isinstance(block, TextBlock):
                     chunks.append(block.text)
+                    if block.text.strip():
+                        await _emit(monitor, "coder.text", level=8,
+                                    summary=_cap_text(block.text.strip(), 80),
+                                    data={"text": _cap_text(block.text)})
+                elif isinstance(block, ToolUseBlock):
+                    await _emit(
+                        monitor, "coder.tool_use", level=7,
+                        summary=f"coder → {block.name}",
+                        data={"tool": block.name,
+                              "input": _cap_text(json.dumps(block.input, default=str, sort_keys=True))},
+                    )
+        elif isinstance(msg, UserMessage):
+            for block in getattr(msg, "content", []) or []:
+                if isinstance(block, ToolResultBlock):
+                    text = block.content if isinstance(block.content, str) else json.dumps(
+                        block.content, default=str
+                    )
+                    await _emit(
+                        monitor, "coder.tool_result", level=7,
+                        summary=f"coder tool result{' (error)' if block.is_error else ''}",
+                        data={"is_error": bool(block.is_error), "text": _cap_text(text)},
+                    )
+        elif isinstance(msg, ResultMessage):
+            await _emit(
+                monitor, "coder.turn_end", level=5,
+                summary=f"coder turn ended ({msg.num_turns} turns)",
+                data={"num_turns": msg.num_turns, "stop_reason": getattr(msg, "stop_reason", None),
+                      "cost_usd": getattr(msg, "total_cost_usd", None),
+                      "is_error": bool(getattr(msg, "is_error", False))},
+            )
     return "\n".join(chunks)
 
 
@@ -491,6 +585,7 @@ async def propose_and_pr(
     worktree_factory: Callable[[Path, Path, str], Path] | None = None,
     sdk_client_factory: Callable[[Any], Any] | None = None,
     approve_edit: Callable[..., str] | None = None,
+    monitor: Any | None = None,
 ) -> MergeFlowResult:
     """Author a tool from a ``ToolSpec`` and drive the bounded rework loop (§9.3).
 
@@ -545,7 +640,8 @@ async def propose_and_pr(
     structure_context = _build_structure_context(toolkit_root)
     system_prompt = load_prompt("coder")
     escalation_server = _make_escalation_server(
-        _make_ask_lead_handler(lead), _make_ask_human_handler(human_handler, model=coder_model)
+        _make_ask_lead_handler(lead, monitor=monitor),
+        _make_ask_human_handler(human_handler, model=coder_model, monitor=monitor),
     )
     options = _build_options(
         worktree=worktree, coder_model=coder_model, system_prompt=system_prompt,
@@ -554,13 +650,31 @@ async def propose_and_pr(
     )
     client = sdk_client_factory(options)
 
+    async def _gated() -> GateReport:
+        await _emit(monitor, "gate.start", level=5, summary="deterministic gate running")
+        g = await run_gate(worktree, tool_spec)
+        failed = [f"[{c.layer}] {c.name}" for c in (*g.layer_a, *g.layer_b) if not c.passed]
+        await _emit(
+            monitor, "gate.result", level=4,
+            summary=f"gate {'passed' if g.passed else 'rejected'}",
+            data={"passed": g.passed, "failing_checks": failed, "report_hash": g.report_hash,
+                  "reason": _cap_text(g.reason)},
+        )
+        return g
+
     await client.connect()
     try:
-        await _drive_author(client, _initial_message(tool_spec, structure_context))
+        await _emit(
+            monitor, "coder.session_start", level=4,
+            summary=f"authoring {tool_spec.proposed_tool_name} on branch {branch}",
+            data={"tool_spec_id": tool_spec.id, "tool": tool_spec.proposed_tool_name,
+                  "branch": branch, "disposition": tool_spec.disposition},
+        )
+        await _drive_author(client, _initial_message(tool_spec, structure_context), monitor=monitor)
 
         gate_attempts = 0
         review_attempts = 0
-        gate = await run_gate(worktree, tool_spec)
+        gate = await _gated()
         while True:
             if not gate.passed:
                 if gate_attempts >= gate_rework_cap:
@@ -569,11 +683,17 @@ async def propose_and_pr(
                         gate_report=gate, reason=f"gate rework cap exhausted: {gate.reason}",
                     )
                 gate_attempts += 1
-                await _drive_author(client, _gate_feedback_message(gate))
-                gate = await run_gate(worktree, tool_spec)
+                await _drive_author(client, _gate_feedback_message(gate), monitor=monitor)
+                gate = await _gated()
                 continue
 
             review = await run_review(worktree, tool_spec, gate)
+            await _emit(
+                monitor, "review.result", level=4,
+                summary=f"co-lead {'approved' if review.approved else 'rejected'}",
+                data={"approved": review.approved, "issues": [_cap_text(i, 200) for i in review.issues],
+                      "checks_adequate": review.checks_adequate, "rationale": _cap_text(review.rationale)},
+            )
             if not review.approved:
                 if review_attempts >= review_rework_cap:
                     return MergeFlowResult(
@@ -582,15 +702,20 @@ async def propose_and_pr(
                         reason=f"review rework cap exhausted: {review.rationale}",
                     )
                 review_attempts += 1
-                await _drive_author(client, _review_feedback_message(review))
+                await _drive_author(client, _review_feedback_message(review), monitor=monitor)
                 # A code change can break the gate — re-run it before re-review.
-                gate = await run_gate(worktree, tool_spec)
+                gate = await _gated()
                 continue
 
             # Commit ⇔ gate-pass ∧ co-lead review-pass (§9.9). The co-lead drafts the commit
             # subject; fall back to the tool name if it left it empty.
             message = review.commit_summary.strip() or tool_spec.proposed_tool_name
             commit_sha = approve_edit(worktree, message=message)
+            await _emit(
+                monitor, "commit", level=3,
+                summary=f"committed {tool_spec.proposed_tool_name} → {commit_sha[:10]}",
+                data={"commit_sha": commit_sha, "branch": branch, "message": _cap_text(message, 200)},
+            )
             return MergeFlowResult(
                 tool_spec_id=tool_spec.id, status="committed", branch=branch,
                 commit_sha=commit_sha, gate_report=gate, review=review,

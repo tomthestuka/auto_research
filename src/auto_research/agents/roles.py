@@ -326,6 +326,13 @@ class AgentRole:
                         "is_error": outcome.is_error,
                         "chars": len(outcome.text),
                         "figure_count": len(outcome.figures),
+                        # Full-fidelity (capped) call args + returned text, so a run is
+                        # diagnosable from the JSONL alone (terminal ignores these keys).
+                        "args": _cap_text(
+                            json.dumps(dict(call.arguments), default=str, sort_keys=True),
+                            _EVENT_ARG_CAP,
+                        ),
+                        "text": _cap_text(outcome.text, _EVENT_RESULT_CAP),
                     },
                 )
             messages.append(ToolResultMessage(results=result_parts))
@@ -1249,6 +1256,18 @@ def _default_sources() -> dict[str, QuerySource]:
 # Per-field character caps written to memory.md (crash-prevention).
 _STDOUT_MEM_CAP = 8_000
 _STDERR_MEM_CAP = 2_000
+
+# Per-field caps for tool-call args/results recorded into the monitor JSONL (full-fidelity
+# diagnosis without unbounded log growth — see monitor/DOCS.md).
+_EVENT_ARG_CAP = 2_000
+_EVENT_RESULT_CAP = 4_000
+
+
+def _cap_text(text: str, limit: int) -> str:
+    """Truncate ``text`` to ``limit`` chars with a count marker (for monitor event data)."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"… [+{len(text) - limit:,} chars]"
 
 
 def _append_tool_results_to_memory(path: Path, results: Sequence[ToolResult]) -> None:

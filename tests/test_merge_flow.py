@@ -98,6 +98,75 @@ def _run(spec, **kwargs):
     return result, client
 
 
+class _RecordingMonitor:
+    """Captures monitor.record() calls for assertion (async-compatible)."""
+
+    def __init__(self):
+        self.events: list[dict] = []
+
+    async def record(self, team, event, *, level, summary, actor=None, data=None):
+        self.events.append({"team": team, "event": event, "level": level, "data": data or {}})
+        return None
+
+    def of(self, name):
+        return [e for e in self.events if e["event"] == name]
+
+
+def test_drive_author_streams_sdk_blocks_to_monitor():
+    """Fix #2 (a): the coder SDK stream is mirrored to the monitor — tool calls, results,
+    narration, turn end — so the otherwise-opaque author session is legible in the JSONL."""
+    from claude_agent_sdk import (
+        AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock, UserMessage,
+    )
+
+    from auto_research.sandbox.merge_flow import _drive_author
+
+    class _StreamClient(_FakeClient):
+        async def receive_response(self):
+            yield AssistantMessage(
+                content=[TextBlock(text="editing red_ixpe.py"),
+                         ToolUseBlock(id="1", name="Bash", input={"command": "pytest -q"})],
+                model="m",
+            )
+            yield UserMessage(content=[ToolResultBlock(tool_use_id="1", content="2 passed", is_error=False)])
+            yield ResultMessage(subtype="success", duration_ms=9, duration_api_ms=8,
+                                is_error=False, num_turns=2, session_id="s")
+
+    mon = _RecordingMonitor()
+    asyncio.run(_drive_author(_StreamClient(), "go", monitor=mon))
+
+    use = mon.of("coder.tool_use")
+    assert use and use[0]["data"]["tool"] == "Bash" and "pytest" in use[0]["data"]["input"]
+    res = mon.of("coder.tool_result")
+    assert res and "2 passed" in res[0]["data"]["text"] and res[0]["data"]["is_error"] is False
+    end = mon.of("coder.turn_end")
+    assert end and end[0]["data"]["num_turns"] == 2
+    assert mon.of("coder.text")
+    assert all(e["team"] == "tooling" for e in mon.events)
+
+
+def test_ask_lead_handler_records_to_monitor():
+    """Fix #2 (b): escalations are logged with question + answer."""
+    mon = _RecordingMonitor()
+    handler = _make_ask_lead_handler(_FakeLead(), monitor=mon)
+    asyncio.run(handler("which lib fn?", context="ctx"))
+    ev = mon.of("coder.ask_lead")
+    assert ev and ev[0]["data"]["question"] == "which lib fn?"
+    assert "lead-answer" in ev[0]["data"]["answer"]
+
+
+def test_propose_and_pr_emits_authoring_milestones(tmp_path):
+    """Fix #2 (c): session start, gate result, review result, and the commit are recorded."""
+    mon = _RecordingMonitor()
+    result, _ = _run(_spec(), toolkit_root=tmp_path, worktree_base=tmp_path / "wt", monitor=mon)
+    assert result.status == "committed"
+    names = {e["event"] for e in mon.events}
+    assert {"coder.session_start", "gate.result", "review.result", "commit"} <= names
+    assert mon.of("gate.result")[0]["data"]["passed"] is True
+    assert mon.of("commit")[0]["data"]["commit_sha"] == "fakesha123"
+    assert all(e["team"] == "tooling" for e in mon.events)
+
+
 def test_happy_path_returns_committed(tmp_path):
     result, client = _run(_spec(), toolkit_root=tmp_path, worktree_base=tmp_path / "wt")
     assert result.status == "committed"

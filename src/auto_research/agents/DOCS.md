@@ -251,3 +251,8 @@ Role wrappers:
   document API rejected it (`400 "The PDF specified was not valid."`); the download-side
   `%PDF-` validation (see `sources/DOCS.md`) keeps such pages out, and this isolation is the
   defense-in-depth so no future bad document can kill the whole run.
+- 2026-06-22 — `_react` `*.analyze.tool_result` events now record the tool-call **`args`** and the
+  returned **`text`** (capped at `_EVENT_ARG_CAP`/`_EVENT_RESULT_CAP` via `_cap_text`), for every
+  ReAct role (worker/lead/reviewer/librarian) — so a run is diagnosable from the JSONL alone rather
+  than only via per-worker `memory.md`/LangSmith. Heavy text lands in the JSONL only (the terminal
+  renderer ignores these keys). Part of the fix for the diagnostic-logging gap (see `monitor/DOCS.md`).

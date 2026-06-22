@@ -360,8 +360,13 @@ class TestWorkerReactLoop:
         assert w.last_tool_results and w.last_tool_results[0].exit_code == 0
         events = {event.event: event for event in monitor.events}
         assert "analyst_worker.analyze.tool_result" in events
-        assert events["analyst_worker.analyze.tool_result"].data["model"] == "fake-tool-model"
-        assert events["analyst_worker.analyze.tool_result"].data["figure_count"] == 1
+        tr_data = events["analyst_worker.analyze.tool_result"].data
+        assert tr_data["model"] == "fake-tool-model"
+        assert tr_data["figure_count"] == 1
+        # Fix #2 (d): the tool-call ARGS and the returned text are now in the event data
+        # (full-fidelity diagnosis from the JSONL alone).
+        assert "args" in tr_data and isinstance(tr_data["args"], str)
+        assert "loaded indices" in tr_data["text"]
 
     def test_starts_dead_sandbox(self) -> None:
         from auto_research.agents.roles import AnalystWorkerAgent

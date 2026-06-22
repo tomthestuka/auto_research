@@ -76,3 +76,12 @@ diagnostic trace, while terminal/notebook output is filtered by `chatter`.
 - 2026-06-15 — Live progress lines now prefix visible events with `team(model)`
   when model metadata is present and include compact per-tool result details
   (`tool`, `status`, `chars`, `figures`) without dumping tool output bodies.
+- 2026-06-22 — **Full-fidelity diagnostic capture** (the monitor itself is unchanged; emitters
+  now populate richer `data`). ReAct `*.analyze.tool_result` events carry the tool-call `args`
+  and the returned `text` (capped — see `agents/DOCS.md`); the tool-authoring flow emits a
+  `tooling`-team stream — `coder.session_start`/`coder.tool_use`/`coder.tool_result`/
+  `coder.text`/`coder.turn_end` (the SDK author session), `coder.ask_lead`/`coder.ask_human`
+  (escalations), and `gate.result`/`review.result`/`commit` (see `sandbox/DOCS.md`). The terminal
+  renderer still surfaces only its select keys, so this heavy text lands in the JSONL only — the
+  log is now a complete trace of a run (incl. the previously-opaque coder/gate phases) without
+  flooding the terminal.

@@ -572,3 +572,12 @@ the hook mapping a fake-model verdict — no live LLM).
   internals) and a `TOOL_MANIFEST` field (hard to hand-edit). `research_toolkit/heasarc_utils/
   tool_config.yaml` sets `acquire` above its 1800s function timeout. Deterministic tests in
   `tests/test_registry.py`.
+- 2026-06-22 — **Authoring flow is now legible in the run JSONL.** `propose_and_pr` gained a
+  `monitor` param (consensus passes `self.monitor`); it threads into `_drive_author` (the SDK
+  author session, previously drained silently — now emits per-block `coder.tool_use`/
+  `coder.tool_result`/`coder.text`/`coder.turn_end`), the `ask_lead`/`ask_human` handler factories
+  (`coder.ask_lead`/`coder.ask_human` with the Q&A), and wraps gate/review/commit
+  (`coder.session_start`, `gate.start`/`gate.result`, `review.result`, `commit`). All on team
+  `tooling`, capped via `_cap_text` (renamed from a clash with the config `_cap`), no-op when
+  `monitor` is None. Fixes the ~20-min blind gap where neither the JSONL nor the terminal showed
+  whether the coder was working, blocked, or the gate was running. Tests in `tests/test_merge_flow.py`.
