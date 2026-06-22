@@ -1016,10 +1016,13 @@ class AnalystLeadAgent(AgentRole):
             "tool_requests": [spec.model_dump(mode="json") for spec in requests],
             "worker_reports": [report.model_dump(mode="json") for report in reports],
             "decision_semantics": (
-                "Browse the toolkit's lib/ source (read_file/list_dir) before deciding. Set "
-                "disposition='extend_existing' when the capability already exists in lib/ and "
-                "only needs surfacing as a skills/ tool; 'new_package' when it is genuinely "
-                "absent. Author ONE tool this cycle in dependency order (acquire before reduce "
+                "Each worker request carries the science context, expected behaviour, a "
+                "suggested tool name, and a validation ObsID — the architectural calls are "
+                "yours. Browse the toolkit's lib/ source (read_file/list_dir) before deciding, "
+                "then finalise ONE ToolSpec: set the target package, the disposition "
+                "('extend_existing' when the capability already exists in lib/ and only needs "
+                "surfacing as a skills/ tool; 'new_package' when it is genuinely absent), and "
+                "the verification checks. Author in dependency order (acquire before reduce "
                 "before analyse). should_author=false when the worker simply mis-called an "
                 "existing tool. Never fabricate; escalate via ask_human if blocked."
             ),

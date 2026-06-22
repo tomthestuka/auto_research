@@ -14,6 +14,7 @@ from auto_research.consensus import DebateToConverge
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
+    AnalystToolRequest,
     AuthoringDecision,
     MergeFlowResult,
     ReviewVerdict,
@@ -24,7 +25,18 @@ from auto_research.schemas import (
 TOOLKIT = Path("/tmp/fake_toolkit")
 
 
+def _tool_request(name: str = "pcube_tool") -> AnalystToolRequest:
+    """The worker → lead message a worker raises on its ``AnalystReport.tool_request``."""
+    return AnalystToolRequest(
+        science_context="workers need a PCUBE polarization tool the toolkit doesn't expose",
+        expected_behavior="run xpbin PCUBE on a merged event file and return the Stokes table",
+        proposed_tool_name=name,
+        validation_data=[ValidationDataset(mission="IXPE", obsid="01002901")],
+    )
+
+
 def _toolspec(name: str = "pcube_tool") -> ToolSpec:
+    """The lead → coder brief the lead finalises (adds disposition/target/checks)."""
     return ToolSpec(
         science_context="workers need a PCUBE polarization tool the toolkit doesn't expose",
         expected_behavior="run xpbin PCUBE on a merged event file and return the Stokes table",
@@ -73,7 +85,7 @@ class AuthoringWorker:
         return AnalystReport(
             summary=f"{self.name} call {self.calls}",
             findings=[f"{self.name} f{self.calls}"],
-            tool_request=_toolspec() if needs_tool else None,
+            tool_request=_tool_request() if needs_tool else None,
             status="ok",
         )
 

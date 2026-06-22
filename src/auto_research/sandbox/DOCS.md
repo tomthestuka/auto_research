@@ -205,7 +205,9 @@ Restricting MCP to read-only filesystem tools is a documented P2 task.
 
 Tools:
 - `bash_exec(command, cwd=None, timeout_s=60)` → `{"stdout": str, "stderr": str, "exit_code": int}`
-  — run a shell command through the MCP server process.
+  — run a shell command through the MCP server process. Its tool description scopes it to
+  **read-only inspection** (listings, headers, shapes, paths, env probes); real analysis steps and
+  any persisted result go through toolkit tools (a missing capability is raised as a `tool_request`).
 - `list_dir(path)` → `{"path": str, "entries": list[str]}` — alphabetically sorted
   directory listing.
 - `read_file(path, max_bytes=65536)` → `{"content": str, "truncated": bool, "size_bytes": int}`
@@ -562,3 +564,9 @@ the hook mapping a fake-model verdict — no live LLM).
 - 2026-06-18 — `review.select_decorrelated_member`'s "no decorrelated co-lead" error now ends
   with the fix: add a member whose provider differs from the author to the `analyst_colead`
   role in `config/models.yaml` (preflight error-message polish).
+- 2026-06-22 — `bash_exec`'s tool description (the docstring FastMCP surfaces to the model) was
+  rescoped to **read-only inspection** (listings, headers, shapes, paths, env probes), dropping the
+  prior "inline `python -c` for persistent work" sanction: the analyst team authors no analysis
+  code itself, so real steps/results run through toolkit tools and a missing capability is raised as
+  a `tool_request` (paired with the analyst prompt policy — see `prompts/DOCS.md`). The function's
+  behavior is unchanged; only the model-facing description narrowed.

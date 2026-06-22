@@ -15,8 +15,8 @@ One module per logical message family:
 - `search.py` — literature search messages.
 - `analysis.py` — analyst task/report messages.
 - `review.py` — reviewer verdicts.
-- `toolspec.py` — Phase-2 tool-authoring brief (`ToolSpec`) + the lead's
-  `AuthoringDecision`.
+- `toolspec.py` — the worker→lead `AnalystToolRequest`, the Phase-2 lead→coder
+  tool-authoring brief (`ToolSpec`), and the lead's `AuthoringDecision`.
 - `merge.py` — Phase-2 tool-authoring flow results (gate report, co-lead review,
   `propose_and_pr` outcome).
 
@@ -48,18 +48,27 @@ carried by **reference** (`FigureRef`), never embedded
 - `ReviewVerdict.needs_more_literature` and
   `ReviewVerdict.needs_analysis_rework` are the schema-level flags used by the
   Phase 1 feedback edges.
-- `ToolSpec` (Phase 2) is the **tool-authoring brief** an analyst worker emits when the
-  toolkit lacks a capability (CLAUDE.md §9.3). It is a *brief, not a frozen contract*:
-  `science_context`/`expected_behavior` (prose), `proposed_tool_name`, `target_domain`
-  + `disposition` (`"extend_existing"`|`"new_package"`, the proposer/lead's call),
-  `validation_data: list[ValidationDataset]` (≥1 required — a real or marked-synthetic
-  ObsID), advisory `proposed_checks: list[ProposedCheck]` (open-ended `kind` hint, not an
-  enum), optional `replication_tolerance`, auto `id`/`created_at`. The **committed tests,
-  not the spec, are authoritative**; tolerances are lead-finalised, hence optional.
-  `AnalystReport.tool_request: ToolSpec | None` is how a worker raises it. `ToolSpec` also
-  carries `request_kind` (`"new_capability"`|`"fix_existing"`) and `observed_issue`: a
-  worker raises `fix_existing` to report an in-use defect (CLAUDE.md §9.3 L5) — the lead
-  triages wrongly-called vs genuinely-buggy. `AnalystReport.status`
+- `AnalystToolRequest` (Phase 2) is the **worker→lead** message an analyst worker raises on
+  its `AnalystReport.tool_request` when the toolkit lacks a capability or an in-use tool
+  misbehaves (CLAUDE.md §9.3). It carries only what the worker is qualified to state:
+  `request_kind` (`"new_capability"`|`"fix_existing"`, default `new_capability`),
+  `science_context`/`expected_behavior` (prose), a *suggested* `proposed_tool_name`,
+  `observed_issue` (the symptom, for `fix_existing` defect reports — §9.3 L5),
+  `validation_data: list[ValidationDataset]` (≥1 required — the real or marked-synthetic
+  ObsID that exposed the gap), and free-text `notes` (where it may *suggest* check ideas).
+  The architectural calls — `target_domain`, `disposition`, `proposed_checks` — are **not**
+  here: §9.3 makes them the lead's, and excluding them keeps the worker's `AnalystReport`
+  response schema free of any open map (so a GPT-backed worker can compose it under strict
+  structured output, §7). `AnalystReport.tool_request: AnalystToolRequest | None`.
+- `ToolSpec` (Phase 2) is the **lead→coder** tool-authoring brief the lead finalises from a
+  worker's `AnalystToolRequest` in `decide_authoring` (CLAUDE.md §9.3). It is a *brief, not a
+  frozen contract*: `science_context`/`expected_behavior` (prose), `proposed_tool_name`,
+  `target_domain` + `disposition` (`"extend_existing"`|`"new_package"`, the proposer/lead's
+  call), `validation_data: list[ValidationDataset]` (≥1 required), advisory
+  `proposed_checks: list[ProposedCheck]` (open-ended `kind` hint, not an enum), optional
+  `replication_tolerance`, auto `id`/`created_at`, plus `request_kind` and `observed_issue`
+  carried over from the request. The **committed tests, not the spec, are authoritative**;
+  tolerances are lead-finalised, hence optional. `AnalystReport.status`
   (`"ok"`|`"failed"`|`"needs_human"`, default `"ok"`) is the §9.6 terminal state so an
   honest authoring failure is a correct outcome, never a trigger to fabricate.
 - The Phase-2 **tool-authoring flow** types (`merge.py`): `GateReport` (the deterministic
@@ -111,8 +120,8 @@ carried by **reference** (`FigureRef`), never embedded
   workers. `previous_report` carries the prior round's result on rework iterations.
 - `AnalystReport(summary: str, findings: list[str] = [],
   figures: list[FigureRef] = [], uncertainty: str | None = None,
-  tool_request: ToolSpec | None = None)` — worker or lead output, including figure
-  references. `tool_request` (Phase 2) is set when the worker proposes a new/extended tool.
+  tool_request: AnalystToolRequest | None = None)` — worker or lead output, including figure
+  references. `tool_request` (Phase 2) is set when the worker raises a toolkit gap/defect.
 - `ReviewVerdict(accepted: bool, rationale: str,
   needs_more_literature: bool = False, needs_analysis_rework: bool = False,
   follow_up: str | None = None)` — reviewer decision and optional feedback
@@ -140,9 +149,17 @@ carried by **reference** (`FigureRef`), never embedded
   `exit_code=127` indicates "tool unavailable".
 - `ValidationDataset(mission: str, obsid: str, synthetic: bool = False)` — one real
   (or marked-synthetic, §9.5) input a `ToolSpec`'s checks run against.
-- `ProposedCheck(kind: str, description: str, params: dict[str, Any] = {},
-  tolerance: float | None = None)` — one *advisory* verification check; `kind` is an
-  open free-text hint (§9.4 open menu), not an enum.
+- `ProposedCheck(kind: str, description: str, tolerance: float | None = None)` — one
+  *advisory* verification check; `kind` is an open free-text hint (§9.4 open menu), not an
+  enum. Every field is a closed scalar (no open map) so the enclosing `ToolSpec` stays valid
+  under any provider's strict structured output.
+- `AnalystToolRequest(request_kind: "new_capability"|"fix_existing" = "new_capability",
+  science_context: str, expected_behavior: str, proposed_tool_name: str,
+  observed_issue: str | None = None, validation_data: list[ValidationDataset] (≥1),
+  notes: str | None = None)` — the worker→lead message (CLAUDE.md §9.3). Carries only what the
+  worker can judge; the lead adds `target_domain`/`disposition`/`proposed_checks` when it
+  finalises a `ToolSpec`. Excluding those open/architectural fields keeps `AnalystReport`'s
+  response schema free of open maps for GPT workers (§7).
 - `ToolSpec(id: str = auto, created_at: datetime = now, science_context: str,
   expected_behavior: str, proposed_tool_name: str, target_domain: str,
   disposition: "extend_existing"|"new_package", validation_data: list[ValidationDataset]
@@ -206,3 +223,17 @@ carried by **reference** (`FigureRef`), never embedded
   team-routing flags. The descriptions reach the provider through `model_json_schema()` (the
   strict sanitizer keeps `description`), so the reviewer reads its dispatch contract from the
   schema — the reviewer was asking the human where dispatch goes because these fields were bare.
+- 2026-06-22 — **Split the worker tool-request from the authoring brief + closed `ProposedCheck`.**
+  A live run's GPT analyst worker 400'd composing its `AnalystReport`: `ProposedCheck.params:
+  dict[str, Any]` (nested `ToolSpec.proposed_checks` → `AnalystReport.tool_request`) is an open
+  map, and OpenAI strict requires every object's `additionalProperties` to be exactly `false`
+  (a typed `dict[str, str]` is rejected too — only a closed shape works). Dropped
+  `ProposedCheck.params` entirely (nothing read it), so `ProposedCheck`/`ToolSpec` carry no open
+  map and the lead's `AuthoringDecision` path is provider-safe too. Added `AnalystToolRequest` as
+  the **worker→lead** message (`request_kind`, `science_context`, `expected_behavior`, a
+  *suggested* `proposed_tool_name`, `observed_issue`, `validation_data` ≥1, `notes`);
+  `AnalystReport.tool_request` is now `AnalystToolRequest | None`. `ToolSpec` is unchanged
+  structurally and stays the **lead→coder** brief the lead finalises (adds
+  `target_domain`/`disposition`/`proposed_checks`), aligning the schema with §9.3's ownership.
+  `tests/test_schemas.py` gained an `AnalystToolRequest` round-trip and a regression test that
+  walks `AnalystReport`'s strict schema asserting no open maps.

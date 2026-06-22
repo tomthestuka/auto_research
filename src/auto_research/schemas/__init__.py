@@ -16,6 +16,7 @@ from auto_research.schemas.review import ReviewVerdict
 from auto_research.schemas.search import FullTextLink, SearchRequest, SearchResult, SearchSource
 from auto_research.schemas.tools import ToolCallRequest, ToolCallReview, ToolKind, ToolResult
 from auto_research.schemas.toolspec import (
+    AnalystToolRequest,
     AuthoringDecision,
     ProposedCheck,
     ToolSpec,
@@ -25,6 +26,7 @@ from auto_research.schemas.toolspec import (
 __all__ = [
     "AnalysisTask",
     "AnalystReport",
+    "AnalystToolRequest",
     "AuthoringDecision",
     "CheckResult",
     "FigureRef",

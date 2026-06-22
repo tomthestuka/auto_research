@@ -29,13 +29,18 @@ Runtime prompt files:
   attachment reading, download and ingest reporting, and bibliographic
   summaries.
 - `analyst_worker.md` — task analysis, debate revisions, assumptions, figure
-  reference handling, ReAct tool use, `tool_request` reporting for missing or
-  broken toolkit capabilities, and **§9.6 failure handling** (wrong call → retry in the loop;
-  broken tool → `fix_existing` request; env/data/human-fault → `ask_human` / set
-  `status=failed|needs_human`, never fabricate). Tool returns are not instantaneous (slow
-  downloads/reductions, human pauses) — wait, never assume an output.
-- `analyst_lead.md` — convergence judgment, adjudication, synthesis, **tool-request
-  triage** (new-capability disposition + `fix_existing` wrongly-called vs buggy),
+  reference handling, ReAct tool use, the **analysis-is-tool-driven / authors-no-code policy**
+  (real steps run through tools; `bash`/`python -c` is read-only inspection only; missing logic
+  → `tool_request`), `tool_request` reporting for missing or broken toolkit capabilities, and
+  **§9.6 failure handling** (wrong call → retry in the loop; broken tool → `fix_existing`
+  request; env/data/human-fault → `ask_human` / set `status=failed|needs_human`, never
+  fabricate). Tool returns are not instantaneous (slow downloads/reductions, human pauses) —
+  wait, never assume an output.
+- `analyst_lead.md` — convergence judgment, adjudication, synthesis, the same
+  tool-driven/inspection-only analysis policy, **tool-request triage** (new-capability
+  disposition + `fix_existing` wrongly-called vs buggy), **general-capability brief framing**
+  (write `expected_behavior` as a parameterized capability serving the class of question — the
+  run's concrete values become argument defaults — not this run's instance),
   authoritative-doc consultation (`web_search`), and **raise-to-human** (`ask_human` / final
   report `status`) on an honest failure or authoring exhaustion.
 - `analyst_colead.md` — the Phase-2 provider-decorrelated **co-lead code reviewer** (loaded
@@ -48,6 +53,9 @@ Runtime prompt files:
 - `coder.md` — the Phase-2 tool author's system prompt (loaded by `merge_flow` and passed
   to the Claude Agent SDK): the real package layout (`lib/` + `skills/` + wrapped-asset subdirs
   + `tests/` + `README.md`), the two-halves split and design-for-extension principle, the
+  **build-the-general-capability principle** (parameterize the variable axis with sensible
+  defaults — a concrete value the brief names becomes an argument default — so the tool serves
+  the class of question, not the one-off), the
   README↔`TOOL_MANIFEST` audience split, `obsdb_catalog` as the sole catalog writer,
   no-fabrication rules, the web/`ask_lead`/`ask_human` escalation ladder, and the committed-tests
   requirement. The role name `coder` mirrors `config/models.yaml`.
@@ -129,3 +137,16 @@ logic here.
   posture on a fresh request. This fixes the reviewer that paused a fresh request to ask the human
   for a data path and an extend-vs-new authoring choice. The harness tool descriptions the prompts
   rely on were enriched in tandem (see `agents/DOCS.md`).
+- 2026-06-22 — **Analysis-is-tool-driven policy + general-capability authoring.** `analyst_worker.md`
+  and `analyst_lead.md` now state the analyst team authors no analysis code itself: every real step
+  (reduction, fitting, computation, figures) runs through tools, `bash`/`python -c` is scoped to
+  read-only inspection (listings, headers, shapes, paths, env probes), and a missing capability is
+  raised as a `tool_request` for the coder to author. The `bash_exec` tool description
+  (`sandbox/builtin_server.py`, surfaced via FastMCP) was rewritten to match — inspection-only,
+  dropping the prior "inline `python -c` for persistent work" sanction (see `sandbox/DOCS.md`).
+  `coder.md` gained a **"Build the general capability, not the one-off"** section (parameterize the
+  variable axis with sensible defaults — a concrete value the brief names becomes an argument
+  default — reconciled with "smallest coherent change": small surface, general capability), and
+  `analyst_lead.md` now instructs phrasing the finalised
+  `ToolSpec.expected_behavior` as a general parameterized capability, keeping the run's target
+  list/ObsIDs out of the brief (they are validation data, not tool design).

@@ -58,6 +58,21 @@ selects among them. Build so the **next** mission or source is a new strategy mo
 helpers small and composable, and push the error-prone per-mission specifics down into the
 strategy module where they are tested once and reused.
 
+## Build the general capability, not the one-off
+
+You are building a reusable tool, not a script for the analysis in front of you. Expose the
+analysis-specific knobs as **arguments with sensible defaults** so the tool serves the whole
+class of question, and the next analysis reuses it untouched. When the brief names a concrete
+value — a bin width, an energy band, a threshold, a count — take it as an argument that
+*defaults* to that value rather than a hardcoded constant, so the same tool covers the whole
+range, not only the point the current analysis needs. Read the brief's `science_context` for
+the *goal*: it tells you which axis the science varies over — parameterize that axis, and let
+the brief's value be its default.
+
+This complements "smallest coherent change": keep the **surface** small (one well-chosen entry
+point, defaults that make the common call trivial), while the **capability** stays general —
+parameterize the variable, rather than special-casing this run's numbers.
+
 ## Often the capability already exists — surface or wire what is there
 
 Most `extend_existing` briefs are about **exposing capability the toolkit already contains**,

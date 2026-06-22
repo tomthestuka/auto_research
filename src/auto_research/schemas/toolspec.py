@@ -11,7 +11,7 @@ are lead-finalised, so they are optional here.
 """
 
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from pydantic import Field
@@ -51,12 +51,51 @@ class ProposedCheck(MessageModel):
     ``kind`` is a free-text hint (e.g. "known-input", "metamorphic", "differential",
     or a novel family), **not** a closed enum — novel tools may need check families
     nobody listed. The author/lead may revise or drop a check the worker proposed.
+
+    Every field is a closed scalar (no open map) so the enclosing ``ToolSpec`` — which
+    rides inside the lead's ``AuthoringDecision`` response schema — stays valid under any
+    provider's strict structured output (OpenAI rejects every open map, §7).
     """
 
     kind: NonEmptyStr
     description: NonEmptyStr
-    params: dict[str, Any] = Field(default_factory=dict)
     tolerance: float | None = None  # optional; lead-finalised
+
+
+class AnalystToolRequest(MessageModel):
+    """A worker → lead message raising a toolkit gap or defect (CLAUDE.md §9.3).
+
+    This is what an analyst **worker** emits on its ``AnalystReport.tool_request`` — only
+    what the worker is qualified to state: the science context, the behaviour it expects, a
+    *suggested* tool name, and the real ObsID that exposed the gap. The architectural calls —
+    ``disposition`` (extend vs. new package), the target ``<domain>_utils`` package, and the
+    verification ``proposed_checks`` — are **not** here: §9.3 makes them the lead's call, and
+    the worker is not the domain expert. The analyst **lead** reads these requests in
+    ``decide_authoring`` and finalises a single :class:`ToolSpec` (adding disposition,
+    target_domain, and checks) for the coder.
+
+    Keeping the worker's message free of those fields also keeps the worker's ``AnalystReport``
+    response schema free of any open map, so a GPT-backed worker can compose its report under
+    strict structured output (§7).
+    """
+
+    # Why the gap is raised. ``fix_existing`` reports an in-use defect (§9.3 L5); the lead
+    # triages wrongly-called vs genuinely-buggy. ``new_capability`` is the default.
+    request_kind: RequestKind = "new_capability"
+
+    science_context: NonEmptyStr  # what is being measured; why the toolkit can't do it
+    expected_behavior: NonEmptyStr  # prose signature + I/O the tool should provide
+    proposed_tool_name: NonEmptyStr  # a *suggested* tool/function name; the lead may rename
+
+    # For ``fix_existing``: the wrong/surprising behaviour the worker observed (the symptom).
+    observed_issue: str | None = None
+
+    # The core of verifiability: the real input(s) that exposed the gap — the ObsID the
+    # check/regression runs against (§9.1). At least one, even for a brand-new capability.
+    validation_data: list[ValidationDataset] = Field(min_length=1)
+
+    # Free-text catch-all — e.g. *suggested* check ideas the lead may adopt or drop.
+    notes: str | None = None
 
 
 class ToolSpec(MessageModel):

@@ -18,14 +18,19 @@ mcp = FastMCP("auto_research_builtin")
 
 @mcp.tool()
 def bash_exec(command: str, cwd: str | None = None, timeout_s: int = 60) -> dict:
-    """Run a shell command; returns stdout, stderr, and exit_code.
+    """Run a shell command for read-only inspection; returns stdout, stderr, and exit_code.
 
-    Inline Python is fine via `python -c "..."`. Separate multiple statements
-    with a semicolon — an escaped newline is a literal two-character sequence,
-    not a newline, and raises SyntaxError (good: `python -c "import os;
-    print(os.getcwd())"`). Do NOT create or modify files on disk (no writing
-    .py files, no edits) — persistent work goes through toolkit tools or inline
-    `python -c` calls. Probe the analysis env with
+    Scope this to inspection: list files, read a FITS header, check an array shape
+    or a path, and probe the analysis environment. Every real analysis step —
+    reduction, fitting, computation, figure production — and any result that
+    persists run through the toolkit tools; a capability the toolkit lacks is raised
+    as a `tool_request` so the coder authors a tested tool, rather than computed here.
+    Keep the filesystem as you found it (the toolkit tools own what lands on disk).
+
+    Inline Python via `python -c "..."` is for inspection too. Separate multiple
+    statements with a semicolon — an escaped newline is a literal two-character
+    sequence, not a newline, and raises SyntaxError (good: `python -c "import os;
+    print(os.getcwd())"`). Probe the analysis env with
     `python -c "import xspec, xspec_utils; print('OK')"` (the xspec module has
     no __version__ attribute)."""
     try:

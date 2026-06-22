@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
+    AnalystToolRequest,
     DocumentRef,
     FigureRef,
     GateReport,
@@ -227,20 +228,78 @@ def test_tool_spec_rejects_unknown_disposition():
 
 
 def test_analyst_report_carries_tool_request():
+    # The worker raises an AnalystToolRequest — only what it can state. The architectural
+    # fields (target_domain/disposition/checks) are the lead's call and are NOT here.
     report = AnalystReport(
         summary="Blocked: toolkit lacks retBB.",
         tool_request={
             "science_context": "Need retBB.",
             "expected_behavior": "add_retbb(indices).",
             "proposed_tool_name": "fit_retbb_hss",
-            "target_domain": "xspec_utils",
-            "disposition": "extend_existing",
             "validation_data": [{"mission": "IXPE", "obsid": "02008401"}],
         },
     )
 
-    assert isinstance(report.tool_request, ToolSpec)
+    assert isinstance(report.tool_request, AnalystToolRequest)
     assert AnalystReport(summary="No tool needed.").tool_request is None
+
+
+def test_analyst_tool_request_round_trips_and_requires_validation_data():
+    req = AnalystToolRequest(
+        request_kind="fix_existing",
+        science_context="add_retbb mis-tied the gain across data groups.",
+        expected_behavior="add_retbb(indices) should leave gain untied unless asked.",
+        proposed_tool_name="fit_retbb_hss",
+        observed_issue="On obsid 02008401 the gain came back tied; chi2/dof inflated.",
+        validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+        notes="maybe a metamorphic load-order check would catch this.",
+    )
+    restored = AnalystToolRequest.model_validate(req.model_dump(mode="json"))
+    assert restored == req
+    assert restored.request_kind == "fix_existing"
+
+    # default path stays new_capability; validation_data is required (>= 1).
+    nc = AnalystToolRequest(
+        science_context="x",
+        expected_behavior="y",
+        proposed_tool_name="z",
+        validation_data=[{"mission": "IXPE", "obsid": "02008401"}],
+    )
+    assert nc.request_kind == "new_capability"
+    assert nc.observed_issue is None
+    with pytest.raises(ValidationError):
+        AnalystToolRequest(
+            science_context="x",
+            expected_behavior="y",
+            proposed_tool_name="z",
+            validation_data=[],
+        )
+
+
+def test_analyst_report_strict_schema_has_no_open_maps():
+    """Regression for the live GPT-worker 400: the AnalystReport response schema (which
+    nests the worker's tool_request) must contain no open map — OpenAI strict rejects any
+    object whose additionalProperties is not exactly false."""
+    from auto_research.models.providers.openai import _strict_json_schema_format
+
+    schema = _strict_json_schema_format(AnalystReport)
+
+    offenders: list[str] = []
+
+    def _walk(node: object, path: str) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                ap = node.get("additionalProperties", None)
+                if ap is not False:  # truthy bool or a sub-schema => open map
+                    offenders.append(f"{path}: additionalProperties={ap!r}")
+            for key, value in node.items():
+                _walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                _walk(item, f"{path}[{i}]")
+
+    _walk(schema, "AnalystReport")
+    assert not offenders, "open maps in AnalystReport strict schema:\n" + "\n".join(offenders)
 
 
 def test_analyst_report_status_defaults_ok_and_accepts_terminal_states():
