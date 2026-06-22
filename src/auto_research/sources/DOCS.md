@@ -58,10 +58,16 @@ Each module is independent; no source imports another.
   source-paper artifact directory (`orchestration.yaml: papers_dir`, defaulting to
   `<runtime_dir>/papers`).
 - `download_pdf(url: str, destination: Path) -> Path | None` — downloads a PDF
-  unless the target already exists. Transient fetch failures (a momentary 404, a
+  unless a valid one already exists. Transient fetch failures (a momentary 404, a
   network blip, a timeout) are retried with linear backoff (`_DOWNLOAD_ATTEMPTS`
   tries); returns `None` when the download ultimately fails so callers degrade to
-  metadata-only ingest instead of raising.
+  metadata-only ingest instead of raising. The fetched bytes are checked with
+  `_is_pdf_bytes` (the `%PDF-` signature): a non-PDF response (e.g. an HTML
+  landing/paywall page from an ADS `esource` link) returns `None` rather than being
+  stored, and a previously stored file is reused only when it is itself a valid PDF
+  (a stale non-PDF is removed and re-fetched).
+- `_is_pdf_bytes(data: bytes) -> bool` — True when `b"%PDF-"` appears in the first
+  1 KB; the guard that keeps HTML-saved-as-`.pdf` out of the document-ingest path.
 - `download_and_ingest_result(storage: Storage, result: SearchResult, *,
   target_dir: str | Path | None = None) -> StoredPaper | None` — downloads a
   source PDF when `result.pdf_url` exists, upserts it into storage with source
@@ -80,3 +86,10 @@ Each module is independent; no source imports another.
   PDF-download 404 (seen transiently from arxiv) escaped `_ingest_one`'s
   `asyncio.gather`, crashed the `literature` graph node, and aborted the whole
   run before analysis began.
+- 2026-06-22 — `download_pdf` validates content, not just presence: it checks the
+  `%PDF-` signature (`_is_pdf_bytes`) and returns `None` for a non-PDF response,
+  and discards/re-fetches a stale non-PDF cache file. A live run had crashed because
+  an ADS `esource` link resolved to an HTML landing page saved as `.pdf`, which the
+  Anthropic document API rejected with `400 "The PDF specified was not valid."` —
+  this keeps such pages out of ingest at the source. Deterministic coverage in
+  `tests/test_sources.py` (rejects non-PDF, accepts PDF, discards stale cache).

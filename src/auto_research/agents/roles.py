@@ -721,35 +721,58 @@ class LibrarianIOAgent(AgentRole):
         consensus = IODebateToConverge(max_rounds=2, monitor=self.monitor)
         sem = asyncio.Semaphore(4)
 
+        async def _store_metadata_only(result: SearchResult) -> None:
+            """Ingest a paper from its search metadata alone (no document read)."""
+            paper_id = await self.storage.upsert_paper(paper_record_from_result(result))
+            existing = await self.storage.get_memory_for_paper(paper_id)
+            if existing is not None and existing.mem_abbrev:
+                return
+            await self.storage.replace_memory_for_paper(
+                MemoryRecord(
+                    paper_id=paper_id,
+                    summary=result.title,
+                    tags=result.keywords,
+                    mem_abbrev=result.abstract,
+                )
+            )
+
         async def _ingest_one(result: SearchResult) -> None:
             async with sem:
-                stored = await download_and_ingest_result(
-                    self.storage, result, target_dir=papers_dir()
-                )
-                if stored is not None and stored.local_path is not None:
-                    existing = await self.storage.get_memory_for_paper(stored.id)
-                    if existing is not None and existing.mem_abbrev:
-                        return
-                    doc = document_from_file(stored.local_path)
-                    memory = await consensus.run([self, self], self, doc)
-                    memory = MemoryRecord(
-                        paper_id=stored.id,
-                        summary=memory.summary,
-                        tags=memory.tags,
-                        mem_abbrev=memory.mem_abbrev,
+                try:
+                    stored = await download_and_ingest_result(
+                        self.storage, result, target_dir=papers_dir()
                     )
-                else:
-                    paper_id = await self.storage.upsert_paper(paper_record_from_result(result))
-                    existing = await self.storage.get_memory_for_paper(paper_id)
-                    if existing is not None and existing.mem_abbrev:
-                        return
-                    memory = MemoryRecord(
-                        paper_id=paper_id,
-                        summary=result.title,
-                        tags=result.keywords,
-                        mem_abbrev=result.abstract,
+                    if stored is not None and stored.local_path is not None:
+                        existing = await self.storage.get_memory_for_paper(stored.id)
+                        if existing is not None and existing.mem_abbrev:
+                            return
+                        doc = document_from_file(stored.local_path)
+                        memory = await consensus.run([self, self], self, doc)
+                        await self.storage.replace_memory_for_paper(
+                            MemoryRecord(
+                                paper_id=stored.id,
+                                summary=memory.summary,
+                                tags=memory.tags,
+                                mem_abbrev=memory.mem_abbrev,
+                            )
+                        )
+                    else:
+                        await _store_metadata_only(result)
+                except Exception as exc:  # noqa: BLE001
+                    # One paper's ingest failure (a document the model API rejects,
+                    # a provider fault, an oversized PDF) must not abort the whole
+                    # literature node. Degrade to metadata-only ingest and continue;
+                    # a failed batch member is never allowed to propagate.
+                    await self._record(
+                        "librarian_io.ingest_document.error",
+                        level=3,
+                        summary=f"Ingest fell back to metadata: {result.title[:80]}",
+                        data={"error": repr(exc)},
                     )
-                await self.storage.replace_memory_for_paper(memory)
+                    try:
+                        await _store_metadata_only(result)
+                    except Exception:  # noqa: BLE001
+                        pass  # give up on this one paper; never fail the batch
 
         await asyncio.gather(*(_ingest_one(r) for r in results))
 

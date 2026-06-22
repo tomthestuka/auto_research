@@ -128,3 +128,8 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `catalog.json`; `mission(name)` resolves by case-insensitive match, reconstructing casing like
   `NuSTAR`); downstream `.missions`/`.mission()` unchanged. Added the analyst sandbox conda env
   spec `environment-analyst.yml`. Deterministic tests in `tests/test_observations.py`.
+- 2026-06-22 — Package `__init__` now mutes two chatty, non-actionable Pydantic v2 warning
+  families emitted by the system's heavy `model_dump`/`model_dump_json` traffic — the v2
+  deprecation notices (`PydanticDeprecatedSince20`) and the serializer "Expected X but got Y"
+  `UserWarning`s (message-scoped) — narrowly, so all other warnings stay audible. (The filter is
+  wrapped so a pydantic-version change can't break import.)

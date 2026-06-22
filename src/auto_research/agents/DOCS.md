@@ -118,10 +118,15 @@ Role wrappers:
 - `LibrarianIOAgent.adjudicate_abstract(document, abstracts) -> MemoryRecord`
   — lead-role synthesis of the final memory record from worker abstractions.
 - `LibrarianIOAgent.ingest_results(results) -> None` — downloads, abstracts,
-  and stores each `SearchResult`. For PDF-bearing results: downloads via
-  `download_and_ingest_result()`, runs `IODebateToConverge` (2 worker passes +
-  lead), writes `mem_abbrev` to storage. For results without a PDF: stores
-  metadata only with `result.abstract` as `mem_abbrev` (no LLM call).
+  and stores each `SearchResult` concurrently (`asyncio.gather`, capped at 4). For
+  PDF-bearing results: downloads via `download_and_ingest_result()`, runs
+  `IODebateToConverge` (2 worker passes + lead), writes `mem_abbrev` to storage.
+  For results without a PDF: stores metadata only with `result.abstract` as
+  `mem_abbrev` (no LLM call). **Each paper's ingest is isolated**: any failure
+  (a document the model API rejects, a provider fault, an oversized PDF) is caught,
+  logged as `librarian_io.ingest_document.error`, and degraded to metadata-only
+  ingest — one bad paper can never propagate out of the batch and abort the
+  `literature` node (the shared `_store_metadata_only` helper is the fallback).
 - `LibrarianIOAgent.evaluate_search_results(request, results) -> ReviewVerdict`
   — Phase 1 stub returning `accepted=True`. See CLAUDE.md §12.
 - `AnalystWorkerAgent(*, sandbox=None, registry=None, memory_path=None, ...)`.
@@ -237,3 +242,12 @@ Role wrappers:
   harness tool gained manifest-quality tool-level + per-argument descriptions (notably
   `ask_human` `question`/`context`/`kind`), so the model reads each tool's contract from the
   tool, not the prompt.
+- 2026-06-22 — `LibrarianIOAgent.ingest_results` now **isolates each paper's ingest**: the
+  per-paper body is wrapped so any failure (a document the model API rejects, a provider fault,
+  an oversized PDF) is caught, logged as `librarian_io.ingest_document.error`, and degraded to
+  metadata-only ingest via the new shared `_store_metadata_only` helper — a single bad paper can
+  no longer propagate out of the `asyncio.gather` and abort the `literature` node. A live run had
+  crashed when an ADS `esource` link resolved to an HTML page saved as `.pdf` and the Anthropic
+  document API rejected it (`400 "The PDF specified was not valid."`); the download-side
+  `%PDF-` validation (see `sources/DOCS.md`) keeps such pages out, and this isolation is the
+  defense-in-depth so no future bad document can kill the whole run.

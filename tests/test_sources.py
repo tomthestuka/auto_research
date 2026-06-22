@@ -145,6 +145,56 @@ def test_download_and_ingest_result_uses_source_metadata(tmp_path, monkeypatch):
     assert paper.local_path.name == "arxiv_1234.5678.pdf"
 
 
+class _FakeResponse:
+    """Minimal context-manager stand-in for an ``urlopen`` response."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self) -> bytes:
+        return self._data
+
+
+def test_download_pdf_rejects_non_pdf_content(tmp_path, monkeypatch):
+    """An HTML landing/paywall page (e.g. from an ADS esource link) is not stored."""
+    from auto_research.sources import downloads
+
+    dest = tmp_path / "paper.pdf"
+    monkeypatch.setattr(
+        downloads, "urlopen", lambda *a, **k: _FakeResponse(b"<!DOCTYPE html><html>paywall</html>")
+    )
+    assert downloads.download_pdf("https://ads/esource", dest) is None
+    assert not dest.exists()
+
+
+def test_download_pdf_accepts_pdf_content(tmp_path, monkeypatch):
+    from auto_research.sources import downloads
+
+    dest = tmp_path / "paper.pdf"
+    monkeypatch.setattr(downloads, "urlopen", lambda *a, **k: _FakeResponse(b"%PDF-1.5\nreal pdf bytes"))
+    out = downloads.download_pdf("https://arxiv/pdf", dest)
+    assert out == dest
+    assert dest.read_bytes().startswith(b"%PDF-")
+
+
+def test_download_pdf_discards_stale_non_pdf_cache(tmp_path, monkeypatch):
+    """A previously stored non-PDF (HTML saved as .pdf) is discarded and re-fetched."""
+    from auto_research.sources import downloads
+
+    dest = tmp_path / "paper.pdf"
+    dest.write_bytes(b"<html>stale landing page</html>")  # poisoned cache from a prior run
+    monkeypatch.setattr(downloads, "urlopen", lambda *a, **k: _FakeResponse(b"%PDF-1.4 real"))
+    out = downloads.download_pdf("https://arxiv/pdf", dest)
+    assert out == dest
+    assert dest.read_bytes().startswith(b"%PDF-")
+
+
 def test_download_and_ingest_result_returns_none_on_failed_download(tmp_path, monkeypatch):
     from auto_research.sources import downloads
 
