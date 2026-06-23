@@ -17,11 +17,13 @@ from auto_research.report import (
     build_references,
     compile_latex,
     stage_figures,
-    validate_latex_refs,
+    stage_papers,
+    validate_latex_figures,
+    validate_report_links,
     write_report_jsonl,
     write_report_latex,
 )
-from auto_research.retrieval import RetrievalBackend, SqliteRetrievalBackend, text_search_paths
+from auto_research.retrieval import RetrievalBackend
 from auto_research.sandbox.registry import ToolkitRegistry
 from auto_research.sandbox.workspace import report_dir as _report_dir
 from auto_research.schemas import (
@@ -60,7 +62,6 @@ class ReviewerLike(Protocol):
         self,
         request: ResearchRequest,
         *,
-        literature: Sequence[Path] = (),
         report: AnalystReport | None = None,
     ) -> ReviewVerdict:
         """Return a review verdict for the supplied state."""
@@ -138,7 +139,6 @@ def build_graph(
     consensus_strategy = consensus or DebateToConverge(
         max_rounds=max_iterations, monitor=monitor, registry=_registry
     )
-    _retrieval = retrieval or SqliteRetrievalBackend()
     try:
         _obs_config: ObservationsConfig | None = load_observations_config()
     except Exception:
@@ -162,8 +162,6 @@ def build_graph(
         # fall back to the single-shot compose→search path when unavailable.
         if hasattr(io_agent, "gather_literature"):
             raw = await io_agent.gather_literature(state["request"], follow_up=follow_up)  # type: ignore[attr-defined]
-            local_query = state["request"].question
-            local_limit = 10
         else:
             search_request = await io_agent.compose_search_strategy(
                 state["request"], follow_up=follow_up
@@ -177,8 +175,6 @@ def build_graph(
                 data={"search_request": search_request, "follow_up": follow_up},
             )
             raw = await io_agent.search(search_request)
-            local_query = search_request.query
-            local_limit = search_request.max_results
         await _record(
             monitor,
             "librarian.search.results",
@@ -188,20 +184,9 @@ def build_graph(
             data={"results": raw},
         )
         await io_agent.ingest_results(raw)
-        paths = await text_search_paths(
-            local_query,
-            limit=local_limit,
-            backend=_retrieval,
-        )
-        await _record(
-            monitor,
-            "librarian.local_retrieval.results",
-            level=5,
-            summary=f"Local retrieval returned {len(paths)} literature paths",
-            data={"paths": paths},
-        )
+        # Retrieval-for-review is reviewer-driven now (the reviewer pulls papers via its
+        # text_search/open_paper tools); this node only ingests into the knowledge base.
         return {
-            "literature": paths,
             "lit_iterations": state.get("lit_iterations", 0) + 1,
         }
 
@@ -212,11 +197,9 @@ def build_graph(
             level=3,
             summary="Reviewer literature review started",
             actor="reviewer",
-            data={"literature": state.get("literature", [])},
         )
         verdict = await reviewer.review(
             state["request"],
-            literature=state.get("literature", []),
             report=None,
         )
         await _record(
@@ -279,18 +262,18 @@ def build_graph(
         )
         verdict = await reviewer.review(
             state["request"],
-            literature=state.get("literature", []),
             report=state.get("report"),
         )
+        cited = _resolve_cited_paths(verdict, reviewer)
         await _record(
             monitor,
             "reviewer.analysis_review.verdict",
             level=2,
             summary="Reviewer returned final/rework verdict",
             actor="reviewer",
-            data={"verdict": verdict},
+            data={"verdict": verdict, "cited_paths": [str(p) for p in cited]},
         )
-        return {"verdicts": [verdict]}
+        return {"verdicts": [verdict], "cited_paths": cited}
 
     def after_review_analysis(state: ResearchState) -> str:
         verdict = _latest_verdict(state)
@@ -338,10 +321,10 @@ def build_graph(
     async def compose_report_node(state: ResearchState) -> dict[str, Any]:
         verdict = state["verdict"]
         analyst_report = state.get("report")
-        literature = state.get("literature") or []
+        cited = state.get("cited_paths") or []
 
         rdir = _report_dir(_run_id)
-        references = await build_references(_storage, literature)
+        references = await build_references(_storage, cited)
 
         result: dict[str, Any] = {}
 
@@ -363,17 +346,20 @@ def build_graph(
 
         if "tex" in _report_formats:
             staged = stage_figures(analyst_report.figures if analyst_report else [], rdir)
+            staged_papers = stage_papers(cited, rdir)
             feedback: list[str] | None = None
             latex_path: Path | None = None
             pdf_path: Path | None = None
 
             for attempt in range(max(1, report_retry_cap)):
                 latex = await reviewer.compose_latex_report(  # type: ignore[attr-defined]
-                    state["request"], analyst_report, staged, references, verdict,
+                    state["request"], analyst_report, staged, staged_papers, verdict,
                     feedback=feedback,
                 )
                 latex_path = write_report_latex(latex, rdir / "report.tex")
-                errs = validate_latex_refs(latex, staged, references)
+                # A dead reference link is a hard reject, fed back like a compile error.
+                errs = validate_latex_figures(latex, staged)
+                errs += validate_report_links(latex, rdir, staged_papers)
                 ok, cerrs = compile_latex(rdir)
                 errs = errs + cerrs
                 await _record(
@@ -472,3 +458,18 @@ def _latest_verdict(state: ResearchState) -> ReviewVerdict | None:
     if verdicts:
         return verdicts[-1]
     return state.get("verdict")
+
+
+def _resolve_cited_paths(verdict: ReviewVerdict, reviewer: Any) -> list[Path]:
+    """Resolve a verdict's ``cited_paths`` to ``Path``s, keeping only papers the reviewer
+    actually opened this run (so a citation can't name a paper it never read).
+
+    When the reviewer carries no knowledge-base tool provider (e.g. a test double with no
+    ``opened_paths``), the citations are taken as-is — there is nothing to enforce against.
+    """
+    opened_attr = getattr(getattr(reviewer, "tools", None), "opened_paths", None)
+    cited = [Path(p) for p in getattr(verdict, "cited_paths", [])]
+    if opened_attr is None:
+        return cited
+    opened = {Path(p).resolve() for p in opened_attr}
+    return [p for p in cited if p.resolve() in opened]

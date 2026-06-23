@@ -29,10 +29,10 @@ CREATE TABLE IF NOT EXISTS papers (
     abstract TEXT,
     keywords_json TEXT NOT NULL DEFAULT '[]',
     local_path TEXT,
-    sha256 TEXT,
+    sha256 TEXT NOT NULL,
     inserted_at TEXT NOT NULL,
     embedding BLOB,
-    UNIQUE(source, source_id)
+    UNIQUE(sha256)
 );
 
 CREATE TABLE IF NOT EXISTS memory (
@@ -166,27 +166,6 @@ def paper_from_search_result(result, path: str | Path) -> PaperRecord:
     )
 
 
-def paper_record_from_result(result) -> PaperRecord:
-    """Create a metadata-only paper record from a search result (no local file)."""
-
-    source_id = (
-        result.identifiers.get("arxiv_id")
-        or result.identifiers.get("bibcode")
-        or result.identifiers.get("doi")
-        or (str(result.url) if result.url else None)
-        or result.title[:200]
-    )
-    return PaperRecord(
-        source=result.source,
-        source_id=source_id,
-        title=result.title,
-        authors=result.authors,
-        year=result.published.year if result.published else None,
-        abstract=result.abstract,
-        keywords=result.keywords,
-    )
-
-
 def safe_filename(name: str, *, suffix: str = ".pdf") -> str:
     """Return a filesystem-safe filename."""
 
@@ -231,14 +210,13 @@ class Storage:
                     keywords_json, local_path, sha256, inserted_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source, source_id) DO UPDATE SET
+                ON CONFLICT(sha256) DO UPDATE SET
                     title = excluded.title,
                     authors_json = excluded.authors_json,
                     year = excluded.year,
                     abstract = excluded.abstract,
                     keywords_json = excluded.keywords_json,
-                    local_path = excluded.local_path,
-                    sha256 = excluded.sha256
+                    local_path = excluded.local_path
                 """,
                 (
                     paper.source,
@@ -254,8 +232,8 @@ class Storage:
                 ),
             )
             row = conn.execute(
-                "SELECT id FROM papers WHERE source = ? AND source_id = ?",
-                (paper.source, paper.source_id),
+                "SELECT id FROM papers WHERE sha256 = ?",
+                (paper.sha256,),
             ).fetchone()
         return int(row[0])
 

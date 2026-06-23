@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 from auto_research.schemas.figures import FigureRef
-from auto_research.schemas.report import Reference, ResearchReport
+from auto_research.schemas.report import ResearchReport
 
 
 def write_report_jsonl(report: ResearchReport, path: Path) -> Path:
@@ -25,26 +25,55 @@ def write_report_latex(latex: str, path: Path) -> Path:
     return path
 
 
-def validate_latex_refs(
+def validate_latex_figures(
     latex: str,
     staged_figures: list[tuple[FigureRef, str]],
-    references: list[Reference],
 ) -> list[str]:
-    """Return warnings for unresolved \\includegraphics paths and \\cite keys."""
+    """Return errors for `\\includegraphics` paths that were not staged."""
     errors: list[str] = []
     staged_paths = {relpath for _, relpath in staged_figures}
-    ref_keys = {r.key for r in references}
+    relpaths = ", ".join(sorted(staged_paths)) or "(none)"
 
     for m in re.finditer(r"\\includegraphics(?:\[.*?\])?\{([^}]+)\}", latex):
         p = m.group(1).strip()
         if p not in staged_paths:
-            errors.append(f"\\includegraphics path not staged: {p!r}")
+            errors.append(f"\\includegraphics path not staged: {p!r}. Use one of: {relpaths}")
 
-    for m in re.finditer(r"\\cite\{([^}]+)\}", latex):
-        for key in m.group(1).split(","):
-            key = key.strip()
-            if key and key not in ref_keys:
-                errors.append(f"\\cite key not in references: {key!r}")
+    return errors
+
+
+def validate_report_links(
+    latex: str,
+    report_dir: Path,
+    staged_papers: list[tuple[Path, str]],
+) -> list[str]:
+    """Hard reference-link gate: every `\\href` to a staged paper must resolve to a PDF.
+
+    Parses `\\href{<target>}{...}` from the composed LaTeX and, for each target that points
+    into ``papers/`` (the staged-paper area), resolves ``report_dir/target`` (following the
+    symlink) and asserts it exists and is a real PDF. A miss is a hard reject — the message
+    names the offending target and lists the valid staged relpaths so the reviewer can fix it.
+    """
+    errors: list[str] = []
+    valid = ", ".join(sorted(relpath for _, relpath in staged_papers)) or "(none)"
+
+    for m in re.finditer(r"\\href\{([^}]+)\}", latex):
+        target = m.group(1).strip()
+        # Only gate links into the staged-paper area; leave other hyperlinks alone.
+        if not (target.startswith("papers/") or target.endswith(".pdf")):
+            continue
+        resolved = (report_dir / target).resolve()
+        ok = resolved.is_file()
+        if ok:
+            try:
+                ok = b"%PDF-" in resolved.read_bytes()[:1024]
+            except OSError:
+                ok = False
+        if not ok:
+            errors.append(
+                f"reference link does not resolve to a PDF on disk: {target!r}. "
+                f"Use one of these exact staged paper paths: {valid}"
+            )
 
     return errors
 

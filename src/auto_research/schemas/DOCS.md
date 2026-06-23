@@ -124,8 +124,10 @@ carried by **reference** (`FigureRef`), never embedded
   references. `tool_request` (Phase 2) is set when the worker raises a toolkit gap/defect.
 - `ReviewVerdict(accepted: bool, rationale: str,
   needs_more_literature: bool = False, needs_analysis_rework: bool = False,
-  follow_up: str | None = None)` — reviewer decision and optional feedback
-  request.
+  follow_up: str | None = None, cited_paths: list[str] = [])` — reviewer decision
+  and optional feedback request. `cited_paths` lists the local PDFs the reviewer
+  opened (via `open_paper`) and actually used; they become the report's References
+  (intersected with the paths actually opened, then staged + linked).
 - `ToolKind` — string tool request kind. Core categories include `"bash"`,
   `"python"`, `"research_toolkit"`, `"observation_db"`, and
   `"source_archive"`; registered tool names such as
@@ -230,3 +232,7 @@ carried by **reference** (`FigureRef`), never embedded
   `target_domain`/`disposition`/`proposed_checks`), aligning the schema with §9.3's ownership.
   `tests/test_schemas.py` gained an `AnalystToolRequest` round-trip and a regression test that
   walks `AnalystReport`'s strict schema asserting no open maps.
+- 2026-06-22 — `ReviewVerdict` gained `cited_paths: list[str]` (review.py): the local PDFs the
+  reviewer opened via `open_paper` and actually used as evidence. Kept as `list[str]` (not
+  `list[Path]`) for OpenAI-strict safety; resolved to `Path` and intersected with the paths
+  actually opened at the runtime boundary, then staged + hyperlinked as the report's References.

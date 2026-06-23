@@ -204,11 +204,11 @@ Current role/tool surfaces:
 | Role | Tool surface | What "one task" means |
 |---|---|---|
 | Librarian I/O | `SourceToolProvider`: arXiv, ADS, Tavily web, and local text search. | Real source/document input can produce structured search results or memory abstractions. |
-| Local retrieval | Pure-Python `text_search()` over SQLite; `vector_search()` remains a stub. | Returns local paper paths from the DB; no runtime LLM role. |
+| Local retrieval | Pure-Python `text_search()`/`vector_search()` (stub) over SQLite, reached through the **reviewer's** `text_search` + `open_paper` tools — not a graph node. | Returns local paper paths and attaches chosen PDFs; no standalone LLM role. |
 | Analyst worker | `SandboxToolProvider`: `research_toolkit` manifest tools + MCP tools in a persistent sandbox, plus the read-only `data_catalog` tool. | `analyze()` chains load→fit→run→plot or other tools, self-corrects in-loop, and reports grounded results. |
-| Analyst lead | `ReadOnlyToolProvider`: run artifacts, figures, memory, papers, full `research_toolkit` source, the `data_catalog` tool, optional web search. | Adjudicates debate, triages `ToolSpec`, decides authoring (`decide_authoring`), and answers author clarifications. |
+| Analyst lead | `ReadOnlyToolProvider`: run artifacts, figures, memory, papers dir, full `research_toolkit` source, the `data_catalog` tool, optional web search (`include_text_search=False` — knowledge-base search is the reviewer's). | Adjudicates debate, triages `ToolSpec`, decides authoring (`decide_authoring`), and answers author clarifications. |
 | Analyst co-lead | `ReadOnlyToolProvider`: the authored toolkit worktree + optional web search (`include_text_search=False`). | Provider-decorrelated **code review** of one authored tool — brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs → `ToolReviewVerdict`. |
-| Reviewer | `ReadOnlyToolProvider`: run artifacts, figures, papers, and memory. | Dispatches/reviews work, requests capped rework, and composes final report handles. |
+| Reviewer | `ReadOnlyToolProvider`: run artifacts, figures, memory, plus the knowledge-base tools `text_search` (find papers) + `open_paper` (read a chosen PDF). | Pulls and reads literature itself, dispatches/reviews work, requests capped rework, and composes final report handles (References = local-PDF hyperlinks it used). |
 
 ---
 
@@ -317,8 +317,9 @@ optional raise-to-human connectors (only when selected) — Twilio WhatsApp
 the SQLite DB, figures/artifacts, per-worker sandbox scratch, run logs, cost ledger, and
 reviewer reports. On an accepted verdict,
 `runs/{run_id}/reviewer/report/` holds `report.jsonl` (machine handle for upstream
-planning teams), `report.tex` + symlinked `figures/` (human LaTeX project), and
-`report.pdf` (compiled by `pdflatex` when available).
+planning teams), `report.tex` + symlinked `figures/` and `papers/` (human LaTeX project;
+the References section is `\href` links into `papers/`, gate-checked to resolve to real
+PDFs), and `report.pdf` (compiled by `pdflatex` when available).
 
 ---
 

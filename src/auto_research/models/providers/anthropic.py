@@ -62,9 +62,17 @@ class AnthropicProvider:
         max_tokens = params.pop("max_tokens", 1024)
         system, provider_messages = _to_anthropic_messages(messages)
 
-        attachment_content = []
-        for document in documents:
-            attachment_content.append(
+        # Documents (e.g. PDFs the reviewer opens) go at the FRONT — a stable position
+        # right after the system prompt — and grow append-only across a ReAct loop, so
+        # each document is cache-written once and cache-read (~0.1x) on every later turn.
+        # Re-sending them at the END (after a conversation that grows in the middle) breaks
+        # the cache prefix right after `system` and re-bills every document each turn.
+        # The cache breakpoint on the last document block, plus the stable [system + docs]
+        # prefix, is what lets Anthropic serve the prior documents from cache as new ones
+        # accumulate. (Anthropic prompt-caching: prefix match, ≤4 breakpoints, 20-block
+        # lookback — the front position also keeps docs inside that lookback window.)
+        if documents:
+            document_blocks: list[dict[str, Any]] = [
                 {
                     "type": "document",
                     "source": {
@@ -73,11 +81,23 @@ class AnthropicProvider:
                         "data": base64.b64encode(document.path.read_bytes()).decode("ascii"),
                     },
                 }
+                for document in documents
+            ]
+            if cache_prefix:
+                document_blocks[-1]["cache_control"] = {"type": "ephemeral"}
+            provider_messages.insert(0, {"role": "user", "content": document_blocks})
+
+        # Figure references are lightweight text; leave them at the end of the conversation.
+        if images:
+            provider_messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"Figure reference: {figure.path}"}
+                        for figure in images
+                    ],
+                }
             )
-        for figure in images:
-            attachment_content.append({"type": "text", "text": f"Figure reference: {figure.path}"})
-        if attachment_content:
-            provider_messages.append({"role": "user", "content": attachment_content})
 
         system_param = _system_param(system, cache_prefix)
         if cache_prefix:

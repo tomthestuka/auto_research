@@ -32,7 +32,9 @@ class MemoryHit(BaseModel):
 class RetrievalBackend(Protocol):
     """Local retrieval interface."""
 
-    async def text_search(self, query: str, *, limit: int = 10) -> list[MemoryHit]:
+    async def text_search(
+        self, query: str, *, limit: int = 10, require_local_path: bool = False
+    ) -> list[MemoryHit]:
         """Search local text metadata."""
 
     async def vector_search(self, query: str, *, limit: int = 10) -> list[MemoryHit]:
@@ -45,12 +47,25 @@ class SqliteRetrievalBackend:
     def __init__(self, storage: Storage | None = None):
         self.storage = storage or Storage(database_path())
 
-    async def text_search(self, query: str, *, limit: int = 10) -> list[MemoryHit]:
-        """Search papers and memory using simple normalized token matching."""
+    async def text_search(
+        self, query: str, *, limit: int = 10, require_local_path: bool = False
+    ) -> list[MemoryHit]:
+        """Search papers and memory using simple normalized token matching.
 
-        return self._text_search(query, limit)
+        One hit is emitted per paper, keyed by the paper id; its downloaded PDF
+        (``local_path``) and its memory abstraction(s) are attributes of that one
+        item, so a paper is never represented twice.  A memory row with no
+        ``paper_id`` (an orphan note) is its own standalone hit.  When
+        ``require_local_path`` is set, hits without a local PDF are dropped
+        *before* the ``limit`` is applied, so the result holds up to ``limit``
+        PDF-backed papers rather than letting path-less items consume the slots.
+        """
 
-    def _text_search(self, query: str, limit: int) -> list[MemoryHit]:
+        return self._text_search(query, limit, require_local_path)
+
+    def _text_search(
+        self, query: str, limit: int, require_local_path: bool = False
+    ) -> list[MemoryHit]:
         terms = _terms(query)
         if not terms:
             return []
@@ -59,8 +74,20 @@ class SqliteRetrievalBackend:
             paper_rows = conn.execute("SELECT * FROM papers").fetchall()
             memory_rows = conn.execute("SELECT * FROM memory").fetchall()
 
+        # Group each memory abstraction under its paper; memories without a
+        # paper are orphan notes indexed on their own.
+        mem_by_paper: dict[int, list[sqlite3.Row]] = {}
+        orphan_memory: list[sqlite3.Row] = []
+        for row in memory_rows:
+            paper_id = row["paper_id"]
+            if paper_id is None:
+                orphan_memory.append(row)
+            else:
+                mem_by_paper.setdefault(paper_id, []).append(row)
+
         hits: list[MemoryHit] = []
         for row in paper_rows:
+            mems = mem_by_paper.get(row["id"], [])
             haystack = " ".join(
                 str(part or "")
                 for part in (
@@ -69,6 +96,9 @@ class SqliteRetrievalBackend:
                     row["keywords_json"],
                     row["local_path"],
                     row["source_id"],
+                    *(mem["summary"] for mem in mems),
+                    *(mem["tags_json"] for mem in mems),
+                    *(mem["mem_abbrev"] for mem in mems),
                 )
             )
             score = _score(terms, haystack)
@@ -79,14 +109,14 @@ class SqliteRetrievalBackend:
                         id=row["id"],
                         score=score,
                         title=row["title"],
-                        snippet=row["abstract"],
+                        snippet=row["abstract"] or (mems[0]["summary"] if mems else None),
                         source=row["source"],
                         source_id=row["source_id"],
                         local_path=Path(row["local_path"]) if row["local_path"] else None,
                     )
                 )
 
-        for row in memory_rows:
+        for row in orphan_memory:
             haystack = " ".join(
                 str(part or "") for part in (row["summary"], row["tags_json"], row["mem_abbrev"])
             )
@@ -102,6 +132,8 @@ class SqliteRetrievalBackend:
                     )
                 )
 
+        if require_local_path:
+            hits = [hit for hit in hits if hit.local_path is not None]
         hits.sort(key=lambda hit: (-hit.score, hit.kind, hit.id))
         return hits[:limit]
 

@@ -23,15 +23,22 @@ cap, images)` drives a provider-agnostic loop: call the model with
 `tools.execute(name, args)`, append the assistant `tool_use` turn + the
 `tool_result` turn, and re-call so the model sees its own results in-context and
 chains dependent calls; stop when it emits no calls or `react_loop_cap`
-(`orchestration.yaml`, default 12) is hit. A terminal `_call_over_messages(...)`
+(`orchestration.yaml`, default 12) is hit. `_react` returns
+`(messages, figures, documents)`: documents a tool attaches (via `ToolOutcome.documents`,
+e.g. a PDF from `open_paper`) are accumulated, deduped by sha256, and **re-attached to every
+subsequent model call** so the model reads them multimodally mid-loop (`cache_prefix=True`
+keeps the stable prefix cached; empty list otherwise, so non-document roles never trip the
+`config.documents` guard). A terminal `_call_over_messages(...)`
 then produces the role's structured output grounded in the trajectory (both reuse
 `_structured_loop`, the shared off-schema-retry core). Tool surfaces live behind
 the `ToolProvider` protocol in `react.py`: `SandboxToolProvider` (analyst science
 tools in the `PersistentSandbox`), `ReadOnlyToolProvider` (reviewer/lead/co-lead — in-process
 `read_file`/`list_dir` confined to its `roots` (the permitted roots are named in each tool's
 description and echoed in the `path not permitted` error so the model self-corrects instead of
-guessing), an optional knowledge-base `text_search`
-(`include_text_search`, default on; the §9.3 co-lead omits it and points `roots` at the
+guessing), an optional **knowledge-base toolset** — `text_search` (returns candidate paper
+paths) **and `open_paper`** (attaches a chosen local PDF as a document, capped at
+`_OPEN_PAPER_CAP`=6 distinct papers, recording `opened_paths`) — both gated by
+`include_text_search` (default on; the §9.3 co-lead omits it and points `roots` at the
 toolkit worktree instead), plus an optional `web_search` tool when a `web_source` is supplied
 — the analyst lead uses it to consult authoritative docs while triaging tool requests, the
 co-lead to check conventions while reviewing, §9.3),
@@ -82,12 +89,12 @@ Prompt loading:
   the Phase-2 `coder` prompt used by `merge_flow`.
 
 Role wrappers:
-- `ReviewerAgent.review(request, *, literature=(), report=None) ->
-  ReviewVerdict`. `literature` is `Sequence[Path]` — local PDF paths loaded as
-  `DocumentRef` attachments. When a `ReadOnlyToolProvider` is attached (`tools`),
-  the reviewer first investigates run artifacts/figures/memory via a ReAct loop,
-  then issues the verdict grounded in that investigation plus the papers; with no
-  `tools` it makes a single structured call.
+- `ReviewerAgent.review(request, *, report=None) -> ReviewVerdict`. When a
+  `ReadOnlyToolProvider` is attached (`tools`), the reviewer investigates run
+  artifacts/figures/memory and **pulls literature itself** (`text_search` →
+  `open_paper`) via a ReAct loop; the opened PDFs arrive as `DocumentRef`
+  attachments (threaded through the loop) and are forwarded into the terminal
+  verdict call. With no `tools` it makes a single structured call (no attachments).
 - `LibrarianIOAgent(sources, storage, ...) -> LibrarianIOAgent`. Constructor
   now accepts a `storage: Storage | None` (defaults to `Storage()`). The IO
   agent satisfies both `IOAbstractionWorkerLike` and `IOAbstractionLeadLike`
@@ -121,12 +128,13 @@ Role wrappers:
   and stores each `SearchResult` concurrently (`asyncio.gather`, capped at 4). For
   PDF-bearing results: downloads via `download_and_ingest_result()`, runs
   `IODebateToConverge` (2 worker passes + lead), writes `mem_abbrev` to storage.
-  For results without a PDF: stores metadata only with `result.abstract` as
-  `mem_abbrev` (no LLM call). **Each paper's ingest is isolated**: any failure
-  (a document the model API rejects, a provider fault, an oversized PDF) is caught,
-  logged as `librarian_io.ingest_document.error`, and degraded to metadata-only
-  ingest — one bad paper can never propagate out of the batch and abort the
-  `literature` node (the shared `_store_metadata_only` helper is the fallback).
+  For results without a PDF: records an **orphan memory** note (`paper_id = NULL`,
+  `mem_abbrev = result.abstract`, no LLM call, no paper row) — a paper row requires a
+  downloaded PDF (its sha256 is the identity). **Each paper's ingest is isolated**: any
+  failure (a document the model API rejects, a provider fault, an oversized PDF) is caught,
+  logged as `librarian_io.ingest_document.error`, and degraded to the orphan-note path —
+  one bad paper can never propagate out of the batch and abort the `literature` node (the
+  shared `_store_metadata_only` helper is the fallback).
 - `LibrarianIOAgent.evaluate_search_results(request, results) -> ReviewVerdict`
   — Phase 1 stub returning `accepted=True`. See CLAUDE.md §12.
 - `AnalystWorkerAgent(*, sandbox=None, registry=None, memory_path=None, ...)`.
@@ -256,3 +264,13 @@ Role wrappers:
   ReAct role (worker/lead/reviewer/librarian) — so a run is diagnosable from the JSONL alone rather
   than only via per-worker `memory.md`/LangSmith. Heavy text lands in the JSONL only (the terminal
   renderer ignores these keys). Part of the fix for the diagnostic-logging gap (see `monitor/DOCS.md`).
+- 2026-06-22 — `ingest_results` no-PDF path now records an **orphan memory** (`paper_id = NULL`,
+  `mem_abbrev = abstract`) instead of a metadata-only paper row, matching the storage rule that a
+  paper row requires a downloaded PDF (sha256 identity, see `storage/DOCS.md`). `_store_metadata_only`
+  calls `insert_memory` directly; no `upsert_paper`.
+- 2026-06-22 — Reviewer-driven retrieval, part 1: `ToolOutcome` gained a `documents` field and
+  `_react` now returns `(messages, figures, documents)`, re-attaching accumulated tool documents to
+  every subsequent model call (multimodal mid-loop reading). `ReadOnlyToolProvider` adds an
+  `open_paper` tool (gated with `text_search`; validates path∈roots + `%PDF-` signature; records
+  `opened_paths`; capped at `_OPEN_PAPER_CAP`=6) so the reviewer reads a candidate before citing it.
+  Each tool self-documents (no prompt note). New `tests/test_react_tools.py`.

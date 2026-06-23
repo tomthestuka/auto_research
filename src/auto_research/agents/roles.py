@@ -44,7 +44,7 @@ from auto_research.schemas import (
 )
 from auto_research.sources import ArxivSource, NasaAdsSource, QuerySource, WebSource
 from auto_research.sources.downloads import download_and_ingest_result, papers_dir
-from auto_research.storage import MemoryRecord, Storage, paper_record_from_result
+from auto_research.storage import MemoryRecord, Storage
 
 
 class CallableModel(Protocol):
@@ -269,7 +269,7 @@ class AgentRole:
         cap: int,
         images: Sequence[FigureRef] = (),
         on_result=None,
-    ) -> tuple[list, list[FigureRef]]:
+    ) -> tuple[list, list[FigureRef], list[DocumentRef]]:
         """Run an inner ReAct loop: gather evidence by calling tools to completion.
 
         Each iteration calls the model with ``tools.tool_definitions()`` and a
@@ -279,18 +279,25 @@ class AgentRole:
         in-context and can chain dependent calls. The loop ends when the model
         emits no tool calls (it's done) or ``cap`` iterations are reached.
 
-        Returns ``(messages, figures)``: the full trajectory (seed + all turns) for
-        a terminal :meth:`_call_over_messages`, and the figures produced by tools.
+        Returns ``(messages, figures, documents)``: the full trajectory (seed + all
+        turns) for a terminal :meth:`_call_over_messages`, the figures produced by
+        tools, and the documents a tool attached (e.g. PDFs opened via ``open_paper``).
+        Accumulated documents are re-attached to every subsequent model call so the
+        model can read them multimodally mid-loop; ``cache_prefix=True`` keeps the
+        stable system+tools prefix cached so only the growing tail is re-sent.
         ``on_result(call, outcome)`` is an optional async hook (monitor/memory).
         """
         messages: list = list(seed_messages)
         figures: list[FigureRef] = []
+        documents: list[DocumentRef] = []
+        seen_docs: set[str] = set()
         for iteration in range(max(1, cap)):
             response = await self.model.call(
                 messages,
                 tools=tools.tool_definitions(),
                 tool_choice="auto",
                 images=images if iteration == 0 else (),
+                documents=documents,
                 cache_prefix=True,
             )
             self.last_response = response
@@ -311,6 +318,10 @@ class AgentRole:
                     )
                 )
                 figures.extend(outcome.figures)
+                for doc in outcome.documents:
+                    if doc.sha256 not in seen_docs:
+                        seen_docs.add(doc.sha256)
+                        documents.append(doc)
                 if on_result is not None:
                     await on_result(call, outcome)
                 await self._record(
@@ -349,7 +360,7 @@ class AgentRole:
                     ],
                 },
             )
-        return messages, figures
+        return messages, figures, documents
 
     async def _record(
         self,
@@ -383,37 +394,35 @@ class ReviewerAgent(AgentRole):
         self,
         request: ResearchRequest,
         *,
-        literature: Sequence[Path] = (),
         report: AnalystReport | None = None,
     ) -> ReviewVerdict:
         """Return a review verdict for the supplied research state.
 
-        ``literature`` is a list of local PDF paths returned by
-        ``text_search_paths()``. Each existing path is loaded as a
-        ``DocumentRef`` attachment so the model can read the full paper.
+        The reviewer pulls literature itself: it searches the local knowledge base
+        (``text_search``) and reads chosen papers (``open_paper``) inside its ReAct
+        loop, so the papers it opens arrive as ``DocumentRef`` attachments via the
+        loop and are forwarded into the terminal verdict call.
         """
 
         payload = {
             "request": request.model_dump(mode="json"),
-            "literature_paths": [str(p) for p in literature],
             "analysis_report": report.model_dump(mode="json") if report else None,
         }
-        docs = [document_from_file(p) for p in literature if p.exists()]
         images = report.figures if report else ()
 
         if self.tools is None:
             return await self._call(
-                payload, ReviewVerdict, images=images, documents=docs, action="review"
+                payload, ReviewVerdict, images=images, action="review"
             )
 
-        # Investigate run artifacts / the knowledge base via read-only tools (seeing
-        # the analysis figures from the first turn), then issue the verdict grounded
-        # in that investigation plus the source papers.
+        # Investigate run artifacts + the knowledge base via read-only tools (seeing
+        # the analysis figures from the first turn), opening the papers it needs, then
+        # issue the verdict grounded in that investigation and the opened papers.
         seed = [
             ModelMessage(role="system", content=self.prompt),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
-        messages, _ = await self._react(
+        messages, _, docs = await self._react(
             seed_messages=seed, tools=self.tools, action="review",
             cap=_react_loop_cap(), images=images,
         )
@@ -478,7 +487,7 @@ class ReviewerAgent(AgentRole):
         request: ResearchRequest,
         report: AnalystReport,
         staged_figures: "list[tuple]",
-        references: "list",
+        staged_papers: "list[tuple]",
         verdict: ReviewVerdict,
         *,
         feedback: list[str] | None = None,
@@ -486,9 +495,10 @@ class ReviewerAgent(AgentRole):
         """Compose a LaTeX research report (human handle).
 
         Returns the raw LaTeX string. ``staged_figures`` is a list of
-        (FigureRef, relpath) pairs; relpaths are relative to the report directory
-        and must be used verbatim in \\includegraphics{}.
-        ``feedback`` carries compile/ref errors from the prior attempt for
+        (FigureRef, relpath) pairs used verbatim in \\includegraphics{}.
+        ``staged_papers`` is a list of (path, relpath) pairs for the cited PDFs; the
+        References section is a list of \\href links to those relpaths (no BibTeX).
+        ``feedback`` carries compile/link errors from the prior attempt for
         self-correction.
         """
         from auto_research.schemas.report import LatexReport
@@ -497,9 +507,7 @@ class ReviewerAgent(AgentRole):
             {"relpath": relpath, "caption": figref.caption, "sha256": figref.sha256}
             for figref, relpath in staged_figures
         ]
-        ref_descriptions = [
-            r.model_dump(mode="json") for r in references
-        ]
+        paper_links = [relpath for _, relpath in staged_papers]
         payload = {
             "output_format": "tex",
             "output_format_instructions": (
@@ -508,16 +516,19 @@ class ReviewerAgent(AgentRole):
                 "(e.g. \\section{}, \\includegraphics{}). Do NOT add any JSON or backslash "
                 "escaping — the response encoding is handled for you, so a single backslash "
                 "is a single backslash. "
-                "Use only the exact figure relpaths and cite keys supplied below. "
-                "Use \\includegraphics{<relpath>} verbatim for each figure. "
-                "Define a self-contained \\begin{thebibliography} block; do not use an "
-                "external .bib file. Cite only the provided keys with \\cite{<key>}."
+                "Load hyperref (\\usepackage{hyperref}). Use \\includegraphics{<relpath>} "
+                "verbatim for each figure relpath supplied below. "
+                "Cite papers in prose in the body. The References section is a list of "
+                "hyperlinks to the local PDFs you used: for each supplied paper relpath emit "
+                "\\href{<relpath>}{<relpath>} using the relpath verbatim. Use ONLY the supplied "
+                "paper relpaths; add no \\cite, no \\begin{thebibliography}, and no invented "
+                "author/title text."
             ),
             "request": request.model_dump(mode="json"),
             "analysis_report": report.model_dump(mode="json"),
             "verdict_rationale": verdict.rationale,
             "figures": fig_descriptions,
-            "references": ref_descriptions,
+            "paper_links": paper_links,
         }
         if feedback:
             payload["feedback"] = (
@@ -729,14 +740,15 @@ class LibrarianIOAgent(AgentRole):
         sem = asyncio.Semaphore(4)
 
         async def _store_metadata_only(result: SearchResult) -> None:
-            """Ingest a paper from its search metadata alone (no document read)."""
-            paper_id = await self.storage.upsert_paper(paper_record_from_result(result))
-            existing = await self.storage.get_memory_for_paper(paper_id)
-            if existing is not None and existing.mem_abbrev:
-                return
-            await self.storage.replace_memory_for_paper(
+            """Record a no-PDF search result as an orphan memory note (never a paper row).
+
+            A paper row requires a downloaded PDF (its sha256 is the identity); a result
+            we could not fetch a PDF for is kept as a free-standing memory note (paper_id
+            None) so its title/abstract stay searchable without polluting the paper table.
+            """
+            await self.storage.insert_memory(
                 MemoryRecord(
-                    paper_id=paper_id,
+                    paper_id=None,
                     summary=result.title,
                     tags=result.keywords,
                     mem_abbrev=result.abstract,
@@ -887,7 +899,7 @@ class AnalystWorkerAgent(AgentRole):
             ModelMessage(role="system", content=self.prompt),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
-        messages, react_figures = await self._react(
+        messages, react_figures, _ = await self._react(
             seed_messages=seed,
             tools=provider,
             action="analyze",
@@ -950,7 +962,7 @@ class AnalystLeadAgent(AgentRole):
             ModelMessage(role="system", content=self.prompt),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
-        messages, _ = await self._react(
+        messages, _, _ = await self._react(
             seed_messages=seed, tools=self.tools, action="adjudicate",
             cap=_react_loop_cap(), images=figures,
         )
@@ -988,7 +1000,7 @@ class AnalystLeadAgent(AgentRole):
             ModelMessage(role="system", content=self.prompt),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
-        messages, _ = await self._react(
+        messages, _, _ = await self._react(
             seed_messages=seed, tools=self.tools, action="clarify_for_author",
             cap=_react_loop_cap(),
         )
@@ -1064,7 +1076,7 @@ class AnalystLeadAgent(AgentRole):
             ModelMessage(role="system", content=self.prompt),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
-        messages, _ = await self._react(
+        messages, _, _ = await self._react(
             seed_messages=seed, tools=self.tools, action="decide_authoring",
             cap=_react_loop_cap(),
         )
@@ -1126,7 +1138,7 @@ class AnalystColeadAgent(AgentRole):
             ModelMessage(role="system", content=self.prompt),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
-        messages, _ = await self._react(
+        messages, _, _ = await self._react(
             seed_messages=seed, tools=tools, action="review_tool", cap=_react_loop_cap(),
         )
         return await self._call_over_messages(messages, ToolReviewVerdict, action="review_tool")

@@ -186,19 +186,17 @@ def test_librarian_io_agent_compose_search_strategy():
 
 
 def test_librarian_io_agent_ingest_results_no_pdf(tmp_path):
-    """ingest_results() with no PDF: stores metadata record with mem_abbrev=abstract."""
+    """ingest_results() with no PDF: records an orphan memory note, never a paper row."""
 
     stored_memories: list[MemoryRecord] = []
 
     class FakeStorage:
-        async def upsert_paper(self, paper):
-            return 42
+        async def upsert_paper(self, paper):  # must NOT be called for the no-PDF path
+            raise AssertionError("no-PDF results must not create a paper row")
 
-        async def get_memory_for_paper(self, paper_id):
-            return None
-
-        async def replace_memory_for_paper(self, memory: MemoryRecord):
+        async def insert_memory(self, memory: MemoryRecord):
             stored_memories.append(memory)
+            return len(stored_memories)
 
     fake = FakeModel({})  # LLM should not be called for no-PDF path
     result = SearchResult(
@@ -214,7 +212,7 @@ def test_librarian_io_agent_ingest_results_no_pdf(tmp_path):
 
     assert len(stored_memories) == 1
     mem = stored_memories[0]
-    assert mem.paper_id == 42
+    assert mem.paper_id is None  # orphan note — no paper row
     assert mem.mem_abbrev == "We measure hard X-ray polarization of Cyg X-1."
     assert "X-ray" in mem.tags
     assert fake.messages is None  # no LLM call made for no-PDF path

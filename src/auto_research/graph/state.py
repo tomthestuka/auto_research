@@ -18,7 +18,9 @@ class ResearchState(TypedDict, total=False):
     """State carried through the orchestration graph."""
 
     request: ResearchRequest
-    literature: list[Path]
+    # PDFs the reviewer opened and cited during the final analysis review (∩ actually
+    # opened). The report's References link to exactly these files.
+    cited_paths: list[Path]
     report: AnalystReport | None
     verdict: ReviewVerdict | None
     verdicts: Annotated[list[ReviewVerdict], operator.add]

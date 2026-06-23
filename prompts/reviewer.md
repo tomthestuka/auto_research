@@ -35,8 +35,8 @@ When the caller requests a report (indicated by `output_format` in the payload),
 
 **LaTeX / human handle** (`output_format: tex`): Return a JSON object `{"latex": "..."}` containing a complete, compilable LaTeX document. Rules:
 - In JSON strings every backslash is `\\` — write LaTeX `\section{}` as `\\section{}` in the JSON value.
+- Load `\\usepackage{hyperref}` in the preamble.
 - Use `\\includegraphics{<relpath>}` with the **exact** relative paths supplied in `figures[*].relpath`.
-- Use `\\cite{<key>}` with the **exact** cite keys supplied in `references[*].key`.
-- Define a self-contained `\\begin{thebibliography}` block at the end that needs no external `.bib` file.
+- Cite papers in prose in the body. The References section is a list of hyperlinks to the local PDFs you used: for each supplied `paper_links` relpath, emit `\\href{<relpath>}{<relpath>}` using the relpath **verbatim**. Use only the supplied relpaths; add no `\\cite`, no `\\begin{thebibliography}`, and no invented author/title text.
 - When `feedback` errors are provided, fix exactly those errors in the revised output.
-- Structure: preamble → `\\begin{document}` → title/abstract → sections → bibliography → `\\end{document}`.
+- Structure: preamble → `\\begin{document}` → title/abstract → sections → references (the `\\href` list) → `\\end{document}`.

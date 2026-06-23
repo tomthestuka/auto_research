@@ -173,14 +173,14 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path, mon
             pass
 
     class Retrieval:
-        async def text_search(self, query, *, limit=10):
+        async def text_search(self, query, *, limit=10, require_local_path=False):
             return []
 
         async def vector_search(self, query, *, limit=10):
             raise NotImplementedError
 
     class Reviewer:
-        async def review(self, request, *, literature=(), report=None):
+        async def review(self, request, *, report=None):
             return ReviewVerdict(
                 accepted=report is not None,
                 rationale="analysis done" if report is not None else "literature ok",

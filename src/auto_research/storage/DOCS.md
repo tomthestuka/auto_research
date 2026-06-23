@@ -30,18 +30,24 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   - `memory(id, paper_id, summary, tags_json, mem_abbrev, created_at, embedding)`.
     `mem_abbrev` is the IO-team consensus-produced memory abbreviation written by
     `LibrarianIOAgent.ingest_results()`. For papers with a PDF, it is a rich
-    summary produced by `IODebateToConverge`; for papers without a PDF, it is
-    the original `SearchResult.abstract`. Added via additive migration in
-    `Storage._initialize()`.
+    summary produced by `IODebateToConverge`; for a no-PDF search result, the
+    result is recorded as an **orphan memory** (`paper_id = NULL`, no paper row)
+    whose `mem_abbrev` is the original `SearchResult.abstract`. Added via additive
+    migration in `Storage._initialize()`.
   - `query_log(id, role, query, source, n_results, latency_ms, created_at)`.
   - `embeddings(id, owner_table, owner_id, embedding, created_at)` reserved for
     Phase 2.
-- `papers` has a unique `(source, source_id)` constraint. Upserts update
-  metadata but preserve the original row id.
+- **A paper is identified by its PDF content hash:** `papers.sha256` is `NOT NULL`
+  with a `UNIQUE(sha256)` constraint, so a paper row always has a downloaded PDF and
+  the same PDF reached via two sources (e.g. arXiv + ADS) collapses to one row.
+  Upserts dedup `ON CONFLICT(sha256)`: metadata + `local_path` are refreshed but the
+  first ingester's `source`/`source_id` are preserved, and the original row id is kept.
 - Local PDFs are ingested as `source="local_file"`, `source_id=<sha256>`, title
   from filename stem, `local_path`, and `sha256`.
 - Downloaded source PDFs are ingested with source metadata when available. For
   example, arXiv downloads use `source="arxiv"` and `source_id=<arxiv_id>`.
+- A search result with **no downloadable PDF never becomes a paper row** — it is
+  kept only as an orphan `memory` note (see `LibrarianIOAgent.ingest_results`).
 - `librarian_io_enrich_stub()` is the documented handoff point for the librarian
   I/O team to read downloaded PDFs, extract abstractions/keywords, and write
   `memory` rows. It intentionally does no work until agent roles land.
@@ -76,10 +82,8 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   metadata for a local PDF or other file.
 - `paper_from_search_result(result: SearchResult, path: str | Path) ->
   PaperRecord` — builds storage metadata from a source search result plus a
-  downloaded PDF path.
-- `paper_record_from_result(result: SearchResult) -> PaperRecord` — builds
-  a metadata-only record (no local file) from a search result. Dedup key is
-  the first of `arxiv_id / bibcode / doi / str(url) / title[:200]`.
+  downloaded PDF path; sets `sha256` from the file. (A no-PDF result has no
+  paper factory — it becomes an orphan memory, not a paper.)
 - `Storage(path: str | Path | None = None)` — SQLite wrapper. Methods:
   `initialize()`, `upsert_paper(paper)`, `get_paper(paper_id)`,
   `list_papers()`, `insert_memory(memory)`,
@@ -101,3 +105,11 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   no-PDF metadata records, memory replacement, local PDF ingestion, deterministic tests, and
   config-driven runtime DB path.
 - 2026-06-12 — Compacted changelog and refreshed deferred vector-search references.
+- 2026-06-22 — **Paper identity is now the PDF content hash.** `papers.sha256` became
+  `NOT NULL` with `UNIQUE(sha256)` (was `UNIQUE(source, source_id)`); `_upsert_paper`
+  dedups `ON CONFLICT(sha256)`, refreshing metadata/`local_path` but preserving the first
+  ingester's `source`/`source_id`. The same PDF reached via two sources now collapses to
+  one row. A no-PDF search result no longer becomes a paper row — `paper_record_from_result`
+  was removed and `LibrarianIOAgent.ingest_results` records such results as orphan `memory`
+  notes (`paper_id = NULL`). Requires a fresh DB (`CREATE TABLE IF NOT EXISTS` does not alter
+  an existing table).

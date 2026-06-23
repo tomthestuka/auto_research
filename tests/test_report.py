@@ -14,7 +14,9 @@ from auto_research.report import (
     build_references,
     compile_latex,
     stage_figures,
-    validate_latex_refs,
+    stage_papers,
+    validate_latex_figures,
+    validate_report_links,
     write_report_jsonl,
     write_report_latex,
 )
@@ -80,6 +82,7 @@ def test_build_references_maps_stored_papers(tmp_path):
         authors=["Niedźwiecki, A.", "Smith, B."],
         year=2026,
         local_path=pdf,
+        sha256="a" * 64,
     )
     asyncio.run(storage.initialize())
     asyncio.run(storage.upsert_paper(paper))
@@ -120,7 +123,7 @@ def test_build_references_deduplicates_keys(tmp_path):
     for i, p in enumerate(pdfs):
         asyncio.run(storage.upsert_paper(PaperRecord(
             source="arxiv", source_id=f"x{i}", title=f"Title {i}",
-            authors=["Smith, J."], year=2026, local_path=p,
+            authors=["Smith, J."], year=2026, local_path=p, sha256=str(i) * 64,
         )))
 
     refs = asyncio.run(build_references(storage, pdfs))
@@ -159,6 +162,34 @@ def test_stage_figures_replaces_stale_symlink(tmp_path):
     assert len(staged) == 1
 
 
+def test_stage_papers_symlinks_cited_pdfs(tmp_path):
+    pdf = tmp_path / "src" / "Cyg X-1.pdf"
+    pdf.parent.mkdir()
+    pdf.write_bytes(b"%PDF-1.5\nbody")
+    rdir = tmp_path / "report"
+
+    staged = stage_papers([pdf], rdir)
+
+    assert len(staged) == 1
+    src, relpath = staged[0]
+    assert relpath == f"papers/{pdf.name}"
+    link = rdir / relpath
+    assert link.is_symlink()
+    assert link.resolve() == pdf.resolve()
+
+
+def test_stage_papers_skips_missing_and_replaces_stale(tmp_path):
+    """Nonexistent paths are skipped; a repeat call replaces the stale link."""
+    pdf = tmp_path / "p.pdf"
+    pdf.write_bytes(b"%PDF-1.5\n")
+    rdir = tmp_path / "report"
+
+    assert stage_papers([tmp_path / "gone.pdf"], rdir) == []  # missing source skipped
+    stage_papers([pdf], rdir)
+    staged = stage_papers([pdf], rdir)  # call again — must not raise
+    assert len(staged) == 1
+
+
 # ---------------------------------------------------------------------------
 # write_report_jsonl
 # ---------------------------------------------------------------------------
@@ -186,41 +217,59 @@ def test_write_report_jsonl_figures_by_reference(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# validate_latex_refs
+# validate_latex_figures (figure paths only)
 # ---------------------------------------------------------------------------
 
-_GOOD_TEX = r"""
+_FIG_GOOD_TEX = r"""
 \documentclass{article}
 \begin{document}
 \includegraphics{figures/fit.png}
-\cite{smith2026}
 \end{document}
 """
 
-_BAD_TEX = r"""
+_FIG_BAD_TEX = r"""
 \documentclass{article}
 \begin{document}
 \includegraphics{figures/missing.png}
-\cite{badkey}
 \end{document}
 """
 
 
-def test_validate_latex_refs_passes_clean(tmp_path):
+def test_validate_latex_figures_passes_clean(tmp_path):
     fig = _make_fig(tmp_path, "fit")
-    ref = Reference(key="smith2026", title="A paper", authors=["Smith"], year=2026)
     staged = [(fig, "figures/fit.png")]
-    errs = validate_latex_refs(_GOOD_TEX, staged, [ref])
-    assert errs == []
+    assert validate_latex_figures(_FIG_GOOD_TEX, staged) == []
 
 
-def test_validate_latex_refs_flags_missing(tmp_path):
+def test_validate_latex_figures_flags_missing(tmp_path):
     fig = _make_fig(tmp_path, "fit")
-    ref = Reference(key="smith2026", title="A paper", authors=["Smith"], year=2026)
     staged = [(fig, "figures/fit.png")]
-    errs = validate_latex_refs(_BAD_TEX, staged, [ref])
+    errs = validate_latex_figures(_FIG_BAD_TEX, staged)
     assert any("missing.png" in e for e in errs)
-    assert any("badkey" in e for e in errs)
+
+
+# ---------------------------------------------------------------------------
+# validate_report_links (hard reference-link resolve gate)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_report_links_passes(tmp_path):
+    rdir = tmp_path / "report"
+    rdir.mkdir()
+    pdf = tmp_path / "cited.pdf"
+    pdf.write_bytes(b"%PDF-1.5\nbody")
+    staged = stage_papers([pdf], rdir)
+    relpath = staged[0][1]
+    tex = r"\href{" + relpath + r"}{" + relpath + r"}"
+    assert validate_report_links(tex, rdir, staged) == []
+
+
+def test_validate_report_links_flags_dead_link(tmp_path):
+    rdir = tmp_path / "report"
+    (rdir / "papers").mkdir(parents=True)
+    tex = r"\href{papers/missing.pdf}{papers/missing.pdf}"
+    errs = validate_report_links(tex, rdir, [])
+    assert any("missing.pdf" in e for e in errs)
 
 
 # ---------------------------------------------------------------------------
@@ -295,12 +344,13 @@ class FakeReviewerForReport:
     async def compose_machine_report(self, request, report, references, verdict, run_id):
         return _make_report(run_id=run_id)
 
-    async def compose_latex_report(self, request, report, staged, references, verdict, *, feedback=None):
+    async def compose_latex_report(self, request, report, staged, staged_papers, verdict, *, feedback=None):
         self._attempt += 1
         if self._attempt < self._latex_attempts:
-            # First attempts return broken LaTeX to trigger feedback
-            return r"\documentclass{article}\begin{document}\cite{badkey}\end{document}"
-        return _MINIMAL_TEX
+            # First attempts link a non-existent PDF to trip the resolve gate.
+            return r"\documentclass{article}\begin{document}\href{papers/missing.pdf}{papers/missing.pdf}\end{document}"
+        links = "".join(r"\href{" + rp + "}{" + rp + "}" for _, rp in staged_papers)
+        return r"\documentclass{article}\begin{document}Hello world." + links + r"\end{document}"
 
 
 def test_report_jsonl_only(tmp_path):
@@ -347,25 +397,26 @@ def test_report_formats_normalization():
 
 
 def test_error_feedback_loop(tmp_path):
-    """Reviewer that returns broken LaTeX on attempt 1 is retried."""
+    """A dead reference link on attempt 1 is fed back and cleared on retry."""
     reviewer = FakeReviewerForReport(latex_attempts=2)
-    storage = Storage(tmp_path / "db.sqlite")
-    asyncio.run(storage.initialize())
-    refs = asyncio.run(build_references(storage, []))
     analyst = FakeAnalystReport()
     verdict = FakeVerdict()
     rdir = tmp_path / "report"
     rdir.mkdir()
+    pdf = tmp_path / "cited.pdf"
+    pdf.write_bytes(b"%PDF-1.5\nbody")
 
     async def _run():
         staged = stage_figures(analyst.figures, rdir)
+        staged_papers = stage_papers([pdf], rdir)
         feedback = None
-        for attempt in range(2):
+        for _ in range(2):
             latex = await reviewer.compose_latex_report(
-                None, analyst, staged, refs, verdict, feedback=feedback
+                None, analyst, staged, staged_papers, verdict, feedback=feedback
             )
             write_report_latex(latex, rdir / "report.tex")
-            errs = validate_latex_refs(latex, staged, refs)
+            errs = validate_latex_figures(latex, staged)
+            errs += validate_report_links(latex, rdir, staged_papers)
             if not errs:
                 return latex, errs
             feedback = errs
@@ -374,3 +425,4 @@ def test_error_feedback_loop(tmp_path):
     latex, errs = asyncio.run(_run())
     assert errs == [], f"Expected clean after retry, got: {errs}"
     assert "Hello world" in latex
+    assert "papers/cited.pdf" in latex

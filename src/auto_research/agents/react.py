@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from auto_research.observations import load_observations_config
-from auto_research.schemas import FigureRef, ToolResult
+from auto_research.schemas import DocumentRef, FigureRef, ToolResult, document_from_file
 
 
 # Figure-output arguments, by naming convention → the extension the toolkit expects.
@@ -29,18 +29,25 @@ from auto_research.schemas import FigureRef, ToolResult
 # Convention-keyed (not tool-keyed) so new toolkits inherit it for free.
 _FIGURE_PATH_ARGS: dict[str, str] = {"save_path": ".png", "save_path_prefix": ""}
 
+# Cap on distinct PDFs the reviewer may open in one ReAct loop. Each opened PDF is
+# re-attached to every subsequent model call, so this bounds the re-sent token cost.
+_OPEN_PAPER_CAP = 6
+
 
 @dataclass
 class ToolOutcome:
     """Result of one tool execution, as fed back into the ReAct conversation.
 
     ``text`` is what the model sees next turn; ``result`` is the full record (for
-    memory/figure propagation) when the provider produces one.
+    memory/figure propagation) when the provider produces one. ``documents`` are
+    attachments (e.g. a PDF opened via ``open_paper``) that the loop accumulates and
+    re-attaches to subsequent model calls so the model can read them multimodally.
     """
 
     text: str
     is_error: bool = False
     figures: list[FigureRef] = field(default_factory=list)
+    documents: list[DocumentRef] = field(default_factory=list)
     result: ToolResult | None = None
 
 
@@ -414,7 +421,11 @@ class ReadOnlyToolProvider:
         self.web_source = web_source
         # The papers knowledge base is irrelevant to pure code review, so the §9.3
         # co-lead reviewer omits text_search (roots = the toolkit worktree instead).
+        # text_search + open_paper are gated together as the knowledge-base toolset.
         self.include_text_search = include_text_search
+        # Paths opened via open_paper this session — the reviewer's cited_paths are
+        # intersected with this so a citation can only name a paper actually read.
+        self.opened_paths: list[Path] = []
         self.max_chars = max_chars
 
     def _roots_text(self) -> str:
@@ -479,6 +490,27 @@ class ReadOnlyToolProvider:
                             },
                         },
                         "required": ["query"],
+                    },
+                }
+            )
+            definitions.append(
+                {
+                    "name": "open_paper",
+                    "description": (
+                        "Open a local PDF (text + figures) to read it before citing. Pass a path "
+                        "from text_search. The papers you open and actually use are exactly the "
+                        "ones to list in the verdict's cited_paths; the report's References "
+                        "section links to those files."
+                    ),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Absolute path to a local PDF returned by text_search.",
+                            }
+                        },
+                        "required": ["path"],
                     },
                 }
             )
@@ -558,6 +590,41 @@ class ReadOnlyToolProvider:
                 )
             text = "\n".join(str(p) for p in paths) or "(no local matches)"
             return ToolOutcome(text=text)
+
+        if name == "open_paper":
+            target = Path(str(arguments.get("path", "")))
+            resolved = target.resolve()
+            if not self._allowed(target):
+                return ToolOutcome(
+                    text=(
+                        f"path not permitted: {target}. Open a paper path inside one of the "
+                        f"permitted roots: {self._roots_text()}"
+                    ),
+                    is_error=True,
+                )
+            if resolved not in self.opened_paths and len(self.opened_paths) >= _OPEN_PAPER_CAP:
+                return ToolOutcome(
+                    text=(
+                        f"open_paper limit reached ({_OPEN_PAPER_CAP} papers). Decide and cite "
+                        "from the papers already opened."
+                    ),
+                    is_error=True,
+                )
+            try:
+                # Same %PDF- signature check the downloader uses, so only real PDFs attach.
+                if not (target.is_file() and b"%PDF-" in target.read_bytes()[:1024]):
+                    return ToolOutcome(
+                        text=f"not a readable PDF: {target}", is_error=True
+                    )
+                doc = document_from_file(target)
+            except OSError as exc:
+                return ToolOutcome(text=f"{type(exc).__name__}: {exc}", is_error=True)
+            if resolved not in self.opened_paths:
+                self.opened_paths.append(resolved)
+            return ToolOutcome(
+                text=f"opened '{doc.title}' ({target}); the PDF is attached above.",
+                documents=[doc],
+            )
 
         if name == "web_search":
             if self.web_source is None:

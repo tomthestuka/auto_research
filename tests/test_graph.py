@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from langgraph.graph import END
 
 from auto_research.graph import build_graph
+from auto_research.graph.builder import _resolve_cited_paths
 from auto_research.retrieval import RetrievalBackend
 from auto_research.schemas import (
     AnalysisTask,
@@ -51,7 +53,7 @@ class FakeRetrieval:
     def __init__(self):
         self._call_count: int = 0
 
-    async def text_search(self, query: str, *, limit: int = 10):
+    async def text_search(self, query: str, *, limit: int = 10, require_local_path: bool = False):
         from auto_research.retrieval import MemoryHit
 
         self._call_count += 1
@@ -78,7 +80,7 @@ class FakeReviewer:
         self.lit_calls = 0
         self.analysis_calls = 0
 
-    async def review(self, request, *, literature=(), report=None):
+    async def review(self, request, *, report=None):
         if report is None:
             self.lit_calls += 1
             need_more = self.lit_calls < self.lit_pass_after
@@ -95,6 +97,8 @@ class FakeReviewer:
             rationale=f"analysis pass {self.analysis_calls}",
             needs_analysis_rework=need_rework,
             follow_up="address X" if need_rework else None,
+            # On acceptance the reviewer cites a paper it read; flows to compose_report.
+            cited_paths=[] if need_rework else ["/fake/cited.pdf"],
         )
 
 
@@ -125,7 +129,6 @@ def _invoke(graph, request: ResearchRequest, *, max_iterations: int = 3):
         graph.ainvoke(
             {
                 "request": request,
-                "literature": [],
                 "report": None,
                 "verdict": None,
                 "lit_iterations": 0,
@@ -160,8 +163,9 @@ def test_graph_runs_full_loop_in_single_pass():
     assert reviewer.analysis_calls == 1
     assert io_agent.compose_calls == 1
     assert io_agent.ingest_calls == 1
-    # literature is a list of Paths from the retrieval backend
-    assert state["literature"] == [Path("/fake/paper_1.pdf")]
+    # The literature node ingests but no longer pre-loads review docs; the reviewer's
+    # accepted verdict carries cited_paths, which flow to compose_report.
+    assert state["cited_paths"] == [Path("/fake/cited.pdf")]
 
 
 def test_graph_literature_feedback_capped_at_three():
@@ -269,3 +273,25 @@ def test_build_graph_rejects_zero_max_iterations():
             lead=FakeLead(),
             max_iterations=0,
         )
+
+
+def test_resolve_cited_paths_drops_unopened_citations(tmp_path):
+    """A citation is kept only if the reviewer actually opened that paper."""
+    opened = tmp_path / "read.pdf"
+    other = tmp_path / "unread.pdf"
+    reviewer = SimpleNamespace(tools=SimpleNamespace(opened_paths=[opened.resolve()]))
+    verdict = ReviewVerdict(
+        accepted=True, rationale="ok", cited_paths=[str(opened), str(other)]
+    )
+
+    cited = _resolve_cited_paths(verdict, reviewer)
+
+    assert cited == [opened]  # the un-opened citation is dropped
+
+
+def test_resolve_cited_paths_no_tools_takes_citations_as_is(tmp_path):
+    """A reviewer with no KB-tool provider (e.g. a test double) keeps citations as given."""
+    reviewer = SimpleNamespace()  # no .tools
+    verdict = ReviewVerdict(accepted=True, rationale="ok", cited_paths=["/x/a.pdf"])
+
+    assert _resolve_cited_paths(verdict, reviewer) == [Path("/x/a.pdf")]

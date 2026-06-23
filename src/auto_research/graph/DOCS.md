@@ -50,24 +50,29 @@ when sandbox + registry are attached, writes real `ToolResult`s to its private
 `memory_path`, and exposes `last_tool_results`. `DebateToConverge` injects a
 truncated cross-worker summary into `task.instructions` for the next round.
 
-The literature node follows a four-step pipeline:
+The literature node is **ingest-only** (three steps); retrieval-for-review is
+reviewer-driven (see below):
 1. **IO agent composes search strategy** — `io_agent.compose_search_strategy()`
    translates the research intent (and optional reviewer follow-up) into a
    focused `SearchRequest`.
 2. **IO agent queries online sources** — `io_agent.search()` hits external
    APIs (arXiv, NASA ADS, web). No LLM ranking; raw results only.
 3. **IO agent downloads and abstracts** — `io_agent.ingest_results()` downloads
-   PDFs, runs `IODebateToConverge`, and writes `mem_abbrev` to SQLite.
-4. **`text_search_paths()` queries local SQLite** — pure Python, no LLM.
-   Returns `list[Path]` for papers with downloaded PDFs. The reviewer receives
-   these paths and loads each as a full PDF `DocumentRef` attachment.
+   PDFs, runs `IODebateToConverge`, and writes `mem_abbrev` to SQLite (no-PDF
+   results land as orphan memory notes). The node no longer pre-loads papers for
+   the reviewer — **the reviewer pulls literature itself** via its `text_search`
+   (find candidate paths) and `open_paper` (read a chosen PDF) ReAct tools.
 
 The analysis node builds an `AnalysisTask` from the question and optional
-instructions (carrying the reviewer's `follow_up` on rework).
+instructions (carrying the reviewer's `follow_up` on rework). After the final
+analysis review, `review_analysis_node` records `cited_paths` =
+`verdict.cited_paths ∩ reviewer.tools.opened_paths` (via `_resolve_cited_paths`),
+so a citation can only name a paper the reviewer actually opened; `compose_report`
+builds References from those paths.
 
-`ResearchState` carries: the request, a `list[Path]` literature set, the latest
-analyst report, the final reviewer verdict, accumulated reviewer verdicts, two
-iteration counters, and the cap.
+`ResearchState` carries: the request, the `cited_paths: list[Path]` the reviewer
+cited, the latest analyst report, the final reviewer verdict, accumulated reviewer
+verdicts, two iteration counters, and the cap.
 
 ## Interfaces / Contracts
 - `build_graph(*, reviewer, io_agent, retrieval=None, workers, lead,
@@ -100,7 +105,7 @@ iteration counters, and the cap.
   per `AnalystWorkerAgent`, assigns each worker's `sandbox` and `memory_path`,
   then tears all sandboxes down after the graph completes or raises.
   Returns the request, final verdict, final state, and `RunMonitor`.
-- `ResearchState` — `TypedDict` with `request`, `literature: list[Path]`,
+- `ResearchState` — `TypedDict` with `request`, `cited_paths: list[Path]`,
   `report`, `verdict`, `verdicts: Annotated[list[ReviewVerdict], operator.add]`,
   `lit_iterations`, `analysis_iterations`, `max_iterations`.
   `tool_queue` and `tool_results` removed — tool state is now private to each
@@ -137,12 +142,15 @@ iteration counters, and the cap.
   `auto_research.models`, `auto_research.retrieval`, `auto_research.schemas`.
 
 ## Dictionary-level reference
-- `ResearchState` — TypedDict for the graph state; `literature` is `list[Path]`;
-  `verdicts` is an accumulated list of reviewer decisions. Tool queues/results
-  are not graph state; tool calls run inside analyst workers and are recorded in
-  per-worker `memory.md` files.
+- `ResearchState` — TypedDict for the graph state; `cited_paths` is `list[Path]`
+  (the papers the reviewer cited); `verdicts` is an accumulated list of reviewer
+  decisions. Tool queues/results are not graph state; tool calls run inside analyst
+  workers and are recorded in per-worker `memory.md` files.
 - `IOAgentLike` — protocol with `compose_search_strategy()`, `search()`, `ingest_results()`.
-- `ReviewerLike` — protocol with `async review(request, *, literature, report)`.
+- `ReviewerLike` — protocol with `async review(request, *, report)`.
+- `_resolve_cited_paths(verdict, reviewer) -> list[Path]` — resolves a verdict's
+  `cited_paths` to `Path`s, keeping only papers the reviewer actually opened this run
+  (no enforcement when the reviewer has no KB-tool provider, e.g. a test double).
 - `build_graph(...)` — constructs and compiles the six-node state graph
   (`literature`, `review_literature`, `analysis`, `review_analysis`,
   `finalize_run`, `compose_report`).
@@ -182,3 +190,11 @@ iteration counters, and the cap.
   read-only `roots` now also include `toolkit_root` (shared `readonly_roots = [run_dir,
   papers_dir, toolkit_root]`), so it can read tool source/`TOOL_MANIFEST` and verify analyst
   results used correct call parameters.
+- 2026-06-22 — **Retrieval-for-review is reviewer-driven.** The `literature` node no longer calls
+  `text_search_paths()` or pre-loads papers into state — it only ingests; the reviewer pulls
+  literature itself via its `text_search`/`open_paper` tools. `ResearchState.literature` was
+  replaced by `cited_paths`; `review_analysis_node` sets it to `verdict.cited_paths ∩
+  reviewer.tools.opened_paths` (`_resolve_cited_paths`), and `compose_report` builds References
+  from those. `reviewer.review(...)` dropped its `literature=` parameter; the analyst lead's
+  `ReadOnlyToolProvider` now passes `include_text_search=False` (knowledge-base tools are the
+  reviewer's alone).

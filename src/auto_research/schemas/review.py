@@ -48,3 +48,11 @@ class ReviewVerdict(MessageModel):
             "leave the build choice to the analyst team."
         ),
     )
+    cited_paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Absolute paths of the local PDFs you opened via open_paper AND actually used "
+            "as evidence for this verdict. These become the report's References — the "
+            "report links to exactly these files, so list only papers you genuinely read."
+        ),
+    )

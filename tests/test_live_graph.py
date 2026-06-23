@@ -85,7 +85,6 @@ def test_live_graph_end_to_end_gx339_question():
         state = await graph.ainvoke(
             {
                 "request": request,
-                "literature": [],
                 "report": None,
                 "verdict": None,
                 "lit_iterations": 0,
@@ -110,7 +109,7 @@ def test_live_graph_end_to_end_gx339_question():
                     "report": state["report"].model_dump(mode="json")
                     if state.get("report")
                     else None,
-                    "literature_count": len(state.get("literature", [])),
+                    "cited_count": len(state.get("cited_paths", [])),
                 },
                 "error": None,
             }

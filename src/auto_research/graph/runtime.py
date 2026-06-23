@@ -321,6 +321,9 @@ async def run_research(
             lead.tools = ReadOnlyToolProvider(
                 roots=readonly_roots, retrieval=retrieval,
                 include_data_catalog=True,
+                # The paper knowledge base is the reviewer's surface, not the lead's:
+                # the lead investigates toolkit source + the data catalog, not papers.
+                include_text_search=False,
                 human_handler=human_handler, asked_by="analyst_lead",
                 model=_model_label(lead.model) or "",
             )
@@ -415,7 +418,6 @@ async def run_research(
         final_state: dict[str, Any] = await graph.ainvoke(
             {
                 "request": request,
-                "literature": [],
                 "report": None,
                 "verdict": None,
                 "verdicts": [],

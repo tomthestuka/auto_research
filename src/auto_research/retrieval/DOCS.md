@@ -15,25 +15,34 @@ Two public tool functions (one module each) plus an internal backend:
   raises `NotImplementedError`.
 - `retrieval/backend.py` — `SqliteRetrievalBackend`: internal engine for
   `text_search()` over `papers`/`memory` tables; used by `text_search_paths()`.
-  Text search uses lightweight normalized token matching across paper
-  title/abstract/keywords/path/source id and memory summary/tags/mem_abbrev.
-  One-character numeric tokens are ignored to avoid broad accidental matches.
+  Each result item is **one paper, keyed by paper id**: its memory abstraction(s)
+  (joined via `memory.paper_id`) and its downloaded PDF (`local_path`) are
+  attributes of that single item, never separate competing hits. A memory row
+  with no `paper_id` (an orphan note) is its own standalone hit. Text search uses
+  lightweight normalized token matching across the paper's
+  title/abstract/keywords/path/source id **and its joined memory
+  summary/tags/mem_abbrev**, so a paper matched only via its abstraction still
+  scores and still surfaces its PDF. One-character numeric tokens are ignored to
+  avoid broad accidental matches. `require_local_path` drops items without a PDF
+  *before* the `limit` is applied.
 
-The graph's `literature_node` calls `text_search_paths()` after ingest;
-the reviewer receives the resulting `list[Path]` and loads them as full PDF
-attachments.
+`text_search_paths()` is now reached through the **reviewer's `text_search` tool**
+(`ReadOnlyToolProvider`), not the graph node: the reviewer searches the knowledge base
+and opens chosen PDFs (`open_paper`) inside its ReAct loop. The `literature_node` only
+ingests.
 
 Live retrieval verification is opt-in:
 `AUTO_RESEARCH_LIVE_RETRIEVAL_TESTS=1 pytest tests/test_live_retrieval.py -s`.
 
 ## Interfaces / Contracts
 - `text_search_paths(query, *, limit=10, backend=None) -> list[Path]`
-  — pure Python, no LLM. Returns local PDF paths for keyword-matching papers.
-  Only papers with a non-null `local_path` in the DB are included.
+  — pure Python, no LLM. Returns up to `limit` local PDF paths for
+  keyword-matching papers, top-scored first. Each paper is one item, so a PDF is
+  never returned twice; only papers with a non-null `local_path` are included.
 - `vector_search_paths(query, *, limit=10, backend=None) -> list[Path]`
   — Phase 2 stub; raises `NotImplementedError`.
 - `RetrievalBackend` protocol:
-  - `async text_search(query: str, *, limit: int = 10) -> list[MemoryHit]`
+  - `async text_search(query: str, *, limit: int = 10, require_local_path: bool = False) -> list[MemoryHit]`
   - `async vector_search(query: str, *, limit: int = 10) -> list[MemoryHit]`
 - `SqliteRetrievalBackend` implements `text_search()` and keeps
   `vector_search()` as a Phase 2 stub that raises `NotImplementedError`.
@@ -62,3 +71,16 @@ Live retrieval verification is opt-in:
   SQLite text search over papers/memory/`mem_abbrev`, deterministic ordering/tests, opt-in
   live test, and `vector_search()` retained as a deferred stub.
 - 2026-06-12 — Compacted changelog; no retrieval behavior changes.
+- 2026-06-22 — Unified retrieval items by paper: a paper and its memory
+  abstraction are now **one hit keyed by paper id**, with the PDF and the joined
+  memory text as attributes (previously a paper surfaced twice — once as a
+  `paper` hit, once as a `memory` hit with `local_path=None` — so high-scoring
+  abstractions crowded the paper rows past the `limit` and `text_search_paths`
+  returned 0). Memory text is now folded into the paper's search haystack, and
+  `text_search(..., require_local_path=True)` filters to PDF-backed papers before
+  the `limit`. Orphan memories (no `paper_id`) remain standalone hits. Added two
+  regression tests.
+- 2026-06-22 — Storage now keys papers by `UNIQUE(sha256)` (see `storage/DOCS.md`), so the
+  same PDF reached via two sources is a single paper row — `text_search_paths` can no longer
+  return the same paper as two different file paths. No retrieval code change; the per-paper
+  hit model already returns one item per row.

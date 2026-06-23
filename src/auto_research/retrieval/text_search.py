@@ -13,9 +13,11 @@ async def text_search_paths(
 ) -> list[Path]:
     """Return local PDF paths for papers matching *query* by text search.
 
-    Only papers with a downloaded PDF (non-null local_path) are returned.
+    Each matching paper is one item (keyed by paper id) whose PDF is an
+    attribute, so ``require_local_path`` filters to PDF-backed papers before the
+    limit — returning up to *limit* distinct local PDFs, top-scored first.
     No LLM call is made — the result is a direct SQLite text-match.
     """
     b = backend if backend is not None else SqliteRetrievalBackend()
-    hits = await b.text_search(query, limit=limit)
+    hits = await b.text_search(query, limit=limit, require_local_path=True)
     return [hit.local_path for hit in hits if hit.local_path is not None]

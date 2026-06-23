@@ -30,7 +30,12 @@ Google by editing YAML alone
   raises `ValueError`.
 - `ModelHandle.call()` also accepts optional `DocumentRef` attachments. If
   documents are passed to a role member whose config has `documents: false`, it
-  raises `ValueError`.
+  raises `ValueError`. The Anthropic adapter places document blocks **at the front**
+  (a stable position right after `system`, before the conversation) with a
+  `cache_control` breakpoint on the last document, so documents that accumulate
+  append-only across a ReAct loop are cache-written once and cache-read on later
+  turns rather than re-billed each turn. Figure references (lightweight text) stay
+  at the end.
 - `ModelRegistry.resolve(role)` returns a `ModelGroupHandle`; callers choose a
   member with `member(name)` or iterate through `handles`.
 - **Native structured output and function calling.** `call(..., schema=Model)`
@@ -130,3 +135,10 @@ Google by editing YAML alone
   conversation tail with native `cache_control: ephemeral`, so ReAct/structured-loop turns can
   read prior history from Anthropic's server-side prompt cache instead of re-prefilling it at
   full price.
+- 2026-06-22 — Anthropic adapter places `documents` at the **front** (right after `system`)
+  with a `cache_control` breakpoint on the last document block, instead of appending them after
+  the (mid-growing) conversation. Documents the reviewer opens via `open_paper` accumulate
+  append-only, so this turns "every opened PDF re-billed every ReAct turn" into "each PDF
+  cache-written once, cache-read thereafter" — the front position also keeps them inside the
+  20-block lookback window. Figure-reference text blocks remain at the end. Confirmed against
+  Anthropic prompt-caching docs (prefix match, ≤4 breakpoints, 20-block lookback).
