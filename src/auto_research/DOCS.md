@@ -16,7 +16,7 @@ and the active Phase 2 build order in
 | Submodule | Step | Role |
 |---|---|---|
 | `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`). |
-| `preflight.py` | — | Launch-time deterministic **checklist** (`Preflight` / async `run_preflight()`): runs every no-LLM precondition (`.env` shape, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, human-channel ping) before any model client is built. |
+| `preflight.py` | — | Launch-time deterministic **checklist** (`Preflight` / async `run_preflight()`): runs every no-LLM precondition (`.env` shape, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, human-channel ping) before any model client is built. |
 | `hitl` | 5 | Raise-to-human clarification channel: the injectable `HumanHandler`, the CLI/Slack/WhatsApp connectors, the CLI-vs-library resolver, and the launch-time channel ping. |
 | `schemas` | 1 | Pydantic v2 message protocol between agents. |
 | `models` | 2 | Provider abstraction + role→model registry from `config/models.yaml`. |
@@ -48,6 +48,8 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - `auto_research.preflight.run_preflight(*, human_handler=None)` (async) is the launch-time
   entry that runs the whole deterministic checklist (registered via
   `build_default_preflight(human_handler)`): `check_required_env`,
+  `storage.check_database_health` (the runtime SQLite DB exists with its full schema,
+  created if absent — so a fresh run's first `text_search` can't hit `no such table: papers`),
   `sandbox.review.check_author_reviewer_decorrelation`,
   `sandbox.merge_flow.check_toolkit_git_identity` (the `research_toolkit` checkout has a git
   commit identity, so a runtime tool commit can't fail mid-flow),
@@ -139,3 +141,7 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - 2026-06-22 — `env.sandbox_call_timeout_default()` added: the global default sandbox per-tool-call
   timeout from `orchestration.yaml: sandbox_call_timeout_s` (default 300), which a package's
   `tool_config.yaml` overrides per tool (`auto_research.sandbox.registry`).
+- 2026-06-23 — Added the `database_health` preflight check (`storage.check_database_health`,
+  registered right after `required_env`). It ensures the runtime SQLite DB exists with its
+  full schema, creating it if absent, so a fresh run's first `text_search` no longer dies on
+  `no such table: papers`.

@@ -308,6 +308,26 @@ class AgentRole:
             )
             result_parts: list[ToolResultPart] = []
             for call in response.tool_calls:
+                # Input event — written (and flushed) BEFORE the call runs, so a tool that
+                # hangs and never returns still leaves a record of exactly what was issued.
+                # Output is a separate event below, written when execute() returns; the two
+                # share `tool_call_id` so a hung call is the input with no matching output.
+                await self._record(
+                    f"{self.role}.{action}.tool_call",
+                    level=7,
+                    summary=f"{self.role} calling {call.name}",
+                    data={
+                        "iteration": iteration + 1,
+                        "tool": call.name,
+                        "tool_call_id": call.id,
+                        # Full-fidelity (capped) call args, so a run is diagnosable from the
+                        # JSONL alone (terminal ignores these keys).
+                        "args": _cap_text(
+                            json.dumps(dict(call.arguments), default=str, sort_keys=True),
+                            _EVENT_ARG_CAP,
+                        ),
+                    },
+                )
                 outcome = await tools.execute(call.name, dict(call.arguments))
                 result_parts.append(
                     ToolResultPart(
@@ -334,15 +354,12 @@ class AgentRole:
                     data={
                         "iteration": iteration + 1,
                         "tool": call.name,
+                        "tool_call_id": call.id,
                         "is_error": outcome.is_error,
                         "chars": len(outcome.text),
                         "figure_count": len(outcome.figures),
-                        # Full-fidelity (capped) call args + returned text, so a run is
-                        # diagnosable from the JSONL alone (terminal ignores these keys).
-                        "args": _cap_text(
-                            json.dumps(dict(call.arguments), default=str, sort_keys=True),
-                            _EVENT_ARG_CAP,
-                        ),
+                        # Returned text at full fidelity (capped); args live on the paired
+                        # `tool_call` input event above.
                         "text": _cap_text(outcome.text, _EVENT_RESULT_CAP),
                     },
                 )

@@ -85,3 +85,10 @@ diagnostic trace, while terminal/notebook output is filtered by `chatter`.
   renderer still surfaces only its select keys, so this heavy text lands in the JSONL only — the
   log is now a complete trace of a run (incl. the previously-opaque coder/gate phases) without
   flooding the terminal.
+- 2026-06-23 — **Tool input/output are now separate events.** `_react` emits
+  `*.{action}.tool_call` (the input) **before** dispatching each call — carrying the
+  tool-call `args` and a `tool_call_id` — and `*.{action}.tool_result` (the output) when the
+  call returns, carrying the returned `text` and the same `tool_call_id`. Because `record()`
+  flushes each event to the JSONL immediately, a tool that hangs and never returns now leaves
+  a `tool_call` with no matching `tool_result`, so a stalled run is diagnosable down to the
+  exact command from the log alone. (`args` moved off `tool_result` onto `tool_call`.)

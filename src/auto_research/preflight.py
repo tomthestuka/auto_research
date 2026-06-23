@@ -84,9 +84,11 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
         check_toolkit_git_identity,
     )
     from auto_research.sandbox.review import check_author_reviewer_decorrelation
+    from auto_research.storage import check_database_health
 
     preflight = Preflight()
     preflight.register("required_env", check_required_env)
+    preflight.register("database_health", check_database_health)
     preflight.register("author_reviewer_decorrelation", check_author_reviewer_decorrelation)
     preflight.register("toolkit_git_identity", check_toolkit_git_identity)
     preflight.register("toolkit_branch_clean", check_toolkit_branch_clean)

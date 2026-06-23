@@ -77,6 +77,13 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   `config/orchestration.yaml::runtime_dir` (defaults to `~/.auto_research`).
 - `database_path(data_dir: str | Path | None = None) -> Path` — returns the
   SQLite DB path for a runtime data dir.
+- `check_database_health() -> None` — launch-time preflight check: ensures the runtime
+  DB exists with its full schema, creating the file and tables if absent (idempotent
+  `CREATE TABLE IF NOT EXISTS` via `Storage._initialize`), then verifies every expected
+  table (`papers`, `memory`, `query_log`, `embeddings`) is present and raises otherwise.
+  Registered in `auto_research.preflight` as `database_health`, so a fresh run no longer
+  fails its first `text_search` on `no such table: papers`.
+- `EXPECTED_TABLES: frozenset[str]` — the table names `check_database_health` requires.
 - `sha256_file(path: str | Path) -> str` — returns a file digest.
 - `paper_from_local_file(path: str | Path) -> PaperRecord` — builds minimal
   metadata for a local PDF or other file.
@@ -113,3 +120,9 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   was removed and `LibrarianIOAgent.ingest_results` records such results as orphan `memory`
   notes (`paper_id = NULL`). Requires a fresh DB (`CREATE TABLE IF NOT EXISTS` does not alter
   an existing table).
+- 2026-06-23 — Added `check_database_health()` (+ `EXPECTED_TABLES`), registered in the
+  launch preflight as `database_health`. The schema was previously created only lazily (by
+  an ingest or report run), so a fresh run whose first DB access was `text_search` died on
+  `no such table: papers` against a 0-byte DB. The check now makes the schema a launch
+  precondition — creating the DB/tables if missing (idempotent) and verifying them — so a
+  fresh run is self-healing.

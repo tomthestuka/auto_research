@@ -198,3 +198,12 @@ verdicts, two iteration counters, and the cap.
   from those. `reviewer.review(...)` dropped its `literature=` parameter; the analyst lead's
   `ReadOnlyToolProvider` now passes `include_text_search=False` (knowledge-base tools are the
   reviewer's alone).
+- 2026-06-23 — **`_builtin_server_config` now pins `{analyze_env}/bin` to the front of the
+  builtin MCP server's `PATH`.** `bash_exec` runs a bare `python` through the shell, which
+  resolves against `PATH` — not the server's own interpreter — so inline inspection
+  (`python -c "import astropy"`, `import xspec_utils`) previously used whatever conda env
+  leaked onto the launching shell's `PATH` (the configured `analyze_env` was never on it).
+  That made it nondeterministic and broke whenever the orchestrator env lacked the science
+  stack (observed: `ModuleNotFoundError: No module named 'astropy'`). A bare `python`/`pip`
+  inside `bash_exec` is now the same interpreter the toolkit tools invoke directly. Guarded
+  by `tests/test_sandbox.py::TestBashExecInterpreterConsistency`.

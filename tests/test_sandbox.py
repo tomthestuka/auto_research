@@ -359,13 +359,19 @@ class TestWorkerReactLoop:
         assert [str(f.path) for f in report.figures] == ["/tmp/fit.png"]  # real figure attached
         assert w.last_tool_results and w.last_tool_results[0].exit_code == 0
         events = {event.event: event for event in monitor.events}
+        # Input/output are now separate events: `tool_call` (logged before the call runs,
+        # carrying the args) and `tool_result` (logged on return, carrying the text). They
+        # share a `tool_call_id`, so a hung call is a `tool_call` with no matching result.
+        assert "analyst_worker.analyze.tool_call" in events
         assert "analyst_worker.analyze.tool_result" in events
+        tc_data = events["analyst_worker.analyze.tool_call"].data
         tr_data = events["analyst_worker.analyze.tool_result"].data
         assert tr_data["model"] == "fake-tool-model"
         assert tr_data["figure_count"] == 1
-        # Fix #2 (d): the tool-call ARGS and the returned text are now in the event data
+        # The call ARGS live on the input event; the returned text on the output event
         # (full-fidelity diagnosis from the JSONL alone).
-        assert "args" in tr_data and isinstance(tr_data["args"], str)
+        assert "args" in tc_data and isinstance(tc_data["args"], str)
+        assert tc_data["tool_call_id"] == tr_data["tool_call_id"]
         assert "loaded indices" in tr_data["text"]
 
     def test_starts_dead_sandbox(self) -> None:
@@ -492,3 +498,45 @@ class TestAppendToolResultsToMemory:
         content = mem.read_text()
         assert "truncated" in content
         assert len(content) < _STDERR_MEM_CAP + 500
+
+
+# ---------------------------------------------------------------------------
+# bash_exec interpreter consistency (regression guard for the analyst env)
+# ---------------------------------------------------------------------------
+
+
+class TestBashExecInterpreterConsistency:
+    """A bare ``python`` inside bash_exec must resolve to the configured ``analyze_env``
+    interpreter — the same one the toolkit tools invoke. Without the PATH pin in
+    ``_builtin_server_config``, bash_exec uses whatever conda env leaked onto the
+    launching shell's PATH (so ``import astropy`` / ``import xspec_utils`` breaks
+    nondeterministically). This test fails if that wiring regresses."""
+
+    def test_bash_exec_python_matches_analyze_env(self) -> None:
+        import shutil
+
+        from auto_research.graph.runtime import (
+            _builtin_server_config,
+            load_orchestration_config,
+        )
+
+        orch = load_orchestration_config()
+        analyze_env = orch.get("analyze_env")
+        analyze_ini_sh = orch.get("analyze_ini_sh")
+        toolkit_root = orch.get("toolkit_root")
+        if not (analyze_env and analyze_ini_sh and toolkit_root):
+            pytest.skip("analyze_env / analyze_ini_sh / toolkit_root not configured")
+        try:
+            cfg = _builtin_server_config(
+                Path(analyze_env), analyze_ini_sh, Path(toolkit_root)
+            )
+        except (RuntimeError, FileNotFoundError) as exc:
+            pytest.skip(f"cannot source analyst env (HEASoft unavailable?): {exc}")
+
+        resolved = shutil.which("python", path=cfg["env"]["PATH"])
+        assert resolved is not None, "no `python` resolvable on the bash_exec PATH"
+        expected = Path(analyze_env) / "bin" / "python"
+        assert Path(resolved).resolve() == expected.resolve(), (
+            f"bash_exec `python` resolves to {resolved}, not the configured analyze_env "
+            f"interpreter {expected}"
+        )

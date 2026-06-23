@@ -103,6 +103,16 @@ def _builtin_server_config(
         pythonpath += os.pathsep + existing
     env = {**base_env, "PYTHONPATH": pythonpath}
 
+    # bash_exec runs a bare `python` through the shell, which resolves against PATH — not
+    # the server's own interpreter. Pin {analyze_env}/bin to the FRONT of PATH so that a
+    # bare `python`/`python3`/`pip` inside bash_exec is the SAME interpreter the toolkit
+    # tools invoke directly ({analyze_env}/bin/python). Without this, bash_exec's
+    # `import astropy` / `import xspec_utils` resolves to whatever conda env happened to
+    # leak onto the launching shell's PATH (the analyst's astropy env is never on it),
+    # so inline inspection breaks the moment the orchestrator env lacks the science stack.
+    if analyze_env:
+        env["PATH"] = str(analyze_env / "bin") + os.pathsep + env.get("PATH", "")
+
     return {
         "name": "builtin",
         "command": python,

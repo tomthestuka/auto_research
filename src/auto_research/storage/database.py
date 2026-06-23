@@ -118,6 +118,36 @@ def database_path(data_dir: str | Path | None = None) -> Path:
     return root / DB_FILENAME
 
 
+EXPECTED_TABLES = frozenset({"papers", "memory", "query_log", "embeddings"})
+
+
+def check_database_health() -> None:
+    """Preflight check: ensure the runtime SQLite DB exists with its full schema.
+
+    The schema is created lazily today (only an ingest or report run touches
+    ``Storage.initialize``), so a fresh run whose first DB access is ``text_search``
+    fails on ``no such table: papers``. This check makes the schema a launch
+    precondition: it creates the DB and tables if absent (idempotent
+    ``CREATE TABLE IF NOT EXISTS``), then verifies every expected table is present so a
+    truncated or unwritable DB is caught cheaply at launch instead of mid-run. Raises on
+    any failure (per the preflight contract).
+    """
+    path = database_path()
+    Storage(path)._initialize()  # idempotent; creates the file, dirs, and all tables
+    with sqlite3.connect(path) as conn:
+        present = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    missing = EXPECTED_TABLES - present
+    if missing:
+        raise RuntimeError(
+            f"SQLite DB at {path} is missing tables after initialize: {sorted(missing)}"
+        )
+
+
 def sha256_file(path: str | Path) -> str:
     """Return the SHA-256 digest for a local file."""
 

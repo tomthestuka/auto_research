@@ -19,9 +19,11 @@ Each role is a small async class:
 
 **Inner ReAct loop (every role).** `AgentRole._react(seed_messages, tools, action,
 cap, images)` drives a provider-agnostic loop: call the model with
-`tools.tool_definitions()`; if it emits tool calls, execute each via
-`tools.execute(name, args)`, append the assistant `tool_use` turn + the
-`tool_result` turn, and re-call so the model sees its own results in-context and
+`tools.tool_definitions()`; if it emits tool calls, for each it emits a
+`*.{action}.tool_call` monitor event (the input — args + `tool_call_id`) **before**
+dispatching, then executes via `tools.execute(name, args)` and emits the paired
+`*.{action}.tool_result` (the output — returned text, same `tool_call_id`); it appends
+the assistant `tool_use` turn + the `tool_result` turn, and re-calls so the model sees its own results in-context and
 chains dependent calls; stop when it emits no calls or `react_loop_cap`
 (`orchestration.yaml`, default 12) is hit. `_react` returns
 `(messages, figures, documents)`: documents a tool attaches (via `ToolOutcome.documents`,
@@ -264,6 +266,16 @@ Role wrappers:
   ReAct role (worker/lead/reviewer/librarian) — so a run is diagnosable from the JSONL alone rather
   than only via per-worker `memory.md`/LangSmith. Heavy text lands in the JSONL only (the terminal
   renderer ignores these keys). Part of the fix for the diagnostic-logging gap (see `monitor/DOCS.md`).
+- 2026-06-23 — **Tool input/output split into two `_react` events.** Each call now emits
+  `*.{action}.tool_call` (input — the `args` + a `tool_call_id`) **before** `tools.execute`
+  runs, and `*.{action}.tool_result` (output — the returned `text` + the same `tool_call_id`)
+  when it returns. Since the monitor flushes per event, a hung tool leaves a `tool_call` with
+  no matching `tool_result` — the stalled command is now in the JSONL (previously the args
+  rode on `tool_result`, which never fired for a hung call). `args` moved off `tool_result`.
+- 2026-06-23 — `analyst_worker.md` data-manipulation policy tightened: **all** data
+  operations (acquire/reduce/filter/bin/merge/transform/fit/derive/write) are `research_toolkit`
+  tool calls; inline `bash`/`python -c` is read-only inspection only (looking, not calculating);
+  a missing data operation becomes a `tool_request`. (Prompt text only — no code change.)
 - 2026-06-22 — `ingest_results` no-PDF path now records an **orphan memory** (`paper_id = NULL`,
   `mem_abbrev = abstract`) instead of a metadata-only paper row, matching the storage rule that a
   paper row requires a downloaded PDF (sha256 identity, see `storage/DOCS.md`). `_store_metadata_only`
