@@ -50,6 +50,24 @@ analyze_env: /grad/fzhou/.conda/envs/astropy
 # (no SSH agent, no gnome-keyring, no competing conda activation).
 # See src/auto_research/sandbox/analyst_env.sh.
 analyze_ini_sh: /nfsdata1/fzhou/auto_research/src/auto_research/sandbox/analyst_env.sh
+# Filesystem allow-list for EVERY runtime agent (coder + reviewer + lead + workers), enforced by
+# auto_research.sandbox.fs_guard.PathGuard. This is the COMPLETE set of absolute roots an agent may
+# read/write; the system's own auto_research repo is deliberately absent (the §2/§4 trust boundary
+# — agents can never read orchestration code or governance files). Portability: this is the one
+# list to edit when moving machines. It MUST include toolkit_root and runtime_dir (so agents can
+# read their own workspace), plus the obs-db root, the analyst conda env, HEASoft HEADAS + CALDB,
+# the local writeable PFILES dir, and /tmp. HEADAS/CALDB roots cover all their subdirs by
+# containment. An empty/unset list disables the guard (allow-all). Governance basenames
+# (CLAUDE.md/DOCS.md/AGENTS.md) are denied even inside an allowed root.
+agent_fs_allow:
+  - /data/fzhou/research_toolkit          # toolkit_root (the coder's worktree lives here)
+  - /data/fzhou/XSPEC/Cyg_X-1             # obs_db_root (config/observations.yaml)
+  - /grad/fzhou/.conda/envs/astropy       # analyze_env (analyst conda + science stack)
+  - /opt/heasoft/heasoft-6.34/x86_64-pc-linux-gnu-libc2.34   # HEADAS (HEASoft install tree)
+  - /man1/CALDB                           # CALDB
+  - /grad/fzhou/pfiles                    # local PFILES (HEASoft writes parameter files here)
+  - /data/fzhou/ar_runtime/test_runtime   # runtime_dir (per-run scratch, figures, logs)
+  - /tmp
 # MCP servers to expose to analyst workers alongside TOOL_MANIFEST tools.
 # Each entry: {name, command, args}.  Omit or leave empty to use only the
 # built-in server (bash_exec, list_dir, read_file).

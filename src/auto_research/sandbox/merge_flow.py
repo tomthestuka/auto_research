@@ -129,10 +129,11 @@ def check_toolkit_branch_clean(root: Path | None = None, branch: str | None = No
     and has a clean working tree (CLAUDE.md §9.9, step 7).
 
     Direct-branch authoring commits straight onto ``branch`` (default ``ai``) in
-    ``toolkit_root``. A wrong branch would commit authored tools to the wrong place; a dirty
-    tree means a **terminal** authoring failure left edits behind (we never reset — §9.4) and
-    the human must inspect/clean before the next run, lest unrelated changes get swept into the
-    next atomic commit. Tolerant when ``root`` isn't a git checkout (mirrors
+    ``toolkit_root``. A wrong branch would commit authored tools to the wrong place. A dirty
+    tree **at launch** means a prior run was interrupted before its in-run auto-reset could run
+    (``propose_and_pr`` resets a non-committed attempt back to HEAD — §9.9) or a human left
+    edits; either way the human inspects/cleans before the next run, lest unrelated changes get
+    swept into the next atomic commit. Tolerant when ``root`` isn't a git checkout (mirrors
     :func:`check_toolkit_git_identity`) so it only bites a real configured run. Prints precise
     remediation so the aggregated preflight error is actionable.
     """
@@ -385,16 +386,70 @@ def approve_edit(worktree: Path, *, message: str) -> str:
     return _git_in(worktree, "rev-parse", "HEAD").strip()
 
 
+async def _reset_direct_tree(
+    toolkit_root: Path,
+    *,
+    artifact_dir: Path | None,
+    monitor: Any | None = None,
+    tool_spec: Any | None = None,
+) -> None:
+    """Reset the direct-branch toolkit checkout to HEAD after a **non-committed** authoring
+    attempt (CLAUDE.md §9.9). The only place besides :func:`approve_edit` the runtime touches
+    the toolkit tree — its counterpart on the failure path: a failed attempt leaves the live
+    ``toolkit_root`` checkout dirty (modified ``lib``/``TOOL_MANIFEST`` + new untracked files),
+    which would both surface a phantom, un-registered tool to re-running workers and trip the
+    next attempt's clean-tree precondition. Before discarding, the attempt's full diff (tracked
+    edits **and** new untracked file content) is saved as a ``.patch`` under ``artifact_dir``
+    (the run's authoring dir, outside the toolkit) so the rejected code stays inspectable
+    without a dirty live tree. Best-effort: any failure is logged and swallowed — cleanup must
+    never mask the caller's result or re-raise.
+    """
+    toolkit_root = Path(toolkit_root)
+    try:
+        patch_path: Path | None = None
+        if artifact_dir is not None:
+            artifact_dir = Path(artifact_dir)
+            # Never write the artifact inside the toolkit — it would re-dirty the tree.
+            ad, tr = artifact_dir.resolve(), toolkit_root.resolve()
+            if ad != tr and tr not in ad.parents:
+                # Stage everything so the diff captures new untracked files too; the
+                # ``reset --hard`` below immediately unstages it, so this is safe.
+                _git_in(toolkit_root, "add", "-A")
+                diff = _git_in(toolkit_root, "diff", "--cached", "HEAD")
+                if diff.strip():
+                    artifact_dir.mkdir(parents=True, exist_ok=True)
+                    sid = getattr(tool_spec, "id", None) or "tool"
+                    patch_path = artifact_dir / f"tool_author_failed_{sid}_{uuid.uuid4().hex[:8]}.patch"
+                    patch_path.write_text(diff, encoding="utf-8")
+        _git_in(toolkit_root, "reset", "--hard", "HEAD")
+        _git_in(toolkit_root, "clean", "-fd")
+        await _emit(
+            monitor, "coder.tree_reset", level=4,
+            summary=f"reset {toolkit_root.name} to HEAD after a non-committed authoring attempt",
+            data={"patch": str(patch_path) if patch_path else None},
+        )
+    except Exception as exc:  # noqa: BLE001 — cleanup must never mask the caller's result
+        await _emit(
+            monitor, "coder.tree_reset.error", level=3,
+            summary=f"working-tree reset failed: {type(exc).__name__}: {exc}",
+            data={"error": repr(exc)},
+        )
+
+
 # Captured so ``propose_and_pr``'s ``approve_edit`` parameter (a test seam) can default to
 # the real implementation without the local name shadowing the module-level function.
 _DEFAULT_APPROVE_EDIT = approve_edit
 
 
 def _make_path_confiner(worktree: Path):
-    """A ``can_use_tool`` callback denying file writes outside the worktree (best-effort).
+    """DEPRECATED — do not use for confinement (see CLAUDE.md "Loose ends").
 
-    OS-level jailing is deferred (§12); the worktree cwd is already isolated under the
-    runtime data dir. This is a backstop against an edit/write escaping the worktree.
+    A ``can_use_tool`` callback that denied file writes outside the worktree. The official
+    Claude Agent SDK permission flow runs ``can_use_tool`` **last** and **skips it** under
+    ``permission_mode="acceptEdits"`` / when an ``allowed_tools`` rule matches — so it never
+    fired here (it could not gate reads or Bash at all). Superseded by the ``PreToolUse`` hook
+    :func:`_make_fs_guard_hook` (runs first, fires for every tool call) enforcing the shared
+    :class:`~auto_research.sandbox.fs_guard.PathGuard` allow-list. Kept for reference; unwired.
     """
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
@@ -411,6 +466,52 @@ def _make_path_confiner(worktree: Path):
         return PermissionResultAllow()
 
     return can_use_tool
+
+
+_FILE_TOOLS = {"Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Glob", "Grep"}
+
+
+def _make_fs_guard_hook(guard):
+    """A Claude Agent SDK ``PreToolUse`` hook enforcing the shared filesystem allow-list
+    (:class:`~auto_research.sandbox.fs_guard.PathGuard`) on the coder.
+
+    The correct gate: ``PreToolUse`` runs **first** in the permission flow and fires for **every**
+    tool call (unlike ``can_use_tool`` — see the deprecated :func:`_make_path_confiner`). File
+    tools are checked by their path argument (exact); ``Bash`` by the absolute paths *named* in its
+    command (best-effort — a subprocess's implicit reads are invisible to the hook; the complete
+    fix is the OS-level jail, §12 / Loose ends). The system's ``auto_research`` repo and governance
+    files are not on the allow-list, so they are denied (§2/§4). Fail-open on an unexpected internal
+    error so a guard bug never bricks authoring.
+    """
+
+    async def hook(input_data, tool_use_id, context):  # noqa: ANN001 — SDK callback signature
+        try:
+            tool = input_data.get("tool_name", "")
+            ti = input_data.get("tool_input") or {}
+            denied: str | None = None
+            if tool in _FILE_TOOLS:
+                target = ti.get("file_path") or ti.get("path") or ti.get("notebook_path")
+                if target is not None and not guard.is_allowed(target):
+                    denied = str(target)
+            elif tool == "Bash":
+                denied = guard.forbidden_in_command(ti.get("command", ""))
+            if denied is not None:
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": input_data.get("hook_event_name", "PreToolUse"),
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": (
+                            f"{denied} is outside the coder's filesystem allow-list "
+                            f"(research_toolkit / obsdb / analyst-env / HEASoft); the auto_research "
+                            f"orchestration repo and governance files are off-limits (§2/§4)."
+                        ),
+                    }
+                }
+        except Exception:  # noqa: BLE001 — a guard bug must never brick authoring (fail-open)
+            return {}
+        return {}
+
+    return hook
 
 
 def _author_env(toolkit_root: Path) -> dict[str, str] | None:
@@ -447,15 +548,28 @@ def _author_env(toolkit_root: Path) -> dict[str, str] | None:
 
 
 def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, escalation_server, max_turns: int, env: dict[str, str] | None = None):
-    from claude_agent_sdk import ClaudeAgentOptions
+    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
+    from auto_research.sandbox.fs_guard import PathGuard
+
+    # Filesystem jail: a PreToolUse hook (runs first, fires for every tool call) enforcing the
+    # shared config allow-list. Replaces the deprecated can_use_tool confiner, which the SDK
+    # skips under acceptEdits/allow-rules. Inactive when agent_fs_allow is unset (allow-all).
+    fs_guard_hook = _make_fs_guard_hook(PathGuard.from_config())
     kwargs: dict[str, Any] = dict(
         cwd=str(worktree),
         model=coder_model,
         system_prompt=system_prompt,
         setting_sources=[],  # SDK-only: ignore any filesystem .claude/settings
         permission_mode="acceptEdits",
-        can_use_tool=_make_path_confiner(worktree),
+        hooks={
+            "PreToolUse": [
+                HookMatcher(
+                    matcher="Read|Write|Edit|MultiEdit|NotebookEdit|Glob|Grep|Bash",
+                    hooks=[fs_guard_hook],
+                )
+            ]
+        },
         mcp_servers={"escalation": escalation_server},
         allowed_tools=[
             "Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep",
@@ -597,7 +711,8 @@ async def propose_and_pr(
 
     ``direct_branch`` selects runtime authoring mode (§9.9): when set, the author works in
     ``toolkit_root`` on that ambient branch (default ``ai``, asserted clean) instead of an
-    isolated worktree, and a terminal failure leaves the tree dirty for the human. ``None``
+    isolated worktree, and a **non-committed** attempt auto-resets the tree back to HEAD (a
+    patch artifact of the discarded work is saved under ``worktree_base`` first). ``None``
     keeps the isolated-worktree behaviour (tests/future use).
 
     ``colead`` is the GPT co-lead reviewer (an ``AnalystColeadAgent``); when ``None`` the
@@ -627,8 +742,9 @@ async def propose_and_pr(
     # Direct-branch mode (runtime authoring, §9.9): the author works in ``toolkit_root`` on the
     # ambient ``ai`` branch instead of an isolated worktree. The runtime is passive about
     # checkout — it asserts the precondition (also enforced at launch by the preflight) and
-    # never switches branches. On terminal failure the dirty tree is left for the human (no
-    # reset). The isolated-worktree path stays the default for tests + future use.
+    # never switches branches. On a non-committed terminal exit the tree is auto-reset to HEAD
+    # in ``finally`` (a patch artifact is saved first). The isolated-worktree path stays the
+    # default for tests + future use.
     if direct_branch is not None:
         check_toolkit_branch_clean(toolkit_root, direct_branch)
         branch = direct_branch
@@ -662,6 +778,7 @@ async def propose_and_pr(
         )
         return g
 
+    committed = False  # flips True only after approve_edit lands; gates the failure cleanup
     await client.connect()
     try:
         await _emit(
@@ -711,6 +828,7 @@ async def propose_and_pr(
             # subject; fall back to the tool name if it left it empty.
             message = review.commit_summary.strip() or tool_spec.proposed_tool_name
             commit_sha = approve_edit(worktree, message=message)
+            committed = True  # success — skip the failure-path tree reset in ``finally``
             await _emit(
                 monitor, "commit", level=3,
                 summary=f"committed {tool_spec.proposed_tool_name} → {commit_sha[:10]}",
@@ -732,3 +850,12 @@ async def propose_and_pr(
         )
     finally:
         await client.disconnect()
+        # Failure counterpart to approve_edit (§9.9): a non-committed direct-branch attempt left
+        # the live toolkit checkout dirty — reset it to HEAD (saving a patch artifact first) so
+        # re-running workers never see a phantom tool and the next attempt's precondition finds a
+        # clean tree. Covers every non-committed exit (the failed returns, the unexpected-error
+        # path, and the re-raised HumanInputRequired). Worktree-mode cleanup is a separate todo.
+        if direct_branch is not None and not committed:
+            await _reset_direct_tree(
+                toolkit_root, artifact_dir=worktree_base, monitor=monitor, tool_spec=tool_spec
+            )

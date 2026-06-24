@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from auto_research.observations import load_observations_config
+from auto_research.sandbox.fs_guard import GOVERNANCE_BASENAMES, PathGuard
 from auto_research.schemas import DocumentRef, FigureRef, ToolResult, document_from_file
 
 
@@ -283,6 +284,10 @@ class SandboxToolProvider:
         self._figures_dir_ready = False
         self.timeout_s = timeout_s
         self.results: list[ToolResult] = []
+        # Filesystem jail (CLAUDE.md §2/§12): the worker's builtin file tools are otherwise raw.
+        # Inactive (allow-all) when agent_fs_allow is unset. Toolkit tools take obs/data paths and
+        # run in the sandbox — not gated here (OS jail closes that, §12 / Loose ends).
+        self._guard = PathGuard.from_config()
 
     def tool_definitions(self) -> list[dict]:
         defs = list(self.registry.tool_definitions())
@@ -302,6 +307,26 @@ class SandboxToolProvider:
         args = dict(arguments)
         if kind == "mcp.builtin.bash_exec" and "cwd" not in args and self.cwd is not None:
             args["cwd"] = str(self.cwd)
+
+        # Filesystem allow-list on the builtin file tools (the raw read/list/bash surface).
+        # bash_exec is checked by the absolute paths it NAMES (best-effort); read_file/list_dir
+        # by their target. Denies the auto_research repo + governance files (§2/§4).
+        denied = None
+        if kind == "mcp.builtin.bash_exec":
+            denied = self._guard.forbidden_in_command(args.get("command", ""))
+        elif kind in ("mcp.builtin.read_file", "mcp.builtin.list_dir"):
+            target = args.get("path")
+            if target is not None and not self._guard.is_allowed(target):
+                denied = str(target)
+        if denied is not None:
+            return ToolOutcome(
+                text=(
+                    f"path not permitted: {denied} — outside the agent filesystem allow-list "
+                    f"(research_toolkit / obsdb / analyst-env / HEASoft). The auto_research "
+                    f"orchestration repo and governance files are off-limits (§2/§4)."
+                ),
+                is_error=True,
+            )
 
         # Sandbox call timeout: the tool's declared ceiling (tool_config.yaml; default 300s),
         # the hard SIGTERM backstop that lets a long-running tool (e.g. a HEASARC download) run
@@ -547,6 +572,10 @@ class ReadOnlyToolProvider:
 
     def _allowed(self, path: Path) -> bool:
         resolved = path.resolve()
+        # §4: build-time governance files never enter runtime context, even inside a root
+        # (research_toolkit carries its own CLAUDE.md/DOCS.md). Closes the reviewer/lead leak.
+        if resolved.name in GOVERNANCE_BASENAMES:
+            return False
         return any(resolved == root or root in resolved.parents for root in self.roots)
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:

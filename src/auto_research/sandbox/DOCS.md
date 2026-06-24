@@ -341,6 +341,19 @@ atomic commit via `approve_edit` (step 6) and returns `status="committed"` with 
 `commit_sha`; the runtime never touches master. `HumanInputRequired` is the typed headless
 fail-safe (a run never silently hangs).
 
+In **direct-branch mode** (`direct_branch="ai"`, the runtime default — the author works the
+live `toolkit_root` checkout, not an isolated worktree), a **non-committed** terminal exit
+(any of the `failed` returns, the unexpected-error path, or a re-raised `HumanInputRequired`)
+**auto-resets that tree to HEAD** in `finally` (`_reset_direct_tree`: `git reset --hard HEAD`
++ `git clean -fd`), after first saving the discarded attempt's full diff as a
+`tool_author_failed_<spec-id>_<rand>.patch` under `worktree_base` (the run's `authoring/`
+dir, outside the toolkit). This is the failure-path counterpart to `approve_edit`: it stops a
+rejected attempt's edits from surfacing a phantom, un-registered tool to re-running workers
+and from tripping the next attempt's clean-tree precondition. The reset is best-effort (a git
+failure is logged via `coder.tree_reset.error` and swallowed, never masking the result). The
+launch preflight (`check_toolkit_branch_clean`) still guards a dirty tree at startup — e.g. a
+run killed before `finally` ran.
+
 ### `gate.run_gate` (Phase 2 step 3 — the deterministic mergeability gate)
 
 ```python
@@ -489,6 +502,14 @@ the hook mapping a fake-model verdict — no live LLM).
   can't leak), commits with `message` on the branch the worktree is already on, and returns
   the new commit sha (`git rev-parse HEAD`). Pure git mechanics — it does not re-assert
   gate-/review-pass (the pipeline guarantees it). The runtime never merges/touches master.
+- `_reset_direct_tree(toolkit_root, *, artifact_dir, monitor=None, tool_spec=None)` (async) —
+  the failure-path counterpart to `approve_edit`. Called from `propose_and_pr`'s `finally` on a
+  **non-committed** direct-branch exit: saves the discarded attempt's full diff (tracked edits
+  + new untracked content, via `git add -A` → `git diff --cached HEAD`) to a
+  `tool_author_failed_*.patch` under `artifact_dir` when that dir is outside `toolkit_root`,
+  then resets the live checkout with `git reset --hard HEAD` + `git clean -fd` (no `-x`:
+  gitignored caches don't trip the dirty check). Best-effort — any git failure is emitted as
+  `coder.tree_reset.error` and swallowed so cleanup never masks the caller's result.
 - `check_toolkit_git_identity()` — launch-time preflight (no LLM): asserts the
   `toolkit_root` checkout (`config/orchestration.yaml`) has both `user.name` and `user.email`
   set, so the runtime's atomic commit can't fail mid-flow on a missing ambient git identity.
@@ -581,3 +602,31 @@ the hook mapping a fake-model verdict — no live LLM).
   `tooling`, capped via `_cap_text` (renamed from a clash with the config `_cap`), no-op when
   `monitor` is None. Fixes the ~20-min blind gap where neither the JSONL nor the terminal showed
   whether the coder was working, blocked, or the gate was running. Tests in `tests/test_merge_flow.py`.
+- 2026-06-23 — **Auto-reset the toolkit tree after a non-committed authoring attempt** (the
+  failure-path counterpart to `approve_edit`). `propose_and_pr` now tracks a `committed` flag and,
+  in `finally` for direct-branch mode, calls the new best-effort `_reset_direct_tree`
+  (`git reset --hard HEAD` + `git clean -fd`) on any non-committed exit — after saving the
+  discarded diff as a `tool_author_failed_*.patch` under `worktree_base`. Fixes the live-run bug
+  where a gate-rejected attempt left the live `ai` checkout dirty, which (a) surfaced a phantom,
+  un-registered tool to re-running workers (`[exit 127] Tool not registered`) and (b) made a 2nd
+  authoring attempt's `check_toolkit_branch_clean` raise an unhandled `RuntimeError` → `run.error`
+  → whole-run crash. Docstrings updated (`propose_and_pr`, `check_toolkit_branch_clean`: the
+  runtime is no longer "never reset" — it self-heals in-run; the launch preflight still guards a
+  dirty tree at startup). Minimal scope: graceful-degrade of the in-flow precondition and
+  worktree-mode orphan pruning are tracked as separate follow-ups. Five new tests in
+  `tests/test_merge_flow.py`, plus an **env-gated live test** `tests/test_live_merge_flow.py`
+  (`AUTO_RESEARCH_LIVE_MERGE_FLOW_TESTS=1`): a reusable `ScriptedCoder` (drives chosen "bad diffs"
+  through the `sdk_client_factory` seam) runs the **real** `gate.run_gate` against a throwaway
+  clone of `toolkit_root` on a fresh `ai` branch and asserts gate-reject → tree-reset → patch
+  artifact — the shortcut for live-testing deep authoring-flow changes without an LLM.
+- 2026-06-23 — **Filesystem jail (todo #3).** New `fs_guard.py`: `PathGuard` + `load_fs_allowlist`
+  — the shared, config-driven allow-list (`orchestration.yaml: agent_fs_allow`) every runtime agent's
+  file access is checked against (`is_allowed` exact; `forbidden_in_command` best-effort for shell
+  command strings; denies governance basenames `CLAUDE.md`/`DOCS.md`/`AGENTS.md` even inside a root;
+  empty list = inactive). `merge_flow._build_options` now installs `_make_fs_guard_hook` as a
+  **`PreToolUse` hook** (runs first, fires for every tool call) — the correct gate; the old
+  `can_use_tool` `_make_path_confiner` is **deprecated/unwired** (the SDK skips `can_use_tool` under
+  `acceptEdits`/allow-rules, so it never fired for reads/Bash). So `auto_research` + governance files
+  are denied to the coder. Env-gated live battery test `tests/test_live_fs_guard.py`
+  (`AUTO_RESEARCH_LIVE_FS_GUARD_TESTS=1`) launches a real coder and asserts the hook actually fires.
+  Bash confinement is best-effort (command-string only) — OS jail completes it (CLAUDE.md §12/§13).

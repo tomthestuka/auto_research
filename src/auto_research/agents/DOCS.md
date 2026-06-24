@@ -286,3 +286,12 @@ Role wrappers:
   `open_paper` tool (gated with `text_search`; validates path∈roots + `%PDF-` signature; records
   `opened_paths`; capped at `_OPEN_PAPER_CAP`=6) so the reviewer reads a candidate before citing it.
   Each tool self-documents (no prompt note). New `tests/test_react_tools.py`.
+- 2026-06-23 — **Filesystem jail for the ReAct agents (todo #3 Stage C).** `ReadOnlyToolProvider`
+  (reviewer/lead) now denies the governance basenames `CLAUDE.md`/`DOCS.md`/`AGENTS.md` even inside a
+  permitted root (`_allowed` uses `sandbox.fs_guard.GOVERNANCE_BASENAMES`) — closes the reviewer/lead
+  governance-file leak (its roots already excluded `auto_research`). `SandboxToolProvider` (workers,
+  previously **unrestricted**) now holds a `PathGuard.from_config()` and rejects the builtin
+  `bash_exec` (by the absolute paths named in the command — best-effort), `read_file`, and `list_dir`
+  when the target is outside the `agent_fs_allow` allow-list (so `auto_research`/governance are
+  denied). Inactive when `agent_fs_allow` is unset. Toolkit-tool path args + implicit shell reads are
+  not gated here (OS jail, CLAUDE.md §12/§13). Tests in `tests/test_react_tools.py`.

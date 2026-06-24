@@ -301,7 +301,7 @@ tools simply won't be available.
 |---|---|
 | `.env` | API keys and optional tracing flags. Loaded automatically. Never committed (`cp .env.example .env`). |
 | `config/models.yaml` | Role → model-group mapping (OpenAI/Anthropic/Google). No model IDs in code. |
-| `config/orchestration.yaml` | `runtime_dir`, iteration/ReAct caps, `toolkit_root`, `analyze_env`, `analyze_ini_sh`, `disabled_tools`, report formats, report retry cap, and Phase-2 authoring caps. |
+| `config/orchestration.yaml` | `runtime_dir`, iteration/ReAct caps, `toolkit_root`, `analyze_env`, `analyze_ini_sh`, `disabled_tools`, `agent_fs_allow` (the per-agent filesystem allow-list), report formats, report retry cap, and Phase-2 authoring caps. |
 | `config/observations.yaml` | `obs_db_root` — the single obs-db folder; missions are its `<MISSION>` subdirs (those holding a `catalog.json`), discovered from disk and treated as data. |
 | `config/code_gate.yaml` | The Phase-2 gate's no-fabrication scan lists (banned vocabulary, RNG hard-fails, literal-array findings, ObsID allowlist). Human-tunable; no scan constant in code. |
 
@@ -404,7 +404,9 @@ and reviewer narrative.
 ## Beyond Phase 2 (deferred stubs)
 
 Vector retrieval (sqlite-vec, embedding column reserved) · durable HITL suspend/resume
-(LangGraph checkpointer) · OS-level sandbox jailing (bind-mounts / seccomp) ·
+(LangGraph checkpointer) · OS-level sandbox jailing (bind-mounts / seccomp — every agent's file
+access is already confined to the `agent_fs_allow` allow-list via `sandbox.fs_guard.PathGuard`; the
+OS jail would also gate a shell subprocess's implicit reads) ·
 `bash_exec` figure capture (diff worker cwd → `FigureRef`s) · librarian IO ingest
 consensus (activate `IODebateToConverge`, replace `accepted=True` stub) ·
 the lead-scientist group that mines the knowledge base to propose new research requests.

@@ -542,6 +542,14 @@ rule that *you, the coding agent, perform zero git*:
   LLM never issues git; `approve_edit()` (code) does, and it is unreachable unless the gate
   passed **and** the provider-decorrelated GPT co-lead's review passed. **Commit ⇔ gate-pass
   ∧ co-lead review-pass.** A reject → no commit, feedback to the author.
+- A **non-committed terminal attempt auto-resets** the working tree back to HEAD — the
+  failure-path counterpart to `approve_edit` (`git reset --hard HEAD` + `git clean -fd`), after
+  saving the discarded attempt's diff as a `tool_author_failed_*.patch` under the run's
+  `authoring/` dir for inspection. This keeps a rejected attempt's edits from surfacing a
+  phantom, un-registered tool to re-running workers or tripping the next attempt's clean-tree
+  precondition. The launch preflight still asserts a clean branch at startup (a dirty tree there
+  means a run was killed before its reset ran). The runtime resets only its own authoring
+  branch; it never touches master.
 - The runtime has **no concept of master** — it never merges, never asks to merge, holds no
   reference to the trusted branch. A **human reviews branches and merges to master entirely
   manually, out of band**; that human review is where **replicability** (rerun the human-half)
@@ -616,7 +624,12 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
 - **Durable HITL suspend/resume:** a LangGraph checkpointer so a `HumanQuery` can be
   answered later without holding the process (Phase 2 ships the blocking handler only).
 - **OS-level sandbox jailing:** read-only bind-mounts / seccomp / egress control beyond the
-  relocated-scratch subprocess sandbox.
+  relocated-scratch subprocess sandbox. *(Partly mitigated: every runtime agent's file access is
+  now confined to the `config/orchestration.yaml: agent_fs_allow` allow-list via
+  `sandbox.fs_guard.PathGuard` — a `PreToolUse` hook for the coder, provider checks for the
+  reviewer/lead/workers — so `auto_research` and governance files are denied. The OS jail of that
+  same allow-list is what remains: it would also gate a shell subprocess's **implicit** reads,
+  which the command-string `Bash` check cannot see. See §13.)*
 - **`bash_exec` figure capture:** snapshot the worker scratch `cwd` before each `bash_exec`,
   diff for new image files after, and synthesize `FigureRef`s into `ToolResult.figures`.
 - **Vector retrieval:** keep `vector_search()` stubbed; the embedding column/table is
@@ -627,7 +640,35 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   `evaluate_search_results()` stub (`accepted=True`) with a real IO-lead LLM call (cap 3).
 - **Restrict runtime MCP to read-only file-tree exploration:** no network, shell, or writes
   via MCP — directory listing and path/metadata reads only, via prompt + a registration
-  filter at role-init.
+  filter at role-init. *(Largely subsumed by the §13 `PathGuard` allow-list, which now scopes
+  every agent's file reads; the no-network/no-write tightening for MCP exploration remains.)*
+
+---
+
+## 13. Loose ends (in-code stubs, deprecations, best-effort gaps)
+
+A **living registry** of code that is intentionally incomplete, deprecated, or best-effort — so the
+gaps stay visible rather than getting rediscovered the hard way. Distinct from §12 (planned-but-
+unbuilt *features*): these exist in the tree **today**. Append as new ones land; delete when closed.
+
+- **`retrieval.vector_search` / `vector_search_paths`** — `NotImplementedError` Phase-2 stub
+  (sqlite-vec backend deferred — §12).
+- **Librarian IO search-iteration / `evaluate_search_results()`** — Phase-1 stubs; the latter
+  returns `accepted=True` (IO ingest consensus deferred — §12).
+- **`sandbox.merge_flow._make_path_confiner`** — **DEPRECATED, unwired.** The SDK runs
+  `can_use_tool` last and skips it under `acceptEdits`/allow-rules, so it never gated reads/Bash.
+  Superseded by the `_make_fs_guard_hook` `PreToolUse` hook (`sandbox.fs_guard.PathGuard`). Kept
+  for reference only; do not use `can_use_tool` for confinement.
+- **Filesystem jail is best-effort for shell commands.** `PathGuard` enforces the `agent_fs_allow`
+  allow-list **exactly** for tools whose path it sees (`Read`/`Write`/`Edit`/`Glob`/`Grep`, and the
+  workers' `read_file`/`list_dir`), but for `Bash`/`bash_exec` it only checks the absolute paths
+  **named in the command** — a subprocess's implicit reads are invisible. Complete confinement is
+  the OS-level jail (§12). Also: the workers' **toolkit-tool path *arguments*** are not yet
+  allow-listed (toolkit tools take obs/data paths and run in the sandbox).
+- **`sandbox.merge_flow._reset_direct_tree`** — best-effort: a git failure during the post-failed-
+  authoring reset is logged (`coder.tree_reset.error`) and swallowed so it never masks the result;
+  a residual dirty tree is then caught at the next launch's preflight (the in-flow
+  `check_toolkit_branch_clean` still *raises* mid-run — graceful-degrade is a tracked TODO).
 
 ---
 

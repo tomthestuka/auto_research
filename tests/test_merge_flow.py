@@ -437,3 +437,134 @@ def test_direct_branch_mode_rejects_wrong_branch(tmp_path):
     repo = _toolkit_repo(tmp_path)  # still on the default branch, not "ai"
     with pytest.raises(RuntimeError, match="not the authoring branch"):
         _run(_spec(), toolkit_root=repo, worktree_base=tmp_path / "unused", direct_branch="ai")
+
+
+# ── auto-reset the toolkit tree after a non-committed authoring attempt (§9.9) ────
+
+
+async def _dirtying_gate(worktree, spec):
+    """A gate that fails after the 'coder' left edits behind: a tracked-file modification, a
+    new untracked file under a *_utils package, and scratch outside any package."""
+    (worktree / "README.md").write_text("MODIFIED by the coder\n")  # tracked modification
+    (worktree / "demo_utils" / "lib" / "pcube_ts.py").write_text("x = 1  # phantom tool\n")
+    (worktree / "scratch_out_of_pkg.txt").write_text("worker scratch\n")  # outside any *_utils
+    return GateReport(passed=False, reason="non-deterministic test")
+
+
+def test_direct_branch_failed_resets_dirty_tree(tmp_path):
+    """A non-committed direct-branch attempt resets the live checkout to HEAD — tracked edits
+    reverted AND new untracked files (incl. scratch outside *_utils) removed."""
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    result, _ = _run(
+        _spec(), toolkit_root=repo, worktree_base=tmp_path / "wt",
+        direct_branch="ai", run_gate=_dirtying_gate, gate_rework_cap=0,
+    )
+    assert result.status == "failed"
+    assert _git_out(repo, "status", "--porcelain") == ""  # tree clean == HEAD
+    assert _git_out(repo, "show", "HEAD:README.md") == "base\n"  # tracked edit reverted
+    assert not (repo / "demo_utils" / "lib" / "pcube_ts.py").exists()
+    assert not (repo / "scratch_out_of_pkg.txt").exists()
+
+
+def test_direct_branch_committed_does_not_reset(tmp_path):
+    """The success path must NOT reset — the committed tool survives (cleanup skipped)."""
+    from auto_research.sandbox.merge_flow import approve_edit as real_approve
+
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+
+    async def writing_gate(worktree, spec):
+        (worktree / "demo_utils" / "lib" / "tool.py").write_text("def t():\n    return 1\n")
+        return GateReport(passed=True)
+
+    head_before = _git_out(repo, "rev-parse", "HEAD").strip()
+    result, _ = _run(
+        _spec(), toolkit_root=repo, worktree_base=tmp_path / "wt",
+        direct_branch="ai", run_gate=writing_gate, approve_edit=real_approve,
+    )
+    assert result.status == "committed"
+    assert _git_out(repo, "rev-parse", "HEAD").strip() != head_before  # HEAD advanced
+    assert (repo / "demo_utils" / "lib" / "tool.py").exists()  # committed file survives
+    assert _git_out(repo, "status", "--porcelain") == ""
+
+
+def test_direct_branch_second_attempt_after_failure_does_not_crash(tmp_path):
+    """Reproduces the observed crash: a 2nd authoring attempt after a failed one must NOT trip
+    the clean-tree precondition — auto-clean restored the tree between attempts."""
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    r1, _ = _run(_spec(), toolkit_root=repo, worktree_base=tmp_path / "wt",
+                 direct_branch="ai", run_gate=_dirtying_gate, gate_rework_cap=0)
+    assert r1.status == "failed"
+    # Before the fix this 2nd call raised RuntimeError("uncommitted changes") and crashed the run.
+    r2, _ = _run(_spec(), toolkit_root=repo, worktree_base=tmp_path / "wt",
+                 direct_branch="ai", run_gate=_dirtying_gate, gate_rework_cap=0)
+    assert r2.status == "failed"
+
+
+def test_direct_branch_failure_writes_patch_artifact(tmp_path):
+    """The rejected attempt's diff is preserved as a .patch under the artifact dir before reset,
+    so the failed code stays inspectable without a dirty live tree."""
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    artifacts = tmp_path / "authoring"
+    result, _ = _run(_spec(), toolkit_root=repo, worktree_base=artifacts,
+                     direct_branch="ai", run_gate=_dirtying_gate, gate_rework_cap=0)
+    assert result.status == "failed"
+    patches = list(artifacts.glob("tool_author_failed_*.patch"))
+    assert len(patches) == 1
+    body = patches[0].read_text()
+    assert "phantom tool" in body and "MODIFIED by the coder" in body
+    assert _git_out(repo, "status", "--porcelain") == ""  # tree clean after
+
+
+def test_reset_direct_tree_swallows_errors(tmp_path):
+    """Cleanup is best-effort — a git failure is logged, never raised (must not mask the result)."""
+    from auto_research.sandbox.merge_flow import _reset_direct_tree
+
+    bad = tmp_path / "not_a_repo"
+    bad.mkdir()
+    mon = _RecordingMonitor()
+    asyncio.run(_reset_direct_tree(bad, artifact_dir=None, monitor=mon))  # no raise
+    assert mon.of("coder.tree_reset.error")
+
+
+# ── coder filesystem jail — the PreToolUse hook (todo #3 Stage B) ─────────────────
+
+
+def test_fs_guard_hook_allows_inside_denies_outside_and_governance(tmp_path):
+    from auto_research.sandbox.fs_guard import PathGuard
+    from auto_research.sandbox.merge_flow import _make_fs_guard_hook
+
+    tk = tmp_path / "research_toolkit"
+    tk.mkdir()
+    hook = _make_fs_guard_hook(PathGuard([tk]))
+
+    def call(tool, ti):
+        return asyncio.run(hook(
+            {"tool_name": tool, "tool_input": ti, "hook_event_name": "PreToolUse"}, None, None,
+        ))
+
+    def denied(out):
+        return out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+
+    assert call("Read", {"file_path": str(tk / "xspec_utils" / "lib" / "x.py")}) == {}  # inside → allow
+    assert denied(call("Read", {"file_path": str(tmp_path / "auto_research" / "gate.py")}))  # outside
+    assert denied(call("Read", {"file_path": str(tk / "CLAUDE.md")}))  # governance, even inside
+    assert call("Glob", {"pattern": "**/*.py"}) == {}  # no path arg → defaults to cwd → allow
+    # Bash: named-path enforcement (best-effort)
+    assert call("Bash", {"command": 'python -c "import xspec_utils"'}) == {}  # no abs path named
+    assert denied(call("Bash", {"command": f"cat {tmp_path}/auto_research/gate.py"}))
+
+
+def test_fs_guard_hook_inactive_when_allowlist_empty():
+    from auto_research.sandbox.fs_guard import PathGuard
+    from auto_research.sandbox.merge_flow import _make_fs_guard_hook
+
+    hook = _make_fs_guard_hook(PathGuard([]))  # unconfigured → allow-all
+    out = asyncio.run(hook(
+        {"tool_name": "Read", "tool_input": {"file_path": "/etc/passwd"},
+         "hook_event_name": "PreToolUse"}, None, None,
+    ))
+    assert out == {}

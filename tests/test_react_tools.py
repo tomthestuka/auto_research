@@ -8,10 +8,43 @@ and re-attaches them to every subsequent model call.
 
 import asyncio
 
-from auto_research.agents.react import ReadOnlyToolProvider, ToolOutcome
+import pytest
+
+from auto_research.agents.react import ReadOnlyToolProvider, SandboxToolProvider, ToolOutcome
 from auto_research.agents.roles import ReviewerAgent
 from auto_research.models import ModelResponse, ToolCall
+from auto_research.sandbox.fs_guard import load_fs_allowlist
 from auto_research.schemas import document_from_file
+
+
+# ── filesystem jail for ReAct agents (todo #3 Stage C) ───────────────────────────
+
+
+def test_readonly_provider_denies_governance_files(tmp_path):
+    """Reviewer/lead can read source inside a root, but never governance files (§4)."""
+    (tmp_path / "CLAUDE.md").write_text("governance — off-limits")
+    (tmp_path / "notes.py").write_text("x = 1\n")
+    p = ReadOnlyToolProvider(roots=[tmp_path])
+    assert asyncio.run(p.execute("read_file", {"path": str(tmp_path / "CLAUDE.md")})).is_error
+    assert asyncio.run(p.execute("read_file", {"path": str(tmp_path / "DOCS.md")})).is_error
+    assert not asyncio.run(p.execute("read_file", {"path": str(tmp_path / "notes.py")})).is_error
+
+
+def test_worker_sandbox_guard_blocks_auto_research(tmp_path):
+    """Workers' builtin file tools are jailed to the allow-list; auto_research is denied."""
+    if not load_fs_allowlist():
+        pytest.skip("agent_fs_allow not configured — jail inactive")
+
+    class _Reg:
+        def kind_for_function(self, name):
+            return f"mcp.builtin.{name}"
+
+    p = SandboxToolProvider(_Reg(), sandbox=None, cwd=tmp_path)  # guard denies before sandbox use
+    out = asyncio.run(p.execute(
+        "bash_exec", {"command": "cat /data/fzhou/auto_research/src/auto_research/sandbox/gate.py"}))
+    assert out.is_error and "not permitted" in out.text
+    out2 = asyncio.run(p.execute("read_file", {"path": "/data/fzhou/auto_research/x.py"}))
+    assert out2.is_error and "not permitted" in out2.text
 
 
 def _names(provider):
