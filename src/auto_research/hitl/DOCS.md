@@ -54,8 +54,11 @@ directly) so the preflight can import it without pulling the graph/LLM stack.
   attended terminal no longer hangs the run forever.
 - `SlackHandler(*, app=None, socket_handler=None, channel=None, timeout_s=None)` — Socket
   Mode; posts to `SLACK_HUMAN_CHANNEL`, awaits a threaded reply via a Future resolved by
-  `on_message`. `start()`/`aclose()` manage the socket. `timeout_s` defaults to the shared
-  `response_timeout_s()` when unset. Built per spec; **not live-tested**.
+  `on_message`. `start()`/`aclose()` manage the socket. `start()` also installs
+  `_SocketRotationDowngradeFilter` on the `slack_sdk.socket_mode.aiohttp` logger, demoting the
+  benign websocket-rotation ERROR ("Cannot write to closing transport") to WARNING while leaving
+  genuine errors untouched. `timeout_s` defaults to the shared `response_timeout_s()` when unset.
+  Built per spec; **not live-tested**.
 - `WhatsAppHandler(*, client=None, from_number=None, to_number=None, timeout_s=None,
   poll_interval_s=5)` — `timeout_s` defaults to the shared `response_timeout_s()` when unset.
   Twilio: sends, then **polls** `messages.list` for the inbound reply
@@ -115,3 +118,9 @@ live in `auto_research.schemas` (the protocol, §7).
   Twilio faults (HTTP-401 → named creds; else from/to + connectivity) and surface the
   `human_channel='cli'`/`'none'` escape hatch; `human_channel_ping_timeout_s` lowered 300→60.
   Covered by `tests/test_hitl.py`.
+- 2026-06-24 — **Slack rotation-noise downgrade (fix-list #8).** `SlackHandler.start()` installs
+  `_SocketRotationDowngradeFilter` on the `slack_sdk.socket_mode.aiohttp` logger: the benign
+  Socket Mode websocket-rotation ERROR ("Cannot write to closing transport") is rewritten to
+  WARNING (the connection self-heals), while genuine errors keep their level. The optional
+  "reconnect health-check before `ask_human`" was **not** added — Slack is not live-tested in this
+  deployment and the rotation self-heals, so it isn't warranted now. Test in `tests/test_hitl.py`.

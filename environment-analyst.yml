@@ -25,6 +25,7 @@ dependencies:
   - python=3.13
   - astropy=7.1.1
   - astroquery=0.4.11      # heasarc_utils.acquire (HEASARC downloads)
+  - boto3=1.43.24          # heasarc_utils.acquire AWS/S3 fallback (the robust path for >1GB files)
   - pyvo=1.9.1             # astroquery TAP/datalink dependency
   - numpy=2.3.4
   - scipy=1.16.3

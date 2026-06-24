@@ -147,6 +147,28 @@ def test_response_timeout_s_default_is_one_hour():
     assert response_timeout_s() == 3600.0
 
 
+def test_slack_rotation_log_downgrade_filter():
+    """The benign Socket Mode rotation ERROR is rewritten to WARNING; other errors pass through."""
+    import logging
+
+    from auto_research.hitl.slack import _SocketRotationDowngradeFilter
+
+    filt = _SocketRotationDowngradeFilter()
+
+    def _record(msg):
+        return logging.LogRecord("slack_sdk.socket_mode.aiohttp", logging.ERROR,
+                                 __file__, 1, msg, None, None)
+
+    rotation = _record("Failed to check the current session (s1) or reconnect to the server "
+                       "(error: ClientConnectionError, message: Cannot write to closing transport)")
+    assert filt.filter(rotation) is True
+    assert rotation.levelno == logging.WARNING and rotation.levelname == "WARNING"
+
+    genuine = _record("Failed to retrieve WSS URL: boom")
+    assert filt.filter(genuine) is True
+    assert genuine.levelno == logging.ERROR and genuine.levelname == "ERROR"
+
+
 def test_channels_default_to_shared_response_timeout(monkeypatch):
     # All channels read the shared window when no explicit timeout_s is passed.
     monkeypatch.setattr("auto_research.hitl.slack.response_timeout_s", lambda: 1234.0)

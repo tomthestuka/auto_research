@@ -623,6 +623,20 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
 
 - **Durable HITL suspend/resume:** a LangGraph checkpointer so a `HumanQuery` can be
   answered later without holding the process (Phase 2 ships the blocking handler only).
+- **Human-steer channel:** a way for a human end/abort/redirect steer to **bind the whole run**,
+  not just the role that happened to ask. Today the HITL handler is *blocking/reply-only*
+  (`resolve_human` only listens while an agent is awaiting a query), so a human "end with failure"
+  reply to one role (e.g. a worker) does **not** stop another (e.g. the analyst lead independently
+  re-deciding to author). A *reply-borne* steer is buildable now (capture an abort from any reply
+  at the single `resolve_human` chokepoint → a shared `RunControl` flag → the lead's authoring loop
+  and graph nodes consult it → honest §9.6 terminal); a true *anytime* interjection (steer while no
+  query is pending) depends on the durable suspend/resume above. Interim stop = **Ctrl-C**, which is
+  an acceptable *kill* (most cleanup runs via `finally`; a dirty authoring branch is caught next
+  launch by `check_toolkit_branch_clean`) but **not** a clean steer — asyncio cleanup-during-cancel
+  can skip the tree reset, a second Ctrl-C orphans subprocesses, and there is no honest
+  `FAILED`/`run.finish`. Hardening to pair with the channel: a SIGINT handler for graceful
+  honest-failure shutdown, and `asyncio.shield`/reordering so the authoring cleanup can't be skipped.
+  (§5.5's `plan_and_debate` already gives the human a veto checkpoint before *non-trivial* authoring.)
 - **OS-level sandbox jailing:** read-only bind-mounts / seccomp / egress control beyond the
   relocated-scratch subprocess sandbox. *(Partly mitigated: every runtime agent's file access is
   now confined to the `config/orchestration.yaml: agent_fs_allow` allow-list via

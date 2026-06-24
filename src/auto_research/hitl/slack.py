@@ -12,11 +12,46 @@ installed or any network.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from typing import Any
 
 from auto_research.hitl.resolve import response_timeout_s
 from auto_research.schemas import HumanQuery, HumanResponse
+
+
+class _SocketRotationDowngradeFilter(logging.Filter):
+    """Demote slack_sdk's benign Socket Mode rotation ERROR to WARNING.
+
+    When Socket Mode rotates its websocket, an in-flight send hits a closing transport and
+    ``slack_sdk.socket_mode.aiohttp`` logs it at ERROR ("Cannot write to closing transport").
+    The connection self-heals (a new endpoint is dialed), so the ERROR is misleading noise —
+    this filter rewrites only that specific rotation message to WARNING and passes everything
+    else through untouched, so genuine errors keep their level.
+    """
+
+    _NEEDLE = "closing transport"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.ERROR and self._NEEDLE in record.getMessage():
+            record.levelno = logging.WARNING
+            record.levelname = "WARNING"
+        return True
+
+
+# One shared instance; installing it twice on the same logger is a no-op (idempotent start()).
+_ROTATION_FILTER = _SocketRotationDowngradeFilter()
+
+
+def _install_socket_rotation_log_downgrade() -> None:
+    """Attach the rotation-noise downgrade filter to slack_sdk's async socket-mode logger.
+
+    The filter must live on the *emitting* logger (so it can mutate the record's level before
+    handlers render it). Idempotent — re-adding the same filter instance is harmless.
+    """
+    logger = logging.getLogger("slack_sdk.socket_mode.aiohttp")
+    if _ROTATION_FILTER not in logger.filters:
+        logger.addFilter(_ROTATION_FILTER)
 
 
 class SlackHandler:
@@ -87,6 +122,7 @@ class SlackHandler:
     async def start(self) -> None:
         if self._started:
             return
+        _install_socket_rotation_log_downgrade()  # quiet the benign rotation ERROR (#8)
         if self.app is None:  # real connector: build slack_bolt now, inside the running loop
             self.app, self._socket = _build_slack_app()
             self._register_listener()
