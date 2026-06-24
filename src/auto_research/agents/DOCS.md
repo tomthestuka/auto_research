@@ -24,8 +24,15 @@ cap, images)` drives a provider-agnostic loop: call the model with
 dispatching, then executes via `tools.execute(name, args)` and emits the paired
 `*.{action}.tool_result` (the output — returned text, same `tool_call_id`); it appends
 the assistant `tool_use` turn + the `tool_result` turn, and re-calls so the model sees its own results in-context and
-chains dependent calls; stop when it emits no calls or `react_loop_cap`
-(`orchestration.yaml`, default 12) is hit. `_react` returns
+chains dependent calls; stop when it emits no calls or the budget is spent. **Budget
+(`free_tools`, §5.5):** `cap` (`react_loop_cap`, default 30) bounds the *budget-consuming*
+iterations — those calling ≥1 tool **not** in `free_tools` (default empty); a free-only
+iteration (e.g. the lead's `plan_and_debate`) does not count, so the lead can debate a toolkit
+design with the human across as many rounds as it needs without starving its evidence-gathering
+iterations. `absolute_cap` (`react_loop_absolute_cap`, default 60; passed only by the lead's
+`decide_authoring`) is a hard ceiling on *total* iterations — the runaway-free-tool backstop;
+when unset it defaults to `cap`, so every other caller is unchanged (`free_tools` empty ⇒ the
+loop is identical to `range(cap)`). `_react` returns
 `(messages, figures, documents)`: documents a tool attaches (via `ToolOutcome.documents`,
 e.g. a PDF from `open_paper`) are accumulated, deduped by sha256, and **re-attached to every
 subsequent model call** so the model reads them multimodally mid-loop (`cache_prefix=True`
@@ -57,6 +64,16 @@ handler to the workers (`SandboxToolProvider`) and to the reviewer/lead (`ReadOn
 `asked_by` = the role). Each provider also carries the backing `model` id (resolved via
 `_model_label`), set on the `HumanQuery` so connector message bodies identify the sender as
 `"<role> (<model>)"`.
+
+**Lead design channel (`plan_and_debate`, §5.5).** When `include_plan_and_debate=True` **and** a
+`human_handler` is wired, `ReadOnlyToolProvider` also exposes `plan_and_debate`
+(`plan_and_debate_tool_def`/`execute_plan_and_debate`) — set only for the **analyst lead** (in
+`graph/runtime.py`). It routes a proposed design + question to the human via the same
+`resolve_human` path (reusing the `clarify_science` `HumanQuery` kind, folding `plan` into the
+context), but is listed in the lead's `_react` `free_tools`, so the lead settles a toolkit design
+with the human across unbounded rounds **without consuming `react_loop_cap`** — only the
+`react_loop_absolute_cap` backstop bounds it; the human ending the discussion is the normal stop.
+The coder then follows the settled brief rather than re-opening the architecture.
 
 When a `RunMonitor` is injected, role wrappers record high-chatter input,
 parsed output, raw model content, attachment counts, and errors. These records
@@ -295,3 +312,15 @@ Role wrappers:
   when the target is outside the `agent_fs_allow` allow-list (so `auto_research`/governance are
   denied). Inactive when `agent_fs_allow` is unset. Toolkit-tool path args + implicit shell reads are
   not gated here (OS jail, CLAUDE.md §12/§13). Tests in `tests/test_react_tools.py`.
+- 2026-06-24 — **§5.5 lead-drives-design + budget-free `plan_and_debate`.** `_react` gained
+  `free_tools`/`absolute_cap`: `react_loop_cap` (30) now bounds only budget-*consuming* iterations,
+  a free-only iteration is uncounted, and `react_loop_absolute_cap` (60) is the total-iteration
+  runaway backstop (defaults to `cap` when unset ⇒ every existing caller byte-identical). New
+  lead-only `plan_and_debate` tool (`plan_and_debate_tool_def`/`execute_plan_and_debate`,
+  `ReadOnlyToolProvider(include_plan_and_debate=True)` + a `human_handler`, wired in
+  `graph/runtime.py`): a budget-free design channel to the human (reuses the `clarify_science`
+  kind, folds `plan` into the query context). `AnalystLeadAgent.decide_authoring` opts in
+  (`free_tools={plan_and_debate}`, `absolute_cap=_react_loop_absolute_cap()`). Prompts: `analyst_lead.md`
+  (settle the design with the human via the budget-free channel before finalising the brief),
+  `coder.md` (the brief is a settled plan — execute it, ask_lead rather than re-open the
+  architecture). Tests in `tests/test_react_tools.py` (budget accounting + tool exposure/routing).

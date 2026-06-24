@@ -29,7 +29,10 @@ tool_retry_cap: 3            # (legacy) accepted by DebateToConverge, now unused
 # (worker 2 hit 12/12 and never reached plot_iqu). Now split per-role. Future
 # hardening: make a token/cost/wall-clock BUDGET the primary guard and keep these
 # step counts as the secondary backstop (the industry trend, e.g. Claude Agent SDK).
-react_loop_cap: 30           # max tool iterations per agent inner ReAct loop before it must report
+react_loop_cap: 30           # max budget-consuming tool iterations per agent inner ReAct loop
+react_loop_absolute_cap: 60  # hard ceiling on TOTAL iterations incl. budget-free ones (the lead's
+                             # §5.5 plan_and_debate design rounds don't count toward react_loop_cap,
+                             # only toward this runaway backstop; the human ends the debate normally)
 librarian_react_loop_cap: 1  # tighter cap for the librarian literature loop — each search re-sends the
                              # growing 20-paper abstract context, so unbounded refinement is costly
 structured_retry_cap: 2      # attempts for a structured _call (off-schema feedback loop) before raising

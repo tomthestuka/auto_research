@@ -124,8 +124,10 @@ on disk; never invent an entry for data you did not produce.
 
 - The brief's **disposition** — extend an existing package vs. scaffold a new one — and its
   **target package** are already decided for you (by the analyst lead, who read the full
-  `lib/`). Execute that architectural decision as given. If it looks wrong, ask the lead
-  before diverging.
+  `lib/` and settled the design with the human before you were spawned). The brief is a
+  **settled plan** — execute it as given, do not re-open the architecture. If it looks wrong
+  or underspecified, ask the lead (`ask_lead`) before diverging rather than improvising your
+  own design.
 - The brief's proposed checks and tolerances are **advisory**. You and the lead, with full
   `lib/` sight, finalize the real checks. **The tests you commit — not the brief — are
   authoritative.**

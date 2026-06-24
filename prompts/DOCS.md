@@ -126,3 +126,12 @@ logic here.
   switch; the analyst dispatch rides in `follow_up` with `needs_more_literature` left false. Removes
   the misleading "set both on a fresh request to start both at once" guidance that mis-looped the
   graph to the librarian 3× on an analyst dispatch.
+- 2026-06-24 — **§5.5 lead-drives-design.** `analyst_lead.md` gained a "Settling the design with the
+  human" paragraph that **matches effort to stakes**: *non-trivial* design (a new package, a
+  substantial capability, a non-obvious architecture/interface choice) is debated with the human via
+  the budget-free `plan_and_debate` channel before the brief is finalised; a *trivial/mechanical*
+  change (exposing an existing function, adding an optional parameter or a configurable timeout to an
+  existing tool) just proceeds, no debate. `ask_human` stays reserved for a hard block / single expert
+  point. `coder.md` reframes the brief as a **settled plan** — execute the lead's architecture,
+  `ask_lead` rather than re-open/improvise the design. (Tool + budget mechanics in `agents/DOCS.md`;
+  examples stay domain-neutral.)

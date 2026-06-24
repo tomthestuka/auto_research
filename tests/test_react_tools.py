@@ -14,7 +14,7 @@ from auto_research.agents.react import ReadOnlyToolProvider, SandboxToolProvider
 from auto_research.agents.roles import ReviewerAgent
 from auto_research.models import ModelResponse, ToolCall
 from auto_research.sandbox.fs_guard import load_fs_allowlist
-from auto_research.schemas import document_from_file
+from auto_research.schemas import HumanResponse, document_from_file
 
 
 # ── filesystem jail for ReAct agents (todo #3 Stage C) ───────────────────────────
@@ -135,3 +135,98 @@ def test_react_threads_documents_into_subsequent_calls(tmp_path):
     assert [d.sha256 for d in model.documents_per_call[1]] == [doc.sha256]
     # The accumulated documents are returned for the terminal structured call.
     assert [d.sha256 for d in documents] == [doc.sha256]
+
+
+# ── §5.5 budget-free design channel + plan_and_debate tool ──────────────────────
+
+
+class _LoopTools:
+    """A no-op ToolProvider that always succeeds — for budget-accounting tests."""
+
+    def tool_definitions(self):
+        return [{"name": "t", "description": "d",
+                 "input_schema": {"type": "object", "properties": {}, "required": []}}]
+
+    async def execute(self, name, arguments):
+        return ToolOutcome(text="ok")
+
+
+class _LoopModel:
+    """Always emits one tool call (of a fixed name); counts model invocations."""
+
+    def __init__(self, tool_name):
+        self.tool_name = tool_name
+        self.calls = 0
+
+    async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
+                   images=(), documents=(), cache_prefix=False):
+        self.calls += 1
+        return ModelResponse(
+            tool_calls=[ToolCall(id=f"c{self.calls}", name=self.tool_name, arguments={})]
+        )
+
+
+def _react(model, **kwargs):
+    agent = ReviewerAgent(model=model, prompt="p")
+    asyncio.run(agent._react(seed_messages=[], tools=_LoopTools(), action="a", **kwargs))
+
+
+def test_react_paid_tools_bounded_by_cap():
+    """With no free_tools, every iteration consumes budget — identical to range(cap)."""
+    model = _LoopModel("paid")
+    _react(model, cap=3)
+    assert model.calls == 3
+
+
+def test_react_free_tool_does_not_consume_budget():
+    """A free-only iteration never increments the budget; the run is bounded by absolute_cap."""
+    model = _LoopModel("plan_and_debate")
+    _react(model, cap=3, free_tools=frozenset({"plan_and_debate"}), absolute_cap=7)
+    assert model.calls == 7  # budget never spent → only the absolute backstop bounds it
+
+
+def test_react_absolute_cap_defaults_to_cap_when_unset():
+    """Free tools without an explicit absolute_cap stay bounded by cap (no opt-in = unchanged)."""
+    model = _LoopModel("plan_and_debate")
+    _react(model, cap=3, free_tools=frozenset({"plan_and_debate"}))
+    assert model.calls == 3
+
+
+def test_plan_and_debate_exposed_only_with_flag_and_handler(tmp_path):
+    async def handler(query):
+        return HumanResponse(query_id=query.id, answer="ok")
+
+    lead = ReadOnlyToolProvider(
+        roots=[tmp_path], include_plan_and_debate=True, human_handler=handler
+    )
+    assert "plan_and_debate" in _names(lead)
+    # Flag set but no handler → absent (it needs the human channel).
+    assert "plan_and_debate" not in _names(
+        ReadOnlyToolProvider(roots=[tmp_path], include_plan_and_debate=True)
+    )
+    # Handler but no flag (the reviewer) → absent (lead-only).
+    assert "plan_and_debate" not in _names(
+        ReadOnlyToolProvider(roots=[tmp_path], human_handler=handler)
+    )
+
+
+def test_plan_and_debate_routes_plan_and_question_to_human(tmp_path):
+    seen = {}
+
+    async def handler(query):
+        seen["query"] = query
+        return HumanResponse(query_id=query.id, answer="extend heasarc_utils")
+
+    provider = ReadOnlyToolProvider(
+        roots=[tmp_path], include_plan_and_debate=True, human_handler=handler,
+        asked_by="analyst_lead",
+    )
+    out = asyncio.run(provider.execute(
+        "plan_and_debate",
+        {"plan": "extend the acquire package", "question": "which package?", "context": "two options"},
+    ))
+    assert not out.is_error
+    assert "extend heasarc_utils" in out.text
+    assert seen["query"].kind == "clarify_science"
+    assert seen["query"].asked_by == "analyst_lead"
+    assert "extend the acquire package" in seen["query"].context  # plan folded into context

@@ -331,6 +331,9 @@ async def run_research(
             lead.tools = ReadOnlyToolProvider(
                 roots=readonly_roots, retrieval=retrieval,
                 include_data_catalog=True,
+                # §5.5: only the lead gets the budget-free plan_and_debate design channel, to
+                # settle a toolkit design with the human before authoring (decide_authoring).
+                include_plan_and_debate=True,
                 # The paper knowledge base is the reviewer's surface, not the lead's:
                 # the lead investigates toolkit source + the data catalog, not papers.
                 include_text_search=False,

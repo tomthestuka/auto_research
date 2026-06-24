@@ -69,6 +69,12 @@ class ToolProvider(Protocol):
 ASK_HUMAN_TOOL = "ask_human"
 _ASK_HUMAN_KINDS = ("clarify_science", "clarify_code", "blocked")
 
+# Lead-only design channel (§5.5): the analyst lead settles a toolkit design WITH the human
+# before authoring. It routes through the same human_handler as ask_human but is **budget-free**
+# in the ReAct loop (see AgentRole._react free_tools), so the lead can debate the design across
+# as many rounds as it needs to converge without starving its evidence-gathering iterations.
+PLAN_AND_DEBATE_TOOL = "plan_and_debate"
+
 
 def ask_human_tool_def() -> dict:
     """The provider-neutral definition for the shared ``ask_human`` tool."""
@@ -102,6 +108,44 @@ def ask_human_tool_def() -> dict:
                         "A few sentences of supporting facts the human needs to answer — the "
                         "situation and what you already tried."
                     ),
+                },
+            },
+            "required": ["question"],
+        },
+    }
+
+
+def plan_and_debate_tool_def() -> dict:
+    """The definition for the lead-only, budget-free ``plan_and_debate`` design channel (§5.5).
+
+    Distinct from ``ask_human`` so the ReAct loop can treat it as budget-free: the lead settles
+    a toolkit design with the human before authoring, and these rounds do not count against the
+    loop's iteration cap (the human ending the discussion is the stop).
+    """
+    return {
+        "name": PLAN_AND_DEBATE_TOOL,
+        "description": (
+            "Debate a toolkit-design decision with the human to settle it before authoring — "
+            "state your proposed plan or the design choice you are weighing, and ask the one "
+            "thing you need decided (which package to extend vs. start, the interface, the "
+            "validation strategy, a trade-off). Blocks until the human replies. Use it as many "
+            "rounds as you need to converge: it does not consume your tool-iteration budget. "
+            "Settle the design here, then finalise the ToolSpec the coder will follow."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "plan": {
+                    "type": "string",
+                    "description": "Your current proposed design/plan in a few sentences.",
+                },
+                "question": {
+                    "type": "string",
+                    "description": "The single design decision you want the human to settle.",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "A few supporting facts the human needs — options considered and their trade-offs.",
                 },
             },
             "required": ["question"],
@@ -196,6 +240,35 @@ async def execute_ask_human(
         kind=kind,
         question=str(arguments.get("question") or "(no question provided)"),
         context=str(arguments.get("context") or ""),
+        asked_by=asked_by or "agent",
+        model=model or "",
+    )
+    response = await resolve_human(human_handler, query)
+    return ToolOutcome(text=response.answer or "(human gave no answer)")
+
+
+async def execute_plan_and_debate(
+    human_handler: Any, asked_by: str, arguments: Mapping[str, Any], *, model: str = ""
+) -> ToolOutcome:
+    """Route a lead design-debate turn to the human (§5.5).
+
+    Folds the proposed ``plan`` into the question so the human sees the design being weighed,
+    then blocks on the injected handler (same path as ``ask_human`` — ``resolve_human`` raises
+    ``HumanInputRequired`` headless). The budget-free treatment lives in the ReAct loop, not
+    here; this just delivers the turn. Reuses the ``clarify_science`` HumanQuery kind.
+    """
+    from auto_research.hitl import resolve_human
+    from auto_research.schemas import HumanQuery
+
+    plan = str(arguments.get("plan") or "").strip()
+    question = str(arguments.get("question") or "(no question provided)")
+    context = str(arguments.get("context") or "")
+    if plan:
+        context = f"Proposed design/plan: {plan}\n\n{context}".strip()
+    query = HumanQuery(
+        kind="clarify_science",
+        question=question,
+        context=context,
         asked_by=asked_by or "agent",
         model=model or "",
     )
@@ -425,6 +498,7 @@ class ReadOnlyToolProvider:
         web_source: Any | None = None,
         include_text_search: bool = True,
         include_data_catalog: bool = False,
+        include_plan_and_debate: bool = False,
         human_handler: Any | None = None,
         asked_by: str = "agent",
         model: str = "",
@@ -435,6 +509,9 @@ class ReadOnlyToolProvider:
         # The analyst lead (not the reviewer) gets the read-only data_catalog tool so it can
         # check local data availability before deciding to author an acquire tool (§9.10).
         self.include_data_catalog = include_data_catalog
+        # The analyst lead (only) gets the budget-free plan_and_debate design channel (§5.5),
+        # so it can settle a toolkit design with the human before authoring. Needs human_handler.
+        self.include_plan_and_debate = include_plan_and_debate
         # When a human_handler is wired, expose the shared ask_human tool (§9.7).
         self.human_handler = human_handler
         self.asked_by = asked_by
@@ -568,6 +645,8 @@ class ReadOnlyToolProvider:
             definitions.append(data_catalog_tool_def())
         if self.human_handler is not None:
             definitions.append(ask_human_tool_def())
+            if self.include_plan_and_debate:
+                definitions.append(plan_and_debate_tool_def())
         return definitions
 
     def _allowed(self, path: Path) -> bool:
@@ -583,6 +662,10 @@ class ReadOnlyToolProvider:
             return await execute_data_catalog(arguments)
         if name == ASK_HUMAN_TOOL:
             return await execute_ask_human(
+                self.human_handler, self.asked_by, arguments, model=self.model
+            )
+        if name == PLAN_AND_DEBATE_TOOL:
+            return await execute_plan_and_debate(
                 self.human_handler, self.asked_by, arguments, model=self.model
             )
         if name in ("read_file", "list_dir"):

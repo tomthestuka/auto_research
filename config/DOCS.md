@@ -84,7 +84,11 @@ role or swapping a provider is a YAML edit; no Python change.
   `evaluate_search_results()` is a stub.
 - `orchestration.yaml.tool_retry_cap` — legacy accepted cap for old tool-execution
   call sites; the current worker ReAct loop self-corrects inside `react_loop_cap`.
-- `orchestration.yaml.react_loop_cap` — general inner ReAct tool-call cap.
+- `orchestration.yaml.react_loop_cap` — general inner ReAct cap; bounds the
+  budget-*consuming* iterations (those calling a non-free tool).
+- `orchestration.yaml.react_loop_absolute_cap` — hard ceiling on *total* ReAct iterations
+  incl. budget-free ones (the lead's §5.5 `plan_and_debate` design rounds don't count toward
+  `react_loop_cap`, only toward this runaway backstop). Defaults to 60.
 - `orchestration.yaml.librarian_react_loop_cap` — tighter cap for the literature loop,
   whose repeated searches re-send a growing paper context.
 - `orchestration.yaml.structured_retry_cap` — bounded off-schema structured-output retry
@@ -160,3 +164,7 @@ role or swapping a provider is a YAML edit; no Python change.
   the tool's internal timeout, so a slow HEASARC download never completed. A package's
   `<domain>_utils/tool_config.yaml` (`call_timeout_s` per tool) overrides this, no upper clamp;
   read by `ToolkitRegistry.call_timeout_ceiling` (see `sandbox/DOCS.md`).
+- 2026-06-24 — Added `orchestration.yaml.react_loop_absolute_cap` (default 60, fix-list #5.5):
+  the hard ceiling on total ReAct iterations. `react_loop_cap` (30) now bounds only the
+  budget-consuming iterations; the analyst lead's budget-free `plan_and_debate` design rounds are
+  uncounted against it and bounded only by this backstop.

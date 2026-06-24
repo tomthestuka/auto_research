@@ -12,7 +12,11 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ValidationError
 
 from auto_research.agents.prompts import PromptRole, load_prompt
-from auto_research.agents.react import SandboxToolProvider, SourceToolProvider
+from auto_research.agents.react import (
+    PLAN_AND_DEBATE_TOOL,
+    SandboxToolProvider,
+    SourceToolProvider,
+)
 from auto_research.consensus import IODebateToConverge
 from auto_research.monitor import RunMonitor
 from auto_research.models import (
@@ -269,6 +273,8 @@ class AgentRole:
         cap: int,
         images: Sequence[FigureRef] = (),
         on_result=None,
+        free_tools: frozenset[str] = frozenset(),
+        absolute_cap: int | None = None,
     ) -> tuple[list, list[FigureRef], list[DocumentRef]]:
         """Run an inner ReAct loop: gather evidence by calling tools to completion.
 
@@ -277,7 +283,18 @@ class AgentRole:
         ``tools.execute(name, arguments)``; the assistant ``tool_use`` turn and the
         ``tool_result`` turn are appended so the model sees its own results
         in-context and can chain dependent calls. The loop ends when the model
-        emits no tool calls (it's done) or ``cap`` iterations are reached.
+        emits no tool calls (it's done) or the budget is spent.
+
+        Budget: ``cap`` bounds the **budget-consuming** iterations — those calling ≥1
+        tool NOT in ``free_tools``. ``free_tools`` (default empty) are budget-free: an
+        iteration that calls only free tools does not count toward ``cap``. This lets the
+        analyst lead debate a toolkit design with the human (``plan_and_debate``, §5.5)
+        across as many rounds as it needs to converge without starving the evidence-
+        gathering iterations the same loop is for; the human ending the debate is the
+        normal stop. With ``free_tools`` empty the loop is identical to ``range(cap)``.
+        ``absolute_cap`` (config ``react_loop_absolute_cap``, passed only by the lead's
+        design debate) is a hard ceiling on TOTAL iterations — the runaway-free-tool backstop;
+        when ``None`` it defaults to ``cap`` (so non-opt-in callers are unchanged).
 
         Returns ``(messages, figures, documents)``: the full trajectory (seed + all
         turns) for a terminal :meth:`_call_over_messages`, the figures produced by
@@ -291,7 +308,11 @@ class AgentRole:
         figures: list[FigureRef] = []
         documents: list[DocumentRef] = []
         seen_docs: set[str] = set()
-        for iteration in range(max(1, cap)):
+        budget_cap = max(1, cap)
+        absolute_ceiling = max(budget_cap, absolute_cap) if absolute_cap is not None else budget_cap
+        budget_used = 0
+        iteration = 0
+        while budget_used < budget_cap and iteration < absolute_ceiling:
             response = await self.model.call(
                 messages,
                 tools=tools.tool_definitions(),
@@ -364,13 +385,22 @@ class AgentRole:
                     },
                 )
             messages.append(ToolResultMessage(results=result_parts))
+            # Budget accounting: an iteration consumes budget unless EVERY tool it called is
+            # free (e.g. plan_and_debate). Free-only iterations advance `iteration` (so the
+            # absolute backstop still bounds them) but not `budget_used`.
+            consumed_budget = any(call.name not in free_tools for call in response.tool_calls)
+            if consumed_budget:
+                budget_used += 1
+            iteration += 1
             await self._record(
                 f"{self.role}.{action}.tools",
                 level=7,
-                summary=f"{self.role} ran {len(result_parts)} tool(s) (iteration {iteration + 1})",
+                summary=f"{self.role} ran {len(result_parts)} tool(s) (iteration {iteration})",
                 data={
-                    "iteration": iteration + 1,
+                    "iteration": iteration,
                     "cap": cap,
+                    "budget_used": budget_used,
+                    "budget_free": not consumed_budget,
                     "calls": [
                         {"name": p.name, "is_error": p.is_error, "chars": len(p.content)}
                         for p in result_parts
@@ -1096,6 +1126,11 @@ class AnalystLeadAgent(AgentRole):
         messages, _, _ = await self._react(
             seed_messages=seed, tools=self.tools, action="decide_authoring",
             cap=_react_loop_cap(),
+            # §5.5: the lead settles the toolkit design with the human via the budget-free
+            # plan_and_debate channel; those rounds don't count against react_loop_cap, only
+            # against the larger react_loop_absolute_cap backstop.
+            free_tools=frozenset({PLAN_AND_DEBATE_TOOL}),
+            absolute_cap=_react_loop_absolute_cap(),
         )
         return await self._call_over_messages(messages, AuthoringDecision, action="decide_authoring")
 
@@ -1229,6 +1264,18 @@ def _librarian_react_loop_cap() -> int:
     """
     cfg = _orchestration_config()
     return int(cfg.get("librarian_react_loop_cap", cfg.get("react_loop_cap", 12)))
+
+
+def _react_loop_absolute_cap() -> int:
+    """Hard ceiling on TOTAL ReAct iterations, incl. budget-free ones (orchestration.yaml).
+
+    Key: ``react_loop_absolute_cap``. Defaults to 60. ``react_loop_cap`` bounds the
+    budget-consuming iterations; budget-free tools (``plan_and_debate``, §5.5) are uncounted
+    against that cap, so this larger ceiling backstops a runaway free-tool loop (the human
+    ending the design debate is the normal stop). Only the analyst lead's design debate opts
+    in; every other ReAct loop is bound by ``react_loop_cap`` alone.
+    """
+    return int(_orchestration_config().get("react_loop_absolute_cap", 60))
 
 
 @lru_cache(maxsize=1)

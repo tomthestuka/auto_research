@@ -214,3 +214,7 @@ verdicts, two iteration counters, and the cap.
   message rather than silently routing agents to a stale path. `builder.py`'s no-registry fallback
   (Studio/standalone) reads the root from `load_orchestration_config()` via a lazy import (keeps
   builder ⇍ runtime acyclic) instead of the hardcoded literal.
+- 2026-06-24 — **§5.5 lead design channel wiring.** `runtime.py` now builds the analyst lead's
+  `ReadOnlyToolProvider` with `include_plan_and_debate=True`, so the lead (only) gets the
+  budget-free `plan_and_debate` channel to settle a toolkit design with the human before
+  authoring. Reviewer/co-lead providers unchanged. (Loop/tool mechanics in `agents/DOCS.md`.)
