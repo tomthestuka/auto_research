@@ -75,10 +75,33 @@ def test_build_default_preflight_registers_known_checks():
     names = build_default_preflight().names()
     assert "required_env" in names
     assert "author_reviewer_decorrelation" in names
+    assert "toolkit_root_configured" in names
     assert "toolkit_git_identity" in names
     assert "toolkit_branch_clean" in names
+    # toolkit_root must be validated before the git-identity check that assumes it exists.
+    assert names.index("toolkit_root_configured") < names.index("toolkit_git_identity")
     # The human-channel ping is only registered when a handler is resolved.
     assert "human_channel" not in names
+
+
+def test_check_toolkit_root_configured(tmp_path, monkeypatch):
+    import auto_research.sandbox.merge_flow as mf
+
+    # Configured + existing → passes.
+    monkeypatch.setattr(mf, "_orchestration_config", lambda: {"toolkit_root": str(tmp_path)})
+    mf.check_toolkit_root_configured()
+
+    # Missing key → fails loudly naming the key.
+    monkeypatch.setattr(mf, "_orchestration_config", lambda: {})
+    with pytest.raises(RuntimeError, match="toolkit_root is not set"):
+        mf.check_toolkit_root_configured()
+
+    # Set but not a directory → fails.
+    monkeypatch.setattr(
+        mf, "_orchestration_config", lambda: {"toolkit_root": str(tmp_path / "nope")}
+    )
+    with pytest.raises(RuntimeError, match="not a directory"):
+        mf.check_toolkit_root_configured()
 
 
 def test_build_default_preflight_registers_channel_check_when_handler_present():

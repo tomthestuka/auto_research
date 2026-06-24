@@ -137,7 +137,7 @@ def _default_graph():
     max_iterations = int(orch.get("max_iterations", 3))
     debate_max_rounds = int(orch.get("debate_max_rounds", 3))
     tool_retry_cap = int(orch.get("tool_retry_cap", 3))
-    toolkit_root = Path(orch.get("toolkit_root", "/data/fzhou/research_toolkit"))
+    toolkit_root = Path(orch["toolkit_root"])  # required; validated by the launch preflight
     disabled_tools: list[str] = orch.get("disabled_tools") or []
 
     storage = Storage()
@@ -260,7 +260,7 @@ async def run_research(
         max_iterations = int(orch.get("max_iterations", 3))
     debate_max_rounds = int(orch.get("debate_max_rounds", 3))
     tool_retry_cap = int(orch.get("tool_retry_cap", 3))
-    toolkit_root = Path(orch.get("toolkit_root", "/data/fzhou/research_toolkit"))
+    toolkit_root = Path(orch["toolkit_root"])  # required; validated by the launch preflight
     analyze_env_str = orch.get("analyze_env")
     analyze_env = Path(analyze_env_str) if analyze_env_str else None
     analyze_ini_sh: str | None = orch.get("analyze_ini_sh") or None

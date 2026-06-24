@@ -630,3 +630,15 @@ the hook mapping a fake-model verdict — no live LLM).
   are denied to the coder. Env-gated live battery test `tests/test_live_fs_guard.py`
   (`AUTO_RESEARCH_LIVE_FS_GUARD_TESTS=1`) launches a real coder and asserts the hook actually fires.
   Bash confinement is best-effort (command-string only) — OS jail completes it (CLAUDE.md §12/§13).
+- 2026-06-24 — **Coder path-hints (fix-list #2).** `_build_structure_context` now takes the author's
+  actual working dir (`worktree`, passed at the call site) instead of `toolkit_root`, states it up
+  front as `# Working directory (your cwd): <abs>`, and prints the template layout as **absolute**
+  paths (was `relative_to`, with no root stated — the coder used to guess `/root/…` → EACCES →
+  `find /`). Mission observation paths (validation ObsIDs) are reframed as the absolute dirs they are.
+  New launch preflight `check_toolkit_root_configured` (registered before `check_toolkit_git_identity`):
+  asserts `toolkit_root` is set in `config/orchestration.yaml` and is a directory, failing loudly
+  instead of letting a stale default mask a misconfig. New env-gated live test
+  `tests/test_live_path_hints.py` (`AUTO_RESEARCH_LIVE_PATH_HINT_TESTS=1`): seeds a real coder with
+  the actual structure context (paths NOT restated in the prompt) and asserts — from the recorded
+  tool stream — a clean `ls` of the toolkit root + every obsdb path at their absolute paths, with no
+  hunting. Unit coverage in `test_merge_flow.py`/`test_preflight.py`.

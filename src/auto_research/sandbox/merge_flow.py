@@ -72,6 +72,31 @@ def _resolve_toolkit_root() -> Path:
     return Path(_orchestration_config().get("toolkit_root", "")).expanduser()
 
 
+def check_toolkit_root_configured() -> None:
+    """Launch-time preflight (no LLM): assert ``toolkit_root`` is configured and is a directory.
+
+    Every runtime path hint derives from ``config/orchestration.yaml: toolkit_root`` — the
+    coder's structure context (its cwd + the template layout), the reviewer/lead read-only
+    roots, and the ``ToolkitRegistry`` discovery root. A missing or wrong key would send
+    agents hunting for the checkout (and silently mask the fault behind a stale default), so
+    we fail loudly at launch with a precise message. Runs before ``check_toolkit_git_identity``
+    so a misconfigured root reports as such rather than as a confusing "not a git checkout".
+    Registered in ``auto_research.preflight``.
+    """
+    raw = str(_orchestration_config().get("toolkit_root", "")).strip()
+    if not raw:
+        raise RuntimeError(
+            "toolkit_root is not set in config/orchestration.yaml — set it to the "
+            "research_toolkit checkout path (where the runtime authors tools)."
+        )
+    root = Path(raw).expanduser()
+    if not root.is_dir():
+        raise RuntimeError(
+            f"toolkit_root {str(root)!r} (config/orchestration.yaml) is not a directory — "
+            "set it to the research_toolkit checkout path."
+        )
+
+
 def check_toolkit_git_identity() -> None:
     """Launch-time preflight (no LLM): assert ``research_toolkit`` has a git commit identity.
 
@@ -180,33 +205,47 @@ def _resolve_coder_provider() -> str:
 # ----------------------------------------------------------------------------
 
 
-def _build_structure_context(toolkit_root: Path) -> str:
+def _build_structure_context(workdir: Path) -> str:
     """Assemble the local-structure context the author is seeded with.
 
     Runtime-safe sources only (CLAUDE.md §4): the real ``xspec_utils`` template layout +
     its top-level source, plus the configured mission observation paths. Never reads any
     ``DOCS.md``/``CLAUDE.md``.
+
+    ``workdir`` is the author's actual working directory (its cwd) — the ``research_toolkit``
+    checkout it edits (``toolkit_root`` itself in direct-branch mode, the worktree otherwise).
+    Its absolute path is stated up front and every template path is printed **absolute**, so
+    the author never has to guess the toolkit root or hunt for the validation data: it used to
+    receive relative paths with no root stated and burned turns probing wrong roots
+    (``/root/…`` → EACCES → ``find /``). The mission observation paths are the absolute
+    locations of the validation ObsIDs the tool's tests run against.
     """
-    parts: list[str] = []
-    template = Path(toolkit_root) / "xspec_utils"
+    workdir = Path(workdir)
+    parts: list[str] = [
+        f"# Working directory (your cwd): {workdir}\n"
+        "This absolute path is the research_toolkit checkout you edit; every tool package "
+        "lives directly under it, and the paths below are absolute — use them verbatim."
+    ]
+    template = workdir / "xspec_utils"
     if template.is_dir():
         tree = sorted(
-            str(p.relative_to(toolkit_root))
+            str(p)
             for p in template.rglob("*")
             if p.is_file() and "__pycache__" not in p.parts
         )
-        parts.append("# Template package layout (mirror this exactly):\n" + "\n".join(tree))
+        parts.append("# Template package layout (mirror xspec_utils exactly):\n" + "\n".join(tree))
         for rel in ("xspec_utils/__init__.py", "xspec_utils/skills/__init__.py"):
-            src = Path(toolkit_root) / rel
+            src = workdir / rel
             if src.is_file():
-                parts.append(f"# {rel}\n```python\n{src.read_text(encoding='utf-8')}\n```")
+                parts.append(f"# {src}\n```python\n{src.read_text(encoding='utf-8')}\n```")
 
     obs = _observation_paths()
     if obs:
         lines = "\n".join(f"- {mission}: {path}" for mission, path in obs.items())
         parts.append(
-            "# Mission observation paths (validation ObsIDs live under these; synthetic "
-            "fixtures are marked `synth…` ObsIDs, never toolkit code):\n" + lines
+            "# Mission observation paths — your validation ObsIDs live under these absolute "
+            "directories (synthetic fixtures are marked `synth…` ObsIDs, never toolkit code):\n"
+            + lines
         )
     return "\n\n".join(parts)
 
@@ -753,7 +792,7 @@ async def propose_and_pr(
         branch = f"tool/{tool_spec.proposed_tool_name}-{uuid.uuid4().hex[:8]}"
         worktree = worktree_factory(toolkit_root, worktree_base, branch)
 
-    structure_context = _build_structure_context(toolkit_root)
+    structure_context = _build_structure_context(worktree)
     system_prompt = load_prompt("coder")
     escalation_server = _make_escalation_server(
         _make_ask_lead_handler(lead, monitor=monitor),

@@ -47,7 +47,14 @@ carried by **reference** (`FigureRef`), never embedded
   returns stored PDF paths separately for reviewer `DocumentRef` attachments.
 - `ReviewVerdict.needs_more_literature` and
   `ReviewVerdict.needs_analysis_rework` are the schema-level flags used by the
-  Phase 1 feedback edges.
+  Phase 1 feedback edges. Each controls **one** loop edge: `needs_more_literature`
+  is the literature **re-loop** switch (the graph always runs an initial literature
+  pass before the first verdict, so it is set true only to close a real literature
+  gap; left false it advances to analysis), and `needs_analysis_rework` is the
+  analysis **re-loop** switch. The dispatch text rides in `follow_up` regardless of
+  flag — `graph._build_task` hands it to the analysis stage even on the first verdict —
+  so dispatching the analysts means writing `follow_up` and keeping
+  `needs_more_literature` false.
 - `AnalystToolRequest` (Phase 2) is the **worker→lead** message an analyst worker raises on
   its `AnalystReport.tool_request` when the toolkit lacks a capability or an in-use tool
   misbehaves (CLAUDE.md §9.3). It carries only what the worker is qualified to state:
@@ -236,3 +243,10 @@ carried by **reference** (`FigureRef`), never embedded
   reviewer opened via `open_paper` and actually used as evidence. Kept as `list[str]` (not
   `list[Path]`) for OpenAI-strict safety; resolved to `Path` and intersected with the paths
   actually opened at the runtime boundary, then staged + hyperlinked as the report's References.
+- 2026-06-24 — `ReviewVerdict.needs_more_literature`/`needs_analysis_rework` field descriptions
+  rewritten (fix-list #1) to state the one-edge-each semantics: `needs_more_literature` is the
+  literature **re-loop** switch (the initial literature pass always runs before the first verdict,
+  so it is set true only to close a real literature gap; left false it advances to analysis) and
+  `needs_analysis_rework` is the analysis re-loop switch. Drops the misleading "set both on a fresh
+  request to start both at once" line that drove a librarian misloop. Interfaces note updated to
+  match; no schema-shape change.

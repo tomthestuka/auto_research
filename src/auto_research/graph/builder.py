@@ -135,7 +135,15 @@ def build_graph(
     if max_iterations < 1:
         raise ValueError("max_iterations must be at least 1")
 
-    _registry = registry or ToolkitRegistry(Path("/data/fzhou/research_toolkit"))
+    if registry is not None:
+        _registry = registry
+    else:
+        # Standalone/Studio path (real runs always inject a registry). Read the toolkit root
+        # from config rather than a hardcoded literal so it stays portable; lazy import keeps
+        # builder ⇍ runtime (runtime imports build_graph) acyclic.
+        from auto_research.graph.runtime import load_orchestration_config
+
+        _registry = ToolkitRegistry(Path(load_orchestration_config()["toolkit_root"]))
     consensus_strategy = consensus or DebateToConverge(
         max_rounds=max_iterations, monitor=monitor, registry=_registry
     )

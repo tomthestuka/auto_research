@@ -119,3 +119,10 @@ logic here.
   package `tool_config.yaml` (`call_timeout_s`; overrides the `orchestration.yaml`
   `sandbox_call_timeout_s` default, no upper clamp). Pairs with the auto_research-side mechanism
   (`ToolkitRegistry.call_timeout_ceiling` + `SandboxToolProvider`, see `sandbox/DOCS.md`).
+- 2026-06-24 — `reviewer.md` "How you dispatch" rewritten to teach the **flag→edge mapping**
+  (fix-list #1): the graph always runs an initial literature pass before the first verdict, so
+  `needs_more_literature` is the literature **re-loop** switch (set true only for a real literature
+  gap; leave false to advance to analysis) and `needs_analysis_rework` is the analysis re-loop
+  switch; the analyst dispatch rides in `follow_up` with `needs_more_literature` left false. Removes
+  the misleading "set both on a fresh request to start both at once" guidance that mis-looped the
+  graph to the librarian 3× on an analyst dispatch.

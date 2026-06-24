@@ -207,3 +207,10 @@ verdicts, two iteration counters, and the cap.
   stack (observed: `ModuleNotFoundError: No module named 'astropy'`). A bare `python`/`pip`
   inside `bash_exec` is now the same interpreter the toolkit tools invoke directly. Guarded
   by `tests/test_sandbox.py::TestBashExecInterpreterConsistency`.
+- 2026-06-24 — **Removed the hardcoded `toolkit_root` fallbacks (fix-list #2).** `runtime.py`
+  (both graph builders) now read `orch["toolkit_root"]` directly — the literal
+  `"/data/fzhou/research_toolkit"` default is gone; the launch preflight's new
+  `check_toolkit_root_configured` is the clean gate, so a missing key fails there with a precise
+  message rather than silently routing agents to a stale path. `builder.py`'s no-registry fallback
+  (Studio/standalone) reads the root from `load_orchestration_config()` via a lazy import (keeps
+  builder ⇍ runtime acyclic) instead of the hardcoded literal.

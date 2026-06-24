@@ -53,14 +53,23 @@ class Preflight:
         Each check is run independently so one failure never masks another; if any failed,
         the collected messages are raised together. Sync checks are called directly; async
         ones (e.g. the human-channel ping that awaits a real reply) are awaited.
+
+        One progress line is printed per check (the project has no logging framework and the
+        preflight runs before the monitor exists): ``[preflight] <name> …`` before, then
+        ``ok``/``FAILED`` after. The in-flight ``…`` makes a blocking check legible — most
+        usefully the ``human_channel`` ping, which would otherwise hang silently waiting for
+        a human reply.
         """
         failures: list[str] = []
         for name, check in self._checks:
+            print(f"  [preflight] {name} …", end="", flush=True)
             try:
                 result = check()
                 if inspect.isawaitable(result):
                     await result
+                print(" ok", flush=True)
             except Exception as exc:  # noqa: BLE001 — any failure is a launch-blocking fault
+                print(" FAILED", flush=True)
                 failures.append(f"[{name}] {exc}")
         if failures:
             raise PreflightError(
@@ -82,6 +91,7 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     from auto_research.sandbox.merge_flow import (
         check_toolkit_branch_clean,
         check_toolkit_git_identity,
+        check_toolkit_root_configured,
     )
     from auto_research.sandbox.review import check_author_reviewer_decorrelation
     from auto_research.storage import check_database_health
@@ -90,6 +100,7 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     preflight.register("required_env", check_required_env)
     preflight.register("database_health", check_database_health)
     preflight.register("author_reviewer_decorrelation", check_author_reviewer_decorrelation)
+    preflight.register("toolkit_root_configured", check_toolkit_root_configured)
     preflight.register("toolkit_git_identity", check_toolkit_git_identity)
     preflight.register("toolkit_branch_clean", check_toolkit_branch_clean)
     preflight.register("catalog_health", check_catalog_health)

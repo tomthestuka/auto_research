@@ -10,6 +10,7 @@ import pytest
 
 from auto_research.sandbox.merge_flow import (
     HumanInputRequired,
+    _build_structure_context,
     _make_ask_human_handler,
     _make_ask_lead_handler,
     propose_and_pr,
@@ -110,6 +111,30 @@ class _RecordingMonitor:
 
     def of(self, name):
         return [e for e in self.events if e["event"] == name]
+
+
+def test_structure_context_states_absolute_cwd_and_paths(tmp_path):
+    """The author's structure context must name its cwd and print template paths absolute
+    (todo #2) so it never guesses the toolkit root. ``workdir`` is the actual checkout it
+    edits (toolkit_root in direct mode, the worktree otherwise)."""
+    pkg = tmp_path / "xspec_utils"
+    (pkg / "skills").mkdir(parents=True)
+    (pkg / "lib").mkdir()
+    (pkg / "__init__.py").write_text("# init\n")
+    (pkg / "skills" / "__init__.py").write_text("TOOL_MANIFEST = {}\n")
+    lib_file = pkg / "lib" / "xspec_help.py"
+    lib_file.write_text("def load_data(): ...\n")
+
+    ctx = _build_structure_context(tmp_path)
+
+    # The cwd is stated up front, as an absolute path the author can use verbatim.
+    assert f"Working directory (your cwd): {tmp_path}" in ctx
+    # The template layout lists ABSOLUTE paths (not bare relative ones).
+    assert str(lib_file) in ctx
+    # Every listed template line sits under the absolute workdir.
+    for line in ctx.splitlines():
+        if line.endswith(".py") and "/" in line and not line.startswith("#"):
+            assert line.startswith(str(tmp_path)), line
 
 
 def test_drive_author_streams_sdk_blocks_to_monitor():

@@ -51,6 +51,8 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `storage.check_database_health` (the runtime SQLite DB exists with its full schema,
   created if absent — so a fresh run's first `text_search` can't hit `no such table: papers`),
   `sandbox.review.check_author_reviewer_decorrelation`,
+  `sandbox.merge_flow.check_toolkit_root_configured` (`toolkit_root` is set in
+  `config/orchestration.yaml` and is a directory — every runtime path hint derives from it),
   `sandbox.merge_flow.check_toolkit_git_identity` (the `research_toolkit` checkout has a git
   commit identity, so a runtime tool commit can't fail mid-flow),
   `observations.check_catalog_health` (every mission's local data catalog is healthy via
@@ -145,3 +147,10 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   registered right after `required_env`). It ensures the runtime SQLite DB exists with its
   full schema, creating it if absent, so a fresh run's first `text_search` no longer dies on
   `no such table: papers`.
+- 2026-06-24 — Added the `toolkit_root_configured` preflight check (fix-list #2,
+  `sandbox.merge_flow.check_toolkit_root_configured`, registered before `toolkit_git_identity`):
+  fails loudly when `toolkit_root` is unset/non-existent rather than letting a stale hardcoded
+  default mask the misconfig. `Preflight.run_checklist` now prints one progress line per check
+  (`[preflight] <name> … ok/FAILED`) — the project has no logging framework and the preflight
+  predates the monitor, so `print` matches convention; the in-flight `…` makes the blocking
+  `human_channel` ping legible instead of a silent hang.

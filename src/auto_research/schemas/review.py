@@ -29,14 +29,19 @@ class ReviewVerdict(MessageModel):
     )
     needs_more_literature: bool = Field(
         default=False,
-        description="Set true to send follow_up to the librarian team for a literature pass.",
+        description=(
+            "The literature re-loop switch. The graph always runs an initial literature "
+            "pass before the first verdict, so set this true only when the gathered papers "
+            "leave a genuine literature gap that another librarian pass would close. Leave "
+            "it false to advance to analysis — analysis is the automatic next step once "
+            "literature is adequate, including when dispatching the analysts for the first time."
+        ),
     )
     needs_analysis_rework: bool = Field(
         default=False,
         description=(
-            "Set true to send follow_up to the analyst team for data work or revision. "
-            "Set this together with needs_more_literature on a fresh request to start both "
-            "teams at once."
+            "The analysis re-loop switch. After reviewing an analysis report, set this true "
+            "to send follow_up to the analyst team for more data work or revision."
         ),
     )
     follow_up: str | None = Field(
