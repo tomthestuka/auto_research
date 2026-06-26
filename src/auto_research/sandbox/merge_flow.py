@@ -428,22 +428,28 @@ def approve_edit(worktree: Path, *, message: str) -> str:
 async def _reset_direct_tree(
     toolkit_root: Path,
     *,
+    base_ref: str | None = None,
     artifact_dir: Path | None,
     monitor: Any | None = None,
     tool_spec: Any | None = None,
 ) -> None:
-    """Reset the direct-branch toolkit checkout to HEAD after a **non-committed** authoring
-    attempt (CLAUDE.md §9.9). The only place besides :func:`approve_edit` the runtime touches
-    the toolkit tree — its counterpart on the failure path: a failed attempt leaves the live
-    ``toolkit_root`` checkout dirty (modified ``lib``/``TOOL_MANIFEST`` + new untracked files),
-    which would both surface a phantom, un-registered tool to re-running workers and trip the
-    next attempt's clean-tree precondition. Before discarding, the attempt's full diff (tracked
-    edits **and** new untracked file content) is saved as a ``.patch`` under ``artifact_dir``
-    (the run's authoring dir, outside the toolkit) so the rejected code stays inspectable
-    without a dirty live tree. Best-effort: any failure is logged and swallowed — cleanup must
-    never mask the caller's result or re-raise.
+    """Reset the direct-branch toolkit checkout to ``base_ref`` after a **non-committed**
+    authoring attempt (CLAUDE.md §9.9). The only place besides :func:`approve_edit` the runtime
+    touches the toolkit tree — its counterpart on the failure path: a failed attempt leaves the
+    live ``toolkit_root`` checkout dirty (modified ``lib``/``TOOL_MANIFEST`` + new untracked
+    files), and — if the coder ran git itself despite the deny-rule — with an illegitimate
+    commit. ``base_ref`` is HEAD recorded at the attempt's start (per-attempt, by
+    :func:`propose_and_pr`); resetting to it (rather than ``HEAD``) **drops any coder commit**
+    while preserving an earlier round's successful commit, and clears the dirty tree so
+    re-running workers never see a phantom tool and the next attempt's clean-tree precondition
+    holds. Falls back to ``HEAD`` when ``base_ref`` is unset. Before discarding, the attempt's
+    full diff against ``base_ref`` (tracked edits, new untracked content, **and** any coder
+    commit) is saved as a ``.patch`` under ``artifact_dir`` (the run's authoring dir, outside the
+    toolkit) so the rejected work stays inspectable. Best-effort: any failure is logged and
+    swallowed — cleanup must never mask the caller's result or re-raise.
     """
     toolkit_root = Path(toolkit_root)
+    reset_to = base_ref or "HEAD"
     try:
         patch_path: Path | None = None
         if artifact_dir is not None:
@@ -451,20 +457,21 @@ async def _reset_direct_tree(
             # Never write the artifact inside the toolkit — it would re-dirty the tree.
             ad, tr = artifact_dir.resolve(), toolkit_root.resolve()
             if ad != tr and tr not in ad.parents:
-                # Stage everything so the diff captures new untracked files too; the
-                # ``reset --hard`` below immediately unstages it, so this is safe.
+                # Stage everything so the diff captures new untracked files too; diff against
+                # ``reset_to`` so a coder commit is captured as well. The ``reset --hard`` below
+                # immediately unstages it, so staging here is safe.
                 _git_in(toolkit_root, "add", "-A")
-                diff = _git_in(toolkit_root, "diff", "--cached", "HEAD")
+                diff = _git_in(toolkit_root, "diff", "--cached", reset_to)
                 if diff.strip():
                     artifact_dir.mkdir(parents=True, exist_ok=True)
                     sid = getattr(tool_spec, "id", None) or "tool"
                     patch_path = artifact_dir / f"tool_author_failed_{sid}_{uuid.uuid4().hex[:8]}.patch"
                     patch_path.write_text(diff, encoding="utf-8")
-        _git_in(toolkit_root, "reset", "--hard", "HEAD")
+        _git_in(toolkit_root, "reset", "--hard", reset_to)
         _git_in(toolkit_root, "clean", "-fd")
         await _emit(
             monitor, "coder.tree_reset", level=4,
-            summary=f"reset {toolkit_root.name} to HEAD after a non-committed authoring attempt",
+            summary=f"reset {toolkit_root.name} to {reset_to[:10]} after a non-committed authoring attempt",
             data={"patch": str(patch_path) if patch_path else None},
         )
     except Exception as exc:  # noqa: BLE001 — cleanup must never mask the caller's result
@@ -615,6 +622,13 @@ def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, esca
             "WebSearch", "WebFetch",
             "mcp__escalation__ask_lead", "mcp__escalation__ask_human",
         ],
+        # The coder never issues git (§9.9): staging/commit is the runtime's job
+        # (``approve_edit`` only, after gate-pass ∧ review-pass). Deny-rules are evaluated
+        # first and apply under acceptEdits; prefix-matching is best-effort (pipes/subshells
+        # can slip), so the per-attempt base-ref reset (``_reset_direct_tree``) is the robust
+        # backstop that drops any commit a coder still lands. Scoped to the coder by being on
+        # the coder's own options, not global settings.
+        disallowed_tools=["Bash(git:*)", "Bash(git)"],
         max_turns=max_turns,
     )
     if env:  # full sourced env (analyst conda + HEASoft); omit when unset so the SDK inherits.
@@ -784,10 +798,15 @@ async def propose_and_pr(
     # never switches branches. On a non-committed terminal exit the tree is auto-reset to HEAD
     # in ``finally`` (a patch artifact is saved first). The isolated-worktree path stays the
     # default for tests + future use.
+    base_ref: str | None = None
     if direct_branch is not None:
         check_toolkit_branch_clean(toolkit_root, direct_branch)
         branch = direct_branch
         worktree = toolkit_root
+        # Record HEAD for THIS attempt (per-attempt, not once at launch): a failed authoring
+        # resets the tree back to exactly here (§9.9), dropping any commit the coder lands —
+        # while preserving an earlier round's successful approve_edit commit in a multi-tool run.
+        base_ref = _git_in(toolkit_root, "rev-parse", "HEAD").strip()
     else:
         branch = f"tool/{tool_spec.proposed_tool_name}-{uuid.uuid4().hex[:8]}"
         worktree = worktree_factory(toolkit_root, worktree_base, branch)
@@ -807,6 +826,24 @@ async def propose_and_pr(
 
     async def _gated() -> GateReport:
         await _emit(monitor, "gate.start", level=5, summary="deterministic gate running")
+        # §9.9 backstop, first thing at the gate: the coder must never commit. If HEAD moved off
+        # this attempt's recorded base, the coder ran git itself (slipping the deny-rule) — undo it
+        # with ``reset --mixed`` so its work returns to the working tree (uncommitted) and the scans
+        # below see the changes normally; only ``approve_edit`` (post gate+review) ever lands a real
+        # commit. Direct mode only (``base_ref`` set); best-effort — a reset failure falls through to
+        # the gate's empty-changeset rejection + the finally reset.
+        if base_ref is not None:
+            head = _git_in(worktree, "rev-parse", "HEAD").strip()
+            if head != base_ref:
+                try:
+                    _git_in(worktree, "reset", "--mixed", base_ref)
+                except RuntimeError:
+                    pass
+                await _emit(
+                    monitor, "coder.committed", level=4,
+                    summary="coder ran git itself — auto-reverted the commit to uncommitted changes",
+                    data={"head_was": head, "base_ref": base_ref},
+                )
         g = await run_gate(worktree, tool_spec)
         failed = [f"[{c.layer}] {c.name}" for c in (*g.layer_a, *g.layer_b) if not c.passed]
         await _emit(
@@ -890,11 +927,15 @@ async def propose_and_pr(
     finally:
         await client.disconnect()
         # Failure counterpart to approve_edit (§9.9): a non-committed direct-branch attempt left
-        # the live toolkit checkout dirty — reset it to HEAD (saving a patch artifact first) so
-        # re-running workers never see a phantom tool and the next attempt's precondition finds a
-        # clean tree. Covers every non-committed exit (the failed returns, the unexpected-error
-        # path, and the re-raised HumanInputRequired). Worktree-mode cleanup is a separate todo.
+        # the live toolkit checkout dirty — or, if the coder ran git itself, with an illegitimate
+        # commit. Reset to the per-attempt ``base_ref`` (HEAD at entry), saving a patch artifact
+        # first, so re-running workers never see a phantom tool, a coder commit is dropped (not
+        # kept as it would be by ``reset --hard HEAD``), and the next attempt's precondition finds
+        # a clean tree at the right base. Covers every non-committed exit (the failed returns, the
+        # unexpected-error path, and the re-raised HumanInputRequired). Worktree-mode cleanup is a
+        # separate todo. (A run killed mid-attempt may skip this finally — §12 Ctrl-C hardening.)
         if direct_branch is not None and not committed:
             await _reset_direct_tree(
-                toolkit_root, artifact_dir=worktree_base, monitor=monitor, tool_spec=tool_spec
+                toolkit_root, base_ref=base_ref, artifact_dir=worktree_base,
+                monitor=monitor, tool_spec=tool_spec,
             )

@@ -542,14 +542,28 @@ rule that *you, the coding agent, perform zero git*:
   LLM never issues git; `approve_edit()` (code) does, and it is unreachable unless the gate
   passed **and** the provider-decorrelated GPT co-lead's review passed. **Commit ⇔ gate-pass
   ∧ co-lead review-pass.** A reject → no commit, feedback to the author.
-- A **non-committed terminal attempt auto-resets** the working tree back to HEAD — the
-  failure-path counterpart to `approve_edit` (`git reset --hard HEAD` + `git clean -fd`), after
-  saving the discarded attempt's diff as a `tool_author_failed_*.patch` under the run's
-  `authoring/` dir for inspection. This keeps a rejected attempt's edits from surfacing a
-  phantom, un-registered tool to re-running workers or tripping the next attempt's clean-tree
-  precondition. The launch preflight still asserts a clean branch at startup (a dirty tree there
-  means a run was killed before its reset ran). The runtime resets only its own authoring
-  branch; it never touches master.
+- The **coder never issues git** — it is the runtime's job, so the author's Bash carries a deny-rule
+  (`disallowed_tools=["Bash(git:*)", "Bash(git)"]` on the coder's own options) and `prompts/coder.md`
+  tells it to leave git to the runtime and `ask_lead` instead of working around it. Deny-rules are
+  best-effort (prefix-matched; pipes/subshells can slip), so the gate-entry check and reset below are
+  the robust backstops.
+- As the **first action at the gate**, `_gated` compares HEAD to the per-attempt base ref; if the
+  coder committed (slipped the deny-rule), the runtime does `git reset --mixed <base_ref>` — undoing
+  the commit but **keeping the work in the working tree** — and emits a `coder.committed` event, so the
+  gate then scans the recovered changes normally. The coder never touches git, its work is preserved,
+  and the only real commit remains `approve_edit`'s (post gate+review), so `commit ⇔ gate ∧ review`
+  holds. This is what makes the gate robust to commit state (vs. the old empty-changeset confusion).
+- A **non-committed terminal attempt auto-resets** the working tree back to the attempt's **base ref**
+  — HEAD recorded per-attempt at `propose_and_pr` entry — not just to `HEAD` (`git reset --hard
+  <base_ref>` + `git clean -fd`), after saving the discarded attempt's diff vs the base ref as a
+  `tool_author_failed_*.patch` under the run's `authoring/` dir. Resetting to the base ref (rather
+  than `HEAD`) **drops any commit the coder lands itself** — a `reset --hard HEAD` would keep it —
+  while preserving an earlier round's successful `approve_edit` commit in a multi-tool run. This keeps
+  a rejected attempt's edits (and any illegitimate commit) from surfacing a phantom tool to re-running
+  workers or tripping the next attempt's clean-tree precondition. The launch preflight still asserts a
+  clean branch at startup (a dirty tree, or a survived commit, there means a run was killed before its
+  reset ran — the §12 Ctrl-C hardening). The runtime resets only its own authoring branch; it never
+  touches master.
 - The runtime has **no concept of master** — it never merges, never asks to merge, holds no
   reference to the trusted branch. A **human reviews branches and merges to master entirely
   manually, out of band**; that human review is where **replicability** (rerun the human-half)
@@ -682,7 +696,19 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
 - **`sandbox.merge_flow._reset_direct_tree`** — best-effort: a git failure during the post-failed-
   authoring reset is logged (`coder.tree_reset.error`) and swallowed so it never masks the result;
   a residual dirty tree is then caught at the next launch's preflight (the in-flow
-  `check_toolkit_branch_clean` still *raises* mid-run — graceful-degrade is a tracked TODO).
+  `check_toolkit_branch_clean` still *raises* mid-run — graceful-degrade is a tracked TODO). It now
+  resets to the **per-attempt base ref** (HEAD at `propose_and_pr` entry), so a commit the coder
+  lands itself is dropped, not kept (§9.9). **Residual (§12 Ctrl-C hardening):** a run killed
+  mid-attempt can skip this `finally`, leaving the coder's commit on the branch with a *clean* tree —
+  which the launch `check_toolkit_branch_clean` (dirty-tree only) does not catch; the human drops it
+  with `git reset --hard <base>` out of band.
+- **Coder git-ban is best-effort (deny-rule).** The coder's Bash deny-rule
+  (`disallowed_tools=["Bash(git:*)", "Bash(git)"]`, §9.9) blocks the obvious `git …`, but prefix
+  matching can be slipped (pipes, `$(…)`, env prefixes, `python -c subprocess`). The robust catches are
+  the **gate-entry auto-revert** (`_gated` does `reset --mixed <base_ref>` on a moved HEAD before
+  scanning, so a slipped commit is normalized to uncommitted work, not a confusing reject) and the
+  **base-ref failure reset** above (drops any commit on a failed attempt) — both regardless of how the
+  commit was made; the deny-rule is the early, legible block that also steers the coder to `ask_lead`.
 
 ---
 

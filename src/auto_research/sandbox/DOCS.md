@@ -650,3 +650,42 @@ the hook mapping a fake-model verdict — no live LLM).
   manifest entry was correct but invisible to the gate). Now matches both `ast.Assign` (`.targets`)
   and `ast.AnnAssign` (`.target`). New test `tests/test_gate.py::test_structural_annotated_manifest_entry_found`
   (and a `manifest_annotated` flag on the `_write_pkg` fixture); `pytest tests/test_gate.py` green (34).
+- 2026-06-25 — **Coder git-discipline hardening (fix-list #6/#7).** The runtime now contains a coder
+  that issues git itself (the observed §9.9 breach), two layers: (1) a **deny-rule** on the coder's
+  own options — `_build_options` adds `disallowed_tools=["Bash(git:*)", "Bash(git)"]` (coder-scoped,
+  evaluated first, applies under acceptEdits; best-effort prefix match). (2) **`_reset_direct_tree`
+  resets to a per-attempt base ref**, not `HEAD`: `propose_and_pr` records `base_ref = git rev-parse
+  HEAD` right after `check_toolkit_branch_clean` (per-attempt, so a failed later round preserves an
+  earlier round's successful commit) and the failure-path reset does `reset --hard <base_ref>` +
+  saves the discarded diff vs `base_ref` (capturing any coder commit) — so an illegitimate commit is
+  **dropped**, where `reset --hard HEAD` would have kept it (the phantom-committed-tool hole). Falls
+  back to `HEAD` when `base_ref` is unset (worktree mode). `prompts/coder.md` now tells the coder to
+  leave git to the runtime and `ask_lead` instead of working around it, and its three misleading
+  "commit" verbs (the deliverable, not git) were reworded to "include"/"write". Tests:
+  `test_merge_flow.test_direct_branch_failed_drops_coder_commit` (a committing gate → HEAD back at
+  base, file gone, commit captured in the patch) + env-gated live `test_live_fs_guard.test_live_coder_git_denied`
+  (real coder told to `git commit` lands no commit). CLAUDE.md §9.9/§13 updated. Residual: a run
+  killed mid-attempt can skip the reset `finally` (§12 Ctrl-C hardening). `pytest tests/test_merge_flow.py
+  tests/test_gate.py` green (65).
+- 2026-06-25 — **`finding_vocabulary` Tier-3 scan tier (fix-list #9a).** `stub`/`stubbed`/
+  `not implemented`/`to be implemented` moved out of `hard_fail_vocabulary` into a new
+  `config/code_gate.yaml: finding_vocabulary` — they legitimately appear in real mergeable code
+  (a test stub, an honest not-implemented branch) and were causing false hard-fails (the 2026-06-25
+  run rejected a test for the word `'stub'`). `gate.scan_python_source`/`scan_text_source` now load
+  `finding_vocabulary` and record matches as a non-failing `no_fabrication.vocabulary_finding`
+  (Tier-3, routed to the co-lead like the literal-array landmine) instead of hard-failing.
+  `TODO`/`FIXME`/`XXX`/`HACK` stay hard-fail. Test `test_gate.test_incompleteness_markers_are_findings_not_hard_fails`;
+  `pytest tests/test_gate.py` green (35).
+- 2026-06-25 — **Gate-entry coder-commit auto-revert (fix-list #8).** The gate's change-detection
+  keyed on `git status` (uncommitted), so a coder that committed (slipping the deny-rule) blinded it
+  into a confusing empty-changeset rejection. Now, as the **first action when arriving at the gate**,
+  `merge_flow._gated` compares HEAD to the per-attempt `base_ref`; if it moved, the coder ran git
+  itself, so the runtime does `git reset --mixed base_ref` (un-commits, leaving the work in the
+  working tree) and emits a `coder.committed` monitor event — then `run_gate` scans the recovered
+  changes normally. The coder never touches git, its work is preserved, and the only real commit
+  remains `approve_edit`'s (post gate+review), so `commit ⇔ gate ∧ review` holds. Best-effort (a
+  reset failure falls through to the empty-changeset rejection + the finally reset); direct mode only
+  (`base_ref` set). No change to `gate.py`/`run_gate` signature (test stubs untouched). Test
+  `test_merge_flow.test_direct_branch_coder_commit_auto_reverted_before_gate` (HEAD advances by
+  exactly one — approve_edit's — and the `coder.committed` event fires). `pytest tests/test_merge_flow.py`
+  green (32).

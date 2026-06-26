@@ -135,3 +135,16 @@ logic here.
   point. `coder.md` reframes the brief as a **settled plan** — execute the lead's architecture,
   `ask_lead` rather than re-open/improvise the design. (Tool + budget mechanics in `agents/DOCS.md`;
   examples stay domain-neutral.)
+- 2026-06-25 — **Analyst-lead knowledge + behaviour (fix-list #1–#4).** `analyst_lead.md` gained,
+  at design altitude (the coder keeps the implementation detail): the **two-halves toolkit structure**
+  on the "Toolkit inspection" paragraph (human-half `lib/` strategy modules + abstracted entry API;
+  ai-half `skills/TOOL_MANIFEST`; extend the structure rather than fork; keep error-prone choices in
+  `lib/`) so disposition + interface decisions fit what the coder builds to (#2); an **`obsdb_catalog`
+  data policy** paragraph after the "general capability" brief guidance (record acquired/produced data
+  through the single trusted writer; validation data is **data, not code** — a real or marked `synth…`
+  ObsID, never data-fabricating toolkit code) (#1); and two additions to "Settling the design" — close
+  a non-trivial debate by **reporting the settled design back** via `plan_and_debate` before dispatching
+  the coder (#3), and **weigh the human's steer against grounded evidence**, challenging it with cited
+  authoritative documentation when they conflict rather than treating steer as an override (#4).
+  Validation is live-only (prompt behaviour). Examples stay domain-neutral; §3 positive-actions kept
+  (the no-fabrication ban in the data paragraph is the sanctioned exception).

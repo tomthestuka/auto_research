@@ -492,6 +492,76 @@ def test_direct_branch_failed_resets_dirty_tree(tmp_path):
     assert not (repo / "scratch_out_of_pkg.txt").exists()
 
 
+async def _committing_gate(worktree, spec):
+    """A gate that fails AFTER the 'coder' committed its own work — the §9.9 breach we now
+    contain (deny-rule + base-ref reset). A real commit lands on the branch, then the gate
+    rejects, so the failure path must undo the commit, not keep it."""
+    import subprocess
+    (worktree / "demo_utils" / "lib" / "rogue.py").write_text("x = 1  # coder-committed\n")
+    subprocess.run(["git", "add", "-A"], cwd=str(worktree), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-qm", "coder self-commit"], cwd=str(worktree),
+                   check=True, capture_output=True, text=True)
+    return GateReport(passed=False, reason="rejected after a coder commit")
+
+
+def test_direct_branch_failed_drops_coder_commit(tmp_path):
+    """A failed attempt in which the coder committed its own work resets to the per-attempt base
+    ref — dropping the illegitimate commit. A plain `reset --hard HEAD` would have KEPT it (the
+    observed phantom-committed-tool hole); the patch artifact still captures the discarded commit."""
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    base = _git_out(repo, "rev-parse", "HEAD").strip()
+    artifacts = tmp_path / "authoring"
+    result, _ = _run(
+        _spec(), toolkit_root=repo, worktree_base=artifacts,
+        direct_branch="ai", run_gate=_committing_gate, gate_rework_cap=0,
+    )
+    assert result.status == "failed"
+    assert _git_out(repo, "rev-parse", "HEAD").strip() == base  # coder commit dropped
+    assert not (repo / "demo_utils" / "lib" / "rogue.py").exists()
+    assert _git_out(repo, "status", "--porcelain") == ""  # clean tree at base
+    patches = list(artifacts.glob("tool_author_failed_*.patch"))
+    assert len(patches) == 1 and "coder-committed" in patches[0].read_text()
+
+
+def test_direct_branch_coder_commit_auto_reverted_before_gate(tmp_path):
+    """A coder that commits during its turn (slipping the deny-rule) has the commit auto-reverted
+    by `_gated` (`reset --mixed base_ref`) BEFORE the scan, so the gate sees the work uncommitted and
+    the only real commit is `approve_edit`'s. HEAD advances by exactly one from base (not two)."""
+    from auto_research.sandbox.merge_flow import approve_edit as real_approve
+
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    base = _git_out(repo, "rev-parse", "HEAD").strip()
+
+    class _CommittingClient(_FakeClient):
+        async def query(self, message, session_id="default"):
+            await super().query(message, session_id)
+            if len(self.queries) == 1:  # first drive: the coder commits its own work
+                (repo / "demo_utils" / "lib" / "tool.py").write_text("def t():\n    return 1\n")
+                _git(repo, "add", "-A")
+                _git(repo, "commit", "-qm", "coder self-commit")
+
+    async def asserting_gate(worktree, spec):
+        # By the time the gate runs, the auto-revert has undone the coder's commit …
+        assert _git_out(worktree, "rev-parse", "HEAD").strip() == base
+        # … and left the work in the working tree (visible to the scan).
+        assert _git_out(worktree, "status", "--porcelain").strip()
+        return GateReport(passed=True)
+
+    mon = _RecordingMonitor()
+    result, _ = _run(
+        _spec(), toolkit_root=repo, worktree_base=tmp_path / "wt", direct_branch="ai",
+        sdk_client_factory=lambda options: _CommittingClient(),
+        run_gate=asserting_gate, approve_edit=real_approve, monitor=mon,
+    )
+    assert result.status == "committed"
+    assert mon.of("coder.committed"), "the auto-revert should be surfaced on the monitor"
+    # Exactly ONE commit beyond base — approve_edit's, not the coder's + approve_edit's.
+    assert _git_out(repo, "rev-list", "--count", f"{base}..HEAD").strip() == "1"
+    assert (repo / "demo_utils" / "lib" / "tool.py").exists()
+
+
 def test_direct_branch_committed_does_not_reset(tmp_path):
     """The success path must NOT reset — the committed tool survives (cleanup skipped)."""
     from auto_research.sandbox.merge_flow import approve_edit as real_approve

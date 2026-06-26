@@ -16,8 +16,9 @@ real toolkit code (which is full of legitimate hardcoded numeric arrays — XSPE
 parameter vectors, energy bins):
   Tier 1 HARD-FAIL  — banned vocabulary (comments/docstrings/strings), any RNG (seeded
                       or not), placeholder function bodies.
-  Tier 3 FINDING    — numeric-literal arrays returned/plotted/framed: recorded on the
-                      report but NOT a failure; the step-4 co-lead judges intent.
+  Tier 3 FINDING    — incompleteness-marker vocabulary (e.g. a test "stub", "not
+                      implemented") and numeric-literal arrays returned/plotted/framed:
+                      recorded on the report but NOT a failure; the step-4 co-lead judges intent.
 
 All scan lists live in ``config/code_gate.yaml`` (tunable without a code edit).
 
@@ -231,6 +232,7 @@ def scan_python_source(
     """
     cfg = config if config is not None else _code_gate_config()
     vocab = [v.lower() for v in cfg.get("hard_fail_vocabulary", [])]
+    finding_vocab = [v.lower() for v in cfg.get("finding_vocabulary", [])]
     rng_patterns = list(cfg.get("hard_fail_code_patterns", []))
     finding_patterns = set(cfg.get("finding_code_patterns", []))
     allow_res = [re.compile(p) for p in cfg.get("allowlist_obsid_tokens", [])]
@@ -259,11 +261,18 @@ def scan_python_source(
             lineno = base_line + offset
             if not _in_scope(lineno, added) or lineno in allow_lines:
                 continue
-            for phrase in _match_vocabulary(raw.lower(), vocab):
+            low = raw.lower()
+            for phrase in _match_vocabulary(low, vocab):
                 key = (lineno, phrase)
                 if key not in seen_vocab:
                     seen_vocab.add(key)
                     _hard("no_fabrication.vocabulary", lineno, f"banned phrase {phrase!r}")
+            for phrase in _match_vocabulary(low, finding_vocab):
+                key = (lineno, phrase)
+                if key not in seen_vocab:
+                    seen_vocab.add(key)
+                    _find("no_fabrication.vocabulary_finding", lineno,
+                          f"incompleteness marker {phrase!r} (recorded, not a hard-fail)")
 
     try:
         tree = ast.parse(source)
@@ -327,23 +336,27 @@ def scan_text_source(
     config: dict | None = None,
 ) -> tuple[list[CheckResult], list[CheckResult]]:
     """Vocabulary-only no-fabrication scan for a **non-Python text** file (e.g. a shell
-    reduction script). Returns ``(hard_fails, findings)`` with ``findings`` always empty.
+    reduction script). Returns ``(hard_fails, findings)`` — hard-fails from the banned
+    vocabulary, findings from the Tier-3 ``finding_vocabulary`` (incompleteness markers).
 
     There is no AST, so the RNG / placeholder-body / literal-array / provenance checks
-    (all Python concepts) do not apply; the banned-vocabulary scan does, run over every
-    physical line (a shell file has no cheap comment/string boundary to narrow to). The
-    ObsID allowlist and ``added`` scoping match :func:`scan_python_source`. Pure.
+    (all Python concepts) do not apply; the vocabulary scans do, run over every physical
+    line (a shell file has no cheap comment/string boundary to narrow to). The ObsID
+    allowlist and ``added`` scoping match :func:`scan_python_source`. Pure.
     """
     cfg = config if config is not None else _code_gate_config()
     vocab = [v.lower() for v in cfg.get("hard_fail_vocabulary", [])]
+    finding_vocab = [v.lower() for v in cfg.get("finding_vocabulary", [])]
     allow_res = [re.compile(p) for p in cfg.get("allowlist_obsid_tokens", [])]
 
     hard: list[CheckResult] = []
+    findings: list[CheckResult] = []
     seen: set[tuple[int, str]] = set()
     for lineno, raw in enumerate(source.splitlines(), 1):
         if not _in_scope(lineno, added) or any(rx.search(raw) for rx in allow_res):
             continue
-        for phrase in _match_vocabulary(raw.lower(), vocab):
+        low = raw.lower()
+        for phrase in _match_vocabulary(low, vocab):
             key = (lineno, phrase)
             if key not in seen:
                 seen.add(key)
@@ -351,7 +364,15 @@ def scan_text_source(
                     name="no_fabrication.vocabulary", layer="A", passed=False,
                     detail=f"{rel_path}:{lineno} — banned phrase {phrase!r}",
                 ))
-    return hard, []
+        for phrase in _match_vocabulary(low, finding_vocab):
+            key = (lineno, phrase)
+            if key not in seen:
+                seen.add(key)
+                findings.append(CheckResult(
+                    name="no_fabrication.vocabulary_finding", layer="A", passed=True,
+                    detail=f"{rel_path}:{lineno} — incompleteness marker {phrase!r} (recorded, not a hard-fail)",
+                ))
+    return hard, findings
 
 
 # ----------------------------------------------------------------------------

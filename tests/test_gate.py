@@ -76,6 +76,17 @@ def test_synth_obsid_line_is_allowlisted():
     assert hard == [], [c.detail for c in hard]
 
 
+def test_incompleteness_markers_are_findings_not_hard_fails():
+    # "stub"/"not implemented" are Tier-3 finding_vocabulary (recorded for the co-lead, not a
+    # hard-fail) — a legitimate test stub or honest not-implemented branch must not reject.
+    src = '"""A stub fixture; the slow path is not implemented here."""\n'
+    hard, findings = scan_python_source("tests/test_x.py", src)
+    assert hard == [], [c.detail for c in hard]
+    phrases = {c.detail.split("— ")[-1] for c in findings}
+    assert any("stub" in p for p in phrases) and any("not implemented" in p for p in phrases)
+    assert all(c.name == "no_fabrication.vocabulary_finding" and c.passed for c in findings)
+
+
 # ── pure scanner: RNG hard-fails (seeded or not) ────────────────────────────────
 
 

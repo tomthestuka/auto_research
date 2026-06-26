@@ -133,3 +133,48 @@ def test_live_coder_jail_blocks_auto_research(tmp_path):
     assert allow_probes, f"no allow-list root was probed; decisions={decisions}"
     wrongly_denied = [d for d in allow_probes if not d[2]]
     assert not wrongly_denied, f"allow-list path(s) wrongly DENIED: {wrongly_denied}"
+
+
+def test_live_coder_git_denied(tmp_path):
+    """The coder's ``git`` deny-rule (`disallowed_tools=["Bash(git:*)", "Bash(git)"]`, §9.9) actually
+    blocks git in a real SDK session — validating the pattern string end-to-end. Unlike the jail
+    above, this deny is SDK-enforced (not our PreToolUse hook), so we assert the *effect*: a coder
+    told to `git add` + `git commit` lands no commit (HEAD is unchanged). The robust backstop is the
+    per-attempt base-ref reset (unit-tested in `test_merge_flow.test_direct_branch_failed_drops_coder_commit`)."""
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+
+    clone = _scratch_clone(tmp_path)
+
+    def _head() -> str:
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(clone), check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    head_before = _head()
+    options = ClaudeAgentOptions(
+        cwd=str(clone),
+        model=_resolve_coder_model(),
+        setting_sources=[],
+        permission_mode="acceptEdits",
+        allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+        disallowed_tools=["Bash(git:*)", "Bash(git)"],  # mirrors merge_flow._build_options
+        max_turns=12,
+        **({"env": _author_env(clone)} if _author_env(clone) else {}),
+    )
+    prompt = (
+        "Run EXACTLY these steps in order; attempt each even if it is blocked or errors, do not "
+        "skip any, then reply DONE.\n"
+        "1. Write a file `probe.txt` containing the text `probe` in the current directory.\n"
+        "2. Bash: git add -A\n"
+        "3. Bash: git commit -m 'probe commit'\n"
+        "4. Bash: git status\n"
+    )
+
+    async def run():
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query(prompt)
+            async for _ in client.receive_response():
+                pass
+
+    asyncio.run(run())
+
+    assert _head() == head_before, "git was NOT blocked — the coder landed a commit (deny-rule pattern wrong?)"

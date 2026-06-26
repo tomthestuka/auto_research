@@ -8,7 +8,8 @@
 # Precision tiers (see gate.py / plan):
 #   Tier 1 HARD-FAIL  — flips GateReport.passed=False. High precision, low false-positive.
 #   Tier 3 FINDING    — recorded on the GateReport but does NOT fail it; the step-4
-#                       co-lead reviewer judges intent (the literal-array landmine).
+#                       co-lead reviewer judges intent (incompleteness-marker vocabulary
+#                       like a test "stub", and the literal-array landmine).
 #
 # Matching: vocabulary is matched case-insensitively as whole words / phrases (not bare
 # substrings) inside COMMENTS, DOCSTRINGS, and STRING LITERALS of added/new lines only.
@@ -63,10 +64,6 @@ hard_fail_vocabulary:
   - FIXME
   - XXX
   - HACK
-  - stub
-  - stubbed
-  - not implemented
-  - to be implemented
 
 # ── Tier 1: code patterns (hard-fail) — randomness, seeded or not ───────────────────
 # Any RNG in toolkit code is fabrication-shaped and rejected: the toolkit computes
@@ -92,6 +89,17 @@ hard_fail_code_patterns:
   - torch.randn
   - torch.randint
   - tf.random
+
+# ── Tier 3: vocabulary (FINDINGS, routed to co-lead review — NOT hard-fail) ─────────
+# Incompleteness markers that legitimately appear in real, mergeable code — most often a
+# test "stub"/mock, or an honest "not implemented" branch that raises. They are worth
+# surfacing (the step-4 co-lead reviewer judges whether the tool is actually incomplete),
+# but they are not fabrication, so they record a finding rather than hard-failing the gate.
+finding_vocabulary:
+  - stub
+  - stubbed
+  - not implemented
+  - to be implemented
 
 # ── Tier 3: code patterns (FINDINGS, routed to co-lead review — NOT hard-fail) ──────
 # Numeric-literal arrays passed directly to return / a plotting call / a DataFrame
