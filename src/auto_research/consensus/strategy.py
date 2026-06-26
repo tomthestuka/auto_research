@@ -13,8 +13,10 @@ from auto_research.schemas import (
     AnalystReport,
     AuthoringDecision,
     DocumentRef,
+    MergeFlowResult,
     ReviewVerdict,
     ToolResult,
+    ToolSpec,
 )
 from auto_research.schemas.figures import FigureRef
 from auto_research.storage import MemoryRecord
@@ -57,6 +59,15 @@ class LeadLike(Protocol):
         reports: Sequence[AnalystReport],
     ) -> AuthoringDecision:
         """Decide whether to author a tool for the workers' ``tool_request``s (§9.3)."""
+
+    async def finalize_authoring_outcome(
+        self,
+        task: AnalysisTask,
+        reports: Sequence[AnalystReport],
+        tool_spec: ToolSpec,
+        result: MergeFlowResult,
+    ) -> AnalystReport:
+        """Compose the terminal report after an authoring attempt did not commit (§9.6)."""
 
 
 class ConsensusStrategy(Protocol):
@@ -137,9 +148,16 @@ class DebateToConverge:
             # --- authoring / resume phase (§9.10 step 7) — at most one decision per reports
             # set; a committed tool reruns workers and loops back here for the next gap. ---
             if author_budget > 0 and any(r.tool_request is not None for r in reports):
-                resumed, reports, task, author_budget = await self._maybe_author_and_resume(
-                    workers, lead, task, reports, author_budget
+                resumed, final_report, reports, task, author_budget = (
+                    await self._maybe_author_and_resume(
+                        workers, lead, task, reports, author_budget
+                    )
                 )
+                if final_report is not None:
+                    # An authoring attempt did not commit: the lead composed the terminal report
+                    # (§9.6). Return it — the reviewer adjudicates downstream (the reviewer is the
+                    # sole I/O; no debate-spin, no re-authoring, no bypass).
+                    return final_report
                 if resumed:
                     continue  # fresh reports may surface the next dependency gap
 
@@ -217,13 +235,16 @@ class DebateToConverge:
         task: AnalysisTask,
         reports: list[AnalystReport],
         author_budget: int,
-    ) -> tuple[bool, list[AnalystReport], AnalysisTask, int]:
-        """Author one requested tool and, on a committed tool, resume the workers (§9.10 step 7).
+    ) -> tuple[bool, AnalystReport | None, list[AnalystReport], AnalysisTask, int]:
+        """Author one requested tool; resume on commit, finalize honestly on a non-commit (§9.6).
 
-        Returns ``(resumed, reports, task, author_budget)``. ``resumed`` is True only when a
-        tool was committed and the workers were rerun on the refreshed toolkit; otherwise the
-        caller falls through to ordinary debate (honest failure if the gap persists). The LLM
-        never issues git — this code calls ``merge_flow.propose_and_pr`` (§9.9).
+        Returns ``(resumed, final_report, reports, task, author_budget)``:
+        - ``resumed=True`` — a tool committed and the workers were rerun; loop for the next gap.
+        - ``final_report`` set — an authoring attempt did not commit; the lead composed the
+          terminal honest report (``finalize_authoring_outcome``) and ``run()`` returns it (the
+          reviewer adjudicates downstream — no debate-spin, no re-authoring, no bypass).
+        - both falsy — the lead declined to author (a mis-called tool); fall through to debate.
+        The LLM never issues git — this code calls ``merge_flow.propose_and_pr`` (§9.9).
         """
         decision = await lead.decide_authoring(reports)
         await _record(
@@ -235,7 +256,7 @@ class DebateToConverge:
             data={"decision": decision},
         )
         if not decision.should_author or decision.tool_spec is None:
-            return False, reports, task, author_budget
+            return False, None, reports, task, author_budget
 
         from auto_research.sandbox.merge_flow import propose_and_pr
 
@@ -259,9 +280,13 @@ class DebateToConverge:
             data={"result": result},
         )
         if result.status != "committed":
-            # Honest failure (gate/review reject or human-block): no resume; fall through to
-            # debate so §9.6-trained workers/lead produce an honest report (no fabrication).
-            return False, reports, task, author_budget
+            # Honest failure (gate/review cap exhausted or human-block): the lead composes the
+            # terminal report documenting the unavailable capability (§9.6) — no resume, no
+            # re-authoring, no debate-spin. The reviewer adjudicates it downstream.
+            final = await lead.finalize_authoring_outcome(
+                task, reports, decision.tool_spec, result
+            )
+            return False, final, reports, task, author_budget
 
         # Refresh discovery (orchestration env) + restart sandboxes (REPL re-imports new code).
         if self.registry is not None and hasattr(self.registry, "reload"):
@@ -274,7 +299,7 @@ class DebateToConverge:
         task = _augment_with_authored_tool(task, decision.tool_spec, result)
         reports = await self._initial_reports(workers, task)
         task = self._augment_with_peer_tools(workers, task)
-        return True, reports, task, author_budget
+        return True, None, reports, task, author_budget
 
     def _augment_with_peer_tools(
         self,

@@ -201,6 +201,7 @@ def test_graph_analysis_feedback_capped_at_three():
         retrieval=FakeRetrieval(),
         workers=workers,
         lead=lead,
+        report_formats=[],  # finalize now always routes to compose unless no formats are set
     )
 
     state = _invoke(graph, ResearchRequest(question="What is X?"))
@@ -241,8 +242,11 @@ class FailConsensus:
         )
 
 
-def test_graph_routes_honest_failure_around_reviewer_to_end():
-    reviewer = FakeReviewer()
+def test_graph_routes_honest_failure_through_reviewer():
+    # §9.6 / handoff #4: the reviewer is the sole I/O — an honest failure is adjudicated by the
+    # reviewer, not bypassed straight to finalize. (report_formats=[] keeps the fake reviewer off
+    # the compose path; the routing is what matters here.)
+    reviewer = FakeReviewer()  # analysis_pass_after=1 → it accepts (finalizes) the failed report
     graph = build_graph(
         reviewer=reviewer,
         io_agent=FakeIOAgent(),
@@ -250,17 +254,37 @@ def test_graph_routes_honest_failure_around_reviewer_to_end():
         workers=[FakeWorker()],
         lead=FakeLead(),
         consensus=FailConsensus("failed"),
-        report_formats=["jsonl"],
+        report_formats=[],
     )
 
     state = _invoke(graph, ResearchRequest(question="What is X?"))
 
     assert state["report"].status == "failed"
-    # Reviewer never reviewed the analysis (failure routes straight to finalize, §9.6) …
-    assert reviewer.analysis_calls == 0
-    # … the verdict is non-accepted, so no report is composed (no fabrication).
-    assert state["verdict"].accepted is False
-    assert "research_report" not in state
+    # The reviewer DID review the failed analysis (no bypass) …
+    assert reviewer.analysis_calls == 1
+    # … and the terminal verdict is the reviewer's call, not a manufactured non-accept.
+    assert state["verdict"].rationale == "analysis pass 1"
+
+
+def test_graph_reviewer_can_rework_a_failed_analysis_bounded():
+    # The reviewer may send a failed analysis back for a different approach, bounded by the cap.
+    reviewer = FakeReviewer(analysis_pass_after=99)  # always asks for rework
+    graph = build_graph(
+        reviewer=reviewer,
+        io_agent=FakeIOAgent(),
+        retrieval=FakeRetrieval(),
+        workers=[FakeWorker()],
+        lead=FakeLead(),
+        consensus=FailConsensus("failed"),
+        report_formats=[],
+    )
+
+    state = _invoke(graph, ResearchRequest(question="What is X?"), max_iterations=3)
+
+    assert state["report"].status == "failed"
+    assert reviewer.analysis_calls == 3           # reviewed the failed report each round, capped
+    assert state["analysis_iterations"] == 3
+    assert state["verdict"].needs_analysis_rework is True
 
 
 def test_build_graph_rejects_zero_max_iterations():

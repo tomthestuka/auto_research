@@ -37,6 +37,7 @@ from auto_research.schemas import (
     DocumentRef,
     FigureRef,
     GateReport,
+    MergeFlowResult,
     ResearchRequest,
     ReviewVerdict,
     SearchRequest,
@@ -1133,6 +1134,62 @@ class AnalystLeadAgent(AgentRole):
             absolute_cap=_react_loop_absolute_cap(),
         )
         return await self._call_over_messages(messages, AuthoringDecision, action="decide_authoring")
+
+    async def finalize_authoring_outcome(
+        self,
+        task: AnalysisTask,
+        reports: Sequence[AnalystReport],
+        tool_spec: ToolSpec,
+        result: MergeFlowResult,
+    ) -> AnalystReport:
+        """Compose the terminal analyst report after an authoring attempt did not commit (§9.6).
+
+        Called by ``DebateToConverge`` when ``propose_and_pr`` returns a non-committed result
+        (gate/review rework cap exhausted, or blocked on an absent human). The lead synthesizes
+        the workers' partial findings **with** the honest authoring failure into one terminal
+        :class:`AnalystReport` — documenting what was attempted, the capability that is
+        unavailable under the current construction and why — and sets ``status``:
+        ``needs_human`` when the flow blocked on a human, ``failed`` when the missing capability
+        blocks the request, or ``ok`` when partial results still answer it. There is no resume
+        and no re-authoring; the reviewer adjudicates this report downstream (the reviewer is the
+        sole I/O). Never fabricate a result to cover the gap.
+        """
+        payload = {
+            "task": task.model_dump(mode="json"),
+            "failed_tool": tool_spec.model_dump(mode="json"),
+            "authoring_result": {
+                "status": result.status,
+                "reason": result.reason,
+                "review": result.review.model_dump(mode="json") if result.review else None,
+            },
+            "worker_reports": [report.model_dump(mode="json") for report in reports],
+            "semantics": (
+                "An attempt to author the toolkit capability the analysis needs did NOT succeed "
+                f"(authoring status '{result.status}'). This is a correct outcome with no quality "
+                "penalty — compose ONE terminal report. Document what was attempted, the "
+                "capability that is unavailable under the current construction and why, and any "
+                "partial findings that genuinely hold. Set status='needs_human' when blocked on a "
+                "human, 'failed' when the missing capability blocks the request, or 'ok' when "
+                "partial results still answer it. Never fabricate a result to cover the gap; "
+                "report real results, or report none. Do not request the tool again."
+            ),
+        }
+        figures = [figure for report in reports for figure in report.figures]
+        if self.tools is None:
+            return await self._call(
+                payload, AnalystReport, images=figures, action="finalize_authoring_outcome"
+            )
+        seed = [
+            ModelMessage(role="system", content=self.prompt),
+            ModelMessage(role="user", content=_payload_text(payload)),
+        ]
+        messages, _, _ = await self._react(
+            seed_messages=seed, tools=self.tools, action="finalize_authoring_outcome",
+            cap=_react_loop_cap(), images=figures,
+        )
+        return await self._call_over_messages(
+            messages, AnalystReport, action="finalize_authoring_outcome", images=figures,
+        )
 
 
 class AnalystColeadAgent(AgentRole):

@@ -47,14 +47,19 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
 - Lead objects for analyst debate must provide
   `judge_convergence(task, reports, *, round_index, max_rounds) ->
   ReviewVerdict`, `adjudicate(task, reports) -> AnalystReport`, and (for the
-  authoring path) `decide_authoring(reports) -> AuthoringDecision`.
+  authoring path) `decide_authoring(reports) -> AuthoringDecision` and
+  `finalize_authoring_outcome(task, reports, tool_spec, result) -> AnalystReport`.
 - Authoring/resume (Phase 2 step 7): when ≥1 worker report carries a `tool_request` and
   authoring is wired (`toolkit_root` set, with `direct_branch`), the strategy asks the lead
   to `decide_authoring`; on `should_author` it calls `merge_flow.propose_and_pr(direct_branch=…)`
-  itself (the LLM never issues git — §9.9). A committed tool triggers `registry.reload()` +
+  itself (the LLM never issues git — §9.9). A **committed** tool triggers `registry.reload()` +
   per-worker `sandbox.restart()` + a provenance-augmented task + a worker rerun (a *resume*,
-  bounded by `tool_author_cap`, not counted against `max_rounds`); `should_author=false` and
-  non-committed results fall through to ordinary debate (honest failure, no fabrication).
+  bounded by `tool_author_cap`, not counted against `max_rounds`). `should_author=false` falls
+  through to ordinary debate (a mis-called tool, not a failure). A **non-committed** authoring
+  result (gate/review cap exhausted, or a human block) is an honest failure (§9.6): the lead
+  composes a terminal report via `finalize_authoring_outcome` and `run()` **returns it**
+  immediately — no re-authoring, no debate-spin. That report flows to the reviewer, which is the
+  sole I/O and adjudicates it (finalize vs. bounded rework); never fabricated.
 - Worker objects for IO debate (`IOAbstractionWorkerLike`) must provide
   `abstract_document(document, *, peer_abstracts=()) -> MemoryRecord`.
 - Lead objects for IO debate (`IOAbstractionLeadLike`) must provide
@@ -73,7 +78,9 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
 - `WorkerLike` — protocol for analyst workers used by `DebateToConverge`. Method:
   `analyze()`.
 - `LeadLike` — protocol for analyst lead used by `DebateToConverge`. Methods:
-  `judge_convergence()`, `adjudicate()`, and `decide_authoring()`.
+  `judge_convergence()`, `adjudicate()`, `decide_authoring()`, and
+  `finalize_authoring_outcome()` (the terminal honest report after a non-committed authoring
+  attempt, §9.6).
 - `ConsensusStrategy` — protocol for swappable analyst consensus policies. Method:
   `run()`.
 - `DebateToConverge(max_rounds=3, monitor=None, registry=None, tool_retry_cap=3,
@@ -84,8 +91,10 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   onto the lead's final report so they flow to the reviewer. When `toolkit_root` is set it also
   runs the authoring/resume path (above). Method: `run(workers, lead, task)` → `AnalystReport`.
   Internals: `_initial_reports(workers, task)`; `_maybe_author_and_resume(...)` →
-  `(resumed, reports, task, author_budget)`; `_augment_with_peer_tools(workers, task)`;
-  module-level `_augment_with_authored_tool(task, tool_spec, result)`; `_deduplicated(figures)`.
+  `(resumed, final_report, reports, task, author_budget)` (`final_report` set ⇔ a non-committed
+  authoring attempt — `run()` returns it as the §9.6 terminal); `_augment_with_peer_tools(workers,
+  task)`; module-level `_augment_with_authored_tool(task, tool_spec, result)`;
+  `_deduplicated(figures)`.
 - `IOAbstractionWorkerLike` — protocol for IO abstraction workers. Method:
   `abstract_document()`.
 - `IOAbstractionLeadLike` — protocol for IO abstraction lead. Methods:
@@ -109,3 +118,12 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   tool reloads the registry, restarts sandboxes, augments the task with provenance, and reruns
   workers — bounded by `tool_author_cap`, not counted against `max_rounds`. Phase-1 behaviour is
   unchanged when `toolkit_root` is unset. Coverage: `tests/test_consensus_authoring.py`.
+- 2026-06-26 — **Honest finalize on a non-committed authoring attempt (handoff #4).** A
+  non-committed `propose_and_pr` result no longer falls through to debate (where workers
+  re-requested the tool and the lead re-authored — the cap-exhausted *spin* of the 2026-06-26
+  run). `_maybe_author_and_resume` now returns `(resumed, final_report, …)`; on a non-committed
+  result it calls the new `lead.finalize_authoring_outcome(task, reports, tool_spec, result)` and
+  `run()` returns that terminal report immediately. The report flows to the reviewer (the sole
+  I/O, no bypass — graph change), which adjudicates finalize vs. bounded rework. `should_author=false`
+  still falls through to debate. `LeadLike` gained `finalize_authoring_outcome`. Coverage:
+  `tests/test_consensus_authoring.py`.

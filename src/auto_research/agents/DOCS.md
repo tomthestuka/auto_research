@@ -174,6 +174,11 @@ Role wrappers:
   tool author's `ask_lead` clarification (the lead↔author channel, §9.3); consults
   `web_search` (when a `ReadOnlyToolProvider` with a `web_source` is attached) before
   answering rather than guessing. Used by `merge_flow.propose_and_pr`.
+- `AnalystLeadAgent.finalize_authoring_outcome(task, reports, tool_spec, result) ->
+  AnalystReport` — composes the terminal report after a **non-committed** authoring attempt
+  (§9.6): documents the unavailable capability + partial findings and sets `status`
+  (`needs_human`/`failed`/`ok`); never fabricates, never re-requests the tool. Called by
+  `DebateToConverge` instead of re-authoring; the report flows to the reviewer (sole I/O).
 - `AnalystColeadAgent.review_tool(tool_spec, *, diff, gate, tools=None) -> ToolReviewVerdict`
   — the Phase-2 step-4 provider-decorrelated **code review** (§9.3). Payload carries the
   `ToolSpec` brief, the authored `diff` bundle, and the (already-passed) `GateReport`
@@ -324,3 +329,16 @@ Role wrappers:
   (settle the design with the human via the budget-free channel before finalising the brief),
   `coder.md` (the brief is a settled plan — execute it, ask_lead rather than re-open the
   architecture). Tests in `tests/test_react_tools.py` (budget accounting + tool exposure/routing).
+- 2026-06-26 — **`AnalystLeadAgent.finalize_authoring_outcome` (handoff #4).** After a
+  non-committed authoring attempt, the lead composes ONE terminal `AnalystReport` documenting the
+  unavailable capability + partial findings and sets an honest `status` (§9.6), instead of the
+  consensus loop re-authoring/spinning. Uses the `ReadOnlyToolProvider` loop (with the workers'
+  figures) when `tools` is attached, else a plain structured call. The report flows to the
+  reviewer (the sole I/O; graph no longer bypasses it on failure). Reviewer prompt `reviewer.md`
+  gained an honest-failure adjudication section (finalize-and-document vs. bounded rework) + a
+  compose note (document an incomplete/failed analysis honestly). Coverage:
+  `tests/test_consensus_authoring.py`, `tests/test_graph.py`, plus env-gated live probes
+  `tests/test_live_honest_failure.py` (`AUTO_RESEARCH_LIVE_HONEST_FAILURE_TESTS=1`) feeding the real
+  edge payloads — observational (logs to `logs/dev/honest-failure/`), not asserting LLM content.
+  Verified live: lead → honest `needs_human` report (failure documented, partial result kept, no
+  tool re-request); reviewer → finalize-and-document (no futile rework, no fabrication).

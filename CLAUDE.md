@@ -502,6 +502,16 @@ and reviewer treat as a *correct* outcome with **no quality penalty** — otherw
 cap pressures the agent to invent something on the last attempt. "Real results or no
 results" is absolute.
 
+**The reviewer is the sole I/O — an honest failure is adjudicated, not bypassed.** When an
+authoring attempt does not commit, the analyst lead composes **one terminal report**
+(`finalize_authoring_outcome`) documenting the unavailable capability and any partial findings,
+rather than re-authoring or re-entering debate (closing the cap-exhausted authoring *spin*). That
+report — like every analysis result — flows to the **reviewer**, who decides **finalize vs.
+bounded rework** (capped by `max_iterations`). On finalize a report is **always** composed
+(honouring `report_formats`), so the honest failure is *documented*, never silent. The
+no-fabrication guarantee for that report lives in the reviewer + compose prompts (state the
+limitation; never invent a result), no longer in suppressing the report.
+
 ### 9.7 Raise-to-human — clarification only, every role
 
 Raise-to-human is a **cross-cutting clarification channel, not a merge gate.** Every role —
@@ -773,3 +783,17 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   test — lead-planned in `proposed_checks`, coder-written, co-lead-reviewed against the plan, **not**
   gate-enforced (acquisition/literature tools exempt); its verdict rides the same outcome map.
   Prompts (`coder`/`analyst_lead`/`analyst_colead`) + `sandbox`/`prompts` DOCS updated.
+- 2026-06-26 — **Reviewer is the sole I/O; honest authoring failure is finalized, not spun
+  (handoff #4, §9.6).** A cap-exhausted authoring attempt used to fall through to debate, where
+  workers re-requested the tool and the lead re-authored — an observed *spin*. Now a non-committed
+  `propose_and_pr` makes the lead compose **one** terminal report (`AnalystLeadAgent.
+  finalize_authoring_outcome`, documenting the unavailable capability + partial findings + honest
+  `status`) and `DebateToConverge.run()` returns it. The graph's `analysis → review_analysis` edge
+  is **unconditional** (the old `after_analysis` bypass that routed a `failed`/`needs_human` report
+  straight to `finalize_run` is removed; the analyst lead gets no bypass): the reviewer adjudicates
+  **every** result — finalize vs. bounded rework (capped by `max_iterations`) — and on finalize a
+  report is **always** composed (honouring `report_formats`), so an honest failure is documented,
+  not silent. The "no report on failure" *code* guarantee moves to the reviewer + compose prompts
+  (`reviewer.md`: document the limitation, never invent a result). §9.9 unchanged — consensus still
+  issues `propose_and_pr` (code issues git). Coverage: `tests/test_graph.py`,
+  `tests/test_consensus_authoring.py`.

@@ -33,15 +33,20 @@ Reviewer nodes return state updates containing the newest `ReviewVerdict`.
 `add_conditional_edges()` then routes from `review_literature` back to
 `literature` or onward to `analysis`, and from `review_analysis` back to
 `analysis` or onward to `finalize_run`. `finalize_run` copies the latest
-accumulated verdict into `state["verdict"]`, then either routes to `compose_report`
-on an accepted verdict with requested report formats or exits to `END`.
+accumulated verdict into `state["verdict"]`, then routes to `compose_report`
+whenever any report format is configured (else `END`).
 
-**Honest-failure routing (§9.6).** `after_analysis` inspects the adjudicated
-`AnalystReport.status`: an `ok` report goes to `review_analysis`; a `failed`/`needs_human`
-report routes **straight to `finalize_run`**, bypassing reviewer rework (an honest failure is
-a *correct* outcome with no penalty). `finalize_run` then emits a non-accepted `ReviewVerdict`
-for those, so `route_after_finalize` exits to `END` — **no report is composed**, never a
-fabricated one.
+**The reviewer is the sole I/O (§9.6).** Every analysis result — success *or* an honest
+`failed`/`needs_human` outcome — is adjudicated by `review_analysis`: `analysis → review_analysis`
+is now an **unconditional** edge (the old `after_analysis` bypass that sent a failed report
+straight to `finalize_run` is gone; the analyst lead gets no bypass). The reviewer decides
+**finalize vs. bounded rework** (`needs_analysis_rework`, capped by `max_iterations`), and on
+finalize a report is **always** composed (`route_after_finalize → compose_report` when
+`report_formats` is non-empty), so an honest failure is **documented, not silent**.
+`finalize_run` only records the terminal (`run.honest_failure` for a `failed`/`needs_human`
+status) and forwards the reviewer's verdict. The no-fabrication guarantee now lives in the
+reviewer + compose prompts (document the limitation; never invent a result), not in suppressing
+the report.
 
 **Tool execution inside `analysis_node`:** `analysis_node` calls
 `consensus_strategy.run(workers, lead, task)`. Each worker's
@@ -218,3 +223,14 @@ verdicts, two iteration counters, and the cap.
   `ReadOnlyToolProvider` with `include_plan_and_debate=True`, so the lead (only) gets the
   budget-free `plan_and_debate` channel to settle a toolkit design with the human before
   authoring. Reviewer/co-lead providers unchanged. (Loop/tool mechanics in `agents/DOCS.md`.)
+- 2026-06-26 — **Reviewer is the sole I/O — honest failure is adjudicated, not bypassed
+  (handoff #4, §9.6).** `analysis → review_analysis` is now an **unconditional** edge: the
+  `after_analysis` router that sent a `failed`/`needs_human` report straight to `finalize_run`
+  is removed, so the reviewer reviews **every** analysis result. `finalize_run_node` no longer
+  manufactures a non-accepted verdict from `status` — it records the terminal (`run.honest_failure`
+  on a failed status) and forwards the reviewer's verdict. `route_after_finalize` now routes to
+  `compose_report` whenever `report_formats` is non-empty (decoupled from `verdict.accepted`), so
+  a finalize **always documents the outcome** (success or honest failure), never silently ENDs.
+  The no-fabrication guarantee for the report moved to the reviewer + compose prompts. Pairs with
+  the consensus change (`finalize_authoring_outcome` emits the failed report). Tests rewritten in
+  `tests/test_graph.py` (`…through_reviewer`, `…reviewer_can_rework_a_failed_analysis_bounded`).

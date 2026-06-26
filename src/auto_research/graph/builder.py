@@ -293,34 +293,28 @@ def build_graph(
             return "analysis"
         return "finalize_run"
 
-    def after_analysis(state: ResearchState) -> str:
-        """Route an honest analysis failure straight to finalize (§9.6): a ``failed`` /
-        ``needs_human`` report is a *correct* outcome with no penalty — never reviewer rework
-        and never a fabricated report. Only an ``ok`` report goes to analysis review."""
-        report = state.get("report")
-        status = getattr(report, "status", "ok") if report is not None else "ok"
-        return "finalize_run" if status in ("failed", "needs_human") else "review_analysis"
-
     async def finalize_run_node(state: ResearchState) -> dict[str, Any]:
+        """Pass the reviewer's verdict through to report composition (§9.6).
+
+        Every analysis — including an honest ``failed``/``needs_human`` outcome — is now
+        adjudicated by the reviewer (the reviewer is the sole I/O; the analyst lead gets no
+        bypass). This node only records the terminal and forwards the reviewer's verdict; the
+        report is always composed (``route_after_finalize`` honours ``report_formats``), so an
+        honest failure is *documented*, never silent. The no-fabrication guarantee lives in the
+        reviewer + compose prompts, not in suppressing the report.
+        """
         report = state.get("report")
         status = getattr(report, "status", "ok") if report is not None else "ok"
+        verdict = _latest_verdict(state)
         if status in ("failed", "needs_human"):
-            # Honest failure: surface it as a non-accepted verdict so no report is composed
-            # (route_after_finalize → END). No fabrication, no quality penalty (§9.6).
-            detail = (report.uncertainty or report.summary) if report is not None else ""
-            verdict = ReviewVerdict(
-                accepted=False,
-                rationale=f"Run terminated with honest status '{status}': {detail}".strip(),
-            )
             await _record(
                 monitor,
                 "run.honest_failure",
                 level=1,
-                summary=f"Analysis ended with status '{status}' — accepted as a correct outcome",
-                data={"status": status, "report": report},
+                summary=f"Analysis ended with honest status '{status}' — reviewer-adjudicated, documented",
+                data={"status": status, "report": report, "verdict": verdict},
             )
-            return {"verdict": verdict}
-        return {"verdict": _latest_verdict(state)}
+        return {"verdict": verdict}
 
     _run_id = run_id or uuid.uuid4().hex
     _storage = storage or Storage()
@@ -407,10 +401,9 @@ def build_graph(
         return result
 
     def route_after_finalize(state: ResearchState) -> str:
-        verdict = state.get("verdict")
-        if verdict and verdict.accepted and _report_formats:
-            return "compose_report"
-        return END
+        # Always document the outcome (success or an honest failure) — the reviewer has already
+        # decided finalize-vs-rework. report_formats=[] means no report files are written.
+        return "compose_report" if _report_formats else END
 
     builder = StateGraph(ResearchState)
     builder.add_node("literature", literature_node)
@@ -422,11 +415,9 @@ def build_graph(
 
     builder.add_edge(START, "literature")
     builder.add_edge("literature", "review_literature")
-    builder.add_conditional_edges(
-        "analysis",
-        after_analysis,
-        {"review_analysis": "review_analysis", "finalize_run": "finalize_run"},
-    )
+    # The reviewer is the sole I/O: every analysis result — success or honest failure —
+    # is adjudicated by review_analysis (no analyst-lead bypass to finalize).
+    builder.add_edge("analysis", "review_analysis")
     builder.add_conditional_edges(
         "review_literature",
         after_review_literature,

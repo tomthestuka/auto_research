@@ -95,6 +95,7 @@ class AuthoringLead:
         self.should_author = should_author
         self.converge_on = converge_on
         self.decided = 0
+        self.finalized = 0
         self.judged: list[int] = []
 
     async def decide_authoring(self, reports) -> AuthoringDecision:
@@ -103,6 +104,15 @@ class AuthoringLead:
             should_author=self.should_author,
             tool_spec=_toolspec() if self.should_author else None,
             rationale="fake decision",
+        )
+
+    async def finalize_authoring_outcome(self, task, reports, tool_spec, result) -> AnalystReport:
+        self.finalized += 1
+        return AnalystReport(
+            summary="authoring impossible under current construction",
+            findings=["honest failure"],
+            status="failed",
+            uncertainty=result.reason,
         )
 
     async def judge_convergence(self, task, reports, *, round_index, max_rounds) -> ReviewVerdict:
@@ -201,7 +211,10 @@ def test_author_cap_bounds_attempts(monkeypatch):
     assert registry.reloads == 2
 
 
-def test_failed_authoring_does_not_resume(monkeypatch):
+def test_failed_authoring_finalizes_honestly(monkeypatch):
+    # handoff #4: a non-committed authoring attempt no longer falls through to debate (the
+    # cap-exhausted spin). The lead composes the terminal report and run() returns it; the
+    # reviewer adjudicates it downstream (graph change). No resume, no re-authoring.
     state = {"authored": 0}
     calls: list = []
     _patch_ppr(monkeypatch, state, status="failed", calls=calls)
@@ -211,13 +224,18 @@ def test_failed_authoring_does_not_resume(monkeypatch):
 
     final = asyncio.run(
         DebateToConverge(
-            max_rounds=1, registry=registry, tool_author_cap=1,
+            max_rounds=3, registry=registry, tool_author_cap=3,
             toolkit_root=TOOLKIT, direct_branch="ai",
         ).run(workers, lead, AnalysisTask(question="q"))
     )
 
-    assert final.summary == "final"
-    assert len(calls) == 1  # one attempt (budget=1), then no resume
+    # The terminal report is the lead's honest-failure report, not an adjudicated "final".
+    assert final.summary == "authoring impossible under current construction"
+    assert final.status == "failed"
+    assert lead.finalized == 1
+    assert len(calls) == 1  # exactly one authoring attempt — no spin, no re-authoring
+    assert lead.judged == []  # never entered the debate phase
+    assert workers[0].calls == 1  # only the initial report; no resume/rerun
     assert registry.reloads == 0  # failed → no reload
     assert workers[0].sandbox.restarts == 0  # failed → no restart
 
