@@ -407,3 +407,108 @@ def test_run_gate_binary_file_hard_fails(tmp_path):
     report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
     assert not report.passed
     assert any(c.name == "no_fabrication.binary" and not c.passed for c in report.layer_a)
+
+
+# ── determinism by per-test outcomes (junit), not byte-identical output (handoff #2) ──
+
+_JUNIT = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="pytest" errors="1" failures="1" skipped="1" tests="4" time="{t}">
+    <testcase classname="test_demo" name="test_pass" time="{t}"/>
+    <testcase classname="test_demo" name="test_fail" time="{t}"><failure message="x">trace {t}</failure></testcase>
+    <testcase classname="test_demo" name="test_err" time="{t}"><error message="x">boom {t}</error></testcase>
+    <testcase classname="test_demo" name="test_skip" time="0.0"><skipped message="x"/></testcase>
+  </testsuite>
+</testsuites>
+"""
+
+
+def test_parse_junit_outcomes_reads_each_verdict(tmp_path):
+    p = tmp_path / "j.xml"
+    p.write_text(_JUNIT.format(t="0.12"))
+    outcomes = gate._parse_junit_outcomes(p)
+    assert outcomes == {
+        "test_demo::test_pass": "PASSED",
+        "test_demo::test_fail": "FAILED",
+        "test_demo::test_err": "ERROR",
+        "test_demo::test_skip": "SKIPPED",
+    }
+
+
+def test_parse_junit_outcomes_absent_or_unparseable_is_empty(tmp_path):
+    assert gate._parse_junit_outcomes(tmp_path / "nope.xml") == {}
+    bad = tmp_path / "bad.xml"
+    bad.write_text("<not-xml")
+    assert gate._parse_junit_outcomes(bad) == {}
+
+
+def test_determinism_same_outcomes_pass():
+    m = {"test_demo::test_a": "PASSED", "test_demo::test_b": "FAILED"}
+    deterministic, detail = gate._outcomes_determinism(m, dict(m))
+    assert deterministic
+    assert detail == ""
+
+
+def test_determinism_outcome_flip_rejected():
+    m1 = {"test_demo::test_a": "PASSED"}
+    m2 = {"test_demo::test_a": "FAILED"}
+    deterministic, detail = gate._outcomes_determinism(m1, m2)
+    assert not deterministic
+    assert "test_demo::test_a" in detail
+    assert "PASSED" in detail and "FAILED" in detail
+
+
+def test_determinism_same_count_different_tests_rejected():
+    # A bare rc1==rc2 would miss this; the outcome-map compare catches the swap.
+    m1 = {"test_demo::t1": "PASSED", "test_demo::t2": "FAILED"}
+    m2 = {"test_demo::t1": "FAILED", "test_demo::t2": "PASSED"}
+    deterministic, _ = gate._outcomes_determinism(m1, m2)
+    assert not deterministic
+
+
+def test_determinism_differing_logs_same_outcomes_pass(tmp_path):
+    # Two junit reports that differ only in timing/log text (the volatility that the old
+    # byte-compare false-flagged) parse to the same outcome map → deterministic.
+    a = tmp_path / "a.xml"
+    b = tmp_path / "b.xml"
+    a.write_text(_JUNIT.format(t="0.11"))
+    b.write_text(_JUNIT.format(t="9.87"))
+    map_a = gate._parse_junit_outcomes(a)
+    map_b = gate._parse_junit_outcomes(b)
+    assert map_a == map_b
+    deterministic, detail = gate._outcomes_determinism(map_a, map_b)
+    assert deterministic
+    assert detail == ""
+
+
+# ── gate_test_timeout precedence: per-package tool_config > orchestration > 900 ──
+
+
+def test_gate_test_timeout_global_default_when_no_tool_config(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)  # creates demo_utils/, no tool_config.yaml
+    monkeypatch.setattr(gate, "_orchestration_config", lambda: {"gate_test_timeout_s": 1234})
+    assert gate._gate_test_timeout(repo, _spec()) == 1234
+
+
+def test_gate_test_timeout_falls_back_to_900_when_unset(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    monkeypatch.setattr(gate, "_orchestration_config", lambda: {})
+    assert gate._gate_test_timeout(repo, _spec()) == 900
+
+
+def test_gate_test_timeout_per_package_override_wins(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path)
+    pkg = _write_pkg(repo)
+    (pkg / "tool_config.yaml").write_text("gate_test_timeout_s: 3600\ncall_timeout_s:\n  my_tool: 100\n")
+    monkeypatch.setattr(gate, "_orchestration_config", lambda: {"gate_test_timeout_s": 900})
+    assert gate._gate_test_timeout(repo, _spec()) == 3600
+
+
+def test_gate_test_timeout_malformed_tool_config_falls_back(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path)
+    pkg = _write_pkg(repo)
+    (pkg / "tool_config.yaml").write_text("gate_test_timeout_s: [not, an, int]\n")
+    monkeypatch.setattr(gate, "_orchestration_config", lambda: {"gate_test_timeout_s": 777})
+    assert gate._gate_test_timeout(repo, _spec()) == 777

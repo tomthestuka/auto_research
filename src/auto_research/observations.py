@@ -249,8 +249,51 @@ def check_catalog_health(
             problems[mission] = result
     if problems:
         raise RuntimeError(
-            "data catalog health drift detected. Fix it (the deliberate human write — the "
-            "runtime never repairs), then rerun:\n"
-            f"  PYTHONPATH={tk_root} python -m obsdb_catalog repair_all {cfg_all.obs_db_root}\n"
-            f"drift by mission: {problems}"
+            "data catalog drift — the catalog and the files on disk disagree. The runtime never "
+            "repairs the catalog (that is a deliberate human step). Fix it, then rerun:\n\n"
+            f"  PYTHONPATH={tk_root} python -m obsdb_catalog repair_all {cfg_all.obs_db_root}\n\n"
+            "what drifted:\n" + _summarize_drift(problems)
         )
+
+
+# Friendly labels for the `obsdb_catalog.healthcheck` drift categories (see that module).
+_DRIFT_LABEL = {
+    "missing": "catalogued but missing on disk",
+    "uncatalogued": "on disk but not in the catalog",
+    "level_inconsistent": "levels_present / max_level inconsistent",
+    "regressed": "max_level regressed below a kept level-3 product",
+    "malformed": "catalog.json malformed",
+}
+
+
+def _summarize_drift(problems: dict) -> str:
+    """Render the healthcheck drift report as a few human-readable lines — one per
+    mission/category with a count and a couple of examples — instead of dumping every path.
+    """
+    lines: list[str] = []
+    for mission in sorted(problems):
+        detail = problems[mission]
+        if not isinstance(detail, dict):  # defensive: unexpected shape
+            lines.append(f"  {mission}: {detail}")
+            continue
+        for category in sorted(detail):
+            items = detail[category]
+            label = _DRIFT_LABEL.get(category, category)
+            if isinstance(items, str):  # malformed → the parse error
+                lines.append(f"  {mission}: {label} — {items}")
+                continue
+            if not isinstance(items, list):
+                lines.append(f"  {mission}: {label}: {items}")
+                continue
+            examples: list[str] = []
+            for item in items:
+                if isinstance(item, dict):
+                    examples.append(" ".join(str(item[k]) for k in ("obsid", "kind") if item.get(k)))
+                else:  # a bare path / obsid string
+                    examples.append(Path(str(item)).name)
+            unique = sorted(dict.fromkeys(e for e in examples if e))
+            shown = unique[:3]
+            more = f" (+{len(unique) - len(shown)} more)" if len(unique) > len(shown) else ""
+            eg = f" — e.g. {'; '.join(shown)}{more}" if shown else ""
+            lines.append(f"  {mission}: {len(items)} {label}{eg}")
+    return "\n".join(lines)

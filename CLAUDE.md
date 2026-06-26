@@ -417,7 +417,13 @@ human's, at merge — [§9.9](#99-git-discipline--the-runtime-is-master-blind).)
 
 **Layer A — the generic gate** (lives in `merge_flow`, domain-blind; the only checks the gate
 itself implements):
-- **Determinism** — re-running is identical.
+- **Determinism** — re-running yields the same per-test outcomes. The gate runs the tool's
+  tests twice and compares a JUnit `{test_id: PASSED/FAILED/ERROR/SKIPPED}` map (not byte-
+  identical pytest output, which chatty science tooling makes a false-positive magnet); the run
+  is deterministic ⇔ the two maps are equal. Result-reproducibility *within tolerance* is a
+  **science tool's** own `test_repro…` Layer-B test (lead-planned, coder-written, co-lead-
+  reviewed — not gate-enforced), whose verdict the same map tracks; rigorous replicability stays
+  the human's at merge ([§9.9](#99-git-discipline--the-runtime-is-master-blind)).
 - **No-fabrication scan** — the diff and any captured output trip no banned-vocabulary
   check ("representative", "synthetic", "illustrative", "mock", "placeholder", "for now",
   "in operational mode this would…") and contain **no data-fabricating code**
@@ -755,3 +761,15 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   policy landed: analysis runs through tools, `bash` is read-only inspection, a missing capability
   is a `tool_request`, and the coder/lead frame tools as parameterized capabilities, not one-offs.
   Module and `CLAUDE.md` changelogs compacted. Non-live suite green (298 passed).
+- 2026-06-26 — **Gate determinism reworked to per-test outcomes (§9.4); reproducibility is an
+  LLM-planned science-tool check.** The gate's determinism check was a byte-compare of two pytest
+  runs (`_strip_volatile`), which chatty science tooling (growing INFO filelists, banners) made a
+  false-positive magnet — it rejected a *correct* tool 4× and exhausted the rework cap on the
+  2026-06-26 live run. Now `gate._default_test_runner` runs pytest twice with `--junitxml`, parses
+  each into a `{test_id: PASSED/FAILED/ERROR/SKIPPED}` map, and defines deterministic ⇔ the two maps
+  are equal (catches an outcome flip; ignores log volatility). The 900s pytest timeout became config
+  (`gate_test_timeout_s`: per-package `tool_config.yaml` > `orchestration.yaml` > 900, no clamp).
+  Result-reproducibility *within tolerance* moved to a **science tool's** own `test_repro…` Layer-B
+  test — lead-planned in `proposed_checks`, coder-written, co-lead-reviewed against the plan, **not**
+  gate-enforced (acquisition/literature tools exempt); its verdict rides the same outcome map.
+  Prompts (`coder`/`analyst_lead`/`analyst_colead`) + `sandbox`/`prompts` DOCS updated.

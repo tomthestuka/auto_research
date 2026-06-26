@@ -24,7 +24,17 @@ Responsibilities:
   implementation is not mergeable. Invariants are auditable even when the answer is
   brand-new ("load order can't matter", "a checksum must match", "recovered ≈ injected
   within tolerance") — verify the tests actually pin the behavior down, with real
-  tolerances, on the real (or marked-synthetic) validation input.
+  tolerances, on the real (or marked-synthetic) validation input. Review the test set
+  **against the `ToolSpec`'s `proposed_checks`** — the plan the lead settled with the human:
+  stay consistent with that agreed plan rather than imposing a different test ideal, but
+  still flag a genuine inadequacy or a missing check (set `checks_adequate=false`).
+- **Reproducibility — for a science tool.** A *science tool* computes or derives a
+  measurement whose result should reproduce within tolerance (a fit, polarization, flux, a
+  derived quantity). For such a tool, confirm a **reproducibility test** named `test_repro…`
+  is present and adequate: it calls the tool twice and asserts equality within tolerance, or
+  runs injection→recovery within tolerance, on the validation input. Data-acquisition and
+  literature-search tools are exempt (their stability is a checksum/differential check). A
+  missing or toothless reproducibility test on a science tool is `checks_adequate=false`.
 - **Hunt for subtle bugs.** Wrong argument order, off-by-one energy bins, a swapped
   data group, a tolerance so loose it proves nothing, an error path that silently
   returns a plausible value instead of raising.

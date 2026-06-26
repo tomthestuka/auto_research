@@ -374,7 +374,17 @@ The **trust boundary** (§9.4) — code, not an LLM opinion. Two layers:
   **binary / undecodable** → a `no_fabrication.binary` hard-fail (data never belongs in the
   toolkit, §9.5) that is fed back to the author through the rework loop, never an exception.
 - **Layer B (the tool's own tests):** `pytest` in the worktree (via the injectable
-  `test_runner`; the default runs the analyst interpreter twice for determinism).
+  `test_runner`; the default runs the analyst interpreter twice for determinism). **Determinism
+  is a per-test-outcome compare, not a byte compare:** each run writes a JUnit XML report
+  (`--junitxml`), parsed into a `{test_id: PASSED/FAILED/ERROR/SKIPPED}` map; the run is
+  deterministic ⇔ the two maps are equal. This ignores log/timing/stdout volatility (chatty
+  science tooling — growing INFO filelists, banners) that the old `_strip_volatile` byte compare
+  false-flagged, and catches a test *outcome* that flips run-to-run. Each pytest invocation is
+  bounded by `_gate_test_timeout` (per-package `tool_config.yaml: gate_test_timeout_s` >
+  `orchestration.yaml: gate_test_timeout_s` > 900; no clamp). **Reproducibility is not gate-
+  enforced:** for a science tool the lead plans a `test_repro…` test (`proposed_checks`), the
+  coder writes it, and the co-lead reviews it — it runs as a normal Layer-B test, so a result
+  that wobbles outside tolerance flips its verdict and the determinism map catches it.
 
 The **no-fabrication scan** (`scan_python_source`, pure over source text) is split into
 precision tiers so it stays clean on real toolkit code (full of legitimate hardcoded
@@ -529,7 +539,24 @@ the hook mapping a fake-model verdict — no live LLM).
   text counterpart (vocabulary only); binary/undecodable targets hard-fail without scanning.
   `scan_provenance`, `check_structural`, `collect_targets` (now extension-agnostic under a
   `*_utils` package), and `_manifest_keys` are its helpers. Scan lists load from
-  `config/code_gate.yaml`.
+  `config/code_gate.yaml`. When no `test_runner` is injected, the default is the real
+  `_default_test_runner` with the per-package timeout bound via `partial` (so an injected
+  runner keeps its `(worktree, test_paths)` signature).
+- `gate._default_test_runner(worktree, test_paths, *, timeout_s=900)` → `dict` — the real
+  Layer-B runner: runs pytest twice with the analyst interpreter (`--junitxml` to a throwaway
+  temp dir), `timeout_s` per invocation. Returns `{results, deterministic, determinism_detail}`;
+  `results` carries the `layer_b.pytest` `CheckResult` (`passed ⇔ rc1==0`), determinism from the
+  two per-test outcome maps.
+- `gate._parse_junit_outcomes(junit_path)` → `dict[str,str]` — pure: parse a JUnit XML report
+  into `{"<classname>::<name>": PASSED/FAILED/ERROR/SKIPPED}` (read from each `<testcase>`'s
+  child element). Returns `{}` on an absent/unparseable report.
+- `gate._outcomes_determinism(map1, map2)` → `(bool, str)` — pure: deterministic ⇔ the two maps
+  are identical (keys + values); the detail names every diverging test. Catches an outcome flip
+  and the same-count/different-tests swap a bare return-code compare misses.
+- `gate._gate_test_timeout(worktree, tool_spec)` → `int` — resolve the per-pytest-invocation
+  Layer-B timeout: per-package `<worktree>/<target_domain>/tool_config.yaml: gate_test_timeout_s`
+  > `orchestration.yaml: gate_test_timeout_s` > 900. No clamp (trusted infra), coder-settable;
+  the per-package value is read (never imported) from the worktree.
 - `review.make_review_hook(colead=None, *, author_provider, web_source=None, monitor=None)` →
   the default `run_review` hook (§9.3 step 4); the provider-decorrelated co-lead review.
   - `review.select_decorrelated_member(group, author_provider)` → `ModelHandle` — picks the
@@ -689,3 +716,23 @@ the hook mapping a fake-model verdict — no live LLM).
   `test_merge_flow.test_direct_branch_coder_commit_auto_reverted_before_gate` (HEAD advances by
   exactly one — approve_edit's — and the `coder.committed` event fires). `pytest tests/test_merge_flow.py`
   green (32).
+- 2026-06-26 — **Gate determinism = per-test outcomes, not byte-identical output (handoff #2,
+  the confirmed authoring blocker).** `_default_test_runner` now runs pytest twice with
+  `--junitxml` (to a throwaway temp dir), parses each report into a `{test_id: outcome}` map via
+  the new pure `_parse_junit_outcomes`, and declares the run deterministic ⇔ the two maps are
+  equal (new pure `_outcomes_determinism`, naming any diverging test). `_strip_volatile` and the
+  byte-compare are removed. This fixes the false-positive that rejected a *correct* tool 4× and
+  exhausted the rework cap on the 2026-06-26 run (a benign growing `xpselect` INFO filelist tripped
+  the byte compare though 18/18 tests passed both runs); it still catches a test *outcome* that
+  flips run-to-run, including the same-count/different-tests swap a bare `rc==rc` misses. Layer-B
+  pass stays `rc1==0`; the map governs determinism only. The hardcoded 900s pytest timeout became
+  config: `_gate_test_timeout` resolves per-package `tool_config.yaml: gate_test_timeout_s` >
+  `orchestration.yaml: gate_test_timeout_s` > 900 (no clamp, coder-settable), bound into the
+  default runner via `partial` so injected runners keep their `(worktree, test_paths)` signature.
+  Reproducibility is **not** gate-enforced — it is an LLM-planned check for **science tools** only
+  (`test_repro…`, call-twice / injection-recovery within tolerance): the lead plans it in
+  `proposed_checks`, the coder writes it, the co-lead reviews it against the plan; it runs as a
+  normal Layer-B test so a wobble outside tolerance flips its verdict and the determinism map
+  catches it. Prompts updated (`coder.md`, `analyst_lead.md`, `analyst_colead.md`); CLAUDE.md §9.4
+  reworded. New tests in `tests/test_gate.py` (junit parse, the three determinism cases, timeout
+  precedence).

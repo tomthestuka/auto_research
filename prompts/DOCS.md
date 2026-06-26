@@ -148,3 +148,16 @@ logic here.
   authoritative documentation when they conflict rather than treating steer as an override (#4).
   Validation is live-only (prompt behaviour). Examples stay domain-neutral; §3 positive-actions kept
   (the no-fabrication ban in the data paragraph is the sanctioned exception).
+- 2026-06-26 — **Reproducibility-test convention + per-test-outcome determinism (handoff #2).** All
+  three coding-relevant prompts learned the convention: a **science tool** (computes/derives a
+  measurement reproducible within tolerance — fit, polarization, flux, derived quantity) ships a
+  `test_repro…` test that pins its core output (call-twice / injection-recovery within tolerance);
+  data-acquisition and literature-search tools are exempt. `analyst_lead.md` plans it in the brief's
+  `proposed_checks` (part of the `plan_and_debate` validation strategy); `coder.md` writes it; and
+  `analyst_colead.md` reviews it **against** the lead's `proposed_checks` — consistent with the agreed
+  plan by default, but still flagging a genuine gap (`checks_adequate=false`). `coder.md`'s test
+  guidance was corrected for the new gate: determinism is now a **per-test-outcome** compare (a
+  verdict that flips between the two runs fails; harmless log/stdout volatility no longer matters), so
+  the old "make the two runs' output identical" advice is gone; and a slow test declares
+  `gate_test_timeout_s` in its package `tool_config.yaml`. Validation is live-only (prompt behaviour);
+  examples stay domain-neutral.

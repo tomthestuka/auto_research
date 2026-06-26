@@ -8,7 +8,8 @@ rejection (L2).
 
 Two layers:
   Layer A (generic, domain-blind)  — the no-fabrication scan, structural checks,
-                                     determinism, provenance.
+                                     determinism (same per-test outcomes across two
+                                     runs), provenance.
   Layer B (the tool's own tests)   — run pytest in the worktree.
 
 The no-fabrication scan is split into precision tiers so it stays high-precision on
@@ -34,8 +35,10 @@ import hashlib
 import json
 import re
 import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 
 import yaml
@@ -475,13 +478,24 @@ def _manifest_keys(source: str) -> list[str]:
 TestRunner = Callable[[Path, list[str]], Awaitable[dict]]
 
 
-async def _default_test_runner(worktree: Path, test_paths: list[str]) -> dict:
-    """Run the worktree's tests twice (determinism) with the analyst sandbox interpreter.
+async def _default_test_runner(
+    worktree: Path, test_paths: list[str], *, timeout_s: int = 900
+) -> dict:
+    """Run the worktree's tests twice and compare **per-test outcomes** for determinism.
 
     Reuses the ``analyze_env`` / ``analyze_ini_sh`` env-source pattern from
     ``sandbox/runner.py`` so HEASoft/XSPEC are available; PYTHONPATH points at the
     worktree so the freshly-authored package imports.
+
+    Each run writes a JUnit XML report (``--junitxml``) parsed into a ``{test_id: outcome}``
+    map; the run is deterministic ⇔ the two maps are identical. This ignores log/timing/
+    stdout volatility (chatty science tooling — growing INFO filelists, version banners) that
+    a byte-compare false-flagged, and catches what matters: a test *outcome* that flips
+    run-to-run (CLAUDE.md §9.4). ``timeout_s`` bounds **each** pytest invocation (resolved
+    per-package by :func:`_gate_test_timeout`).
     """
+    import os
+
     from auto_research.sandbox.runner import _source_ini_env
 
     cfg = _orchestration_config()
@@ -489,45 +503,118 @@ async def _default_test_runner(worktree: Path, test_paths: list[str]) -> dict:
     ini_sh = cfg.get("analyze_ini_sh")
     python_exec = str(Path(analyze_env) / "bin" / "python") if analyze_env else "python"
 
-    import os
-
     base_env = _source_ini_env(ini_sh) if ini_sh else dict(os.environ)
     existing = base_env.get("PYTHONPATH", "")
     env = {**base_env, "PYTHONPATH": str(worktree) + (":" + existing if existing else "")}
 
-    def _run() -> tuple[int, str]:
+    def _run(junit_path: str) -> tuple[int, str, dict[str, str]]:
         try:
             proc = subprocess.run(
-                [python_exec, "-m", "pytest", "-p", "no:cacheprovider", "-q", *test_paths],
-                cwd=str(worktree), capture_output=True, text=True, env=env, timeout=900,
+                [python_exec, "-m", "pytest", "-p", "no:cacheprovider", "-q",
+                 f"--junitxml={junit_path}", *test_paths],
+                cwd=str(worktree), capture_output=True, text=True, env=env, timeout=timeout_s,
             )
         except subprocess.TimeoutExpired as exc:
             # A test that runs longer than the cap is a Layer-B *failure* (rework, then honest
             # failure), never an exception that aborts the whole run. Keep any partial output.
-            partial = "".join(p for p in (exc.stdout, exc.stderr) if isinstance(p, str))
-            return 124, f"pytest timed out after {exc.timeout:.0f}s\n{partial}".strip()
-        return proc.returncode, (proc.stdout + proc.stderr).strip()
+            partial_out = "".join(p for p in (exc.stdout, exc.stderr) if isinstance(p, str))
+            return 124, f"pytest timed out after {exc.timeout:.0f}s\n{partial_out}".strip(), {}
+        return (
+            proc.returncode,
+            (proc.stdout + proc.stderr).strip(),
+            _parse_junit_outcomes(Path(junit_path)),
+        )
 
-    rc1, out1 = _run()
-    rc2, out2 = _run()
+    # JUnit reports go to a throwaway dir outside the worktree, so they never pollute the
+    # changeset (collect_targets) or survive a later git clean.
+    with tempfile.TemporaryDirectory() as td:
+        rc1, out1, map1 = _run(str(Path(td) / "junit1.xml"))
+        _rc2, _out2, map2 = _run(str(Path(td) / "junit2.xml"))
+
     passed = rc1 == 0
     results = [CheckResult(
         name="layer_b.pytest", layer="B", passed=passed,
         detail="" if passed else out1[-2000:],
     )]
-    deterministic = (rc1 == rc2) and (_strip_volatile(out1) == _strip_volatile(out2))
+    deterministic, detail = _outcomes_determinism(map1, map2)
     return {
         "results": results,
         "deterministic": deterministic,
-        "determinism_detail": "" if deterministic else "two identical test runs produced different output",
+        "determinism_detail": detail,
     }
 
 
-def _strip_volatile(text: str) -> str:
-    """Drop pytest's inherently-volatile bits (timing, session paths) before diffing."""
-    text = re.sub(r"in [0-9.]+s", "in <t>s", text)
-    text = re.sub(r"0x[0-9a-fA-F]+", "0x<addr>", text)
-    return text
+def _parse_junit_outcomes(junit_path: Path) -> dict[str, str]:
+    """Parse a pytest ``--junitxml`` report into ``{test_id: outcome}``.
+
+    ``test_id`` is ``"<classname>::<name>"``; ``outcome`` ∈ ``{PASSED, FAILED, ERROR,
+    SKIPPED}`` read from each ``<testcase>``'s child element (``<error>``→ERROR,
+    ``<failure>``→FAILED, ``<skipped>``→SKIPPED, none→PASSED). Only the per-test verdict is
+    read — timing/log/stdout volatility is ignored. Returns ``{}`` if the report is absent or
+    unparseable (e.g. a collection crash), in which case Layer B's ``rc != 0`` fails the gate
+    on its own.
+    """
+    try:
+        root = ET.parse(str(junit_path)).getroot()
+    except (OSError, ET.ParseError):
+        return {}
+    outcomes: dict[str, str] = {}
+    for case in root.iter("testcase"):
+        test_id = f"{case.get('classname', '')}::{case.get('name', '')}"
+        outcome = "PASSED"
+        for child in case:
+            if child.tag == "error":
+                outcome = "ERROR"
+                break
+            if child.tag == "failure":
+                outcome = "FAILED"
+                break
+            if child.tag == "skipped":
+                outcome = "SKIPPED"
+                break
+        outcomes[test_id] = outcome
+    return outcomes
+
+
+def _outcomes_determinism(map1: dict[str, str], map2: dict[str, str]) -> tuple[bool, str]:
+    """Determinism ⇔ the two per-test outcome maps are identical (keys **and** values).
+
+    Catches an outcome that flips run-to-run and the same-count/different-tests swap a bare
+    return-code compare would miss; ignores log/stdout volatility (never in the maps).
+    Returns ``(deterministic, detail)`` — ``detail`` names every diverging test.
+    """
+    if map1 == map2:
+        return True, ""
+    ids = sorted(set(map1) | set(map2))
+    diffs = [
+        f"{tid}: {map1.get(tid, '<absent>')} → {map2.get(tid, '<absent>')}"
+        for tid in ids
+        if map1.get(tid) != map2.get(tid)
+    ]
+    return False, "test outcomes differ between two runs: " + "; ".join(diffs)
+
+
+def _gate_test_timeout(worktree: Path, tool_spec: ToolSpec) -> int:
+    """Resolve the per-pytest-invocation timeout (seconds) for the gate's Layer-B run.
+
+    Precedence: the target package's ``tool_config.yaml: gate_test_timeout_s`` >
+    ``orchestration.yaml: gate_test_timeout_s`` > 900. No upper clamp — this is trusted
+    human/coder infra (mirrors ``call_timeout_s``, sandbox/DOCS.md); a slow tool (e.g. a real
+    archive download, run twice by a reproducibility test) sets its own ceiling beside its
+    ``call_timeout_s``. The per-package value is read (never imported) from the worktree so it
+    reflects what the coder declared for the package under review.
+    """
+    default = int(_orchestration_config().get("gate_test_timeout_s") or 900)
+    pkg_cfg = worktree / tool_spec.target_domain / "tool_config.yaml"
+    try:
+        with pkg_cfg.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        val = data.get("gate_test_timeout_s")
+        if val is not None:
+            return int(val)
+    except (OSError, ValueError, TypeError, yaml.YAMLError):
+        pass
+    return default
 
 
 @lru_cache(maxsize=1)
@@ -562,13 +649,18 @@ async def run_gate(
     """Run the deterministic gate over an authored tool in ``worktree`` (§9.4).
 
     ``GateReport.passed`` ⇔ every Layer-A hard check passes ∧ Layer-B tests pass ∧ the
-    run is deterministic. Tier-3 ``findings`` are recorded but never flip ``passed``.
-    ``test_runner`` is injectable so the loop/structure is exercised without a live
-    science stack; the default runs pytest twice with the analyst interpreter.
+    run is deterministic. Determinism here means **the two runs yield the same per-test
+    outcomes** (a junit ``{test_id: outcome}`` map compare), not byte-identical output.
+    Tier-3 ``findings`` are recorded but never flip ``passed``. ``test_runner`` is injectable
+    so the loop/structure is exercised without a live science stack; the default runs pytest
+    twice with the analyst interpreter (timeout per :func:`_gate_test_timeout`).
     """
     worktree = Path(worktree)
     cfg = config if config is not None else _code_gate_config()
-    test_runner = test_runner or _default_test_runner
+    if test_runner is None:
+        # Bind the per-package timeout into the default runner only; an injected runner keeps
+        # its (worktree, test_paths) signature untouched.
+        test_runner = partial(_default_test_runner, timeout_s=_gate_test_timeout(worktree, tool_spec))
 
     targets = collect_targets(worktree)
 

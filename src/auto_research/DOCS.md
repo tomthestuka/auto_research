@@ -154,3 +154,10 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   (`[preflight] <name> … ok/FAILED`) — the project has no logging framework and the preflight
   predates the monitor, so `print` matches convention; the in-flight `…` makes the blocking
   `human_channel` ping legible instead of a silent hang.
+- 2026-06-25 — **Human-friendly `catalog_health` preflight message.** `check_catalog_health` no
+  longer dumps the raw `obsdb_catalog.healthcheck` drift dict (every missing path). New
+  `observations._summarize_drift` renders one line per mission/category with a friendly label
+  (`missing` → "catalogued but missing on disk", `uncatalogued`, `level_inconsistent`, `regressed`,
+  `malformed`), a count, and ≤3 examples (`obsid kind`, or a basename for path lists) — the
+  `repair_all` fix command stays up top. Tests updated in `test_observations.py` (match `catalog
+  drift`; assert the friendly summary + no raw dict/list dump).

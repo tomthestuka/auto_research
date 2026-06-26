@@ -42,6 +42,12 @@ structured_retry_cap: 2      # attempts for a structured _call (off-schema feedb
 # (key call_timeout_s: {<tool>: <seconds>}), which takes precedence over this value. No hard upper
 # bound on the per-tool override — tool_config.yaml is trusted infra, never LLM-set.
 sandbox_call_timeout_s: 300
+# Global default timeout (seconds) for ONE pytest invocation in the deterministic gate's
+# Layer-B run (the gate runs the tool's tests twice). A slow package (e.g. a real archive
+# download, run twice by its reproducibility test) raises it per package in its
+# <domain>_utils/tool_config.yaml (key gate_test_timeout_s), which takes precedence. No hard
+# upper bound on the override — tool_config.yaml is trusted infra, never LLM-set.
+gate_test_timeout_s: 900
 toolkit_root: /data/fzhou/research_toolkit
 # Python environment used for sandbox tool execution.
 # Must be a conda/venv prefix whose Python has the analysis stack (XSPEC, HEASoft, ixpeobssim,

@@ -44,7 +44,7 @@ roles:
           input: 5.0
           output: 25.0
         parameters:
-          max_tokens: 4096
+          max_tokens: 16384
   analyst_worker:
     members:
       - name: claude_sonnet_4_6

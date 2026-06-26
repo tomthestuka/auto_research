@@ -134,7 +134,7 @@ def test_check_catalog_health_good_catalog_passes(tmp_path):
 def test_check_catalog_health_malformed_raises(tmp_path):
     cfg, obs_db = _health_config(tmp_path)
     (obs_db / "catalog.json").write_text("{ not valid json")
-    with pytest.raises(RuntimeError, match="catalog health drift"):
+    with pytest.raises(RuntimeError, match="catalog drift"):
         check_catalog_health(config_path=cfg, toolkit_root=TOOLKIT_ROOT)
 
 
@@ -148,8 +148,14 @@ def test_check_catalog_health_missing_product_raises(tmp_path):
             },
         }
     }))
-    with pytest.raises(RuntimeError, match="catalog health drift"):
+    with pytest.raises(RuntimeError) as ei:
         check_catalog_health(config_path=cfg, toolkit_root=TOOLKIT_ROOT)
+    # Human-friendly: the repair command + a one-line drift summary (not a raw dict dump).
+    msg = str(ei.value)
+    assert "repair_all" in msg
+    assert "what drifted:" in msg
+    assert "catalogued but missing on disk" in msg and "01 level2_evt" in msg
+    assert "{'" not in msg and "[{" not in msg  # no raw dict/list dump
 
 
 # ── data_catalog ReAct tool (worker + lead) ─────────────────────────────────

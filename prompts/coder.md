@@ -169,12 +169,24 @@ you declare done — your `Bash` runs in the analysis environment, so `python`/`
 full science stack (the same interpreter that gates your tool), and import-time failures surface
 to you directly, well before the gate.
 
-**Keep each test fast and quiet.** The gate runs your tests **twice** (a determinism check) with
-a per-run time limit, so a test that reduces a whole observation can blow the budget. Validate on
-a **small, already-local ObsID** and the **smallest slice that exercises the logic** (e.g. one or
-two segments, not a full GTI). Assert on **stable quantities** (values within a tolerance, shapes,
-monotonicity, sanity bounds) and keep stdout quiet — sort any globbed file lists and silence noisy
-library warnings, so the two runs produce identical output and the determinism check holds.
+**Reproducibility test — required for a science tool.** A *science tool* computes or derives a
+scientific measurement whose result should reproduce within tolerance (a spectral fit,
+polarization, flux, a derived quantity). For such a tool, ship a reproducibility test named
+`test_repro…` that pins the tool's **core output** stable, in the form that fits the tool: call
+the tool twice and assert equality within tolerance, or run injection→recovery and assert the
+recovered value within tolerance. Data-acquisition and literature-search tools are **exempt**
+(their stability is a checksum/differential check, not a within-tolerance result). The lead plans
+which checks a tool needs — it is in your brief's proposed checks; follow that plan, and ask the
+lead (`ask_lead`) if the brief is silent on reproducibility for a science tool.
+
+**Keep each test fast, and its verdict stable.** The gate runs your tests **twice** and compares
+the **per-test outcomes** (pass / fail / error / skip): a test whose verdict *flips* between the
+two runs is rejected as non-deterministic — but harmless log/stdout volatility (timestamps,
+growing INFO filelists, version banners) no longer matters. So write tests whose **pass/fail is
+stable**: assert on **stable quantities** (values within a tolerance, shapes, monotonicity, sanity
+bounds), not on exact chatty output. Each run is also time-limited, so keep tests fast — validate
+on a **small, already-local ObsID** and the **smallest slice that exercises the logic** (one or
+two segments, not a full GTI).
 
 ## A slow tool must declare its sandbox call-timeout
 
@@ -199,6 +211,15 @@ Without an entry, a tool gets the global default (`orchestration.yaml: sandbox_c
 as high as the work honestly needs (it is a protective cap, not a target), and keep it above your
 tool's own graceful timeout. The backstop is fixed infrastructure, not a per-call knob — callers
 tune runtime through your tool's own timeout argument, and this ceiling stays invisible to them.
+
+A slow **test** has a separate budget. The gate runs your test suite under a per-run limit
+(`orchestration.yaml: gate_test_timeout_s`, default 900s, applied to **each** of the two runs).
+If a science tool's tests honestly need longer — especially a reproducibility test that runs the
+tool twice — raise it per package in the same `tool_config.yaml`:
+
+```yaml
+gate_test_timeout_s: 3600   # seconds; the gate's per-run Layer-B budget for this package
+```
 
 ## When you are unsure — escalate to ground each decision
 
