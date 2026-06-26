@@ -91,7 +91,7 @@ report_retry_cap: 2
 # self-correction loop (L0, SDK turns); the two rework caps bound how many times the
 # author is re-driven after a gate rejection (L2) or a co-lead review rejection (L3)
 # before the lead raises the failure to the human (§9.6/§9.7).
-tool_author_max_turns: 50
+tool_author_max_turns: 999
 tool_author_gate_rework_cap: 3
 tool_author_review_rework_cap: 2
 # Phase 2 step-7 runtime authoring/resume (consensus → merge_flow). tool_author_branch: the

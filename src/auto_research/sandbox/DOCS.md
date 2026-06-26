@@ -642,3 +642,11 @@ the hook mapping a fake-model verdict — no live LLM).
   the actual structure context (paths NOT restated in the prompt) and asserts — from the recorded
   tool stream — a clean `ls` of the toolkit root + every obsdb path at their absolute paths, with no
   hunting. Unit coverage in `test_merge_flow.py`/`test_preflight.py`.
+- 2026-06-25 — **`gate._manifest_keys` now handles annotated `TOOL_MANIFEST` (fix-list #11).** It
+  matched only a plain `ast.Assign` (`TOOL_MANIFEST = {...}`), but `xspec_utils` declares
+  `TOOL_MANIFEST: dict = {...}` — an `ast.AnnAssign` — so it extracted **zero** keys and
+  `structural.tool_manifest_entry` reported "no entry" for *every* extend-`xspec_utils` tool,
+  regardless of the key written (the root cause of the 2026-06-25 P1 authoring failure: the coder's
+  manifest entry was correct but invisible to the gate). Now matches both `ast.Assign` (`.targets`)
+  and `ast.AnnAssign` (`.target`). New test `tests/test_gate.py::test_structural_annotated_manifest_entry_found`
+  (and a `manifest_annotated` flag on the `_write_pkg` fixture); `pytest tests/test_gate.py` green (34).

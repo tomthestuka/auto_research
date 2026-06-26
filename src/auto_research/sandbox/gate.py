@@ -422,17 +422,26 @@ def check_structural(worktree: Path, tool_spec: ToolSpec, targets: dict[Path, se
 
 
 def _manifest_keys(source: str) -> list[str]:
-    """Extract the string keys of the ``TOOL_MANIFEST`` dict literal (pure-data, §9.2)."""
+    """Extract the string keys of the ``TOOL_MANIFEST`` dict literal (pure-data, §9.2).
+
+    Accepts both a plain assignment (``TOOL_MANIFEST = {...}`` → ``ast.Assign``) and an
+    annotated one (``TOOL_MANIFEST: dict = {...}`` → ``ast.AnnAssign``). The annotated form is
+    what ``xspec_utils`` uses; matching only ``Assign`` would extract zero keys and make every
+    extend-``xspec_utils`` tool's manifest entry invisible to the structural check.
+    """
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "TOOL_MANIFEST" for t in node.targets
-        ):
-            if isinstance(node.value, ast.Dict):
-                return [k.value for k in node.value.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+        else:
+            continue
+        if "TOOL_MANIFEST" in names and isinstance(node.value, ast.Dict):
+            return [k.value for k in node.value.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)]
     return []
 
 

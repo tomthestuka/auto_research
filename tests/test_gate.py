@@ -224,17 +224,21 @@ def _make_repo(tmp_path):
     return repo
 
 
-def _write_pkg(repo, *, with_test=True, manifest_name="my_tool", lib_body="    return load(obsid)\n"):
+def _write_pkg(repo, *, with_test=True, manifest_name="my_tool", lib_body="    return load(obsid)\n",
+               manifest_annotated=False):
     pkg = repo / "demo_utils"
     (pkg / "lib").mkdir(parents=True, exist_ok=True)
     (pkg / "skills").mkdir(parents=True, exist_ok=True)
     (pkg / "__init__.py").write_text("from .skills import TOOL_MANIFEST\n")
     (pkg / "lib" / "__init__.py").write_text("")
     (pkg / "lib" / "demo_help.py").write_text(f"def my_tool(obsid):\n{lib_body}")
+    # `xspec_utils` declares the manifest with a type annotation (`TOOL_MANIFEST: dict = {...}`);
+    # the gate must extract keys from that annotated form too (ast.AnnAssign).
+    lhs = "TOOL_MANIFEST: dict" if manifest_annotated else "TOOL_MANIFEST"
     (pkg / "skills" / "__init__.py").write_text(
-        'TOOL_MANIFEST = {\n  "research_toolkit.demo_utils.%s": {\n'
+        '%s = {\n  "research_toolkit.demo_utils.%s": {\n'
         '    "module": "demo_utils.lib.demo_help", "fn": "my_tool",\n'
-        '    "description": "d", "args_schema": {}}}\n' % manifest_name
+        '    "description": "d", "args_schema": {}}}\n' % (lhs, manifest_name)
     )
     if with_test:
         (pkg / "lib" / "test_demo.py").write_text(
@@ -268,6 +272,16 @@ def test_structural_all_pass(tmp_path):
     targets = collect_targets(repo)
     out = {c.name: c for c in check_structural(repo, _spec(), targets)}
     assert all(c.passed for c in out.values())
+
+
+def test_structural_annotated_manifest_entry_found(tmp_path):
+    """`TOOL_MANIFEST: dict = {...}` (annotated, as xspec_utils declares it) is recognised —
+    the manifest-entry check must not depend on a plain (un-annotated) assignment."""
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo, manifest_annotated=True)
+    targets = collect_targets(repo)
+    out = {c.name: c for c in check_structural(repo, _spec(), targets)}
+    assert out["structural.tool_manifest_entry"].passed
 
 
 # ── run_gate integration (fake Layer-B runner; real temp git worktree) ──────────
