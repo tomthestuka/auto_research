@@ -736,3 +736,11 @@ the hook mapping a fake-model verdict — no live LLM).
   catches it. Prompts updated (`coder.md`, `analyst_lead.md`, `analyst_colead.md`); CLAUDE.md §9.4
   reworded. New tests in `tests/test_gate.py` (junit parse, the three determinism cases, timeout
   precedence).
+- 2026-06-26 — **Gate rejection message demands ALL checks fixed; jargon dropped (handoff #3).**
+  `_gate_feedback_message` now tells the coder to fix **every** listed issue before resubmitting (a
+  partial fix is rejected again) and, when the structural checks fail (so the tests were skipped),
+  appends a plain "your tests have not run yet — more feedback may follow" note so the coder doesn't
+  submit a half-fix. The internal gate vocabulary the coder never sees defined was removed: the
+  per-line `[A]/[B]` layer tag is gone and the message no longer says "Layer A/B" or "determinism
+  check". The old `Do not … weaken a check` prohibition is reframed positively (§3); the
+  no-fabrication ban stays explicit. Tests in `tests/test_merge_flow.py`.

@@ -714,10 +714,20 @@ def _initial_message(tool_spec: ToolSpec, structure_context: str) -> str:
 
 def _gate_feedback_message(gate: GateReport) -> str:
     failed = [c for c in (*gate.layer_a, *gate.layer_b) if not c.passed]
-    detail = "\n".join(f"- [{c.layer}] {c.name}: {c.detail}" for c in failed) or gate.reason
+    detail = "\n".join(f"- {c.name}: {c.detail}" for c in failed) or gate.reason
+    # When the structural checks fail, the tool's tests are not run yet — warn the coder so a
+    # partial "looks done" fix isn't submitted before the remaining feedback can surface.
+    tests_not_run = (not gate.layer_b) and any(not c.passed for c in gate.layer_a)
+    tail = (
+        "\n\nYour tests have not run yet — they run only after the checks above pass, so more "
+        "feedback may follow once you fix these."
+        if tests_not_run else ""
+    )
     return (
-        "The deterministic gate REJECTED your tool. Fix these and re-run pytest:\n"
-        f"{detail}\n\nDo not fabricate or weaken a check to pass — fix the cause."
+        "The gate rejected your tool. Fix EVERY issue listed below before you resubmit — a "
+        "partial fix is rejected again — then re-run pytest in the worktree:\n"
+        f"{detail}\n\nNever fabricate data or results; fix the underlying cause rather than "
+        f"weakening a check to pass.{tail}"
     )
 
 

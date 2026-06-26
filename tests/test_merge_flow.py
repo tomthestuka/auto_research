@@ -663,3 +663,44 @@ def test_fs_guard_hook_inactive_when_allowlist_empty():
          "hook_event_name": "PreToolUse"}, None, None,
     ))
     assert out == {}
+
+
+# ── gate feedback message (handoff #3): fix ALL; warn tests not run on structural fail ──
+
+
+def test_gate_feedback_demands_all_and_warns_tests_not_run():
+    from auto_research.sandbox.merge_flow import _gate_feedback_message
+    from auto_research.schemas import CheckResult
+
+    # Structural failure → no Layer-B results → the "tests have not run yet" note appears.
+    report = GateReport(
+        passed=False,
+        layer_a=[
+            CheckResult(name="structural.test_present", layer="A", passed=False,
+                        detail="no test_*.py added"),
+            CheckResult(name="no_fabrication.scan", layer="A", passed=True, detail="clean"),
+        ],
+        layer_b=[],
+        reason="structural.test_present failed",
+    )
+    msg = _gate_feedback_message(report)
+    assert "EVERY" in msg                                   # demand all checks fixed
+    assert "structural.test_present: no test_*.py added" in msg
+    assert "have not run yet" in msg                        # tests-not-run warning
+    assert "Layer" not in msg and "determinism check" not in msg  # no internal jargon
+
+
+def test_gate_feedback_no_tests_note_when_tests_ran():
+    from auto_research.sandbox.merge_flow import _gate_feedback_message
+    from auto_research.schemas import CheckResult
+
+    # A pure test failure (Layer B ran) → no "tests have not run yet" note.
+    report = GateReport(
+        passed=False,
+        layer_a=[CheckResult(name="determinism", layer="A", passed=True, detail="")],
+        layer_b=[CheckResult(name="layer_b.pytest", layer="B", passed=False, detail="1 failed")],
+        reason="layer_b.pytest failed",
+    )
+    msg = _gate_feedback_message(report)
+    assert "layer_b.pytest: 1 failed" in msg
+    assert "have not run yet" not in msg
