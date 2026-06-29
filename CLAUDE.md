@@ -660,13 +660,25 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   re-deciding to author). A *reply-borne* steer is buildable now (capture an abort from any reply
   at the single `resolve_human` chokepoint → a shared `RunControl` flag → the lead's authoring loop
   and graph nodes consult it → honest §9.6 terminal); a true *anytime* interjection (steer while no
-  query is pending) depends on the durable suspend/resume above. Interim stop = **Ctrl-C**, which is
-  an acceptable *kill* (most cleanup runs via `finally`; a dirty authoring branch is caught next
-  launch by `check_toolkit_branch_clean`) but **not** a clean steer — asyncio cleanup-during-cancel
-  can skip the tree reset, a second Ctrl-C orphans subprocesses, and there is no honest
-  `FAILED`/`run.finish`. Hardening to pair with the channel: a SIGINT handler for graceful
-  honest-failure shutdown, and `asyncio.shield`/reordering so the authoring cleanup can't be skipped.
-  (§5.5's `plan_and_debate` already gives the human a veto checkpoint before *non-trivial* authoring.)
+  query is pending) depends on the durable suspend/resume above. **Graceful-shutdown is deferred
+  as one piece of this bundle (decided 2026-06-29):** rather than bolt a Ctrl-C/cleanup mechanism
+  onto each entry context separately, the SIGINT handler, the consolidated cleanup routine, the
+  `asyncio.shield`/reordering that protects the authoring-branch reset, and the OS-level
+  child-process kill are **co-designed together** with durable suspend/resume + this human-steer
+  channel, so **one** architecture serves all three entry contexts. The contexts differ enough that
+  a single naive handler does not fit: a global `KeyboardInterrupt`→cleanup handler works on the
+  **CLI** (it owns the process) but is wrong as a library (a runtime must not seize the host's
+  signal handling; off the main thread `signal.signal` raises and Ctrl-C never reaches the run) and
+  does **not** fire in a **notebook** (ipykernel keeps the interrupt and often never cancels the
+  awaited run — the observed 2026-06-26 failure). The portable spine is *idempotent cleanup run from
+  a shielded `finally` on cancellation* (CLI/library), plus a *cooperative "stop please" flag* the
+  run polls at safe points (the notebook story, = the reply-borne steer above) — built once, later.
+  **Interim stop = hard kill of the kernel's whole process tree/group**, not just its PID: sandbox
+  subprocesses share the kernel's process group (no `start_new_session`) so a terminal Ctrl-C or a
+  process-group kill reaches them, but `kill <kernel_pid>` alone orphans them (no `PR_SET_PDEATHSIG`
+  auto-reap). A hard kill skips the `finally` reset, so a dirty authoring branch may survive — caught
+  next launch by `check_toolkit_branch_clean`. (§5.5's `plan_and_debate` already gives the human a
+  veto checkpoint before *non-trivial* authoring.)
 - **OS-level sandbox jailing:** read-only bind-mounts / seccomp / egress control beyond the
   relocated-scratch subprocess sandbox. *(Partly mitigated: every runtime agent's file access is
   now confined to the `config/orchestration.yaml: agent_fs_allow` allow-list via
@@ -714,10 +726,12 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   a residual dirty tree is then caught at the next launch's preflight (the in-flow
   `check_toolkit_branch_clean` still *raises* mid-run — graceful-degrade is a tracked TODO). It now
   resets to the **per-attempt base ref** (HEAD at `propose_and_pr` entry), so a commit the coder
-  lands itself is dropped, not kept (§9.9). **Residual (§12 Ctrl-C hardening):** a run killed
-  mid-attempt can skip this `finally`, leaving the coder's commit on the branch with a *clean* tree —
-  which the launch `check_toolkit_branch_clean` (dirty-tree only) does not catch; the human drops it
-  with `git reset --hard <base>` out of band.
+  lands itself is dropped, not kept (§9.9). **Residual (deferred — §12 graceful-shutdown bundle):** a
+  run killed mid-attempt can skip this `finally`, leaving the coder's commit on the branch with a
+  *clean* tree — which the launch `check_toolkit_branch_clean` (dirty-tree only) does not catch; the
+  human drops it with `git reset --hard <base>` out of band. The accepted interim is a hard kill of
+  the kernel's whole process tree/group (a graceful SIGINT/cleanup path is co-designed later with
+  durable suspend/resume + human-steer, §12 — not bolted on per entry context now).
 - **Coder git-ban is best-effort (deny-rule).** The coder's Bash deny-rule
   (`disallowed_tools=["Bash(git:*)", "Bash(git)"]`, §9.9) blocks the obvious `git …`, but prefix
   matching can be slipped (pipes, `$(…)`, env prefixes, `python -c subprocess`). The robust catches are
@@ -735,84 +749,46 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
 
 ## Changelog
 
-- 2026-05-27 -> 2026-06-12 — **Phase 1 built, hardened, and verified live.** The full
-  LangGraph team runs end-to-end: Pydantic schemas, config-driven provider registry,
-  observability, SQLite storage/retrieval, source adapters, prompts, agent roles, ReAct tool
-  loops, consensus, graph feedback edges, sandbox/tool registry, reports, CLI, Studio, and
-  notebook inspection. A Cyg X-1 soft-state joint-fit run completed the graph and produced
-  JSONL + compiled LaTeX/PDF reports (closeout fixes: reviewer LaTeX token ceiling, ADS 404
-  degradation, split ReAct caps). Phase 2's trust-boundary spec was written here: uniform
-  `research_toolkit` package layout, no-fabrication policy, deterministic gate, actor flow,
-  runtime git discipline, and build order.
-- 2026-06-12 -> 2026-06-16 — **Phase 2 steps 0–7 built (the full author→gate→review→commit
-  flow).** Runtime writes are confined under `runtime_dir` (worker scratch, MCP cwd, figures).
-  The protocol: `ToolSpec`/`ValidationDataset`/`ProposedCheck`/`AuthoringDecision` +
-  `AnalystReport.tool_request`/`status` (missing-capability + §9.6 honest-failure). The flow:
-  `merge_flow.propose_and_pr` drives a Sonnet Claude-SDK `coder` in an isolated worktree
-  (runtime-safe structure context, `ask_lead`/`ask_human` escalation, bounded rework);
-  `gate.run_gate` is the deterministic gate (Layer-A structural/provenance/determinism + the
-  `config/code_gate.yaml` no-fabrication scan; Layer-B tool-local tests); `review.make_review_hook`
-  is the provider-decorrelated GPT co-lead code review (`select_decorrelated_member`, raises if
-  no different-provider member); `merge_flow.approve_edit` lands one atomic commit by explicit-path
-  staging of `gate.collect_targets` (never `git add -A`; commit ⇔ gate-pass ∧ review-pass; the
-  runtime never merges to master). Launch `preflight` runs every no-LLM check before any model
-  client (all configured roles required); the `hitl` package adds the injectable `HumanHandler`
-  + `resolve_human` fail-safe, CLI/Slack/WhatsApp connectors, and the shared `ask_human` tool.
-  Lead-driven authoring/resume wires it together: `decide_authoring` → `DebateToConverge` itself
-  issues `propose_and_pr(direct_branch="ai")` (LLM never issues git), then on a committed tool
-  reloads the registry (dynamic `*_utils` discovery), restarts sandboxes, augments the task, and
-  reruns workers — bounded by `tool_author_cap`. Per-mission data catalog read side
-  (`observations.read_catalog`/`local_obsids`) written by authored tools. Live end-to-end via the
-  `notebooks/usage_example.ipynb` "test code authoring" run (IXPE P1); non-live suite green.
-- 2026-06-18 -> 2026-06-22 — **Live-run polish + hardening.** Dispatch mechanics moved into the
-  `ReviewVerdict` schema (`Field(description=…)` on `follow_up` + the routing flags) and every
-  `agents/react.py` harness tool gained manifest-quality descriptions, so the reviewer stops
-  pausing fresh requests for routing/paths; `hitl/slack.py` posts a Block Kit message; literature/web
-  provider faults degrade to recoverable outcomes. New §3 rule **write only positive actions**
-  (all six runtime prompts swept; the no-fabrication ban is the sanctioned exception). The
-  worker→lead `AnalystToolRequest` was then split from the lead→coder `ToolSpec` and
-  `ProposedCheck.params` dropped, removing the open map that 400'd GPT analyst workers under
-  OpenAI strict structured output (§7). The **analysts-author-no-code / general-capability** prompt
-  policy landed: analysis runs through tools, `bash` is read-only inspection, a missing capability
-  is a `tool_request`, and the coder/lead frame tools as parameterized capabilities, not one-offs.
-  Module and `CLAUDE.md` changelogs compacted. Non-live suite green (298 passed).
-- 2026-06-26 — **Gate determinism reworked to per-test outcomes (§9.4); reproducibility is an
-  LLM-planned science-tool check.** The gate's determinism check was a byte-compare of two pytest
-  runs (`_strip_volatile`), which chatty science tooling (growing INFO filelists, banners) made a
-  false-positive magnet — it rejected a *correct* tool 4× and exhausted the rework cap on the
-  2026-06-26 live run. Now `gate._default_test_runner` runs pytest twice with `--junitxml`, parses
-  each into a `{test_id: PASSED/FAILED/ERROR/SKIPPED}` map, and defines deterministic ⇔ the two maps
-  are equal (catches an outcome flip; ignores log volatility). The 900s pytest timeout became config
-  (`gate_test_timeout_s`: per-package `tool_config.yaml` > `orchestration.yaml` > 900, no clamp).
-  Result-reproducibility *within tolerance* moved to a **science tool's** own `test_repro…` Layer-B
-  test — lead-planned in `proposed_checks`, coder-written, co-lead-reviewed against the plan, **not**
-  gate-enforced (acquisition/literature tools exempt); its verdict rides the same outcome map.
-  Prompts (`coder`/`analyst_lead`/`analyst_colead`) + `sandbox`/`prompts` DOCS updated.
-- 2026-06-26 — **Reviewer is the sole I/O; honest authoring failure is finalized, not spun
-  (handoff #4, §9.6).** A cap-exhausted authoring attempt used to fall through to debate, where
-  workers re-requested the tool and the lead re-authored — an observed *spin*. Now a non-committed
-  `propose_and_pr` makes the lead compose **one** terminal report (`AnalystLeadAgent.
-  finalize_authoring_outcome`, documenting the unavailable capability + partial findings + honest
-  `status`) and `DebateToConverge.run()` returns it. The graph's `analysis → review_analysis` edge
-  is **unconditional** (the old `after_analysis` bypass that routed a `failed`/`needs_human` report
-  straight to `finalize_run` is removed; the analyst lead gets no bypass): the reviewer adjudicates
-  **every** result — finalize vs. bounded rework (capped by `max_iterations`) — and on finalize a
-  report is **always** composed (honouring `report_formats`), so an honest failure is documented,
-  not silent. The "no report on failure" *code* guarantee moves to the reviewer + compose prompts
-  (`reviewer.md`: document the limitation, never invent a result). §9.9 unchanged — consensus still
-  issues `propose_and_pr` (code issues git). Coverage: `tests/test_graph.py`,
-  `tests/test_consensus_authoring.py`.
+- 2026-05-27 -> 2026-06-12 — **Phase 1 built, hardened, verified live.** Full LangGraph team
+  end-to-end (schemas, provider registry, observability, SQLite storage/retrieval, sources,
+  prompts, agent roles, ReAct loops, consensus, feedback edges, sandbox/registry, reports, CLI,
+  Studio, notebook); a Cyg X-1 joint-fit run produced JSONL + LaTeX/PDF. Phase 2's trust-boundary
+  spec written here (uniform `research_toolkit` layout, no-fabrication, deterministic gate, actor
+  flow, runtime git discipline, build order).
+- 2026-06-12 -> 2026-06-16 — **Phase 2 steps 0–7: the full author→gate→review→commit flow.**
+  Runtime writes confined under `runtime_dir`. Protocol: `ToolSpec`/`ValidationDataset`/
+  `ProposedCheck`/`AuthoringDecision` + `AnalystReport.tool_request`/`status`. Flow:
+  `merge_flow.propose_and_pr` (Sonnet Claude-SDK `coder`, isolated worktree, `ask_lead`/`ask_human`,
+  bounded rework) → `gate.run_gate` (Layer-A structural/provenance/determinism + `code_gate.yaml`
+  no-fabrication scan; Layer-B tool tests) → `review.make_review_hook` (provider-decorrelated GPT
+  co-lead) → `approve_edit` (one atomic commit, explicit-path staging, never `git add -A`; commit ⇔
+  gate ∧ review; runtime never merges to master). `preflight` runs every no-LLM check before any
+  model; the `hitl` package adds the injectable `HumanHandler`/`resolve_human` + connectors + the
+  shared `ask_human`. Lead-driven authoring/resume (`decide_authoring` → consensus issues
+  `propose_and_pr(direct_branch="ai")` → registry reload + sandbox restart + workers rerun, capped
+  by `tool_author_cap`). Live: `notebooks/usage_example.ipynb` IXPE P1.
+- 2026-06-18 -> 2026-06-26 — **Live-run polish + hardening.** Dispatch mechanics moved into the
+  `ReviewVerdict` schema + manifest-quality `react.py` tool descriptions (reviewer stops pausing for
+  routing/paths); §3 **write only positive actions** (no-fabrication ban excepted); worker→lead
+  `AnalystToolRequest` split from lead→coder `ToolSpec` + `ProposedCheck.params` dropped (OpenAI
+  strict open-map 400, §7); **analysts-author-no-code** prompt policy (analysis via tools, `bash`
+  read-only, missing capability → `tool_request`). Authoring hardened across fix-lists (timeouts,
+  monitor legibility, `fs_guard.PathGuard` `PreToolUse` jail, coder path-hints, coder git-discipline:
+  deny-rule + per-attempt base-ref reset + gate-entry auto-revert). **Gate determinism reworked
+  (§9.4):** per-test JUnit outcome maps, not a byte-compare (`_strip_volatile` removed) — the
+  false-positive that exhausted the rework cap on a correct tool; reproducibility is now a
+  science-tool-only LLM-planned `test_repro…` Layer-B check. **Reviewer is the sole I/O (§9.6):**
+  `analysis → review_analysis` unconditional, the lead's `finalize_authoring_outcome` composes one
+  honest terminal report instead of spinning, and a finalize always documents the outcome. Non-live
+  suite green.
 - 2026-06-29 — **Clarification channels carry one Markdown `message`; rendered per channel
-  ("use the wheel", §1; handoff #1).** The raise-to-human/inter-agent *clarification* channels —
-  `ask_human`, the lead's `plan_and_debate`, and the coder↔lead `ask_lead`
-  (`clarify_for_author`) — carry free-form natural language, which LLMs emit as Markdown natively
-  and every surface can render. So `HumanQuery` drops its `question` + `context` (and
-  `plan_and_debate`'s `plan`) for a single Markdown `message` + a derived `headline`, and the
-  connectors *render* it per surface instead of the protocol prescribing a shape: **CLI** via `rich`
-  (`environment.yml` gains `rich`), **Slack** via the dedicated `markdown` block (12000-char limit,
-  chunked) replacing the 2900-char `_truncate` of the superseded `section` block. **WhatsApp/Twilio
-  is deprecated** (bills per message; warns on construction, raw-Markdown passthrough) — prefer
-  `slack`/`cli` (§13). The boundary held deliberately: **only** the free-text clarification carrier
-  moved to Markdown; the **typed protocol messages** (`ReviewVerdict`, `AnalystReport`, `ToolSpec`,
-  `FigureRef`, … — where code branches on fields, §7) stay Pydantic. Coverage: `tests/test_hitl.py`,
-  `tests/test_react_tools.py`, `tests/test_merge_flow.py`. Non-live suite green (365 passed).
+  ("use the wheel", §1; handoff #1).** `ask_human`, the lead's `plan_and_debate`, and the coder↔lead
+  `ask_lead`/`clarify_for_author` carry free-form NL, so `HumanQuery` drops `question`+`context`
+  (and `plan`) for one Markdown `message` + a derived `headline`; connectors *render* it — **CLI**
+  via `rich`, **Slack** via the dedicated `markdown` block (12000-char, chunked, replacing the
+  2900-char section `_truncate`). **WhatsApp/Twilio deprecated** (bills per message). The boundary
+  held: only the free-text carrier moved to Markdown; the **typed protocol** (`ReviewVerdict`,
+  `AnalystReport`, `ToolSpec`, `FigureRef`, … — code branches on fields, §7) stays Pydantic.
+  Graceful SIGINT/cleanup shutdown (handoff #5) **deferred** into the §12 human-steer + durable
+  suspend/resume bundle (one design for CLI/notebook/library; interim = hard-kill the kernel's
+  process tree). Coverage: `tests/test_{hitl,react_tools,merge_flow}.py`; suite green (365).

@@ -212,53 +212,21 @@ carried by **reference** (`FigureRef`), never embedded
   typed contract behind the injectable `human_handler` and the `ask_human` tools.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Full Pydantic v2 protocol built: research/search/analysis/
-  review messages, `FigureRef`/`DocumentRef`, native function-call tool envelopes, sandbox
-  results, report schemas, LaTeX report schema, and strict JSON-serializable boundaries.
-- 2026-06-12 -> 2026-06-16 — Phase 2 schemas built and evolved (steps 3-7). Added `ToolSpec`,
-  `ValidationDataset`, `ProposedCheck`, `AnalystReport.tool_request`, `AnalystReport.status`,
-  `ToolSpec.request_kind`/`observed_issue`, the merge-flow types (`CheckResult`, `GateReport`
-  incl. `findings` for non-failing gate observations, `ToolReviewVerdict`, `MergeFlowResult`),
-  the raise-to-human `HumanQuery`/`HumanResponse` (§9.7; `HumanQuery.model` + `sender_label`
-  rendering `"<asked_by> (<model>)"`), `ToolReviewVerdict.commit_summary` (the co-lead's
-  one-line commit subject used by `merge_flow.approve_edit`, fallback tool name), and
-  `AuthoringDecision` (`should_author`/`tool_spec`/`rationale` — the lead's decision over a
-  worker `tool_request`, acted on by consensus, not the LLM).
-- 2026-06-18 — `ReviewVerdict` fields now carry `Field(description=…)` (review.py): `follow_up`
-  is described as the dispatch text routed to the flagged team(s) and the two booleans as the
-  team-routing flags. The descriptions reach the provider through `model_json_schema()` (the
-  strict sanitizer keeps `description`), so the reviewer reads its dispatch contract from the
-  schema — the reviewer was asking the human where dispatch goes because these fields were bare.
-- 2026-06-22 — **Split the worker tool-request from the authoring brief + closed `ProposedCheck`.**
-  A live run's GPT analyst worker 400'd composing its `AnalystReport`: `ProposedCheck.params:
-  dict[str, Any]` (nested `ToolSpec.proposed_checks` → `AnalystReport.tool_request`) is an open
-  map, and OpenAI strict requires every object's `additionalProperties` to be exactly `false`
-  (a typed `dict[str, str]` is rejected too — only a closed shape works). Dropped
-  `ProposedCheck.params` entirely (nothing read it), so `ProposedCheck`/`ToolSpec` carry no open
-  map and the lead's `AuthoringDecision` path is provider-safe too. Added `AnalystToolRequest` as
-  the **worker→lead** message (`request_kind`, `science_context`, `expected_behavior`, a
-  *suggested* `proposed_tool_name`, `observed_issue`, `validation_data` ≥1, `notes`);
-  `AnalystReport.tool_request` is now `AnalystToolRequest | None`. `ToolSpec` is unchanged
-  structurally and stays the **lead→coder** brief the lead finalises (adds
-  `target_domain`/`disposition`/`proposed_checks`), aligning the schema with §9.3's ownership.
-  `tests/test_schemas.py` gained an `AnalystToolRequest` round-trip and a regression test that
-  walks `AnalystReport`'s strict schema asserting no open maps.
-- 2026-06-22 — `ReviewVerdict` gained `cited_paths: list[str]` (review.py): the local PDFs the
-  reviewer opened via `open_paper` and actually used as evidence. Kept as `list[str]` (not
-  `list[Path]`) for OpenAI-strict safety; resolved to `Path` and intersected with the paths
-  actually opened at the runtime boundary, then staged + hyperlinked as the report's References.
-- 2026-06-24 — `ReviewVerdict.needs_more_literature`/`needs_analysis_rework` field descriptions
-  rewritten (fix-list #1) to state the one-edge-each semantics: `needs_more_literature` is the
-  literature **re-loop** switch (the initial literature pass always runs before the first verdict,
-  so it is set true only to close a real literature gap; left false it advances to analysis) and
-  `needs_analysis_rework` is the analysis re-loop switch. Drops the misleading "set both on a fresh
-  request to start both at once" line that drove a librarian misloop. Interfaces note updated to
-  match; no schema-shape change.
-- 2026-06-29 — **`HumanQuery` carries one Markdown `message` (was `question` + `context`).** The
-  raise-to-human clarification channels carry free-form natural language, so the body is now a
-  single Markdown `message` the raising LLM composes — connectors polish it per channel (CLI via
-  `rich`, Slack via a `markdown` block) rather than the protocol prescribing a question/context
-  shape (which a longer `plan_and_debate` design report did not fit). Added the `headline` property
-  (first meaningful line, capped) for notifications / Slack thread label / monitor / the headless
-  fail-safe. Typed protocol messages (where code branches on fields) are unchanged — only the
-  free-text clarification carrier moved to Markdown. `tests/test_hitl.py` round-trip + headline.
+- 2026-05-26 -> 2026-06-12 — Full Pydantic v2 protocol: research/search/analysis/review messages,
+  `FigureRef`/`DocumentRef`, function-call tool envelopes, sandbox results, report + LaTeX schemas,
+  strict JSON-serializable boundaries.
+- 2026-06-12 -> 2026-06-16 — **Phase 2 schemas (steps 3–7).** `ToolSpec`/`ValidationDataset`/
+  `ProposedCheck`, `AnalystReport.tool_request`/`status`, merge-flow types (`CheckResult`,
+  `GateReport` incl. `findings`, `ToolReviewVerdict` incl. `commit_summary`, `MergeFlowResult`),
+  the raise-to-human `HumanQuery`/`HumanResponse` (§9.7), and `AuthoringDecision` (the lead's
+  decision over a worker `tool_request`, acted on by consensus).
+- 2026-06-18 -> 2026-06-24 — **Provider-strict + routing-legible fixes.** `ReviewVerdict` fields
+  carry `Field(description=…)` (the reviewer reads its dispatch/routing contract from the schema);
+  `needs_more_literature`/`needs_analysis_rework` rewritten to one-edge-each semantics (fix-list #1).
+  Split the worker→lead `AnalystToolRequest` from the lead→coder `ToolSpec` and dropped
+  `ProposedCheck.params` — the open map that 400'd GPT workers under OpenAI strict (§7). Added
+  `ReviewVerdict.cited_paths` (PDFs opened + used; `list[str]` for strict-safety).
+- 2026-06-29 — **`HumanQuery` carries one Markdown `message`** (was `question`+`context`). The
+  clarification channels carry free-form NL; connectors render per channel (CLI `rich`, Slack
+  `markdown` block). Added the `headline` property (notifications / thread label / monitor /
+  fail-safe). Typed protocol messages unchanged. `tests/test_hitl.py`.

@@ -176,61 +176,24 @@ verdicts, two iteration counters, and the cap.
 - `DEFAULT_WORKER_COUNT` — default analyst worker count (currently 2).
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Graph/runtime built and ReAct-wired: six-node LangGraph
-  including `compose_report`, two capped feedback edges, Studio wiring, per-run workspace,
-  one persistent sandbox per worker, MCP client lifecycle, read-only reviewer/lead tools,
-  required-env checks, role-specific ReAct caps, report formats, and ReAct literature
-  gathering.
-- 2026-06-12 — Phase 2 step 0 added off-repo MCP server cwd pinning and lead read-only
-  `toolkit_root` access; compacted changelog, refreshed the graph diagram/interfaces, and
-  reflected worker-owned tool execution.
-- 2026-06-15 -> 2026-06-18 — Phase 2 steps 5 and 7. `run_research` resolves a raise-to-human
-  channel (`human_handler`/`human_channel`), awaits the now-async preflight (incl. the channel
-  ping), and threads the handler to the role tool providers; `after_analysis` routes an honest
-  `failed`/`needs_human` report around the reviewer to `finalize_run` (no fabricated report).
-  `runtime.py` wires the consensus authoring/resume path — `DebateToConverge` receives
-  `tool_author_cap`, `toolkit_root`, `worktree_base` (`<run_dir>/authoring`), `direct_branch`
-  (`orchestration.yaml: tool_author_branch`, default `ai`), and `human_handler`, so the lead
-  authors missing capability into `research_toolkit` and workers rerun on it. The reviewer's
-  read-only `roots` now also include `toolkit_root` (shared `readonly_roots = [run_dir,
-  papers_dir, toolkit_root]`), so it can read tool source/`TOOL_MANIFEST` and verify analyst
-  results used correct call parameters.
-- 2026-06-22 — **Retrieval-for-review is reviewer-driven.** The `literature` node no longer calls
-  `text_search_paths()` or pre-loads papers into state — it only ingests; the reviewer pulls
-  literature itself via its `text_search`/`open_paper` tools. `ResearchState.literature` was
-  replaced by `cited_paths`; `review_analysis_node` sets it to `verdict.cited_paths ∩
-  reviewer.tools.opened_paths` (`_resolve_cited_paths`), and `compose_report` builds References
-  from those. `reviewer.review(...)` dropped its `literature=` parameter; the analyst lead's
-  `ReadOnlyToolProvider` now passes `include_text_search=False` (knowledge-base tools are the
-  reviewer's alone).
-- 2026-06-23 — **`_builtin_server_config` now pins `{analyze_env}/bin` to the front of the
-  builtin MCP server's `PATH`.** `bash_exec` runs a bare `python` through the shell, which
-  resolves against `PATH` — not the server's own interpreter — so inline inspection
-  (`python -c "import astropy"`, `import xspec_utils`) previously used whatever conda env
-  leaked onto the launching shell's `PATH` (the configured `analyze_env` was never on it).
-  That made it nondeterministic and broke whenever the orchestrator env lacked the science
-  stack (observed: `ModuleNotFoundError: No module named 'astropy'`). A bare `python`/`pip`
-  inside `bash_exec` is now the same interpreter the toolkit tools invoke directly. Guarded
-  by `tests/test_sandbox.py::TestBashExecInterpreterConsistency`.
-- 2026-06-24 — **Removed the hardcoded `toolkit_root` fallbacks (fix-list #2).** `runtime.py`
-  (both graph builders) now read `orch["toolkit_root"]` directly — the literal
-  `"/data/fzhou/research_toolkit"` default is gone; the launch preflight's new
-  `check_toolkit_root_configured` is the clean gate, so a missing key fails there with a precise
-  message rather than silently routing agents to a stale path. `builder.py`'s no-registry fallback
-  (Studio/standalone) reads the root from `load_orchestration_config()` via a lazy import (keeps
-  builder ⇍ runtime acyclic) instead of the hardcoded literal.
-- 2026-06-24 — **§5.5 lead design channel wiring.** `runtime.py` now builds the analyst lead's
-  `ReadOnlyToolProvider` with `include_plan_and_debate=True`, so the lead (only) gets the
-  budget-free `plan_and_debate` channel to settle a toolkit design with the human before
-  authoring. Reviewer/co-lead providers unchanged. (Loop/tool mechanics in `agents/DOCS.md`.)
-- 2026-06-26 — **Reviewer is the sole I/O — honest failure is adjudicated, not bypassed
-  (handoff #4, §9.6).** `analysis → review_analysis` is now an **unconditional** edge: the
-  `after_analysis` router that sent a `failed`/`needs_human` report straight to `finalize_run`
-  is removed, so the reviewer reviews **every** analysis result. `finalize_run_node` no longer
-  manufactures a non-accepted verdict from `status` — it records the terminal (`run.honest_failure`
-  on a failed status) and forwards the reviewer's verdict. `route_after_finalize` now routes to
-  `compose_report` whenever `report_formats` is non-empty (decoupled from `verdict.accepted`), so
-  a finalize **always documents the outcome** (success or honest failure), never silently ENDs.
-  The no-fabrication guarantee for the report moved to the reviewer + compose prompts. Pairs with
-  the consensus change (`finalize_authoring_outcome` emits the failed report). Tests rewritten in
-  `tests/test_graph.py` (`…through_reviewer`, `…reviewer_can_rework_a_failed_analysis_bounded`).
+- 2026-05-26 -> 2026-06-12 — Graph/runtime built and ReAct-wired: six-node LangGraph incl.
+  `compose_report`, two capped feedback edges, Studio wiring, per-run workspace, one persistent
+  sandbox per worker, MCP client lifecycle, read-only reviewer/lead tools, required-env checks,
+  role-specific ReAct caps, report formats, ReAct literature gathering.
+- 2026-06-12 -> 2026-06-18 — **Phase 2 steps 0/5/7.** Off-repo MCP cwd + lead read-only
+  `toolkit_root`. `run_research` resolves a raise-to-human channel, awaits the async preflight
+  (channel ping), threads the handler to role providers. Consensus authoring/resume wired:
+  `DebateToConverge` receives `tool_author_cap`/`toolkit_root`/`worktree_base`/`direct_branch`
+  (default `ai`)/`human_handler`; reviewer/lead read-only `roots` include `toolkit_root`.
+- 2026-06-22 -> 2026-06-24 — **Reviewer-driven retrieval + env/path fixes.** The `literature` node
+  only ingests; the reviewer pulls literature via its own `text_search`/`open_paper`
+  (`ResearchState.literature` → `cited_paths`, `_resolve_cited_paths`; `reviewer.review` dropped
+  `literature=`). `_builtin_server_config` pins `{analyze_env}/bin` to the front of `bash_exec`'s
+  `PATH` (a bare `python` is the same interpreter the toolkit uses). Removed hardcoded `toolkit_root`
+  fallbacks (fix-list #2 — `check_toolkit_root_configured` is the gate). Lead provider built with
+  `include_plan_and_debate=True` (§5.5).
+- 2026-06-26 — **Reviewer is the sole I/O (handoff #4, §9.6).** `analysis → review_analysis` is
+  unconditional (the `after_analysis` bypass removed); `finalize_run_node` forwards the reviewer's
+  verdict (records `run.honest_failure` on a failed status, no manufactured verdict);
+  `route_after_finalize → compose_report` whenever `report_formats` is set, so a finalize always
+  documents the outcome. Tests rewritten in `tests/test_graph.py`.

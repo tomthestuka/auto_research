@@ -104,43 +104,20 @@ protocol, §7).
 - `SlackHandler` / `WhatsAppHandler` — connector classes (see contracts above).
 
 ## Changelog
-
-- 2026-06-15 — Phase 2 step 5: package created. `HumanQuery`/`HumanResponse` protocol; the
-  injectable `HumanHandler` + `resolve_human` fail-safe; the `resolve_handler` CLI-vs-library
-  auto-detect; CLI/Slack/WhatsApp connectors; and the `make_human_channel_check` launch ping.
-- 2026-06-16 -> 2026-06-18 — Connector hardening and shared timeout. `WhatsAppHandler` moved to
-  Twilio **API-key** auth (`TWILIO_API_KEY_SID`/`TWILIO_API_KEY_SECRET` + `TWILIO_ACCOUNT_SID`)
-  so a leaked key is revoked without rotating the account. All connectors render the sender via
-  `HumanQuery.sender_label` (`"<role> (<model>)"`). Added `response_timeout_s()`
-  (`orchestration.yaml: human_response_timeout_s`, default 3600s/1h): one shared mid-run
-  response window every channel waits at most (CLI no longer blocks indefinitely; Slack/WhatsApp
-  default to it) — deliberately decoupled from the LLM prompt-cache TTL.
-- 2026-06-18 — Slack/preflight robustness. `SlackHandler` construction (app + socket + listener)
-  deferred to `async start()` (avoids `no running event loop` when built synchronously);
-  injected apps still wire in `__init__`. `on_message` now resolves a plain channel reply (no
-  `thread_ts`) when **exactly one** question is open (the common case), keeping in-thread replies
-  unambiguous; both round-trips live-verified. `slack.py` posts a Block Kit message
-  (header/sender/question/context, each `_truncate`d to 2900 chars) replacing the italic-wrapped
-  line Slack rendered as gibberish. WhatsApp/`make_human_channel_check` errors now translate
-  Twilio faults (HTTP-401 → named creds; else from/to + connectivity) and surface the
-  `human_channel='cli'`/`'none'` escape hatch; `human_channel_ping_timeout_s` lowered 300→60.
-  Covered by `tests/test_hitl.py`.
-- 2026-06-24 — **Slack rotation-noise downgrade (fix-list #8).** `SlackHandler.start()` installs
-  `_SocketRotationDowngradeFilter` on the `slack_sdk.socket_mode.aiohttp` logger: the benign
-  Socket Mode websocket-rotation ERROR ("Cannot write to closing transport") is rewritten to
-  WARNING (the connection self-heals), while genuine errors keep their level. The optional
-  "reconnect health-check before `ask_human`" was **not** added — Slack is not live-tested in this
-  deployment and the rotation self-heals, so it isn't warranted now. Test in `tests/test_hitl.py`.
+- 2026-06-15 — Phase 2 step 5: package created. `HumanQuery`/`HumanResponse` protocol; injectable
+  `HumanHandler` + `resolve_human` fail-safe; `resolve_handler` CLI-vs-library auto-detect;
+  CLI/Slack/WhatsApp connectors; `make_human_channel_check` launch ping.
+- 2026-06-16 -> 2026-06-24 — **Connector hardening.** `WhatsAppHandler` → Twilio API-key auth;
+  shared `response_timeout_s()` every channel waits at most (default 1h, decoupled from the
+  prompt-cache TTL). `SlackHandler` construction deferred to `async start()`; `on_message` resolves
+  a plain channel reply when exactly one question is open; a benign Socket Mode rotation ERROR is
+  downgraded to WARNING (`_SocketRotationDowngradeFilter`). Twilio/ping faults translate to named
+  causes + the `cli`/`none` escape hatch. Covered by `tests/test_hitl.py`.
 - 2026-06-29 — **Markdown `message` + per-channel rendering; WhatsApp deprecated.** `HumanQuery`
-  now carries one Markdown `message` (was `question` + `context`), and connectors *render* it per
-  surface instead of prescribing a shape (the "use the wheel" path — LLMs emit Markdown natively):
-  CLI renders via `rich` (`rich.markdown.Markdown` to stderr; new hard dep); Slack emits `markdown`
-  block(s) with `_chunk` over the 12000-char limit (replacing the old 2900-char `_truncate` of the
-  superseded `section` block), and the notification text uses `query.headline`; the headless
-  fail-safe + preflight use `message`/`headline`. **WhatsApp/Twilio is deprecated** (bills per
-  message) — it warns on construction and passes the Markdown body raw; prefer `slack`/`cli`
-  (CLAUDE.md §13). Tests in `tests/test_hitl.py` (headline, Slack markdown/chunk, WhatsApp
-  deprecation + raw body). Opt-in live render across every channel: `tests/test_live_hitl.py`
-  (`AUTO_RESEARCH_LIVE_HITL=1`) emits one Markdown-rich query through CLI/Slack/WhatsApp — each
-  wrapped in its own try/except so a failing channel never blocks the others — logging to
-  `logs/dev/hitl/`.
+  carries one Markdown `message` (was `question`+`context`); connectors *render* per surface (LLMs
+  emit Markdown natively): CLI via `rich`; Slack via the dedicated `markdown` block with `_chunk`
+  over the 12000-char limit (replacing the 2900-char section `_truncate`), notification text =
+  `query.headline`; fail-safe/preflight use `message`/`headline`. **WhatsApp/Twilio deprecated**
+  (bills per message; warns on construction, raw passthrough; prefer `slack`/`cli`, CLAUDE.md §13).
+  Tests `tests/test_hitl.py`; opt-in live render across channels `tests/test_live_hitl.py`
+  (`AUTO_RESEARCH_LIVE_HITL=1`, each channel try/except, logs `logs/dev/hitl/`).

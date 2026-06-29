@@ -568,186 +568,42 @@ the hook mapping a fake-model verdict — no live LLM).
     via `select_decorrelated_member`. Registered in `auto_research.preflight`.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Phase 1 sandbox/tooling built and hardened:
-  manifest-based `ToolkitRegistry`, disabled-tool filtering, provider-native tool
-  definitions, persistent JSON-line sandbox with fd capture and XSPEC non-interactive boot,
-  per-run workspace/memory/figures layout, built-in MCP server/client, and config-driven
-  runtime paths.
-- 2026-06-12 -> 2026-06-16 — **Phase 2 steps 0–7 built.** Step 0 pinned worker scratch,
-  figure outputs, and the builtin MCP cwd under the runtime data dir (writes stay outside both
-  repos). The tool-authoring path was assembled: `merge_flow.propose_and_pr()` (isolated-worktree
-  Sonnet author, runtime-safe structure context, `ask_lead`/`ask_human` escalation, bounded L0–L4
-  rework loop, typed no-commit failure); `gate.py::run_gate` (Layer-A structural/provenance/
-  determinism + configurable no-fabrication scan with non-failing Tier-3 findings, Layer-B test
-  runner); `review.py::make_review_hook` (provider-decorrelated GPT co-lead review backing the
-  default `run_review` hook — decorrelation routing, diff bundle, `AnalystColeadAgent` over a
-  worktree-scoped `ReadOnlyToolProvider`); `approve_edit(worktree, *, message)` (the one atomic
-  commit per tool, explicit-path staging of exactly `gate.collect_targets`, never `git add -A`,
-  returns a real `commit_sha`, subject from the co-lead's `commit_summary`). The gate became
-  extension-agnostic under `*_utils` packages (`collect_targets`, `scan_text_source` for non-`.py`
-  text, binary/undecodable hard-fail). Step 5 moved `HumanInputRequired`/`HumanHandler` to
-  `auto_research.hitl` (re-exported; `ask_human` routes through `hitl.resolve_human`). Step 7 made
-  `ToolkitRegistry` discover `*_utils` packages dynamically + `reload()`, and added
-  `propose_and_pr(direct_branch=…)` (author on the ambient `ai` branch in `toolkit_root`). Launch
-  preflights added: `check_author_reviewer_decorrelation`, `check_toolkit_git_identity`,
-  `check_toolkit_branch_clean`. Deterministic coverage in `tests/test_{merge_flow,gate,review,
-  registry,preflight}.py`.
-- 2026-06-18 -> 2026-06-22 — **Authoring-path hardening + analysis-is-tool-driven scoping.** The
-  gate/authoring path survives a slow or erroring test: `gate._default_test_runner` catches
-  `subprocess.TimeoutExpired` as a Layer-B failure (rc 124, over the 900 s cap → normal rejection)
-  and `propose_and_pr` has an exception backstop that turns any unexpected gate/author/review error
-  into `MergeFlowResult(status="failed")` (re-raising only `HumanInputRequired`); determinism stays
-  a console-output proxy (`_strip_volatile` over two pytest runs) by design. The SDK author's `Bash`
-  now runs in the **analyst code-execution env** (`merge_flow._author_env`: analyst conda interpreter
-  + HEASoft/CALDB from `analyze_ini_sh` + `toolkit_root` on `PYTHONPATH`, passed as
-  `ClaudeAgentOptions.env`; falls back to the parent env when unconfigured) so it can run the real
-  science tests it authors. `bash_exec`'s model-facing description was rescoped to **read-only
-  inspection** (the analyst team authors no analysis code — real steps run through toolkit tools, a
-  missing capability becomes a `tool_request`); behavior unchanged.
-- 2026-06-22 — **Per-tool sandbox call-timeout.** A live run exposed that the sandbox
-  SIGTERM-kills every tool call at a flat ~300s (exit 124), so a slow HEASARC download could never
-  complete no matter what timeout the tool set internally. Now layered: the global default lives in
-  `orchestration.yaml: sandbox_call_timeout_s` (default 300, via `env.sandbox_call_timeout_default`);
-  a package's optional `tool_config.yaml` (`call_timeout_s` per tool, `default_call_timeout_s` per
-  package) overrides it. `ToolkitRegistry` reads it (`_load_tool_config`) and exposes
-  `call_timeout_ceiling(tool)` (precedence per-tool > package-default > global; **no upper clamp** —
-  trusted human/coder infra); `SandboxToolProvider.execute` uses it directly as the per-call timeout
-  (falls back to `self.timeout_s` for registries without the method). **Decoupled from the model:**
-  the ceiling is a fixed hard backstop, never surfaced to the LLM and not model-tunable; a tool's
-  *own* timeout arg (e.g. `acquire`'s astroquery `timeout_s`, in its `args_schema`) is the caller's
-  graceful knob, passed through untouched, and the backstop is set above it so the tool times out
-  cleanly first. Chosen over an orchestration→tool-name map (would couple orchestration to toolkit
-  internals) and a `TOOL_MANIFEST` field (hard to hand-edit). `research_toolkit/heasarc_utils/
-  tool_config.yaml` sets `acquire` above its 1800s function timeout. Deterministic tests in
-  `tests/test_registry.py`.
-- 2026-06-22 — **Authoring flow is now legible in the run JSONL.** `propose_and_pr` gained a
-  `monitor` param (consensus passes `self.monitor`); it threads into `_drive_author` (the SDK
-  author session, previously drained silently — now emits per-block `coder.tool_use`/
-  `coder.tool_result`/`coder.text`/`coder.turn_end`), the `ask_lead`/`ask_human` handler factories
-  (`coder.ask_lead`/`coder.ask_human` with the Q&A), and wraps gate/review/commit
-  (`coder.session_start`, `gate.start`/`gate.result`, `review.result`, `commit`). All on team
-  `tooling`, capped via `_cap_text` (renamed from a clash with the config `_cap`), no-op when
-  `monitor` is None. Fixes the ~20-min blind gap where neither the JSONL nor the terminal showed
-  whether the coder was working, blocked, or the gate was running. Tests in `tests/test_merge_flow.py`.
-- 2026-06-23 — **Auto-reset the toolkit tree after a non-committed authoring attempt** (the
-  failure-path counterpart to `approve_edit`). `propose_and_pr` now tracks a `committed` flag and,
-  in `finally` for direct-branch mode, calls the new best-effort `_reset_direct_tree`
-  (`git reset --hard HEAD` + `git clean -fd`) on any non-committed exit — after saving the
-  discarded diff as a `tool_author_failed_*.patch` under `worktree_base`. Fixes the live-run bug
-  where a gate-rejected attempt left the live `ai` checkout dirty, which (a) surfaced a phantom,
-  un-registered tool to re-running workers (`[exit 127] Tool not registered`) and (b) made a 2nd
-  authoring attempt's `check_toolkit_branch_clean` raise an unhandled `RuntimeError` → `run.error`
-  → whole-run crash. Docstrings updated (`propose_and_pr`, `check_toolkit_branch_clean`: the
-  runtime is no longer "never reset" — it self-heals in-run; the launch preflight still guards a
-  dirty tree at startup). Minimal scope: graceful-degrade of the in-flow precondition and
-  worktree-mode orphan pruning are tracked as separate follow-ups. Five new tests in
-  `tests/test_merge_flow.py`, plus an **env-gated live test** `tests/test_live_merge_flow.py`
-  (`AUTO_RESEARCH_LIVE_MERGE_FLOW_TESTS=1`): a reusable `ScriptedCoder` (drives chosen "bad diffs"
-  through the `sdk_client_factory` seam) runs the **real** `gate.run_gate` against a throwaway
-  clone of `toolkit_root` on a fresh `ai` branch and asserts gate-reject → tree-reset → patch
-  artifact — the shortcut for live-testing deep authoring-flow changes without an LLM.
-- 2026-06-23 — **Filesystem jail (todo #3).** New `fs_guard.py`: `PathGuard` + `load_fs_allowlist`
-  — the shared, config-driven allow-list (`orchestration.yaml: agent_fs_allow`) every runtime agent's
-  file access is checked against (`is_allowed` exact; `forbidden_in_command` best-effort for shell
-  command strings; denies governance basenames `CLAUDE.md`/`DOCS.md`/`AGENTS.md` even inside a root;
-  empty list = inactive). `merge_flow._build_options` now installs `_make_fs_guard_hook` as a
-  **`PreToolUse` hook** (runs first, fires for every tool call) — the correct gate; the old
-  `can_use_tool` `_make_path_confiner` is **deprecated/unwired** (the SDK skips `can_use_tool` under
-  `acceptEdits`/allow-rules, so it never fired for reads/Bash). So `auto_research` + governance files
-  are denied to the coder. Env-gated live battery test `tests/test_live_fs_guard.py`
-  (`AUTO_RESEARCH_LIVE_FS_GUARD_TESTS=1`) launches a real coder and asserts the hook actually fires.
-  Bash confinement is best-effort (command-string only) — OS jail completes it (CLAUDE.md §12/§13).
-- 2026-06-24 — **Coder path-hints (fix-list #2).** `_build_structure_context` now takes the author's
-  actual working dir (`worktree`, passed at the call site) instead of `toolkit_root`, states it up
-  front as `# Working directory (your cwd): <abs>`, and prints the template layout as **absolute**
-  paths (was `relative_to`, with no root stated — the coder used to guess `/root/…` → EACCES →
-  `find /`). Mission observation paths (validation ObsIDs) are reframed as the absolute dirs they are.
-  New launch preflight `check_toolkit_root_configured` (registered before `check_toolkit_git_identity`):
-  asserts `toolkit_root` is set in `config/orchestration.yaml` and is a directory, failing loudly
-  instead of letting a stale default mask a misconfig. New env-gated live test
-  `tests/test_live_path_hints.py` (`AUTO_RESEARCH_LIVE_PATH_HINT_TESTS=1`): seeds a real coder with
-  the actual structure context (paths NOT restated in the prompt) and asserts — from the recorded
-  tool stream — a clean `ls` of the toolkit root + every obsdb path at their absolute paths, with no
-  hunting. Unit coverage in `test_merge_flow.py`/`test_preflight.py`.
-- 2026-06-25 — **`gate._manifest_keys` now handles annotated `TOOL_MANIFEST` (fix-list #11).** It
-  matched only a plain `ast.Assign` (`TOOL_MANIFEST = {...}`), but `xspec_utils` declares
-  `TOOL_MANIFEST: dict = {...}` — an `ast.AnnAssign` — so it extracted **zero** keys and
-  `structural.tool_manifest_entry` reported "no entry" for *every* extend-`xspec_utils` tool,
-  regardless of the key written (the root cause of the 2026-06-25 P1 authoring failure: the coder's
-  manifest entry was correct but invisible to the gate). Now matches both `ast.Assign` (`.targets`)
-  and `ast.AnnAssign` (`.target`). New test `tests/test_gate.py::test_structural_annotated_manifest_entry_found`
-  (and a `manifest_annotated` flag on the `_write_pkg` fixture); `pytest tests/test_gate.py` green (34).
-- 2026-06-25 — **Coder git-discipline hardening (fix-list #6/#7).** The runtime now contains a coder
-  that issues git itself (the observed §9.9 breach), two layers: (1) a **deny-rule** on the coder's
-  own options — `_build_options` adds `disallowed_tools=["Bash(git:*)", "Bash(git)"]` (coder-scoped,
-  evaluated first, applies under acceptEdits; best-effort prefix match). (2) **`_reset_direct_tree`
-  resets to a per-attempt base ref**, not `HEAD`: `propose_and_pr` records `base_ref = git rev-parse
-  HEAD` right after `check_toolkit_branch_clean` (per-attempt, so a failed later round preserves an
-  earlier round's successful commit) and the failure-path reset does `reset --hard <base_ref>` +
-  saves the discarded diff vs `base_ref` (capturing any coder commit) — so an illegitimate commit is
-  **dropped**, where `reset --hard HEAD` would have kept it (the phantom-committed-tool hole). Falls
-  back to `HEAD` when `base_ref` is unset (worktree mode). `prompts/coder.md` now tells the coder to
-  leave git to the runtime and `ask_lead` instead of working around it, and its three misleading
-  "commit" verbs (the deliverable, not git) were reworded to "include"/"write". Tests:
-  `test_merge_flow.test_direct_branch_failed_drops_coder_commit` (a committing gate → HEAD back at
-  base, file gone, commit captured in the patch) + env-gated live `test_live_fs_guard.test_live_coder_git_denied`
-  (real coder told to `git commit` lands no commit). CLAUDE.md §9.9/§13 updated. Residual: a run
-  killed mid-attempt can skip the reset `finally` (§12 Ctrl-C hardening). `pytest tests/test_merge_flow.py
-  tests/test_gate.py` green (65).
-- 2026-06-25 — **`finding_vocabulary` Tier-3 scan tier (fix-list #9a).** `stub`/`stubbed`/
-  `not implemented`/`to be implemented` moved out of `hard_fail_vocabulary` into a new
-  `config/code_gate.yaml: finding_vocabulary` — they legitimately appear in real mergeable code
-  (a test stub, an honest not-implemented branch) and were causing false hard-fails (the 2026-06-25
-  run rejected a test for the word `'stub'`). `gate.scan_python_source`/`scan_text_source` now load
-  `finding_vocabulary` and record matches as a non-failing `no_fabrication.vocabulary_finding`
-  (Tier-3, routed to the co-lead like the literal-array landmine) instead of hard-failing.
-  `TODO`/`FIXME`/`XXX`/`HACK` stay hard-fail. Test `test_gate.test_incompleteness_markers_are_findings_not_hard_fails`;
-  `pytest tests/test_gate.py` green (35).
-- 2026-06-25 — **Gate-entry coder-commit auto-revert (fix-list #8).** The gate's change-detection
-  keyed on `git status` (uncommitted), so a coder that committed (slipping the deny-rule) blinded it
-  into a confusing empty-changeset rejection. Now, as the **first action when arriving at the gate**,
-  `merge_flow._gated` compares HEAD to the per-attempt `base_ref`; if it moved, the coder ran git
-  itself, so the runtime does `git reset --mixed base_ref` (un-commits, leaving the work in the
-  working tree) and emits a `coder.committed` monitor event — then `run_gate` scans the recovered
-  changes normally. The coder never touches git, its work is preserved, and the only real commit
-  remains `approve_edit`'s (post gate+review), so `commit ⇔ gate ∧ review` holds. Best-effort (a
-  reset failure falls through to the empty-changeset rejection + the finally reset); direct mode only
-  (`base_ref` set). No change to `gate.py`/`run_gate` signature (test stubs untouched). Test
-  `test_merge_flow.test_direct_branch_coder_commit_auto_reverted_before_gate` (HEAD advances by
-  exactly one — approve_edit's — and the `coder.committed` event fires). `pytest tests/test_merge_flow.py`
-  green (32).
-- 2026-06-26 — **Gate determinism = per-test outcomes, not byte-identical output (handoff #2,
-  the confirmed authoring blocker).** `_default_test_runner` now runs pytest twice with
-  `--junitxml` (to a throwaway temp dir), parses each report into a `{test_id: outcome}` map via
-  the new pure `_parse_junit_outcomes`, and declares the run deterministic ⇔ the two maps are
-  equal (new pure `_outcomes_determinism`, naming any diverging test). `_strip_volatile` and the
-  byte-compare are removed. This fixes the false-positive that rejected a *correct* tool 4× and
-  exhausted the rework cap on the 2026-06-26 run (a benign growing `xpselect` INFO filelist tripped
-  the byte compare though 18/18 tests passed both runs); it still catches a test *outcome* that
-  flips run-to-run, including the same-count/different-tests swap a bare `rc==rc` misses. Layer-B
-  pass stays `rc1==0`; the map governs determinism only. The hardcoded 900s pytest timeout became
-  config: `_gate_test_timeout` resolves per-package `tool_config.yaml: gate_test_timeout_s` >
-  `orchestration.yaml: gate_test_timeout_s` > 900 (no clamp, coder-settable), bound into the
-  default runner via `partial` so injected runners keep their `(worktree, test_paths)` signature.
-  Reproducibility is **not** gate-enforced — it is an LLM-planned check for **science tools** only
-  (`test_repro…`, call-twice / injection-recovery within tolerance): the lead plans it in
-  `proposed_checks`, the coder writes it, the co-lead reviews it against the plan; it runs as a
-  normal Layer-B test so a wobble outside tolerance flips its verdict and the determinism map
-  catches it. Prompts updated (`coder.md`, `analyst_lead.md`, `analyst_colead.md`); CLAUDE.md §9.4
-  reworded. New tests in `tests/test_gate.py` (junit parse, the three determinism cases, timeout
-  precedence).
-- 2026-06-26 — **Gate rejection message demands ALL checks fixed; jargon dropped (handoff #3).**
-  `_gate_feedback_message` now tells the coder to fix **every** listed issue before resubmitting (a
-  partial fix is rejected again) and, when the structural checks fail (so the tests were skipped),
-  appends a plain "your tests have not run yet — more feedback may follow" note so the coder doesn't
-  submit a half-fix. The internal gate vocabulary the coder never sees defined was removed: the
-  per-line `[A]/[B]` layer tag is gone and the message no longer says "Layer A/B" or "determinism
-  check". The old `Do not … weaken a check` prohibition is reframed positively (§3); the
-  no-fabrication ban stays explicit. Tests in `tests/test_merge_flow.py`.
-- 2026-06-29 — **Coder escalation tools take one Markdown `message`.** The in-process MCP
-  `ask_lead`/`ask_human` tools (`_make_escalation_server`) and their handlers
-  (`_make_ask_lead_handler`/`_make_ask_human_handler`) now take a single Markdown `message` instead
-  of `question` + `context` — the clarification channels carry free-form NL (CLAUDE.md §9.7).
-  `_make_ask_lead_handler` calls `lead.clarify_for_author(message, kind=…)`; `_make_ask_human_handler`
-  builds `HumanQuery(message=…)`; the `coder.ask_lead`/`coder.ask_human` monitor events log `message`.
-  Tests in `tests/test_merge_flow.py`.
+- 2026-05-26 -> 2026-06-12 — **Phase 1 sandbox/tooling** built and hardened: manifest-based
+  `ToolkitRegistry` (disabled-tool filtering, provider-native tool defs), persistent JSON-line
+  sandbox (fd capture, XSPEC non-interactive boot), per-run workspace/memory/figures layout,
+  built-in MCP server/client, config-driven runtime paths.
+- 2026-06-12 -> 2026-06-16 — **Phase 2 steps 0–7 built** — the author→gate→review→commit flow.
+  Writes pinned under the runtime data dir. `merge_flow.propose_and_pr()` (isolated-worktree /
+  `direct_branch="ai"` Sonnet author, runtime-safe structure context, `ask_lead`/`ask_human`
+  escalation, bounded L0–L4 rework, typed no-commit failure); `gate.run_gate` (Layer-A structural/
+  provenance/determinism + configurable no-fabrication scan, Layer-B test runner; extension-agnostic
+  over `*_utils` via `collect_targets`/`scan_text_source`); `review.make_review_hook` (provider-
+  decorrelated GPT co-lead); `approve_edit(worktree, *, message)` (one atomic commit, explicit-path
+  staging of `gate.collect_targets`, never `git add -A`). Dynamic `*_utils` discovery + `reload()`.
+  Launch preflights (`check_author_reviewer_decorrelation`, `check_toolkit_git_identity`/
+  `_branch_clean`). Coverage in `tests/test_{merge_flow,gate,review,registry,preflight}.py`.
+- 2026-06-18 -> 2026-06-26 — **Live-run hardening (fix-lists #1–#11).** Resilience: the gate
+  survives a slow/erroring test (`_default_test_runner` catches `TimeoutExpired`; `propose_and_pr`
+  exception backstop → `MergeFlowResult(status="failed")`, re-raising only `HumanInputRequired`); the
+  SDK author's `Bash` runs in the analyst code-exec env (`_author_env`) to run the real science
+  tests; `bash_exec` rescoped to read-only inspection. **Timeouts** decoupled from the model: per-
+  tool/-package `sandbox_call_timeout_s` ceiling (`ToolkitRegistry.call_timeout_ceiling`, no clamp)
+  + configurable gate `gate_test_timeout_s`. **Legibility:** `propose_and_pr(monitor=…)` emits the
+  full `coder.*`/`gate.*`/`review`/`commit` stream. **FS jail (#3):** `fs_guard.PathGuard` +
+  `agent_fs_allow`, installed as a `PreToolUse` hook (`_make_fs_guard_hook`; `can_use_tool`
+  `_make_path_confiner` deprecated/unwired). **Path-hints (#2):** `_build_structure_context` takes
+  the real `worktree`, absolute paths; `check_toolkit_root_configured`. **Git discipline (#6/#7/#8):**
+  non-committed attempts auto-reset to a per-attempt `base_ref` (`_reset_direct_tree`, saving a
+  `tool_author_failed_*.patch`, dropping any coder commit); a coder Bash deny-rule
+  (`["Bash(git:*)","Bash(git)"]`); gate-entry auto-revert (`_gated` `reset --mixed base_ref` on a
+  moved HEAD + `coder.committed`). **Gate fixes:** `_manifest_keys` handles annotated `TOOL_MANIFEST`
+  (#11); `finding_vocabulary` Tier-3 (stub/not-implemented = co-lead finding, not hard-fail, #9a);
+  determinism = per-test JUnit outcome maps not a byte-compare (#2, the confirmed blocker;
+  `_parse_junit_outcomes`/`_outcomes_determinism`, `_strip_volatile` removed); reproducibility is a
+  science-tool-only LLM-planned `test_repro…` Layer-B check; `_gate_feedback_message` demands ALL
+  issues fixed, jargon dropped (#3). Env-gated live batteries `tests/test_live_{merge_flow,fs_guard,
+  path_hints}.py`.
+- 2026-06-29 — **Coder escalation tools take one Markdown `message`** (was `question`+`context`):
+  `_make_escalation_server`, `_make_ask_lead_handler`→`clarify_for_author(message, kind=…)`,
+  `_make_ask_human_handler`→`HumanQuery(message=…)`; `coder.ask_lead`/`coder.ask_human` log
+  `message` (CLAUDE.md §9.7). Tests in `tests/test_merge_flow.py`.

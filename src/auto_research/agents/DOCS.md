@@ -247,106 +247,33 @@ Role wrappers:
   Method: `review_tool(tool_spec, *, diff, gate, tools=None) -> ToolReviewVerdict`.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Agent wrappers built and ReAct-wired: reviewer,
-  librarian I/O, analyst worker, analyst lead, native structured output/function calling,
-  bounded schema retries, `SandboxToolProvider`/`ReadOnlyToolProvider`/`SourceToolProvider`,
-  report composition, monitor hooks, librarian cap split, reviewer LaTeX token fix, figure
-  redirection, and `coder` prompt loading.
-- 2026-06-12 -> 2026-06-15 — Phase 2 agent support landed (steps 4-5). Lead read-only toolkit
-  inspection + optional `web_search`, `clarify_for_author()` for `ask_lead`, and
-  `AnalystWorkerAgent.analyze()` as the sole owner of tool execution (stale
-  `request_tools`/`execute_tools` removed). Added `AnalystColeadAgent.review_tool()`
-  (provider-decorrelated code review → `ToolReviewVerdict`) + the `analyst_colead` prompt role,
-  with `ReadOnlyToolProvider.include_text_search` so the co-lead reviews the toolkit worktree
-  without the papers KB. Both tool providers gained a shared `ask_human` tool + `human_handler`.
-  Monitor hooks attach configured model strings and emit per-tool ReAct result events.
-- 2026-06-16 -> 2026-06-18 — Phase 2 step 7 + live-run polish. `AnalystLeadAgent` gained
-  `decide_authoring(reports) -> AuthoringDecision` (read-only `toolkit_root` browse sets
-  disposition and returns one finalised `ToolSpec` or declines; consensus, not the LLM, then
-  issues `merge_flow.propose_and_pr`, §9.9). Added a shared read-only `data_catalog` tool
-  (reading `observations.read_catalog`) on `SandboxToolProvider` (worker) and on
-  `ReadOnlyToolProvider` when `include_data_catalog=True` (lead, not reviewer), so a role checks
-  local data before requesting an acquire tool. `HumanQuery` carries a `model` id (sender shown
-  as `"<role> (<model>)"`). `ReadOnlyToolProvider.read_file`/`list_dir` self-describe permitted
-  `roots` in descriptions + errors (the reviewer's `roots` now include `research_toolkit`), so a
-  role recovers in one step instead of thrashing — the failure mode that stalled a reviewer
-  triage loop. Literature/web provider faults in `SourceToolProvider`/`ReadOnlyToolProvider`
-  now degrade to recoverable `is_error` outcomes instead of aborting the run. Every `react.py`
-  harness tool gained manifest-quality tool-level + per-argument descriptions (notably
-  `ask_human` `question`/`context`/`kind`), so the model reads each tool's contract from the
-  tool, not the prompt.
-- 2026-06-22 — `LibrarianIOAgent.ingest_results` now **isolates each paper's ingest**: the
-  per-paper body is wrapped so any failure (a document the model API rejects, a provider fault,
-  an oversized PDF) is caught, logged as `librarian_io.ingest_document.error`, and degraded to
-  metadata-only ingest via the new shared `_store_metadata_only` helper — a single bad paper can
-  no longer propagate out of the `asyncio.gather` and abort the `literature` node. A live run had
-  crashed when an ADS `esource` link resolved to an HTML page saved as `.pdf` and the Anthropic
-  document API rejected it (`400 "The PDF specified was not valid."`); the download-side
-  `%PDF-` validation (see `sources/DOCS.md`) keeps such pages out, and this isolation is the
-  defense-in-depth so no future bad document can kill the whole run.
-- 2026-06-22 — `_react` `*.analyze.tool_result` events now record the tool-call **`args`** and the
-  returned **`text`** (capped at `_EVENT_ARG_CAP`/`_EVENT_RESULT_CAP` via `_cap_text`), for every
-  ReAct role (worker/lead/reviewer/librarian) — so a run is diagnosable from the JSONL alone rather
-  than only via per-worker `memory.md`/LangSmith. Heavy text lands in the JSONL only (the terminal
-  renderer ignores these keys). Part of the fix for the diagnostic-logging gap (see `monitor/DOCS.md`).
-- 2026-06-23 — **Tool input/output split into two `_react` events.** Each call now emits
-  `*.{action}.tool_call` (input — the `args` + a `tool_call_id`) **before** `tools.execute`
-  runs, and `*.{action}.tool_result` (output — the returned `text` + the same `tool_call_id`)
-  when it returns. Since the monitor flushes per event, a hung tool leaves a `tool_call` with
-  no matching `tool_result` — the stalled command is now in the JSONL (previously the args
-  rode on `tool_result`, which never fired for a hung call). `args` moved off `tool_result`.
-- 2026-06-23 — `analyst_worker.md` data-manipulation policy tightened: **all** data
-  operations (acquire/reduce/filter/bin/merge/transform/fit/derive/write) are `research_toolkit`
-  tool calls; inline `bash`/`python -c` is read-only inspection only (looking, not calculating);
-  a missing data operation becomes a `tool_request`. (Prompt text only — no code change.)
-- 2026-06-22 — `ingest_results` no-PDF path now records an **orphan memory** (`paper_id = NULL`,
-  `mem_abbrev = abstract`) instead of a metadata-only paper row, matching the storage rule that a
-  paper row requires a downloaded PDF (sha256 identity, see `storage/DOCS.md`). `_store_metadata_only`
-  calls `insert_memory` directly; no `upsert_paper`.
-- 2026-06-22 — Reviewer-driven retrieval, part 1: `ToolOutcome` gained a `documents` field and
-  `_react` now returns `(messages, figures, documents)`, re-attaching accumulated tool documents to
-  every subsequent model call (multimodal mid-loop reading). `ReadOnlyToolProvider` adds an
-  `open_paper` tool (gated with `text_search`; validates path∈roots + `%PDF-` signature; records
-  `opened_paths`; capped at `_OPEN_PAPER_CAP`=6) so the reviewer reads a candidate before citing it.
-  Each tool self-documents (no prompt note). New `tests/test_react_tools.py`.
-- 2026-06-23 — **Filesystem jail for the ReAct agents (todo #3 Stage C).** `ReadOnlyToolProvider`
-  (reviewer/lead) now denies the governance basenames `CLAUDE.md`/`DOCS.md`/`AGENTS.md` even inside a
-  permitted root (`_allowed` uses `sandbox.fs_guard.GOVERNANCE_BASENAMES`) — closes the reviewer/lead
-  governance-file leak (its roots already excluded `auto_research`). `SandboxToolProvider` (workers,
-  previously **unrestricted**) now holds a `PathGuard.from_config()` and rejects the builtin
-  `bash_exec` (by the absolute paths named in the command — best-effort), `read_file`, and `list_dir`
-  when the target is outside the `agent_fs_allow` allow-list (so `auto_research`/governance are
-  denied). Inactive when `agent_fs_allow` is unset. Toolkit-tool path args + implicit shell reads are
-  not gated here (OS jail, CLAUDE.md §12/§13). Tests in `tests/test_react_tools.py`.
+- 2026-05-26 -> 2026-06-12 — Agent wrappers built and ReAct-wired: reviewer, librarian I/O,
+  analyst worker, analyst lead; native structured output/function calling, bounded schema retries,
+  `Sandbox`/`ReadOnly`/`SourceToolProvider`, report composition, monitor hooks, `coder` prompt.
+- 2026-06-12 -> 2026-06-18 — **Phase 2 agent support (steps 4–5, 7) + polish.** Lead read-only
+  toolkit inspection + `web_search` + `clarify_for_author` (`ask_lead`); `AnalystWorkerAgent.analyze`
+  the sole tool-execution owner; `AnalystColeadAgent.review_tool → ToolReviewVerdict` +
+  `analyst_colead` role; both providers gained `ask_human`/`human_handler`. `decide_authoring(reports)
+  → AuthoringDecision` (lead sets disposition + finalises one `ToolSpec`; consensus issues
+  `propose_and_pr`, §9.9). Shared read-only `data_catalog` tool; `HumanQuery.model` sender label;
+  `read_file`/`list_dir` self-describe permitted `roots`; literature/web faults degrade to
+  recoverable `is_error`; every `react.py` tool gained manifest-quality descriptions.
+- 2026-06-22 -> 2026-06-23 — **Diagnosability + retrieval + FS jail.** `_react` returns
+  `(messages, figures, documents)` and splits each call into `*.tool_call` (input, pre-exec) +
+  `*.tool_result` (output) events with capped `args`/`text` — a hung tool is visible in the JSONL;
+  `ReadOnlyToolProvider.open_paper` (reviewer reads a candidate before citing; `cited_paths`).
+  `ingest_results` isolates each paper (bad doc → metadata/orphan-memory, never aborts the node).
+  FS jail (todo #3): `ReadOnlyToolProvider` denies governance basenames inside a root,
+  `SandboxToolProvider` holds a `PathGuard.from_config()` gating `bash_exec`/`read_file`/`list_dir`.
+  `analyst_worker.md`: all data ops are toolkit calls, `bash` read-only.
 - 2026-06-24 — **§5.5 lead-drives-design + budget-free `plan_and_debate`.** `_react` gained
-  `free_tools`/`absolute_cap`: `react_loop_cap` (30) now bounds only budget-*consuming* iterations,
-  a free-only iteration is uncounted, and `react_loop_absolute_cap` (60) is the total-iteration
-  runaway backstop (defaults to `cap` when unset ⇒ every existing caller byte-identical). New
-  lead-only `plan_and_debate` tool (`plan_and_debate_tool_def`/`execute_plan_and_debate`,
-  `ReadOnlyToolProvider(include_plan_and_debate=True)` + a `human_handler`, wired in
-  `graph/runtime.py`): a budget-free design channel to the human (reuses the `clarify_science`
-  kind, folds `plan` into the query context). `AnalystLeadAgent.decide_authoring` opts in
-  (`free_tools={plan_and_debate}`, `absolute_cap=_react_loop_absolute_cap()`). Prompts: `analyst_lead.md`
-  (settle the design with the human via the budget-free channel before finalising the brief),
-  `coder.md` (the brief is a settled plan — execute it, ask_lead rather than re-open the
-  architecture). Tests in `tests/test_react_tools.py` (budget accounting + tool exposure/routing).
-- 2026-06-26 — **`AnalystLeadAgent.finalize_authoring_outcome` (handoff #4).** After a
-  non-committed authoring attempt, the lead composes ONE terminal `AnalystReport` documenting the
-  unavailable capability + partial findings and sets an honest `status` (§9.6), instead of the
-  consensus loop re-authoring/spinning. Uses the `ReadOnlyToolProvider` loop (with the workers'
-  figures) when `tools` is attached, else a plain structured call. The report flows to the
-  reviewer (the sole I/O; graph no longer bypasses it on failure). Reviewer prompt `reviewer.md`
-  gained an honest-failure adjudication section (finalize-and-document vs. bounded rework) + a
-  compose note (document an incomplete/failed analysis honestly). Coverage:
-  `tests/test_consensus_authoring.py`, `tests/test_graph.py`, plus env-gated live probes
-  `tests/test_live_honest_failure.py` (`AUTO_RESEARCH_LIVE_HONEST_FAILURE_TESTS=1`) feeding the real
-  edge payloads — observational (logs to `logs/dev/honest-failure/`), not asserting LLM content.
-  Verified live: lead → honest `needs_human` report (failure documented, partial result kept, no
-  tool re-request); reviewer → finalize-and-document (no futile rework, no fabrication).
-- 2026-06-29 — **Clarification channels carry one Markdown `message`.** `ask_human`,
-  `plan_and_debate` (react.py), and `clarify_for_author` (the `ask_lead` lead↔author channel) now
-  take a single Markdown `message` instead of a `question`/`context` (and `plan`) split — the
-  free-text clarification channels carry NL, which Markdown expresses better than a fixed shape, and
-  connectors polish it per channel (CLAUDE.md §9.7/§9.8). `execute_plan_and_debate` no longer folds
-  a `plan` into context; `execute_ask_human` reads `message`. Typed protocol messages are unchanged.
-  Tests: `tests/test_hitl.py`, `tests/test_react_tools.py` (`…routes_message_to_human`).
+  `free_tools`/`absolute_cap` (`react_loop_cap`=30 bounds budget-consuming iterations only,
+  `react_loop_absolute_cap`=60 backstop); the lead-only `plan_and_debate` design channel
+  (`decide_authoring` opts in). Prompts: settle the design with the human before finalising the brief.
+- 2026-06-26 — **`finalize_authoring_outcome` (handoff #4).** After a non-committed authoring
+  attempt the lead composes ONE honest terminal `AnalystReport` (§9.6) instead of the consensus loop
+  spinning; it flows to the reviewer (sole I/O). `reviewer.md` gained honest-failure adjudication.
+  Coverage `tests/test_{consensus_authoring,graph}.py` + live `tests/test_live_honest_failure.py`.
+- 2026-06-29 — **Clarification channels take one Markdown `message`** (was `question`/`context`/
+  `plan`): `ask_human`, `plan_and_debate`, `clarify_for_author`; `execute_plan_and_debate` no longer
+  folds a plan into context. Typed protocol unchanged. Tests `tests/test_{hitl,react_tools}.py`.

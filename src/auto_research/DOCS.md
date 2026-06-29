@@ -106,58 +106,22 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   it. Each check is a zero-arg fn that raises on failure and lives in its own module.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Phase 1 completed and verified: schemas, providers,
-  observability, storage/retrieval, sources, prompts, agents, consensus, graph/runtime,
-  sandbox, report, CLI, notebook, environment checks, and config-driven `runtime_dir`.
-  Phase 2 is active: sandbox scratch is off-repo, `ToolSpec`/merge-flow/gate scaffolding
-  exists, and `research_toolkit` remains the only runtime-authored repo.
-- 2026-06-12 -> 2026-06-15 — Launch preflight + the `hitl` package (Phase 2 step 5).
-  Centralized project `.env` loading in `check_required_env()`, then added `preflight.py`: a
-  `Preflight` checklist class owning every launch-time no-LLM check (each in its home module,
-  registered centrally, run by `run_checklist()`); `run_research()`/CLI now call
-  `run_preflight()`, the first extra check being the author↔reviewer provider decorrelation.
-  Added the `hitl` raise-to-human channel and made the preflight **async** with a parameterized
-  `human_channel` ping (green only on a reply); `run_research` gained `human_handler`/
-  `human_channel`.
-- 2026-06-16 -> 2026-06-18 — Phase 2 steps 6-7 + observations restructure. `papers_dir()`
-  became a first-class `env.py` helper reading `orchestration.yaml: papers_dir`. Registered
-  `sandbox.merge_flow.check_toolkit_git_identity` and `check_toolkit_branch_clean` (branch `ai`
-  + clean tree) in the default preflight, so a missing git identity / dirty toolkit is caught at
-  launch, not mid-commit. `observations.py` gained the read-side data catalog
-  (`DataCatalog`/`CatalogEntry`/`DataProduct`, `read_catalog`, `local_obsids`, `catalog_path`)
-  for `<obs_db_path>/catalog.json` — what's local, processing level, and product provenance;
-  authored tools write it (JSON contract in `prompts/coder.md`). Added
-  `check_catalog_health()` (registered `catalog_health`), delegating to `research_toolkit`'s
-  detect-only `obsdb_catalog.healthcheck` (pure stdlib, never writes); hard-blocks launch on any
-  drift, aggregating every mission, and prints the exact repair command (repair stays the
-  human's out-of-band `obsdb_catalog.repair`). `observations.yaml` restructured to a single
-  `obs_db_root` with missions discovered from disk (`<root>/<MISSION>` subdirs marked by a
-  `catalog.json`; `mission(name)` resolves by case-insensitive match, reconstructing casing like
-  `NuSTAR`); downstream `.missions`/`.mission()` unchanged. Added the analyst sandbox conda env
-  spec `environment-analyst.yml`. Deterministic tests in `tests/test_observations.py`.
-- 2026-06-22 — Package `__init__` now mutes two chatty, non-actionable Pydantic v2 warning
-  families emitted by the system's heavy `model_dump`/`model_dump_json` traffic — the v2
-  deprecation notices (`PydanticDeprecatedSince20`) and the serializer "Expected X but got Y"
-  `UserWarning`s (message-scoped) — narrowly, so all other warnings stay audible. (The filter is
-  wrapped so a pydantic-version change can't break import.)
-- 2026-06-22 — `env.sandbox_call_timeout_default()` added: the global default sandbox per-tool-call
-  timeout from `orchestration.yaml: sandbox_call_timeout_s` (default 300), which a package's
-  `tool_config.yaml` overrides per tool (`auto_research.sandbox.registry`).
-- 2026-06-23 — Added the `database_health` preflight check (`storage.check_database_health`,
-  registered right after `required_env`). It ensures the runtime SQLite DB exists with its
-  full schema, creating it if absent, so a fresh run's first `text_search` no longer dies on
-  `no such table: papers`.
-- 2026-06-24 — Added the `toolkit_root_configured` preflight check (fix-list #2,
-  `sandbox.merge_flow.check_toolkit_root_configured`, registered before `toolkit_git_identity`):
-  fails loudly when `toolkit_root` is unset/non-existent rather than letting a stale hardcoded
-  default mask the misconfig. `Preflight.run_checklist` now prints one progress line per check
-  (`[preflight] <name> … ok/FAILED`) — the project has no logging framework and the preflight
-  predates the monitor, so `print` matches convention; the in-flight `…` makes the blocking
-  `human_channel` ping legible instead of a silent hang.
-- 2026-06-25 — **Human-friendly `catalog_health` preflight message.** `check_catalog_health` no
-  longer dumps the raw `obsdb_catalog.healthcheck` drift dict (every missing path). New
-  `observations._summarize_drift` renders one line per mission/category with a friendly label
-  (`missing` → "catalogued but missing on disk", `uncatalogued`, `level_inconsistent`, `regressed`,
-  `malformed`), a count, and ≤3 examples (`obsid kind`, or a basename for path lists) — the
-  `repair_all` fix command stays up top. Tests updated in `test_observations.py` (match `catalog
-  drift`; assert the friendly summary + no raw dict/list dump).
+- 2026-05-26 -> 2026-06-12 — Phase 1 completed and verified (schemas, providers, observability,
+  storage/retrieval, sources, prompts, agents, consensus, graph/runtime, sandbox, report, CLI,
+  notebook, env checks, config-driven `runtime_dir`). Phase 2 active: off-repo scratch,
+  `ToolSpec`/merge-flow/gate scaffolding, `research_toolkit` the only runtime-authored repo.
+- 2026-06-12 -> 2026-06-18 — **Launch preflight + `hitl` + observations (steps 5–7).** Centralized
+  `.env` loading in `check_required_env`; `preflight.py` (`Preflight` checklist owning every no-LLM
+  launch check, run by `run_checklist`; `run_research`/CLI call `run_preflight`); made it **async**
+  with the `human_channel` ping; added the `hitl` raise-to-human channel + `human_handler`/
+  `human_channel`. `papers_dir()` helper. Registered toolkit git-identity/branch-clean checks.
+  `observations.py` read-side data catalog (`DataCatalog`/`read_catalog`/`local_obsids`, written by
+  authored tools, JSON contract in `prompts/coder.md`) + `check_catalog_health` (delegates to
+  `research_toolkit`'s detect-only healthcheck; hard-blocks launch on drift). `observations.yaml`
+  → single `obs_db_root`, missions discovered from disk. Analyst env spec `environment-analyst.yml`.
+- 2026-06-22 -> 2026-06-25 — **Resilience + preflight UX.** `__init__` mutes two non-actionable
+  Pydantic v2 warning families (narrowly). `env.sandbox_call_timeout_default()`. `database_health`
+  preflight (creates the SQLite schema if absent, so first `text_search` doesn't die).
+  `toolkit_root_configured` preflight (fix-list #2); `run_checklist` prints one progress line per
+  check (legible blocking-ping). `check_catalog_health` renders a friendly per-mission drift summary
+  (`_summarize_drift`) instead of a raw dict.
