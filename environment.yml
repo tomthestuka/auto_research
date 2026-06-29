@@ -21,10 +21,11 @@ dependencies:
   - tavily-python>=0.5
   # MCP client
   - mcp>=1.27
-  # human-in-the-loop connectors (raise-to-human, §9.8) — optional at runtime, only
+  # human-in-the-loop connectors and renders (raise-to-human, §9.8) — optional at runtime, only
   # imported when the corresponding channel is selected.
   - twilio>=9
   - slack-bolt>=1.18
+  - rich >= 15.0.0
   # tests
   - pytest>=8
   # langgraph-cli and claude-agent-sdk are not on conda-forge.

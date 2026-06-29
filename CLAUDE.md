@@ -725,6 +725,11 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   scanning, so a slipped commit is normalized to uncommitted work, not a confusing reject) and the
   **base-ref failure reset** above (drops any commit on a failed attempt) — both regardless of how the
   commit was made; the deny-rule is the early, legible block that also steers the coder to `ask_lead`.
+- **WhatsApp/Twilio HITL connector is DEPRECATED.** `hitl/whatsapp.py` bills per message — a poor fit
+  for an agent HITL channel that may raise many clarifications in a run. It still works (warns a
+  `DeprecationWarning` on construction, sends the query's Markdown body raw) but prefer
+  `human_channel='slack'` (free, renders Markdown via a `markdown` block) or `'cli'` (attended
+  terminal, renders via `rich`). Its env-gated live test (`tests/test_live_whatsapp.py`) stays.
 
 ---
 
@@ -797,3 +802,17 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   (`reviewer.md`: document the limitation, never invent a result). §9.9 unchanged — consensus still
   issues `propose_and_pr` (code issues git). Coverage: `tests/test_graph.py`,
   `tests/test_consensus_authoring.py`.
+- 2026-06-29 — **Clarification channels carry one Markdown `message`; rendered per channel
+  ("use the wheel", §1; handoff #1).** The raise-to-human/inter-agent *clarification* channels —
+  `ask_human`, the lead's `plan_and_debate`, and the coder↔lead `ask_lead`
+  (`clarify_for_author`) — carry free-form natural language, which LLMs emit as Markdown natively
+  and every surface can render. So `HumanQuery` drops its `question` + `context` (and
+  `plan_and_debate`'s `plan`) for a single Markdown `message` + a derived `headline`, and the
+  connectors *render* it per surface instead of the protocol prescribing a shape: **CLI** via `rich`
+  (`environment.yml` gains `rich`), **Slack** via the dedicated `markdown` block (12000-char limit,
+  chunked) replacing the 2900-char `_truncate` of the superseded `section` block. **WhatsApp/Twilio
+  is deprecated** (bills per message; warns on construction, raw-Markdown passthrough) — prefer
+  `slack`/`cli` (§13). The boundary held deliberately: **only** the free-text clarification carrier
+  moved to Markdown; the **typed protocol messages** (`ReviewVerdict`, `AnalystReport`, `ToolSpec`,
+  `FigureRef`, … — where code branches on fields, §7) stay Pydantic. Coverage: `tests/test_hitl.py`,
+  `tests/test_react_tools.py`, `tests/test_merge_flow.py`. Non-live suite green (365 passed).

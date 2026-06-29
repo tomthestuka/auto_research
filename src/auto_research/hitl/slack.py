@@ -137,7 +137,9 @@ class SlackHandler:
 
     async def __call__(self, query: HumanQuery) -> HumanResponse:
         await self.start()
-        summary = f"Human input needed ({query.kind}) from {query.sender_label}"
+        summary = (
+            f"Human input needed ({query.kind}) from {query.sender_label}: {query.headline}"
+        )
         posted = await self.app.client.chat_postMessage(
             channel=self.channel, text=summary, blocks=_blocks(query)
         )
@@ -153,20 +155,42 @@ class SlackHandler:
         return HumanResponse(query_id=query.id, answer=answer)
 
 
-_SLACK_TEXT_LIMIT = 2900  # Block Kit caps a section text object at 3000 chars.
+# Slack's dedicated ``markdown`` block accepts standard Markdown up to 12000 chars (4× the
+# 3000-char ``section`` text cap it supersedes). A long design report is split across several
+# markdown blocks; the per-message ceiling is 50 blocks, so the body is capped to leave room
+# for the header/sender/reply context blocks.
+_MARKDOWN_BLOCK_LIMIT = 11900
+_MAX_BODY_BLOCKS = 45
 
 
-def _truncate(text: str, limit: int = _SLACK_TEXT_LIMIT) -> str:
-    """Return ``text`` within Slack's per-block character budget, marking any cut."""
+def _chunk(text: str, size: int = _MARKDOWN_BLOCK_LIMIT) -> list[str]:
+    """Split ``text`` into chunks of at most ``size`` chars, preserving the original Markdown.
+
+    Each cut prefers the last paragraph break inside the window, then the last line break,
+    and hard-slices only a single run with no break — so formatting survives the split.
+    """
     text = text.strip()
-    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+    chunks: list[str] = []
+    while len(text) > size:
+        window = text[:size]
+        cut = window.rfind("\n\n")
+        if cut <= 0:
+            cut = window.rfind("\n")
+        if cut <= 0:
+            cut = size
+        chunks.append(text[:cut].rstrip())
+        text = text[cut:].lstrip("\n")
+    if text:
+        chunks.append(text)
+    return chunks
 
 
 def _blocks(query: HumanQuery) -> list[dict]:
     """Render a :class:`HumanQuery` as a Block Kit message.
 
-    A header, a sender line, the question, and (when present) the context each get their
-    own block, so the message stays readable in Slack and the reply lands in this thread.
+    A header, a sender line, the Markdown ``message`` (one ``markdown`` block per chunk), and a
+    reply hint — so a full design report renders cleanly in Slack and the reply lands in this
+    thread. A body longer than the block budget marks its final block as truncated.
     """
     blocks: list[dict] = [
         {
@@ -177,18 +201,13 @@ def _blocks(query: HumanQuery) -> list[dict]:
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": f"from *{query.sender_label}*"}],
         },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*Question*\n{_truncate(query.question)}"},
-        },
     ]
-    if query.context:
-        blocks.append(
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*Context*\n{_truncate(query.context)}"},
-            }
-        )
+    chunks = _chunk(query.message) or [query.message.strip() or "(no message)"]
+    body = chunks[:_MAX_BODY_BLOCKS]
+    truncated = len(body) < len(chunks)
+    for i, chunk in enumerate(body):
+        text = chunk + "\n\n…(truncated)" if (truncated and i == len(body) - 1) else chunk
+        blocks.append({"type": "markdown", "text": text})
     blocks.append(
         {
             "type": "context",

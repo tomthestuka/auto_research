@@ -29,7 +29,7 @@ from auto_research.schemas import HumanQuery, HumanResponse
 
 
 def _query(**kw):
-    base = dict(question="Is the IXPE response file current?", asked_by="analyst_worker")
+    base = dict(message="Is the IXPE response file current?", asked_by="analyst_worker")
     base.update(kw)
     return HumanQuery(**base)
 
@@ -38,11 +38,19 @@ def _query(**kw):
 
 
 def test_humanquery_humanresponse_roundtrip():
-    q = _query(kind="clarify_science", context="cyg x-1")
+    q = _query(kind="clarify_science", message="cyg x-1 response check")
     again = HumanQuery.model_validate(q.model_dump(mode="json"))
     assert again.kind == "clarify_science" and again.asked_by == "analyst_worker"
+    assert again.message == "cyg x-1 response check"
     r = HumanResponse(query_id=q.id, answer="yes, v13")
     assert HumanResponse.model_validate(r.model_dump(mode="json")).answer == "yes, v13"
+
+
+def test_humanquery_headline_is_first_meaningful_line():
+    q = _query(message="## Plan\n\n- extend acquire\n- author new\n\nWhich one?")
+    assert q.headline == "Plan"
+    long = _query(message="x" * 200)
+    assert len(long.headline) == 120 and long.headline.endswith("…")
 
 
 # ── resolve_human ─────────────────────────────────────────────────────────────
@@ -87,7 +95,7 @@ def test_execute_ask_human_builds_query_and_returns_answer():
         return HumanResponse(query_id=query.id, answer="the human answer")
 
     outcome = asyncio.run(
-        execute_ask_human(handler, "reviewer", {"question": "ok?", "kind": "clarify_code"})
+        execute_ask_human(handler, "reviewer", {"message": "ok?", "kind": "clarify_code"})
     )
     assert outcome.text == "the human answer" and outcome.is_error is False
     assert seen == {"kind": "clarify_code", "asked_by": "reviewer"}
@@ -95,7 +103,7 @@ def test_execute_ask_human_builds_query_and_returns_answer():
 
 def test_execute_ask_human_no_handler_raises():
     with pytest.raises(HumanInputRequired):
-        asyncio.run(execute_ask_human(None, "reviewer", {"question": "ok?"}))
+        asyncio.run(execute_ask_human(None, "reviewer", {"message": "ok?"}))
 
 
 def test_readonly_provider_offers_ask_human_only_with_handler(tmp_path):
@@ -106,7 +114,7 @@ def test_readonly_provider_offers_ask_human_only_with_handler(tmp_path):
         roots=[tmp_path], human_handler=lambda q: "hi", asked_by="analyst_lead"
     )
     assert "ask_human" in {d["name"] for d in with_handler.tool_definitions()}
-    out = asyncio.run(with_handler.execute("ask_human", {"question": "q?"}))
+    out = asyncio.run(with_handler.execute("ask_human", {"message": "q?"}))
     assert out.text == "hi"
 
 
@@ -119,14 +127,14 @@ def test_sandbox_provider_offers_ask_human_only_with_handler():
     names = {d["name"] for d in with_handler.tool_definitions()}
     # data_catalog is always exposed (read-only local-data check); ask_human only with a handler.
     assert names == {"xspec_fit", "data_catalog", "ask_human"}
-    out = asyncio.run(with_handler.execute("ask_human", {"question": "blocked"}))
+    out = asyncio.run(with_handler.execute("ask_human", {"message": "blocked"}))
     assert out.text == "ok"
 
 
 def test_ask_human_tool_def_shape():
     d = ask_human_tool_def()
     assert d["name"] == "ask_human"
-    assert d["input_schema"]["required"] == ["question"]
+    assert d["input_schema"]["required"] == ["message"]
 
 
 # ── cli handler ───────────────────────────────────────────────────────────────
@@ -269,6 +277,17 @@ def test_whatsapp_times_out_without_reply():
         asyncio.run(handler(_query()))
 
 
+def test_whatsapp_handler_is_deprecated():
+    with pytest.warns(DeprecationWarning):
+        WhatsAppHandler(client=_FakeTwilio(), from_number="+1", to_number="+2")
+
+
+def test_whatsapp_body_passes_markdown_message_through():
+    handler = WhatsAppHandler(client=_FakeTwilio(), from_number="+1", to_number="+2")
+    body = handler._body(_query(message="## Plan\n\n- a\n- b"))
+    assert "## Plan" in body and "- a" in body and "(reply to this message)" in body
+
+
 # ── Slack connector (fake app) ───────────────────────────────────────────────
 
 
@@ -306,6 +325,32 @@ def test_slack_posts_and_resolves_on_reply():
     resp = asyncio.run(_run())
     assert resp.answer == "answer from human"
     assert handler.app.client.posted[0]["channel"] == "C0"
+    # The notification text carries the headline so a phone push shows the actual ask.
+    assert handler.app.client.posted[0]["text"].endswith(_query().headline)
+
+
+def test_slack_blocks_use_markdown_block_and_chunk():
+    from auto_research.hitl.slack import _MARKDOWN_BLOCK_LIMIT, _blocks, _chunk
+
+    q = _query(kind="clarify_science", message="## Plan\n\nbody text\n\n```py\nx=1\n```")
+    blocks = _blocks(q)
+    assert blocks[0]["type"] == "header"
+    md = [b for b in blocks if b["type"] == "markdown"]
+    assert len(md) == 1 and md[0]["text"] == q.message.strip()
+
+    big = _query(message="para.\n\n" * 4000)  # well over the per-block limit
+    md_big = [b for b in _blocks(big) if b["type"] == "markdown"]
+    assert len(md_big) >= 2
+    assert all(len(b["text"]) <= _MARKDOWN_BLOCK_LIMIT for b in md_big)
+
+
+def test_chunk_prefers_paragraph_boundaries():
+    from auto_research.hitl.slack import _chunk
+
+    text = "A" * 100 + "\n\n" + "B" * 100
+    assert _chunk(text, size=150) == ["A" * 100, "B" * 100]
+    # a single run with no break is hard-sliced
+    assert _chunk("C" * 250, size=100) == ["C" * 100, "C" * 100, "C" * 50]
 
 
 def test_slack_on_message_ignores_untracked_and_bot():

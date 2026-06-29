@@ -744,3 +744,10 @@ the hook mapping a fake-model verdict — no live LLM).
   per-line `[A]/[B]` layer tag is gone and the message no longer says "Layer A/B" or "determinism
   check". The old `Do not … weaken a check` prohibition is reframed positively (§3); the
   no-fabrication ban stays explicit. Tests in `tests/test_merge_flow.py`.
+- 2026-06-29 — **Coder escalation tools take one Markdown `message`.** The in-process MCP
+  `ask_lead`/`ask_human` tools (`_make_escalation_server`) and their handlers
+  (`_make_ask_lead_handler`/`_make_ask_human_handler`) now take a single Markdown `message` instead
+  of `question` + `context` — the clarification channels carry free-form NL (CLAUDE.md §9.7).
+  `_make_ask_lead_handler` calls `lead.clarify_for_author(message, kind=…)`; `_make_ask_human_handler`
+  builds `HumanQuery(message=…)`; the `coder.ask_lead`/`coder.ask_human` monitor events log `message`.
+  Tests in `tests/test_merge_flow.py`.

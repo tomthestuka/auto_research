@@ -300,16 +300,15 @@ async def _emit(
 
 
 def _make_ask_lead_handler(lead: Any, *, monitor: Any | None = None) -> Callable[..., Awaitable[str]]:
-    async def handler(question: str, *, kind: str = "clarify_code", context: str = "") -> str:
-        answer = lead.clarify_for_author(question, kind=kind, context=context)
+    async def handler(message: str, *, kind: str = "clarify_code") -> str:
+        answer = lead.clarify_for_author(message, kind=kind)
         if inspect.isawaitable(answer):
             answer = await answer
         answer = str(answer)
         await _emit(
             monitor, "coder.ask_lead", level=4,
-            summary=f"coder asked the lead: {_cap_text(question, 80)}",
-            data={"kind": kind, "question": _cap_text(question), "context": _cap_text(context),
-                  "answer": _cap_text(answer)},
+            summary=f"coder asked the lead: {_cap_text(message, 80)}",
+            data={"kind": kind, "message": _cap_text(message), "answer": _cap_text(answer)},
         )
         return answer
 
@@ -319,18 +318,17 @@ def _make_ask_lead_handler(lead: Any, *, monitor: Any | None = None) -> Callable
 def _make_ask_human_handler(
     human_handler: HumanHandler | None, *, model: str = "", monitor: Any | None = None
 ) -> Callable[..., Awaitable[str]]:
-    async def handler(question: str, *, kind: str = "blocked", context: str = "") -> str:
+    async def handler(message: str, *, kind: str = "blocked") -> str:
         query = HumanQuery(
             kind=kind if kind in ("clarify_science", "clarify_code", "blocked") else "blocked",
-            question=question or "(no question provided)",
-            context=context,
+            message=message or "(no message provided)",
             asked_by="coder",
             model=model or "",
         )
         await _emit(
             monitor, "coder.ask_human", level=3,
-            summary=f"coder raised to the human ({query.kind}): {_cap_text(question, 80)}",
-            data={"kind": query.kind, "question": _cap_text(question), "context": _cap_text(context)},
+            summary=f"coder raised to the human ({query.kind}): {_cap_text(message, 80)}",
+            data={"kind": query.kind, "message": _cap_text(message)},
         )
         response = await resolve_human(human_handler, query)  # raises HumanInputRequired if None
         await _emit(
@@ -349,20 +347,33 @@ def _make_escalation_server(
     """Build the in-process MCP server exposing ``ask_lead`` and ``ask_human`` (§9.7)."""
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
-    _q_schema = {
+    _msg_schema = {
         "type": "object",
-        "properties": {"question": {"type": "string"}, "context": {"type": "string"}},
-        "required": ["question"],
+        "properties": {
+            "message": {
+                "type": "string",
+                "description": "Your question, in Markdown — the ask first, then any needed facts.",
+            }
+        },
+        "required": ["message"],
     }
 
-    @tool("ask_lead", "Ask the analyst lead a code/convention/which-lib-function question.", _q_schema)
+    @tool(
+        "ask_lead",
+        "Ask the analyst lead a code/convention/which-lib-function question (Markdown).",
+        _msg_schema,
+    )
     async def _ask_lead(args: dict[str, Any]) -> dict[str, Any]:
-        answer = await ask_lead(args["question"], context=args.get("context", ""))
+        answer = await ask_lead(args["message"])
         return {"content": [{"type": "text", "text": answer}]}
 
-    @tool("ask_human", "Escalate a genuine expert-science unknown to the real human.", _q_schema)
+    @tool(
+        "ask_human",
+        "Escalate a genuine expert-science unknown to the real human (Markdown).",
+        _msg_schema,
+    )
     async def _ask_human(args: dict[str, Any]) -> dict[str, Any]:
-        answer = await ask_human(args["question"], context=args.get("context", ""))
+        answer = await ask_human(args["message"])
         return {"content": [{"type": "text", "text": answer}]}
 
     return create_sdk_mcp_server("escalation", tools=[_ask_lead, _ask_human])

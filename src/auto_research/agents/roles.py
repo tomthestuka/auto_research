@@ -1018,22 +1018,19 @@ class AnalystLeadAgent(AgentRole):
             messages, AnalystReport, action="adjudicate", images=figures,
         )
 
-    async def clarify_for_author(
-        self, question: str, *, kind: str = "clarify_code", context: str = ""
-    ) -> str:
-        """Answer a tool author's clarification question (the lead↔author channel, §9.3).
+    async def clarify_for_author(self, message: str, *, kind: str = "clarify_code") -> str:
+        """Answer a tool author's clarification message (the lead↔author channel, §9.3).
 
         The Sonnet author calls this via the ``ask_lead`` in-process tool when it hits a
-        code/convention/which-``lib/``-function question. When a read-only ToolProvider is
-        attached (with ``web_search``), the lead may consult authoritative documentation
-        before answering rather than guessing.
+        code/convention/which-``lib/``-function question, sending a single Markdown ``message``.
+        When a read-only ToolProvider is attached (with ``web_search``), the lead may consult
+        authoritative documentation before answering rather than guessing.
         """
 
         payload = {
             "request": "A tool author is asking you a clarification question while writing toolkit code.",
             "kind": kind,
-            "question": question,
-            "context": context,
+            "message": message,
             "answer_semantics": (
                 "Answer concisely and concretely. If you are unsure of an expert science "
                 "point, consult authoritative documentation (web_search) before answering; "

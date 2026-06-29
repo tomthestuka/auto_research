@@ -62,7 +62,7 @@ class ScriptedCoder:
 
 
 class _FakeLead:
-    async def clarify_for_author(self, question, *, kind="clarify_code", context=""):
+    async def clarify_for_author(self, message, *, kind="clarify_code"):
         return "n/a — scripted coder never escalates"
 
 

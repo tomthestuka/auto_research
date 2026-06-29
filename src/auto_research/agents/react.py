@@ -83,16 +83,20 @@ def ask_human_tool_def() -> dict:
         "description": (
             "Reach a real human for one clarification: an expert science or code question, "
             "or a hard block such as missing data, a broken dependency, or a contradictory "
-            "request. Blocks until the human replies, so ask early and specifically. The "
-            "human reads this on a phone — keep it to the one question plus the few facts "
-            "needed to answer it."
+            "request. Blocks until the human replies, so ask early and specifically. The human "
+            "reads this on a phone — lead with the one question, then the few facts needed to "
+            "answer it. Write 'message' as Markdown (a heading, short bullets, or a fenced code "
+            "block when it helps); keep it brief."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "question": {
+                "message": {
                     "type": "string",
-                    "description": "The single question for the human, in one or two sentences.",
+                    "description": (
+                        "Your question to the human, in Markdown. Lead with the question itself, "
+                        "then any supporting facts (what you observed, what you already tried)."
+                    ),
                 },
                 "kind": {
                     "type": "string",
@@ -102,15 +106,8 @@ def ask_human_tool_def() -> dict:
                         "'clarify_code' for a code or convention point, 'blocked' for a hard block."
                     ),
                 },
-                "context": {
-                    "type": "string",
-                    "description": (
-                        "A few sentences of supporting facts the human needs to answer — the "
-                        "situation and what you already tried."
-                    ),
-                },
             },
-            "required": ["question"],
+            "required": ["message"],
         },
     }
 
@@ -126,29 +123,26 @@ def plan_and_debate_tool_def() -> dict:
         "name": PLAN_AND_DEBATE_TOOL,
         "description": (
             "Debate a toolkit-design decision with the human to settle it before authoring — "
-            "state your proposed plan or the design choice you are weighing, and ask the one "
-            "thing you need decided (which package to extend vs. start, the interface, the "
-            "validation strategy, a trade-off). Blocks until the human replies. Use it as many "
-            "rounds as you need to converge: it does not consume your tool-iteration budget. "
-            "Settle the design here, then finalise the ToolSpec the coder will follow."
+            "lay out the design report (proposal, options and their trade-offs, an interface "
+            "sketch) and ask the one thing you need decided (which package to extend vs. start, "
+            "the interface, the validation strategy, a trade-off). Blocks until the human "
+            "replies. Use it as many rounds as you need to converge: it does not consume your "
+            "tool-iteration budget. Write 'message' as Markdown — use headings, bullet lists, "
+            "and fenced code blocks so a longer design reads cleanly. Settle the design here, "
+            "then finalise the ToolSpec the coder will follow."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "plan": {
+                "message": {
                     "type": "string",
-                    "description": "Your current proposed design/plan in a few sentences.",
-                },
-                "question": {
-                    "type": "string",
-                    "description": "The single design decision you want the human to settle.",
-                },
-                "context": {
-                    "type": "string",
-                    "description": "A few supporting facts the human needs — options considered and their trade-offs.",
+                    "description": (
+                        "Your design report and the decision you want settled, in Markdown — "
+                        "proposal, options/trade-offs, an interface sketch, and the explicit ask."
+                    ),
                 },
             },
-            "required": ["question"],
+            "required": ["message"],
         },
     }
 
@@ -238,8 +232,7 @@ async def execute_ask_human(
         kind = "blocked"
     query = HumanQuery(
         kind=kind,
-        question=str(arguments.get("question") or "(no question provided)"),
-        context=str(arguments.get("context") or ""),
+        message=str(arguments.get("message") or "(no message provided)"),
         asked_by=asked_by or "agent",
         model=model or "",
     )
@@ -252,23 +245,17 @@ async def execute_plan_and_debate(
 ) -> ToolOutcome:
     """Route a lead design-debate turn to the human (§5.5).
 
-    Folds the proposed ``plan`` into the question so the human sees the design being weighed,
-    then blocks on the injected handler (same path as ``ask_human`` — ``resolve_human`` raises
-    ``HumanInputRequired`` headless). The budget-free treatment lives in the ReAct loop, not
-    here; this just delivers the turn. Reuses the ``clarify_science`` HumanQuery kind.
+    Delivers the lead's Markdown design report to the injected handler (same path as
+    ``ask_human`` — ``resolve_human`` raises ``HumanInputRequired`` headless). The budget-free
+    treatment lives in the ReAct loop, not here; this just delivers the turn. Reuses the
+    ``clarify_science`` HumanQuery kind.
     """
     from auto_research.hitl import resolve_human
     from auto_research.schemas import HumanQuery
 
-    plan = str(arguments.get("plan") or "").strip()
-    question = str(arguments.get("question") or "(no question provided)")
-    context = str(arguments.get("context") or "")
-    if plan:
-        context = f"Proposed design/plan: {plan}\n\n{context}".strip()
     query = HumanQuery(
         kind="clarify_science",
-        question=question,
-        context=context,
+        message=str(arguments.get("message") or "(no message provided)"),
         asked_by=asked_by or "agent",
         model=model or "",
     )

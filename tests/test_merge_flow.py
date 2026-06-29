@@ -52,11 +52,11 @@ class _FakeClient:
 
 class _FakeLead:
     def __init__(self):
-        self.questions: list[str] = []
+        self.messages: list[str] = []
 
-    async def clarify_for_author(self, question, *, kind="clarify_code", context=""):
-        self.questions.append(question)
-        return f"lead-answer:{question}"
+    async def clarify_for_author(self, message, *, kind="clarify_code"):
+        self.messages.append(message)
+        return f"lead-answer:{message}"
 
 
 async def _pass_gate(worktree, spec):
@@ -174,9 +174,9 @@ def test_ask_lead_handler_records_to_monitor():
     """Fix #2 (b): escalations are logged with question + answer."""
     mon = _RecordingMonitor()
     handler = _make_ask_lead_handler(_FakeLead(), monitor=mon)
-    asyncio.run(handler("which lib fn?", context="ctx"))
+    asyncio.run(handler("which lib fn?"))
     ev = mon.of("coder.ask_lead")
-    assert ev and ev[0]["data"]["question"] == "which lib fn?"
+    assert ev and ev[0]["data"]["message"] == "which lib fn?"
     assert "lead-answer" in ev[0]["data"]["answer"]
 
 
@@ -321,9 +321,9 @@ def test_review_cap_exhaustion_returns_failed(tmp_path):
 def test_ask_lead_handler_routes_to_lead():
     lead = _FakeLead()
     handler = _make_ask_lead_handler(lead)
-    answer = asyncio.run(handler("which lib fn?", context="ctx"))
+    answer = asyncio.run(handler("which lib fn?"))
     assert answer == "lead-answer:which lib fn?"
-    assert lead.questions == ["which lib fn?"]
+    assert lead.messages == ["which lib fn?"]
 
 
 def test_ask_human_handler_routes_to_injected_handler():
@@ -331,14 +331,14 @@ def test_ask_human_handler_routes_to_injected_handler():
 
     def human(query):  # query is a HumanQuery (typed §9.8 contract)
         seen["kind"] = query.kind
-        seen["question"] = query.question
+        seen["message"] = query.message
         seen["asked_by"] = query.asked_by
         return "human-says-go"
 
     handler = _make_ask_human_handler(human)
-    answer = asyncio.run(handler("response convention?", context="expert"))
+    answer = asyncio.run(handler("response convention?"))
     assert answer == "human-says-go"
-    assert seen["kind"] == "blocked" and seen["question"] == "response convention?"
+    assert seen["kind"] == "blocked" and seen["message"] == "response convention?"
     assert seen["asked_by"] == "coder"
 
 

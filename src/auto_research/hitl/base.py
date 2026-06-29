@@ -34,7 +34,7 @@ async def resolve_human(handler: HumanHandler | None, query: HumanQuery) -> Huma
     hangs, never fabricates.
     """
     if handler is None:
-        raise HumanInputRequired(query.question)
+        raise HumanInputRequired(query.headline)
     result = handler(query)
     if inspect.isawaitable(result):
         result = await result

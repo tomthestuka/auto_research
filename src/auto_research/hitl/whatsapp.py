@@ -1,8 +1,14 @@
-"""WhatsApp human handler over Twilio (CLAUDE.md §9.8).
+"""WhatsApp human handler over Twilio (CLAUDE.md §9.8) — **DEPRECATED**.
 
 Two-way without a public webhook: send the query via the Twilio REST API, then **poll**
 ``messages.list`` for the human's inbound reply (decision #2 in the step-5 plan). A blocking
 ``HumanHandler`` — it hangs-and-waits up to ``timeout_s``.
+
+**Deprecated:** Twilio bills per message, which is a poor fit for an agent HITL channel that
+may raise many clarifications in a run. Prefer ``human_channel='slack'`` (free, richer
+rendering) or ``'cli'`` (attended terminal). Kept functional for now; it sends the query's
+Markdown ``message`` body as-is (WhatsApp renders a near-subset of Markdown), with no per-
+channel polish. See CLAUDE.md §13.
 
 The Twilio ``Client`` is injectable so the send/poll logic is unit-testable with a fake
 (no network, no ``twilio`` dependency in tests).
@@ -12,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import warnings
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -45,6 +52,12 @@ class WhatsAppHandler:
                 "(and TWILIO_ACCOUNT_SID / TWILIO_API_KEY_SID / TWILIO_API_KEY_SECRET for the "
                 "Twilio client — API-key auth, not the root Auth Token)."
             )
+        warnings.warn(
+            "The WhatsApp/Twilio HITL connector is deprecated (it bills per message); prefer "
+            "human_channel='slack' or 'cli'. See CLAUDE.md §13.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.from_number = _wa(from_number)
         self.to_number = _wa(to_number)
         # Default to the shared cross-channel human-response window (orchestration.yaml).
@@ -54,8 +67,7 @@ class WhatsAppHandler:
 
     def _body(self, query: HumanQuery) -> str:
         head = f"[auto_research · {query.kind} · {query.sender_label}]"
-        ctx = f"\n\ncontext: {query.context}" if query.context else ""
-        return f"{head}\n\n{query.question}{ctx}\n\n(reply to this message)"
+        return f"{head}\n\n{query.message}\n\n(reply to this message)"
 
     async def __call__(self, query: HumanQuery) -> HumanResponse:
         # A small back-dated cutoff avoids clock-skew dropping a fast reply.

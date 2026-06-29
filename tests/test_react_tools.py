@@ -210,7 +210,7 @@ def test_plan_and_debate_exposed_only_with_flag_and_handler(tmp_path):
     )
 
 
-def test_plan_and_debate_routes_plan_and_question_to_human(tmp_path):
+def test_plan_and_debate_routes_message_to_human(tmp_path):
     seen = {}
 
     async def handler(query):
@@ -223,10 +223,10 @@ def test_plan_and_debate_routes_plan_and_question_to_human(tmp_path):
     )
     out = asyncio.run(provider.execute(
         "plan_and_debate",
-        {"plan": "extend the acquire package", "question": "which package?", "context": "two options"},
+        {"message": "## Plan\nextend the acquire package\n\nWhich package?"},
     ))
     assert not out.is_error
     assert "extend heasarc_utils" in out.text
     assert seen["query"].kind == "clarify_science"
     assert seen["query"].asked_by == "analyst_lead"
-    assert "extend the acquire package" in seen["query"].context  # plan folded into context
+    assert "extend the acquire package" in seen["query"].message  # the Markdown body

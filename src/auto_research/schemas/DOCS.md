@@ -198,12 +198,16 @@ carried by **reference** (`FigureRef`), never embedded
   `merge_flow.propose_and_pr`. `committed` ⇔ gate-pass ∧ co-lead review-pass.
 - `AnalystReport.status: "ok"|"failed"|"needs_human"` (default `"ok"`) — §9.6 terminal
   state; an honest failure is a correct outcome, never a reason to fabricate.
-- `HumanQuery(id, kind: "clarify_science"|"clarify_code"|"blocked", question: str,
-  context: str = "", asked_by: str, model: str = "", created_at)` — a blocked role's
-  raise-to-human clarification (§9.7); no `approve` kind (the runtime never asks a human to
-  merge). `model` is the backing model id (e.g. `claude-sonnet-4-6`); the `sender_label`
-  property renders `"<asked_by> (<model>)"` for connector message bodies, or just the role
-  when `model` is blank.
+- `HumanQuery(id, kind: "clarify_science"|"clarify_code"|"blocked", message: str,
+  asked_by: str, model: str = "", created_at)` — a blocked role's raise-to-human
+  clarification (§9.7); no `approve` kind (the runtime never asks a human to merge). `message`
+  is the body in **Markdown** (the raising LLM composes it — the clarification channels carry
+  free-form NL, so Markdown is the container, not a fixed question/context shape; connectors
+  polish it per channel). `model` is the backing model id (e.g. `claude-sonnet-4-6`); the
+  `sender_label` property renders `"<asked_by> (<model>)"` for connector message bodies, or just
+  the role when `model` is blank. The `headline` property is a one-line summary of `message`
+  (first meaningful line, capped) for notifications, the Slack thread label, the monitor, and the
+  headless fail-safe.
 - `HumanResponse(query_id: str, answer: str, created_at)` — the human's reply. Both are the
   typed contract behind the injectable `human_handler` and the `ask_human` tools.
 
@@ -250,3 +254,11 @@ carried by **reference** (`FigureRef`), never embedded
   `needs_analysis_rework` is the analysis re-loop switch. Drops the misleading "set both on a fresh
   request to start both at once" line that drove a librarian misloop. Interfaces note updated to
   match; no schema-shape change.
+- 2026-06-29 — **`HumanQuery` carries one Markdown `message` (was `question` + `context`).** The
+  raise-to-human clarification channels carry free-form natural language, so the body is now a
+  single Markdown `message` the raising LLM composes — connectors polish it per channel (CLI via
+  `rich`, Slack via a `markdown` block) rather than the protocol prescribing a question/context
+  shape (which a longer `plan_and_debate` design report did not fit). Added the `headline` property
+  (first meaningful line, capped) for notifications / Slack thread label / monitor / the headless
+  fail-safe. Typed protocol messages (where code branches on fields) are unchanged — only the
+  free-text clarification carrier moved to Markdown. `tests/test_hitl.py` round-trip + headline.

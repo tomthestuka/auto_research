@@ -40,8 +40,10 @@ def test_live_whatsapp_round_trip():
         kind="clarify_science",
         asked_by="analyst_worker",
         model=worker_model,
-        question="auto_research live test — reply with any text to confirm the channel.",
-        context="tests/test_live_whatsapp.py",
+        message=(
+            "## auto_research live test\n\nReply with any text to confirm the channel.\n\n"
+            "_source: tests/test_live_whatsapp.py_"
+        ),
     )
     response = asyncio.run(handler(query))
 

@@ -49,26 +49,33 @@ directly) so the preflight can import it without pulling the graph/LLM stack.
   the preflight ping: passes only when the channel returns a non-empty reply within the
   timeout; raises otherwise. Registered by `auto_research.preflight` only when a handler is
   resolved.
-- `cli_stdin_handler(query) -> HumanResponse` — attended-terminal handler (prints to stderr,
-  reads stdin off-thread). Waits at most `response_timeout_s()` then raises `TimeoutError` — an
-  attended terminal no longer hangs the run forever.
+- `cli_stdin_handler(query) -> HumanResponse` — attended-terminal handler: renders the query's
+  Markdown `message` to stderr with `rich` (a titled rule + `rich.markdown.Markdown`; degrades to
+  plain text on a non-tty), then reads stdin off-thread. Waits at most `response_timeout_s()` then
+  raises `TimeoutError` — an attended terminal no longer hangs the run forever.
 - `SlackHandler(*, app=None, socket_handler=None, channel=None, timeout_s=None)` — Socket
   Mode; posts to `SLACK_HUMAN_CHANNEL`, awaits a threaded reply via a Future resolved by
-  `on_message`. `start()`/`aclose()` manage the socket. `start()` also installs
+  `on_message`. The query's Markdown `message` is rendered as one or more `markdown` blocks
+  (`_blocks`); `_chunk` splits a body over the 12000-char block limit at paragraph/line
+  boundaries (the per-message ceiling is 50 blocks), and the notification `text` carries
+  `query.headline`. `start()`/`aclose()` manage the socket. `start()` also installs
   `_SocketRotationDowngradeFilter` on the `slack_sdk.socket_mode.aiohttp` logger, demoting the
   benign websocket-rotation ERROR ("Cannot write to closing transport") to WARNING while leaving
   genuine errors untouched. `timeout_s` defaults to the shared `response_timeout_s()` when unset.
   Built per spec; **not live-tested**.
 - `WhatsAppHandler(*, client=None, from_number=None, to_number=None, timeout_s=None,
-  poll_interval_s=5)` — `timeout_s` defaults to the shared `response_timeout_s()` when unset.
+  poll_interval_s=5)` — **deprecated** (Twilio bills per message; prefer `slack`/`cli` — emits a
+  `DeprecationWarning` on construction, CLAUDE.md §13). Sends the Markdown `message` body raw (no
+  per-channel polish). `timeout_s` defaults to the shared `response_timeout_s()` when unset.
   Twilio: sends, then **polls** `messages.list` for the inbound reply
   (no public webhook). Auth is via a Twilio **API key** (`TWILIO_ACCOUNT_SID` +
   `TWILIO_API_KEY_SID` + `TWILIO_API_KEY_SECRET`), not the root Auth Token, so a leaked key is
   revoked on its own. Live-tested via `tests/test_live_whatsapp.py` (opt-in).
 
-The schemas `HumanQuery` (`id`, `kind ∈ {clarify_science, clarify_code, blocked}`, `question`,
-`context`, `asked_by`, `created_at`) and `HumanResponse` (`query_id`, `answer`, `created_at`)
-live in `auto_research.schemas` (the protocol, §7).
+The schemas `HumanQuery` (`id`, `kind ∈ {clarify_science, clarify_code, blocked}`, Markdown
+`message`, `asked_by`, `model`, `created_at`; `sender_label`/`headline` properties) and
+`HumanResponse` (`query_id`, `answer`, `created_at`) live in `auto_research.schemas` (the
+protocol, §7).
 
 ## Dependencies
 
@@ -76,8 +83,8 @@ live in `auto_research.schemas` (the protocol, §7).
   `config/orchestration.yaml` directly. Imported by `auto_research.preflight` (channel check),
   `auto_research.graph.runtime` (resolve + thread), `auto_research.agents.react`
   (`ask_human` tool), `auto_research.sandbox.merge_flow` (author `ask_human`).
-- External (optional, lazy): `twilio` (WhatsApp), `slack_bolt` (Slack). The CLI handler needs
-  nothing.
+- External: `rich` (CLI Markdown rendering — a hard dep, in `environment.yml`). Optional, lazy:
+  `twilio` (WhatsApp — deprecated), `slack_bolt` (Slack).
 
 ## Dictionary-level reference
 
@@ -124,3 +131,16 @@ live in `auto_research.schemas` (the protocol, §7).
   WARNING (the connection self-heals), while genuine errors keep their level. The optional
   "reconnect health-check before `ask_human`" was **not** added — Slack is not live-tested in this
   deployment and the rotation self-heals, so it isn't warranted now. Test in `tests/test_hitl.py`.
+- 2026-06-29 — **Markdown `message` + per-channel rendering; WhatsApp deprecated.** `HumanQuery`
+  now carries one Markdown `message` (was `question` + `context`), and connectors *render* it per
+  surface instead of prescribing a shape (the "use the wheel" path — LLMs emit Markdown natively):
+  CLI renders via `rich` (`rich.markdown.Markdown` to stderr; new hard dep); Slack emits `markdown`
+  block(s) with `_chunk` over the 12000-char limit (replacing the old 2900-char `_truncate` of the
+  superseded `section` block), and the notification text uses `query.headline`; the headless
+  fail-safe + preflight use `message`/`headline`. **WhatsApp/Twilio is deprecated** (bills per
+  message) — it warns on construction and passes the Markdown body raw; prefer `slack`/`cli`
+  (CLAUDE.md §13). Tests in `tests/test_hitl.py` (headline, Slack markdown/chunk, WhatsApp
+  deprecation + raw body). Opt-in live render across every channel: `tests/test_live_hitl.py`
+  (`AUTO_RESEARCH_LIVE_HITL=1`) emits one Markdown-rich query through CLI/Slack/WhatsApp — each
+  wrapped in its own try/except so a failing channel never blocks the others — logging to
+  `logs/dev/hitl/`.

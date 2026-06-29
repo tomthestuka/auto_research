@@ -120,7 +120,7 @@ def make_human_channel_check(
         query = HumanQuery(
             kind="blocked",
             asked_by="preflight",
-            question="Reply to confirm this run's human-response channel is live.",
+            message="Reply to confirm this run's human-response channel is live.",
         )
         print(
             f"⏳ Launch preflight: a confirmation ping was sent to your human channel — "

@@ -56,9 +56,9 @@ co-lead to check conventions while reviewing, §9.3),
 
 **Raise-to-human (`ask_human`, §9.7/§9.8).** When a `human_handler` is wired, both
 `SandboxToolProvider` and `ReadOnlyToolProvider` expose one shared `ask_human` tool
-(`ask_human_tool_def`/`execute_ask_human` in `react.py`): the role builds a `HumanQuery` and
-**blocks** on the injected handler (via `hitl.resolve_human`) until the human replies — the
-same model the SDK author uses. With no handler the tool is not offered, and a direct call
+(`ask_human_tool_def`/`execute_ask_human` in `react.py`): the role writes a Markdown `message`,
+which builds a `HumanQuery`, and **blocks** on the injected handler (via `hitl.resolve_human`)
+until the human replies — the same model the SDK author uses. With no handler the tool is not offered, and a direct call
 raises `HumanInputRequired` (the headless fail-safe). `run_research` threads the resolved
 handler to the workers (`SandboxToolProvider`) and to the reviewer/lead (`ReadOnlyToolProvider`,
 `asked_by` = the role). Each provider also carries the backing `model` id (resolved via
@@ -68,9 +68,9 @@ handler to the workers (`SandboxToolProvider`) and to the reviewer/lead (`ReadOn
 **Lead design channel (`plan_and_debate`, §5.5).** When `include_plan_and_debate=True` **and** a
 `human_handler` is wired, `ReadOnlyToolProvider` also exposes `plan_and_debate`
 (`plan_and_debate_tool_def`/`execute_plan_and_debate`) — set only for the **analyst lead** (in
-`graph/runtime.py`). It routes a proposed design + question to the human via the same
-`resolve_human` path (reusing the `clarify_science` `HumanQuery` kind, folding `plan` into the
-context), but is listed in the lead's `_react` `free_tools`, so the lead settles a toolkit design
+`graph/runtime.py`). It routes the lead's Markdown design report (proposal, options/trade-offs,
+interface sketch, the ask) to the human via the same `resolve_human` path (reusing the
+`clarify_science` `HumanQuery` kind), but is listed in the lead's `_react` `free_tools`, so the lead settles a toolkit design
 with the human across unbounded rounds **without consuming `react_loop_cap`** — only the
 `react_loop_absolute_cap` backstop bounds it; the human ending the discussion is the normal stop.
 The coder then follows the settled brief rather than re-opening the architecture.
@@ -170,8 +170,9 @@ Role wrappers:
 - `AnalystLeadAgent.judge_convergence(task, reports, *, round_index,
   max_rounds) -> ReviewVerdict` judges whether worker reports have converged
   enough for final synthesis.
-- `AnalystLeadAgent.clarify_for_author(question, *, kind, context) -> str` — answers a
-  tool author's `ask_lead` clarification (the lead↔author channel, §9.3); consults
+- `AnalystLeadAgent.clarify_for_author(message, *, kind) -> str` — answers a
+  tool author's `ask_lead` clarification (the lead↔author channel, §9.3), sent as a single
+  Markdown `message`; consults
   `web_search` (when a `ReadOnlyToolProvider` with a `web_source` is attached) before
   answering rather than guessing. Used by `merge_flow.propose_and_pr`.
 - `AnalystLeadAgent.finalize_authoring_outcome(task, reports, tool_spec, result) ->
@@ -342,3 +343,10 @@ Role wrappers:
   edge payloads — observational (logs to `logs/dev/honest-failure/`), not asserting LLM content.
   Verified live: lead → honest `needs_human` report (failure documented, partial result kept, no
   tool re-request); reviewer → finalize-and-document (no futile rework, no fabrication).
+- 2026-06-29 — **Clarification channels carry one Markdown `message`.** `ask_human`,
+  `plan_and_debate` (react.py), and `clarify_for_author` (the `ask_lead` lead↔author channel) now
+  take a single Markdown `message` instead of a `question`/`context` (and `plan`) split — the
+  free-text clarification channels carry NL, which Markdown expresses better than a fixed shape, and
+  connectors polish it per channel (CLAUDE.md §9.7/§9.8). `execute_plan_and_debate` no longer folds
+  a `plan` into context; `execute_ask_human` reads `message`. Typed protocol messages are unchanged.
+  Tests: `tests/test_hitl.py`, `tests/test_react_tools.py` (`…routes_message_to_human`).
