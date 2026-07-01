@@ -202,7 +202,7 @@ class MCPToolClient:
     def list_kinds(self) -> list[str]      # all registered MCP tool kinds
     def describe(self, kind: str) -> str   # description string for a kind
     def schema(self, kind: str) -> dict    # input JSON schema for a kind
-    async def call_tool(self, kind: str, arguments: dict) -> dict
+    async def call_tool(self, kind: str, arguments: dict, *, timeout_s: float | None = 900.0) -> dict
     async def shutdown(self) -> None       # close all sessions; terminate servers
 ```
 
@@ -213,6 +213,9 @@ class MCPToolClient:
 - `call_tool()` returns a dict with at minimum `stdout`, `stderr`, `exit_code`.
   Non-zero `exit_code` or `result.isError=True` is surfaced in the same `ToolResult`
   schema used by manifest tools, so the retry loop applies equally.
+- The `session.call_tool` await is bounded by `timeout_s` (`asyncio.wait_for`, default
+  `900 s` — far above any builtin tool's own timeout). It is a **backstop**, not a normal
+  path: a wedged server returns `exit_code` 124 instead of hanging the whole run.
 
 ### Built-in MCP server (`builtin_server.py`)
 
@@ -226,6 +229,12 @@ Tools:
   — run a shell command through the MCP server process. Its tool description scopes it to
   **read-only inspection** (listings, headers, shapes, paths, env probes); real analysis steps and
   any persisted result go through toolkit tools (a missing capability is raised as a `tool_request`).
+  Runs the command with **stdin closed** (`DEVNULL`) in its **own session/process group**
+  (`start_new_session=True`); on timeout the whole group is SIGKILLed (`_kill_process_group`),
+  returning `exit_code` 124. Both matter: a prompting/forking grandchild (e.g. an interactive
+  HEASoft FTOOL) can neither read this server's MCP stdio transport (which would starve the
+  protocol and wedge the run) nor outlive the timeout. The tool description also instructs the
+  model to invoke commands non-interactively (all parameters supplied up front).
 - `list_dir(path)` → `{"path": str, "entries": list[str]}` — alphabetically sorted
   directory listing.
 - `read_file(path, max_bytes=65536)` → `{"content": str, "truncated": bool, "size_bytes": int}`
@@ -646,3 +655,18 @@ the hook mapping a fake-model verdict — no live LLM).
   `review_tool`. `build_authoring_session` resolves `tool_author_submit_cap`/`tool_author_debate_cap`.
   The consensus strategy now drives authoring via `lead.drive_authoring` (not `propose_and_pr`,
   which stays for tests/non-lead callers). Commit still ⇔ gate ∧ review; `approve_edit` unchanged.
+- 2026-06-30 — **`bash_exec` non-interactive isolation + MCP-await backstop (fixes a whole-run
+  hang).** A live IXPE P1 run wedged: a worker ran an interactive HEASoft FTOOL (`fdump` without
+  full PIL params) via `bash_exec`; the FTOOL prompted, blocked on stdin, was orphaned past
+  `subprocess.run`'s timeout (no process-group kill), and — because `bash_exec` left **stdin
+  inherited** — sat on the MCP server's own stdio *command channel*, stealing the next request's
+  bytes so the server never replied. `MCPToolClient.call_tool` awaited that reply with **no
+  timeout** → the whole asyncio run hung; killing the orphan couldn't recover the lost request.
+  Three co-located fixes: (1) `bash_exec` now uses `subprocess.Popen(..., stdin=DEVNULL,
+  start_new_session=True)` + `communicate(timeout)`; on `TimeoutExpired` it `_kill_process_group`s
+  the session then drains (EOF is prompt once the group is dead) → `exit_code` 124. (2) The
+  `bash_exec` tool **description** now instructs the model to invoke commands non-interactively
+  (all params up front; stdin is closed → a prompting command gets EOF). (3) `MCPToolClient.
+  call_tool` bounds the await with `asyncio.wait_for(timeout_s=900)` — a backstop so no wedged
+  server can hang a run. Regression tests: `tests/test_sandbox.py::TestBashExecIsolation`
+  (stdin-closed; timeout kills a backgrounded grandchild). Full suite 380 pass / 25 skip.

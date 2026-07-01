@@ -13,6 +13,7 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import sys
@@ -22,6 +23,11 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 _BUILTIN_SERVER = Path(__file__).parent / "builtin_server.py"
+
+# Backstop ceiling on a single MCP tool call. Far above any builtin inspection
+# tool's own timeout (bash_exec defaults to 60s), so it never fires in normal
+# use — it bounds the await so a wedged server can never hang the whole run.
+_CALL_TIMEOUT_S = 900.0
 
 _DEFAULT_SERVERS: list[dict] = [
     {
@@ -83,17 +89,28 @@ class MCPToolClient:
         """Return the input JSON schema for a tool kind."""
         return self._tool_schemas.get(kind, {"type": "object", "properties": {}})
 
-    async def call_tool(self, kind: str, arguments: dict) -> dict:
+    async def call_tool(
+        self, kind: str, arguments: dict, *, timeout_s: float | None = _CALL_TIMEOUT_S
+    ) -> dict:
         """Call a tool by its full kind string and return a result dict.
 
         Returns a dict with at minimum ``stdout``, ``stderr``, and ``exit_code``.
+        The await is bounded by ``timeout_s`` (a backstop against a wedged server);
+        exceeding it returns ``exit_code`` 124 rather than hanging the run.
         """
         if kind not in self._tool_index:
             return {"stdout": "", "stderr": f"MCP tool not found: {kind}", "exit_code": 127}
         server_name, tool_name = self._tool_index[kind]
         session = self._sessions[server_name]
         try:
-            result = await session.call_tool(tool_name, arguments)
+            call = session.call_tool(tool_name, arguments)
+            result = await (asyncio.wait_for(call, timeout_s) if timeout_s else call)
+        except asyncio.TimeoutError:
+            return {
+                "stdout": "",
+                "stderr": f"MCP tool {kind} exceeded the {timeout_s}s ceiling",
+                "exit_code": 124,
+            }
         except Exception as exc:
             return {"stdout": "", "stderr": str(exc), "exit_code": 1}
         parts = [item.text for item in result.content if hasattr(item, "text")]

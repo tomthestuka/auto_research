@@ -540,3 +540,43 @@ class TestBashExecInterpreterConsistency:
             f"bash_exec `python` resolves to {resolved}, not the configured analyze_env "
             f"interpreter {expected}"
         )
+
+
+# ---------------------------------------------------------------------------
+# bash_exec non-interactive isolation (regression guard for the MCP-transport hang)
+# ---------------------------------------------------------------------------
+
+
+class TestBashExecIsolation:
+    """A prompting/forking command must never hang the MCP server or outlive its
+    timeout. stdin is closed (a stdin read gets EOF, not a block on the transport)
+    and a timeout kills the whole process group (a forked grandchild dies with it)."""
+
+    def test_stdin_is_closed(self) -> None:
+        """`cat` with no file reads stdin; DEVNULL gives immediate EOF, so it exits
+        0 fast instead of blocking until the timeout."""
+        import time
+
+        from auto_research.sandbox.builtin_server import bash_exec
+
+        t0 = time.time()
+        out = bash_exec("cat", timeout_s=5)
+        assert out["exit_code"] == 0, out
+        assert (time.time() - t0) < 3, "cat blocked on stdin — stdin is not DEVNULL"
+
+    def test_timeout_kills_grandchild(self, tmp_path: Path) -> None:
+        """On timeout the whole process group is killed, so a backgrounded
+        grandchild cannot survive to touch its marker file."""
+        import time
+
+        from auto_research.sandbox.builtin_server import bash_exec
+
+        marker = tmp_path / "grandchild_ran"
+        cmd = f"( sleep 3; touch {marker!s} ) & echo spawned; wait"
+        t0 = time.time()
+        out = bash_exec(cmd, timeout_s=1)
+        elapsed = time.time() - t0
+        assert out["exit_code"] == 124, out
+        assert elapsed < 3, "did not return at the timeout — group kill/drain hung"
+        time.sleep(3.5)  # long enough for a surviving grandchild to have run
+        assert not marker.exists(), "grandchild survived the timeout process-group kill"
