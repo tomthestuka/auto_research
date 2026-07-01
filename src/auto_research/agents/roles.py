@@ -13,7 +13,11 @@ from pydantic import BaseModel, ValidationError
 
 from auto_research.agents.prompts import PromptRole, load_prompt
 from auto_research.agents.react import (
+    DRIVE_CODER_TOOL,
     PLAN_AND_DEBATE_TOOL,
+    RESPOND_TO_REVIEW_TOOL,
+    ReadOnlyToolProvider,
+    SUBMIT_TOOL,
     SandboxToolProvider,
     SourceToolProvider,
 )
@@ -1132,6 +1136,128 @@ class AnalystLeadAgent(AgentRole):
         )
         return await self._call_over_messages(messages, AuthoringDecision, action="decide_authoring")
 
+    async def drive_authoring(
+        self,
+        tool_spec: ToolSpec,
+        *,
+        toolkit_root: Path,
+        worktree_base: Path,
+        direct_branch: str | None = None,
+        colead: Any | None = None,
+        human_handler: Any | None = None,
+    ) -> MergeFlowResult:
+        """Drive one tool through authoring as the plan owner (§9.3 B-topology, A1).
+
+        Builds + connects an ``AuthoringSession`` for ``tool_spec``, then runs the lead's ReAct
+        loop over it: the lead steers the Sonnet coder (``drive_coder``) and submits to the
+        deterministic gate + GPT co-lead review (``submit_for_review``); the coder is seeded with
+        the brief first. The commit happens inside ``submit`` on gate-pass ∧ review-pass (the lead
+        never self-approves). Returns the terminal ``MergeFlowResult`` (committed → the strategy
+        resumes; failed → it finalizes) read off the session. Owns the session lifecycle
+        (``aclose`` in ``finally``); the LLM never issues git — ``build_authoring_session`` /
+        ``approve_edit`` do (§9.9).
+        """
+        from auto_research.sandbox.merge_flow import build_authoring_session
+
+        session = build_authoring_session(
+            tool_spec,
+            lead=self,
+            toolkit_root=toolkit_root,
+            worktree_base=worktree_base,
+            colead=colead,
+            human_handler=human_handler,
+            direct_branch=direct_branch,
+            monitor=self.monitor,
+        )
+        await session.connect()
+        try:
+            return await self._drive_authoring_loop(session, tool_spec, human_handler)
+        finally:
+            await session.aclose()
+
+    async def _drive_authoring_loop(
+        self, session: Any, tool_spec: ToolSpec, human_handler: Any | None
+    ) -> MergeFlowResult:
+        """The lead's ReAct loop over a connected session (split out so the lifecycle stays in a
+        clean ``try/finally`` in :meth:`drive_authoring`)."""
+        base = self.tools
+        roots = list(getattr(base, "roots", []) or []) + [session.worktree]
+        tools = ReadOnlyToolProvider(
+            roots=roots,
+            retrieval=getattr(base, "retrieval", None),
+            web_source=getattr(base, "web_source", None),
+            include_text_search=False,  # authoring steers code, not the papers KB
+            include_plan_and_debate=human_handler is not None,
+            authoring_session=session,
+            human_handler=human_handler,
+            asked_by="analyst_lead",
+            model=getattr(base, "model", "") or "",
+        )
+
+        # Seed the coder with the brief settled in decide_authoring, then steer it.
+        await session.drive(session.initial_message)
+
+        payload = {
+            "request": (
+                "You are authoring the tool below into the toolkit. You are the plan owner driving "
+                "a Sonnet coder — it executes, you decide. It has been given the brief and produced "
+                "a first attempt."
+            ),
+            "tool_spec": session.tool_spec.model_dump(mode="json"),
+            "loop_semantics": (
+                "Inspect the coder's work with read_file/list_dir. Steer it with drive_coder, "
+                "giving concrete algorithm-level instructions (signature, exact procedure, edge "
+                "cases, the tests it must add). When you believe the tool and its tests are right, "
+                "call submit_for_review: it runs the deterministic gate, then the independent GPT "
+                "co-lead review, and commits automatically on gate-pass AND review-pass — you never "
+                "self-approve. On a gate failure (mechanical), fix the underlying cause via "
+                "drive_coder; never weaken a check to pass. On a review rejection, either steer the "
+                "coder to address it (drive_coder) or, when you believe a challenge is unfounded or "
+                "already handled, defend it with respond_to_review — the co-lead reconsiders and may "
+                "concede to a sound argument (it commits if persuaded and the gate still passes). "
+                "When the tool commits you are done; if it cannot be made mergeable within the "
+                "budget, conclude honestly — an honest failure is a correct outcome, never fabricate "
+                "a result to force a pass."
+            ),
+        }
+        seed = [
+            ModelMessage(role="system", content=self.prompt),
+            ModelMessage(role="user", content=_payload_text(payload)),
+        ]
+        # Drive the lead's ReAct loop. The loop is drive → inspect (read_file) → submit, many
+        # times: use the absolute cap as the iteration ceiling so inspecting the coder's diffs
+        # never starves it. submit_for_review (expensive) is separately bounded by
+        # session.submit_cap; the human design channel is budget-free; both stay out of the budget.
+        #
+        # Authoring finalizes ONLY through submit_for_review (commit ⇔ gate ∧ review). Its tool
+        # description states this as the sole finalization path — stopping without it discards the
+        # work — so a bare _react stop (no tool call) is a deliberate, honest give-up, not a missed
+        # submit. (This replaced an earlier code-level nudge loop, dropped per CLAUDE.md §1 once a
+        # live run showed the lead submits on its own and the backstop never fired.)
+        free = frozenset({SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL, PLAN_AND_DEBATE_TOOL})
+        await self._react(
+            seed_messages=seed, tools=tools, action="drive_authoring",
+            cap=_react_loop_absolute_cap(), free_tools=free,
+        )
+
+        spec_id = session.tool_spec.id
+        if session.committed:
+            return MergeFlowResult(
+                tool_spec_id=spec_id, status="committed", branch=session.branch,
+                commit_sha=session.last_commit_sha, gate_report=session.last_gate,
+                review=session.last_review, reason="gate-pass and co-lead review-pass",
+            )
+        if session.last_review is not None and not session.last_review.approved:
+            reason = f"co-lead review unresolved: {session.last_review.rationale}"
+        elif session.last_gate is not None and not session.last_gate.passed:
+            reason = f"gate unresolved: {session.last_gate.reason}"
+        else:
+            reason = "lead concluded authoring without a mergeable tool"
+        return MergeFlowResult(
+            tool_spec_id=spec_id, status="failed", branch=session.branch,
+            gate_report=session.last_gate, review=session.last_review, reason=reason,
+        )
+
     async def finalize_authoring_outcome(
         self,
         task: AnalysisTask,
@@ -1210,6 +1336,8 @@ class AnalystColeadAgent(AgentRole):
         diff: str,
         gate: GateReport,
         tools: Any | None = None,
+        prior_review: ToolReviewVerdict | None = None,
+        lead_rebuttal: str | None = None,
     ) -> ToolReviewVerdict:
         """Review an authored tool's diff against its brief and the gate report.
 
@@ -1219,6 +1347,13 @@ class AnalystColeadAgent(AgentRole):
         ``ToolProvider`` (the worktree + web) is supplied, the co-lead first investigates
         the surrounding code/conventions, then issues the verdict grounded in that
         investigation; otherwise it makes a plain structured call.
+
+        ``lead_rebuttal`` (+ ``prior_review``) carries the analyst lead's response to a prior
+        rejection (the §9.3 B-topology debate). The co-lead **reconsiders** in light of it and
+        re-issues a verdict — conceding only when genuinely persuaded that a flagged issue was
+        wrong or already addressed, and holding firm (with the same or sharpened issues) when the
+        rebuttal does not actually resolve the substance. It is the *trust boundary*: the lead may
+        persuade with a sound argument, never pressure the reviewer into approving.
         """
         payload = {
             "tool_spec": tool_spec.model_dump(mode="json"),
@@ -1237,6 +1372,20 @@ class AnalystColeadAgent(AgentRole):
                 "issues; set checks_adequate=false when the weakness is in the verification."
             ),
         }
+        if lead_rebuttal is not None:
+            payload["prior_review"] = (
+                prior_review.model_dump(mode="json") if prior_review is not None else None
+            )
+            payload["lead_rebuttal"] = lead_rebuttal
+            payload["reconsider_semantics"] = (
+                "The analyst lead is responding to your prior rejection (above). Reconsider each "
+                "of your issues against the rebuttal. Concede (drop an issue, or set approved=true) "
+                "ONLY when the rebuttal genuinely shows the issue was wrong or is already handled in "
+                "the code/tests — cite where. Hold firm (keep approved=false, keep or sharpen the "
+                "issue) when the rebuttal argues around the substance, appeals to deadlines/effort, "
+                "or asks you to relax a check without fixing the underlying gap. A sound argument may "
+                "move you; pressure must not. Never approve fabrication or an inadequate test."
+            )
         if tools is None:
             return await self._call(payload, ToolReviewVerdict, action="review_tool")
 

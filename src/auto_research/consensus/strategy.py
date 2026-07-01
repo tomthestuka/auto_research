@@ -60,6 +60,20 @@ class LeadLike(Protocol):
     ) -> AuthoringDecision:
         """Decide whether to author a tool for the workers' ``tool_request``s (§9.3)."""
 
+    async def drive_authoring(
+        self,
+        tool_spec: ToolSpec,
+        *,
+        toolkit_root: Path,
+        worktree_base: Path,
+        direct_branch: str | None = None,
+        colead: Any | None = None,
+        human_handler: Any | None = None,
+    ) -> MergeFlowResult:
+        """Drive one tool through authoring via the lead's own ReAct loop (§9.3 B-topology):
+        the lead steers the coder + submits to gate/review and diagnoses each verdict, owning the
+        session lifecycle. Returns the terminal ``MergeFlowResult``."""
+
     async def finalize_authoring_outcome(
         self,
         task: AnalysisTask,
@@ -258,18 +272,18 @@ class DebateToConverge:
         if not decision.should_author or decision.tool_spec is None:
             return False, None, reports, task, author_budget
 
-        from auto_research.sandbox.merge_flow import propose_and_pr
-
         author_budget -= 1  # an authoring attempt is expensive — bound it regardless of outcome
-        result = await propose_and_pr(
+        # B-topology (§9.3, A1): the lead drives the coder + gate + review through its OWN ReAct
+        # loop (drive_coder / submit_for_review), diagnosing each verdict and re-steering, rather
+        # than a fixed auto-loop that terminates on cap exhaustion. The lead owns the session
+        # lifecycle; the LLM never issues git — build_authoring_session/approve_edit do (§9.9).
+        result = await lead.drive_authoring(
             decision.tool_spec,
-            lead=lead,
             toolkit_root=self.toolkit_root,
             worktree_base=self.worktree_base or self.toolkit_root,
+            direct_branch=self.direct_branch,
             colead=self.colead,
             human_handler=self.human_handler,
-            direct_branch=self.direct_branch,
-            monitor=self.monitor,
         )
         await _record(
             self.monitor,

@@ -755,6 +755,245 @@ def _review_feedback_message(review: ToolReviewVerdict) -> str:
 # ----------------------------------------------------------------------------
 
 
+class AuthoringSession:
+    """A live tool-authoring session over one ``ToolSpec``: a connected Sonnet (Claude-SDK)
+    coder on a toolkit branch, plus the deterministic gate and provider-decorrelated co-lead
+    review exposed as **discrete, separately-callable steps** (§9.3/§9.4).
+
+    :func:`propose_and_pr` drives these primitives in the bounded auto-loop (back-compat for
+    tests and any non-lead caller). The analyst lead's authoring ReAct tools
+    (``drive_coder``/``submit``/``respond_to_review``) drive the *same* primitives directly, so
+    the lead — the plan owner — diagnoses each gate/review verdict itself rather than the run
+    terminating. Build via :func:`build_authoring_session`; ``await connect()`` before use and
+    ``await aclose()`` in a ``finally``.
+    """
+
+    def __init__(
+        self,
+        *,
+        tool_spec: ToolSpec,
+        client: Any,
+        worktree: Path,
+        branch: str,
+        base_ref: str | None,
+        structure_context: str,
+        run_gate: GateHook,
+        run_review: ReviewHook,
+        approve_edit: Callable[..., str],
+        direct_branch: str | None,
+        toolkit_root: Path,
+        worktree_base: Path,
+        submit_cap: int = 5,
+        debate_cap: int = 3,
+        monitor: Any | None = None,
+    ) -> None:
+        self.tool_spec = tool_spec
+        self.worktree = worktree
+        self.branch = branch
+        self.committed = False  # flips True only after commit() lands; gates the failure reset
+        # Lead-driven loop state (§9.3 B-topology): the most recent gate/review/commit, so a
+        # caller (the lead's drive_authoring loop) can build the terminal MergeFlowResult from
+        # session state; submit_cap bounds the expensive submit_for_review calls.
+        self.submit_cap = submit_cap
+        self.submits_used = 0
+        self.debate_cap = debate_cap  # bounds respond_to_review (lead↔co-lead) turns
+        self.debates_used = 0
+        self.last_gate: GateReport | None = None
+        self.last_review: ToolReviewVerdict | None = None
+        self.last_commit_sha: str | None = None
+        self._client = client
+        self._base_ref = base_ref
+        self._structure_context = structure_context
+        self._run_gate = run_gate
+        self._run_review = run_review
+        self._approve_edit = approve_edit
+        self._direct_branch = direct_branch
+        self._toolkit_root = toolkit_root
+        self._worktree_base = worktree_base
+        self._monitor = monitor
+
+    @property
+    def initial_message(self) -> str:
+        """The seed turn: the ToolSpec brief + runtime-safe local structure context."""
+        return _initial_message(self.tool_spec, self._structure_context)
+
+    async def connect(self) -> None:
+        await self._client.connect()
+        await _emit(
+            self._monitor, "coder.session_start", level=4,
+            summary=f"authoring {self.tool_spec.proposed_tool_name} on branch {self.branch}",
+            data={"tool_spec_id": self.tool_spec.id, "tool": self.tool_spec.proposed_tool_name,
+                  "branch": self.branch, "disposition": self.tool_spec.disposition},
+        )
+
+    async def drive(self, message: str) -> str:
+        """Send one instruction to the warm coder session and drain its response (L0 inside)."""
+        return await _drive_author(self._client, message, monitor=self._monitor)
+
+    async def run_gate_step(self) -> GateReport:
+        """Run the deterministic gate over the current tree (§9.4). First applies the §9.9
+        backstop: if the coder slipped in a commit (HEAD moved off this attempt's base), undo it
+        with ``reset --mixed`` so its work returns to the working tree and the scans see it. The
+        gate is domain-blind and mechanical — a lead can only *satisfy* it (via :meth:`drive`),
+        never argue it."""
+        await _emit(self._monitor, "gate.start", level=5, summary="deterministic gate running")
+        if self._base_ref is not None:
+            head = _git_in(self.worktree, "rev-parse", "HEAD").strip()
+            if head != self._base_ref:
+                try:
+                    _git_in(self.worktree, "reset", "--mixed", self._base_ref)
+                except RuntimeError:
+                    pass
+                await _emit(
+                    self._monitor, "coder.committed", level=4,
+                    summary="coder ran git itself — auto-reverted the commit to uncommitted changes",
+                    data={"head_was": head, "base_ref": self._base_ref},
+                )
+        g = await self._run_gate(self.worktree, self.tool_spec)
+        failed = [f"[{c.layer}] {c.name}" for c in (*g.layer_a, *g.layer_b) if not c.passed]
+        await _emit(
+            self._monitor, "gate.result", level=4,
+            summary=f"gate {'passed' if g.passed else 'rejected'}",
+            data={"passed": g.passed, "failing_checks": failed, "report_hash": g.report_hash,
+                  "reason": _cap_text(g.reason)},
+        )
+        self.last_gate = g
+        return g
+
+    async def run_review_step(
+        self, gate: GateReport, *, lead_rebuttal: str | None = None
+    ) -> ToolReviewVerdict:
+        """Run the provider-decorrelated co-lead review over the diff + gate result (§9.3 step 4).
+        The review is *debatable* (unlike the gate): when ``lead_rebuttal`` is set the co-lead
+        **reconsiders** its prior verdict (``self.last_review``) in light of the lead's argument
+        (the §9.3 debate) — but ``commit ⇔ gate-pass ∧ review-pass`` holds; the lead persuades,
+        never overrides."""
+        if lead_rebuttal is not None:
+            # Debate turn: the co-lead reconsiders its prior verdict given the lead's argument.
+            # Only this path needs the extended hook kwargs, so the plain auto-loop / submit path
+            # stays compatible with a 3-arg injected review hook (tests, non-lead callers).
+            review = await self._run_review(
+                self.worktree, self.tool_spec, gate,
+                prior_review=self.last_review, lead_rebuttal=lead_rebuttal,
+            )
+        else:
+            review = await self._run_review(self.worktree, self.tool_spec, gate)
+        await _emit(
+            self._monitor, "review.result", level=4,
+            summary=f"co-lead {'approved' if review.approved else 'rejected'}",
+            data={"approved": review.approved, "issues": [_cap_text(i, 200) for i in review.issues],
+                  "checks_adequate": review.checks_adequate, "rationale": _cap_text(review.rationale)},
+        )
+        self.last_review = review
+        return review
+
+    async def commit(self, message: str) -> str:
+        """Land one atomic commit (§9.9 ``approve_edit``) — the **only** place the runtime
+        commits. Caller guarantees gate-pass ∧ review-pass. Sets :attr:`committed` so
+        :meth:`aclose` skips the failure-path tree reset."""
+        commit_sha = self._approve_edit(self.worktree, message=message)
+        self.committed = True
+        self.last_commit_sha = commit_sha
+        await _emit(
+            self._monitor, "commit", level=3,
+            summary=f"committed {self.tool_spec.proposed_tool_name} → {commit_sha[:10]}",
+            data={"commit_sha": commit_sha, "branch": self.branch,
+                  "message": _cap_text(message, 200)},
+        )
+        return commit_sha
+
+    async def aclose(self) -> None:
+        """Disconnect the coder; on a non-committed direct-branch attempt, reset the tree to the
+        per-attempt base ref (§9.9 failure counterpart to ``approve_edit`` — saves a patch
+        artifact first, drops any coder-landed commit, leaves a clean tree at the right base)."""
+        await self._client.disconnect()
+        if self._direct_branch is not None and not self.committed:
+            await _reset_direct_tree(
+                self._toolkit_root, base_ref=self._base_ref, artifact_dir=self._worktree_base,
+                monitor=self._monitor, tool_spec=self.tool_spec,
+            )
+
+
+def build_authoring_session(
+    tool_spec: ToolSpec,
+    *,
+    lead: Any,
+    toolkit_root: Path,
+    worktree_base: Path,
+    colead: Any | None = None,
+    human_handler: HumanHandler | None = None,
+    coder_model: str | None = None,
+    run_gate: GateHook | None = None,
+    run_review: ReviewHook | None = None,
+    max_turns: int | None = None,
+    submit_cap: int | None = None,
+    debate_cap: int | None = None,
+    direct_branch: str | None = None,
+    worktree_factory: Callable[[Path, Path, str], Path] | None = None,
+    sdk_client_factory: Callable[[Any], Any] | None = None,
+    approve_edit: Callable[..., str] | None = None,
+    monitor: Any | None = None,
+) -> AuthoringSession:
+    """Resolve config + hooks, choose worktree/direct-branch mode (§9.9), build the Claude-SDK
+    coder client (seeded via ``coder`` prompt + escalation MCP tools), and return a **not yet
+    connected** :class:`AuthoringSession`. Setup only — the sole git touches are the
+    direct-branch clean-tree precondition and the per-attempt base-ref record. ``await connect()``
+    on the returned session before driving it."""
+    toolkit_root = Path(toolkit_root)
+    worktree_base = Path(worktree_base)
+    coder_model = coder_model or _resolve_coder_model()
+    if run_gate is None:
+        from auto_research.sandbox.gate import run_gate as _real_gate
+
+        run_gate = _real_gate
+    if run_review is None:
+        from auto_research.sandbox.review import make_review_hook
+
+        run_review = make_review_hook(colead=colead, author_provider=_resolve_coder_provider())
+    max_turns = max_turns if max_turns is not None else _cap("tool_author_max_turns", 50)
+    submit_cap = submit_cap if submit_cap is not None else _cap("tool_author_submit_cap", 5)
+    debate_cap = debate_cap if debate_cap is not None else _cap("tool_author_debate_cap", 3)
+    worktree_factory = worktree_factory or _create_worktree
+    sdk_client_factory = sdk_client_factory or _default_sdk_client_factory
+    approve_edit = approve_edit or _DEFAULT_APPROVE_EDIT
+
+    # Direct-branch mode (runtime authoring, §9.9): the author works in ``toolkit_root`` on the
+    # ambient ``ai`` branch instead of an isolated worktree. The runtime is passive about
+    # checkout — it asserts the precondition (also enforced at launch by the preflight) and
+    # never switches branches. The isolated-worktree path stays the default for tests + future use.
+    base_ref: str | None = None
+    if direct_branch is not None:
+        check_toolkit_branch_clean(toolkit_root, direct_branch)
+        branch = direct_branch
+        worktree = toolkit_root
+        # Record HEAD for THIS attempt (per-attempt, not once at launch): a failed authoring
+        # resets the tree back to exactly here (§9.9), dropping any commit the coder lands —
+        # while preserving an earlier round's successful approve_edit commit in a multi-tool run.
+        base_ref = _git_in(toolkit_root, "rev-parse", "HEAD").strip()
+    else:
+        branch = f"tool/{tool_spec.proposed_tool_name}-{uuid.uuid4().hex[:8]}"
+        worktree = worktree_factory(toolkit_root, worktree_base, branch)
+
+    structure_context = _build_structure_context(worktree)
+    system_prompt = load_prompt("coder")
+    escalation_server = _make_escalation_server(
+        _make_ask_lead_handler(lead, monitor=monitor),
+        _make_ask_human_handler(human_handler, model=coder_model, monitor=monitor),
+    )
+    options = _build_options(
+        worktree=worktree, coder_model=coder_model, system_prompt=system_prompt,
+        escalation_server=escalation_server, max_turns=max_turns,
+        env=_author_env(toolkit_root),  # author's Bash == analyst/gate code-execution env
+    )
+    client = sdk_client_factory(options)
+    return AuthoringSession(
+        tool_spec=tool_spec, client=client, worktree=worktree, branch=branch, base_ref=base_ref,
+        structure_context=structure_context, run_gate=run_gate, run_review=run_review,
+        approve_edit=approve_edit, direct_branch=direct_branch, toolkit_root=toolkit_root,
+        worktree_base=worktree_base, submit_cap=submit_cap, debate_cap=debate_cap, monitor=monitor,
+    )
+
+
 async def propose_and_pr(
     tool_spec: ToolSpec,
     *,
@@ -795,144 +1034,54 @@ async def propose_and_pr(
     (``run_gate``/``run_review``/``worktree_factory``/``sdk_client_factory``/``approve_edit``)
     let the loop and the commit be exercised deterministically without a live LLM or git.
     """
-    toolkit_root = Path(toolkit_root)
-    worktree_base = Path(worktree_base)
-    coder_model = coder_model or _resolve_coder_model()
-    if run_gate is None:
-        from auto_research.sandbox.gate import run_gate as _real_gate
-
-        run_gate = _real_gate
-    if run_review is None:
-        from auto_research.sandbox.review import make_review_hook
-
-        run_review = make_review_hook(colead=colead, author_provider=_resolve_coder_provider())
     gate_rework_cap = gate_rework_cap if gate_rework_cap is not None else _cap("tool_author_gate_rework_cap", 3)
     review_rework_cap = review_rework_cap if review_rework_cap is not None else _cap("tool_author_review_rework_cap", 2)
-    max_turns = max_turns if max_turns is not None else _cap("tool_author_max_turns", 50)
-    worktree_factory = worktree_factory or _create_worktree
-    sdk_client_factory = sdk_client_factory or _default_sdk_client_factory
-    approve_edit = approve_edit or _DEFAULT_APPROVE_EDIT
-
-    # Direct-branch mode (runtime authoring, §9.9): the author works in ``toolkit_root`` on the
-    # ambient ``ai`` branch instead of an isolated worktree. The runtime is passive about
-    # checkout — it asserts the precondition (also enforced at launch by the preflight) and
-    # never switches branches. On a non-committed terminal exit the tree is auto-reset to HEAD
-    # in ``finally`` (a patch artifact is saved first). The isolated-worktree path stays the
-    # default for tests + future use.
-    base_ref: str | None = None
-    if direct_branch is not None:
-        check_toolkit_branch_clean(toolkit_root, direct_branch)
-        branch = direct_branch
-        worktree = toolkit_root
-        # Record HEAD for THIS attempt (per-attempt, not once at launch): a failed authoring
-        # resets the tree back to exactly here (§9.9), dropping any commit the coder lands —
-        # while preserving an earlier round's successful approve_edit commit in a multi-tool run.
-        base_ref = _git_in(toolkit_root, "rev-parse", "HEAD").strip()
-    else:
-        branch = f"tool/{tool_spec.proposed_tool_name}-{uuid.uuid4().hex[:8]}"
-        worktree = worktree_factory(toolkit_root, worktree_base, branch)
-
-    structure_context = _build_structure_context(worktree)
-    system_prompt = load_prompt("coder")
-    escalation_server = _make_escalation_server(
-        _make_ask_lead_handler(lead, monitor=monitor),
-        _make_ask_human_handler(human_handler, model=coder_model, monitor=monitor),
+    session = build_authoring_session(
+        tool_spec, lead=lead, toolkit_root=toolkit_root, worktree_base=worktree_base,
+        colead=colead, human_handler=human_handler, coder_model=coder_model,
+        run_gate=run_gate, run_review=run_review, max_turns=max_turns, direct_branch=direct_branch,
+        worktree_factory=worktree_factory, sdk_client_factory=sdk_client_factory,
+        approve_edit=approve_edit, monitor=monitor,
     )
-    options = _build_options(
-        worktree=worktree, coder_model=coder_model, system_prompt=system_prompt,
-        escalation_server=escalation_server, max_turns=max_turns,
-        env=_author_env(toolkit_root),  # author's Bash == analyst/gate code-execution env
-    )
-    client = sdk_client_factory(options)
 
-    async def _gated() -> GateReport:
-        await _emit(monitor, "gate.start", level=5, summary="deterministic gate running")
-        # §9.9 backstop, first thing at the gate: the coder must never commit. If HEAD moved off
-        # this attempt's recorded base, the coder ran git itself (slipping the deny-rule) — undo it
-        # with ``reset --mixed`` so its work returns to the working tree (uncommitted) and the scans
-        # below see the changes normally; only ``approve_edit`` (post gate+review) ever lands a real
-        # commit. Direct mode only (``base_ref`` set); best-effort — a reset failure falls through to
-        # the gate's empty-changeset rejection + the finally reset.
-        if base_ref is not None:
-            head = _git_in(worktree, "rev-parse", "HEAD").strip()
-            if head != base_ref:
-                try:
-                    _git_in(worktree, "reset", "--mixed", base_ref)
-                except RuntimeError:
-                    pass
-                await _emit(
-                    monitor, "coder.committed", level=4,
-                    summary="coder ran git itself — auto-reverted the commit to uncommitted changes",
-                    data={"head_was": head, "base_ref": base_ref},
-                )
-        g = await run_gate(worktree, tool_spec)
-        failed = [f"[{c.layer}] {c.name}" for c in (*g.layer_a, *g.layer_b) if not c.passed]
-        await _emit(
-            monitor, "gate.result", level=4,
-            summary=f"gate {'passed' if g.passed else 'rejected'}",
-            data={"passed": g.passed, "failing_checks": failed, "report_hash": g.report_hash,
-                  "reason": _cap_text(g.reason)},
-        )
-        return g
-
-    committed = False  # flips True only after approve_edit lands; gates the failure cleanup
-    await client.connect()
+    await session.connect()
     try:
-        await _emit(
-            monitor, "coder.session_start", level=4,
-            summary=f"authoring {tool_spec.proposed_tool_name} on branch {branch}",
-            data={"tool_spec_id": tool_spec.id, "tool": tool_spec.proposed_tool_name,
-                  "branch": branch, "disposition": tool_spec.disposition},
-        )
-        await _drive_author(client, _initial_message(tool_spec, structure_context), monitor=monitor)
-
+        await session.drive(session.initial_message)
         gate_attempts = 0
         review_attempts = 0
-        gate = await _gated()
+        gate = await session.run_gate_step()
         while True:
             if not gate.passed:
                 if gate_attempts >= gate_rework_cap:
                     return MergeFlowResult(
-                        tool_spec_id=tool_spec.id, status="failed", branch=branch,
+                        tool_spec_id=tool_spec.id, status="failed", branch=session.branch,
                         gate_report=gate, reason=f"gate rework cap exhausted: {gate.reason}",
                     )
                 gate_attempts += 1
-                await _drive_author(client, _gate_feedback_message(gate), monitor=monitor)
-                gate = await _gated()
+                await session.drive(_gate_feedback_message(gate))
+                gate = await session.run_gate_step()
                 continue
 
-            review = await run_review(worktree, tool_spec, gate)
-            await _emit(
-                monitor, "review.result", level=4,
-                summary=f"co-lead {'approved' if review.approved else 'rejected'}",
-                data={"approved": review.approved, "issues": [_cap_text(i, 200) for i in review.issues],
-                      "checks_adequate": review.checks_adequate, "rationale": _cap_text(review.rationale)},
-            )
+            review = await session.run_review_step(gate)
             if not review.approved:
                 if review_attempts >= review_rework_cap:
                     return MergeFlowResult(
-                        tool_spec_id=tool_spec.id, status="failed", branch=branch,
+                        tool_spec_id=tool_spec.id, status="failed", branch=session.branch,
                         gate_report=gate, review=review,
                         reason=f"review rework cap exhausted: {review.rationale}",
                     )
                 review_attempts += 1
-                await _drive_author(client, _review_feedback_message(review), monitor=monitor)
+                await session.drive(_review_feedback_message(review))
                 # A code change can break the gate — re-run it before re-review.
-                gate = await _gated()
+                gate = await session.run_gate_step()
                 continue
 
             # Commit ⇔ gate-pass ∧ co-lead review-pass (§9.9). The co-lead drafts the commit
             # subject; fall back to the tool name if it left it empty.
             message = review.commit_summary.strip() or tool_spec.proposed_tool_name
-            commit_sha = approve_edit(worktree, message=message)
-            committed = True  # success — skip the failure-path tree reset in ``finally``
-            await _emit(
-                monitor, "commit", level=3,
-                summary=f"committed {tool_spec.proposed_tool_name} → {commit_sha[:10]}",
-                data={"commit_sha": commit_sha, "branch": branch, "message": _cap_text(message, 200)},
-            )
+            commit_sha = await session.commit(message)
             return MergeFlowResult(
-                tool_spec_id=tool_spec.id, status="committed", branch=branch,
+                tool_spec_id=tool_spec.id, status="committed", branch=session.branch,
                 commit_sha=commit_sha, gate_report=gate, review=review,
                 reason="gate-pass and co-lead review-pass",
             )
@@ -942,21 +1091,11 @@ async def propose_and_pr(
         # A gate/author/review error (e.g. a git hiccup, a decode error) is an honest failure,
         # not a reason to crash the whole research run. The lead surfaces it per §9.6/§9.7.
         return MergeFlowResult(
-            tool_spec_id=tool_spec.id, status="failed", branch=branch,
+            tool_spec_id=tool_spec.id, status="failed", branch=session.branch,
             reason=f"authoring aborted by unexpected error: {type(exc).__name__}: {exc}",
         )
     finally:
-        await client.disconnect()
-        # Failure counterpart to approve_edit (§9.9): a non-committed direct-branch attempt left
-        # the live toolkit checkout dirty — or, if the coder ran git itself, with an illegitimate
-        # commit. Reset to the per-attempt ``base_ref`` (HEAD at entry), saving a patch artifact
-        # first, so re-running workers never see a phantom tool, a coder commit is dropped (not
-        # kept as it would be by ``reset --hard HEAD``), and the next attempt's precondition finds
-        # a clean tree at the right base. Covers every non-committed exit (the failed returns, the
-        # unexpected-error path, and the re-raised HumanInputRequired). Worktree-mode cleanup is a
-        # separate todo. (A run killed mid-attempt may skip this finally — §12 Ctrl-C hardening.)
-        if direct_branch is not None and not committed:
-            await _reset_direct_tree(
-                toolkit_root, base_ref=base_ref, artifact_dir=worktree_base,
-                monitor=monitor, tool_spec=tool_spec,
-            )
+        # §9.9 failure counterpart to approve_edit: disconnect the coder and, on a non-committed
+        # direct-branch attempt, reset the tree to the per-attempt base ref (a phantom tool never
+        # surfaces to re-running workers; any coder-landed commit is dropped). See AuthoringSession.aclose.
+        await session.aclose()

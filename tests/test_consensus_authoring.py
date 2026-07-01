@@ -91,12 +91,25 @@ class AuthoringWorker:
 
 
 class AuthoringLead:
-    def __init__(self, *, should_author: bool = True, converge_on: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        should_author: bool = True,
+        converge_on: int = 1,
+        state: dict | None = None,
+        calls: list | None = None,
+        author_status: str = "committed",
+    ) -> None:
         self.should_author = should_author
         self.converge_on = converge_on
         self.decided = 0
         self.finalized = 0
         self.judged: list[int] = []
+        # B-topology (A1): the lead drives authoring itself; the test stubs the OUTCOME of
+        # drive_authoring (no real session/SDK) instead of monkeypatching propose_and_pr.
+        self.state = state
+        self.calls = calls
+        self.author_status = author_status
 
     async def decide_authoring(self, reports) -> AuthoringDecision:
         self.decided += 1
@@ -104,6 +117,22 @@ class AuthoringLead:
             should_author=self.should_author,
             tool_spec=_toolspec() if self.should_author else None,
             rationale="fake decision",
+        )
+
+    async def drive_authoring(
+        self, tool_spec, *, toolkit_root, worktree_base, direct_branch=None,
+        colead=None, human_handler=None,
+    ) -> MergeFlowResult:
+        if self.calls is not None:
+            self.calls.append({"direct_branch": direct_branch, "toolkit_root": toolkit_root})
+        if self.author_status == "committed" and self.state is not None:
+            self.state["authored"] += 1
+        return MergeFlowResult(
+            tool_spec_id=tool_spec.id,
+            status=self.author_status,
+            branch=direct_branch or "ai",
+            commit_sha="abc123def456" if self.author_status == "committed" else None,
+            reason="fake",
         )
 
     async def finalize_authoring_outcome(self, task, reports, tool_spec, result) -> AnalystReport:
@@ -123,31 +152,11 @@ class AuthoringLead:
         return AnalystReport(summary="final", findings=["done"])
 
 
-def _patch_ppr(monkeypatch, state, *, status="committed", calls=None):
-    async def fake_propose_and_pr(tool_spec, **kwargs):
-        if calls is not None:
-            calls.append(kwargs)
-        if status == "committed":
-            state["authored"] += 1
-        return MergeFlowResult(
-            tool_spec_id=tool_spec.id,
-            status=status,
-            branch=kwargs.get("direct_branch") or "ai",
-            commit_sha="abc123def456" if status == "committed" else None,
-            reason="fake",
-        )
-
-    monkeypatch.setattr(
-        "auto_research.sandbox.merge_flow.propose_and_pr", fake_propose_and_pr
-    )
-
-
-def test_committed_authoring_reloads_restarts_and_reruns(monkeypatch):
+def test_committed_authoring_reloads_restarts_and_reruns():
     state = {"authored": 0}
     calls: list = []
-    _patch_ppr(monkeypatch, state, status="committed", calls=calls)
     workers = [AuthoringWorker("w1", state, stop_after=1), AuthoringWorker("w2", state, stop_after=1)]
-    lead = AuthoringLead(should_author=True, converge_on=1)
+    lead = AuthoringLead(should_author=True, converge_on=1, state=state, calls=calls)
     registry = FakeRegistry()
 
     final = asyncio.run(
@@ -169,12 +178,11 @@ def test_committed_authoring_reloads_restarts_and_reruns(monkeypatch):
     assert all(w.calls == 2 for w in workers)
 
 
-def test_should_author_false_falls_through_to_debate(monkeypatch):
+def test_should_author_false_falls_through_to_debate():
     state = {"authored": 0}
     calls: list = []
-    _patch_ppr(monkeypatch, state, status="committed", calls=calls)
     workers = [AuthoringWorker("w1", state, stop_after=99)]  # would keep requesting
-    lead = AuthoringLead(should_author=False, converge_on=99)
+    lead = AuthoringLead(should_author=False, converge_on=99, state=state, calls=calls)
     registry = FakeRegistry()
 
     final = asyncio.run(
@@ -190,13 +198,12 @@ def test_should_author_false_falls_through_to_debate(monkeypatch):
     assert lead.judged == [1, 2]  # ordinary debate, capped at max_rounds
 
 
-def test_author_cap_bounds_attempts(monkeypatch):
+def test_author_cap_bounds_attempts():
     state = {"authored": 0}
     calls: list = []
-    _patch_ppr(monkeypatch, state, status="committed", calls=calls)
     # Worker is never satisfied (stop_after huge), so authoring would loop forever but the cap bounds it.
     workers = [AuthoringWorker("w1", state, stop_after=99)]
-    lead = AuthoringLead(should_author=True, converge_on=99)
+    lead = AuthoringLead(should_author=True, converge_on=99, state=state, calls=calls)
     registry = FakeRegistry()
 
     final = asyncio.run(
@@ -217,9 +224,9 @@ def test_failed_authoring_finalizes_honestly(monkeypatch):
     # reviewer adjudicates it downstream (graph change). No resume, no re-authoring.
     state = {"authored": 0}
     calls: list = []
-    _patch_ppr(monkeypatch, state, status="failed", calls=calls)
     workers = [AuthoringWorker("w1", state, stop_after=99)]
-    lead = AuthoringLead(should_author=True, converge_on=99)
+    lead = AuthoringLead(should_author=True, converge_on=99, state=state, calls=calls,
+                         author_status="failed")
     registry = FakeRegistry()
 
     final = asyncio.run(

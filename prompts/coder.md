@@ -78,6 +78,13 @@ This complements "smallest coherent change": keep the **surface** small (one wel
 point, defaults that make the common call trivial), while the **capability** stays general —
 parameterize the variable, rather than special-casing this run's numbers.
 
+**Write minimal, tight code.** Prefer the fewest lines and helpers that satisfy the brief and its
+tests. Do not pad the tool with a long README, verbose narration docstrings, defensive checks for
+inputs the brief does not require, or layers the task did not ask for — a tool a person would write
+in tens of lines should not balloon into hundreds. A short docstring (what it does, args, returns)
+plus the focused Layer-B tests is enough; the gate and the co-lead judge correctness and coverage,
+not volume. Lean on existing primitives instead of re-deriving them.
+
 ## Often the capability already exists — surface or wire what is there
 
 Most `extend_existing` briefs are about **exposing capability the toolkit already contains**,
@@ -152,6 +159,16 @@ on disk; never invent an entry for data you did not produce.
 - Do not leave placeholder/marketing language in code, comments, or output:
   no "representative", "synthetic", "illustrative", "mock", "placeholder", "for now",
   "in operational mode this would…". Write the real thing or raise an honest failure.
+- **Write comments and docstrings in positive terms — describe what the code *does*, never what
+  it *isn't*.** State the thing's purpose plainly; do not add defensive disclaimers about what it
+  is not. Write *"build a 2-HDU FITS carrying the EVENTS TSTART/TSTOP the time-parser reads"*, not
+  *"a synthetic FITS that is not a real/fabricated measurement"*. A positive description reads
+  better and avoids the banned words above; a disclaimer that something is "not fabricated" both
+  reads worse and trips the no-fabrication scan. (This mirrors the project-wide rule: state the
+  positive action, not the prohibition.) When a test genuinely needs a minimal in-memory fixture
+  to exercise control flow, name and describe it for what it is — *"a minimal FITS fixture with the
+  header keywords the parser reads"* — and keep any real measurement data out of the toolkit
+  (reference a marked ObsID instead).
 - A tool that cannot do its job must **fail loudly** (raise), not return a plausible-looking
   fake. Outputs should carry their input identity (e.g. input hashes) so a downstream result
   can never be silently built on a failed or fake upstream step.

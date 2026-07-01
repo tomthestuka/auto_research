@@ -15,8 +15,12 @@ results against prior work.
 > commit (one gated commit per tool on a branch; the runtime never merges), and the
 > lead-driven authoring/resume loop (a worker's `tool_request` → the lead's `decide_authoring`
 > → an atomic commit on branch `ai` → registry reload + sandbox restart → workers rerun on the
-> new tool). Vector retrieval, durable HITL suspend/resume, and the lead-scientist
-> idea-generation group remain documented stubs.
+> new tool). **Authoring is the analyst lead's own ReAct loop** (the lead is the plan owner,
+> like a person driving Claude Code): it steers the Sonnet coder (`drive_coder`), submits to the
+> gate + GPT co-lead review (`submit_for_review`, committing only on gate-pass ∧ review-pass —
+> never self-approving), and debates an unfounded review challenge (`respond_to_review`),
+> diagnosing each verdict rather than the run terminating. Vector retrieval, durable HITL
+> suspend/resume, and the lead-scientist idea-generation group remain documented stubs.
 
 Coding agents: read **`CLAUDE.md`** before doing anything. It is the single source of
 truth for how this project is built.

@@ -264,6 +264,223 @@ async def execute_plan_and_debate(
 
 
 # ----------------------------------------------------------------------------
+# Lead-only tool-authoring tools (§9.3, B-topology). The analyst lead drives a live
+# AuthoringSession: it steers the Sonnet coder (drive_coder), submits to the deterministic
+# gate + GPT co-lead review (submit_for_review), and — slice 4 — debates a review challenge
+# (respond_to_review). Masked to the lead alone (a session is wired only on its provider).
+# ----------------------------------------------------------------------------
+
+DRIVE_CODER_TOOL = "drive_coder"
+SUBMIT_TOOL = "submit_for_review"
+RESPOND_TO_REVIEW_TOOL = "respond_to_review"
+
+
+def drive_coder_tool_def() -> dict:
+    """Lead-only: instruct the Sonnet coder and read back its work. The lead is the plan owner;
+    the coder executes. Budget-free in the lead's authoring loop (set via ``free_tools``)."""
+    return {
+        "name": DRIVE_CODER_TOOL,
+        "description": (
+            "Instruct the coder (a Sonnet Claude-Code session) to write or revise the tool, then "
+            "read back what it did. The coder executes your plan — give concrete, algorithm-level "
+            "instructions (signature, the exact procedure, edge cases, the tests to add), not a "
+            "restated goal. It keeps the working files across your instructions, so iterate: "
+            "inspect its diff with read_file, then drive_coder again. When the tool and its tests "
+            "are right, call submit_for_review. Write 'instructions' as Markdown."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "instructions": {
+                    "type": "string",
+                    "description": (
+                        "What the coder should do next, in Markdown — concrete and algorithm-level. "
+                        "On the first call, seed the full brief; afterwards, the specific change."
+                    ),
+                },
+            },
+            "required": ["instructions"],
+        },
+    }
+
+
+def submit_tool_def() -> dict:
+    """Lead-only: run the gate + co-lead review over the coder's current work; commit on
+    gate-pass ∧ review-pass (the lead never self-approves)."""
+    return {
+        "name": SUBMIT_TOOL,
+        "description": (
+            "Submit the coder's current work to the deterministic gate and the independent GPT "
+            "co-lead review. The gate is mechanical (determinism, no-fabrication, structure, the "
+            "tool's own tests) — you can only satisfy it, by fixing the code via drive_coder. The "
+            "review judges whether the plan and its tests are right and strict enough. On gate-pass "
+            "AND review-pass the tool is committed automatically — you never self-approve. If the "
+            "gate fails, fix and submit again; if the review rejects, either drive_coder to address "
+            "it or respond_to_review to debate it. This is the ONLY way to finish: your authored "
+            "tool is committed solely through this call — if your turn ends without calling it (or "
+            "respond_to_review), the work is discarded as a failure. When the tool and its tests are "
+            "right, call it; if after your best effort it genuinely cannot be made mergeable, say so "
+            "explicitly in one line rather than stopping silently. Takes no arguments."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    }
+
+
+async def execute_drive_coder(session: Any, arguments: Mapping[str, Any]) -> ToolOutcome:
+    """Drive one coder turn over the live ``AuthoringSession`` (B-topology: lead steers, the
+    Sonnet coder executes). Returns the coder's narration for the lead to inspect."""
+    instructions = str(arguments.get("instructions") or "").strip()
+    if not instructions:
+        return ToolOutcome(
+            text="drive_coder needs 'instructions': what the coder should do next.", is_error=True
+        )
+    response = await session.drive(instructions)
+    return ToolOutcome(
+        text=(response or "").strip()
+        or "(coder produced no narration; inspect the worktree with read_file, or submit_for_review "
+        "to run the gate.)"
+    )
+
+
+async def execute_submit(session: Any) -> ToolOutcome:
+    """Run the gate, then (gate-pass) the co-lead review, over the session's current tree; commit
+    on gate-pass ∧ review-pass (§9.9 commit ⇔ gate ∧ review — the lead never self-approves).
+    Returns a verdict the lead diagnoses: a gate failure (fix via drive_coder), a review rejection
+    (drive_coder or respond_to_review), or a successful commit. Bounded by ``session.submit_cap``
+    (each submit runs the gate twice + a GPT review — expensive)."""
+    if session.submits_used >= session.submit_cap:
+        return ToolOutcome(
+            text=(
+                f"You have used all {session.submit_cap} review submissions for this tool. Make a "
+                "final call: if your last submit committed, you are done; otherwise this authoring "
+                "attempt ends without a mergeable tool — an honest failure is an acceptable, "
+                "correct outcome (do not fabricate to force a pass)."
+            )
+        )
+    session.submits_used += 1
+    gate = await session.run_gate_step()
+    if not gate.passed:
+        failed = [
+            f"- [{c.layer}] {c.name}: {c.detail}"
+            for c in (*gate.layer_a, *gate.layer_b)
+            if not c.passed
+        ]
+        body = "\n".join(failed) or gate.reason
+        return ToolOutcome(
+            text=(
+                "GATE FAILED — mechanical checks you can only satisfy. Fix the underlying cause via "
+                f"drive_coder (never weaken a check to pass), then submit_for_review again:\n{body}"
+            )
+        )
+    review = await session.run_review_step(gate)
+    if not review.approved:
+        issues = "\n".join(f"- {i}" for i in review.issues) or review.rationale
+        return ToolOutcome(
+            text=(
+                "GATE PASSED, but the independent co-lead REVIEW REJECTED the tool:\n"
+                f"{issues}\n\n{review.rationale}\n\nEither drive_coder to address these, or "
+                "respond_to_review to defend the design if you believe a challenge is unfounded."
+            )
+        )
+    sha = await session.commit(
+        review.commit_summary.strip() or session.tool_spec.proposed_tool_name
+    )
+    return ToolOutcome(
+        text=(
+            f"COMMITTED {session.tool_spec.proposed_tool_name} → {sha[:10]}. Gate passed and the "
+            "co-lead approved — the tool is on the authoring branch. Authoring for this tool is done."
+        )
+    )
+
+
+def respond_to_review_tool_def() -> dict:
+    """Lead-only: debate the co-lead's most recent rejection (§9.3 — the lead persuades, never
+    overrides). Budget-free in the lead's loop; bounded by ``session.debate_cap``."""
+    return {
+        "name": RESPOND_TO_REVIEW_TOOL,
+        "description": (
+            "Respond to the co-lead's most recent review rejection — defend the design or a specific "
+            "test choice when you believe the challenge is unfounded or already addressed. The "
+            "independent GPT co-lead reconsiders your argument and re-issues its verdict: it concedes "
+            "only if genuinely persuaded (a sound argument, or evidence the issue is already handled) "
+            "and holds firm against pressure. If it is persuaded and the gate still passes, the tool "
+            "commits. Use this for a genuine disagreement; when the co-lead is right, fix the code via "
+            "drive_coder instead. Write 'message' as Markdown."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": (
+                        "Your argument to the co-lead, in Markdown — address its specific issues, "
+                        "citing where the code/tests already handle them or why the concern is wrong."
+                    ),
+                },
+            },
+            "required": ["message"],
+        },
+    }
+
+
+async def execute_respond_to_review(session: Any, arguments: Mapping[str, Any]) -> ToolOutcome:
+    """Re-run the co-lead review with the lead's rebuttal in view (§9.3 debate). On a concede, the
+    immovable gate is re-validated before committing (the tree may have changed); commit ⇔ gate ∧
+    review still holds. Bounded by ``session.debate_cap``."""
+    message = str(arguments.get("message") or "").strip()
+    if not message:
+        return ToolOutcome(
+            text="respond_to_review needs 'message': your argument to the co-lead.", is_error=True
+        )
+    if session.last_gate is None or session.last_review is None:
+        return ToolOutcome(
+            text="There is no co-lead review to respond to yet — call submit_for_review first.",
+            is_error=True,
+        )
+    if session.debates_used >= session.debate_cap:
+        return ToolOutcome(
+            text=(
+                f"You have used all {session.debate_cap} debate turns. Either address the issues "
+                "via drive_coder, or conclude — an honest failure is an acceptable outcome."
+            )
+        )
+    session.debates_used += 1
+    review = await session.run_review_step(session.last_gate, lead_rebuttal=message)
+    if not review.approved:
+        issues = "\n".join(f"- {i}" for i in review.issues) or review.rationale
+        return ToolOutcome(
+            text=(
+                "The co-lead HELD its position after your rebuttal:\n"
+                f"{issues}\n\n{review.rationale}\n\nAddress these via drive_coder, or accept the "
+                "challenge and conclude (an honest failure is acceptable)."
+            )
+        )
+    # Persuaded — re-validate the immovable gate (the tree may have changed) before committing.
+    gate = await session.run_gate_step()
+    if not gate.passed:
+        failed = "\n".join(
+            f"- [{c.layer}] {c.name}: {c.detail}"
+            for c in (*gate.layer_a, *gate.layer_b)
+            if not c.passed
+        ) or gate.reason
+        return ToolOutcome(
+            text=(
+                "The co-lead is persuaded, but the gate no longer passes (did the tree change?):\n"
+                f"{failed}\nFix via drive_coder, then submit_for_review."
+            )
+        )
+    sha = await session.commit(
+        review.commit_summary.strip() or session.tool_spec.proposed_tool_name
+    )
+    return ToolOutcome(
+        text=(
+            f"The co-lead was PERSUADED and the gate passed — COMMITTED "
+            f"{session.tool_spec.proposed_tool_name} → {sha[:10]}. Authoring for this tool is done."
+        )
+    )
+
+
+# ----------------------------------------------------------------------------
 # Analyst science tools — the existing ToolkitRegistry + PersistentSandbox.
 # ----------------------------------------------------------------------------
 
@@ -486,6 +703,7 @@ class ReadOnlyToolProvider:
         include_text_search: bool = True,
         include_data_catalog: bool = False,
         include_plan_and_debate: bool = False,
+        authoring_session: Any | None = None,
         human_handler: Any | None = None,
         asked_by: str = "agent",
         model: str = "",
@@ -493,6 +711,10 @@ class ReadOnlyToolProvider:
     ) -> None:
         self.roots = [Path(r).resolve() for r in roots]
         self.retrieval = retrieval
+        # The analyst lead (only) drives tool authoring via a live AuthoringSession (§9.3
+        # B-topology): drive_coder / submit_for_review. Masked to the lead alone — a session is
+        # wired here only on the lead's provider; no other role sees the tools. None ⇒ disabled.
+        self.authoring_session = authoring_session
         # The analyst lead (not the reviewer) gets the read-only data_catalog tool so it can
         # check local data availability before deciding to author an acquire tool (§9.10).
         self.include_data_catalog = include_data_catalog
@@ -634,6 +856,10 @@ class ReadOnlyToolProvider:
             definitions.append(ask_human_tool_def())
             if self.include_plan_and_debate:
                 definitions.append(plan_and_debate_tool_def())
+        if self.authoring_session is not None:
+            definitions.append(drive_coder_tool_def())
+            definitions.append(submit_tool_def())
+            definitions.append(respond_to_review_tool_def())
         return definitions
 
     def _allowed(self, path: Path) -> bool:
@@ -655,6 +881,18 @@ class ReadOnlyToolProvider:
             return await execute_plan_and_debate(
                 self.human_handler, self.asked_by, arguments, model=self.model
             )
+        if name == DRIVE_CODER_TOOL:
+            if self.authoring_session is None:
+                return ToolOutcome(text="authoring is not enabled for this role.", is_error=True)
+            return await execute_drive_coder(self.authoring_session, arguments)
+        if name == SUBMIT_TOOL:
+            if self.authoring_session is None:
+                return ToolOutcome(text="authoring is not enabled for this role.", is_error=True)
+            return await execute_submit(self.authoring_session)
+        if name == RESPOND_TO_REVIEW_TOOL:
+            if self.authoring_session is None:
+                return ToolOutcome(text="authoring is not enabled for this role.", is_error=True)
+            return await execute_respond_to_review(self.authoring_session, arguments)
         if name in ("read_file", "list_dir"):
             target = Path(str(arguments.get("path", "")))
             if not self._allowed(target):

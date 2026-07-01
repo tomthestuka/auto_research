@@ -75,6 +75,19 @@ with the human across unbounded rounds **without consuming `react_loop_cap`** �
 `react_loop_absolute_cap` backstop bounds it; the human ending the discussion is the normal stop.
 The coder then follows the settled brief rather than re-opening the architecture.
 
+**Lead authoring tools (`drive_coder`/`submit_for_review`, §9.3 B-topology — A1 slice 2).** When an
+`authoring_session` (an `auto_research.sandbox.merge_flow.AuthoringSession`) is wired,
+`ReadOnlyToolProvider` exposes two **lead-only** tools — masked to the lead alone, because a session
+is attached only on its provider (no other role sees them; this is the mask). `drive_coder`
+(`execute_drive_coder`) steers the live Sonnet coder one turn (the lead is the plan owner, the coder
+executes); `submit_for_review` (`execute_submit`) runs the deterministic gate, then (on gate-pass)
+the provider-decorrelated GPT co-lead review, and **commits on gate-pass ∧ review-pass** — the lead
+never self-approves (`commit ⇔ gate ∧ review`, §9.9). The gate is a mechanical wall the lead can only
+*satisfy* via `drive_coder`; the review is *debatable* (the slice-4 `respond_to_review`). Both will be
+listed in the lead's authoring-loop `free_tools` (slice 3), bounded by `submit_cap` +
+`react_loop_absolute_cap`. They drive the **same** `AuthoringSession` primitives `propose_and_pr`
+drives in its auto-loop — the difference is *who* diagnoses each verdict (the lead, vs. the coder).
+
 When a `RunMonitor` is injected, role wrappers record high-chatter input,
 parsed output, raw model content, attachment counts, and errors. These records
 are for human inspection only and are never fed back into runtime prompts. Model-backed
@@ -274,6 +287,40 @@ Role wrappers:
   attempt the lead composes ONE honest terminal `AnalystReport` (§9.6) instead of the consensus loop
   spinning; it flows to the reviewer (sole I/O). `reviewer.md` gained honest-failure adjudication.
   Coverage `tests/test_{consensus_authoring,graph}.py` + live `tests/test_live_honest_failure.py`.
+- 2026-06-29 — **A1 slice 2: lead-only authoring tools `drive_coder`/`submit_for_review`.**
+  `ReadOnlyToolProvider` gains an `authoring_session` param; when set it exposes the two tools
+  (`drive_coder_tool_def`/`execute_drive_coder`, `submit_tool_def`/`execute_submit`) and dispatches
+  them, else they are hidden **and** denied (the mask — a session is attached only on the lead's
+  provider). `submit_for_review` runs gate → (gate-pass) GPT review → commit on both-pass; the lead
+  never self-approves. They drive the same `AuthoringSession` primitives as `propose_and_pr`. Tests
+  in `tests/test_react_tools.py` (masking, drive routing, the three submit branches). Suite 372 pass.
+- 2026-06-29 — **A1 slice 3: `AnalystLeadAgent.drive_authoring` (the lead drives authoring).**
+  `drive_authoring(tool_spec, *, toolkit_root, worktree_base, direct_branch, colead, human_handler)`
+  builds + connects an `AuthoringSession`, attaches it to a lead-scoped `ReadOnlyToolProvider`
+  (`include_text_search=False`, `authoring_session=…`), seeds the coder with the brief, then runs
+  `_react` over `drive_coder`/`submit_for_review` (free: `submit_for_review` + `plan_and_debate`;
+  ceiling `react_loop_absolute_cap`; submits bounded by `session.submit_cap`), and returns the
+  terminal `MergeFlowResult` read off the session (`committed`/`failed`). Owns the session lifecycle
+  (`aclose` in `finally`). Consensus calls this instead of `propose_and_pr`; `execute_submit` enforces
+  `submit_cap`. Suite 373 pass.
+- 2026-06-29 — **A1 slice 4: the lead↔co-lead debate (`respond_to_review`) + anti-sycophancy.**
+  `AnalystColeadAgent.review_tool` gains `prior_review`/`lead_rebuttal`: when a rebuttal is supplied
+  it **reconsiders** (concede only when genuinely persuaded; hold firm against pressure — the
+  `reconsider_semantics` payload + `prompts/analyst_colead.md`). New lead-only tool
+  `respond_to_review` (`respond_to_review_tool_def`/`execute_respond_to_review`): re-runs the review
+  with the rebuttal; on a concede it **re-validates the gate** then commits (commit ⇔ gate ∧ review
+  holds — the lead persuades, never overrides), bounded by `session.debate_cap`
+  (`tool_author_debate_cap`). Added to the lead's authoring provider + `free_tools`. Tests in
+  `tests/test_react_tools.py` (before-submit error, holds, persuade→regate→commit, debate cap,
+  exposure). Suite 378 pass.
 - 2026-06-29 — **Clarification channels take one Markdown `message`** (was `question`/`context`/
   `plan`): `ask_human`, `plan_and_debate`, `clarify_for_author`; `execute_plan_and_debate` no longer
   folds a plan into context. Typed protocol unchanged. Tests `tests/test_{hitl,react_tools}.py`.
+- 2026-06-30 — **Authoring finalization is prompt-borne, not a code nudge loop.** Dropped the
+  `_drive_authoring_loop` nudge-on-uncommitted-stop loop (+ `_drive_authoring_nudge_cap` and config
+  `tool_author_drive_nudge_cap`) per CLAUDE.md §1: `drive_authoring` now runs a single `_react`, and
+  `submit_for_review`'s tool description (`submit_tool_def`) states it is the **sole** finalization
+  path — stopping without it discards the work — so a bare no-tool stop is a deliberate honest
+  give-up. Decided after the sonnet-5 live loader run (`logs/dev/P2/loader-test/…140117`) showed the
+  lead called `submit_for_review` 18× on its own and the nudge fired 0× (the run-1 narrate-and-stop
+  did not recur). Tests `tests/test_{react_tools,merge_flow}.py`.

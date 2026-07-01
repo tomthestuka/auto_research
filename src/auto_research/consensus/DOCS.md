@@ -47,12 +47,18 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
 - Lead objects for analyst debate must provide
   `judge_convergence(task, reports, *, round_index, max_rounds) ->
   ReviewVerdict`, `adjudicate(task, reports) -> AnalystReport`, and (for the
-  authoring path) `decide_authoring(reports) -> AuthoringDecision` and
-  `finalize_authoring_outcome(task, reports, tool_spec, result) -> AnalystReport`.
-- Authoring/resume (Phase 2 step 7): when ≥1 worker report carries a `tool_request` and
-  authoring is wired (`toolkit_root` set, with `direct_branch`), the strategy asks the lead
-  to `decide_authoring`; on `should_author` it calls `merge_flow.propose_and_pr(direct_branch=…)`
-  itself (the LLM never issues git — §9.9). A **committed** tool triggers `registry.reload()` +
+  authoring path) `decide_authoring(reports) -> AuthoringDecision`,
+  `drive_authoring(tool_spec, *, toolkit_root, worktree_base, direct_branch, colead, human_handler)
+  -> MergeFlowResult`, and `finalize_authoring_outcome(task, reports, tool_spec, result) ->
+  AnalystReport`.
+- Authoring/resume (Phase 2 step 7; A1 B-topology, §9.3): when ≥1 worker report carries a
+  `tool_request` and authoring is wired (`toolkit_root` set, with `direct_branch`), the strategy
+  asks the lead to `decide_authoring` (settle the plan); on `should_author` it calls
+  `lead.drive_authoring(tool_spec, …)` — the lead drives the coder + gate + GPT review through its
+  **own** ReAct loop (`drive_coder`/`submit_for_review`), diagnosing each verdict, and owns the
+  `AuthoringSession` lifecycle. The strategy never calls `propose_and_pr` (that auto-loop is kept
+  for tests / non-lead callers); the LLM never issues git — `build_authoring_session`/`approve_edit`
+  do (§9.9). A **committed** tool triggers `registry.reload()` +
   per-worker `sandbox.restart()` + a provenance-augmented task + a worker rerun (a *resume*,
   bounded by `tool_author_cap`, not counted against `max_rounds`). `should_author=false` falls
   through to ordinary debate (a mis-called tool, not a failure). A **non-committed** authoring
@@ -127,3 +133,13 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   I/O, no bypass — graph change), which adjudicates finalize vs. bounded rework. `should_author=false`
   still falls through to debate. `LeadLike` gained `finalize_authoring_outcome`. Coverage:
   `tests/test_consensus_authoring.py`.
+- 2026-06-29 — **A1 slice 3: the lead drives authoring (B-topology, §9.3).**
+  `_maybe_author_and_resume` no longer calls `merge_flow.propose_and_pr`; it calls
+  `lead.drive_authoring(tool_spec, toolkit_root=…, worktree_base=…, direct_branch=…, colead=…,
+  human_handler=…)`, which builds + connects an `AuthoringSession`, runs the lead's ReAct loop over
+  `drive_coder`/`submit_for_review` (the lead diagnoses each gate/review verdict and re-steers), and
+  returns the terminal `MergeFlowResult` (committed → resume; failed → `finalize_authoring_outcome`).
+  `LeadLike` gained `drive_authoring`. Budget: `tool_author_submit_cap` (orchestration.yaml) bounds
+  `submit_for_review`; the loop ceiling is `react_loop_absolute_cap`. The committed/failed routing,
+  reload/restart/rerun, and `tool_author_cap` bound are unchanged — `test_consensus_authoring.py`
+  stubs `drive_authoring`'s outcome (no SDK) instead of monkeypatching `propose_and_pr`. Suite 373.

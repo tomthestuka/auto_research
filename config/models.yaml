@@ -74,13 +74,13 @@ roles:
   #   own family. Backed by GPT-5.5 reasoning xhigh (cheapest eligible, capable enough).
   coder:
     members:
-      - name: claude_sonnet_4_6
+      - name: claude_sonnet_5
         provider: anthropic
-        model: claude-sonnet-4-6
+        model: claude-sonnet-5
         vision: true
         priceMTk:
-          input: 3.0
-          output: 15.0
+          input: 2.0
+          output: 10.0
         parameters:
           max_tokens: 16384
   analyst_colead:

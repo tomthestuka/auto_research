@@ -505,7 +505,27 @@ the hook mapping a fake-model verdict — no live LLM).
   real atomic commit. On gate-pass ∧ review-pass it sets the commit subject to
   `review.commit_summary` (falling back to `tool_spec.proposed_tool_name`), calls
   `approve_edit`, and returns `status="committed"` with the real `commit_sha`. All hooks stay
-  injectable for deterministic tests.
+  injectable for deterministic tests. **Now a thin driver over `AuthoringSession`** (below): it
+  builds the session, then runs the L2/L3 auto-loop calling `drive`/`run_gate_step`/
+  `run_review_step`/`commit`. Behaviour is byte-identical to the pre-refactor inline loop.
+- `AuthoringSession` — a live authoring session over one `ToolSpec`: a connected Sonnet
+  (Claude-SDK) coder on a toolkit branch, with the gate and co-lead review exposed as
+  **discrete, separately-callable steps** so a caller can drive them à la carte. Methods:
+  `initial_message` (property — the ToolSpec-brief seed turn), `connect()`, `drive(message)`
+  (one warm-session coder turn → response text; L0 self-correction inside), `run_gate_step()` →
+  `GateReport` (applies the §9.9 commit-backstop, then the deterministic gate — mechanical, only
+  *satisfiable*), `run_review_step(gate)` → `ToolReviewVerdict` (the provider-decorrelated
+  co-lead — *debatable*), `commit(message)` → sha (the only commit path; sets `committed`),
+  `aclose()` (disconnect + §9.9 non-committed direct-branch tree reset). `propose_and_pr` drives
+  these in the auto-loop; the analyst lead's authoring ReAct tools drive the *same* primitives
+  directly (so the lead diagnoses each verdict rather than the run terminating).
+- `build_authoring_session(tool_spec, *, lead, toolkit_root, worktree_base, colead=None,
+  human_handler=None, coder_model=None, run_gate=None, run_review=None, max_turns=None,
+  direct_branch=None, worktree_factory=None, sdk_client_factory=None, approve_edit=None,
+  monitor=None)` → `AuthoringSession` — resolves config/hooks, picks worktree vs direct-branch
+  mode (§9.9), builds the seeded SDK client, returns a **not-yet-connected** session (`await
+  connect()` before use). Setup only — the sole git touches are the direct-branch clean-tree
+  precondition and the per-attempt base-ref record.
 - `approve_edit(worktree, *, message)` → `str` — Phase 2 step 6, the **only** place the
   runtime commits (§9.9). Stages **exactly** `gate.collect_targets(worktree)`'s paths
   (explicit-path `git add -- …`, never `git add -A`, so scratch outside a `*_utils` package
@@ -607,3 +627,22 @@ the hook mapping a fake-model verdict — no live LLM).
   `_make_escalation_server`, `_make_ask_lead_handler`→`clarify_for_author(message, kind=…)`,
   `_make_ask_human_handler`→`HumanQuery(message=…)`; `coder.ask_lead`/`coder.ask_human` log
   `message` (CLAUDE.md §9.7). Tests in `tests/test_merge_flow.py`.
+- 2026-06-29 — **Authoring refactor A1 slice 1: `AuthoringSession` decomposition (behaviour-
+  preserving).** Extracted the author/gate/review/commit/cleanup primitives out of
+  `propose_and_pr`'s inline loop into an `AuthoringSession` class (`drive`/`run_gate_step`/
+  `run_review_step`/`commit`/`aclose` + `initial_message`/`connect`), built by
+  `build_authoring_session()`. `propose_and_pr` is now a thin driver running the same L2/L3
+  auto-loop over those primitives — `tests/test_merge_flow.py` green unchanged (34 pass; full
+  suite 365 pass / 24 skip). This is the scaffold for the lead-driven authoring ReAct tools
+  (`drive_coder`/`submit`/`respond_to_review`) that drive the same session directly so the
+  analyst lead — the plan owner — diagnoses each gate/review verdict (CLAUDE.md §9.3 mental model:
+  lead = the user's clone driving Claude Code CLI; GPT co-lead = challenger; Sonnet = executor).
+- 2026-06-29 — **A1 slices 3–4: lead-driven authoring + the co-lead debate.** `AuthoringSession`
+  gains `submit_cap`/`debate_cap` + `submits_used`/`debates_used` + `last_gate`/`last_review`/
+  `last_commit_sha` (so a lead loop builds the terminal `MergeFlowResult` from session state and
+  bounds the expensive steps); `run_review_step(gate, *, lead_rebuttal=None)` carries the lead's
+  rebuttal on the debate path only (the auto-loop / injected 3-arg hooks stay compatible).
+  `make_review_hook`'s `run_review` gained `*, prior_review=None, lead_rebuttal=None`, forwarded to
+  `review_tool`. `build_authoring_session` resolves `tool_author_submit_cap`/`tool_author_debate_cap`.
+  The consensus strategy now drives authoring via `lead.drive_authoring` (not `propose_and_pr`,
+  which stays for tests/non-lead callers). Commit still ⇔ gate ∧ review; `approve_edit` unchanged.

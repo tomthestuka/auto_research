@@ -144,7 +144,14 @@ def make_review_hook(
     default :class:`~auto_research.sources.WebSource` is attempted (best-effort).
     """
 
-    async def run_review(worktree: Path, tool_spec: ToolSpec, gate: GateReport) -> ToolReviewVerdict:
+    async def run_review(
+        worktree: Path,
+        tool_spec: ToolSpec,
+        gate: GateReport,
+        *,
+        prior_review: ToolReviewVerdict | None = None,
+        lead_rebuttal: str | None = None,
+    ) -> ToolReviewVerdict:
         from auto_research.agents import AnalystColeadAgent
         from auto_research.agents.react import ReadOnlyToolProvider
 
@@ -169,7 +176,10 @@ def make_review_hook(
             include_text_search=False,  # the papers KB is irrelevant to code review
         )
         diff = build_diff_bundle(Path(worktree))
-        return await agent.review_tool(tool_spec, diff=diff, gate=gate, tools=tools)
+        return await agent.review_tool(
+            tool_spec, diff=diff, gate=gate, tools=tools,
+            prior_review=prior_review, lead_rebuttal=lead_rebuttal,
+        )
 
     return run_review
 

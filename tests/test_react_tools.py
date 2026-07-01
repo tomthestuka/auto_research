@@ -230,3 +230,195 @@ def test_plan_and_debate_routes_message_to_human(tmp_path):
     assert seen["query"].kind == "clarify_science"
     assert seen["query"].asked_by == "analyst_lead"
     assert "extend the acquire package" in seen["query"].message  # the Markdown body
+
+
+# --- Authoring tools (A1 slice 2): drive_coder / submit_for_review over an AuthoringSession ---
+
+from types import SimpleNamespace  # noqa: E402
+
+from auto_research.agents.react import (  # noqa: E402
+    DRIVE_CODER_TOOL,
+    SUBMIT_TOOL,
+    execute_drive_coder,
+    execute_submit,
+)
+
+
+class _FakeSession:
+    """Minimal AuthoringSession stand-in exercising drive/gate/review/commit primitives."""
+
+    def __init__(
+        self, *, gate, review, tool_name="my_tool", submit_cap=5, debate_cap=3,
+        rebuttal_review=None,
+    ):
+        self._gate = gate
+        self._review = review
+        self._rebuttal_review = rebuttal_review  # verdict when a lead_rebuttal is supplied
+        self.tool_spec = SimpleNamespace(proposed_tool_name=tool_name)
+        self.driven: list[str] = []
+        self.committed_with: str | None = None
+        self.submit_cap = submit_cap
+        self.submits_used = 0
+        self.debate_cap = debate_cap
+        self.debates_used = 0
+        self.last_gate = None
+        self.last_review = None
+
+    async def drive(self, message):
+        self.driven.append(message)
+        return f"coder did: {message}"
+
+    async def run_gate_step(self):
+        self.last_gate = self._gate
+        return self._gate
+
+    async def run_review_step(self, gate, *, lead_rebuttal=None):
+        review = (
+            self._rebuttal_review
+            if lead_rebuttal is not None and self._rebuttal_review is not None
+            else self._review
+        )
+        self.last_review = review
+        return review
+
+    async def commit(self, message):
+        self.committed_with = message
+        return "deadbeefcafe123"
+
+
+def _check(passed, *, layer="A", name="determinism", detail="ok"):
+    return SimpleNamespace(passed=passed, layer=layer, name=name, detail=detail)
+
+
+def _gate(passed, *, layer_a=None, layer_b=None, reason="gate"):
+    return SimpleNamespace(
+        passed=passed, layer_a=layer_a or [], layer_b=layer_b or [], reason=reason
+    )
+
+
+def _review(approved, *, issues=None, rationale="r", commit_summary="add my_tool"):
+    return SimpleNamespace(
+        approved=approved, issues=issues or [], rationale=rationale,
+        commit_summary=commit_summary, checks_adequate=approved,
+    )
+
+
+def test_authoring_tools_masked_without_session(tmp_path):
+    p = ReadOnlyToolProvider(roots=[tmp_path])
+    names = [d["name"] for d in p.tool_definitions()]
+    assert DRIVE_CODER_TOOL not in names and SUBMIT_TOOL not in names
+    # dispatch is denied too, not just hidden
+    assert asyncio.run(p.execute(DRIVE_CODER_TOOL, {"instructions": "x"})).is_error
+    assert asyncio.run(p.execute(SUBMIT_TOOL, {})).is_error
+
+
+def test_authoring_tools_exposed_only_with_session(tmp_path):
+    sess = _FakeSession(gate=_gate(True), review=_review(True))
+    p = ReadOnlyToolProvider(roots=[tmp_path], authoring_session=sess)
+    names = [d["name"] for d in p.tool_definitions()]
+    assert DRIVE_CODER_TOOL in names and SUBMIT_TOOL in names
+
+
+def test_drive_coder_routes_instructions_to_session():
+    sess = _FakeSession(gate=_gate(True), review=_review(True))
+    out = asyncio.run(execute_drive_coder(sess, {"instructions": "write pcube_timeseg"}))
+    assert not out.is_error
+    assert sess.driven == ["write pcube_timeseg"]
+    assert "coder did" in out.text
+
+
+def test_drive_coder_requires_instructions():
+    sess = _FakeSession(gate=_gate(True), review=_review(True))
+    assert asyncio.run(execute_drive_coder(sess, {})).is_error
+
+
+def test_submit_gate_failure_reports_checks_and_does_not_commit():
+    sess = _FakeSession(
+        gate=_gate(False, layer_a=[_check(False, name="no_fabrication.vocabulary",
+                                          detail="banned phrase 'synthetic'")]),
+        review=_review(True),
+    )
+    out = asyncio.run(execute_submit(sess))
+    assert "GATE FAILED" in out.text and "no_fabrication.vocabulary" in out.text
+    assert sess.committed_with is None  # gate is the immovable wall
+
+
+def test_submit_review_rejection_offers_debate_and_does_not_commit():
+    sess = _FakeSession(
+        gate=_gate(True),
+        review=_review(False, issues=["tests do not prove per-segment time-filtering"]),
+    )
+    out = asyncio.run(execute_submit(sess))
+    assert "REVIEW REJECTED" in out.text and "time-filtering" in out.text
+    assert "respond_to_review" in out.text  # the debate path is offered
+    assert sess.committed_with is None
+
+
+def test_submit_gate_and_review_pass_commits():
+    sess = _FakeSession(gate=_gate(True), review=_review(True, commit_summary="add my_tool"))
+    out = asyncio.run(execute_submit(sess))
+    assert "COMMITTED" in out.text and "my_tool" in out.text
+    assert sess.committed_with == "add my_tool"  # commit ⇔ gate ∧ review, no self-approval
+
+
+def test_submit_cap_exhaustion_returns_terminal_message():
+    sess = _FakeSession(
+        gate=_gate(True), review=_review(False, issues=["x"]), submit_cap=1
+    )
+    out1 = asyncio.run(execute_submit(sess))
+    assert "REVIEW REJECTED" in out1.text and sess.submits_used == 1
+    out2 = asyncio.run(execute_submit(sess))
+    assert "used all 1 review submissions" in out2.text
+    assert sess.submits_used == 1  # the cap is not exceeded
+
+
+# --- respond_to_review (A1 slice 4): the lead↔co-lead debate ---
+
+from auto_research.agents.react import (  # noqa: E402
+    RESPOND_TO_REVIEW_TOOL,
+    execute_respond_to_review,
+)
+
+
+def test_respond_to_review_before_submit_is_error():
+    sess = _FakeSession(gate=_gate(True), review=_review(False, issues=["x"]))
+    out = asyncio.run(execute_respond_to_review(sess, {"message": "I disagree"}))
+    assert out.is_error and "submit_for_review first" in out.text
+
+
+def test_respond_to_review_holds_position_no_commit():
+    sess = _FakeSession(gate=_gate(True), review=_review(False, issues=["weak test"]))
+    asyncio.run(execute_submit(sess))  # establishes last_gate/last_review (rejected)
+    out = asyncio.run(execute_respond_to_review(sess, {"message": "the test is fine because..."}))
+    assert "HELD its position" in out.text
+    assert sess.committed_with is None
+    assert sess.debates_used == 1
+
+
+def test_respond_to_review_persuades_then_regates_and_commits():
+    sess = _FakeSession(
+        gate=_gate(True),
+        review=_review(False, issues=["weak test"]),
+        rebuttal_review=_review(True, commit_summary="add my_tool"),
+    )
+    asyncio.run(execute_submit(sess))  # gate pass, review reject
+    out = asyncio.run(execute_respond_to_review(sess, {"message": "already handled at line 40"}))
+    assert "PERSUADED" in out.text and "COMMITTED" in out.text
+    assert sess.committed_with == "add my_tool"  # commit only after re-gate passed
+
+
+def test_respond_to_review_debate_cap():
+    sess = _FakeSession(
+        gate=_gate(True), review=_review(False, issues=["x"]), debate_cap=1
+    )
+    asyncio.run(execute_submit(sess))
+    asyncio.run(execute_respond_to_review(sess, {"message": "arg 1"}))
+    out = asyncio.run(execute_respond_to_review(sess, {"message": "arg 2"}))
+    assert "used all 1 debate turns" in out.text
+    assert sess.debates_used == 1
+
+
+def test_respond_to_review_exposed_with_session(tmp_path):
+    sess = _FakeSession(gate=_gate(True), review=_review(True))
+    p = ReadOnlyToolProvider(roots=[tmp_path], authoring_session=sess)
+    assert RESPOND_TO_REVIEW_TOOL in [d["name"] for d in p.tool_definitions()]

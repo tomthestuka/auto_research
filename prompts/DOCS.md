@@ -161,3 +161,16 @@ logic here.
   the old "make the two runs' output identical" advice is gone; and a slow test declares
   `gate_test_timeout_s` in its package `tool_config.yaml`. Validation is live-only (prompt behaviour);
   examples stay domain-neutral.
+- 2026-06-30 — **`analyst_colead.md` reframed to a single relaxed trust-bar (no advisory tier).**
+  Live evidence (sonnet-5 loader run `…140117`): the co-lead rejected a correct, gate-passing tool 4×
+  with ever-finer "a wrong impl could still pass this" objections until the lead's budget exhausted →
+  honest `failed`. Root cause: three rejection-biasing clauses with no counterweight. Reframe: the bar
+  is now *"would a competent domain scientist trust this tool's output?"* — **approve-or-reject only,
+  no advisory** (an advisory note is a no-op here — the human merges, never refactors — so anything
+  worth fixing must be a rejection that drives a rework, and anything below the bar is not raised at
+  all); `proposed_checks` are "neither a ceiling nor a floor" (merits, not plan-conformance — the
+  committed tests stay authoritative); the "subtly wrong impl" clause is scoped to *plausible*
+  implementations; **raise all blockers in round 1, then stop** (no goalpost-moving); a **symmetric
+  cost** (over-rejecting a sound tool is also expensive); rebuttal hold-firm scoped to real blockers +
+  "don't manufacture a new blocker to avoid conceding". Anti-sycophancy on fabrication/real-bug/
+  unproven-core-capability preserved. Validation is live-only (prompt behaviour).
