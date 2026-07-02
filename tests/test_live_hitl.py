@@ -7,6 +7,8 @@ the per-channel renderers handle Markdown:
 
   * **CLI** — ``cli._render`` via ``rich`` (run with ``-s`` to see it in the terminal).
   * **Slack** — a real ``chat_postMessage`` with the ``markdown``-block rendering (``_blocks``).
+  * **Telegram** — a real send of the HTML-rendered chunks (``_render_chunks`` + ``_send``) over
+    a briefly-started ``Application``; the recommended channel.
   * **WhatsApp** — a real Twilio send of the raw Markdown body (``_body``); **deprecated** and
     expected to fail here (missing/again-deprecated creds), which is the point of the per-channel
     try/except — one channel failing never blocks the others.
@@ -107,6 +109,18 @@ async def _emit_slack(query: HumanQuery) -> dict:
         await handler.aclose()
 
 
+async def _emit_telegram(query: HumanQuery) -> dict:
+    from auto_research.hitl.telegram import TelegramHandler, _render_chunks
+
+    handler = TelegramHandler()
+    await handler.start()
+    try:
+        ids = [(await handler._send(chunk)).message_id for chunk in _render_chunks(query)]
+        return {"emitted": True, "message_ids": ids}
+    finally:
+        await handler.aclose()
+
+
 async def _emit_whatsapp(query: HumanQuery) -> dict:
     from auto_research.hitl.whatsapp import WhatsAppHandler  # warns: deprecated
 
@@ -120,7 +134,12 @@ async def _emit_whatsapp(query: HumanQuery) -> dict:
     return {"emitted": True, "sid": getattr(msg, "sid", None)}
 
 
-_CHANNELS = {"cli": _emit_cli, "slack": _emit_slack, "whatsapp": _emit_whatsapp}
+_CHANNELS = {
+    "cli": _emit_cli,
+    "slack": _emit_slack,
+    "telegram": _emit_telegram,
+    "whatsapp": _emit_whatsapp,
+}
 
 
 def test_live_hitl_emits_markdown_across_channels():
@@ -163,6 +182,7 @@ def test_live_hitl_emits_markdown_across_channels():
     print("\nHITL emit results:", json.dumps(results, indent=2))
 
     # Every channel is attempted and recorded; the always-available CLI emit must succeed,
-    # while the external channels (Slack/WhatsApp) are best-effort and may fail-and-be-caught.
+    # while the external channels (Slack/Telegram/WhatsApp) are best-effort and may
+    # fail-and-be-caught.
     assert set(results) == set(_CHANNELS)
     assert results["cli"]["ok"], results["cli"]

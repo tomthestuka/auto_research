@@ -73,7 +73,9 @@ directly) so the preflight can import it without pulling the graph/LLM stack.
   rendered to Telegram's HTML subset (`_md_to_html`: bold/italic, inline+fenced code, links, headings→
   bold, bullets→`•`, escaping `< > &`) and `_chunk_md` splits a long body across ≤4096-char messages;
   `_send` falls back to plain text if Telegram rejects the HTML. `start()`/`aclose()` manage the
-  `Application` + polling; `timeout_s` defaults to the shared `response_timeout_s()`.
+  `Application` + polling; `timeout_s` defaults to the shared `response_timeout_s()`. Live-tested
+  via `tests/test_live_telegram.py` (opt-in, `AUTO_RESEARCH_LIVE_TELEGRAM=1`) and the cross-channel
+  `tests/test_live_hitl.py`.
 - `WhatsAppHandler(*, client=None, from_number=None, to_number=None, timeout_s=None,
   poll_interval_s=5)` — **deprecated** (Twilio bills per message; prefer `slack`/`cli` — emits a
   `DeprecationWarning` on construction, CLAUDE.md §13). Sends the Markdown `message` body raw (no
@@ -144,3 +146,10 @@ protocol, §7).
   `python-telegram-bot>=22` added to `environment.yml`. Tests: `tests/test_hitl.py` (fake
   Application/bot — reply-to routing, concurrent-question routing, plain-reply fallback, chat/bot/empty
   filtering, timeout, MD→HTML, chunking). WhatsApp stays deprecated.
+- 2026-07-02 — **Telegram live-test stubs.** Added the dedicated opt-in blocking round-trip
+  `tests/test_live_telegram.py` (`AUTO_RESEARCH_LIVE_TELEGRAM=1`; gates on the two Telegram vars
+  only — decoupled from the LLM/ADS keys `check_required_env()` requires, since a Telegram send
+  needs neither; logs the exchange under `logs/dev/`) and wired the recommended channel into the
+  cross-channel send-only `tests/test_live_hitl.py` (`_emit_telegram` starts the `Application`,
+  sends the HTML-rendered chunks, `aclose()`s; best-effort like the other external channels). No
+  connector code changed.

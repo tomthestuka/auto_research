@@ -132,6 +132,34 @@ A level-3 product (pcube/pha/…) **must** record the real parameters used to ob
 is reproducible. This is data provenance, not fabrication — record only data that is actually
 on disk; never invent an entry for data you did not produce.
 
+## Figures — the FigureRef capture convention (a plotter tool)
+
+A plotter tool is a **separate** tool from the data/analysis tool that produced the numbers —
+never fold figure-writing into a data tool. It takes the data tool's product (or the live session
+state) and returns figures only. Mirror `xspec_utils/skills/session.py:plot_fit` (one PNG) and
+`plot_iqu` (one PNG per sub-unit) exactly — they are the template. Two conventions make the runtime
+**capture** each figure as a `FigureRef` and re-home it under the run's figures directory; a tool
+that misses either produces a file the harness never tracks and the reviewer never sees:
+
+1. **Return a dict with a top-level `"figures"` key** — a list of plain dicts, one per PNG written.
+   The runtime validates each dict into a `FigureRef`, so each must carry exactly these keys, or that
+   figure is dropped: `path` (the PNG path you wrote), `caption` (a non-empty description), `mime_type`
+   (`"image/png"`), `produced_by` (the tool's dotted path, e.g. `"<domain>_utils.skills.session.<fn>"`),
+   `created_at` (an ISO-8601 UTC timestamp string), and `sha256` — the 64-char lowercase hex digest of
+   the **file you actually wrote** (`hashlib.sha256(Path(save_path).read_bytes()).hexdigest()`), so the
+   figure carries the identity of its own bytes. Return `{"figures": [...], "stdout": "...", "exit_code": 0}`.
+2. **Name the output-path argument `save_path`** (a single PNG) **or `save_path_prefix`** (several PNGs —
+   append `_<label>.png` per file). The runtime keys on these exact argument names to redirect the file
+   under the run's figures dir (it keeps the caller's basename, enforces the directory and extension).
+   An output-path argument by any other name is not redirected — the PNG lands in scratch and is never
+   tracked. Default it to `None` and auto-generate a timestamped path when it is absent (the runtime
+   overrides the directory regardless), and expose it in the `TOOL_MANIFEST` `args_schema`.
+
+Write the PNG with a non-interactive backend (Agg) inside `skills/session.py` (the science-stack half),
+one figure per file, and close each figure after saving. A plotter is not a *science tool* in the
+reproducibility sense — its Layer-B test asserts the file was written and the returned dict carries the
+required keys (and, where it matters, that the figure reflects its input), not a within-tolerance value.
+
 ## What the brief tells you, and what is yours to decide
 
 - The brief's **disposition** — extend an existing package vs. scaffold a new one — and its

@@ -174,3 +174,18 @@ logic here.
   cost** (over-rejecting a sound tool is also expensive); rebuttal hold-firm scoped to real blockers +
   "don't manufacture a new blocker to avoid conceding". Anti-sycophancy on fabrication/real-bug/
   unproven-core-capability preserved. Validation is live-only (prompt behaviour).
+- 2026-07-02 — **Data/plots-separated figure guardrail ([A6]).** Live evidence (run `151419`): an
+  authored data tool correctly returns data only, but with no companion plotter tool analysts
+  improvised `bash_exec` matplotlib — off-design, uncaptured as `FigureRef`s, and blocked by the
+  fs-guard → a figureless report. Prompt fix, keeping the data/plots-separated guardrail: `analyst_worker.md`
+  states a review figure comes only from a **plotter tool** (one PNG → `FigureRef`) and to raise a
+  `tool_request` for a dedicated plotter when none covers the product rather than drawing it inline;
+  `analyst_lead.md` extends the authoring dependency order to `…then plot it` and adds the rule to
+  author a **separate** plotter tool (mirroring `plot_fit`/`plot_iqu`) for a plottable product, never
+  folding figure-writing into the data tool. `coder.md` gained a **FigureRef capture convention** section
+  (grounded in the real `xspec_utils/skills/session.py` + `agents/react.py:_redirect_figure_args` /
+  `sandbox/runner.py` capture path): return a top-level `"figures"` list of dicts carrying exactly
+  `{path, caption, mime_type, produced_by, created_at, sha256}` (validated into `FigureRef`), and name the
+  output-path arg **`save_path`**/**`save_path_prefix`** so the harness re-homes the PNG under the run's
+  figures dir and tracks it — an arg by any other name is not redirected. Validation is live-only (prompt
+  behaviour); examples stay domain-neutral.
