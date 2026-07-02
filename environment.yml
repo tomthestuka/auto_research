@@ -25,6 +25,7 @@ dependencies:
   # imported when the corresponding channel is selected.
   - twilio>=9
   - slack-bolt>=1.18
+  - python-telegram-bot>=22
   - rich >= 15.0.0
   # tests
   - pytest>=8

@@ -1,7 +1,7 @@
 """Human-in-the-loop clarification channel (CLAUDE.md §9.7/§9.8).
 
 The injectable ``HumanHandler`` interface plus pluggable connector backends (CLI stdin,
-Slack, WhatsApp), the auto-detecting resolver, and the launch-time channel ping.
+Slack, Telegram, WhatsApp), the auto-detecting resolver, and the launch-time channel ping.
 """
 
 from auto_research.hitl.base import HumanHandler, HumanInputRequired, resolve_human
@@ -14,12 +14,14 @@ from auto_research.hitl.resolve import (
     response_timeout_s,
 )
 from auto_research.hitl.slack import SlackHandler
+from auto_research.hitl.telegram import TelegramHandler
 from auto_research.hitl.whatsapp import WhatsAppHandler
 
 __all__ = [
     "HumanHandler",
     "HumanInputRequired",
     "SlackHandler",
+    "TelegramHandler",
     "WhatsAppHandler",
     "build_human_handler",
     "cli_stdin_handler",

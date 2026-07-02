@@ -51,11 +51,17 @@ def build_human_handler(name: str, **cfg: Any) -> HumanHandler | None:
         from auto_research.hitl.slack import SlackHandler
 
         return SlackHandler(**cfg)
+    if key == "telegram":
+        from auto_research.hitl.telegram import TelegramHandler
+
+        return TelegramHandler(**cfg)
     if key == "whatsapp":
         from auto_research.hitl.whatsapp import WhatsAppHandler
 
         return WhatsAppHandler(**cfg)
-    raise ValueError(f"unknown human channel {name!r}; expected cli|slack|whatsapp|none")
+    raise ValueError(
+        f"unknown human channel {name!r}; expected cli|slack|telegram|whatsapp|none"
+    )
 
 
 def resolve_handler(

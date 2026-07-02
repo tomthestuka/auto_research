@@ -50,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--human",
-        choices=("auto", "cli", "none", "slack", "whatsapp"),
+        choices=("auto", "cli", "none", "slack", "telegram", "whatsapp"),
         default="auto",
         help=(
             "Channel a blocked agent uses to reach you. 'auto' (default) picks the terminal "

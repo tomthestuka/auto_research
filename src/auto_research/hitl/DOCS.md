@@ -4,7 +4,7 @@
 
 The cross-cutting **raise-to-human** channel (CLAUDE.md §9.7/§9.8): a single injectable
 `HumanHandler` every role uses when blocked, plus pluggable connector backends (CLI stdin,
-Slack, WhatsApp), an auto-detecting resolver, and the launch-time channel ping. It is a
+Slack, Telegram, WhatsApp), an auto-detecting resolver, and the launch-time channel ping. It is a
 **clarification** channel, fully decoupled from toolkit merging — the runtime never asks a
 human to merge.
 
@@ -26,10 +26,10 @@ wired, `resolve_human` raises `HumanInputRequired` (the §9.8 headless fail-safe
   `sys.stdin.isatty()` → CLI else the `orchestration.yaml: human_channel` default).
   `build_human_handler` is the name→connector factory. `make_human_channel_check` builds the
   launch-time preflight ping (decision #5).
-- **Connectors** (`cli.py`, `slack.py`, `whatsapp.py`) — each a `HumanHandler`. The Slack/
-  Twilio clients are injectable so the send/poll logic is unit-tested without those libraries
-  or any network; the real clients are imported lazily inside their `_build_*` helpers, so
-  `import auto_research.hitl` never requires `twilio`/`slack_bolt`.
+- **Connectors** (`cli.py`, `slack.py`, `telegram.py`, `whatsapp.py`) — each a `HumanHandler`.
+  The Slack/Telegram/Twilio clients are injectable so the send/reply logic is unit-tested without
+  those libraries or any network; the real clients are imported lazily inside their `_build_*`
+  helpers, so `import auto_research.hitl` never requires `python-telegram-bot`/`twilio`/`slack_bolt`.
 
 This package stays independent of `auto_research.graph` (it reads `orchestration.yaml`
 directly) so the preflight can import it without pulling the graph/LLM stack.
@@ -42,7 +42,7 @@ directly) so the preflight can import it without pulling the graph/LLM stack.
   `HumanInputRequired` when `handler is None`.
 - `resolve_handler(human_handler, human_channel) -> HumanHandler | None` — the CLI-vs-library
   decision; explicit handler/channel override the `isatty` auto-detect.
-- `build_human_handler(name, **cfg) -> HumanHandler | None` — `cli|slack|whatsapp|none`;
+- `build_human_handler(name, **cfg) -> HumanHandler | None` — `cli|slack|telegram|whatsapp|none`;
   raises `ValueError` on an unknown name and a clear `RuntimeError` when a selected
   connector's env keys are missing.
 - `make_human_channel_check(handler, *, timeout_s=None) -> Callable[[], Awaitable[None]]` —
@@ -63,6 +63,17 @@ directly) so the preflight can import it without pulling the graph/LLM stack.
   benign websocket-rotation ERROR ("Cannot write to closing transport") to WARNING while leaving
   genuine errors untouched. `timeout_s` defaults to the shared `response_timeout_s()` when unset.
   Built per spec; **not live-tested**.
+- `TelegramHandler(*, app=None, token=None, chat_id=None, timeout_s=None)` — **the recommended
+  reliable channel** (CLAUDE.md §12/[E4]): long polling (`getUpdates`) — **outbound-only**, no public
+  URL, and Telegram retains updates ≤24h so a reconnect is lossless. Posts to `TELEGRAM_CHAT_ID`
+  (auth: `TELEGRAM_BOT_TOKEN` from BotFather) and awaits a reply via a Future resolved by `on_message`.
+  **Multi-question ready:** `_pending` maps every posted `message_id → Future`, so a Telegram
+  **reply-to** (`reply_to_message.message_id`) routes to the right pending query even with several open
+  (future parallel analysts); a plain reply resolves the single open one. The Markdown `message` is
+  rendered to Telegram's HTML subset (`_md_to_html`: bold/italic, inline+fenced code, links, headings→
+  bold, bullets→`•`, escaping `< > &`) and `_chunk_md` splits a long body across ≤4096-char messages;
+  `_send` falls back to plain text if Telegram rejects the HTML. `start()`/`aclose()` manage the
+  `Application` + polling; `timeout_s` defaults to the shared `response_timeout_s()`.
 - `WhatsAppHandler(*, client=None, from_number=None, to_number=None, timeout_s=None,
   poll_interval_s=5)` — **deprecated** (Twilio bills per message; prefer `slack`/`cli` — emits a
   `DeprecationWarning` on construction, CLAUDE.md §13). Sends the Markdown `message` body raw (no
@@ -84,7 +95,8 @@ protocol, §7).
   `auto_research.graph.runtime` (resolve + thread), `auto_research.agents.react`
   (`ask_human` tool), `auto_research.sandbox.merge_flow` (author `ask_human`).
 - External: `rich` (CLI Markdown rendering — a hard dep, in `environment.yml`). Optional, lazy:
-  `twilio` (WhatsApp — deprecated), `slack_bolt` (Slack).
+  `python-telegram-bot` (Telegram — the recommended channel), `slack_bolt` (Slack), `twilio`
+  (WhatsApp — deprecated).
 
 ## Dictionary-level reference
 
@@ -101,7 +113,7 @@ protocol, §7).
   only costs one cheap cold prefix re-prefill on resume).
 - `make_human_channel_check(handler, *, timeout_s=None)` — preflight ping check factory.
 - `cli_stdin_handler(query)` — attended-terminal handler.
-- `SlackHandler` / `WhatsAppHandler` — connector classes (see contracts above).
+- `SlackHandler` / `TelegramHandler` / `WhatsAppHandler` — connector classes (see contracts above).
 
 ## Changelog
 - 2026-06-15 — Phase 2 step 5: package created. `HumanQuery`/`HumanResponse` protocol; injectable
@@ -121,3 +133,14 @@ protocol, §7).
   (bills per message; warns on construction, raw passthrough; prefer `slack`/`cli`, CLAUDE.md §13).
   Tests `tests/test_hitl.py`; opt-in live render across channels `tests/test_live_hitl.py`
   (`AUTO_RESEARCH_LIVE_HITL=1`, each channel try/except, logs `logs/dev/hitl/`).
+- 2026-07-02 — **Telegram connector added — the recommended reliable channel (CLAUDE.md §12/[E4]).**
+  `telegram.py` `TelegramHandler`: `python-telegram-bot` long polling (outbound-only, no public URL,
+  24h server-side retention → reconnect-lossless), chosen over Slack Socket Mode (chronically stale)
+  and Slack-HTTP (a public inbound endpoint = cluster-policy blocker). Auth = `TELEGRAM_BOT_TOKEN`
+  (BotFather) + `TELEGRAM_CHAT_ID`. **Multi-question-ready** via reply-to routing (`message_id→Future`
+  map) for future parallel analysts, single-open plain-reply fallback. Markdown→Telegram-HTML render
+  (`_md_to_html`) with a plain-text fallback; `_chunk_md` splits over the 4096-char cap. Wired into
+  `build_human_handler` (`telegram`), the CLI `--human` choices, and the generic preflight ping.
+  `python-telegram-bot>=22` added to `environment.yml`. Tests: `tests/test_hitl.py` (fake
+  Application/bot — reply-to routing, concurrent-question routing, plain-reply fallback, chat/bot/empty
+  filtering, timeout, MD→HTML, chunking). WhatsApp stays deprecated.

@@ -24,6 +24,7 @@ from auto_research.hitl import (
     resolve_human,
 )
 from auto_research.hitl.slack import SlackHandler
+from auto_research.hitl.telegram import TelegramHandler
 from auto_research.hitl.whatsapp import WhatsAppHandler
 from auto_research.schemas import HumanQuery, HumanResponse
 
@@ -407,3 +408,167 @@ def test_slack_on_message_ignores_other_channel_and_subtype():
         return fut.done()
 
     assert asyncio.run(_run()) is False
+
+
+# ── Telegram connector (fake Application/bot) ────────────────────────────────
+
+
+class _FakeTGBot:
+    def __init__(self):
+        self.sent = []
+        self._id = 100
+
+    async def send_message(self, *, chat_id, text, parse_mode=None):
+        self._id += 1
+        self.sent.append({"chat_id": chat_id, "text": text, "parse_mode": parse_mode})
+        return SimpleNamespace(message_id=self._id)
+
+
+async def _tg_anoop(*a, **k):
+    return None
+
+
+class _FakeTGApp:
+    def __init__(self):
+        self.bot = _FakeTGBot()
+        self.handlers = []
+        self.updater = SimpleNamespace(start_polling=_tg_anoop, stop=_tg_anoop)
+
+    def add_handler(self, h):
+        self.handlers.append(h)
+
+    async def initialize(self):
+        pass
+
+    async def start(self):
+        pass
+
+    async def stop(self):
+        pass
+
+    async def shutdown(self):
+        pass
+
+
+def _tg_update(text, chat_id="555", reply_to_id=None, is_bot=False):
+    msg = SimpleNamespace(
+        text=text,
+        chat=SimpleNamespace(id=chat_id),
+        from_user=SimpleNamespace(is_bot=is_bot),
+        reply_to_message=(SimpleNamespace(message_id=reply_to_id) if reply_to_id is not None else None),
+    )
+    return SimpleNamespace(effective_message=msg, effective_chat=SimpleNamespace(id=chat_id), message=msg)
+
+
+def test_telegram_posts_html_and_resolves_on_reply():
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
+
+    async def _run():
+        task = asyncio.create_task(handler(_query(asked_by="reviewer")))
+        for _ in range(200):
+            if handler._pending:
+                break
+            await asyncio.sleep(0)
+        mid = next(iter(handler._pending))
+        handler.on_message(_tg_update("answer from human", reply_to_id=mid))
+        return await task
+
+    resp = asyncio.run(_run())
+    assert resp.answer == "answer from human"
+    assert handler.app.bot.sent[0]["chat_id"] == "555"
+    assert handler.app.bot.sent[0]["parse_mode"] == "HTML"
+
+
+def test_telegram_routes_concurrent_questions_by_reply_to():
+    """Two questions open at once → a reply-to each message resolves the right one (multi-question)."""
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
+
+    async def _run():
+        t1 = asyncio.create_task(handler(_query(asked_by="w1")))
+        while len(handler._pending) < 1:
+            await asyncio.sleep(0)
+        id1 = next(iter(handler._pending))
+        t2 = asyncio.create_task(handler(_query(asked_by="w2")))
+        while len(handler._pending) < 2:
+            await asyncio.sleep(0)
+        id2 = next(i for i in handler._pending if i != id1)
+        handler.on_message(_tg_update("answer-2", reply_to_id=id2))
+        handler.on_message(_tg_update("answer-1", reply_to_id=id1))
+        return await asyncio.gather(t1, t2)
+
+    r1, r2 = asyncio.run(_run())
+    assert r1.answer == "answer-1" and r2.answer == "answer-2"
+
+
+def test_telegram_plain_reply_resolves_single_open():
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
+
+    async def _run():
+        task = asyncio.create_task(handler(_query()))
+        while not handler._pending:
+            await asyncio.sleep(0)
+        handler.on_message(_tg_update("plain answer", reply_to_id=None))
+        return await task
+
+    assert asyncio.run(_run()).answer == "plain answer"
+
+
+def test_telegram_on_message_ignores_other_chat_bot_empty():
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
+
+    async def _run():
+        task = asyncio.create_task(handler(_query()))
+        while not handler._pending:
+            await asyncio.sleep(0)
+        mid = next(iter(handler._pending))
+        handler.on_message(_tg_update("x", chat_id="999", reply_to_id=mid))  # wrong chat
+        handler.on_message(_tg_update("x", reply_to_id=mid, is_bot=True))  # our own echo
+        handler.on_message(_tg_update("   ", reply_to_id=mid))  # empty
+        await asyncio.sleep(0)
+        assert all(not f.done() for f in handler._pending.values())
+        handler.on_message(_tg_update("real", reply_to_id=mid))  # valid → resolves
+        return await task
+
+    assert asyncio.run(_run()).answer == "real"
+
+
+def test_telegram_times_out_without_reply():
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555", timeout_s=0.05)
+    with pytest.raises(TimeoutError):
+        asyncio.run(handler(_query()))
+
+
+def test_telegram_uses_shared_response_timeout(monkeypatch):
+    monkeypatch.setattr("auto_research.hitl.telegram.response_timeout_s", lambda: 1234.0)
+    assert TelegramHandler(app=_FakeTGApp(), chat_id="555").timeout_s == 1234.0
+    assert TelegramHandler(app=_FakeTGApp(), chat_id="555", timeout_s=7.0).timeout_s == 7.0
+
+
+def test_build_human_handler_telegram(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "555")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "x")
+    assert isinstance(build_human_handler("telegram"), TelegramHandler)
+
+
+def test_md_to_html_renders_telegram_subset():
+    from auto_research.hitl.telegram import _md_to_html
+
+    out = _md_to_html("# Title\n\n**bold** and *it* and `x<y` and [t](https://e.com)\n- one\n- two")
+    assert "<b>Title</b>" in out  # heading → bold
+    assert "<b>bold</b>" in out and "<i>it</i>" in out
+    assert "<code>x&lt;y</code>" in out  # inline code, escaped
+    assert '<a href="https://e.com">t</a>' in out
+    assert "• one" in out and "• two" in out  # bullets
+    # fenced code: content escaped, wrapped in <pre>
+    assert "<pre>a &lt; b &amp; c\n</pre>" in _md_to_html("```py\na < b & c\n```")
+    # raw prose angle brackets are escaped, never emitted as tags
+    assert "&lt;" in _md_to_html("a < b") and "<b>" not in _md_to_html("a < b")
+
+
+def test_telegram_render_chunks_header_hint_and_split():
+    from auto_research.hitl.telegram import _TG_MSG_LIMIT, _render_chunks
+
+    chunks = _render_chunks(_query(kind="clarify_science", message="para.\n\n" * 4000))
+    assert chunks[0].startswith("<b>Human input needed · clarify_science</b>")
+    assert chunks[-1].endswith("<i>Reply to this message to answer.</i>")
+    assert len(chunks) >= 2 and all(len(c) <= _TG_MSG_LIMIT for c in chunks)
