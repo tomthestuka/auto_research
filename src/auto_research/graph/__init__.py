@@ -1,6 +1,7 @@
 """LangGraph orchestration for the Phase 1 research loop."""
 
 from auto_research.graph.builder import IOAgentLike, ReviewerLike, build_graph
+from auto_research.graph.detached import RunDied, run_research_nohup
 from auto_research.graph.runtime import DEFAULT_WORKER_COUNT, ResearchRun, run_research, run_request
 from auto_research.graph.state import ResearchState
 
@@ -10,7 +11,9 @@ __all__ = [
     "ResearchRun",
     "ResearchState",
     "ReviewerLike",
+    "RunDied",
     "build_graph",
     "run_research",
+    "run_research_nohup",
     "run_request",
 ]

@@ -10,11 +10,14 @@ import the public library entry points and read monitor artifacts from the
 runtime data directory or `logs/dev/step-N/`.
 
 ## Interfaces / Contracts
-- `usage_example.ipynb` runs monitored requests with
-  `RunMonitor(..., stream=sys.stdout)` so compact chatter-filtered progress
-  lines appear while the run is active, including `team(model)` agent prefixes
-  and compact tool-result summaries, then displays the grouped Markdown monitor
-  report. It has two example sections:
+- `usage_example.ipynb` drives requests with the **detached** entry
+  `run_research_nohup(request, chatter=7, ...)` so a killed kernel (logout) does not lose the
+  run — re-running a cell reconnects by the deterministic `run_id`. `chatter=7` progress lines
+  **stream live into the cell** exactly as a non-detached run (the wait loop follows the run's
+  `monitor.jsonl`), and everything also persists to that JSONL + `backend.log`. The returned
+  `ResearchRun`'s monitor is reconstructed from the JSONL — `run.markdown()` displays the grouped
+  report. The authoring example passes `human_channel="slack"` (a detached child has no stdin, so
+  `'cli'` is rejected). It has two example sections:
   - **Using existing tools** — a Cyg X-1 joint broadband spectral-fit question the
     current `xspec_utils` toolkit already answers.
   - **Test code authoring** — IXPE project P1 (intra-observation PA/PD stability),
@@ -27,7 +30,7 @@ runtime data directory or `logs/dev/step-N/`.
   agents.
 
 ## Dependencies
-- Internal: `auto_research.run_research`, `auto_research.monitor`.
+- Internal: `auto_research.run_research_nohup` (detached entry), `auto_research.monitor`.
 - External: a Jupyter/IPython environment for display, supplied by the human's
   notebook tooling.
 
@@ -46,3 +49,10 @@ runtime data directory or `logs/dev/step-N/`.
   `step12_monitor_inspection.ipynb` and restructured into a "using existing tools" section
   (the Cyg X-1 spectral fit) and a new "test code authoring" section (IXPE P1 PA/PD stability,
   the Phase 2 step-7 authoring chain), keeping the monitor-inspection cell.
+- 2026-07-06 — **`usage_example.ipynb` switched to the detached entry `run_research_nohup`.**
+  Both example runs (existing-tools + authoring) now use `run_research_nohup(request, chatter=7[,
+  human_channel="slack"])` instead of `run_research(monitor=RunMonitor(...))`, so a killed kernel
+  survives and re-running a cell reconnects by `run_id`. Dropped the in-notebook `RunMonitor`
+  construction (the monitor lives in the detached backend; `run.monitor` is reconstructed from its
+  JSONL); markdown notes updated (live progress = tail the run dir's `monitor.jsonl`; `human_channel='cli'`
+  rejected under detach).

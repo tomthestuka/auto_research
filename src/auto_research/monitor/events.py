@@ -233,6 +233,12 @@ def _render_events(events: Sequence[MonitorEvent]) -> list[str]:
     return lines
 
 
+def write_stream_event(stream: TextIO, event: MonitorEvent) -> None:
+    """Write one concise, live-friendly monitor line (public: the detached-run follower in
+    ``graph/detached.py`` reuses this so a tailed JSONL renders identically to a live run)."""
+    _write_stream_event(stream, event)
+
+
 def _write_stream_event(stream: TextIO, event: MonitorEvent) -> None:
     """Write one concise, live-friendly monitor line."""
 

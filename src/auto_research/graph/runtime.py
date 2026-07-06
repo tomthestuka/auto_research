@@ -227,6 +227,7 @@ async def run_research(
     report_formats: str | list[str] | None = None,
     human_handler: HumanHandler | None = None,
     human_channel: str | None = None,
+    run_id: str | None = None,
 ) -> ResearchRun:
     """Run the graph and return the verdict, final state, and monitor.
 
@@ -252,7 +253,9 @@ async def run_research(
     if isinstance(request, str):
         request = ResearchRequest(question=request)
 
-    run_id = uuid.uuid4().hex
+    # A caller (e.g. the detached `run_research_nohup` backend) may pin the run_id so its
+    # workspace/report/JSONL land in a known, reconnectable dir; else auto-generate.
+    run_id = run_id or uuid.uuid4().hex
     run_monitor = monitor or RunMonitor(chatter=chatter, jsonl_path=monitor_jsonl)
     orch = load_orchestration_config()
 

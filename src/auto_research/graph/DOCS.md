@@ -95,7 +95,7 @@ verdicts, two iteration counters, and the cap.
   monitor=None, monitor_jsonl=None) -> ReviewVerdict` — compatibility entry.
   Runs `run_research()` and returns only the final reviewer verdict.
 - `async run_research(request, *, ..., chatter=10, monitor=None, monitor_jsonl=None,
-  report_formats=None, human_handler=None, human_channel=None) -> ResearchRun` — high-level
+  report_formats=None, human_handler=None, human_channel=None, run_id=None) -> ResearchRun` — high-level
   monitored entry. Resolves the raise-to-human channel (`hitl.resolve_handler` — explicit
   `human_handler` → `human_channel` → auto-detect TTY/library) then `await run_preflight(
   human_handler=…)` immediately (the launch-time checklist: `.env` + required keys, the
@@ -109,7 +109,27 @@ verdicts, two iteration counters, and the cap.
   (`<runtime_dir>/runs/{run_id}/`; `runtime_dir` from `config/orchestration.yaml`), spawns one `PersistentSandbox`
   per `AnalystWorkerAgent`, assigns each worker's `sandbox` and `memory_path`,
   then tears all sandboxes down after the graph completes or raises.
-  Returns the request, final verdict, final state, and `RunMonitor`.
+  Returns the request, final verdict, final state, and `RunMonitor`. Optional `run_id` pins
+  the workspace/report/JSONL dir (defaults to an auto-generated uuid) — used by the detached
+  entry below; otherwise behavior is unchanged.
+- `async run_research_nohup(request, *, chatter=10, report_formats=None, human_channel=None,
+  max_iterations=None, run_id='auto', overwrite=False, poll_s=5.0, stream=<cell stdout>) -> ResearchRun`
+  (`graph/detached.py`) — runs the pipeline in a **detached** child (`python -m auto_research`
+  in its own session via `start_new_session`), so a killed kernel (logout) does not kill it;
+  re-running the same call **reconnects** by a deterministic `run_id` (`'auto'` = `sha256`
+  of the request; a named string forces a distinct run, validated path-safe). `overwrite=True`
+  erases an existing run and starts fresh but **refuses if it is still alive**. Liveness is
+  process existence (`backend.pid` = pid + `/proc` start-time, PID-reuse-safe), never log
+  freshness. **Live progress streams to `stream`** (default: the current cell's `sys.stdout`,
+  resolved at call time so it follows ipykernel's per-cell rebinding; pass `None` to silence)
+  by following the run's `monitor.jsonl` chatter-filtered — identical to a non-detached live
+  run — so detaching does not cost the live view. Output is reconstructed from that `monitor.jsonl`
+  + terminal `result.json` (written by the CLI backend); `human_channel='cli'` is rejected (a
+  detached child has no stdin). Raises `RunDied` (carrying the run_id, reason, log path, and
+  reconstructed partial markdown) when the process died without writing a result — honest, no
+  silent relaunch.
+- `RunDied(run_id, reason, *, log_path=None, partial='')` — a detached run ended without a
+  usable result (process died mid-run, or the pipeline raised).
 - `ResearchState` — `TypedDict` with `request`, `cited_paths: list[Path]`,
   `report`, `verdict`, `verdicts: Annotated[list[ReviewVerdict], operator.add]`,
   `lit_iterations`, `analysis_iterations`, `max_iterations`.
@@ -197,3 +217,21 @@ verdicts, two iteration counters, and the cap.
   verdict (records `run.honest_failure` on a failed status, no manufactured verdict);
   `route_after_finalize → compose_report` whenever `report_formats` is set, so a finalize always
   documents the outcome. Tests rewritten in `tests/test_graph.py`.
+- 2026-07-06 — **Detached (nohup-style) runs — `run_research_nohup` (E5, partial).** New
+  `graph/detached.py`: runs the pipeline in a detached `python -m auto_research` child (own
+  session), so a killed kernel/logout no longer loses the run; re-running the same call
+  reconnects by a deterministic `run_id` (`sha256` of the request). `overwrite=True` starts
+  fresh (refuses if the run is still alive — process-based liveness via `backend.pid` = pid +
+  `/proc` start-time, PID-reuse-safe, not log mtime). Output reconstructed from the run dir's
+  `monitor.jsonl` + a terminal `result.json` the CLI now writes; `RunDied` surfaces a dead run
+  honestly (no silent relaunch); `human_channel='cli'` rejected (detached ⇒ no stdin). Additive
+  only: `run_research` gains an optional `run_id` param (defaults to auto — behavior unchanged);
+  CLI gains `--run-id`/`--max-iterations` + the `result.json` write. NOT true mid-run resume —
+  that (the §12 checkpointer) is still deferred; this survives *kernel* death, not backend death.
+  Tests: `tests/test_detached.py` (real-pid liveness, attach/launch, overwrite guardrail).
+- 2026-07-06 — **`run_research_nohup` streams live progress** (gains `stream`, default the cell's
+  `sys.stdout` resolved at call time; `None` silences). Its wait loop now follows the run's
+  `monitor.jsonl` (via `monitor.write_stream_event`, chatter-filtered like the live monitor) instead
+  of only polling status — so a detached run shows the same live chatter in the notebook cell as a
+  non-detached run, and replays the backlog on reconnect. `tests/test_detached.py` (drain filter,
+  partial-line, live relay).

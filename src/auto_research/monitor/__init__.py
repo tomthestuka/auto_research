@@ -5,6 +5,7 @@ from auto_research.monitor.events import (
     RunMonitor,
     default_monitor_jsonl_path,
     validate_chatter,
+    write_stream_event,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "RunMonitor",
     "default_monitor_jsonl_path",
     "validate_chatter",
+    "write_stream_event",
 ]

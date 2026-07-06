@@ -10,7 +10,9 @@ import sys
 from typing import Sequence
 
 from auto_research.graph import run_research
+from auto_research.graph.detached import jsonable
 from auto_research.monitor import RunMonitor, default_monitor_jsonl_path, validate_chatter
+from auto_research.sandbox.workspace import run_dir
 from auto_research.schemas import ResearchRequest
 
 
@@ -69,7 +71,29 @@ def build_parser() -> argparse.ArgumentParser:
             "May be supplied more than once. Defaults to both jsonl and tex."
         ),
     )
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="Hard cap for each reviewer feedback edge. Defaults to config.",
+    )
+    parser.add_argument(
+        "--run-id",
+        help=(
+            "Pin the run_id so the workspace/report/JSONL land in a known, reconnectable dir "
+            "and a terminal result.json is written. Used by the detached run_research_nohup "
+            "backend; defaults to an auto-generated id."
+        ),
+    )
     return parser
+
+
+def _write_result(run_id: str, payload: dict) -> None:
+    """Write the detached run's terminal ``result.json`` (the marker run_research_nohup
+    tails for). ``run_id`` is auto/path-safe by the time it reaches here."""
+    target = run_dir(run_id) / "result.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, default=jsonable), encoding="utf-8")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -82,7 +106,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    jsonl_path = args.monitor_jsonl or default_monitor_jsonl_path("cli_run")
+    # A pinned --run-id (the detached backend) puts the JSONL in the reconnectable run dir.
+    if args.monitor_jsonl:
+        jsonl_path = args.monitor_jsonl
+    elif args.run_id:
+        jsonl_path = run_dir(args.run_id) / "monitor.jsonl"
+    else:
+        jsonl_path = default_monitor_jsonl_path("cli_run")
     md_path = args.monitor_md or jsonl_path.with_suffix(".md")
     monitor = RunMonitor(chatter=chatter, jsonl_path=jsonl_path, stream=sys.stderr)
     request = ResearchRequest(
@@ -91,15 +121,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         constraints=args.constraint,
     )
 
-    run = asyncio.run(
-        run_research(
-            request,
-            monitor=monitor,
-            report_formats=args.report_formats,
-            human_channel=args.human,
+    try:
+        run = asyncio.run(
+            run_research(
+                request,
+                monitor=monitor,
+                report_formats=args.report_formats,
+                human_channel=args.human,
+                max_iterations=args.max_iterations,
+                run_id=args.run_id,
+            )
         )
-    )
+    except Exception as exc:  # noqa: BLE001 — record an honest terminal marker, then re-raise
+        # A caught crash → a `failed` result.json so the detached client raises RunDied with
+        # the reason (a hard kill writes nothing → the client detects a dead process instead).
+        if args.run_id:
+            _write_result(args.run_id, {"status": "failed", "error": repr(exc)})
+        raise
     run.monitor.write_markdown(md_path)
+
+    if args.run_id:
+        _write_result(args.run_id, {
+            "status": "done",
+            "verdict": run.verdict.model_dump(mode="json"),
+            "final_state": json.loads(json.dumps(run.final_state, default=jsonable)),
+            "report_jsonl": str(run.report_jsonl) if run.report_jsonl else None,
+            "report_latex": str(run.report_latex) if run.report_latex else None,
+            "report_pdf": str(run.report_pdf) if run.report_pdf else None,
+        })
 
     if args.format == "json":
         out: dict = {

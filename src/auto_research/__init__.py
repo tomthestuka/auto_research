@@ -21,7 +21,15 @@ try:  # pragma: no cover - depends on installed pydantic version
 except Exception:  # noqa: BLE001 - never let a warning filter break import
     pass
 
-from auto_research.graph import ResearchRun, run_research, run_request
+from auto_research.graph import RunDied, ResearchRun, run_research, run_request, run_research_nohup
 from auto_research.monitor import RunMonitor
 
-__all__ = ["ResearchRun", "RunMonitor", "__version__", "run_research", "run_request"]
+__all__ = [
+    "ResearchRun",
+    "RunDied",
+    "RunMonitor",
+    "__version__",
+    "run_research",
+    "run_research_nohup",
+    "run_request",
+]

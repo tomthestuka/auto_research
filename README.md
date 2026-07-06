@@ -356,6 +356,20 @@ run.markdown()       # grouped monitor report
 run.report_pdf       # path to the compiled report (if accepted + tex requested)
 ```
 
+**Detached** — survive a killed kernel/logout (notebooks); reconnect by re-running:
+
+```python
+from auto_research import run_research_nohup
+
+# Runs the pipeline in a detached process (its own session). If the kernel dies
+# (logout), the run keeps going and finishes to disk; re-running the *same* call
+# reconnects by a deterministic run_id (sha256 of the request) and returns the result.
+run = await run_research_nohup("your research question", human_channel="telegram")
+# overwrite=True starts fresh (refuses if the run is still alive);
+# a dead run raises RunDied (carrying how far it got). human_channel='cli' is rejected
+# (a detached child has no stdin) — use a connector or 'none'.
+```
+
 **LangGraph Studio** — live per-node graph state (`langgraph.json` → `graph/serve.py`):
 
 ```bash

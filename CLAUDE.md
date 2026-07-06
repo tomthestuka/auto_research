@@ -804,3 +804,12 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   agent presents a plan and debates it to agreement before landing edits, except where the
   human has instructed/permitted a direct proceed; investigating/reading to form the plan is
   always allowed. Added as the first hard rule (it gates the whole workflow).
+- 2026-07-06 — **Live-run robustness pass** (all additive, `run_research` behavior unchanged):
+  figure bytes now reach models at the multimodal boundary (cross-agent `images=` + inline
+  `ToolResultPart.figures`, live-confirmed); report `\href` display escaping (unattended PDFs);
+  gate Layer-B requires ≥1 PASSED (an all-skipped suite no longer merges untested, §9.4);
+  malformed tool figures are dropped-with-note, not fatal; no-fab scan moved bare ambiguous
+  descriptors (`synthetic`/`illustrative`) to soft co-lead findings. **Detached runs**
+  (`run_research_nohup`, §9.8-adjacent) run the pipeline in a `start_new_session` child so a
+  killed kernel/logout survives; reconnect by a deterministic `run_id`; **not** the §12 durable
+  mid-run resume (still deferred) — this survives *kernel* death, not *backend* death.
