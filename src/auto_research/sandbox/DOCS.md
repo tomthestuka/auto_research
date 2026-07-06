@@ -383,10 +383,13 @@ The **trust boundary** (§9.4) — code, not an LLM opinion. Two layers:
   **binary / undecodable** → a `no_fabrication.binary` hard-fail (data never belongs in the
   toolkit, §9.5) that is fed back to the author through the rework loop, never an exception.
 - **Layer B (the tool's own tests):** `pytest` in the worktree (via the injectable
-  `test_runner`; the default runs the analyst interpreter twice for determinism). **Determinism
-  is a per-test-outcome compare, not a byte compare:** each run writes a JUnit XML report
-  (`--junitxml`), parsed into a `{test_id: PASSED/FAILED/ERROR/SKIPPED}` map; the run is
-  deterministic ⇔ the two maps are equal. This ignores log/timing/stdout volatility (chatty
+  `test_runner`; the default runs the analyst interpreter twice for determinism). **Layer B
+  passes only if pytest exits 0 AND ≥1 test PASSED** (`_layer_b_verdict`): `rc==0` alone also
+  holds when every test is SKIPPED (validation data absent / hardcoded / off-host path), which
+  would merge a tool that never ran — an all-SKIPPED/empty outcome map fails with a specific
+  "not verified (§9.4)" reason, not a silent pass. **Determinism is a per-test-outcome compare,
+  not a byte compare:** each run writes a JUnit XML report (`--junitxml`), parsed into a
+  `{test_id: PASSED/FAILED/ERROR/SKIPPED}` map; the run is deterministic ⇔ the two maps are equal. This ignores log/timing/stdout volatility (chatty
   science tooling — growing INFO filelists, banners) that the old `_strip_volatile` byte compare
   false-flagged, and catches a test *outcome* that flips run-to-run. Each pytest invocation is
   bounded by `_gate_test_timeout` (per-package `tool_config.yaml: gate_test_timeout_s` >
@@ -574,7 +577,8 @@ the hook mapping a fake-model verdict — no live LLM).
 - `gate._default_test_runner(worktree, test_paths, *, timeout_s=900)` → `dict` — the real
   Layer-B runner: runs pytest twice with the analyst interpreter (`--junitxml` to a throwaway
   temp dir), `timeout_s` per invocation. Returns `{results, deterministic, determinism_detail}`;
-  `results` carries the `layer_b.pytest` `CheckResult` (`passed ⇔ rc1==0`), determinism from the
+  `results` carries the `layer_b.pytest` `CheckResult` (`passed ⇔ rc1==0 ∧ ≥1 PASSED`, via
+  `_layer_b_verdict`), determinism from the
   two per-test outcome maps.
 - `gate._parse_junit_outcomes(junit_path)` → `dict[str,str]` — pure: parse a JUnit XML report
   into `{"<classname>::<name>": PASSED/FAILED/ERROR/SKIPPED}` (read from each `<testcase>`'s
@@ -670,3 +674,11 @@ the hook mapping a fake-model verdict — no live LLM).
   call_tool` bounds the await with `asyncio.wait_for(timeout_s=900)` — a backstop so no wedged
   server can hang a run. Regression tests: `tests/test_sandbox.py::TestBashExecIsolation`
   (stdin-closed; timeout kills a backgrounded grandchild). Full suite 380 pass / 25 skip.
+- 2026-07-06 — **Gate Layer-B no longer passes an all-skipped suite ([G2]).** `_default_test_runner`
+  routed its verdict through a new pure `_layer_b_verdict(rc1, outcomes, out1)`: pass ⇔ pytest exited 0
+  **and ≥1 test PASSED**. `rc==0` alone also holds when every test is SKIPPED — the normal-path case when
+  the validation ObsID is absent or a test hardcodes an off-host path (`skipif(not path.exists(...))` all
+  fire) — which merged a tool that never ran, breaking §9.4. An all-SKIPPED/empty outcome map now fails with
+  a specific "no test PASSED — not verified (§9.4)" reason (→ rework / honest failure), not a silent pass.
+  Adversarial staged-change blindness ([G1]) stays deferred (git is banned in the coder sandbox; the gate's
+  git backstops normalize a deny-rule slip). Tests: `test_gate.py::test_layer_b_verdict_*`; suite green.

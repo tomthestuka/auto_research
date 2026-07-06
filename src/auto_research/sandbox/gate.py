@@ -478,6 +478,29 @@ def _manifest_keys(source: str) -> list[str]:
 TestRunner = Callable[[Path, list[str]], Awaitable[dict]]
 
 
+def _layer_b_verdict(rc1: int, outcomes: dict[str, str], out1: str) -> tuple[bool, str]:
+    """Decide Layer B pass/fail from the first run's exit code + per-test outcome map.
+
+    Pass ⇔ pytest exited 0 **and ≥1 test PASSED**. ``rc == 0`` alone is insufficient:
+    pytest also exits 0 when every test is SKIPPED, so a suite whose data-guards
+    (``skipif(not path.exists(...))``) all fire — the normal-path case when the validation
+    ObsID is absent or a path is hardcoded/off-host — would merge a tool that never ran,
+    breaking §9.4 ("an untested tool is not mergeable"). Nothing verified ⇒ fail loud
+    (→ rework or honest failure), never a silent pass.
+    """
+    if rc1 != 0:
+        return False, out1[-2000:]
+    if not any(outcome == "PASSED" for outcome in outcomes.values()):
+        return False, (
+            f"Layer-B suite exited 0 but no test PASSED "
+            f"({len(outcomes)} collected, all skipped/none executed) — the tool was not "
+            f"verified (§9.4). Point the tests at the ToolSpec validation ObsID via "
+            f"config/obs_db_path so they actually run, not a hardcoded or off-host path.\n"
+            + out1[-1500:]
+        )
+    return True, ""
+
+
 async def _default_test_runner(
     worktree: Path, test_paths: list[str], *, timeout_s: int = 900
 ) -> dict:
@@ -493,6 +516,10 @@ async def _default_test_runner(
     a byte-compare false-flagged, and catches what matters: a test *outcome* that flips
     run-to-run (CLAUDE.md §9.4). ``timeout_s`` bounds **each** pytest invocation (resolved
     per-package by :func:`_gate_test_timeout`).
+
+    Layer B passes only when pytest exits 0 **and** ≥1 test PASSED: an all-SKIPPED suite
+    (validation data absent / hardcoded / off-host) also exits 0, and merging it would land a
+    tool that never ran (§9.4). Nothing verified ⇒ fail, not silent pass.
     """
     import os
 
@@ -531,11 +558,8 @@ async def _default_test_runner(
         rc1, out1, map1 = _run(str(Path(td) / "junit1.xml"))
         _rc2, _out2, map2 = _run(str(Path(td) / "junit2.xml"))
 
-    passed = rc1 == 0
-    results = [CheckResult(
-        name="layer_b.pytest", layer="B", passed=passed,
-        detail="" if passed else out1[-2000:],
-    )]
+    passed, detail = _layer_b_verdict(rc1, map1, out1)
+    results = [CheckResult(name="layer_b.pytest", layer="B", passed=passed, detail=detail)]
     deterministic, detail = _outcomes_determinism(map1, map2)
     return {
         "results": results,

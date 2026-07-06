@@ -18,10 +18,34 @@ def write_report_jsonl(report: ResearchReport, path: Path) -> Path:
     return path
 
 
+# `\href{URL}{DISPLAY}` with simple (brace-free) arguments — what the compose prompt emits.
+_HREF_RE = re.compile(r"\\href\{([^{}]*)\}\{([^{}]*)\}")
+
+
+def _sanitize_href_display(latex: str) -> str:
+    r"""Wrap every ``\href`` display argument in ``\nolinkurl{}``.
+
+    The compose prompt tells the reviewer to emit ``\href{<relpath>}{<relpath>}``
+    verbatim, and staged relpaths are always ``papers/arxiv_<id>.pdf`` — the ``_``
+    in the *display* argument is typeset in text mode as a math subscript, giving a
+    fatal ``! Missing $ inserted.`` and no PDF, every run that cites a paper.
+    hyperref reads the *URL* argument verbatim (so it is fine) and ``\includegraphics``
+    filenames are fine; only the display text breaks. ``\nolinkurl`` (hyperref, already
+    loaded) typesets the path verbatim while the enclosing ``\href`` keeps the link.
+    Idempotent: an already-wrapped display arg contains braces, so it never matches.
+    """
+
+    def _wrap(match: re.Match) -> str:
+        url, display = match.group(1), match.group(2)
+        return f"\\href{{{url}}}{{\\nolinkurl{{{display}}}}}"
+
+    return _HREF_RE.sub(_wrap, latex)
+
+
 def write_report_latex(latex: str, path: Path) -> Path:
-    """Write the LaTeX source."""
+    """Write the LaTeX source, sanitizing ``\\href`` display args so it compiles."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(latex, encoding="utf-8")
+    path.write_text(_sanitize_href_display(latex), encoding="utf-8")
     return path
 
 

@@ -42,7 +42,10 @@ The `compose_report` graph node (in `builder.py`) orchestrates these utilities:
   sources are skipped so a dangling link is never offered as valid.
 - `write_report_jsonl(report, path) -> Path` — single JSONL line via
   `model_dump_json()`.
-- `write_report_latex(latex, path) -> Path` — writes `.tex` source.
+- `write_report_latex(latex, path) -> Path` — writes `.tex` source, first wrapping every
+  `\href` display argument in `\nolinkurl{}` (`_sanitize_href_display`) so a staged relpath's
+  underscore in the display text does not trip `! Missing $ inserted.`. URL arg and
+  `\includegraphics` are left untouched; idempotent.
 - `validate_latex_figures(latex, staged_figures) -> list[str]` — returns error
   strings for `\includegraphics` relpaths that were not staged (names the valid relpaths).
 - `validate_report_links(latex, report_dir, staged_papers) -> list[str]` — the **hard
@@ -86,3 +89,12 @@ The `compose_report` graph node (in `builder.py`) orchestrates these utilities:
   The JSONL handle keeps `build_references`/`Reference` and is correct by construction (built from
   already-validated `cited_paths`). New `stage_papers`/`validate_report_links` tests; the
   error-feedback-loop test now exercises a dead link.
+- 2026-07-06 — **Deterministic `\href` display escaping — fixes the systematic no-PDF ([D1]).**
+  `write_report_latex` now runs `_sanitize_href_display`, wrapping every `\href` display argument in
+  `\nolinkurl{}`. The compose prompt emits `\href{<relpath>}{<relpath>}` verbatim, and staged relpaths
+  are always `papers/arxiv_<id>.pdf`; the `_` in the *display* arg was typeset as a math subscript →
+  `! Missing $ inserted.` → no PDF on **every** paper-citing run, and the compile-repair loop could not
+  converge (its feedback contradicted the standing "verbatim" instruction). hyperref reads the URL arg
+  verbatim and `\includegraphics` is fine, so only the display text needed fixing; `\nolinkurl` (hyperref,
+  already loaded) typesets it verbatim while `\href` keeps the link. No prompt change. pdflatex-verified
+  (raw fails, wrapped compiles). New `test_report.py` sanitizer + idempotency tests.

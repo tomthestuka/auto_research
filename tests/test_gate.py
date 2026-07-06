@@ -442,6 +442,28 @@ def test_parse_junit_outcomes_absent_or_unparseable_is_empty(tmp_path):
     assert gate._parse_junit_outcomes(bad) == {}
 
 
+def test_layer_b_verdict_requires_a_passed_test():
+    r"""rc==0 alone is not a pass: an all-SKIPPED suite (validation data absent /
+    hardcoded / off-host) exited 0 but verified nothing, so it must fail (§9.4)."""
+    # >=1 PASSED -> pass.
+    ok, detail = gate._layer_b_verdict(0, {"t::a": "PASSED", "t::b": "SKIPPED"}, "out")
+    assert ok and detail == ""
+    # All skipped -> fail, with a specific "not verified" reason (not a generic failure).
+    bad, detail = gate._layer_b_verdict(0, {"t::a": "SKIPPED", "t::b": "SKIPPED"}, "logtail")
+    assert not bad
+    assert "no test PASSED" in detail and "§9.4" in detail
+    # Empty map (e.g. junit unparseable on an rc==0 run) -> fail closed.
+    empty_bad, _ = gate._layer_b_verdict(0, {}, "")
+    assert not empty_bad
+
+
+def test_layer_b_verdict_nonzero_rc_fails_with_output():
+    """A real failure (rc!=0) fails and surfaces the pytest output tail, unchanged."""
+    bad, detail = gate._layer_b_verdict(1, {"t::a": "FAILED"}, "assertion boom")
+    assert not bad
+    assert "assertion boom" in detail
+
+
 def test_determinism_same_outcomes_pass():
     m = {"test_demo::test_a": "PASSED", "test_demo::test_b": "FAILED"}
     deterministic, detail = gate._outcomes_determinism(m, dict(m))

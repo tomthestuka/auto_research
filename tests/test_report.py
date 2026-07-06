@@ -426,3 +426,32 @@ def test_error_feedback_loop(tmp_path):
     assert errs == [], f"Expected clean after retry, got: {errs}"
     assert "Hello world" in latex
     assert "papers/cited.pdf" in latex
+
+
+def test_write_report_latex_sanitizes_href_display(tmp_path):
+    r"""The \href display arg is wrapped in \nolinkurl so an underscore in a staged
+    relpath (papers/arxiv_<id>.pdf) no longer trips 'Missing $ inserted' (the
+    systematic no-PDF bug). URL arg and \includegraphics are left untouched."""
+    latex = (
+        r"\href{papers/arxiv_2401_12345.pdf}{papers/arxiv_2401_12345.pdf}"
+        "\n"
+        r"\includegraphics{figures/plot_fit_1.png}"
+    )
+    written = write_report_latex(latex, tmp_path / "report.tex").read_text(encoding="utf-8")
+
+    # Display arg is now verbatim (link preserved), so the underscore is no longer text-mode math.
+    assert r"\href{papers/arxiv_2401_12345.pdf}{\nolinkurl{papers/arxiv_2401_12345.pdf}}" in written
+    # The raw, unwrapped display (the failing form) is gone.
+    assert r"{papers/arxiv_2401_12345.pdf}{papers/arxiv_2401_12345.pdf}" not in written
+    # \includegraphics is untouched (graphicx tolerates underscores in filenames).
+    assert r"\includegraphics{figures/plot_fit_1.png}" in written
+
+
+def test_sanitize_href_display_is_idempotent(tmp_path):
+    r"""Re-writing an already-sanitized \href does not double-wrap (braces block the match)."""
+    once = write_report_latex(
+        r"\href{papers/a_b.pdf}{papers/a_b.pdf}", tmp_path / "r1.tex"
+    ).read_text(encoding="utf-8")
+    twice = write_report_latex(once, tmp_path / "r2.tex").read_text(encoding="utf-8")
+    assert once == twice
+    assert twice.count(r"\nolinkurl") == 1
