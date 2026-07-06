@@ -99,6 +99,8 @@ class AuthoringLead:
         state: dict | None = None,
         calls: list | None = None,
         author_status: str = "committed",
+        chain_len: int = 1,
+        fail_on: int | None = None,
     ) -> None:
         self.should_author = should_author
         self.converge_on = converge_on
@@ -110,12 +112,22 @@ class AuthoringLead:
         self.state = state
         self.calls = calls
         self.author_status = author_status
+        # A8: decide_authoring plans an ordered chain of ``chain_len`` tools; ``fail_on`` (1-based)
+        # marks the drive_authoring call that returns a non-commit (to exercise a mid-chain stop).
+        self.chain_len = chain_len
+        self.fail_on = fail_on
+        self._drive_calls = 0
 
     async def decide_authoring(self, reports) -> AuthoringDecision:
         self.decided += 1
+        specs = (
+            [_toolspec(f"pcube_tool_{i}") for i in range(self.chain_len)]
+            if self.should_author
+            else []
+        )
         return AuthoringDecision(
             should_author=self.should_author,
-            tool_spec=_toolspec() if self.should_author else None,
+            tool_specs=specs,
             rationale="fake decision",
         )
 
@@ -123,15 +135,17 @@ class AuthoringLead:
         self, tool_spec, *, toolkit_root, worktree_base, direct_branch=None,
         colead=None, human_handler=None,
     ) -> MergeFlowResult:
+        self._drive_calls += 1
         if self.calls is not None:
             self.calls.append({"direct_branch": direct_branch, "toolkit_root": toolkit_root})
-        if self.author_status == "committed" and self.state is not None:
+        failed = self.author_status != "committed" or self._drive_calls == self.fail_on
+        if not failed and self.state is not None:
             self.state["authored"] += 1
         return MergeFlowResult(
             tool_spec_id=tool_spec.id,
-            status=self.author_status,
+            status="failed" if failed else "committed",
             branch=direct_branch or "ai",
-            commit_sha="abc123def456" if self.author_status == "committed" else None,
+            commit_sha=None if failed else "abc123def456",
             reason="fake",
         )
 
@@ -245,6 +259,83 @@ def test_failed_authoring_finalizes_honestly(monkeypatch):
     assert workers[0].calls == 1  # only the initial report; no resume/rerun
     assert registry.reloads == 0  # failed → no reload
     assert workers[0].sandbox.restarts == 0  # failed → no restart
+
+
+def test_chain_authored_sequentially_reruns_once():
+    """A8: a multi-tool chain is authored back-to-back on ONE decision, and the workers rerun
+    exactly ONCE after the whole chain — not once per tool."""
+    state = {"authored": 0}
+    calls: list = []
+    workers = [
+        AuthoringWorker("w1", state, stop_after=2),
+        AuthoringWorker("w2", state, stop_after=2),
+    ]
+    lead = AuthoringLead(should_author=True, converge_on=1, state=state, calls=calls, chain_len=2)
+    registry = FakeRegistry()
+
+    final = asyncio.run(
+        DebateToConverge(
+            max_rounds=3, registry=registry, tool_author_cap=12,
+            toolkit_root=TOOLKIT, direct_branch="ai",
+        ).run(workers, lead, AnalysisTask(question="Broadband PD-hardness survey."))
+    )
+
+    assert final.summary == "final"
+    assert len(calls) == 2  # both chain tools authored, in order, on one decision
+    assert lead.decided == 1  # ONE authoring decision for the whole chain (not one per tool)
+    assert registry.reloads == 1  # a single rerun after the chain, not one reload per tool
+    assert all(w.sandbox.restarts == 1 for w in workers)
+    assert all(w.calls == 2 for w in workers)  # initial report + exactly one rerun
+    assert lead.judged == [1]
+
+
+def test_chain_midchain_failure_stops_and_finalizes():
+    """A8: when a chain tool cannot commit, the chain stops and the lead composes the honest
+    terminal report (downstream depends on it) — no rerun, no re-authoring."""
+    state = {"authored": 0}
+    calls: list = []
+    workers = [AuthoringWorker("w1", state, stop_after=99)]
+    # chain of 3, but the 2nd drive_authoring returns a non-commit.
+    lead = AuthoringLead(
+        should_author=True, converge_on=99, state=state, calls=calls, chain_len=3, fail_on=2
+    )
+    registry = FakeRegistry()
+
+    final = asyncio.run(
+        DebateToConverge(
+            max_rounds=3, registry=registry, tool_author_cap=12,
+            toolkit_root=TOOLKIT, direct_branch="ai",
+        ).run(workers, lead, AnalysisTask(question="q"))
+    )
+
+    assert final.summary == "authoring impossible under current construction"
+    assert final.status == "failed"
+    assert lead.finalized == 1
+    assert len(calls) == 2  # tool 1 committed, tool 2 failed → chain stopped (tool 3 never attempted)
+    assert lead.judged == []  # never entered debate
+    assert workers[0].calls == 1  # no rerun
+    assert registry.reloads == 0  # stopped before the post-chain rerun
+
+
+def test_chain_budget_caps_total_tools():
+    """A8: tool_author_cap bounds the TOTAL tools authored across the chain; a chain longer than
+    the remaining budget authors up to the cap, then reruns once on what committed."""
+    state = {"authored": 0}
+    calls: list = []
+    workers = [AuthoringWorker("w1", state, stop_after=99)]  # never satisfied
+    lead = AuthoringLead(should_author=True, converge_on=1, state=state, calls=calls, chain_len=3)
+    registry = FakeRegistry()
+
+    final = asyncio.run(
+        DebateToConverge(
+            max_rounds=1, registry=registry, tool_author_cap=2,
+            toolkit_root=TOOLKIT, direct_branch="ai",
+        ).run(workers, lead, AnalysisTask(question="q"))
+    )
+
+    assert final.summary == "final"  # honest finish
+    assert len(calls) == 2  # cap=2 stops the 3-tool chain at 2
+    assert registry.reloads == 1  # a single rerun on the partial chain (budget then exhausted)
 
 
 def test_no_authoring_when_toolkit_unwired():

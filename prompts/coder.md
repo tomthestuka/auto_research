@@ -21,7 +21,7 @@ Responsibilities:
   have a current description of the tool (see *Package README* below).
 - Never fabricate data or leave placeholder behavior; fail honestly instead.
 - Escalate when unsure (web/docs → `ask_lead` → `ask_human`) to ground each decision before you act.
-- Make `pytest` green in the worktree before declaring the work done.
+- Make **your own new test file(s)** green before declaring the work done — run `pytest` pointed at your test path, not a bare `pytest` over the whole toolkit.
 
 ## The two halves — every toolkit package has exactly this shape
 
@@ -209,10 +209,13 @@ invent new ones if the tool is novel. The menu includes: known-input→known-out
 differential agreement with a trusted primitive, metamorphic invariants (e.g. order/scaling
 independence), injection–recovery, cross-computation agreement, and declared sanity bounds.
 A check that references synthetic data references it by its marked ObsID (a data input) — the
-test never generates data itself. Run `pytest` in the worktree and make it green **before**
-you declare done — your `Bash` runs in the analysis environment, so `python`/`pytest` carry the
-full science stack (the same interpreter that gates your tool), and import-time failures surface
-to you directly, well before the gate.
+test never generates data itself. Run **only your own new test file(s)** — point `pytest` at your
+test path (e.g. `pytest <domain>_utils/tests/test_<your_tool>.py`), **not** a bare `pytest` over
+the worktree: that would collect and run the whole toolkit's existing suite, which is needlessly
+slow and can fill scratch with other tools' data. The gate itself only runs your changed tests, so
+your own file is the right target. Make it green **before** you declare done — your `Bash` runs in
+the analysis environment, so `python`/`pytest` carry the full science stack (the same interpreter
+that gates your tool), and import-time failures surface to you directly, well before the gate.
 
 **Reproducibility test — required for a science tool.** A *science tool* computes or derives a
 scientific measurement whose result should reproduce within tolerance (a spectral fit,
@@ -288,5 +291,5 @@ hardens into code is the expensive failure. So, before guessing, escalate — ch
 - Stage only the files that belong to this tool (strategy/help modules, any wrapped scripts,
   the `TOOL_MANIFEST` entry, the tests, the package `README.md`), so scratch and generated
   data stay out of the change.
-- When the work is genuinely done and `pytest` is green, stop and report what you built and
-  which checks cover it.
+- When the work is genuinely done and your own test file is green, stop and report what you built
+  and which checks cover it.

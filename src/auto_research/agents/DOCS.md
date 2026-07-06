@@ -338,3 +338,10 @@ Role wrappers:
   each bad entry is dropped and a `"[figure capture: N dropped] …"` note is appended to the tool's returned
   text so the analyst notices and can fix its plotter. Tests: `test_sandbox.py::TestSandboxToolProvider::
   test_{malformed_figure_dropped_not_fatal,parse_tool_figures_helper}`.
+- 2026-07-06 — **[A8] `decide_authoring` plans the whole ordered chain.** It now returns
+  `AuthoringDecision.tool_specs` (the ordered dependency chain — acquire → reduce → analyse → plot) it
+  plans up front from the full analysis prescription, not a single first-gap `ToolSpec`; the payload
+  prompt and the method docstring say so. Consensus authors the chain sequentially and reruns workers
+  once (consensus/DOCS.md, A8). `finalize_authoring_outcome` still takes the single failed tool.
+  `prompts/analyst_lead.md` reworded (plan the whole chain). Live check:
+  `tests/test_live_loader_authoring.py::test_chain_planning_returns_ordered_chain`.

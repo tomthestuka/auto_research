@@ -193,14 +193,22 @@ def test_authoring_decision_round_trips():
         disposition="extend_existing",
         validation_data=[{"mission": "IXPE", "obsid": "01002901"}],
     )
-    decision = AuthoringDecision(should_author=True, tool_spec=spec, rationale="exists in lib/, surface it")
+    spec2 = spec.model_copy(update={"proposed_tool_name": "pcube_plot"})
+    # A8: an ordered dependency chain (data tool → companion plotter), not a single tool.
+    decision = AuthoringDecision(
+        should_author=True, tool_specs=[spec, spec2], rationale="exists in lib/, surface it"
+    )
     restored = AuthoringDecision.model_validate(decision.model_dump(mode="json"))
     assert restored.should_author is True
-    assert restored.tool_spec is not None and restored.tool_spec.proposed_tool_name == "pcube"
+    assert [s.proposed_tool_name for s in restored.tool_specs] == ["pcube", "pcube_plot"]
 
-    # Declining to author needs no tool_spec.
+    # Declining to author needs no tool_specs.
     no = AuthoringDecision(should_author=False, rationale="worker mis-called an existing tool")
-    assert no.tool_spec is None
+    assert no.tool_specs == []
+
+    # The validator rejects an authoring decision with no briefs (partially closes [I3]).
+    with pytest.raises(ValidationError):
+        AuthoringDecision(should_author=True, tool_specs=[], rationale="contradiction")
 
 
 def test_tool_spec_requires_a_validation_dataset():

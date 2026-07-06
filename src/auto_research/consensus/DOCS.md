@@ -53,19 +53,23 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   AnalystReport`.
 - Authoring/resume (Phase 2 step 7; A1 B-topology, §9.3): when ≥1 worker report carries a
   `tool_request` and authoring is wired (`toolkit_root` set, with `direct_branch`), the strategy
-  asks the lead to `decide_authoring` (settle the plan); on `should_author` it calls
-  `lead.drive_authoring(tool_spec, …)` — the lead drives the coder + gate + GPT review through its
-  **own** ReAct loop (`drive_coder`/`submit_for_review`), diagnosing each verdict, and owns the
-  `AuthoringSession` lifecycle. The strategy never calls `propose_and_pr` (that auto-loop is kept
-  for tests / non-lead callers); the LLM never issues git — `build_authoring_session`/`approve_edit`
-  do (§9.9). A **committed** tool triggers `registry.reload()` +
-  per-worker `sandbox.restart()` + a provenance-augmented task + a worker rerun (a *resume*,
-  bounded by `tool_author_cap`, not counted against `max_rounds`). `should_author=false` falls
-  through to ordinary debate (a mis-called tool, not a failure). A **non-committed** authoring
-  result (gate/review cap exhausted, or a human block) is an honest failure (§9.6): the lead
-  composes a terminal report via `finalize_authoring_outcome` and `run()` **returns it**
-  immediately — no re-authoring, no debate-spin. That report flows to the reviewer, which is the
-  sole I/O and adjudicates it (finalize vs. bounded rework); never fabricated.
+  asks the lead to `decide_authoring` (plan the whole ordered dependency chain, `tool_specs`); on
+  `should_author` it authors **each tool in the chain sequentially** via `lead.drive_authoring(spec,
+  …)` — the lead drives the coder + gate + GPT review through its **own** ReAct loop
+  (`drive_coder`/`submit_for_review`), diagnosing each verdict, and owns each `AuthoringSession`
+  lifecycle. The strategy never calls `propose_and_pr` (that auto-loop is kept for tests / non-lead
+  callers); the LLM never issues git — `build_authoring_session`/`approve_edit` do (§9.9). **A8:**
+  after the **whole chain** commits — each tool sees the prior tool's committed code (direct-branch
+  mode: `worktree == toolkit_root` on the `ai` branch) — the strategy triggers `registry.reload()` +
+  per-worker `sandbox.restart()` + a per-tool provenance-augmented task + **one** worker rerun (a
+  *resume*), not a reload/restart/rerun per tool. `tool_author_cap` bounds **total tools** across the
+  chain (not counted against `max_rounds`); if the budget is hit mid-chain the workers still rerun on
+  what committed. `should_author=false` (empty `tool_specs`) falls through to ordinary debate (a
+  mis-called tool, not a failure). A **non-committed** chain tool (gate/review cap exhausted, or a
+  human block) is an honest failure (§9.6): the chain **stops at that tool** (downstream depends on
+  it), the lead composes a terminal report via `finalize_authoring_outcome` and `run()` **returns it**
+  immediately — no re-authoring, no debate-spin. That report flows to the reviewer, which is the sole
+  I/O and adjudicates it (finalize vs. bounded rework); never fabricated.
 - Worker objects for IO debate (`IOAbstractionWorkerLike`) must provide
   `abstract_document(document, *, peer_abstracts=()) -> MemoryRecord`.
 - Lead objects for IO debate (`IOAbstractionLeadLike`) must provide
@@ -143,3 +147,12 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `submit_for_review`; the loop ceiling is `react_loop_absolute_cap`. The committed/failed routing,
   reload/restart/rerun, and `tool_author_cap` bound are unchanged — `test_consensus_authoring.py`
   stubs `drive_authoring`'s outcome (no SDK) instead of monkeypatching `propose_and_pr`. Suite 373.
+- 2026-07-06 — **[A8] author the whole tool chain before re-running workers.** `_maybe_author_and_resume`
+  now iterates the lead's ordered `AuthoringDecision.tool_specs` (was a single `tool_spec`), authoring
+  each tool sequentially via `drive_authoring` and moving `registry.reload()` + `sandbox.restart()` +
+  `_initial_reports` rerun to **once, after the whole chain** (was per tool). Each tool sees the prior
+  tool's committed code (direct-branch mode). A mid-chain non-commit stops the chain → honest
+  `finalize_authoring_outcome` terminal (§9.6); `tool_author_cap` now bounds total tools across the
+  chain; the outer `run()` loop stays the safety net for a gap the plan missed. New tests in
+  `test_consensus_authoring.py`: `test_chain_authored_sequentially_reruns_once`,
+  `test_chain_midchain_failure_stops_and_finalizes`, `test_chain_budget_caps_total_tools`.

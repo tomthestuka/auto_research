@@ -159,8 +159,9 @@ class DebateToConverge:
         author_budget = self.tool_author_cap if self.toolkit_root is not None else 0
         debate_round = 0
         while True:
-            # --- authoring / resume phase (§9.10 step 7) — at most one decision per reports
-            # set; a committed tool reruns workers and loops back here for the next gap. ---
+            # --- authoring / resume phase (§9.10 step 7, A8) — one decision per reports set; the
+            # lead's whole tool chain is authored, then workers rerun once and loop back here so a
+            # gap the chain plan missed can re-drive a follow-up chain (bounded by budget). ---
             if author_budget > 0 and any(r.tool_request is not None for r in reports):
                 resumed, final_report, reports, task, author_budget = (
                     await self._maybe_author_and_resume(
@@ -250,15 +251,19 @@ class DebateToConverge:
         reports: list[AnalystReport],
         author_budget: int,
     ) -> tuple[bool, AnalystReport | None, list[AnalystReport], AnalysisTask, int]:
-        """Author one requested tool; resume on commit, finalize honestly on a non-commit (§9.6).
+        """Author the lead's whole tool chain; resume on commit, finalize honestly on a non-commit (§9.6).
 
-        Returns ``(resumed, final_report, reports, task, author_budget)``:
-        - ``resumed=True`` — a tool committed and the workers were rerun; loop for the next gap.
-        - ``final_report`` set — an authoring attempt did not commit; the lead composed the
-          terminal honest report (``finalize_authoring_outcome``) and ``run()`` returns it (the
-          reviewer adjudicates downstream — no debate-spin, no re-authoring, no bypass).
+        The lead plans an **ordered dependency chain** (``decision.tool_specs``); this authors the
+        tools **sequentially, one session at a time**, then reruns the workers **once** after the
+        whole chain (A8) — not one tool then a full rerun per tool. Returns
+        ``(resumed, final_report, reports, task, author_budget)``:
+        - ``resumed=True`` — the chain committed (or budget was hit mid-chain) and the workers were
+          rerun; loop back — a fresh gap the plan missed re-drives a follow-up chain.
+        - ``final_report`` set — a chain tool did not commit; the lead composed the terminal honest
+          report (``finalize_authoring_outcome`` on the failed tool) and ``run()`` returns it — the
+          chain stops (downstream depends on it); the reviewer adjudicates downstream.
         - both falsy — the lead declined to author (a mis-called tool); fall through to debate.
-        The LLM never issues git — this code calls ``merge_flow.propose_and_pr`` (§9.9).
+        The LLM never issues git — this code calls ``merge_flow.propose_and_pr`` per tool (§9.9).
         """
         decision = await lead.decide_authoring(reports)
         await _record(
@@ -269,48 +274,58 @@ class DebateToConverge:
             actor="analyst_lead",
             data={"decision": decision},
         )
-        if not decision.should_author or decision.tool_spec is None:
+        if not decision.should_author or not decision.tool_specs:
             return False, None, reports, task, author_budget
 
-        author_budget -= 1  # an authoring attempt is expensive — bound it regardless of outcome
-        # B-topology (§9.3, A1): the lead drives the coder + gate + review through its OWN ReAct
-        # loop (drive_coder / submit_for_review), diagnosing each verdict and re-steering, rather
-        # than a fixed auto-loop that terminates on cap exhaustion. The lead owns the session
-        # lifecycle; the LLM never issues git — build_authoring_session/approve_edit do (§9.9).
-        result = await lead.drive_authoring(
-            decision.tool_spec,
-            toolkit_root=self.toolkit_root,
-            worktree_base=self.worktree_base or self.toolkit_root,
-            direct_branch=self.direct_branch,
-            colead=self.colead,
-            human_handler=self.human_handler,
-        )
-        await _record(
-            self.monitor,
-            "analyst.tool.authored",
-            level=5,
-            summary=f"Tool authoring {result.status}: {decision.tool_spec.proposed_tool_name}",
-            actor="analyst_lead",
-            data={"result": result},
-        )
-        if result.status != "committed":
-            # Honest failure (gate/review cap exhausted or human-block): the lead composes the
-            # terminal report documenting the unavailable capability (§9.6) — no resume, no
-            # re-authoring, no debate-spin. The reviewer adjudicates it downstream.
-            final = await lead.finalize_authoring_outcome(
-                task, reports, decision.tool_spec, result
+        # A8: author the lead's whole ordered dependency chain sequentially, one session at a
+        # time, BEFORE rerunning workers. Each tool commits atomically to the shared authoring
+        # branch (direct-branch mode: worktree == toolkit_root), so the next tool's coder + its
+        # Layer-B gate tests see the prior tool's committed code on disk — no registry reload or
+        # sandbox restart is needed *between* chain tools (only the workers need discovery/REPL
+        # refresh, once, before they rerun). B-topology (§9.3, A1): the lead drives the coder +
+        # gate + review through its OWN ReAct loop per tool; the LLM never issues git —
+        # build_authoring_session/approve_edit do (§9.9).
+        committed = 0
+        for spec in decision.tool_specs:
+            if author_budget <= 0:
+                break  # budget exhausted mid-chain — rerun workers on what did commit
+            author_budget -= 1  # an authoring attempt is expensive — bound it regardless of outcome
+            result = await lead.drive_authoring(
+                spec,
+                toolkit_root=self.toolkit_root,
+                worktree_base=self.worktree_base or self.toolkit_root,
+                direct_branch=self.direct_branch,
+                colead=self.colead,
+                human_handler=self.human_handler,
             )
-            return False, final, reports, task, author_budget
+            await _record(
+                self.monitor,
+                "analyst.tool.authored",
+                level=5,
+                summary=f"Tool authoring {result.status}: {spec.proposed_tool_name}",
+                actor="analyst_lead",
+                data={"result": result},
+            )
+            if result.status != "committed":
+                # Honest failure (gate/review cap exhausted or human-block): downstream chain
+                # tools depend on this one, so stop the chain and let the lead compose the
+                # terminal report documenting the unavailable capability (§9.6) — no resume, no
+                # re-authoring, no debate-spin. The reviewer adjudicates it downstream. Tools
+                # that committed earlier in the chain stay on the branch for the human.
+                final = await lead.finalize_authoring_outcome(task, reports, spec, result)
+                return False, final, reports, task, author_budget
+            # Provenance note per committed tool so reran workers know the whole chain landed.
+            task = _augment_with_authored_tool(task, spec, result)
+            committed += 1
 
-        # Refresh discovery (orchestration env) + restart sandboxes (REPL re-imports new code).
+        # Whole chain committed (or budget hit mid-chain): rerun workers ONCE. Refresh discovery
+        # (orchestration env) + restart sandboxes (REPL re-imports the new code).
         if self.registry is not None and hasattr(self.registry, "reload"):
             self.registry.reload()
         for worker in workers:
             sandbox = getattr(worker, "sandbox", None)
             if sandbox is not None and hasattr(sandbox, "restart"):
                 await sandbox.restart()
-
-        task = _augment_with_authored_tool(task, decision.tool_spec, result)
         reports = await self._initial_reports(workers, task)
         task = self._augment_with_peer_tools(workers, task)
         return True, None, reports, task, author_budget

@@ -230,3 +230,9 @@ carried by **reference** (`FigureRef`), never embedded
   clarification channels carry free-form NL; connectors render per channel (CLI `rich`, Slack
   `markdown` block). Added the `headline` property (notifications / thread label / monitor /
   fail-safe). Typed protocol messages unchanged. `tests/test_hitl.py`.
+- 2026-07-06 — **[A8] `AuthoringDecision` carries an ordered chain.** `tool_spec: ToolSpec | None`
+  → `tool_specs: list[ToolSpec]` (the ordered dependency chain the lead plans up front; empty ⇔ not
+  authoring). Added the codebase's first pydantic `@model_validator` enforcing `should_author ⇒
+  len(tool_specs) >= 1` (partially closes [I3]'s should_author-with-no-spec contradiction). The
+  strategy authors the chain sequentially and reruns workers once (consensus/DOCS.md).
+  `tests/test_schemas.py::test_authoring_decision_round_trips` covers the chain + validator.

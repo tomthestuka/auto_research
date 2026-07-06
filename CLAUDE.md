@@ -813,3 +813,17 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   (`run_research_nohup`, §9.8-adjacent) run the pipeline in a `start_new_session` child so a
   killed kernel/logout survives; reconnect by a deterministic `run_id`; **not** the §12 durable
   mid-run resume (still deferred) — this survives *kernel* death, not *backend* death.
+- 2026-07-06 — **[A8] the lead authors the whole tool chain before re-running analysts.** The
+  authoring loop no longer authors one tool then reruns all workers to rediscover the next gap
+  (measured on run 46ed6671: a ~13-min rerun + 2 avoidable HITL rounds for a plotter the lead had
+  *already* foreseen). Now `decide_authoring` returns an **ordered `tool_specs` chain** (was a single
+  `tool_spec`; `AuthoringDecision` gains the codebase's first pydantic validator: `should_author ⇒
+  len(tool_specs) ≥ 1`), and `DebateToConverge._maybe_author_and_resume` authors each tool
+  **sequentially** — each coder + its Layer-B gate seeing the prior tool's committed code (direct-branch
+  mode: `worktree == toolkit_root` on `ai`) — then reloads the registry / restarts sandboxes / reruns
+  workers **once**, after the whole chain. `tool_author_cap` (now 12) bounds total tools; a mid-chain
+  non-commit stops the chain → honest §9.6 terminal; the outer `run()` loop stays the safety net for a
+  missed gap. Workers still surface only the first gap (lead-only chain planning, §9.3); the lead
+  expands to the full chain from the prescription. `prompts/analyst_lead.md` + `decide_authoring`
+  reworded. Deterministic: `test_consensus_authoring.py` (3 new chain tests) + `test_schemas.py`; live:
+  `test_live_loader_authoring.py::test_chain_planning_returns_ordered_chain`.

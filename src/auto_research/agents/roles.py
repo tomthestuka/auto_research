@@ -1099,29 +1099,36 @@ class AnalystLeadAgent(AgentRole):
         lead browses the **full** ``lib/`` source read-only (its ``ReadOnlyToolProvider`` is
         rooted at ``toolkit_root``) to set the architectural disposition — *capability exists
         but is unexposed* (``extend_existing``) vs *genuinely absent* (``new_package``) — and
-        to refine the worker's advisory spec. It returns **one** ``ToolSpec`` to author this
-        cycle (dependency-ordered), or ``should_author=false`` when the "gap" was really a
-        mis-called existing tool. Consensus — not this method — issues the
-        ``merge_flow.propose_and_pr`` call (§9.9: code issues git, never the model).
+        to refine the workers' advisory specs. It returns the **ordered dependency chain**
+        (``tool_specs``: acquire → reduce → analyse → plot) the analysis needs — planned up front
+        from the full prescription, not just the first gap a worker surfaced — or
+        ``should_author=false`` when the "gap" was really a mis-called existing tool. Consensus —
+        not this method — authors the chain sequentially and reruns workers once (A8); it issues
+        the ``merge_flow.propose_and_pr`` calls (§9.9: code issues git, never the model).
         """
         requests = [r.tool_request for r in reports if r.tool_request is not None]
         payload = {
             "request": (
-                "Analyst workers report the toolkit lacks a capability the analysis needs. "
-                "Decide whether to author a tool now, and if so, finalise ONE ToolSpec."
+                "Analyst workers report the toolkit lacks capability the analysis needs. Decide "
+                "whether to author now, and if so, finalise the ORDERED CHAIN of ToolSpecs the "
+                "whole analysis needs (tool_specs)."
             ),
             "tool_requests": [spec.model_dump(mode="json") for spec in requests],
             "worker_reports": [report.model_dump(mode="json") for report in reports],
             "decision_semantics": (
-                "Each worker request carries the science context, expected behaviour, a "
-                "suggested tool name, and a validation ObsID — the architectural calls are "
-                "yours. Browse the toolkit's lib/ source (read_file/list_dir) before deciding, "
-                "then finalise ONE ToolSpec: set the target package, the disposition "
-                "('extend_existing' when the capability already exists in lib/ and only needs "
-                "surfacing as a skills/ tool; 'new_package' when it is genuinely absent), and "
-                "the verification checks. Author in dependency order (acquire before reduce "
-                "before analyse). should_author=false when the worker simply mis-called an "
-                "existing tool. Never fabricate; escalate via ask_human if blocked."
+                "A worker surfaces only the FIRST gap it hits (it cannot run past a missing step), "
+                "but you read the full analysis prescription in the reports — so plan the WHOLE "
+                "dependency chain the analysis needs, not just that first gap. Browse the toolkit's "
+                "lib/ source (read_file/list_dir) before deciding, then return tool_specs as an "
+                "ordered list in dependency order (acquire before reduce before analyse before "
+                "plot). For each ToolSpec set the target package, the disposition ('extend_existing' "
+                "when the capability already exists in lib/ and only needs surfacing as a skills/ "
+                "tool; 'new_package' when it is genuinely absent), and the verification checks. The "
+                "tools are authored back-to-back, each seeing the prior tool's committed code, and "
+                "the workers rerun once after the whole chain — so keep the data/analysis tool and "
+                "its companion plotter as separate entries in the SAME chain. should_author=false "
+                "(empty tool_specs) when the worker simply mis-called an existing tool. Never "
+                "fabricate; escalate via ask_human if blocked."
             ),
         }
         if self.tools is None:

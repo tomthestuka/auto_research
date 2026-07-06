@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import uuid4
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from auto_research.schemas.base import MessageModel
 
@@ -137,17 +137,32 @@ class ToolSpec(MessageModel):
 
 
 class AuthoringDecision(MessageModel):
-    """The analyst lead's structured decision on whether to author a tool now (§9.3).
+    """The analyst lead's structured decision on whether to author tools now (§9.3).
 
     Returned by ``AnalystLeadAgent.decide_authoring`` after the lead browses the full
-    ``lib/`` source (read-only) for the gap(s) a worker raised. The lead — not the weaker
-    Sonnet coder — owns the architectural call, so the ``tool_spec`` it returns carries the
-    finalised ``disposition``/``target_domain`` (extend an existing package vs scaffold a new
-    one) and any tightened checks. Consensus (``DebateToConverge``), not the LLM, then issues
-    the actual ``merge_flow.propose_and_pr`` call (CLAUDE.md §9.9: code issues git, never the
-    model). One tool per resume cycle — dependency-ordered (acquire → reduce → analyse).
+    ``lib/`` source (read-only) and reads the analysis prescription for the gap(s) a worker
+    raised. The lead — not the weaker Sonnet coder — owns the architectural call, so each
+    ``ToolSpec`` it returns carries the finalised ``disposition``/``target_domain`` (extend an
+    existing package vs scaffold a new one) and any tightened checks. Consensus
+    (``DebateToConverge``), not the LLM, then issues the actual ``merge_flow.propose_and_pr``
+    calls (CLAUDE.md §9.9: code issues git, never the model).
+
+    ``tool_specs`` is the **ordered dependency chain** (acquire → reduce → analyse → plot): the
+    lead plans the whole chain the analysis needs up front, and the strategy authors the tools
+    **sequentially, one session at a time** — each coder sees the prior tool's committed code in
+    the worktree — then reruns the workers **once**, after the whole chain (A8). A worker
+    surfaces only the first gap it hits; the lead expands to the full chain from the prescription.
     """
 
     should_author: bool  # False when the "gap" was really a mis-called existing tool
-    tool_spec: ToolSpec | None = None  # the single refined brief to author; None iff not authoring
+    # The ordered dependency chain to author this cycle (empty ⇔ not authoring).
+    tool_specs: list[ToolSpec] = Field(default_factory=list)
     rationale: str = ""
+
+    @model_validator(mode="after")
+    def _require_specs_when_authoring(self) -> "AuthoringDecision":
+        """Authoring implies at least one brief — a ``should_author`` decision with an empty
+        chain is a contradiction the consumer cannot act on (partially closes [I3])."""
+        if self.should_author and not self.tool_specs:
+            raise ValueError("should_author is True but tool_specs is empty")
+        return self
