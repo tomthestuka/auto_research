@@ -402,12 +402,15 @@ The **no-fabrication scan** (`scan_python_source`, pure over source text) is spl
 precision tiers so it stays clean on real toolkit code (full of legitimate hardcoded
 numeric arrays — XSPEC param vectors, energy bins):
 
-- **Tier 1 HARD-FAIL** — banned **vocabulary** in comments/docstrings/strings
-  (`synthetic`, `example data`, `placeholder`, `TODO`, … whole-word/phrase matched);
-  **any RNG**, seeded or not (`np.random`, `default_rng`, `.rvs`, …) — §9.5 made absolute;
-  **placeholder function bodies** (`pass`/`...`/`raise NotImplementedError`).
-- **Tier 3 FINDING** — numeric-literal arrays `return`ed / plotted / framed: recorded on
-  `GateReport.findings` (does **not** flip `passed`); the step-4 co-lead judges intent.
+- **Tier 1 HARD-FAIL** — banned **vocabulary** in comments/docstrings/strings: explicit
+  fabrication phrases (`example data`, `fake data`, `in operational mode this would`,
+  `placeholder`, `TODO`, … whole-word/phrase matched); **any RNG**, seeded or not
+  (`np.random`, `default_rng`, `.rvs`, …) — §9.5 made absolute; **placeholder function
+  bodies** (`pass`/`...`/`raise NotImplementedError`).
+- **Tier 3 FINDING** — recorded on `GateReport.findings` (does **not** flip `passed`); the
+  step-4 co-lead judges intent: numeric-literal arrays `return`ed / plotted / framed; **and
+  bare ambiguous descriptors** (`synthetic`, `synthesized`, `illustrative`, `stub`, `not
+  implemented`) that recur in honest §9.5 disclosures — soft-flagged, not blocked (C1).
 
 All scan lists live in **`config/code_gate.yaml`** (tunable without a code edit). A line
 referencing a marked `synth…` ObsID is allowlisted so §9.5 fixtures stay legal.
@@ -682,3 +685,9 @@ the hook mapping a fake-model verdict — no live LLM).
   a specific "no test PASSED — not verified (§9.4)" reason (→ rework / honest failure), not a silent pass.
   Adversarial staged-change blindness ([G1]) stays deferred (git is banned in the coder sandbox; the gate's
   git backstops normalize a deny-rule slip). Tests: `test_gate.py::test_layer_b_verdict_*`; suite green.
+- 2026-07-06 — **No-fab scan: bare ambiguous words are soft findings, not hard-fails ([C1]).**
+  Via `code_gate.yaml`, `synthetic`/`synthesized`/`illustrative` moved from `hard_fail_vocabulary`
+  to `finding_vocabulary` (they recurred in honest §9.5 fixture prose, taxing every authoring run
+  a rework round); explicit fabrication phrases + RNG patterns stay hard, and the co-lead still
+  judges the soft findings (§9.4 two-pass). No `gate.py` change (config-driven); `test_gate.py`
+  updated (`test_synthetic_is_soft_finding_not_hard_fail`).

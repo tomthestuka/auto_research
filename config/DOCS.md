@@ -45,7 +45,8 @@ role or swapping a provider is a YAML edit; no Python change.
   configuration.
 - `code_gate.yaml` — the no-fabrication scan lists for the Phase-2 deterministic gate
   (`sandbox/gate.py`, §9.4/§9.5): `hard_fail_vocabulary`, `hard_fail_code_patterns` (RNG),
-  `finding_code_patterns` (literal arrays → review, not fail), `allowlist_obsid_tokens`.
+  `finding_vocabulary` + `finding_code_patterns` (soft flags → co-lead review, not fail),
+  `allowlist_obsid_tokens`.
   The single place a human tunes what the gate rejects vs. flags — no scan constant lives
   in source. Loaded by `gate._code_gate_config()`.
 
@@ -118,11 +119,15 @@ role or swapping a provider is a YAML edit; no Python change.
   terminal regardless. Consumed by `hitl.resolve_handler` (§9.8).
 - `orchestration.yaml.human_channel_ping_timeout_s` — how long the launch-time preflight
   channel ping waits for a reply before failing the run (green only when a reply arrives).
-- `code_gate.yaml.hard_fail_vocabulary` — phrases that, in a comment/docstring/string
-  literal of an added line, fail the gate (`synthetic`, `example data`, `placeholder`,
-  `TODO`, …). Whole-word/phrase matched, case-insensitive.
+- `code_gate.yaml.hard_fail_vocabulary` — explicit fabrication phrases that, in a
+  comment/docstring/string literal of an added line, fail the gate (`example data`,
+  `fake data`, `in operational mode this would`, `placeholder`, `TODO`, …). Whole-word/phrase
+  matched, case-insensitive.
 - `code_gate.yaml.hard_fail_code_patterns` — dotted call/name prefixes that fail the gate:
   any RNG, seeded or not (`np.random`, `default_rng`, `.rvs`, …). §9.5 made absolute.
+- `code_gate.yaml.finding_vocabulary` — **non-failing** soft flags for the co-lead to judge:
+  incompleteness markers (`stub`, `not implemented`) + bare ambiguous descriptors that recur
+  in honest §9.5 disclosures (`synthetic`, `synthesized`, `illustrative`) (C1).
 - `code_gate.yaml.finding_code_patterns` — AST shapes recorded as **non-failing** findings
   for the co-lead to judge (`literal_array_return`/`_plot`/`_dataframe`).
 - `code_gate.yaml.allowlist_obsid_tokens` — regexes (default `synth\d{6}`) that exempt a
@@ -168,3 +173,10 @@ role or swapping a provider is a YAML edit; no Python change.
   the hard ceiling on total ReAct iterations. `react_loop_cap` (30) now bounds only the
   budget-consuming iterations; the analyst lead's budget-free `plan_and_debate` design rounds are
   uncounted against it and bounded only by this backstop.
+- 2026-07-06 — **C1: bare ambiguous descriptors moved from hard-fail to soft finding.**
+  `code_gate.yaml` reclassifies `synthetic`/`synthesized`/`synthesised`/`illustrative` from
+  `hard_fail_vocabulary` to `finding_vocabulary` — they recur in honest §9.5 disclosures
+  ("synthetic fixture", docstring "illustrative example") and taxed every authoring run a
+  rework round. Explicit fabrication phrases (`fake data`, `mock data`, `in operational mode
+  this would`, …) + all RNG patterns stay hard-fail; the co-lead judges the soft findings
+  (§9.4 two-pass). Config-only; `tests/test_gate.py` updated.

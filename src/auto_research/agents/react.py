@@ -526,6 +526,31 @@ def _normalize_tool_raw(raw: dict) -> dict:
     return {**raw, "stdout": stdout}
 
 
+def _parse_tool_figures(raw_figures: Any) -> tuple[list[FigureRef], list[str]]:
+    """Validate returned figure dicts into ``FigureRef``s, **dropping** (never crashing on)
+    malformed entries.
+
+    A tool — most often a freshly authored plotter — that emits a slightly-off figure dict
+    (bad ``sha256``, an extra key under ``extra="forbid"``, a missing field, a bad
+    ``created_at``) must not abort the whole run. Each bad entry is dropped and a short reason
+    is returned so the analyst learns its plotter is malformed and can fix/re-author it — this
+    is what ``coder.md`` already promises ("that figure is dropped"). Returns
+    ``(figures, drop_notes)``.
+    """
+    figures: list[FigureRef] = []
+    notes: list[str] = []
+    if not isinstance(raw_figures, list):
+        if raw_figures:
+            notes.append(f"'figures' is not a list ({type(raw_figures).__name__}); ignored")
+        return figures, notes
+    for index, entry in enumerate(raw_figures):
+        try:
+            figures.append(FigureRef.model_validate(entry))
+        except Exception as exc:  # noqa: BLE001 — any malformed figure is dropped, never fatal
+            notes.append(f"figure[{index}] dropped — invalid FigureRef: {exc}")
+    return figures, notes
+
+
 class SandboxToolProvider:
     """Analyst tool surface: ``ToolkitRegistry`` tools run in a ``PersistentSandbox``.
 
@@ -632,7 +657,7 @@ class SandboxToolProvider:
         elapsed = time.monotonic() - t0
 
         raw = _normalize_tool_raw(raw)
-        figures = [FigureRef.model_validate(f) for f in raw.get("figures", [])]
+        figures, figure_notes = _parse_tool_figures(raw.get("figures"))
         result = ToolResult(
             tool_name=kind,
             stdout=raw.get("stdout", ""),
@@ -646,6 +671,10 @@ class SandboxToolProvider:
             text = result.stdout or "(tool returned no output)"
         else:
             text = f"[exit {result.exit_code}]\n{result.stderr or result.stdout or '(no error detail)'}"
+        # Surface any dropped figures so the analyst notices its plotter emitted a bad
+        # FigureRef (rather than the figure silently vanishing) — never fatal (F4).
+        if figure_notes:
+            text += f"\n[figure capture: {len(figure_notes)} dropped] " + " | ".join(figure_notes)
         return ToolOutcome(text=text, is_error=result.exit_code != 0, figures=figures, result=result)
 
     def _redirect_figure_args(self, fn: str, args: dict, schema_props: Mapping) -> None:

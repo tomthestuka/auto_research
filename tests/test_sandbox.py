@@ -302,6 +302,42 @@ class TestSandboxToolProvider:
         _, _, args = sb.tool_calls[0]
         assert args["ixpe_path"] == "/custom/IXPE"
 
+    def test_malformed_figure_dropped_not_fatal(self) -> None:
+        """A bad figure dict is dropped with a note, never raised — the whole run must
+        survive a freshly-authored plotter emitting a slightly-off FigureRef (F4)."""
+        from datetime import UTC, datetime
+
+        from auto_research.agents.react import SandboxToolProvider
+        good = {
+            "path": "/tmp/ok.png", "caption": "ok", "mime_type": "image/png",
+            "produced_by": "tk.plot", "created_at": datetime.now(UTC).isoformat(), "sha256": "a" * 64,
+        }
+        bad_sha = {**good, "path": "/tmp/b.png", "sha256": "NOT-hex"}   # bad sha256
+        extra_key = {**good, "path": "/tmp/c.png", "dpi": 150}          # extra key (extra="forbid")
+        sb = _FakeSandbox(tool_fn=lambda m, f, a: {
+            "exit_code": 0, "stdout": "plotted", "figures": [good, bad_sha, extra_key]})
+        prov = SandboxToolProvider(_FakeRegistry(known={"tk.plot"}, mcp=set()), sb)
+        out = asyncio.run(prov.execute("tk.plot", {}))  # must NOT raise
+        assert not out.is_error
+        assert [str(f.path) for f in out.figures] == ["/tmp/ok.png"]  # only the valid one survives
+        assert "2 dropped" in out.text and "plotted" in out.text      # drop surfaced, output kept
+
+    def test_parse_tool_figures_helper(self) -> None:
+        """_parse_tool_figures keeps valid figures, drops bad ones with a reason, and
+        never chokes on a non-list `figures` value."""
+        from datetime import UTC, datetime
+
+        from auto_research.agents.react import _parse_tool_figures
+        good = {
+            "path": "/tmp/ok.png", "caption": "ok", "mime_type": "image/png",
+            "produced_by": "t", "created_at": datetime.now(UTC).isoformat(), "sha256": "a" * 64,
+        }
+        figs, notes = _parse_tool_figures([good, {"caption": "missing everything else"}])
+        assert len(figs) == 1 and len(notes) == 1
+        figs2, notes2 = _parse_tool_figures({"path": "x"})   # not a list → ignored, noted
+        assert figs2 == [] and len(notes2) == 1
+        assert _parse_tool_figures(None) == ([], [])          # absent → clean empty
+
 
 def _script_model():
     """A model that emits one tool call, then stops, then returns a report."""

@@ -11,10 +11,7 @@
 # "dummy variable" survives; "toy data" not "toy"). Banning "synthetic" does NOT catch a
 # `synth<YYMMDD>-<sha>` ObsID token, so §9.5 fixtures stay legal via the allowlist below.
 hard_fail_vocabulary:
-  # fabrication words
-  - synthetic
-  - synthesized
-  - synthesised
+  # fabrication words (bare ambiguous descriptors → finding_vocabulary; see below)
   - example data
   - sample data
   - fake data
@@ -38,7 +35,6 @@ hard_fail_vocabulary:
   - representative data
   - representative value
   - representative result
-  - illustrative
   - for now
   - in operational mode this would
   - in production this would
@@ -77,13 +73,16 @@ hard_fail_code_patterns:
   - tf.random
 
 # ── Tier 3: vocabulary (FINDINGS → co-lead review, not hard-fail) ──
-# Incompleteness markers that legitimately appear in mergeable code (a test "stub", an honest
-# "not implemented" raise). Surfaced for the reviewer to judge; not fabrication.
+# Incompleteness markers + bare ambiguous descriptors that recur in honest §9.5 disclosures.
 finding_vocabulary:
   - stub
   - stubbed
   - not implemented
   - to be implemented
+  - synthetic
+  - synthesized
+  - synthesised
+  - illustrative
 
 # ── Tier 3: code patterns (FINDINGS → co-lead review, not hard-fail) ──
 # Numeric-literal arrays into return / plot / DataFrame — the XSPEC param-vector / energy-bin

@@ -329,3 +329,12 @@ Role wrappers:
   give-up. Decided after the sonnet-5 live loader run (`logs/dev/P2/loader-test/…140117`) showed the
   lead called `submit_for_review` 18× on its own and the nudge fired 0× (the run-1 narrate-and-stop
   did not recur). Tests `tests/test_{react_tools,merge_flow}.py`.
+- 2026-07-06 — **A malformed tool figure is dropped, not fatal ([F4]).** `SandboxToolProvider.execute`
+  parsed returned figures with a bare `[FigureRef.model_validate(f) for f in …]` — one bad dict (invalid
+  `sha256`, an extra key under `extra="forbid"`, a missing/empty field, a bad `created_at`) raised
+  `ValidationError` out of `execute()`, and neither `_react` nor `analysis_node` guards it, so the **whole
+  run crashed** — most likely on a freshly authored plotter, and contradicting `coder.md`'s promise that a
+  bad figure "is dropped." Now routed through `_parse_tool_figures(raw)` (also guards a non-list `figures`):
+  each bad entry is dropped and a `"[figure capture: N dropped] …"` note is appended to the tool's returned
+  text so the analyst notices and can fix its plotter. Tests: `test_sandbox.py::TestSandboxToolProvider::
+  test_{malformed_figure_dropped_not_fatal,parse_tool_figures_helper}`.

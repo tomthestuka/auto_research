@@ -52,19 +52,29 @@ def test_fp_landmine_source_has_no_hard_fails():
 # ── pure scanner: vocabulary hard-fails ─────────────────────────────────────────
 
 
-def test_vocabulary_synthetic_and_example_data_fail():
-    src = 'x = 1  # build synthetic data for now\ndef g():\n    """returns example data"""\n    return 2\n'
+def test_vocabulary_explicit_fabrication_phrases_fail():
+    src = 'x = 1  # build example data for now\ndef g():\n    """returns fake data"""\n    return 2\n'
     hard, _ = scan_python_source("lib/x.py", src)
     phrases = {c.detail.split("— ")[-1] for c in hard}
-    assert any("synthetic" in p for p in phrases)
     assert any("example data" in p for p in phrases)
+    assert any("fake data" in p for p in phrases)
     assert any("for now" in p for p in phrases)
     assert all(c.name == "no_fabrication.vocabulary" for c in hard)
 
 
+def test_synthetic_is_soft_finding_not_hard_fail():
+    # C1: bare "synthetic"/"illustrative" recur in honest §9.5 disclosures, so they are Tier-3
+    # findings (co-lead judges intent), not hard-fails. Explicit fabrication phrases stay hard.
+    src = '"""Loads the synthetic fixture (§9.5); an illustrative example follows."""\n'
+    hard, findings = scan_python_source("lib/x.py", src)
+    assert hard == [], [c.detail for c in hard]
+    found = {c.detail.split("— ")[-1] for c in findings}
+    assert any("synthetic" in p for p in found) and any("illustrative" in p for p in found)
+
+
 def test_vocabulary_whole_word_avoids_collisions():
     # "dummy variable" (statistics) / "toy model" (physics) must NOT trip — only the
-    # banned *phrases* (dummy data / toy data) do. ("synthetic" anywhere IS banned.)
+    # banned *phrases* (dummy data / toy data) do.
     src = '"""Uses a dummy variable in a toy model to regress the spectrum."""\n'
     hard, _ = scan_python_source("lib/x.py", src)
     assert hard == [], [c.detail for c in hard]
