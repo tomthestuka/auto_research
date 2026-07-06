@@ -146,6 +146,15 @@ protocol, §7).
   `python-telegram-bot>=22` added to `environment.yml`. Tests: `tests/test_hitl.py` (fake
   Application/bot — reply-to routing, concurrent-question routing, plain-reply fallback, chat/bot/empty
   filtering, timeout, MD→HTML, chunking). WhatsApp stays deprecated.
+- 2026-07-06 — **Telegram blockquote render fixed.** `_md_to_html` escapes the body (so `>`→`&gt;`)
+  before its per-line structure pass, so the blockquote regex — which matched a literal `>` — never
+  fired and a `> quote` line rendered as plain `&gt; quote`. The regex now matches the escaped `&gt;`;
+  a mid-line `>` (a comparison) still stays escaped. Surfaced by the live render probe. `tests/test_hitl.py`.
+- 2026-07-06 — **[E4] Telegram fast-reply race fixed.** `TelegramHandler.__call__` now registers
+  each posted `message_id → Future` in `_pending` **immediately after its own send** (was: send all
+  chunks, then register all ids). A human reply arriving mid-send — reply-to a chunk, or a single-open
+  plain reply — now resolves the query instead of being dropped and hanging the run to the full
+  `response_timeout_s`. Code-only; no interface change; `tests/test_hitl.py` green.
 - 2026-07-02 — **Telegram live-test stubs.** Added the dedicated opt-in blocking round-trip
   `tests/test_live_telegram.py` (`AUTO_RESEARCH_LIVE_TELEGRAM=1`; gates on the two Telegram vars
   only — decoupled from the LLM/ADS keys `check_required_env()` requires, since a Telegram send

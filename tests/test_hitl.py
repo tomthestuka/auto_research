@@ -470,6 +470,36 @@ def test_telegram_posts_html_and_resolves_on_reply():
     assert handler.app.bot.sent[0]["parse_mode"] == "HTML"
 
 
+def test_telegram_reply_during_send_is_not_dropped():
+    """A reply-to arriving mid-send (chunk posted, later chunks still going out) resolves the
+    query — the registration-after-each-send fix ([E4]); the old register-after-all ordering
+    left ``_pending`` empty during the sends and dropped the reply, hanging to the timeout."""
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555", timeout_s=0.5)
+
+    first_id: list[int] = []
+    orig_send = handler.app.bot.send_message
+
+    async def _send_then_reply_on_second(*, chat_id, text, parse_mode=None):
+        posted = await orig_send(chat_id=chat_id, text=text, parse_mode=parse_mode)
+        if not first_id:
+            first_id.append(posted.message_id)
+        else:
+            # second send: a human replies-to the first message before this send returns
+            handler.on_message(_tg_update("mid-send answer", reply_to_id=first_id[0]))
+        return posted
+
+    handler.app.bot.send_message = _send_then_reply_on_second
+
+    async def _run():
+        # a >_CHUNK body forces at least two messages, so there is a genuine mid-send window
+        long_md = "para one.\n\n" + ("word " * 800) + "\n\npara two."
+        return await handler(_query(asked_by="reviewer", message=long_md))
+
+    resp = asyncio.run(_run())
+    assert resp.answer == "mid-send answer"
+    assert len(handler.app.bot.sent) >= 2  # actually chunked
+
+
 def test_telegram_routes_concurrent_questions_by_reply_to():
     """Two questions open at once → a reply-to each message resolves the right one (multi-question)."""
     handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
@@ -554,6 +584,10 @@ def test_md_to_html_renders_telegram_subset():
     assert "<pre>a &lt; b &amp; c\n</pre>" in _md_to_html("```py\na < b & c\n```")
     # raw prose angle brackets are escaped, never emitted as tags
     assert "&lt;" in _md_to_html("a < b") and "<b>" not in _md_to_html("a < b")
+    # blockquote: a leading '>' (escaped to '&gt;' by the escape pass) → <blockquote>
+    assert _md_to_html("> quoted line") == "<blockquote>quoted line</blockquote>"
+    # a mid-line '>' (a comparison) stays escaped, not a blockquote
+    assert _md_to_html("a > b") == "a &gt; b"
 
 
 def test_telegram_render_chunks_header_hint_and_split():

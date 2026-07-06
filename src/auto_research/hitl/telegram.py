@@ -143,11 +143,13 @@ class TelegramHandler:
         loop = asyncio.get_event_loop()
         fut: asyncio.Future[str] = loop.create_future()
         ids: list[int] = []
+        # Register each message_id -> Future the instant its message exists, so a fast reply-to
+        # (or a single-open plain reply) arriving mid-send resolves the query rather than being
+        # dropped — which would otherwise block the run to the full response timeout ([E4]).
         for chunk in chunks:
             posted = await self._send(chunk)
+            self._pending[posted.message_id] = fut
             ids.append(posted.message_id)
-        for mid in ids:
-            self._pending[mid] = fut
         try:
             answer = await asyncio.wait_for(fut, timeout=self.timeout_s)
         finally:
@@ -210,7 +212,8 @@ def _md_to_html(md: str) -> str:
         if b:
             out.append(f"{b.group(1)}• {b.group(2)}")
             continue
-        q = re.match(r"\s{0,3}>\s?(.*)$", line)
+        # the leading '>' was HTML-escaped to '&gt;' by the escape pass above, so match that
+        q = re.match(r"\s{0,3}&gt;\s?(.*)$", line)
         if q:
             out.append(f"<blockquote>{q.group(1)}</blockquote>")
             continue
