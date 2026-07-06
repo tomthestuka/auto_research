@@ -64,13 +64,11 @@ class OpenAIProvider:
                     "file_data": f"data:{document.mime_type};base64,{data}",
                 }
             )
+        # Cross-agent figures (from another agent's report) ride this call-time channel;
+        # figures a tool produced *this* loop live inline at their tool-result turn instead
+        # (see `_to_openai_input`).
         for figure in images:
-            attachment_content.append(
-                {
-                    "type": "input_text",
-                    "text": f"Figure reference: {figure.path}",
-                }
-            )
+            attachment_content.extend(_figure_items(figure))
         if attachment_content:
             input_items.append({"role": "user", "content": attachment_content})
 
@@ -130,6 +128,19 @@ class OpenAIProvider:
         return _response(content=getattr(response, "output_text", ""), raw=response)
 
 
+def _figure_items(figure: FigureRef) -> list[dict]:
+    """Render one figure as Responses-API content items: a caption then the image bytes.
+
+    Loading bytes here is the multimodal boundary — the only place a figure's pixels
+    enter a request (elsewhere figures travel as lightweight ``FigureRef``).
+    """
+    data = base64.b64encode(figure.path.read_bytes()).decode("ascii")
+    return [
+        {"type": "input_text", "text": f"Figure — {figure.caption} (produced by {figure.produced_by})"},
+        {"type": "input_image", "image_url": f"data:{figure.mime_type};base64,{data}"},
+    ]
+
+
 def _to_openai_input(messages: Sequence[ConversationMessage]) -> list[dict]:
     """Translate neutral conversation turns into Responses-API input items.
 
@@ -150,6 +161,7 @@ def _to_openai_input(messages: Sequence[ConversationMessage]) -> list[dict]:
                     }
                 )
         elif isinstance(message, ToolResultMessage):
+            figure_content: list[dict] = []
             for part in message.results:
                 items.append(
                     {
@@ -158,6 +170,13 @@ def _to_openai_input(messages: Sequence[ConversationMessage]) -> list[dict]:
                         "output": part.content,
                     }
                 )
+                for figure in part.figures:
+                    figure_content.extend(_figure_items(figure))
+            # A tool's figures live inline at this turn: a user message carrying the image(s)
+            # placed right after the function_call_output item(s), so they replay in place
+            # every round and fall inside the automatically-cached prefix as the loop grows.
+            if figure_content:
+                items.append({"role": "user", "content": figure_content})
         else:
             content_type = "output_text" if message.role == "assistant" else "input_text"
             items.append(

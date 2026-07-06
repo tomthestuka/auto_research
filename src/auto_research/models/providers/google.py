@@ -85,6 +85,18 @@ def _clean_gemini(node: Any) -> None:
             _clean_gemini(item)
 
 
+def _figure_parts(figure: FigureRef, types: Any) -> list:
+    """Render one figure as Gemini ``Part``s: a caption then the image bytes.
+
+    Loading bytes here is the multimodal boundary — the only place a figure's pixels
+    enter a request (elsewhere figures travel as lightweight ``FigureRef``).
+    """
+    return [
+        types.Part.from_text(text=f"Figure — {figure.caption} (produced by {figure.produced_by})"),
+        types.Part.from_bytes(data=figure.path.read_bytes(), mime_type=figure.mime_type),
+    ]
+
+
 def _to_gemini_contents(messages: Sequence[ConversationMessage], types: Any) -> tuple[str | None, list]:
     """Split system text out and translate the rest into Gemini ``Content`` turns.
 
@@ -108,6 +120,15 @@ def _to_gemini_contents(messages: Sequence[ConversationMessage], types: Any) -> 
                 for part in message.results
             ]
             contents.append(types.Content(role="user", parts=parts))
+            # A tool's figures live inline at this turn: a user Content carrying the image(s)
+            # placed right after the function_response Content, so they replay in place every
+            # round and land in the (implicit) cached prefix as the loop grows.
+            figure_parts: list = []
+            for part in message.results:
+                for figure in part.figures:
+                    figure_parts.extend(_figure_parts(figure, types))
+            if figure_parts:
+                contents.append(types.Content(role="user", parts=figure_parts))
         elif message.role == "system":
             system_texts.append(message.content)
         else:
@@ -154,8 +175,11 @@ class GoogleProvider:
             extra_parts.append(
                 types.Part.from_bytes(data=document.path.read_bytes(), mime_type=document.mime_type)
             )
+        # Cross-agent figures (from another agent's report) ride this call-time channel;
+        # figures a tool produced *this* loop live inline at their tool-result turn instead
+        # (see `_to_gemini_contents`).
         for figure in images:
-            extra_parts.append(types.Part.from_text(text=f"Figure reference: {figure.path}"))
+            extra_parts.extend(_figure_parts(figure, types))
         if extra_parts:
             contents.append(types.Content(role="user", parts=extra_parts))
 

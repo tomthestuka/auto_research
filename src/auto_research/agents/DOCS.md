@@ -37,7 +37,12 @@ loop is identical to `range(cap)`). `_react` returns
 e.g. a PDF from `open_paper`) are accumulated, deduped by sha256, and **re-attached to every
 subsequent model call** so the model reads them multimodally mid-loop (`cache_prefix=True`
 keeps the stable prefix cached; empty list otherwise, so non-document roles never trip the
-`config.documents` guard). A terminal `_call_over_messages(...)`
+`config.documents` guard). A tool's **figures** are set on the `ToolResultPart` at their turn
+(`ToolResultPart.figures = outcome.figures`), so the adapter renders them **inline in history**
+at that turn — the model keeps seeing its own plots every subsequent round and in the terminal
+report call, cache-stable — rather than only on iteration 0 via `images=`. (The returned
+`figures` list still accumulates them so `analyze()` can staple real `FigureRef`s onto
+`AnalystReport.figures`, which structured output cannot reproduce.) A terminal `_call_over_messages(...)`
 then produces the role's structured output grounded in the trajectory (both reuse
 `_structured_loop`, the shared off-schema-retry core). Tool surfaces live behind
 the `ToolProvider` protocol in `react.py`: `SandboxToolProvider` (analyst science

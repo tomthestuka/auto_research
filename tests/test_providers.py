@@ -32,6 +32,29 @@ def _messages():
     return [ModelMessage(role="system", content="sys"), ModelMessage(role="user", content="hi")]
 
 
+# Minimal PNG header bytes — enough to assert the adapter loads and base64s the file.
+_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake-plot-pixels"
+
+
+def _figure(tmp_path):
+    """Write a real image file and return a FigureRef pointing at it."""
+    import hashlib
+    from datetime import datetime
+
+    from auto_research.schemas import FigureRef
+
+    path = tmp_path / "pa_pd_stability.png"
+    path.write_bytes(_PNG_BYTES)
+    return FigureRef(
+        path=path,
+        caption="PD vs. time",
+        mime_type="image/png",
+        produced_by="ixpe_pa_pd_stability_plot",
+        created_at=datetime(2026, 1, 1),
+        sha256=hashlib.sha256(_PNG_BYTES).hexdigest(),
+    )
+
+
 class _FakeAnthropic:
     """Stand-in for anthropic.AsyncAnthropic; records the last request.
 
@@ -330,3 +353,71 @@ def test_google_function_calling(monkeypatch):
     resp = asyncio.run(GoogleProvider().call(_messages(), cfg, tools=tools))
     assert len(resp.tool_calls) == 1
     assert resp.tool_calls[0].arguments == {"indices": _NESTED}
+
+
+# --- Figures: bytes at the multimodal boundary ([FIG-VIEW]) + inline-in-history ([V2]) ---
+
+import base64  # noqa: E402
+
+
+def _tool_turn_with_figure(fig):
+    from auto_research.models.types import ToolResultMessage, ToolResultPart
+
+    return ToolResultMessage(
+        results=[ToolResultPart(tool_call_id="c1", name="plot", content="wrote plot", figures=[fig])]
+    )
+
+
+def test_anthropic_tool_result_figure_inline(tmp_path):
+    """A tool's figure renders as an image block in the SAME user turn as its tool_result."""
+    from auto_research.models.providers.anthropic import _to_anthropic_messages
+
+    fig = _figure(tmp_path)
+    _, msgs = _to_anthropic_messages([_tool_turn_with_figure(fig)])
+    content = msgs[0]["content"]
+    assert content[0]["type"] == "tool_result"  # tool_result stays first
+    images = [b for b in content if b.get("type") == "image"]
+    assert len(images) == 1
+    assert images[0]["source"]["media_type"] == "image/png"
+    assert base64.b64decode(images[0]["source"]["data"]) == _PNG_BYTES  # real bytes loaded
+
+
+def test_anthropic_images_kwarg_loads_bytes(monkeypatch, tmp_path):
+    """Cross-agent figures passed via images= are base64'd into an image block, not text."""
+    monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
+    fig = _figure(tmp_path)
+    tools = [{"name": "t", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
+    asyncio.run(AnthropicProvider().call(_messages(), _cfg(), tools=tools, images=[fig]))
+    last = _FakeAnthropic.last_request["messages"][-1]
+    assert any(b.get("type") == "image" for b in last["content"])
+
+
+def test_openai_tool_result_figure_inline(tmp_path):
+    """A tool's figure renders as an input_image user item right after function_call_output."""
+    from auto_research.models.providers.openai import _to_openai_input
+
+    fig = _figure(tmp_path)
+    items = _to_openai_input([_tool_turn_with_figure(fig)])
+    assert items[0]["type"] == "function_call_output"
+    user_items = [i for i in items if i.get("role") == "user"]
+    assert user_items
+    imgs = [c for c in user_items[-1]["content"] if c["type"] == "input_image"]
+    assert len(imgs) == 1
+    assert imgs[0]["image_url"].startswith("data:image/png;base64,")
+    assert base64.b64decode(imgs[0]["image_url"].split(",", 1)[1]) == _PNG_BYTES
+
+
+def test_google_tool_result_figure_inline(tmp_path):
+    """A tool's figure renders as an inline-data image Part in a user Content after the response."""
+    from google.genai import types
+
+    from auto_research.models.providers.google import _to_gemini_contents
+
+    fig = _figure(tmp_path)
+    _, contents = _to_gemini_contents([_tool_turn_with_figure(fig)], types)
+    last = contents[-1]
+    assert last.role == "user"
+    image_parts = [p for p in last.parts if getattr(p, "inline_data", None) is not None]
+    assert len(image_parts) == 1
+    assert image_parts[0].inline_data.mime_type == "image/png"
+    assert image_parts[0].inline_data.data == _PNG_BYTES

@@ -34,8 +34,17 @@ Google by editing YAML alone
   (a stable position right after `system`, before the conversation) with a
   `cache_control` breakpoint on the last document, so documents that accumulate
   append-only across a ReAct loop are cache-written once and cache-read on later
-  turns rather than re-billed each turn. Figure references (lightweight text) stay
-  at the end.
+  turns rather than re-billed each turn.
+- **Figures carry pixels at the multimodal boundary, two ways.** A `FigureRef`'s
+  bytes are loaded and base64'd into a native image block only inside the adapter —
+  never elsewhere (figures otherwise travel as lightweight references). (1) **Cross-agent
+  figures** (a peer's plot, a worker's figures the reviewer must see) have no tool-turn
+  in this conversation, so they ride the call-time `images=` channel, appended at the end.
+  (2) **A tool's own figures** (`ToolResultPart.figures`, set by the ReAct loop) render
+  **inline at their tool-result turn** — Anthropic in the same user turn as the
+  `tool_result`, OpenAI/Google as a user turn immediately after — so they replay in place
+  every round and fall inside the cached prefix as the loop grows (the model keeps *seeing*
+  its plots, and the terminal report call that replays the trajectory does too).
 - `ModelRegistry.resolve(role)` returns a `ModelGroupHandle`; callers choose a
   member with `member(name)` or iterate through `handles`.
 - **Native structured output and function calling.** `call(..., schema=Model)`
@@ -71,9 +80,12 @@ Google by editing YAML alone
   provider tool-call id, used to correlate a result back to the call when replaying
   a ReAct trajectory.
 - `ToolResultPart(tool_call_id: str = "", name: str = "", content: str = "",
-  is_error: bool = False)` — one tool result fed back to the model. Carries both
-  ``tool_call_id`` (Anthropic/OpenAI) and ``name`` (Google) so every adapter can
-  build its native shape.
+  is_error: bool = False, figures: list[FigureRef] = [])` — one tool result fed back
+  to the model. Carries both ``tool_call_id`` (Anthropic/OpenAI) and ``name`` (Google)
+  so every adapter can build its native shape. ``figures`` are the figures the tool
+  produced; each adapter renders them as an image turn inline at this tool-result turn
+  (so they persist in history and cache), distinct from the call-time ``images=`` channel
+  used for cross-agent figures.
 - `AssistantToolUse(role="assistant", content: str = "", tool_calls: list[ToolCall])`
   and `ToolResultMessage(role="tool", results: list[ToolResultPart])` — neutral
   conversation turns for ReAct-loop replay. `ConversationMessage = ModelMessage |
@@ -142,3 +154,15 @@ Google by editing YAML alone
   cache-written once, cache-read thereafter" — the front position also keeps them inside the
   20-block lookback window. Figure-reference text blocks remain at the end. Confirmed against
   Anthropic prompt-caching docs (prefix match, ≤4 breakpoints, 20-block lookback).
+- 2026-07-06 — **Figures now carry pixels to the model ([FIG-VIEW] + [V2]).** All three adapters
+  previously serialized `images` as the text line `"Figure reference: <path>"` — every "vision"
+  review of a plot was blind. Fixed two figure flows: (1) **cross-agent** figures on the call-time
+  `images=` channel now load bytes into a native image block (Anthropic `image`, OpenAI
+  `input_image`, Google `from_bytes`), via a shared per-adapter `_figure_blocks`/`_figure_items`/
+  `_figure_parts` helper; (2) **a tool's own** figures ride the new `ToolResultPart.figures` and
+  render **inline at their tool-result turn** (Anthropic: same user turn as `tool_result`;
+  OpenAI/Google: a user turn right after), so they persist in history, cache with the growing
+  prefix, and stay visible every round and in the terminal report call. Gemini stays on
+  `generateContent` (the Interactions-API migration was scoped out as a separate, lower-priority
+  task — stateful-first API vs. our stateless-neutral design; generateContent is not deprecated).
+  Coverage: `tests/test_providers.py` (inline + `images=` bytes, per provider).

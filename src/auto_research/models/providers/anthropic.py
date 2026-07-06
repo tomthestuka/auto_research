@@ -87,17 +87,15 @@ class AnthropicProvider:
                 document_blocks[-1]["cache_control"] = {"type": "ephemeral"}
             provider_messages.insert(0, {"role": "user", "content": document_blocks})
 
-        # Figure references are lightweight text; leave them at the end of the conversation.
+        # Cross-agent figures (peer plots, a worker's figures the reviewer must see) have no
+        # tool-turn in *this* conversation to attach to, so they ride this call-time channel —
+        # a caption block then the image block, at the end. (Figures a tool produced *this*
+        # loop instead live inline at their tool-result turn; see `_to_anthropic_messages`.)
         if images:
-            provider_messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"Figure reference: {figure.path}"}
-                        for figure in images
-                    ],
-                }
-            )
+            image_content: list[dict[str, Any]] = []
+            for figure in images:
+                image_content.extend(_figure_blocks(figure))
+            provider_messages.append({"role": "user", "content": image_content})
 
         system_param = _system_param(system, cache_prefix)
         if cache_prefix:
@@ -177,6 +175,25 @@ class AnthropicProvider:
         )
 
 
+def _figure_blocks(figure: FigureRef) -> list[dict[str, Any]]:
+    """Render one figure as Anthropic content blocks: a caption then the image bytes.
+
+    Loading bytes here is the multimodal boundary — the only place a figure's pixels
+    enter a request (elsewhere figures travel as lightweight ``FigureRef``).
+    """
+    return [
+        {"type": "text", "text": f"Figure — {figure.caption} (produced by {figure.produced_by})"},
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": figure.mime_type,
+                "data": base64.b64encode(figure.path.read_bytes()).decode("ascii"),
+            },
+        },
+    ]
+
+
 def _to_anthropic_messages(
     messages: Sequence[ConversationMessage],
 ) -> tuple[str | None, list[dict]]:
@@ -199,20 +216,22 @@ def _to_anthropic_messages(
                 )
             provider_messages.append({"role": "assistant", "content": blocks})
         elif isinstance(message, ToolResultMessage):
-            provider_messages.append(
+            content: list[dict] = [
                 {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": part.tool_call_id,
-                            "content": part.content,
-                            "is_error": part.is_error,
-                        }
-                        for part in message.results
-                    ],
+                    "type": "tool_result",
+                    "tool_use_id": part.tool_call_id,
+                    "content": part.content,
+                    "is_error": part.is_error,
                 }
-            )
+                for part in message.results
+            ]
+            # A tool's figures live inline at this turn: caption+image blocks appended after
+            # the tool_result blocks in the SAME user message (Anthropic allows mixed content
+            # there), so they replay in place every round and cache with the growing prefix.
+            for part in message.results:
+                for figure in part.figures:
+                    content.extend(_figure_blocks(figure))
+            provider_messages.append({"role": "user", "content": content})
         elif message.role == "system":
             system_texts.append(message.content)
         else:

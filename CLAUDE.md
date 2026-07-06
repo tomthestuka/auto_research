@@ -86,6 +86,14 @@ Consequences:
 
 **Hard rules:**
 
+- **Plan and debate before coding.** Before writing or editing code, present a plan and
+  debate it with the human to convergence; begin implementation only once it is agreed.
+  This holds **except when the human has instructed or permitted you to proceed directly**
+  — an explicit go-ahead, a plan they already approved, or a change small enough that they
+  have waved you on. When a harness offers a plan mode (Claude Code's
+  `EnterPlanMode`/`ExitPlanMode`), use it to structure this; otherwise state the plan in
+  chat and wait for the human's agreement. Investigating, reading, and searching to *form*
+  the plan are always allowed; it is landing edits ahead of agreement that this rule gates.
 - **You perform ZERO git operations.** No `git add`, `git commit`, `git push`, `git
   branch`, `git checkout`, `git stash`, tags — nothing, in either repo. You only create
   and edit files in the working tree. **The human runs all git, for both repos.** When
@@ -792,3 +800,7 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   Graceful SIGINT/cleanup shutdown (handoff #5) **deferred** into the §12 human-steer + durable
   suspend/resume bundle (one design for CLI/notebook/library; interim = hard-kill the kernel's
   process tree). Coverage: `tests/test_{hitl,react_tools,merge_flow}.py`; suite green (365).
+- 2026-07-06 — **§3 coding contract gains "plan and debate before coding."** The build-time
+  agent presents a plan and debates it to agreement before landing edits, except where the
+  human has instructed/permitted a direct proceed; investigating/reading to form the plan is
+  always allowed. Added as the first hard rule (it gates the whole workflow).

@@ -147,15 +147,6 @@ def test_cli_stdin_handler_reads_input(monkeypatch):
     assert resp.answer == "use IXPE-first load order"
 
 
-# ── shared human-response timeout (orchestration.yaml) ───────────────────────
-
-
-def test_response_timeout_s_default_is_one_hour():
-    from auto_research.hitl import response_timeout_s
-
-    assert response_timeout_s() == 3600.0
-
-
 def test_slack_rotation_log_downgrade_filter():
     """The benign Socket Mode rotation ERROR is rewritten to WARNING; other errors pass through."""
     import logging

@@ -361,8 +361,14 @@ class AgentRole:
                         name=call.name,
                         content=outcome.text,
                         is_error=outcome.is_error,
+                        # Carry the figures on the turn so the adapter renders them inline
+                        # in history (an adjacent image turn), keeping them visible every
+                        # later round and in the terminal report call, and cache-stable.
+                        figures=outcome.figures,
                     )
                 )
+                # Also accumulate for the return value: worker.analyze staples these onto
+                # AnalystReport.figures (structured output can't reproduce a FigureRef).
                 figures.extend(outcome.figures)
                 for doc in outcome.documents:
                     if doc.sha256 not in seen_docs:

@@ -55,6 +55,12 @@ class ToolResultPart(BaseModel):
     name: str = ""
     content: str = ""
     is_error: bool = False
+    figures: list[FigureRef] = Field(default_factory=list)
+    """Figures the tool produced, carried so the adapter renders them inline in
+    history — an image turn adjacent to this tool-result turn — instead of via the
+    call-time ``images=`` side-channel. Living at their turn, they slide into the
+    stable cached prefix as the ReAct conversation grows, and every later turn (and
+    the terminal report call that replays the trajectory) keeps seeing them."""
 
 
 class AssistantToolUse(BaseModel):
