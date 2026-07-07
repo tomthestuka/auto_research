@@ -150,6 +150,12 @@ protocol, §7).
   before its per-line structure pass, so the blockquote regex — which matched a literal `>` — never
   fired and a `> quote` line rendered as plain `&gt; quote`. The regex now matches the escaped `&gt;`;
   a mid-line `>` (a comparison) still stays escaped. Surfaced by the live render probe. `tests/test_hitl.py`.
+- 2026-07-06 — **Telegram plain-reply broken for chunked queries — fixed (found live).** `on_message`'s
+  single-open fallback counted `_pending` *entries*, but a chunked query registers every chunk's `message_id`
+  against the **same** Future — so a 2-chunk message looked like "two open questions" and a plain reply was
+  dropped, silently forcing reply-to (live #7 design review: 4 plain sends ignored). Now dedupes by Future
+  identity (`{id(f): f …}`), so a plain reply resolves a single open query regardless of chunk count. Reply-to
+  routing unchanged. `tests/test_hitl.py::test_telegram_plain_reply_resolves_chunked_single_open`.
 - 2026-07-06 — **[E4] Telegram fast-reply race fixed.** `TelegramHandler.__call__` now registers
   each posted `message_id → Future` in `_pending` **immediately after its own send** (was: send all
   chunks, then register all ids). A human reply arriving mid-send — reply-to a chunk, or a single-open

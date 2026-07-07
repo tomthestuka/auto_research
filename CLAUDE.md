@@ -696,8 +696,11 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   which the command-string `Bash` check cannot see. See §13.)*
 - **`bash_exec` figure capture:** snapshot the worker scratch `cwd` before each `bash_exec`,
   diff for new image files after, and synthesize `FigureRef`s into `ToolResult.figures`.
-- **Vector retrieval:** keep `vector_search()` stubbed; the embedding column/table is
-  reserved; intended backend **sqlite-vec** (no new infra); embedding model is config-driven.
+- **RAG retrieval (three targets):** keep `vector_search()` stubbed; intended backend **ChromaDB**
+  (decided 2026-07-06, reversing the earlier sqlite-vec lean; `Maitreya_RAG` is the reference), for
+  **literature**, a **persistent-memory** store (runtime LLMs lay down useful findings, RAG-retrieved),
+  and a **tool** index mirroring `TOOL_MANIFEST` (synced after every commit; tools loaded lazily by
+  relevance). Embedding model is config-driven.
 - **Lead-scientist group:** an idea-generation team that mines the knowledge base to propose
   new research requests, routed through the same reviewer gate.
 - **Librarian IO ingest consensus:** activate `IODebateToConverge` and replace the
@@ -716,7 +719,7 @@ gaps stay visible rather than getting rediscovered the hard way. Distinct from �
 unbuilt *features*): these exist in the tree **today**. Append as new ones land; delete when closed.
 
 - **`retrieval.vector_search` / `vector_search_paths`** — `NotImplementedError` Phase-2 stub
-  (sqlite-vec backend deferred — §12).
+  (ChromaDB RAG backend deferred — §12).
 - **Librarian IO search-iteration / `evaluate_search_results()`** — Phase-1 stubs; the latter
   returns `accepted=True` (IO ingest consensus deferred — §12).
 - **`sandbox.merge_flow._make_path_confiner`** — **DEPRECATED, unwired.** The SDK runs
@@ -827,3 +830,9 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   expands to the full chain from the prescription. `prompts/analyst_lead.md` + `decide_authoring`
   reworded. Deterministic: `test_consensus_authoring.py` (3 new chain tests) + `test_schemas.py`; live:
   `test_live_loader_authoring.py::test_chain_planning_returns_ordered_chain`.
+- 2026-07-06 — **RAG-retrieval direction set: ChromaDB for three targets (§12 update; deferred).** Reverses the
+  earlier sqlite-vec lean. Beyond literature retrieval (the old `vector_search` stub), the scope now covers a
+  **persistent-memory** store (runtime LLMs lay down findings they judge useful, RAG-retrieved on later runs) and
+  a **tool** index mirroring `TOOL_MANIFEST` (synced after every commit — the `approve_edit` hook — with tools
+  loaded lazily by relevance instead of the whole manifest per agent). `Maitreya_RAG` (ChromaDB+Gemini) is the
+  build reference. Still deferred/not-built — §12/§13 notes updated to ChromaDB.

@@ -534,6 +534,24 @@ def test_telegram_plain_reply_resolves_single_open():
     assert asyncio.run(_run()).answer == "plain answer"
 
 
+def test_telegram_plain_reply_resolves_chunked_single_open():
+    """A plain reply resolves a single open query even when it was CHUNKED into several messages.
+    Regression: `_pending` maps every chunk's message_id to the SAME Future, so counting entries
+    (not distinct Futures) made one multi-chunk question look like "many open" and dropped the
+    plain reply — forcing reply-to (seen live: 4 plain sends ignored on a 2-chunk design review)."""
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
+    long_md = "para one.\n\n" + ("word " * 800) + "\n\npara two."  # > _CHUNK ⇒ multiple messages
+
+    async def _run():
+        task = asyncio.create_task(handler(_query(message=long_md)))
+        while len(handler._pending) < 2:  # wait until it has actually chunked into ≥2 messages
+            await asyncio.sleep(0)
+        handler.on_message(_tg_update("plain answer to chunked", reply_to_id=None))
+        return await task
+
+    assert asyncio.run(_run()).answer == "plain answer to chunked"
+
+
 def test_telegram_on_message_ignores_other_chat_bot_empty():
     handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
 

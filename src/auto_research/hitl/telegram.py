@@ -95,7 +95,10 @@ class TelegramHandler:
         if rid is not None and rid in self._pending:
             fut = self._pending.get(rid)  # reply-to → unambiguous
         else:
-            open_futs = [f for f in self._pending.values() if not f.done()]
+            # Dedupe by Future identity, NOT by message_id: a chunked query registers every
+            # chunk's message_id against the SAME Future, so counting entries would see one
+            # multi-chunk question as "many open" and refuse a plain reply (forcing reply-to).
+            open_futs = list({id(f): f for f in self._pending.values() if not f.done()}.values())
             fut = open_futs[0] if len(open_futs) == 1 else None
         if fut is not None and not fut.done():
             fut.set_result(text)
