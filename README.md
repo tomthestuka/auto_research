@@ -120,7 +120,7 @@ prompts carry role and scope only; tool names, arguments, and descriptions reach
 through tool loading, not prompt text.
 
 Model groups are **config-driven** (`config/models.yaml`), spanning OpenAI, Anthropic,
-and Google. No model identifier is hardcoded. Defaults: reviewer group = Opus 4.8,
+and Google. No model identifier is hardcoded. Defaults: reviewer group = Fable 5,
 GPT-5.5 high effort, and Gemini 3.5 Flash high thinking; analyst lead = Opus 4.8;
 analyst worker group = Sonnet 4.6 and GPT-5.5 medium effort; librarian I/O group =
 Sonnet 4.6, GPT-5.5 medium effort, and Gemini 3.5 Flash thinking. Phase 2 adds `coder`

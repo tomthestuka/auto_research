@@ -180,3 +180,26 @@ role or swapping a provider is a YAML edit; no Python change.
   rework round. Explicit fabrication phrases (`fake data`, `mock data`, `in operational mode
   this would`, …) + all RNG patterns stay hard-fail; the co-lead judges the soft findings
   (§9.4 two-pass). Config-only; `tests/test_gate.py` updated.
+- 2026-07-08 — **Reviewer group's Anthropic member swapped Opus 4.8 → Fable 5.** The reviewer
+  runs `_select_model`'s `handles[0]`, so its first member is now `claude-fable-5` (vision-capable,
+  §6) — a reasoning reviewer for adjudication and report authoring, where Opus 4.8 ran with
+  thinking off (the adapter sends no `thinking` field, and Opus treats that as disabled).
+  `priceMTk` → 10/50; `max_tokens` 16384 → 21000 because Fable's thinking is always-on and shares
+  the output budget — 21333 is the SDK non-streaming ceiling (`3600·max_tokens/128000 > 600`
+  raises; a streaming report call would lift it). Requires the org to allow ≥30-day retention
+  (Fable 400s under zero-data-retention). GPT-5.5 and Gemini members unchanged; `analyst_colead`
+  stays non-Anthropic (§9.3). `tests/test_models.py` + README updated.
+- 2026-07-08 — **Adaptive thinking enabled on all Anthropic chat members.** Added
+  `thinking: {type: adaptive}` to the `parameters` of every Anthropic member the chat adapter
+  drives: reviewer (Fable, already always-on), analyst_lead (Opus), analyst_worker (Sonnet),
+  librarian_io (Sonnet). They previously ran thinking-OFF — the adapter sends no `thinking` field
+  and Opus/Sonnet treat omission as disabled, so only the GPT (`reasoning.effort`) and Gemini
+  (`thinking_config`) members reasoned. `max_tokens` raised for headroom (thinking is billed and
+  shares the output budget even at `display:omitted`): lead/worker 16384 → 21000, librarian
+  8192 → 12000 (reviewer already 21000); all ≤ the 21333 non-streaming ceiling. Live-verified that
+  adaptive thinking is compatible with the adapter's tool-loop reconstruction (no thinking-block
+  preservation needed), forced `tool_choice`, and `messages.parse` structured output. **coder
+  excluded**: it runs the Claude Agent SDK (`merge_flow` reads only its model id; `parameters`
+  ignored) and already reasons at the SDK default. `effort` deliberately not set —
+  `output_config.effort` collides with the `.parse()` structured-output path; `thinking` alone is
+  safe on both paths.

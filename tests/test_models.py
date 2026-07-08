@@ -124,7 +124,7 @@ def test_registry_loads_project_model_groups():
     registry = load_registry()
 
     assert [handle.config.name for handle in registry.resolve("reviewer").handles] == [
-        "claude_opus_4_8",
+        "claude_fable_5",
         "gpt_5_5_high",
         "gemini_3_5_flash_high",
     ]

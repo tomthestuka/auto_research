@@ -1,16 +1,18 @@
 roles:
   reviewer:
     members:
-      - name: claude_opus_4_8
+      - name: claude_fable_5
         provider: anthropic
-        model: claude-opus-4-8
+        model: claude-fable-5
         vision: true
         documents: true
         priceMTk:
-          input: 5.0
-          output: 25.0
+          input: 10.0
+          output: 50.0
         parameters:
-          max_tokens: 16384  # reviewer composes the full LaTeX report in one call; 4096 truncated it
+          thinking:
+            type: adaptive
+          max_tokens: 21000  # shares budget with adaptive thinking; 21333 non-streaming ceiling
       - name: gpt_5_5_high
         provider: openai
         model: gpt-5.5
@@ -44,7 +46,9 @@ roles:
           input: 5.0
           output: 25.0
         parameters:
-          max_tokens: 16384
+          thinking:
+            type: adaptive
+          max_tokens: 21000  # shares budget with adaptive thinking; 21333 non-streaming ceiling
   analyst_worker:
     members:
       - name: claude_sonnet_4_6
@@ -55,7 +59,9 @@ roles:
           input: 3.0
           output: 15.0
         parameters:
-          max_tokens: 16384
+          thinking:
+            type: adaptive
+          max_tokens: 21000  # shares budget with adaptive thinking; 21333 non-streaming ceiling
       - name: gpt_5_5_medium
         provider: openai
         model: gpt-5.5
@@ -73,7 +79,7 @@ roles:
   #   because the coder is Claude — two independent checks, not one provider checking its
   #   own family. Backed by GPT-5.5 reasoning xhigh (cheapest eligible, capable enough).
   coder:
-    members:
+    members: # only 1 allowed here
       - name: claude_sonnet_5
         provider: anthropic
         model: claude-sonnet-5
@@ -108,7 +114,9 @@ roles:
           input: 3.0
           output: 15.0
         parameters:
-          max_tokens: 8192
+          thinking:
+            type: adaptive
+          max_tokens: 12000  # shares budget with adaptive thinking (light role; small outputs)
       - name: gpt_5_5_medium
         provider: openai
         model: gpt-5.5
