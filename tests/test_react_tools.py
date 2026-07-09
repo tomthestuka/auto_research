@@ -10,7 +10,12 @@ import asyncio
 
 import pytest
 
-from auto_research.agents.react import ReadOnlyToolProvider, SandboxToolProvider, ToolOutcome
+from auto_research.agents.react import (
+    ReadOnlyToolProvider,
+    SandboxToolProvider,
+    ToolOutcome,
+    _OPEN_PAPER_MAX_MB,
+)
 from auto_research.agents.roles import ReviewerAgent
 from auto_research.models import ModelResponse, ToolCall
 from auto_research.sandbox.fs_guard import load_fs_allowlist
@@ -87,6 +92,21 @@ def test_open_paper_rejects_non_pdf(tmp_path):
     out = asyncio.run(provider.execute("open_paper", {"path": str(fake)}))
     assert out.is_error
     assert provider.opened_paths == []
+
+
+def test_open_paper_rejects_oversized_pdf(tmp_path):
+    """A PDF over the inline size limit is refused with its size named and NOT attached, so an
+    ultra-high-resolution paper cannot blow the provider's request-size cap (the live 413)."""
+    big = tmp_path / "huge.pdf"
+    big.write_bytes(b"%PDF-1.5\n" + b"0" * ((_OPEN_PAPER_MAX_MB + 1) * 1024 * 1024))
+    provider = ReadOnlyToolProvider(roots=[tmp_path])
+
+    out = asyncio.run(provider.execute("open_paper", {"path": str(big)}))
+
+    assert out.is_error
+    assert not out.documents  # nothing attached by value
+    assert "too large" in out.text and f"{_OPEN_PAPER_MAX_MB} MB" in out.text
+    assert provider.opened_paths == []  # not counted against the open cap either
 
 
 def test_react_threads_documents_into_subsequent_calls(tmp_path):

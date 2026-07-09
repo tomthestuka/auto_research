@@ -852,3 +852,13 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   prompt change; the whole failure class is removed at the gate rather than patched at the plan.
   This is a slice of [G6] (the gate still does not import/resolve what it certifies — that stays
   open). `tests/test_gate.py` +2 regressions; suite green.
+- 2026-07-09 — **`open_paper` per-PDF size cap — fixes a live Anthropic 413 run-killer.** A reviewer
+  literature-review run crashed on `RequestTooLargeError` (413) when the Fable reviewer opened a
+  23.5 MB paper: a PDF is attached by value (base64, ~1.33×) to every subsequent model call, so one
+  ultra-high-resolution paper (~31 MB base64) alone ~fills Anthropic's 32 MB request cap, and a second
+  open tipped it over. The `open_paper` handler (`agents/react.py`) now refuses a PDF over
+  `_OPEN_PAPER_MAX_MB`=8 MB (stat-only, before any read) with its size named, so the model cites it
+  from `text_search` metadata instead of attaching it; the tool description states the limit. Chosen
+  from the KB size distribution (p95 ~5.5 MB; 8 MB blocks only the 4 figure-bloated outliers).
+  Prevention at the source; the broader [F6] "degrade the node on a provider error instead of
+  re-raising" stays open as defense-in-depth. `tests/test_react_tools.py` +1; suite green (423).

@@ -51,7 +51,10 @@ tools in the `PersistentSandbox`), `ReadOnlyToolProvider` (reviewer/lead/co-lead
 description and echoed in the `path not permitted` error so the model self-corrects instead of
 guessing), an optional **knowledge-base toolset** — `text_search` (returns candidate paper
 paths) **and `open_paper`** (attaches a chosen local PDF as a document, capped at
-`_OPEN_PAPER_CAP`=6 distinct papers, recording `opened_paths`) — both gated by
+`_OPEN_PAPER_CAP`=6 distinct papers and `_OPEN_PAPER_MAX_MB`=8 MB per PDF — a paper over the
+size limit is refused with its size named rather than attached, since a PDF rides by value in
+every later model call and one ultra-high-resolution paper alone can exceed a provider's
+request-size cap and hard-fail the call, recording `opened_paths`) — both gated by
 `include_text_search` (default on; the §9.3 co-lead omits it and points `roots` at the
 toolkit worktree instead), plus an optional `web_search` tool when a `web_source` is supplied
 — the analyst lead uses it to consult authoritative docs while triaging tool requests, the
@@ -345,3 +348,12 @@ Role wrappers:
   once (consensus/DOCS.md, A8). `finalize_authoring_outcome` still takes the single failed tool.
   `prompts/analyst_lead.md` reworded (plan the whole chain). Live check:
   `tests/test_live_loader_authoring.py::test_chain_planning_returns_ordered_chain`.
+- 2026-07-09 — **`open_paper` per-PDF size limit (`_OPEN_PAPER_MAX_MB`=8 MB).** An opened PDF is
+  attached by value (base64, ~1.33×) to every subsequent model call, so one ultra-high-resolution
+  paper can exhaust a provider's request-size budget on its own and hard-fail the call — a live
+  Anthropic 413 killed a run when the reviewer opened a 23.5 MB paper (~31 MB base64, ~the 32 MB cap).
+  The `open_paper` handler now refuses a PDF over the limit (stat-only check, before any read) with
+  its size named, so the model cites it from `text_search` metadata instead of attaching it; the tool
+  description states the limit too. 8 MB clears every normal paper (KB p95 ~5.5 MB) and blocks only the
+  figure-bloated outliers. Not counted against `_OPEN_PAPER_CAP`. Test:
+  `tests/test_react_tools.py::test_open_paper_rejects_oversized_pdf`.
