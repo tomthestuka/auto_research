@@ -382,6 +382,17 @@ The **trust boundary** (§9.4) — code, not an LLM opinion. Two layers:
   banned-vocabulary scan only — RNG/placeholder/provenance are Python-AST concepts);
   **binary / undecodable** → a `no_fabrication.binary` hard-fail (data never belongs in the
   toolkit, §9.5) that is fed back to the author through the rework loop, never an exception.
+  The **structural** checks (`check_structural`) assert: only `*_utils` paths were touched; a
+  `test_*`/`*_test` file is among them; and a `TOOL_MANIFEST` entry for `proposed_tool_name`
+  exists in the `skills/__init__.py` of one of the packages the **changeset actually touched**
+  (`_touched_packages`, derived from the diff) — **never** at a path built from the brief's
+  advisory `target_domain`. A descriptive `target_domain` label there once built a nonexistent
+  manifest path and rejected forever with a misleading "no entry" message, un-fixable in-run
+  ([A12]); deriving the search from the diff removes that whole failure class, and the rejection
+  now lists the manifest keys actually present per touched package so a name mismatch is
+  diagnosable in round 1. `fix_existing` (a lib-only edit) still passes — its package is touched,
+  so its existing entry is found — while a name colliding with an *untouched* package cannot
+  false-pass.
 - **Layer B (the tool's own tests):** `pytest` in the worktree (via the injectable
   `test_runner`; the default runs the analyst interpreter twice for determinism). **Layer B
   passes only if pytest exits 0 AND ≥1 test PASSED** (`_layer_b_verdict`): `rc==0` alone also
@@ -392,8 +403,10 @@ The **trust boundary** (§9.4) — code, not an LLM opinion. Two layers:
   `{test_id: PASSED/FAILED/ERROR/SKIPPED}` map; the run is deterministic ⇔ the two maps are equal. This ignores log/timing/stdout volatility (chatty
   science tooling — growing INFO filelists, banners) that the old `_strip_volatile` byte compare
   false-flagged, and catches a test *outcome* that flips run-to-run. Each pytest invocation is
-  bounded by `_gate_test_timeout` (per-package `tool_config.yaml: gate_test_timeout_s` >
-  `orchestration.yaml: gate_test_timeout_s` > 900; no clamp). **Reproducibility is not gate-
+  bounded by `_gate_test_timeout` — `max` of `orchestration.yaml: gate_test_timeout_s` (default
+  900; no clamp) and every `tool_config.yaml: gate_test_timeout_s` declared by a package the
+  **changeset touched** (derived from the diff, not the brief's advisory `target_domain` — [A12]),
+  so one pytest run over an authored chain honours the slowest package's ceiling. **Reproducibility is not gate-
   enforced:** for a science tool the lead plans a `test_repro…` test (`proposed_checks`), the
   coder writes it, and the co-lead reviews it — it runs as a normal Layer-B test, so a result
   that wobbles outside tolerance flips its verdict and the determinism map catches it.
@@ -573,7 +586,8 @@ the hook mapping a fake-model verdict — no live LLM).
   findings)` is the pure, unit-testable `.py` scan core; `scan_text_source` is its non-`.py`
   text counterpart (vocabulary only); binary/undecodable targets hard-fail without scanning.
   `scan_provenance`, `check_structural`, `collect_targets` (now extension-agnostic under a
-  `*_utils` package), and `_manifest_keys` are its helpers. Scan lists load from
+  `*_utils` package), `_touched_packages` (the `*_utils` packages the changeset touched,
+  derived from `collect_targets`), and `_manifest_keys` are its helpers. Scan lists load from
   `config/code_gate.yaml`. When no `test_runner` is injected, the default is the real
   `_default_test_runner` with the per-package timeout bound via `partial` (so an injected
   runner keeps its `(worktree, test_paths)` signature).
@@ -589,10 +603,12 @@ the hook mapping a fake-model verdict — no live LLM).
 - `gate._outcomes_determinism(map1, map2)` → `(bool, str)` — pure: deterministic ⇔ the two maps
   are identical (keys + values); the detail names every diverging test. Catches an outcome flip
   and the same-count/different-tests swap a bare return-code compare misses.
-- `gate._gate_test_timeout(worktree, tool_spec)` → `int` — resolve the per-pytest-invocation
-  Layer-B timeout: per-package `<worktree>/<target_domain>/tool_config.yaml: gate_test_timeout_s`
-  > `orchestration.yaml: gate_test_timeout_s` > 900. No clamp (trusted infra), coder-settable;
-  the per-package value is read (never imported) from the worktree.
+- `gate._gate_test_timeout(worktree, targets)` → `int` — resolve the per-pytest-invocation
+  Layer-B timeout: `max` of `orchestration.yaml: gate_test_timeout_s` (default 900) and each
+  `<worktree>/<pkg>/tool_config.yaml: gate_test_timeout_s` for every package the changeset
+  touched (`_touched_packages`), so one pytest run over an authored chain honours the slowest
+  package's ceiling. No clamp (trusted infra), coder-settable; values are read (never imported)
+  from the worktree. Derived from the diff, not the brief's advisory `target_domain` ([A12]).
 - `review.make_review_hook(colead=None, *, author_provider, web_source=None, monitor=None)` →
   the default `run_review` hook (§9.3 step 4); the provider-decorrelated co-lead review.
   - `review.select_decorrelated_member(group, author_provider)` → `ModelHandle` — picks the
@@ -691,3 +707,19 @@ the hook mapping a fake-model verdict — no live LLM).
   a rework round); explicit fabrication phrases + RNG patterns stay hard, and the co-lead still
   judges the soft findings (§9.4 two-pass). No `gate.py` change (config-driven); `test_gate.py`
   updated (`test_synthetic_is_soft_finding_not_hard_fail`).
+- 2026-07-09 — **Gate derives the manifest/timeout target from the diff, not the brief ([A12]).**
+  The `structural.tool_manifest_entry` check and `_gate_test_timeout` no longer build paths from
+  `tool_spec.target_domain` (an unvalidated, lead-free-filled field). A new helper
+  `_touched_packages(worktree, targets)` derives the `*_utils` packages the changeset actually
+  touched from `collect_targets`; the manifest search runs over *those* packages'
+  `skills/__init__.py`, and the timeout is the `max` of the orchestration default and every
+  touched package's `tool_config.yaml`. Root cause: run #12 wrote a descriptive `target_domain`
+  (`"xspec_utils (IXPE polarimetry)"`) → the old check built a nonexistent manifest path →
+  rejected forever with a misleading "no entry" message, un-fixable in-run (the ToolSpec is frozen
+  after `decide_authoring`). Deriving from the diff removes the whole failure class; `target_domain`
+  is now purely advisory (coder-brief prose only). The rejection detail lists the manifest keys
+  actually present per touched package, so a name mismatch is diagnosable in round 1 (part 2).
+  `_gate_test_timeout` signature `(worktree, tool_spec)` → `(worktree, targets)`; `run_gate`
+  computes `targets` before binding the timeout. `test_gate.py`: two regressions
+  (`test_structural_entry_found_despite_descriptive_target_domain`,
+  `test_structural_missing_entry_detail_lists_found_keys`) + the four timeout tests pass `targets`.

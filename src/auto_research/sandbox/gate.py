@@ -106,6 +106,28 @@ def collect_targets(worktree: Path) -> dict[Path, set[int] | None]:
     return targets
 
 
+_PKG_SEGMENT_RE = re.compile(r"[A-Za-z0-9_]+_utils")
+
+
+def _touched_packages(worktree: Path, targets: dict[Path, set[int] | None]) -> dict[str, Path]:
+    """Map each touched ``*_utils`` package name → its package root under the worktree.
+
+    Derived from the gate's own enumerated changeset (:func:`collect_targets`), so the
+    gate verifies **where the tool actually landed** rather than trusting the brief's
+    advisory ``target_domain`` — which the lead free-fills, cannot correct in-run, and
+    doomed run #12's chain when it wrote a descriptive label instead of the bare dir name
+    ([A12]). The package is the first ``*_utils`` segment of each relative path (toolkits
+    are top-level packages under the toolkit root); insertion order is preserved.
+    """
+    pkgs: dict[str, Path] = {}
+    for path in targets:
+        for part in path.relative_to(worktree).parts:
+            if _PKG_SEGMENT_RE.fullmatch(part):
+                pkgs.setdefault(part, worktree / part)
+                break
+    return pkgs
+
+
 def _added_lines(worktree: Path, rel: str) -> set[int]:
     """Added line numbers (new-file side) from ``git diff`` of one modified file."""
     diff = _git(worktree, "diff", "--unified=0", "--", rel)
@@ -432,15 +454,29 @@ def check_structural(worktree: Path, tool_spec: ToolSpec, targets: dict[Path, se
         detail="" if has_test else "no test_*.py / *_test.py added for the tool",
     ))
 
-    # (c) a TOOL_MANIFEST entry exists for the tool in the target package's skills/.
-    pkg = tool_spec.target_domain
-    manifest = worktree / pkg / "skills" / "__init__.py"
+    # (c) a TOOL_MANIFEST entry for the tool exists in one of the packages the changeset
+    #     actually touched — derived from the diff, never from the brief's advisory
+    #     ``target_domain`` (a descriptive value there once built a nonexistent manifest path
+    #     and rejected forever with a misleading "no entry" message, [A12]). Searching the
+    #     touched packages keeps ``fix_existing`` working (a lib-only fix still touches its
+    #     package, whose existing entry is found) and stays tight (a name that collides with a
+    #     tool in an *untouched* package cannot false-pass).
     name = tool_spec.proposed_tool_name
-    keys = _manifest_keys(manifest.read_text(encoding="utf-8")) if manifest.is_file() else []
-    present = any(k == name or k.endswith("." + name) for k in keys)
+    packages = _touched_packages(worktree, targets)
+    found = False
+    key_report: list[str] = []
+    for pkg_name, pkg_root in packages.items():
+        manifest = pkg_root / "skills" / "__init__.py"
+        keys = _manifest_keys(manifest.read_text(encoding="utf-8")) if manifest.is_file() else []
+        if any(k == name or k.endswith("." + name) for k in keys):
+            found = True
+        key_report.append(f"{pkg_name}: {sorted(keys) if keys else 'no skills/__init__.py TOOL_MANIFEST'}")
+    detail = "" if found else (
+        f"no TOOL_MANIFEST entry for {name!r} in any touched package "
+        f"[{'; '.join(key_report) if key_report else 'no *_utils package touched'}]"
+    )
     out.append(CheckResult(
-        name="structural.tool_manifest_entry", layer="A", passed=present,
-        detail="" if present else f"no TOOL_MANIFEST entry for {name!r} in {pkg}/skills/__init__.py",
+        name="structural.tool_manifest_entry", layer="A", passed=found, detail=detail,
     ))
     return out
 
@@ -618,27 +654,29 @@ def _outcomes_determinism(map1: dict[str, str], map2: dict[str, str]) -> tuple[b
     return False, "test outcomes differ between two runs: " + "; ".join(diffs)
 
 
-def _gate_test_timeout(worktree: Path, tool_spec: ToolSpec) -> int:
+def _gate_test_timeout(worktree: Path, targets: dict[Path, set[int] | None]) -> int:
     """Resolve the per-pytest-invocation timeout (seconds) for the gate's Layer-B run.
 
-    Precedence: the target package's ``tool_config.yaml: gate_test_timeout_s`` >
-    ``orchestration.yaml: gate_test_timeout_s`` > 900. No upper clamp — this is trusted
-    human/coder infra (mirrors ``call_timeout_s``, sandbox/DOCS.md); a slow tool (e.g. a real
-    archive download, run twice by a reproducibility test) sets its own ceiling beside its
-    ``call_timeout_s``. The per-package value is read (never imported) from the worktree so it
-    reflects what the coder declared for the package under review.
+    Value: ``max`` of ``orchestration.yaml: gate_test_timeout_s`` (default 900) and every
+    ``tool_config.yaml: gate_test_timeout_s`` declared by a package the changeset actually
+    touched. No upper clamp — this is trusted human/coder infra (mirrors ``call_timeout_s``,
+    sandbox/DOCS.md); a slow tool (e.g. a real archive download, run twice by a
+    reproducibility test) sets its own ceiling beside its ``call_timeout_s``. Reading the
+    touched packages (not the brief's advisory ``target_domain``, [A12]) means one pytest run
+    over a whole authored chain honours the slowest package's declared ceiling.
     """
-    default = int(_orchestration_config().get("gate_test_timeout_s") or 900)
-    pkg_cfg = worktree / tool_spec.target_domain / "tool_config.yaml"
-    try:
-        with pkg_cfg.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        val = data.get("gate_test_timeout_s")
-        if val is not None:
-            return int(val)
-    except (OSError, ValueError, TypeError, yaml.YAMLError):
-        pass
-    return default
+    best = int(_orchestration_config().get("gate_test_timeout_s") or 900)
+    for pkg_root in _touched_packages(worktree, targets).values():
+        pkg_cfg = pkg_root / "tool_config.yaml"
+        try:
+            with pkg_cfg.open("r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            val = data.get("gate_test_timeout_s")
+            if val is not None:
+                best = max(best, int(val))
+        except (OSError, ValueError, TypeError, yaml.YAMLError):
+            pass
+    return best
 
 
 @lru_cache(maxsize=1)
@@ -681,12 +719,14 @@ async def run_gate(
     """
     worktree = Path(worktree)
     cfg = config if config is not None else _code_gate_config()
-    if test_runner is None:
-        # Bind the per-package timeout into the default runner only; an injected runner keeps
-        # its (worktree, test_paths) signature untouched.
-        test_runner = partial(_default_test_runner, timeout_s=_gate_test_timeout(worktree, tool_spec))
 
     targets = collect_targets(worktree)
+
+    if test_runner is None:
+        # Bind the per-package timeout into the default runner only; an injected runner keeps
+        # its (worktree, test_paths) signature untouched. Derived from the touched changeset
+        # (like every other check), so it no longer depends on the brief's advisory field.
+        test_runner = partial(_default_test_runner, timeout_s=_gate_test_timeout(worktree, targets))
 
     layer_a: list[CheckResult] = []
     findings: list[CheckResult] = []

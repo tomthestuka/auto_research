@@ -75,7 +75,10 @@ carried by **reference** (`FigureRef`), never embedded
   `proposed_checks: list[ProposedCheck]` (open-ended `kind` hint, not an enum), optional
   `replication_tolerance`, auto `id`/`created_at`, plus `request_kind` and `observed_issue`
   carried over from the request. The **committed tests, not the spec, are authoritative**;
-  tolerances are lead-finalised, hence optional. `AnalystReport.status`
+  tolerances are lead-finalised, hence optional. `target_domain`/`disposition` are the lead's
+  stated *intent*: the deterministic gate verifies where the tool actually landed from the diff
+  (the touched `*_utils` packages), not from these fields, so a descriptive `target_domain`
+  degrades only the coder brief — it cannot doom the gate ([A12], gate change 2026-07-09). `AnalystReport.status`
   (`"ok"`|`"failed"`|`"needs_human"`, default `"ok"`) is the §9.6 terminal state so an
   honest authoring failure is a correct outcome, never a trigger to fabricate.
 - The Phase-2 **tool-authoring flow** types (`merge.py`): `GateReport` (the deterministic
@@ -236,3 +239,10 @@ carried by **reference** (`FigureRef`), never embedded
   len(tool_specs) >= 1` (partially closes [I3]'s should_author-with-no-spec contradiction). The
   strategy authors the chain sequentially and reruns workers once (consensus/DOCS.md).
   `tests/test_schemas.py::test_authoring_decision_round_trips` covers the chain + validator.
+- 2026-07-09 — **`ToolSpec.target_domain`/`disposition` documented as advisory intent ([A12]).**
+  No schema change: the field stays a `NonEmptyStr`, but its comment now records that the
+  deterministic gate verifies where a tool landed from the diff (the touched `*_utils` packages),
+  never from `target_domain` — so a descriptive value there degrades only the coder brief and can
+  no longer doom the gate. Fixes the run-#12 class where a label like `"xspec_utils (IXPE
+  polarimetry)"` built a nonexistent manifest path and rejected forever. Gate side in
+  `sandbox/DOCS.md` (2026-07-09) + `sandbox/gate.py` `_touched_packages`.

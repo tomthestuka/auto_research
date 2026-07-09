@@ -305,6 +305,32 @@ def test_structural_annotated_manifest_entry_found(tmp_path):
     assert out["structural.tool_manifest_entry"].passed
 
 
+def test_structural_entry_found_despite_descriptive_target_domain(tmp_path):
+    """[A12] regression: the manifest search is derived from the touched changeset, so a
+    descriptive ``target_domain`` label (what doomed run #12) no longer misdirects the gate to
+    a nonexistent path. The entry lands in demo_utils; the brief says something free-filled."""
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)  # entry in demo_utils/skills/__init__.py
+    targets = collect_targets(repo)
+    spec = _spec(target_domain="demo_utils (IXPE polarimetry, freshly authored)")
+    out = {c.name: c for c in check_structural(repo, spec, targets)}
+    assert out["structural.tool_manifest_entry"].passed
+
+
+def test_structural_missing_entry_detail_lists_found_keys(tmp_path):
+    """The rejection names the keys actually present per touched package, so a name mismatch is
+    self-diagnosable in round 1 (part 2 — replaces the misleading 'no entry at <bad path>')."""
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo, manifest_name="other_tool")
+    targets = collect_targets(repo)
+    out = {c.name: c for c in check_structural(repo, _spec(), targets)}
+    entry = out["structural.tool_manifest_entry"]
+    assert not entry.passed
+    assert "my_tool" in entry.detail  # the name it looked for
+    assert "other_tool" in entry.detail  # the key actually present
+    assert "demo_utils" in entry.detail  # the touched package searched
+
+
 # ── run_gate integration (fake Layer-B runner; real temp git worktree) ──────────
 
 
@@ -520,14 +546,14 @@ def test_gate_test_timeout_global_default_when_no_tool_config(tmp_path, monkeypa
     repo = _make_repo(tmp_path)
     _write_pkg(repo)  # creates demo_utils/, no tool_config.yaml
     monkeypatch.setattr(gate, "_orchestration_config", lambda: {"gate_test_timeout_s": 1234})
-    assert gate._gate_test_timeout(repo, _spec()) == 1234
+    assert gate._gate_test_timeout(repo, collect_targets(repo)) == 1234
 
 
 def test_gate_test_timeout_falls_back_to_900_when_unset(tmp_path, monkeypatch):
     repo = _make_repo(tmp_path)
     _write_pkg(repo)
     monkeypatch.setattr(gate, "_orchestration_config", lambda: {})
-    assert gate._gate_test_timeout(repo, _spec()) == 900
+    assert gate._gate_test_timeout(repo, collect_targets(repo)) == 900
 
 
 def test_gate_test_timeout_per_package_override_wins(tmp_path, monkeypatch):
@@ -535,7 +561,7 @@ def test_gate_test_timeout_per_package_override_wins(tmp_path, monkeypatch):
     pkg = _write_pkg(repo)
     (pkg / "tool_config.yaml").write_text("gate_test_timeout_s: 3600\ncall_timeout_s:\n  my_tool: 100\n")
     monkeypatch.setattr(gate, "_orchestration_config", lambda: {"gate_test_timeout_s": 900})
-    assert gate._gate_test_timeout(repo, _spec()) == 3600
+    assert gate._gate_test_timeout(repo, collect_targets(repo)) == 3600
 
 
 def test_gate_test_timeout_malformed_tool_config_falls_back(tmp_path, monkeypatch):
@@ -543,4 +569,4 @@ def test_gate_test_timeout_malformed_tool_config_falls_back(tmp_path, monkeypatc
     pkg = _write_pkg(repo)
     (pkg / "tool_config.yaml").write_text("gate_test_timeout_s: [not, an, int]\n")
     monkeypatch.setattr(gate, "_orchestration_config", lambda: {"gate_test_timeout_s": 777})
-    assert gate._gate_test_timeout(repo, _spec()) == 777
+    assert gate._gate_test_timeout(repo, collect_targets(repo)) == 777

@@ -836,3 +836,19 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   a **tool** index mirroring `TOOL_MANIFEST` (synced after every commit — the `approve_edit` hook — with tools
   loaded lazily by relevance instead of the whole manifest per agent). `Maitreya_RAG` (ChromaDB+Gemini) is the
   build reference. Still deferred/not-built — §12/§13 notes updated to ChromaDB.
+- 2026-07-09 — **Gate verifies the diff, not the brief — fixes the `target_domain` doomed-loop
+  ([A12], top live run-killer).** The deterministic gate's `structural.tool_manifest_entry` check
+  and its Layer-B `_gate_test_timeout` no longer build filesystem paths from
+  `ToolSpec.target_domain` — an unvalidated field the Opus lead free-fills in `decide_authoring`
+  and cannot correct in-run (the ToolSpec is frozen once planning ends; a spec-level bug is
+  unwinnable by the executor, which can amend code but not the spec). Run #12 wrote a descriptive
+  label (`"xspec_utils (IXPE polarimetry)"`) → the gate looked in a nonexistent directory →
+  rejected 3× with byte-identical hashes and a misleading "no TOOL_MANIFEST entry" message, killing
+  a correct 4-tool chain (the analysis still finished honestly — moat held). Fix (`sandbox/gate.py`):
+  a new `_touched_packages` helper derives the `*_utils` packages the changeset actually touched
+  from `collect_targets`; the manifest search runs over those packages, and the rejection lists the
+  keys actually present so a name mismatch is diagnosable in round 1. `target_domain`/`disposition`
+  are now purely advisory (coder-brief prose) — no schema change, no decide-time validation, no
+  prompt change; the whole failure class is removed at the gate rather than patched at the plan.
+  This is a slice of [G6] (the gate still does not import/resolve what it certifies — that stays
+  open). `tests/test_gate.py` +2 regressions; suite green.

@@ -119,7 +119,11 @@ class ToolSpec(MessageModel):
 
     # Where the two halves land. ``target_domain`` is an existing ``<domain>_utils``
     # package (extend) or the proposed new package name (new). ``disposition`` is the
-    # proposer/lead's architectural call; the Sonnet author executes it.
+    # proposer/lead's architectural call; the Sonnet author executes it. Both are the
+    # lead's stated *intent*: the deterministic gate verifies where the tool actually
+    # landed from the diff (the touched ``*_utils`` packages), never from these fields —
+    # a descriptive ``target_domain`` here degrades only the coder brief, it cannot doom
+    # the gate ([A12]).
     target_domain: NonEmptyStr
     disposition: Disposition
 

@@ -43,7 +43,7 @@ mcp_servers: []      # extra MCP servers for workers ({name,command,args}); empt
 disabled_tools: []   # tool names to hide from the catalogue regardless of what the toolkit exposes
 
 # ── Report composition (compose_report node, on accepted verdicts) ──
-report_formats: [jsonl, tex]   # output handles: jsonl (machine), tex (LaTeX+PDF)
+report_formats: [tex]   # output handles: jsonl (machine), tex (LaTeX+PDF)
 report_retry_cap: 2            # LaTeX compile+ref-check iterations before accepting residual errors
 
 # ── Phase-2 tool authoring (backstops, not budgets; §9.3/§9.9) ──
