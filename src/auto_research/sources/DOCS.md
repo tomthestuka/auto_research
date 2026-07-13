@@ -23,8 +23,11 @@ Each module is independent; no source imports another.
   `SearchResult(source="nasa_ads")`. If `token` is not provided, the ADS client
   reads `ADS_DEV_KEY` or `ADS_API_TOKEN` from the environment.
 - `WebSource(client: TavilyClient | None = None)` searches Tavily and returns
-  `SearchResult(source="web")`. If `client` is not provided, it reads
-  `TAVILY_API_KEY` from the environment.
+  `SearchResult(source="web")`. The `TavilyClient` is built **lazily** on first
+  `search` (exposed via the `client` property), reading `TAVILY_API_KEY` then — so
+  constructing a `WebSource` never touches the key. This lets every ReAct role carry a
+  `web_search` tool unconditionally (`TAVILY_API_KEY` is a launch preflight requirement)
+  and keeps the deterministic suite key-independent. Pass `client` to inject a fake.
 - Live source verification is opt-in:
   `AUTO_RESEARCH_LIVE_SOURCE_TESTS=1 pytest tests/test_live_sources.py -s`.
   It queries `black hole binary` against arXiv, NASA ADS, and Tavily, and writes
@@ -93,3 +96,10 @@ Each module is independent; no source imports another.
   Anthropic document API rejected with `400 "The PDF specified was not valid."` —
   this keeps such pages out of ingest at the source. Deterministic coverage in
   `tests/test_sources.py` (rejects non-PDF, accepts PDF, discards stale cache).
+- 2026-07-13 — **`WebSource` Tavily client is now lazy ([I1]).** `__init__` stores the optional
+  injected client only; the real `TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))` is built on
+  first use behind a `client` property. Construction no longer reads the key, so `web_search` can be
+  attached to every role unconditionally (the co-lead's best-effort `_resolve_web_source` wrapper in
+  `sandbox/review.py` — which existed only to mask an eager missing-key construction — was removed)
+  and the deterministic suite constructs `WebSource()` without a key. Test:
+  `tests/test_react_tools.py::test_web_source_constructs_without_key`.

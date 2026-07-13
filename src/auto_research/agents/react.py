@@ -42,6 +42,12 @@ _OPEN_PAPER_CAP = 6
 # the handful of figure-bloated outliers.
 _OPEN_PAPER_MAX_MB = 8
 
+# read_file reads a file BY LINE RANGE (offset/limit), not head-only, so the reviewer/lead can
+# page through long toolkit source rather than reading blind (F8). The line limit + per-line char
+# cap bound what one call returns; "more" is fetched by re-calling with a higher offset.
+_DEFAULT_LINE_LIMIT = 1000
+_MAX_LINE_CHARS = 2000
+
 
 @dataclass
 class ToolOutcome:
@@ -269,6 +275,62 @@ async def execute_plan_and_debate(
     )
     response = await resolve_human(human_handler, query)
     return ToolOutcome(text=response.answer or "(human gave no answer)")
+
+
+WEB_SEARCH_TOOL = "web_search"
+
+
+def web_search_tool_def() -> dict:
+    """The provider-neutral definition for the shared ``web_search`` tool.
+
+    Backed by a ``WebSource`` (Tavily). Attached to the reviewer, analyst lead, analyst
+    workers, and the co-lead so any of them can confirm an uncertain science or code point
+    against a primary source (mission analysis threads, calibration memos, demo slides,
+    official docs) rather than guessing.
+    """
+    return {
+        "name": WEB_SEARCH_TOOL,
+        "description": (
+            "Search the web for authoritative documentation — mission analysis threads, "
+            "calibration memos, official references, demo slides. Use it to confirm an "
+            "uncertain science or code point from a primary source."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keywords describing the documentation you need.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default 5).",
+                },
+            },
+            "required": ["query"],
+        },
+    }
+
+
+async def execute_web_search(
+    web_source: Any | None, arguments: Mapping[str, Any], *, max_chars: int = 8000
+) -> ToolOutcome:
+    """Run one ``web_search`` via ``web_source`` (in-process Tavily).
+
+    Provider faults (rate limit, network, Tavily error) degrade to an error outcome so a hiccup
+    never crashes the ReAct loop; ``TAVILY_API_KEY`` is a launch preflight requirement, so the
+    only ``None`` case here is a role that was deliberately not given the tool.
+    """
+    if web_source is None:
+        return ToolOutcome(text="web_search not available", is_error=True)
+    try:
+        results = await web_source.search(
+            str(arguments.get("query", "")), limit=int(arguments.get("limit", 5))
+        )
+    except Exception as exc:  # noqa: BLE001
+        return ToolOutcome(text=f"web_search failed: {type(exc).__name__}: {exc}", is_error=True)
+    lines = [f"- {r.title} {r.url}\n  {(r.abstract or '')[:300]}" for r in results]
+    return ToolOutcome(text="\n".join(lines)[:max_chars] or "(no results)")
 
 
 # ----------------------------------------------------------------------------
@@ -578,6 +640,7 @@ class SandboxToolProvider:
         cwd: Path | None = None,
         timeout_s: int = 300,
         human_handler: Any | None = None,
+        web_source: Any | None = None,
         asked_by: str = "analyst_worker",
         model: str = "",
     ) -> None:
@@ -586,6 +649,10 @@ class SandboxToolProvider:
         self.cwd = cwd
         # When a human_handler is wired, expose the shared ask_human tool (§9.7).
         self.human_handler = human_handler
+        # Optional Tavily/web QuerySource — when supplied, exposes the shared web_search tool so
+        # the worker can confirm an authoritative-doc point (mission threads, calibration memos)
+        # rather than guessing (its prompt promises this). In-process, never in the sandbox.
+        self.web_source = web_source
         self.asked_by = asked_by
         self.model = model
         # Figures land in <worker scratch>/figures (under the runtime data dir),
@@ -604,6 +671,8 @@ class SandboxToolProvider:
         defs.append(data_catalog_tool_def())
         if self.human_handler is not None:
             defs.append(ask_human_tool_def())
+        if self.web_source is not None:
+            defs.append(web_search_tool_def())
         return defs
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
@@ -613,6 +682,8 @@ class SandboxToolProvider:
             return await execute_ask_human(
                 self.human_handler, self.asked_by, arguments, model=self.model
             )
+        if name == WEB_SEARCH_TOOL:
+            return await execute_web_search(self.web_source, arguments)
         kind = self.registry.kind_for_function(name)
         args = dict(arguments)
         if kind == "mcp.builtin.bash_exec" and "cwd" not in args and self.cwd is not None:
@@ -723,6 +794,38 @@ class SandboxToolProvider:
 # ----------------------------------------------------------------------------
 
 
+def _read_lines(path: Path, offset: int = 1, limit: int = _DEFAULT_LINE_LIMIT) -> dict:
+    """Read a file by line range and format it ``cat -n`` style (1-indexed line numbers + tab).
+
+    Returns a window of at most ``limit`` lines starting at ``offset`` (1-indexed, clamped),
+    each line capped to ``_MAX_LINE_CHARS`` so one pathological line can't blow the budget. The
+    ``content`` carries a footer when more lines remain, naming the next ``offset`` to continue —
+    so truncation is always signalled, never silent (the F8 fix). Caller handles OSError.
+    """
+    lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    total = len(lines)
+    limit = max(1, limit)
+    start = 1 if total == 0 else min(max(1, offset), total)
+    window = lines[start - 1 : start - 1 + limit]
+    body = "\n".join(
+        f"{start + i:>6}\t{line[:_MAX_LINE_CHARS]}" for i, line in enumerate(window)
+    )
+    end = start + len(window) - 1
+    truncated = end < total
+    if truncated:
+        body += (
+            f"\n\n[read lines {start}–{end} of {total}; "
+            f"call read_file with offset={end + 1} to continue]"
+        )
+    return {
+        "content": body,
+        "total_lines": total,
+        "start_line": start,
+        "end_line": end,
+        "truncated": truncated,
+    }
+
+
 class ReadOnlyToolProvider:
     """Lightweight in-process tools for the reviewer/lead to investigate before deciding.
 
@@ -785,8 +888,11 @@ class ReadOnlyToolProvider:
             {
                 "name": "read_file",
                 "description": (
-                    "Read a UTF-8 text file. Give an absolute path inside one of the permitted "
-                    f"roots: {roots_text}."
+                    "Read a UTF-8 text file by line range. Give an absolute path inside one of the "
+                    f"permitted roots: {roots_text}. Returns lines numbered cat -n style; when the "
+                    "file is longer than the window, the output ends with a note naming the offset "
+                    "to continue from — call again with that offset to read on. Text only; read a "
+                    "local PDF with open_paper instead."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -794,7 +900,17 @@ class ReadOnlyToolProvider:
                         "path": {
                             "type": "string",
                             "description": "Absolute path to the file, inside a permitted root.",
-                        }
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "1-indexed line to start at (default 1).",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": (
+                                f"Maximum lines to return (default {_DEFAULT_LINE_LIMIT})."
+                            ),
+                        },
                     },
                     "required": ["path"],
                 },
@@ -865,30 +981,7 @@ class ReadOnlyToolProvider:
                 }
             )
         if self.web_source is not None:
-            definitions.append(
-                {
-                    "name": "web_search",
-                    "description": (
-                        "Search the web for authoritative documentation — mission analysis "
-                        "threads, calibration memos, official references. Use it to confirm an "
-                        "uncertain science or code point from a primary source."
-                    ),
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "Keywords describing the documentation you need.",
-                            },
-                            "limit": {
-                                "type": "integer",
-                                "description": "Maximum number of results to return (default 5).",
-                            },
-                        },
-                        "required": ["query"],
-                    },
-                }
-            )
+            definitions.append(web_search_tool_def())
         if self.include_data_catalog:
             definitions.append(data_catalog_tool_def())
         if self.human_handler is not None:
@@ -944,7 +1037,12 @@ class ReadOnlyToolProvider:
                 )
             try:
                 if name == "read_file":
-                    text = target.read_text(encoding="utf-8", errors="replace")[: self.max_chars]
+                    page = _read_lines(
+                        target,
+                        offset=int(arguments.get("offset", 1)),
+                        limit=int(arguments.get("limit", _DEFAULT_LINE_LIMIT)),
+                    )
+                    text = page["content"]
                 else:
                     text = json.dumps(sorted(p.name for p in target.iterdir()))
             except OSError as exc:
@@ -1017,21 +1115,8 @@ class ReadOnlyToolProvider:
                 documents=[doc],
             )
 
-        if name == "web_search":
-            if self.web_source is None:
-                return ToolOutcome(text="web_search not available", is_error=True)
-            # Provider faults (rate limit, network, Tavily error) degrade to an
-            # error outcome rather than crashing the reviewer/lead ReAct loop.
-            try:
-                results = await self.web_source.search(
-                    str(arguments.get("query", "")), limit=int(arguments.get("limit", 5))
-                )
-            except Exception as exc:  # noqa: BLE001
-                return ToolOutcome(
-                    text=f"web_search failed: {type(exc).__name__}: {exc}", is_error=True
-                )
-            lines = [f"- {r.title} {r.url}\n  {(r.abstract or '')[:300]}" for r in results]
-            return ToolOutcome(text="\n".join(lines)[: self.max_chars] or "(no results)")
+        if name == WEB_SEARCH_TOOL:
+            return await execute_web_search(self.web_source, arguments, max_chars=self.max_chars)
 
         return ToolOutcome(text=f"unknown tool: {name}", is_error=True)
 

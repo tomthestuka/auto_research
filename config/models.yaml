@@ -51,9 +51,9 @@ roles:
           max_tokens: 21000  # shares budget with adaptive thinking; 21333 non-streaming ceiling
   analyst_worker:
     members:
-      - name: claude_sonnet_4_6
+      - name: claude_sonnet_5
         provider: anthropic
-        model: claude-sonnet-4-6
+        model: claude-sonnet-5
         vision: true
         priceMTk:
           input: 3.0

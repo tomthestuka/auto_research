@@ -454,8 +454,9 @@ review-pass`). `make_review_hook` returns the default `run_review` hook (signatu
 - **Diff bundle** (`build_diff_bundle`): reuses `gate.collect_targets` for the file set — new
   files in full, modified files as unified `git diff` (per-file capped, `_DIFF_FILE_CAP`).
 - **The call**: `AnalystColeadAgent.review_tool(tool_spec, diff=…, gate=…, tools=…)`, with a
-  `ReadOnlyToolProvider` scoped to the **worktree** (`include_text_search=False`) + optional
-  `web_search`, so the co-lead investigates surrounding code/conventions before its verdict.
+  `ReadOnlyToolProvider` scoped to the **worktree** (`include_text_search=False`) +
+  `web_search` (a default `WebSource()` when `web_source` is `None`), so the co-lead
+  investigates surrounding code/conventions before its verdict.
 
 Heavy agent/source imports are deferred into the functions (mirroring `merge_flow`), so
 importing the sandbox package never pulls the agent stack. Deterministic coverage in
@@ -723,3 +724,9 @@ the hook mapping a fake-model verdict — no live LLM).
   computes `targets` before binding the timeout. `test_gate.py`: two regressions
   (`test_structural_entry_found_despite_descriptive_target_domain`,
   `test_structural_missing_entry_detail_lists_found_keys`) + the four timeout tests pass `targets`.
+- 2026-07-13 — **[I1] co-lead web_search: dropped the best-effort resolver.** `make_review_hook`'s
+  private `_resolve_web_source` (a `try/except` that silently returned `None` when Tavily creds were
+  missing) was removed; the co-lead now uses `web_source or WebSource()` directly. It was unnecessary:
+  `TAVILY_API_KEY` is a required launch preflight var, and `WebSource`'s client is now lazy
+  (`sources/web_source.py`), so construction can't fail on a missing key. Behaviour unchanged on the
+  happy path; a run missing the key already fails at preflight, not here.

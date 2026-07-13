@@ -252,6 +252,146 @@ def test_plan_and_debate_routes_message_to_human(tmp_path):
     assert "extend the acquire package" in seen["query"].message  # the Markdown body
 
 
+# --- web_search: shared tool wired to reviewer / lead / worker (§9.3, [I1]) -------------------
+
+from types import SimpleNamespace as _NS  # noqa: E402
+
+
+class _RegDefs:
+    """Minimal ToolkitRegistry stand-in exposing no toolkit tools."""
+
+    def tool_definitions(self):
+        return []
+
+    def kind_for_function(self, name):
+        return f"mcp.builtin.{name}"
+
+
+class _FakeWeb:
+    async def search(self, query, *, limit=10):
+        self.query, self.limit = query, limit
+        return [_NS(title="IXPE Cal Memo", url="https://ixpe/cal", abstract="epoch guidance")]
+
+
+def test_web_search_exposed_only_with_web_source(tmp_path):
+    """web_search appears on a provider exactly when a web_source is attached."""
+    # ReadOnly (reviewer/lead): present with a source, absent without.
+    assert "web_search" in _names(ReadOnlyToolProvider(roots=[tmp_path], web_source=_FakeWeb()))
+    assert "web_search" not in _names(ReadOnlyToolProvider(roots=[tmp_path]))
+    # Sandbox (worker): same gating.
+    with_src = SandboxToolProvider(_RegDefs(), sandbox=None, cwd=tmp_path, web_source=_FakeWeb())
+    without = SandboxToolProvider(_RegDefs(), sandbox=None, cwd=tmp_path)
+    assert "web_search" in _names(with_src)
+    assert "web_search" not in _names(without)
+
+
+def test_web_search_routes_query_and_degrades_on_fault(tmp_path):
+    """Both providers route to the source and format results; a source fault → error outcome."""
+    for provider in (
+        ReadOnlyToolProvider(roots=[tmp_path], web_source=_FakeWeb()),
+        SandboxToolProvider(_RegDefs(), sandbox=None, cwd=tmp_path, web_source=_FakeWeb()),
+    ):
+        out = asyncio.run(provider.execute("web_search", {"query": "ixpe irf epoch", "limit": 3}))
+        assert not out.is_error
+        assert "IXPE Cal Memo" in out.text and "https://ixpe/cal" in out.text
+        assert provider.web_source.query == "ixpe irf epoch" and provider.web_source.limit == 3
+
+    class _BoomWeb:
+        async def search(self, query, *, limit=10):
+            raise RuntimeError("tavily down")
+
+    provider = ReadOnlyToolProvider(roots=[tmp_path], web_source=_BoomWeb())
+    out = asyncio.run(provider.execute("web_search", {"query": "x"}))
+    assert out.is_error and "web_search failed" in out.text
+
+
+def test_web_source_constructs_without_key(monkeypatch):
+    """WebSource() never reads TAVILY_API_KEY at construction (lazy client); the key is a
+    launch preflight requirement, keeping the tool always-attachable and tests key-independent."""
+    from auto_research.sources import WebSource
+
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    WebSource()  # must not raise — no client built yet
+    sentinel = object()
+    assert WebSource(client=sentinel).client is sentinel
+
+
+# --- read_file: read-by-line for the reviewer/lead reader (F8) ------------------------------
+
+from auto_research.agents.react import (  # noqa: E402
+    _DEFAULT_LINE_LIMIT,
+    _MAX_LINE_CHARS,
+    _read_lines,
+)
+
+
+def _write_numbered(tmp_path, n, name="src.py"):
+    p = tmp_path / name
+    p.write_text("\n".join(f"line{i}" for i in range(1, n + 1)) + "\n", encoding="utf-8")
+    return p
+
+
+def test_read_lines_cat_n_and_window(tmp_path):
+    p = _write_numbered(tmp_path, 50)
+    page = _read_lines(p, offset=10, limit=5)
+    lines = page["content"].splitlines()
+    assert lines[0] == f"{10:>6}\tline10"          # cat -n: numbered from the offset
+    assert lines[4] == f"{14:>6}\tline14"
+    assert page["start_line"] == 10 and page["end_line"] == 14
+    assert page["total_lines"] == 50 and page["truncated"] is True
+    assert "offset=15 to continue" in page["content"]  # footer names the resume offset
+
+
+def test_read_lines_whole_short_file_not_truncated(tmp_path):
+    p = _write_numbered(tmp_path, 5)
+    page = _read_lines(p, offset=1, limit=_DEFAULT_LINE_LIMIT)
+    assert page["truncated"] is False
+    assert "to continue]" not in page["content"]
+    assert page["content"].splitlines()[-1] == f"{5:>6}\tline5"
+
+
+def test_read_lines_offset_past_eof_clamps(tmp_path):
+    p = _write_numbered(tmp_path, 5)
+    page = _read_lines(p, offset=999, limit=5)
+    assert page["start_line"] == 5 and page["end_line"] == 5 and page["truncated"] is False
+
+
+def test_read_lines_per_line_width_cap(tmp_path):
+    p = tmp_path / "wide.txt"
+    p.write_text("x" * (_MAX_LINE_CHARS + 500) + "\n", encoding="utf-8")
+    body = _read_lines(p)["content"]
+    # the numbered line is capped to _MAX_LINE_CHARS of content (+ the 6-wide number + tab)
+    assert body.count("x") == _MAX_LINE_CHARS
+
+
+def test_read_lines_full_coverage_by_paging(tmp_path):
+    """Walking offset by limit reconstructs the whole file — nothing is dropped."""
+    p = _write_numbered(tmp_path, 2500)  # > default limit → forces multiple pages
+    recovered, offset, pages = [], 1, 0
+    while True:
+        page = _read_lines(p, offset=offset, limit=400)
+        pages += 1
+        for ln in page["content"].splitlines():
+            if "\t" not in ln:  # skip the footer note + its blank separator line
+                continue
+            recovered.append(ln.split("\t", 1)[1])  # strip the cat -n prefix
+        if not page["truncated"]:
+            break
+        offset = page["end_line"] + 1
+    assert pages > 1  # actually paged
+    assert recovered == [f"line{i}" for i in range(1, 2501)]
+
+
+def test_read_file_tool_exposes_offset_limit(tmp_path):
+    p = _write_numbered(tmp_path, 10)
+    prov = ReadOnlyToolProvider(roots=[tmp_path])
+    rf = next(d for d in prov.tool_definitions() if d["name"] == "read_file")
+    assert {"offset", "limit"} <= set(rf["input_schema"]["properties"])
+    out = asyncio.run(prov.execute("read_file", {"path": str(p), "offset": 8, "limit": 5}))
+    assert not out.is_error
+    assert out.text.splitlines()[0] == f"{8:>6}\tline8"  # honored offset, cat -n output
+
+
 # --- Authoring tools (A1 slice 2): drive_coder / submit_for_review over an AuthoringSession ---
 
 from types import SimpleNamespace  # noqa: E402

@@ -950,7 +950,8 @@ class AnalystWorkerAgent(AgentRole):
         cwd = self.memory_path.parent if self.memory_path is not None else None
         provider = SandboxToolProvider(
             self.registry, self.sandbox, cwd=cwd,
-            human_handler=self.human_handler, asked_by="analyst_worker",
+            human_handler=self.human_handler, web_source=WebSource(),
+            asked_by="analyst_worker",
             model=_model_label(self.model) or "",
         )
         seed = [

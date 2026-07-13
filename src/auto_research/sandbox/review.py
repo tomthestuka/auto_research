@@ -140,8 +140,9 @@ def make_review_hook(
     ``colead`` — an :class:`~auto_research.agents.roles.AnalystColeadAgent`; when ``None`` one
     is built from config, routed to a member decorrelated from ``author_provider``. An
     injected co-lead is still asserted to be decorrelated (the trust boundary holds either
-    way). ``web_source`` backs the co-lead's optional ``web_search`` tool; when ``None`` a
-    default :class:`~auto_research.sources.WebSource` is attempted (best-effort).
+    way). ``web_source`` backs the co-lead's ``web_search`` tool; when ``None`` a default
+    :class:`~auto_research.sources.WebSource` is used (its Tavily client is built lazily —
+    ``TAVILY_API_KEY`` is a launch preflight requirement, so no missing-key fallback is needed).
     """
 
     async def run_review(
@@ -154,6 +155,7 @@ def make_review_hook(
     ) -> ToolReviewVerdict:
         from auto_research.agents import AnalystColeadAgent
         from auto_research.agents.react import ReadOnlyToolProvider
+        from auto_research.sources import WebSource
 
         agent = colead
         if agent is None:
@@ -172,7 +174,7 @@ def make_review_hook(
 
         tools = ReadOnlyToolProvider(
             roots=[Path(worktree)],
-            web_source=_resolve_web_source(web_source),
+            web_source=web_source or WebSource(),
             include_text_search=False,  # the papers KB is irrelevant to code review
         )
         diff = build_diff_bundle(Path(worktree))
@@ -182,14 +184,3 @@ def make_review_hook(
         )
 
     return run_review
-
-
-def _resolve_web_source(web_source: Any | None) -> Any | None:
-    if web_source is not None:
-        return web_source
-    try:
-        from auto_research.sources import WebSource
-
-        return WebSource()
-    except Exception:  # noqa: BLE001 — web search is a best-effort aid, never required
-        return None

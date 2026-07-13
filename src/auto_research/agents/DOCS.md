@@ -49,16 +49,24 @@ the `ToolProvider` protocol in `react.py`: `SandboxToolProvider` (analyst scienc
 tools in the `PersistentSandbox`), `ReadOnlyToolProvider` (reviewer/lead/co-lead — in-process
 `read_file`/`list_dir` confined to its `roots` (the permitted roots are named in each tool's
 description and echoed in the `path not permitted` error so the model self-corrects instead of
-guessing), an optional **knowledge-base toolset** — `text_search` (returns candidate paper
+guessing). `read_file` reads **by line range** (`offset`/`limit`, default `_DEFAULT_LINE_LIMIT`=1000
+lines, each capped to `_MAX_LINE_CHARS`=2000) via the module helper `_read_lines`, returning
+`cat -n`-numbered lines; when the file is longer than the window the output ends with a note naming
+the next `offset`, so the lead can page through long toolkit source instead of reading blind (F8) —
+truncation is signalled, never silent. It is text-only (local PDFs go through `open_paper`). Also an
+optional **knowledge-base toolset** — `text_search` (returns candidate paper
 paths) **and `open_paper`** (attaches a chosen local PDF as a document, capped at
 `_OPEN_PAPER_CAP`=6 distinct papers and `_OPEN_PAPER_MAX_MB`=8 MB per PDF — a paper over the
 size limit is refused with its size named rather than attached, since a PDF rides by value in
 every later model call and one ultra-high-resolution paper alone can exceed a provider's
 request-size cap and hard-fail the call, recording `opened_paths`) — both gated by
 `include_text_search` (default on; the §9.3 co-lead omits it and points `roots` at the
-toolkit worktree instead), plus an optional `web_search` tool when a `web_source` is supplied
-— the analyst lead uses it to consult authoritative docs while triaging tool requests, the
-co-lead to check conventions while reviewing, §9.3),
+toolkit worktree instead), plus a shared `web_search` tool present whenever a `web_source`
+(Tavily) is attached — now standard on the reviewer, analyst lead, and co-lead (and, via
+`SandboxToolProvider`, the analyst worker) so any of them can confirm an authoritative
+doc/science point against a primary source rather than guessing ([I1], §9.3); the `WebSource`
+client is lazy so attaching it never reads the key at construction (`TAVILY_API_KEY` is a
+launch preflight requirement)),
 `SourceToolProvider` (librarian — arXiv/ADS/web + local `text_search`). A role with
 `tools=None` falls back to a plain single structured call.
 
@@ -113,10 +121,10 @@ Current role capability surfaces:
 |---|---|---|
 | Librarian I/O | `SourceToolProvider` over arXiv, ADS, Tavily web, and local text search. | Real source/document input can produce structured search results or memory abstractions. |
 | Local retrieval | Pure-Python `text_search_paths()` over SQLite. | No runtime LLM role; returns local paper paths for reviewer attachments. |
-| Analyst worker | `SandboxToolProvider` over `research_toolkit` manifest tools plus MCP tools in a persistent sandbox. | Runs the full analysis tool chain inside `analyze()`, then reports grounded results and figures. |
-| Analyst lead | `ReadOnlyToolProvider` over run artifacts, papers, and `research_toolkit`; optional `web_search`. | Judges convergence, adjudicates, triages `ToolSpec`, and answers author questions. |
-| Analyst co-lead | `ReadOnlyToolProvider` over the **toolkit worktree** (`include_text_search=False`) + optional `web_search`. | Provider-decorrelated **code review** of one authored tool: brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs (§9.3 step 4). |
-| Reviewer | `ReadOnlyToolProvider` over run artifacts, figures, papers, memory, and `research_toolkit` (to read tool source/`TOOL_MANIFEST` and confirm correct call parameters). | Dispatches, reviews, requests capped rework, and composes final report handles. |
+| Analyst worker | `SandboxToolProvider` over `research_toolkit` manifest tools plus MCP tools in a persistent sandbox, plus `web_search` ([I1]). | Runs the full analysis tool chain inside `analyze()`, then reports grounded results and figures. |
+| Analyst lead | `ReadOnlyToolProvider` over run artifacts, papers, and `research_toolkit`; `web_search`. | Judges convergence, adjudicates, triages `ToolSpec`, and answers author questions. |
+| Analyst co-lead | `ReadOnlyToolProvider` over the **toolkit worktree** (`include_text_search=False`) + `web_search`. | Provider-decorrelated **code review** of one authored tool: brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs (§9.3 step 4). |
+| Reviewer | `ReadOnlyToolProvider` over run artifacts, figures, papers, memory, and `research_toolkit` (to read tool source/`TOOL_MANIFEST` and confirm correct call parameters), plus `web_search`. | Dispatches, reviews, requests capped rework, and composes final report handles. |
 
 ## Interfaces / Contracts
 Prompt loading:
@@ -357,3 +365,23 @@ Role wrappers:
   description states the limit too. 8 MB clears every normal paper (KB p95 ~5.5 MB) and blocks only the
   figure-bloated outliers. Not counted against `_OPEN_PAPER_CAP`. Test:
   `tests/test_react_tools.py::test_open_paper_rejects_oversized_pdf`.
+- 2026-07-13 — **[I1] `web_search` wired to reviewer + analyst lead + analyst worker (was co-lead
+  only).** The tool machinery existed in `ReadOnlyToolProvider` but only the co-lead was given a
+  `web_source`, so three roles whose prompts promise web access silently lacked it. Factored the
+  provider-neutral `web_search_tool_def()` + `execute_web_search()` helpers (mirroring the
+  `ask_human`/`data_catalog` pattern); `ReadOnlyToolProvider` now reuses them, and
+  `SandboxToolProvider` gained a `web_source` param + the tool (worker path). `graph.runtime` builds
+  one `WebSource()` and passes it to the reviewer + lead providers (the lead's authoring-loop provider
+  copies it); the worker provider gets one at `analyze()`. The tool is present iff a `web_source` is
+  attached and degrades a Tavily fault to an error outcome. Tests:
+  `tests/test_react_tools.py::{test_web_search_exposed_only_with_web_source,test_web_search_routes_query_and_degrades_on_fault,test_web_source_constructs_without_key}`.
+- 2026-07-13 — **[F8] `ReadOnlyToolProvider.read_file` reads by line range (was a silent char head-cut).**
+  The reviewer/lead/co-lead reader used to return `read_text()[:max_chars]` (8000 chars, no signal) — the
+  lead read long toolkit source blind (#12, couldn't see past the `load_data` window). New module helper
+  `_read_lines(path, offset, limit)` returns a `cat -n`-numbered window (default `_DEFAULT_LINE_LIMIT`=1000
+  lines, each capped to `_MAX_LINE_CHARS`=2000) with a footer naming the next `offset` when more remains, so
+  paging is explicit and truncation is never silent. The `read_file` tool def gained `offset`/`limit` and a
+  text-only note (PDFs → `open_paper`); `self.max_chars` is retained (still used by `web_search`). Worker
+  `read_file` (the builtin) is unchanged — its data-CSV reads rarely truncate; the executer/source-read
+  boundary is tracked separately (handoff [F10], deferred). Tests: `tests/test_react_tools.py::{test_read_lines_*,
+  test_read_file_tool_exposes_offset_limit}` incl. a full-coverage paging reconstruction.

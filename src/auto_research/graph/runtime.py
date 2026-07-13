@@ -310,7 +310,14 @@ async def run_research(
 
     # Give the reviewer and lead a read-only inspection loop (run artifacts +
     # knowledge base), unless a caller pre-wired their own tools.
+    from auto_research.sources import WebSource
     from auto_research.sources.downloads import papers_dir
+
+    # web_search is on for the reviewer and lead (and workers, wired at the provider) so any
+    # role can confirm an authoritative-doc/science point against a primary source rather than
+    # guessing (their prompts promise it). WebSource's Tavily client is lazy; TAVILY_API_KEY is a
+    # launch preflight requirement, so construction never touches the key here.
+    web_source = WebSource()
 
     # The reviewer and analyst lead both browse the whole research_toolkit read-only.
     # The lead needs it to decide a tool proposal's disposition (extend an existing package
@@ -323,7 +330,7 @@ async def run_research(
     if getattr(reviewer, "tools", None) is None:
         try:
             reviewer.tools = ReadOnlyToolProvider(
-                roots=readonly_roots, retrieval=retrieval,
+                roots=readonly_roots, retrieval=retrieval, web_source=web_source,
                 human_handler=human_handler, asked_by="reviewer",
                 model=_model_label(reviewer.model) or "",
             )
@@ -332,7 +339,7 @@ async def run_research(
     if getattr(lead, "tools", None) is None:
         try:
             lead.tools = ReadOnlyToolProvider(
-                roots=readonly_roots, retrieval=retrieval,
+                roots=readonly_roots, retrieval=retrieval, web_source=web_source,
                 include_data_catalog=True,
                 # §5.5: only the lead gets the budget-free plan_and_debate design channel, to
                 # settle a toolkit design with the human before authoring (decide_authoring).

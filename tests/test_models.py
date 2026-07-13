@@ -120,24 +120,41 @@ def test_registry_rejects_empty_group(tmp_path):
         load_registry(path)
 
 
-def test_registry_loads_project_model_groups():
+# Capability contracts a valid config must uphold regardless of WHICH models back a role.
+_VALID_PROVIDERS = {"anthropic", "google", "openai"}
+_VISION_ROLES = {"reviewer", "analyst_lead", "analyst_worker"}  # must see figures (§6/§7)
+_DOCUMENT_ROLES = {"reviewer", "librarian_io"}  # ingest PDFs (open_paper / literature)
+
+
+def test_project_config_satisfies_role_contract():
+    """The shipped `config/models.yaml` loads and upholds the role *contract* — not any specific
+    model choice.
+
+    `models.yaml` is an editable config default (CLAUDE.md §6: "edit freely — not code"), so this
+    asserts structure and capabilities, never member identities.
+    """
     registry = load_registry()
 
-    assert [handle.config.name for handle in registry.resolve("reviewer").handles] == [
-        "claude_fable_5",
-        "gpt_5_5_high",
-        "gemini_3_5_flash_high",
-    ]
-    assert [handle.config.name for handle in registry.resolve("analyst_worker").handles] == [
-        "claude_sonnet_4_6",
-        "gpt_5_5_medium",
-    ]
-    assert [handle.config.name for handle in registry.resolve("librarian_io").handles] == [
-        "claude_sonnet_4_6",
-        "gpt_5_5_medium",
-        "gemini_3_5_flash_thinking",
-    ]
-    assert all(handle.config.documents for handle in registry.resolve("librarian_io").handles)
+    # Every required role is present and resolves to a non-empty group of valid handles.
+    assert REQUIRED_ROLES <= set(registry.config.roles)
+    for role in REQUIRED_ROLES:
+        handles = registry.resolve(role).handles
+        assert handles, f"role {role} has no configured members"
+        for handle in handles:
+            assert handle.config.name
+            assert handle.config.model
+            assert handle.config.provider in _VALID_PROVIDERS
+
+    # Capability contracts (model-independent): vision for the figure-seeing roles, document
+    # input for the PDF-reading roles.
+    for role in _VISION_ROLES:
+        assert all(handle.config.vision for handle in registry.resolve(role).handles), (
+            f"every {role} member must be vision-capable (§6/§7)"
+        )
+    for role in _DOCUMENT_ROLES:
+        assert all(handle.config.documents for handle in registry.resolve(role).handles), (
+            f"every {role} member must accept document (PDF) inputs"
+        )
 
 
 class FakeProvider:
