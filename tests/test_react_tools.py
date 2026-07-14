@@ -392,6 +392,86 @@ def test_read_file_tool_exposes_offset_limit(tmp_path):
     assert out.text.splitlines()[0] == f"{8:>6}\tline8"  # honored offset, cat -n output
 
 
+# --- web_search (uncapped) + web_fetch (Tavily extract, paged) — [I10] --------------------------
+
+from types import SimpleNamespace as _WNS  # noqa: E402
+
+from auto_research.agents.react import (  # noqa: E402
+    WEB_FETCH_TOOL,
+    WEB_SEARCH_TOOL,
+    execute_web_fetch,
+    execute_web_search,
+    web_fetch_tool_def,
+)
+
+
+class _FetchWeb:
+    """Fake WebSource with search + fetch for the tool-handler tests."""
+
+    def __init__(self, *, page="", raise_on_fetch=False):
+        self._page = page
+        self._raise = raise_on_fetch
+        self.fetch_depth = None
+
+    async def search(self, query, *, limit=10):
+        return [_WNS(title="T", url="https://x/y", abstract="Z" * 500)]  # long snippet
+
+    async def fetch(self, url, *, depth="advanced"):
+        self.fetch_depth = depth
+        if self._raise:
+            raise RuntimeError("extract boom")
+        return self._page
+
+
+def test_web_search_returns_full_snippet_uncapped():
+    """No 300-char per-snippet cut and no 8000-char overall cut — Tavily's snippet is returned whole."""
+    out = asyncio.run(execute_web_search(_FetchWeb(), {"query": "q"}))
+    assert not out.is_error
+    assert out.text.count("Z") == 500  # full snippet, not clipped to 300
+
+
+def test_web_fetch_pages_markdown_with_footer_and_depth():
+    md = "\n".join(f"para {i}" for i in range(1, 30))  # 29 lines
+    web = _FetchWeb(page=md)
+    out = asyncio.run(execute_web_fetch(web, {"url": "https://x", "offset": 1, "limit": 10}))
+    assert not out.is_error
+    assert out.text.splitlines()[0] == f"{1:>6}\tpara 1"          # cat -n
+    assert "call web_fetch with offset=11 to continue" in out.text  # web_fetch resume hint
+    assert web.fetch_depth == "advanced"                            # default depth
+    # honors offset on the next page
+    out2 = asyncio.run(execute_web_fetch(web, {"url": "https://x", "offset": 11, "limit": 10}))
+    assert out2.text.splitlines()[0] == f"{11:>6}\tpara 11"
+
+
+def test_web_fetch_guards_and_degrades():
+    assert asyncio.run(execute_web_fetch(None, {"url": "https://x"})).is_error          # no source
+    assert asyncio.run(execute_web_fetch(_FetchWeb(), {})).is_error                      # no url
+    boom = asyncio.run(execute_web_fetch(_FetchWeb(raise_on_fetch=True), {"url": "https://x"}))
+    assert boom.is_error and "web_fetch failed" in boom.text                             # fault → error
+    empty = asyncio.run(execute_web_fetch(_FetchWeb(page=""), {"url": "https://x"}))
+    assert not empty.is_error and "no extractable content" in empty.text                 # soft note
+
+
+def test_web_fetch_exposed_only_with_web_source(tmp_path):
+    web = _FetchWeb()
+    assert WEB_FETCH_TOOL in _names(ReadOnlyToolProvider(roots=[tmp_path], web_source=web))
+    assert WEB_FETCH_TOOL not in _names(ReadOnlyToolProvider(roots=[tmp_path]))
+    with_src = SandboxToolProvider(_RegDefs(), sandbox=None, cwd=tmp_path, web_source=web)
+    assert {WEB_SEARCH_TOOL, WEB_FETCH_TOOL} <= _names(with_src)
+
+
+def test_web_source_fetch_extracts_raw_content():
+    from auto_research.sources import WebSource
+
+    ok = WebSource(client=_WNS(extract=lambda urls, extract_depth: {"results": [{"raw_content": "# md"}]}))
+    assert asyncio.run(ok.fetch("https://x")) == "# md"
+    failed = WebSource(
+        client=_WNS(extract=lambda urls, extract_depth: {"results": [], "failed_results": [{"error": "nope"}]})
+    )
+    with pytest.raises(RuntimeError, match="nope"):
+        asyncio.run(failed.fetch("https://x"))
+
+
 # --- Authoring tools (A1 slice 2): drive_coder / submit_for_review over an AuthoringSession ---
 
 from types import SimpleNamespace  # noqa: E402

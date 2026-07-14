@@ -292,8 +292,9 @@ def web_search_tool_def() -> dict:
         "name": WEB_SEARCH_TOOL,
         "description": (
             "Search the web for authoritative documentation — mission analysis threads, "
-            "calibration memos, official references, demo slides. Use it to confirm an "
-            "uncertain science or code point from a primary source."
+            "calibration memos, official references, demo slides. Returns the top matches, each "
+            "with a title, URL, and a short relevance teaser. Use it to confirm an uncertain "
+            "science or code point; call web_fetch on a result's URL to read that page in full."
         ),
         "input_schema": {
             "type": "object",
@@ -312,14 +313,14 @@ def web_search_tool_def() -> dict:
     }
 
 
-async def execute_web_search(
-    web_source: Any | None, arguments: Mapping[str, Any], *, max_chars: int = 8000
-) -> ToolOutcome:
+async def execute_web_search(web_source: Any | None, arguments: Mapping[str, Any]) -> ToolOutcome:
     """Run one ``web_search`` via ``web_source`` (in-process Tavily).
 
-    Provider faults (rate limit, network, Tavily error) degrade to an error outcome so a hiccup
-    never crashes the ReAct loop; ``TAVILY_API_KEY`` is a launch preflight requirement, so the
-    only ``None`` case here is a role that was deliberately not given the tool.
+    Returns the top-k results, each as a title + URL + the provider's query-aware snippet
+    (verbatim — Tavily's snippets are already concise; the top-k ``limit`` is the only cap).
+    Provider faults degrade to an error outcome so a hiccup never crashes the ReAct loop;
+    ``TAVILY_API_KEY`` is a launch preflight requirement, so the only ``None`` case here is a
+    role that was deliberately not given the tool.
     """
     if web_source is None:
         return ToolOutcome(text="web_search not available", is_error=True)
@@ -329,8 +330,86 @@ async def execute_web_search(
         )
     except Exception as exc:  # noqa: BLE001
         return ToolOutcome(text=f"web_search failed: {type(exc).__name__}: {exc}", is_error=True)
-    lines = [f"- {r.title} {r.url}\n  {(r.abstract or '')[:300]}" for r in results]
-    return ToolOutcome(text="\n".join(lines)[:max_chars] or "(no results)")
+    lines = [f"- {r.title} {r.url}\n  {r.abstract or ''}" for r in results]
+    return ToolOutcome(text="\n".join(lines) or "(no results)")
+
+
+WEB_FETCH_TOOL = "web_fetch"
+
+
+def web_fetch_tool_def() -> dict:
+    """The provider-neutral definition for the shared ``web_fetch`` tool.
+
+    Backed by ``WebSource.fetch`` (Tavily Extract → Markdown). The search→fetch second layer:
+    ``web_search`` returns teasers, ``web_fetch`` reads one page in full. Attached to the same
+    roles as ``web_search``.
+    """
+    return {
+        "name": WEB_FETCH_TOOL,
+        "description": (
+            "Fetch and read one web page's full content as Markdown (e.g. a result from "
+            "web_search, or a workshop/slide/reference URL). Reads BY LINE RANGE like read_file: "
+            "when the page is longer than the window, the output ends with a note naming the "
+            "offset to continue from — call again with that offset. Links in the page are "
+            "preserved, so if the reference you need is behind a link, call web_fetch again on "
+            "that link."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Absolute URL of the page to read."},
+                "offset": {
+                    "type": "integer",
+                    "description": "1-indexed line to start at (default 1).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": f"Maximum lines to return (default {_DEFAULT_LINE_LIMIT}).",
+                },
+                "depth": {
+                    "type": "string",
+                    "enum": ["advanced", "basic"],
+                    "description": (
+                        "Extraction depth: 'advanced' (default, pulls tables/embedded content) "
+                        "or 'basic' (faster, plain pages)."
+                    ),
+                },
+            },
+            "required": ["url"],
+        },
+    }
+
+
+async def execute_web_fetch(web_source: Any | None, arguments: Mapping[str, Any]) -> ToolOutcome:
+    """Fetch one URL via ``web_source.fetch`` and return it as a paged ``cat -n`` line window.
+
+    Faults (network, extraction error, no content) degrade to an error/soft outcome rather than
+    crashing the ReAct loop.
+    """
+    if web_source is None:
+        return ToolOutcome(text="web_fetch not available", is_error=True)
+    url = str(arguments.get("url", "")).strip()
+    if not url:
+        return ToolOutcome(text="web_fetch needs a 'url'", is_error=True)
+    depth = str(arguments.get("depth") or "advanced")
+    try:
+        content = await web_source.fetch(url, depth=depth)
+    except Exception as exc:  # noqa: BLE001
+        return ToolOutcome(text=f"web_fetch failed: {type(exc).__name__}: {exc}", is_error=True)
+    if not content:
+        return ToolOutcome(
+            text=(
+                f"(no extractable content at {url} — it may be a JavaScript-rendered viewer; "
+                "try a linked source or the page's underlying document URL)"
+            )
+        )
+    page = _page_text_lines(
+        content,
+        offset=int(arguments.get("offset", 1)),
+        limit=int(arguments.get("limit", _DEFAULT_LINE_LIMIT)),
+        resume_hint="web_fetch",
+    )
+    return ToolOutcome(text=page["content"])
 
 
 # ----------------------------------------------------------------------------
@@ -673,6 +752,7 @@ class SandboxToolProvider:
             defs.append(ask_human_tool_def())
         if self.web_source is not None:
             defs.append(web_search_tool_def())
+            defs.append(web_fetch_tool_def())
         return defs
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
@@ -684,6 +764,8 @@ class SandboxToolProvider:
             )
         if name == WEB_SEARCH_TOOL:
             return await execute_web_search(self.web_source, arguments)
+        if name == WEB_FETCH_TOOL:
+            return await execute_web_fetch(self.web_source, arguments)
         kind = self.registry.kind_for_function(name)
         args = dict(arguments)
         if kind == "mcp.builtin.bash_exec" and "cwd" not in args and self.cwd is not None:
@@ -794,15 +876,18 @@ class SandboxToolProvider:
 # ----------------------------------------------------------------------------
 
 
-def _read_lines(path: Path, offset: int = 1, limit: int = _DEFAULT_LINE_LIMIT) -> dict:
-    """Read a file by line range and format it ``cat -n`` style (1-indexed line numbers + tab).
+def _page_text_lines(
+    text: str, offset: int = 1, limit: int = _DEFAULT_LINE_LIMIT, *, resume_hint: str = "read_file"
+) -> dict:
+    """Format ``text`` as a ``cat -n`` line window (1-indexed line numbers + tab).
 
-    Returns a window of at most ``limit`` lines starting at ``offset`` (1-indexed, clamped),
-    each line capped to ``_MAX_LINE_CHARS`` so one pathological line can't blow the budget. The
-    ``content`` carries a footer when more lines remain, naming the next ``offset`` to continue —
-    so truncation is always signalled, never silent (the F8 fix). Caller handles OSError.
+    Returns a window of at most ``limit`` lines starting at ``offset`` (1-indexed, clamped), each
+    line capped to ``_MAX_LINE_CHARS`` so one pathological line can't blow the budget. The
+    ``content`` carries a footer when more lines remain, naming the next ``offset`` and the tool
+    (``resume_hint``) to continue with — so truncation is always signalled, never silent (F8).
+    Shared by ``read_file`` (file text) and ``web_fetch`` (extracted page markdown).
     """
-    lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    lines = text.splitlines()
     total = len(lines)
     limit = max(1, limit)
     start = 1 if total == 0 else min(max(1, offset), total)
@@ -815,7 +900,7 @@ def _read_lines(path: Path, offset: int = 1, limit: int = _DEFAULT_LINE_LIMIT) -
     if truncated:
         body += (
             f"\n\n[read lines {start}–{end} of {total}; "
-            f"call read_file with offset={end + 1} to continue]"
+            f"call {resume_hint} with offset={end + 1} to continue]"
         )
     return {
         "content": body,
@@ -824,6 +909,13 @@ def _read_lines(path: Path, offset: int = 1, limit: int = _DEFAULT_LINE_LIMIT) -
         "end_line": end,
         "truncated": truncated,
     }
+
+
+def _read_lines(path: Path, offset: int = 1, limit: int = _DEFAULT_LINE_LIMIT) -> dict:
+    """Read a file by line range (``cat -n`` style). Thin wrapper over :func:`_page_text_lines`;
+    caller handles OSError."""
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
+    return _page_text_lines(text, offset, limit, resume_hint="read_file")
 
 
 class ReadOnlyToolProvider:
@@ -847,7 +939,6 @@ class ReadOnlyToolProvider:
         human_handler: Any | None = None,
         asked_by: str = "agent",
         model: str = "",
-        max_chars: int = 8000,
     ) -> None:
         self.roots = [Path(r).resolve() for r in roots]
         self.retrieval = retrieval
@@ -877,7 +968,6 @@ class ReadOnlyToolProvider:
         # Paths opened via open_paper this session — the reviewer's cited_paths are
         # intersected with this so a citation can only name a paper actually read.
         self.opened_paths: list[Path] = []
-        self.max_chars = max_chars
 
     def _roots_text(self) -> str:
         return ", ".join(str(r) for r in self.roots)
@@ -982,6 +1072,7 @@ class ReadOnlyToolProvider:
             )
         if self.web_source is not None:
             definitions.append(web_search_tool_def())
+            definitions.append(web_fetch_tool_def())
         if self.include_data_catalog:
             definitions.append(data_catalog_tool_def())
         if self.human_handler is not None:
@@ -1116,7 +1207,9 @@ class ReadOnlyToolProvider:
             )
 
         if name == WEB_SEARCH_TOOL:
-            return await execute_web_search(self.web_source, arguments, max_chars=self.max_chars)
+            return await execute_web_search(self.web_source, arguments)
+        if name == WEB_FETCH_TOOL:
+            return await execute_web_fetch(self.web_source, arguments)
 
         return ToolOutcome(text=f"unknown tool: {name}", is_error=True)
 

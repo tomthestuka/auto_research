@@ -61,12 +61,14 @@ size limit is refused with its size named rather than attached, since a PDF ride
 every later model call and one ultra-high-resolution paper alone can exceed a provider's
 request-size cap and hard-fail the call, recording `opened_paths`) — both gated by
 `include_text_search` (default on; the §9.3 co-lead omits it and points `roots` at the
-toolkit worktree instead), plus a shared `web_search` tool present whenever a `web_source`
-(Tavily) is attached — now standard on the reviewer, analyst lead, and co-lead (and, via
-`SandboxToolProvider`, the analyst worker) so any of them can confirm an authoritative
-doc/science point against a primary source rather than guessing ([I1], §9.3); the `WebSource`
-client is lazy so attaching it never reads the key at construction (`TAVILY_API_KEY` is a
-launch preflight requirement)),
+toolkit worktree instead), plus the shared **web pair** `web_search` + `web_fetch`, present
+whenever a `web_source` (Tavily) is attached — standard on the reviewer, analyst lead, and
+co-lead (and, via `SandboxToolProvider`, the analyst worker). `web_search` returns the top-k
+results (title/URL + the provider's query-aware teaser, uncapped by us — the `limit` is the only
+cap); `web_fetch(url, offset, limit, depth)` reads one page in full as Markdown (Tavily Extract,
+`depth="advanced"` default) and pages it exactly like `read_file` (shared `_page_text_lines` +
+resume footer). The `WebSource` client is lazy so attaching it never reads the key at construction
+(`TAVILY_API_KEY` is a launch preflight requirement)),
 `SourceToolProvider` (librarian — arXiv/ADS/web + local `text_search`). A role with
 `tools=None` falls back to a plain single structured call.
 
@@ -121,10 +123,10 @@ Current role capability surfaces:
 |---|---|---|
 | Librarian I/O | `SourceToolProvider` over arXiv, ADS, Tavily web, and local text search. | Real source/document input can produce structured search results or memory abstractions. |
 | Local retrieval | Pure-Python `text_search_paths()` over SQLite. | No runtime LLM role; returns local paper paths for reviewer attachments. |
-| Analyst worker | `SandboxToolProvider` over `research_toolkit` manifest tools plus MCP tools in a persistent sandbox, plus `web_search` ([I1]). | Runs the full analysis tool chain inside `analyze()`, then reports grounded results and figures. |
-| Analyst lead | `ReadOnlyToolProvider` over run artifacts, papers, and `research_toolkit`; `web_search`. | Judges convergence, adjudicates, triages `ToolSpec`, and answers author questions. |
-| Analyst co-lead | `ReadOnlyToolProvider` over the **toolkit worktree** (`include_text_search=False`) + `web_search`. | Provider-decorrelated **code review** of one authored tool: brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs (§9.3 step 4). |
-| Reviewer | `ReadOnlyToolProvider` over run artifacts, figures, papers, memory, and `research_toolkit` (to read tool source/`TOOL_MANIFEST` and confirm correct call parameters), plus `web_search`. | Dispatches, reviews, requests capped rework, and composes final report handles. |
+| Analyst worker | `SandboxToolProvider` over `research_toolkit` manifest tools plus MCP tools in a persistent sandbox, plus `web_search` + `web_fetch`. | Runs the full analysis tool chain inside `analyze()`, then reports grounded results and figures. |
+| Analyst lead | `ReadOnlyToolProvider` over run artifacts, papers, and `research_toolkit`; `web_search` + `web_fetch`. | Judges convergence, adjudicates, triages `ToolSpec`, and answers author questions. |
+| Analyst co-lead | `ReadOnlyToolProvider` over the **toolkit worktree** (`include_text_search=False`) + `web_search` + `web_fetch`. | Provider-decorrelated **code review** of one authored tool: brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs (§9.3 step 4). |
+| Reviewer | `ReadOnlyToolProvider` over run artifacts, figures, papers, memory, and `research_toolkit` (to read tool source/`TOOL_MANIFEST` and confirm correct call parameters), plus `web_search` + `web_fetch`. | Dispatches, reviews, requests capped rework, and composes final report handles. |
 
 ## Interfaces / Contracts
 Prompt loading:
@@ -385,3 +387,13 @@ Role wrappers:
   `read_file` (the builtin) is unchanged — its data-CSV reads rarely truncate; the executer/source-read
   boundary is tracked separately (handoff [F10], deferred). Tests: `tests/test_react_tools.py::{test_read_lines_*,
   test_read_file_tool_exposes_offset_limit}` incl. a full-coverage paging reconstruction.
+- 2026-07-13 — **[I10] web_search de-capped + new `web_fetch` (search→fetch second layer).**
+  `execute_web_search` no longer clips each snippet to 300 chars nor the joined blob to 8000 — Tavily's
+  query-aware snippets are already concise and the top-k `limit` is the only cap; `ReadOnlyToolProvider.max_chars`
+  (its last user) is **retired**. New shared `web_fetch_tool_def()` + `execute_web_fetch()` read one page in full
+  as Markdown via `WebSource.fetch` (Tavily Extract, `depth="advanced"` default, `basic` overridable), paged by the
+  shared `_page_text_lines` core (`_read_lines` refactored onto it) with a `web_fetch` resume footer; links in the
+  markdown let a role chain `web_fetch` on a nested reference. Wired to reviewer/lead/worker/co-lead via both
+  providers, gated on `web_source`; faults/empty extract degrade to an error/soft outcome. Provider-native web
+  tools behind each adapter remain deferred (handoff [I11]). Tests: `tests/test_react_tools.py::{test_web_search_returns_full_snippet_uncapped,
+  test_web_fetch_*, test_web_source_fetch_extracts_raw_content}`; live `tests/test_live_web_fetch.py`.

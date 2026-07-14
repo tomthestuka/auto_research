@@ -40,6 +40,25 @@ class WebSource:
         )
         return [_result_from_tavily(item) for item in response.get("results", [])]
 
+    async def fetch(self, url: str, *, depth: str = "advanced") -> str:
+        """Fetch one page's full content as Markdown via the Tavily Extract endpoint.
+
+        ``depth`` is ``"advanced"`` by default (pulls tables/embedded content — worth the extra
+        credit for reference material that is not plain first-layer text) or ``"basic"``. The
+        ``format`` defaults to markdown (higher semantic density than raw HTML). Raises when the
+        URL yields no content so the caller degrades to an honest error rather than an empty read.
+        """
+        return self._extract(url, depth)
+
+    def _extract(self, url: str, depth: str) -> str:
+        response = self.client.extract(urls=url, extract_depth=depth)
+        results = response.get("results") or []
+        if not results:
+            failed = response.get("failed_results") or []
+            reason = (failed[0].get("error") if failed else None) or "no content extracted"
+            raise RuntimeError(reason)
+        return results[0].get("raw_content") or ""
+
 
 def _result_from_tavily(item: dict) -> SearchResult:
     return SearchResult(

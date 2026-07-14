@@ -56,7 +56,12 @@ Each module is independent; no source imports another.
   `https://api.adsabs.harvard.edu/v1/resolver/<bibcode>/esource` and returns
   the available full-text source buttons for a record.
 - `WebSource.search(query: str, *, limit: int = 10) -> list[SearchResult]` —
-  returns normalized Tavily web results.
+  returns normalized Tavily web results (query-aware snippets; `search_depth="basic"`).
+- `WebSource.fetch(url: str, *, depth: str = "advanced") -> str` — reads one page's full
+  content as Markdown via the Tavily **Extract** endpoint (`format` defaults markdown;
+  `depth` `"advanced"` pulls tables/embedded content, `"basic"` is faster). Raises when the
+  URL yields no content (empty `results` / a `failed_results` entry) so the caller degrades
+  to an honest error. Backs the agents' `web_fetch` tool.
 - `papers_dir() -> Path` — re-exported from `auto_research.env`; returns the configured
   source-paper artifact directory (`orchestration.yaml: papers_dir`, defaulting to
   `<runtime_dir>/papers`).
@@ -103,3 +108,7 @@ Each module is independent; no source imports another.
   `sandbox/review.py` — which existed only to mask an eager missing-key construction — was removed)
   and the deterministic suite constructs `WebSource()` without a key. Test:
   `tests/test_react_tools.py::test_web_source_constructs_without_key`.
+- 2026-07-13 — **`WebSource.fetch` added ([I10]).** A page-read primitive over the Tavily **Extract**
+  endpoint (`client.extract(urls=url, extract_depth=depth)`, markdown format) → `results[0].raw_content`;
+  empty/`failed_results` → raises. Backs the agents' new `web_fetch` tool (the search→fetch second layer).
+  `search` unchanged. Test: `tests/test_react_tools.py::test_web_source_fetch_extracts_raw_content`.
