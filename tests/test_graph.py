@@ -119,7 +119,7 @@ class FakeLead:
     async def judge_convergence(self, task, reports, *, round_index, max_rounds):
         return ReviewVerdict(accepted=True, rationale="converged")
 
-    async def adjudicate(self, task, reports):
+    async def adjudicate(self, task, reports, *, sources=None):
         self.adjudications += 1
         return AnalystReport(summary=f"final {self.adjudications}", findings=["final"])
 

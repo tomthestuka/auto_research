@@ -162,7 +162,7 @@ class AuthoringLead:
         self.judged.append(round_index)
         return ReviewVerdict(accepted=round_index >= self.converge_on, rationale="r")
 
-    async def adjudicate(self, task, reports) -> AnalystReport:
+    async def adjudicate(self, task, reports, *, sources=None) -> AnalystReport:
         return AnalystReport(summary="final", findings=["done"])
 
 

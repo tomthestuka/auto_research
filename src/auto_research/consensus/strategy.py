@@ -18,7 +18,6 @@ from auto_research.schemas import (
     ToolResult,
     ToolSpec,
 )
-from auto_research.schemas.figures import FigureRef
 from auto_research.storage import MemoryRecord
 
 
@@ -51,8 +50,11 @@ class LeadLike(Protocol):
         self,
         task: AnalysisTask,
         reports: Sequence[AnalystReport],
+        *,
+        sources: Sequence[str] | None = None,
     ) -> AnalystReport:
-        """Synthesize the final report."""
+        """Synthesize the final report. ``sources`` names each report's worker (V-4), so the lead
+        keys its per-worker figure catalog and can cite any worker's figure from any round."""
 
     async def decide_authoring(
         self,
@@ -193,12 +195,11 @@ class DebateToConverge:
                 data={"round_index": debate_round, "verdict": verdict},
             )
             if verdict.accepted or debate_round >= self.max_rounds:
-                final = await lead.adjudicate(task, reports)
-                # Carry all tool figures onto the final report so the reviewer
-                # receives them at the multimodal boundary (ReviewerAgent.review
-                # passes images=report.figures).
-                all_figures = _deduplicated([f for r in reports for f in r.figures])
-                final = final.model_copy(update={"figures": all_figures})
+                # V-4: the lead owns figures now — it accumulates a per-worker catalog (append-only
+                # across rounds/iterations) and CITES the subset for its report. The strategy no
+                # longer force-carries last-round figures (the old dedup pass, which dropped any
+                # figure not re-emitted this round); it just passes the worker source keys.
+                final = await lead.adjudicate(task, reports, sources=_source_keys(workers))
                 await _record(
                     self.monitor,
                     "analyst.lead.adjudication",
@@ -373,16 +374,13 @@ def _augment_with_authored_tool(task: AnalysisTask, tool_spec: Any, result: Any)
     )
 
 
-def _deduplicated(figures: list[FigureRef]) -> list[FigureRef]:
-    """Deduplicate figures by path, preserving first-seen order."""
-    seen: set[str] = set()
-    out: list[FigureRef] = []
-    for f in figures:
-        key = str(f.path)
-        if key not in seen:
-            seen.add(key)
-            out.append(f)
-    return out
+def _source_keys(workers: Sequence[Any]) -> list[str]:
+    """Stable per-worker catalog source keys (V-4), aligned to the reports list by index.
+
+    Uses each worker's ``agent_key`` (its working-folder name, set by runtime), falling back to a
+    positional ``analyst_worker_<i>`` so a caller-supplied fake still keys cleanly.
+    """
+    return [getattr(w, "agent_key", None) or f"analyst_worker_{i}" for i, w in enumerate(workers)]
 
 
 def _peers_for(reports: Sequence[AnalystReport], index: int) -> list[AnalystReport]:

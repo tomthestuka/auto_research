@@ -84,31 +84,15 @@ Each module is independent; no source imports another.
   ingest (the caller falls back to metadata-only).
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Source layer built and stabilized: `QuerySource`,
-  arXiv/NASA ADS/Tavily adapters, PDF download/ingest helpers, ADS full-text resolver, and
-  ADS 404 degradation for normal no-esource records.
-- 2026-06-12 — Compacted changelog and refreshed CLAUDE section link.
-- 2026-06-18 — `download_pdf` now retries transient fetch failures and returns
-  `None` (instead of raising `HTTPError`/`URLError`) when a download ultimately
-  fails; `download_and_ingest_result` propagates that `None`. Previously a single
-  PDF-download 404 (seen transiently from arxiv) escaped `_ingest_one`'s
-  `asyncio.gather`, crashed the `literature` graph node, and aborted the whole
-  run before analysis began.
-- 2026-06-22 — `download_pdf` validates content, not just presence: it checks the
-  `%PDF-` signature (`_is_pdf_bytes`) and returns `None` for a non-PDF response,
-  and discards/re-fetches a stale non-PDF cache file. A live run had crashed because
-  an ADS `esource` link resolved to an HTML landing page saved as `.pdf`, which the
-  Anthropic document API rejected with `400 "The PDF specified was not valid."` —
-  this keeps such pages out of ingest at the source. Deterministic coverage in
-  `tests/test_sources.py` (rejects non-PDF, accepts PDF, discards stale cache).
-- 2026-07-13 — **`WebSource` Tavily client is now lazy ([I1]).** `__init__` stores the optional
-  injected client only; the real `TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))` is built on
-  first use behind a `client` property. Construction no longer reads the key, so `web_search` can be
-  attached to every role unconditionally (the co-lead's best-effort `_resolve_web_source` wrapper in
-  `sandbox/review.py` — which existed only to mask an eager missing-key construction — was removed)
-  and the deterministic suite constructs `WebSource()` without a key. Test:
-  `tests/test_react_tools.py::test_web_source_constructs_without_key`.
-- 2026-07-13 — **`WebSource.fetch` added ([I10]).** A page-read primitive over the Tavily **Extract**
-  endpoint (`client.extract(urls=url, extract_depth=depth)`, markdown format) → `results[0].raw_content`;
-  empty/`failed_results` → raises. Backs the agents' new `web_fetch` tool (the search→fetch second layer).
-  `search` unchanged. Test: `tests/test_react_tools.py::test_web_source_fetch_extracts_raw_content`.
+- 2026-05-26 -> 2026-06-12 — Source layer built: `QuerySource`, arXiv/NASA ADS/Tavily adapters,
+  PDF download/ingest helpers, ADS full-text resolver, ADS 404 degradation for no-esource records.
+- 2026-06-18 — `download_pdf` retries transient fetch failures and returns `None` (instead of
+  raising) on ultimate failure, and `download_and_ingest_result` propagates it, so a single bad
+  PDF URL no longer crashes the `literature` graph node.
+- 2026-06-22 — `download_pdf` validates content via the `%PDF-` signature (`_is_pdf_bytes`):
+  a non-PDF response returns `None` and a stale non-PDF cache file is discarded/re-fetched,
+  keeping HTML-saved-as-`.pdf` out of ingest.
+- 2026-07-13 — `WebSource` Tavily client is now lazy ([I1], built on first use behind a `client`
+  property so construction no longer reads the key and `web_search` attaches to every role
+  unconditionally) and gains `WebSource.fetch` ([I10], a page-read primitive over the Tavily
+  Extract endpoint backing the agents' `web_fetch` tool).

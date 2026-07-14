@@ -196,42 +196,8 @@ verdicts, two iteration counters, and the cap.
 - `DEFAULT_WORKER_COUNT` — default analyst worker count (currently 2).
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Graph/runtime built and ReAct-wired: six-node LangGraph incl.
-  `compose_report`, two capped feedback edges, Studio wiring, per-run workspace, one persistent
-  sandbox per worker, MCP client lifecycle, read-only reviewer/lead tools, required-env checks,
-  role-specific ReAct caps, report formats, ReAct literature gathering.
-- 2026-06-12 -> 2026-06-18 — **Phase 2 steps 0/5/7.** Off-repo MCP cwd + lead read-only
-  `toolkit_root`. `run_research` resolves a raise-to-human channel, awaits the async preflight
-  (channel ping), threads the handler to role providers. Consensus authoring/resume wired:
-  `DebateToConverge` receives `tool_author_cap`/`toolkit_root`/`worktree_base`/`direct_branch`
-  (default `ai`)/`human_handler`; reviewer/lead read-only `roots` include `toolkit_root`.
-- 2026-06-22 -> 2026-06-24 — **Reviewer-driven retrieval + env/path fixes.** The `literature` node
-  only ingests; the reviewer pulls literature via its own `text_search`/`open_paper`
-  (`ResearchState.literature` → `cited_paths`, `_resolve_cited_paths`; `reviewer.review` dropped
-  `literature=`). `_builtin_server_config` pins `{analyze_env}/bin` to the front of `bash_exec`'s
-  `PATH` (a bare `python` is the same interpreter the toolkit uses). Removed hardcoded `toolkit_root`
-  fallbacks (fix-list #2 — `check_toolkit_root_configured` is the gate). Lead provider built with
-  `include_plan_and_debate=True` (§5.5).
-- 2026-06-26 — **Reviewer is the sole I/O (handoff #4, §9.6).** `analysis → review_analysis` is
-  unconditional (the `after_analysis` bypass removed); `finalize_run_node` forwards the reviewer's
-  verdict (records `run.honest_failure` on a failed status, no manufactured verdict);
-  `route_after_finalize → compose_report` whenever `report_formats` is set, so a finalize always
-  documents the outcome. Tests rewritten in `tests/test_graph.py`.
-- 2026-07-06 — **Detached (nohup-style) runs — `run_research_nohup` (E5, partial).** New
-  `graph/detached.py`: runs the pipeline in a detached `python -m auto_research` child (own
-  session), so a killed kernel/logout no longer loses the run; re-running the same call
-  reconnects by a deterministic `run_id` (`sha256` of the request). `overwrite=True` starts
-  fresh (refuses if the run is still alive — process-based liveness via `backend.pid` = pid +
-  `/proc` start-time, PID-reuse-safe, not log mtime). Output reconstructed from the run dir's
-  `monitor.jsonl` + a terminal `result.json` the CLI now writes; `RunDied` surfaces a dead run
-  honestly (no silent relaunch); `human_channel='cli'` rejected (detached ⇒ no stdin). Additive
-  only: `run_research` gains an optional `run_id` param (defaults to auto — behavior unchanged);
-  CLI gains `--run-id`/`--max-iterations` + the `result.json` write. NOT true mid-run resume —
-  that (the §12 checkpointer) is still deferred; this survives *kernel* death, not backend death.
-  Tests: `tests/test_detached.py` (real-pid liveness, attach/launch, overwrite guardrail).
-- 2026-07-06 — **`run_research_nohup` streams live progress** (gains `stream`, default the cell's
-  `sys.stdout` resolved at call time; `None` silences). Its wait loop now follows the run's
-  `monitor.jsonl` (via `monitor.write_stream_event`, chatter-filtered like the live monitor) instead
-  of only polling status — so a detached run shows the same live chatter in the notebook cell as a
-  non-detached run, and replays the backlog on reconnect. `tests/test_detached.py` (drain filter,
-  partial-line, live relay).
+- 2026-05-26 -> 2026-06-12 — Graph/runtime built and ReAct-wired: six-node LangGraph incl. `compose_report`, two capped feedback edges, Studio wiring, per-run workspace, one persistent sandbox per worker, MCP client lifecycle, read-only reviewer/lead tools, required-env checks, report formats.
+- 2026-06-12 -> 2026-06-18 — Phase 2 steps 0/5/7: off-repo MCP cwd + lead read-only `toolkit_root`; `run_research` resolves the raise-to-human channel, awaits the async preflight (channel ping), threads the handler to roles; consensus authoring/resume wired (`DebateToConverge` gets `tool_author_cap`/`toolkit_root`/`worktree_base`/`direct_branch`/`human_handler`).
+- 2026-06-22 -> 2026-06-24 — Reviewer-driven retrieval + env/path fixes: the `literature` node only ingests, the reviewer pulls literature via its own `text_search`/`open_paper` (`_resolve_cited_paths`); `bash_exec` PATH pinned to `{analyze_env}/bin`; hardcoded `toolkit_root` fallbacks removed; lead built with `include_plan_and_debate=True`.
+- 2026-06-26 — Reviewer is the sole I/O (§9.6): `analysis → review_analysis` unconditional (the `after_analysis` bypass removed); `finalize_run` forwards the reviewer's verdict (records `run.honest_failure`); on finalize a report is always composed so an honest failure is documented, not silent.
+- 2026-07-06 — Detached runs `run_research_nohup` (E5, partial): pipeline runs in a detached `python -m auto_research` child (own session) surviving kernel death, reconnect by deterministic `run_id`, `overwrite` guarded by process-based liveness, `RunDied` on a dead run; streams live `monitor.jsonl` chatter to `stream`. Additive `run_id` + CLI `--run-id`/`--max-iterations`/`result.json`. Not true mid-run resume (§12 deferred).

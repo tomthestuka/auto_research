@@ -105,8 +105,8 @@ class LoggingLead:
         )
         return verdict
 
-    async def adjudicate(self, task, reports):
-        report = await self.agent.adjudicate(task, reports)
+    async def adjudicate(self, task, reports, *, sources=None):
+        report = await self.agent.adjudicate(task, reports, sources=sources)
         self.events.append(_event("lead_adjudicate", self.agent, output=report.model_dump(mode="json")))
         return report
 

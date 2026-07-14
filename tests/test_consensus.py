@@ -30,6 +30,8 @@ class FakeLead:
         self.converge_on = converge_on
         self.judged_rounds: list[int] = []
         self.final_reports: list[AnalystReport] = []
+        self.adjudicate_sources: list[str] | None = None
+        self.adjudicate_reports: list[AnalystReport] = []
 
     async def judge_convergence(self, task, reports, *, round_index, max_rounds):
         self.judged_rounds.append(round_index)
@@ -39,7 +41,10 @@ class FakeLead:
             needs_analysis_rework=round_index < self.converge_on,
         )
 
-    async def adjudicate(self, task, reports):
+    async def adjudicate(self, task, reports, *, sources=None):
+        # V-4: the consensus now hands the lead the worker source keys; the lead owns figures.
+        self.adjudicate_sources = list(sources) if sources is not None else None
+        self.adjudicate_reports = list(reports)
         report = AnalystReport(
             summary=f"final from {len(reports)} reports",
             findings=[report.findings[0] for report in reports],
@@ -140,34 +145,36 @@ class FakeRegistry:
     pass
 
 
-def test_tool_figures_propagate_to_final_report():
-    """Tool FigureRefs must survive to the final adjudicated report."""
+def test_consensus_feeds_worker_figures_and_sources_to_lead():
+    """V-4: the consensus hands the lead each worker's report + its source key, and returns the
+    lead's report VERBATIM (no last-round figure force-carry — the lead now owns citation)."""
     fig_w1 = _make_fig("w1_plot")
     fig_w2 = _make_fig("w2_plot")
-    workers = [FakeWorkerWithTools("w1", [fig_w1]), FakeWorkerWithTools("w2", [fig_w2])]
+    w1 = FakeWorkerWithTools("w1", [fig_w1])
+    w2 = FakeWorkerWithTools("w2", [fig_w2])
+    w1.agent_key, w2.agent_key = "analyst_worker_0", "analyst_worker_1"
     lead = FakeLead(converge_on=1)
 
     final = asyncio.run(
         DebateToConverge(max_rounds=3, registry=FakeRegistry()).run(
-            workers, lead, AnalysisTask(question="Propagate figures.")
+            [w1, w2], lead, AnalysisTask(question="Propagate figures.")
         )
     )
 
-    paths = {str(f.path) for f in final.figures}
-    assert str(fig_w1.path) in paths
-    assert str(fig_w2.path) in paths
+    # source keys are aligned to the reports by worker index
+    assert lead.adjudicate_sources == ["analyst_worker_0", "analyst_worker_1"]
+    # the reports handed to the lead carried each worker's figures (the lead accumulates + cites)
+    seen = {str(f.path) for r in lead.adjudicate_reports for f in r.figures}
+    assert str(fig_w1.path) in seen and str(fig_w2.path) in seen
+    # the strategy returns the lead's report unmodified — no figure overwrite
+    assert final is lead.final_reports[-1]
 
 
-def test_tool_figures_deduplicated_across_rounds():
-    """Figures produced in multiple rounds are deduplicated by path."""
-    fig = _make_fig("shared_plot")
-    workers = [FakeWorkerWithTools("w1", [fig])]
-    lead = FakeLead(converge_on=2)  # forces one revision round → two tool phases
-
-    final = asyncio.run(
-        DebateToConverge(max_rounds=3, registry=FakeRegistry()).run(
-            workers, lead, AnalysisTask(question="Dedup figures.")
-        )
+def test_consensus_source_keys_fall_back_to_positional():
+    """Workers without an agent_key key positionally (analyst_worker_<i>)."""
+    workers = [FakeWorker("w1"), FakeWorker("w2")]
+    lead = FakeLead(converge_on=1)
+    asyncio.run(
+        DebateToConverge(max_rounds=3).run(workers, lead, AnalysisTask(question="x"))
     )
-
-    assert len([f for f in final.figures if str(f.path) == str(fig.path)]) == 1
+    assert lead.adjudicate_sources == ["analyst_worker_0", "analyst_worker_1"]

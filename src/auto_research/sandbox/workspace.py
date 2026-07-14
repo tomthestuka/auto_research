@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from auto_research.env import runtime_data_dir
@@ -44,6 +45,24 @@ def create_run_workspace(run_id: str, agent_keys: list[str]) -> dict[str, Path]:
         (d / "figures").mkdir(exist_ok=True)
         result[key] = d
     return result
+
+
+def _slug(text: str) -> str:
+    """Filesystem-safe slug for a model label (e.g. ``claude-opus-4-8`` → ``claude-opus-4-8``)."""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", (text or "").strip())
+    return slug.strip("-._") or "model"
+
+
+def round_report_path(agent_dir_path: Path, *, role: str, model: str, round_n: int) -> Path:
+    """Path of one inter-LLM report JSONL inside an agent's working folder (V-4).
+
+    One file per debate round (``round_n`` counts monotonically across rework iterations, so
+    nothing collides and the trail is continuous). The agent folder already disambiguates which
+    worker, so the name carries ``<role>_<model-slug>_round<n>`` — role and model member. This is
+    the durable, ReAct-refined report the agent writes via ``edit_report`` and reads back via
+    ``review_report``; it is distinct from the agent's private ``memory.md``.
+    """
+    return Path(agent_dir_path) / f"{role}_{_slug(model)}_round{round_n}_report.jsonl"
 
 
 def append_memory(path: Path, text: str) -> None:

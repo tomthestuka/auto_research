@@ -118,53 +118,8 @@ protocol, §7).
 - `SlackHandler` / `TelegramHandler` / `WhatsAppHandler` — connector classes (see contracts above).
 
 ## Changelog
-- 2026-06-15 — Phase 2 step 5: package created. `HumanQuery`/`HumanResponse` protocol; injectable
-  `HumanHandler` + `resolve_human` fail-safe; `resolve_handler` CLI-vs-library auto-detect;
-  CLI/Slack/WhatsApp connectors; `make_human_channel_check` launch ping.
-- 2026-06-16 -> 2026-06-24 — **Connector hardening.** `WhatsAppHandler` → Twilio API-key auth;
-  shared `response_timeout_s()` every channel waits at most (default 1h, decoupled from the
-  prompt-cache TTL). `SlackHandler` construction deferred to `async start()`; `on_message` resolves
-  a plain channel reply when exactly one question is open; a benign Socket Mode rotation ERROR is
-  downgraded to WARNING (`_SocketRotationDowngradeFilter`). Twilio/ping faults translate to named
-  causes + the `cli`/`none` escape hatch. Covered by `tests/test_hitl.py`.
-- 2026-06-29 — **Markdown `message` + per-channel rendering; WhatsApp deprecated.** `HumanQuery`
-  carries one Markdown `message` (was `question`+`context`); connectors *render* per surface (LLMs
-  emit Markdown natively): CLI via `rich`; Slack via the dedicated `markdown` block with `_chunk`
-  over the 12000-char limit (replacing the 2900-char section `_truncate`), notification text =
-  `query.headline`; fail-safe/preflight use `message`/`headline`. **WhatsApp/Twilio deprecated**
-  (bills per message; warns on construction, raw passthrough; prefer `slack`/`cli`, CLAUDE.md §13).
-  Tests `tests/test_hitl.py`; opt-in live render across channels `tests/test_live_hitl.py`
-  (`AUTO_RESEARCH_LIVE_HITL=1`, each channel try/except, logs `logs/dev/hitl/`).
-- 2026-07-02 — **Telegram connector added — the recommended reliable channel (CLAUDE.md §12/[E4]).**
-  `telegram.py` `TelegramHandler`: `python-telegram-bot` long polling (outbound-only, no public URL,
-  24h server-side retention → reconnect-lossless), chosen over Slack Socket Mode (chronically stale)
-  and Slack-HTTP (a public inbound endpoint = cluster-policy blocker). Auth = `TELEGRAM_BOT_TOKEN`
-  (BotFather) + `TELEGRAM_CHAT_ID`. **Multi-question-ready** via reply-to routing (`message_id→Future`
-  map) for future parallel analysts, single-open plain-reply fallback. Markdown→Telegram-HTML render
-  (`_md_to_html`) with a plain-text fallback; `_chunk_md` splits over the 4096-char cap. Wired into
-  `build_human_handler` (`telegram`), the CLI `--human` choices, and the generic preflight ping.
-  `python-telegram-bot>=22` added to `environment.yml`. Tests: `tests/test_hitl.py` (fake
-  Application/bot — reply-to routing, concurrent-question routing, plain-reply fallback, chat/bot/empty
-  filtering, timeout, MD→HTML, chunking). WhatsApp stays deprecated.
-- 2026-07-06 — **Telegram blockquote render fixed.** `_md_to_html` escapes the body (so `>`→`&gt;`)
-  before its per-line structure pass, so the blockquote regex — which matched a literal `>` — never
-  fired and a `> quote` line rendered as plain `&gt; quote`. The regex now matches the escaped `&gt;`;
-  a mid-line `>` (a comparison) still stays escaped. Surfaced by the live render probe. `tests/test_hitl.py`.
-- 2026-07-06 — **Telegram plain-reply broken for chunked queries — fixed (found live).** `on_message`'s
-  single-open fallback counted `_pending` *entries*, but a chunked query registers every chunk's `message_id`
-  against the **same** Future — so a 2-chunk message looked like "two open questions" and a plain reply was
-  dropped, silently forcing reply-to (live #7 design review: 4 plain sends ignored). Now dedupes by Future
-  identity (`{id(f): f …}`), so a plain reply resolves a single open query regardless of chunk count. Reply-to
-  routing unchanged. `tests/test_hitl.py::test_telegram_plain_reply_resolves_chunked_single_open`.
-- 2026-07-06 — **[E4] Telegram fast-reply race fixed.** `TelegramHandler.__call__` now registers
-  each posted `message_id → Future` in `_pending` **immediately after its own send** (was: send all
-  chunks, then register all ids). A human reply arriving mid-send — reply-to a chunk, or a single-open
-  plain reply — now resolves the query instead of being dropped and hanging the run to the full
-  `response_timeout_s`. Code-only; no interface change; `tests/test_hitl.py` green.
-- 2026-07-02 — **Telegram live-test stubs.** Added the dedicated opt-in blocking round-trip
-  `tests/test_live_telegram.py` (`AUTO_RESEARCH_LIVE_TELEGRAM=1`; gates on the two Telegram vars
-  only — decoupled from the LLM/ADS keys `check_required_env()` requires, since a Telegram send
-  needs neither; logs the exchange under `logs/dev/`) and wired the recommended channel into the
-  cross-channel send-only `tests/test_live_hitl.py` (`_emit_telegram` starts the `Application`,
-  sends the HTML-rendered chunks, `aclose()`s; best-effort like the other external channels). No
-  connector code changed.
+- 2026-06-15 — Phase 2 step 5: package created. `HumanQuery`/`HumanResponse` protocol; injectable `HumanHandler` + `resolve_human` fail-safe; `resolve_handler` CLI-vs-library auto-detect; CLI/Slack/WhatsApp connectors; `make_human_channel_check` launch ping.
+- 2026-06-16 -> 2026-06-24 — Connector hardening: `WhatsAppHandler` Twilio API-key auth; shared `response_timeout_s()` (default 1h) every channel waits at most; `SlackHandler` construction deferred to `async start()`, single-open plain-reply resolution, benign Socket Mode rotation ERROR downgraded (`_SocketRotationDowngradeFilter`); connector/ping faults translate to named causes with a `cli`/`none` escape hatch.
+- 2026-06-29 — `HumanQuery` carries one Markdown `message` (was `question`+`context`); connectors render per surface (CLI `rich`, Slack `markdown` block with `_chunk` over the 12000-char limit). WhatsApp/Twilio deprecated (bills per message).
+- 2026-07-02 — Telegram connector added — the recommended reliable channel (§12/[E4]): `python-telegram-bot` long polling (outbound-only, no public URL, reconnect-lossless), chosen over unreliable Slack Socket Mode; multi-question reply-to routing (`message_id→Future`) with single-open plain-reply fallback; Markdown→Telegram-HTML render (`_md_to_html`, `_chunk_md`); wired into `build_human_handler`/CLI/preflight; opt-in live tests added.
+- 2026-07-06 — Telegram fixes (found live): `_md_to_html` blockquote render (escape before the structure pass); plain-reply for chunked queries dedupes by Future identity; [E4] each `message_id→Future` registered immediately after its own send so a fast mid-send reply is not dropped.

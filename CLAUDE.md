@@ -755,6 +755,22 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   `DeprecationWarning` on construction, sends the query's Markdown body raw) but prefer
   `human_channel='slack'` (free, renders Markdown via a `markdown` block) or `'cli'` (attended
   terminal, renders via `rich`). Its env-gated live test (`tests/test_live_whatsapp.py`) stays.
+- **Worker `edit_report` formatting is model-dependent (V-4, observed live).** In the V-4 two-round
+  live check (`tests/test_live_report_rounds.py`), a `claude_sonnet_5` worker composing its longer
+  round-2 report crammed the whole report as pseudo-XML into the `summary` argument and left
+  `cited_figures` empty, so *that worker's* report carried no figures (a syntactically-valid but
+  semantically-wrong `edit_report` call — the worker safety net only fires when nothing is written).
+  It did **not** break V-4: the peer GPT worker cited correctly and the lead's cross-iteration
+  catalog accumulation preserved the round-1 figures, so the final adjudicated report still carried
+  figures from both rounds. **Mitigated:** `execute_edit_report` now scans the composed prose for
+  numbered figure references (`Figure N`/`Fig. N`, `_referenced_figure_numbers`) and, when the prose
+  refers to more figures than were placed, appends a **soft note** to its tool output ("…seems to
+  reference Figure(s) […] but attached only N. Did you mean that? …") inviting — not requiring — the
+  model to `review_report` + re-cite (not an error; the report is still saved, and both report tools
+  are budget-free so the model can fix it in-loop if it chooses). Best-effort (a
+  determined mis-format that also omits figure references in prose slips through); it is a source-side
+  nudge at the moment of the slip, not a downstream reviewer check (which cannot see the problem — a
+  misfiled report reads as complete). `tests/test_report_authoring.py::test_edit_report_warns_*`.
 
 ---
 
@@ -778,87 +794,41 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   shared `ask_human`. Lead-driven authoring/resume (`decide_authoring` → consensus issues
   `propose_and_pr(direct_branch="ai")` → registry reload + sandbox restart + workers rerun, capped
   by `tool_author_cap`). Live: `notebooks/usage_example.ipynb` IXPE P1.
-- 2026-06-18 -> 2026-06-26 — **Live-run polish + hardening.** Dispatch mechanics moved into the
-  `ReviewVerdict` schema + manifest-quality `react.py` tool descriptions (reviewer stops pausing for
-  routing/paths); §3 **write only positive actions** (no-fabrication ban excepted); worker→lead
-  `AnalystToolRequest` split from lead→coder `ToolSpec` + `ProposedCheck.params` dropped (OpenAI
-  strict open-map 400, §7); **analysts-author-no-code** prompt policy (analysis via tools, `bash`
-  read-only, missing capability → `tool_request`). Authoring hardened across fix-lists (timeouts,
-  monitor legibility, `fs_guard.PathGuard` `PreToolUse` jail, coder path-hints, coder git-discipline:
-  deny-rule + per-attempt base-ref reset + gate-entry auto-revert). **Gate determinism reworked
-  (§9.4):** per-test JUnit outcome maps, not a byte-compare (`_strip_volatile` removed) — the
-  false-positive that exhausted the rework cap on a correct tool; reproducibility is now a
-  science-tool-only LLM-planned `test_repro…` Layer-B check. **Reviewer is the sole I/O (§9.6):**
-  `analysis → review_analysis` unconditional, the lead's `finalize_authoring_outcome` composes one
-  honest terminal report instead of spinning, and a finalize always documents the outcome. Non-live
-  suite green.
-- 2026-06-29 — **Clarification channels carry one Markdown `message`; rendered per channel
-  ("use the wheel", §1; handoff #1).** `ask_human`, the lead's `plan_and_debate`, and the coder↔lead
-  `ask_lead`/`clarify_for_author` carry free-form NL, so `HumanQuery` drops `question`+`context`
-  (and `plan`) for one Markdown `message` + a derived `headline`; connectors *render* it — **CLI**
-  via `rich`, **Slack** via the dedicated `markdown` block (12000-char, chunked, replacing the
-  2900-char section `_truncate`). **WhatsApp/Twilio deprecated** (bills per message). The boundary
-  held: only the free-text carrier moved to Markdown; the **typed protocol** (`ReviewVerdict`,
-  `AnalystReport`, `ToolSpec`, `FigureRef`, … — code branches on fields, §7) stays Pydantic.
-  Graceful SIGINT/cleanup shutdown (handoff #5) **deferred** into the §12 human-steer + durable
-  suspend/resume bundle (one design for CLI/notebook/library; interim = hard-kill the kernel's
-  process tree). Coverage: `tests/test_{hitl,react_tools,merge_flow}.py`; suite green (365).
-- 2026-07-06 — **§3 coding contract gains "plan and debate before coding."** The build-time
-  agent presents a plan and debates it to agreement before landing edits, except where the
-  human has instructed/permitted a direct proceed; investigating/reading to form the plan is
-  always allowed. Added as the first hard rule (it gates the whole workflow).
-- 2026-07-06 — **Live-run robustness pass** (all additive, `run_research` behavior unchanged):
-  figure bytes now reach models at the multimodal boundary (cross-agent `images=` + inline
-  `ToolResultPart.figures`, live-confirmed); report `\href` display escaping (unattended PDFs);
-  gate Layer-B requires ≥1 PASSED (an all-skipped suite no longer merges untested, §9.4);
-  malformed tool figures are dropped-with-note, not fatal; no-fab scan moved bare ambiguous
-  descriptors (`synthetic`/`illustrative`) to soft co-lead findings. **Detached runs**
-  (`run_research_nohup`, §9.8-adjacent) run the pipeline in a `start_new_session` child so a
-  killed kernel/logout survives; reconnect by a deterministic `run_id`; **not** the §12 durable
-  mid-run resume (still deferred) — this survives *kernel* death, not *backend* death.
-- 2026-07-06 — **[A8] the lead authors the whole tool chain before re-running analysts.** The
-  authoring loop no longer authors one tool then reruns all workers to rediscover the next gap
-  (measured on run 46ed6671: a ~13-min rerun + 2 avoidable HITL rounds for a plotter the lead had
-  *already* foreseen). Now `decide_authoring` returns an **ordered `tool_specs` chain** (was a single
-  `tool_spec`; `AuthoringDecision` gains the codebase's first pydantic validator: `should_author ⇒
-  len(tool_specs) ≥ 1`), and `DebateToConverge._maybe_author_and_resume` authors each tool
-  **sequentially** — each coder + its Layer-B gate seeing the prior tool's committed code (direct-branch
-  mode: `worktree == toolkit_root` on `ai`) — then reloads the registry / restarts sandboxes / reruns
-  workers **once**, after the whole chain. `tool_author_cap` (now 12) bounds total tools; a mid-chain
-  non-commit stops the chain → honest §9.6 terminal; the outer `run()` loop stays the safety net for a
-  missed gap. Workers still surface only the first gap (lead-only chain planning, §9.3); the lead
-  expands to the full chain from the prescription. `prompts/analyst_lead.md` + `decide_authoring`
-  reworded. Deterministic: `test_consensus_authoring.py` (3 new chain tests) + `test_schemas.py`; live:
-  `test_live_loader_authoring.py::test_chain_planning_returns_ordered_chain`.
-- 2026-07-06 — **RAG-retrieval direction set: ChromaDB for three targets (§12 update; deferred).** Reverses the
-  earlier sqlite-vec lean. Beyond literature retrieval (the old `vector_search` stub), the scope now covers a
-  **persistent-memory** store (runtime LLMs lay down findings they judge useful, RAG-retrieved on later runs) and
-  a **tool** index mirroring `TOOL_MANIFEST` (synced after every commit — the `approve_edit` hook — with tools
-  loaded lazily by relevance instead of the whole manifest per agent). `Maitreya_RAG` (ChromaDB+Gemini) is the
-  build reference. Still deferred/not-built — §12/§13 notes updated to ChromaDB.
-- 2026-07-09 — **Gate verifies the diff, not the brief — fixes the `target_domain` doomed-loop
-  ([A12], top live run-killer).** The deterministic gate's `structural.tool_manifest_entry` check
-  and its Layer-B `_gate_test_timeout` no longer build filesystem paths from
-  `ToolSpec.target_domain` — an unvalidated field the Opus lead free-fills in `decide_authoring`
-  and cannot correct in-run (the ToolSpec is frozen once planning ends; a spec-level bug is
-  unwinnable by the executor, which can amend code but not the spec). Run #12 wrote a descriptive
-  label (`"xspec_utils (IXPE polarimetry)"`) → the gate looked in a nonexistent directory →
-  rejected 3× with byte-identical hashes and a misleading "no TOOL_MANIFEST entry" message, killing
-  a correct 4-tool chain (the analysis still finished honestly — moat held). Fix (`sandbox/gate.py`):
-  a new `_touched_packages` helper derives the `*_utils` packages the changeset actually touched
-  from `collect_targets`; the manifest search runs over those packages, and the rejection lists the
-  keys actually present so a name mismatch is diagnosable in round 1. `target_domain`/`disposition`
-  are now purely advisory (coder-brief prose) — no schema change, no decide-time validation, no
-  prompt change; the whole failure class is removed at the gate rather than patched at the plan.
-  This is a slice of [G6] (the gate still does not import/resolve what it certifies — that stays
-  open). `tests/test_gate.py` +2 regressions; suite green.
-- 2026-07-09 — **`open_paper` per-PDF size cap — fixes a live Anthropic 413 run-killer.** A reviewer
-  literature-review run crashed on `RequestTooLargeError` (413) when the Fable reviewer opened a
-  23.5 MB paper: a PDF is attached by value (base64, ~1.33×) to every subsequent model call, so one
-  ultra-high-resolution paper (~31 MB base64) alone ~fills Anthropic's 32 MB request cap, and a second
-  open tipped it over. The `open_paper` handler (`agents/react.py`) now refuses a PDF over
-  `_OPEN_PAPER_MAX_MB`=8 MB (stat-only, before any read) with its size named, so the model cites it
-  from `text_search` metadata instead of attaching it; the tool description states the limit. Chosen
-  from the KB size distribution (p95 ~5.5 MB; 8 MB blocks only the 4 figure-bloated outliers).
-  Prevention at the source; the broader [F6] "degrade the node on a provider error instead of
-  re-raising" stays open as defense-in-depth. `tests/test_react_tools.py` +1; suite green (423).
+- 2026-06-18 -> 2026-06-29 — **Live-run polish + hardening.** Dispatch mechanics moved into the
+  `ReviewVerdict` schema + manifest-quality tool descriptions; §3 **write only positive actions**;
+  worker→lead `AnalystToolRequest` split from lead→coder `ToolSpec` (dropped the OpenAI-strict open
+  map, §7); **analysts-author-no-code** prompt policy; authoring hardened (fs jail, coder
+  git-discipline). **Gate determinism** reworked to per-test JUnit outcome maps (not a byte-compare,
+  §9.4). **Reviewer is the sole I/O (§9.6):** `finalize_authoring_outcome` composes one honest
+  terminal report instead of spinning. **Clarification channels** carry one Markdown `message` +
+  derived `headline` (`HumanQuery` drops `question`/`context`), rendered per channel (CLI `rich`,
+  Slack `markdown` block); WhatsApp/Twilio deprecated; the typed protocol stays Pydantic. Graceful
+  SIGINT/cleanup deferred into the §12 human-steer bundle.
+- 2026-07-06 — **Coding contract, robustness, [A8], RAG direction.** §3 gains **plan-and-debate
+  before coding** (first hard rule). Robustness pass (additive): figure bytes reach models at the
+  multimodal boundary; `\href` display escaping; gate Layer-B requires ≥1 PASSED; malformed figures
+  dropped-with-note; bare no-fab descriptors → soft findings; **detached runs** (`run_research_nohup`)
+  survive a killed kernel (deterministic `run_id`; not the §12 durable resume). **[A8]** the lead
+  authors the whole ordered `tool_specs` chain (first pydantic validator `should_author ⇒ len ≥ 1`)
+  and reruns workers once, not one-tool-then-rerun. **RAG direction** set to ChromaDB for three
+  targets (literature / persistent-memory / tool index) — deferred (§12).
+- 2026-07-09 — **Gate verifies the diff not the brief ([A12]); `open_paper` size cap.** The gate's
+  manifest/timeout checks now derive the target `*_utils` packages from the touched diff
+  (`gate._touched_packages`), not the lead's advisory `ToolSpec.target_domain` — removing the
+  doomed-loop where a descriptive `target_domain` built a nonexistent path and rejected forever (killed
+  run #12's chain; `target_domain` now purely advisory; a [G6] slice). `open_paper` refuses a PDF over
+  `_OPEN_PAPER_MAX_MB`=8 MB (an oversized paper rides by value in every later call and blew Anthropic's
+  413 request cap), citing from `text_search` metadata instead.
+- 2026-07-13 -> 2026-07-14 — **[V-4] inter-LLM reports authored by figure citation (fixes the
+  last-round-only figure leak).** Every analyst report (worker→lead, lead→reviewer) is now a per-round
+  JSONL the agent refines through `edit_report`/`review_report` (analysts stay read-only — the runtime
+  writes). Figures are **cited** by a `{source, index}` handle from an append-only per-source catalog
+  (worker `self`; lead one source per worker) and resolved, in order, to `report.figures` ("Figure k"
+  = k-th cited) — **replacing figure-dedup** (`_deduplicated` removed); the catalog is append-only
+  across rounds AND rework iterations, so no figure is last-round-only. New `FigureCitation` +
+  `FiguredReport` base (`AnalystReport` extends it; `ResearchReport` deferred to reviewer unification,
+  increment 5 — deferred). Consensus passes worker `sources`; provider figure captions rendered
+  verbatim (presentation layer prefixes `Figure N —`/`[source:index]`). `edit_report` emits a soft
+  "did you mean that?" note when the prose references more figures than placed (§13; caught a live
+  Sonnet under-cite that degraded gracefully). Suite green (456); live `test_live_report_rounds.py`
+  (two-round Cyg X-1 replay — the lead's round-2 report carried figures from both rounds).

@@ -72,6 +72,28 @@ resume footer). The `WebSource` client is lazy so attaching it never reads the k
 `SourceToolProvider` (librarian — arXiv/ADS/web + local `text_search`). A role with
 `tools=None` falls back to a plain single structured call.
 
+**Inter-LLM report authoring — `edit_report` / `review_report` (V-4).** Every analyst report
+(worker→lead, lead→reviewer) is a per-round JSONL the agent ReAct-refines **through tools**, so
+analysts keep their read-only discipline (the runtime writes; the agent never touches disk). Both
+providers grow the pair when a `ReportWorkspace` is attached (`report_path` + `report_model` +
+an append-only per-source figure `catalog` + subordinate `source_reports`): `edit_report`
+validates the report args into the model, resolves `cited_figures` (`{source, index}` handles)
+against the catalog → the ordered `figures`, and persists the JSONL; `review_report(source=None)`
+reads the draft back plus the whole citable catalog (every figure attached, `[source:index]`-
+labelled), or a named subordinate's finished report (numbered `Figure N` images). Figures are
+cited, never attached directly: the resolver (`resolve_figure_citations`) drops out-of-range /
+unknown-source citations with a note and keeps a doubly-cited figure once — **citation is the
+de-duplication**. `resolve → figures` runs at the tool boundary; the provider renders each figure
+caption verbatim (the `Figure N —` / `[source:index]` prefix comes from the presentation layer,
+`_report_view` / `_catalog_menu`), so the prose "Figure k" lines up with the k-th attached image.
+The worker's catalog is one source `"self"` (its produced figures, appended live during the loop
+via `figure_sink`); the lead's is one source **per worker** (its cited figures), both append-only
+across debate rounds *and* rework iterations (the agent instances persist), which is what closes
+the "last-round-only figures" leak. Round files are `<role>_<model>_round<n>_report.jsonl`
+(`sandbox.workspace.round_report_path`; `n` = the monotonic debate round). Both tools are
+budget-free in the loop (report authoring, not evidence gathering); a loop that ends without an
+`edit_report` write falls back to one terminal structured compose with the catalog figures attached.
+
 **Raise-to-human (`ask_human`, §9.7/§9.8).** When a `human_handler` is wired, both
 `SandboxToolProvider` and `ReadOnlyToolProvider` expose one shared `ask_human` tool
 (`ask_human_tool_def`/`execute_ask_human` in `react.py`): the role writes a Markdown `message`,
@@ -190,14 +212,18 @@ Role wrappers:
 - `AnalystWorkerAgent(*, sandbox=None, registry=None, memory_path=None, ...)`.
   `AnalystWorkerAgent.analyze(task, *, peer_reports=()) -> AnalystReport` runs the
   inner ReAct loop over a `SandboxToolProvider` (when `sandbox`+`registry` are
-  attached) — chaining toolkit/MCP calls to completion — then composes the report
-  grounded in the tool results, with the loop's figures attached. `last_tool_results`
-  exposes the loop's `ToolResult`s for the consensus peer summary. With no
-  sandbox/registry it falls back to a plain structured call. (`request_tools`/
-  `execute_tools` were removed; the loop subsumes them.)
-- `AnalystLeadAgent.adjudicate(task, reports) -> AnalystReport` — uses a
-  `ReadOnlyToolProvider` loop to inspect run artifacts/figures/memory before
-  synthesizing when `tools` is attached; plain structured call otherwise.
+  attached) — chaining toolkit/MCP calls to completion — then **writes the report via
+  `edit_report`** (V-4), citing figures from its append-only `self` catalog by index; the
+  persisted report is read back. `last_tool_results` exposes the loop's `ToolResult`s for the
+  consensus peer summary. With no sandbox/registry it falls back to a plain structured call; a
+  loop that never calls `edit_report` falls back to one terminal compose with catalog figures
+  attached. `agent_key`/`report_dir` (set by runtime) name its catalog source + report folder.
+- `AnalystLeadAgent.adjudicate(task, reports, *, sources=None) -> AnalystReport` — accumulates
+  each worker's cited figures into a per-worker catalog source (keyed by `sources[i]`, append-only
+  across rounds/iterations), then **writes the adjudicated report via `edit_report`** citing
+  figures by `{worker, index}` when a `ReadOnlyToolProvider` is attached (the workspace is wired
+  onto it only for this call, cleared in `finally`); plain structured call with catalog figures
+  attached otherwise. The lead — not the consensus — now owns the report's figures (V-4).
 - `AnalystLeadAgent.judge_convergence(task, reports, *, round_index,
   max_rounds) -> ReviewVerdict` judges whether worker reports have converged
   enough for final synthesis.
@@ -272,128 +298,51 @@ Role wrappers:
     consensus peer summaries.
   - `is_alive` → `bool` — `True` when no sandbox attached; delegates to
     `sandbox.is_alive` otherwise.
-- `AnalystLeadAgent` — analyst lead wrapper.
-  Methods: `adjudicate()`, `judge_convergence()`, `clarify_for_author()`.
+- `AnalystLeadAgent` — analyst lead wrapper. `agent_key`/`report_dir` (set by runtime) name its
+  report folder; `_figure_catalog` is the per-worker figure catalog (append-only across rounds +
+  iterations). Methods: `adjudicate(task, reports, *, sources=None)` (V-4: accumulate per-worker
+  catalog, write via `edit_report`), `judge_convergence()`, `clarify_for_author()`,
+  `finalize_authoring_outcome()`.
 - `AnalystColeadAgent` — Phase-2 provider-decorrelated co-lead reviewer wrapper.
   Method: `review_tool(tool_spec, *, diff, gate, tools=None) -> ToolReviewVerdict`.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Agent wrappers built and ReAct-wired: reviewer, librarian I/O,
-  analyst worker, analyst lead; native structured output/function calling, bounded schema retries,
+- 2026-05-26 -> 2026-06-12 — Agent wrappers built and ReAct-wired (reviewer, librarian I/O, analyst
+  worker, analyst lead): native structured output/function calling, bounded schema retries,
   `Sandbox`/`ReadOnly`/`SourceToolProvider`, report composition, monitor hooks, `coder` prompt.
-- 2026-06-12 -> 2026-06-18 — **Phase 2 agent support (steps 4–5, 7) + polish.** Lead read-only
-  toolkit inspection + `web_search` + `clarify_for_author` (`ask_lead`); `AnalystWorkerAgent.analyze`
-  the sole tool-execution owner; `AnalystColeadAgent.review_tool → ToolReviewVerdict` +
-  `analyst_colead` role; both providers gained `ask_human`/`human_handler`. `decide_authoring(reports)
-  → AuthoringDecision` (lead sets disposition + finalises one `ToolSpec`; consensus issues
-  `propose_and_pr`, §9.9). Shared read-only `data_catalog` tool; `HumanQuery.model` sender label;
-  `read_file`/`list_dir` self-describe permitted `roots`; literature/web faults degrade to
-  recoverable `is_error`; every `react.py` tool gained manifest-quality descriptions.
-- 2026-06-22 -> 2026-06-23 — **Diagnosability + retrieval + FS jail.** `_react` returns
-  `(messages, figures, documents)` and splits each call into `*.tool_call` (input, pre-exec) +
-  `*.tool_result` (output) events with capped `args`/`text` — a hung tool is visible in the JSONL;
-  `ReadOnlyToolProvider.open_paper` (reviewer reads a candidate before citing; `cited_paths`).
-  `ingest_results` isolates each paper (bad doc → metadata/orphan-memory, never aborts the node).
-  FS jail (todo #3): `ReadOnlyToolProvider` denies governance basenames inside a root,
-  `SandboxToolProvider` holds a `PathGuard.from_config()` gating `bash_exec`/`read_file`/`list_dir`.
-  `analyst_worker.md`: all data ops are toolkit calls, `bash` read-only.
-- 2026-06-24 — **§5.5 lead-drives-design + budget-free `plan_and_debate`.** `_react` gained
-  `free_tools`/`absolute_cap` (`react_loop_cap`=30 bounds budget-consuming iterations only,
-  `react_loop_absolute_cap`=60 backstop); the lead-only `plan_and_debate` design channel
-  (`decide_authoring` opts in). Prompts: settle the design with the human before finalising the brief.
-- 2026-06-26 — **`finalize_authoring_outcome` (handoff #4).** After a non-committed authoring
-  attempt the lead composes ONE honest terminal `AnalystReport` (§9.6) instead of the consensus loop
-  spinning; it flows to the reviewer (sole I/O). `reviewer.md` gained honest-failure adjudication.
-  Coverage `tests/test_{consensus_authoring,graph}.py` + live `tests/test_live_honest_failure.py`.
-- 2026-06-29 — **A1 slice 2: lead-only authoring tools `drive_coder`/`submit_for_review`.**
-  `ReadOnlyToolProvider` gains an `authoring_session` param; when set it exposes the two tools
-  (`drive_coder_tool_def`/`execute_drive_coder`, `submit_tool_def`/`execute_submit`) and dispatches
-  them, else they are hidden **and** denied (the mask — a session is attached only on the lead's
-  provider). `submit_for_review` runs gate → (gate-pass) GPT review → commit on both-pass; the lead
-  never self-approves. They drive the same `AuthoringSession` primitives as `propose_and_pr`. Tests
-  in `tests/test_react_tools.py` (masking, drive routing, the three submit branches). Suite 372 pass.
-- 2026-06-29 — **A1 slice 3: `AnalystLeadAgent.drive_authoring` (the lead drives authoring).**
-  `drive_authoring(tool_spec, *, toolkit_root, worktree_base, direct_branch, colead, human_handler)`
-  builds + connects an `AuthoringSession`, attaches it to a lead-scoped `ReadOnlyToolProvider`
-  (`include_text_search=False`, `authoring_session=…`), seeds the coder with the brief, then runs
-  `_react` over `drive_coder`/`submit_for_review` (free: `submit_for_review` + `plan_and_debate`;
-  ceiling `react_loop_absolute_cap`; submits bounded by `session.submit_cap`), and returns the
-  terminal `MergeFlowResult` read off the session (`committed`/`failed`). Owns the session lifecycle
-  (`aclose` in `finally`). Consensus calls this instead of `propose_and_pr`; `execute_submit` enforces
-  `submit_cap`. Suite 373 pass.
-- 2026-06-29 — **A1 slice 4: the lead↔co-lead debate (`respond_to_review`) + anti-sycophancy.**
-  `AnalystColeadAgent.review_tool` gains `prior_review`/`lead_rebuttal`: when a rebuttal is supplied
-  it **reconsiders** (concede only when genuinely persuaded; hold firm against pressure — the
-  `reconsider_semantics` payload + `prompts/analyst_colead.md`). New lead-only tool
-  `respond_to_review` (`respond_to_review_tool_def`/`execute_respond_to_review`): re-runs the review
-  with the rebuttal; on a concede it **re-validates the gate** then commits (commit ⇔ gate ∧ review
-  holds — the lead persuades, never overrides), bounded by `session.debate_cap`
-  (`tool_author_debate_cap`). Added to the lead's authoring provider + `free_tools`. Tests in
-  `tests/test_react_tools.py` (before-submit error, holds, persuade→regate→commit, debate cap,
-  exposure). Suite 378 pass.
-- 2026-06-29 — **Clarification channels take one Markdown `message`** (was `question`/`context`/
-  `plan`): `ask_human`, `plan_and_debate`, `clarify_for_author`; `execute_plan_and_debate` no longer
-  folds a plan into context. Typed protocol unchanged. Tests `tests/test_{hitl,react_tools}.py`.
-- 2026-06-30 — **Authoring finalization is prompt-borne, not a code nudge loop.** Dropped the
-  `_drive_authoring_loop` nudge-on-uncommitted-stop loop (+ `_drive_authoring_nudge_cap` and config
-  `tool_author_drive_nudge_cap`) per CLAUDE.md §1: `drive_authoring` now runs a single `_react`, and
-  `submit_for_review`'s tool description (`submit_tool_def`) states it is the **sole** finalization
-  path — stopping without it discards the work — so a bare no-tool stop is a deliberate honest
-  give-up. Decided after the sonnet-5 live loader run (`logs/dev/P2/loader-test/…140117`) showed the
-  lead called `submit_for_review` 18× on its own and the nudge fired 0× (the run-1 narrate-and-stop
-  did not recur). Tests `tests/test_{react_tools,merge_flow}.py`.
-- 2026-07-06 — **A malformed tool figure is dropped, not fatal ([F4]).** `SandboxToolProvider.execute`
-  parsed returned figures with a bare `[FigureRef.model_validate(f) for f in …]` — one bad dict (invalid
-  `sha256`, an extra key under `extra="forbid"`, a missing/empty field, a bad `created_at`) raised
-  `ValidationError` out of `execute()`, and neither `_react` nor `analysis_node` guards it, so the **whole
-  run crashed** — most likely on a freshly authored plotter, and contradicting `coder.md`'s promise that a
-  bad figure "is dropped." Now routed through `_parse_tool_figures(raw)` (also guards a non-list `figures`):
-  each bad entry is dropped and a `"[figure capture: N dropped] …"` note is appended to the tool's returned
-  text so the analyst notices and can fix its plotter. Tests: `test_sandbox.py::TestSandboxToolProvider::
-  test_{malformed_figure_dropped_not_fatal,parse_tool_figures_helper}`.
-- 2026-07-06 — **[A8] `decide_authoring` plans the whole ordered chain.** It now returns
-  `AuthoringDecision.tool_specs` (the ordered dependency chain — acquire → reduce → analyse → plot) it
-  plans up front from the full analysis prescription, not a single first-gap `ToolSpec`; the payload
-  prompt and the method docstring say so. Consensus authors the chain sequentially and reruns workers
-  once (consensus/DOCS.md, A8). `finalize_authoring_outcome` still takes the single failed tool.
-  `prompts/analyst_lead.md` reworded (plan the whole chain). Live check:
-  `tests/test_live_loader_authoring.py::test_chain_planning_returns_ordered_chain`.
-- 2026-07-09 — **`open_paper` per-PDF size limit (`_OPEN_PAPER_MAX_MB`=8 MB).** An opened PDF is
-  attached by value (base64, ~1.33×) to every subsequent model call, so one ultra-high-resolution
-  paper can exhaust a provider's request-size budget on its own and hard-fail the call — a live
-  Anthropic 413 killed a run when the reviewer opened a 23.5 MB paper (~31 MB base64, ~the 32 MB cap).
-  The `open_paper` handler now refuses a PDF over the limit (stat-only check, before any read) with
-  its size named, so the model cites it from `text_search` metadata instead of attaching it; the tool
-  description states the limit too. 8 MB clears every normal paper (KB p95 ~5.5 MB) and blocks only the
-  figure-bloated outliers. Not counted against `_OPEN_PAPER_CAP`. Test:
-  `tests/test_react_tools.py::test_open_paper_rejects_oversized_pdf`.
-- 2026-07-13 — **[I1] `web_search` wired to reviewer + analyst lead + analyst worker (was co-lead
-  only).** The tool machinery existed in `ReadOnlyToolProvider` but only the co-lead was given a
-  `web_source`, so three roles whose prompts promise web access silently lacked it. Factored the
-  provider-neutral `web_search_tool_def()` + `execute_web_search()` helpers (mirroring the
-  `ask_human`/`data_catalog` pattern); `ReadOnlyToolProvider` now reuses them, and
-  `SandboxToolProvider` gained a `web_source` param + the tool (worker path). `graph.runtime` builds
-  one `WebSource()` and passes it to the reviewer + lead providers (the lead's authoring-loop provider
-  copies it); the worker provider gets one at `analyze()`. The tool is present iff a `web_source` is
-  attached and degrades a Tavily fault to an error outcome. Tests:
-  `tests/test_react_tools.py::{test_web_search_exposed_only_with_web_source,test_web_search_routes_query_and_degrades_on_fault,test_web_source_constructs_without_key}`.
-- 2026-07-13 — **[F8] `ReadOnlyToolProvider.read_file` reads by line range (was a silent char head-cut).**
-  The reviewer/lead/co-lead reader used to return `read_text()[:max_chars]` (8000 chars, no signal) — the
-  lead read long toolkit source blind (#12, couldn't see past the `load_data` window). New module helper
-  `_read_lines(path, offset, limit)` returns a `cat -n`-numbered window (default `_DEFAULT_LINE_LIMIT`=1000
-  lines, each capped to `_MAX_LINE_CHARS`=2000) with a footer naming the next `offset` when more remains, so
-  paging is explicit and truncation is never silent. The `read_file` tool def gained `offset`/`limit` and a
-  text-only note (PDFs → `open_paper`); `self.max_chars` is retained (still used by `web_search`). Worker
-  `read_file` (the builtin) is unchanged — its data-CSV reads rarely truncate; the executer/source-read
-  boundary is tracked separately (handoff [F10], deferred). Tests: `tests/test_react_tools.py::{test_read_lines_*,
-  test_read_file_tool_exposes_offset_limit}` incl. a full-coverage paging reconstruction.
-- 2026-07-13 — **[I10] web_search de-capped + new `web_fetch` (search→fetch second layer).**
-  `execute_web_search` no longer clips each snippet to 300 chars nor the joined blob to 8000 — Tavily's
-  query-aware snippets are already concise and the top-k `limit` is the only cap; `ReadOnlyToolProvider.max_chars`
-  (its last user) is **retired**. New shared `web_fetch_tool_def()` + `execute_web_fetch()` read one page in full
-  as Markdown via `WebSource.fetch` (Tavily Extract, `depth="advanced"` default, `basic` overridable), paged by the
-  shared `_page_text_lines` core (`_read_lines` refactored onto it) with a `web_fetch` resume footer; links in the
-  markdown let a role chain `web_fetch` on a nested reference. Wired to reviewer/lead/worker/co-lead via both
-  providers, gated on `web_source`; faults/empty extract degrade to an error/soft outcome. Provider-native web
-  tools behind each adapter remain deferred (handoff [I11]). Tests: `tests/test_react_tools.py::{test_web_search_returns_full_snippet_uncapped,
-  test_web_fetch_*, test_web_source_fetch_extracts_raw_content}`; live `tests/test_live_web_fetch.py`.
+- 2026-06-12 -> 2026-06-18 — **Phase 2 agent support (steps 4–5, 7) + polish.** Lead read-only toolkit
+  inspection + `web_search` + `clarify_for_author` (`ask_lead`); `AnalystWorkerAgent.analyze` the sole
+  tool-execution owner; `AnalystColeadAgent.review_tool → ToolReviewVerdict` + `analyst_colead` role;
+  both providers gained `ask_human`/`human_handler`; `decide_authoring → AuthoringDecision`; shared
+  `data_catalog`; self-describing `roots`; source faults degrade to recoverable `is_error`;
+  `HumanQuery.model` sender label; manifest-quality `react.py` tool descriptions.
+- 2026-06-22 -> 2026-06-24 — **Diagnosability, FS jail, lead-drives-design.** `_react` returns
+  `(messages, figures, documents)` and splits each call into `*.tool_call`/`*.tool_result` events;
+  `ReadOnlyToolProvider.open_paper` (`cited_paths`); `ingest_results` isolates each paper (bad doc →
+  orphan memory); FS jail (`ReadOnlyToolProvider` denies governance basenames, `SandboxToolProvider`
+  `PathGuard`); `_react` gained `free_tools`/`absolute_cap` (`react_loop_cap`=30,
+  `react_loop_absolute_cap`=60) + the lead-only budget-free `plan_and_debate` channel; prompts settle
+  the design and keep `bash` read-only.
+- 2026-06-26 -> 2026-06-30 — **Lead-driven authoring + honest failure.** `finalize_authoring_outcome`
+  composes ONE honest terminal `AnalystReport` (§9.6) instead of the consensus loop spinning; lead-only
+  authoring tools `drive_coder`/`submit_for_review`/`respond_to_review` + `AnalystLeadAgent.drive_authoring`
+  drive an `AuthoringSession` directly (gate → GPT review → commit; lead↔co-lead debate with
+  anti-sycophancy; commit ⇔ gate ∧ review); clarification channels take one Markdown `message` (dropped
+  `question`/`context`/`plan`); finalization is prompt-borne (`submit_for_review` the sole path, the
+  nudge loop dropped).
+- 2026-07-06 — **Malformed figure non-fatal ([F4]); whole-chain authoring ([A8]).** Returned figures
+  route through `_parse_tool_figures` (a bad figure is dropped with a note, not fatal); `decide_authoring`
+  returns the ordered `AuthoringDecision.tool_specs` chain planned up front, not a single `ToolSpec`.
+- 2026-07-09 — **`open_paper` per-PDF size limit (`_OPEN_PAPER_MAX_MB`=8 MB).** A PDF over the limit is
+  refused (stat-only, before read) with its size named — an opened PDF rides by value in every later model
+  call and one huge paper can exhaust a provider's request-size cap (a live Anthropic 413).
+- 2026-07-13 — **Web tools wired + read-by-line ([I1]/[I10]/[F8]).** `web_search` wired to reviewer +
+  lead + worker (was co-lead only) and de-capped, plus a new `web_fetch` (one page in full as Markdown,
+  paged); `ReadOnlyToolProvider.read_file` reads by line range (`_read_lines`, `cat -n` window + resume
+  footer) instead of a silent char head-cut.
+- 2026-07-14 — **V-4: inter-LLM reports authored by citation (`edit_report`/`review_report`).** Both
+  `react.py` providers grow the pair when a `ReportWorkspace` is attached; `edit_report` resolves
+  `cited_figures` ({source,index}) → ordered `figures` and persists the per-round JSONL, `review_report`
+  reads the draft + catalog back. `AnalystWorkerAgent.analyze` writes via `edit_report` (its `self`
+  catalog); `AnalystLeadAgent.adjudicate(…, sources=)` cites by `{worker, index}`. Citation replaces
+  figure-dedup, closing the last-round-only leak.

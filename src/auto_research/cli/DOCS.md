@@ -44,13 +44,10 @@ the run, and prints the final `ReviewVerdict`.
 - `auto_research.__main__` — module entry point for `python -m auto_research`.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — CLI supports `python -m auto_research`, chatter control,
-  JSON/text output, monitor JSONL/Markdown paths, repeatable report formats, report artifact
-  printing, `.env` loading, and required-key validation before the run starts.
-- 2026-06-12 — Compacted changelog; no CLI behavior changes.
-- 2026-06-15 — Streaming + preflight + raise-to-human. CLI now constructs a streaming
-  `RunMonitor` (concise live stderr progress; JSON stdout preserved for `--format json`) and
-  shares dotenv loading via `check_required_env()`. The full launch checklist moved into the
-  now-async preflight owned by `run_research` (env + Phase-2 author↔reviewer decorrelation +
-  channel ping), so the CLI no longer calls it directly. Phase 2 step 5 added
-  `--human {auto,cli,none,slack,whatsapp}` → `run_research(human_channel=…)`.
+- 2026-05-26 -> 2026-06-12 — CLI (`python -m auto_research`) supports chatter control, JSON/text
+  output, monitor JSONL/Markdown paths, repeatable report formats, report artifact printing,
+  `.env` loading, and required-key validation before the run starts.
+- 2026-06-15 — Streaming + preflight + raise-to-human: CLI constructs a streaming `RunMonitor`
+  (concise live stderr progress; JSON stdout preserved for `--format json`) and shares dotenv via
+  `check_required_env()`; the launch checklist moved into the now-async preflight owned by
+  `run_research`; added `--human {auto,cli,none,slack,whatsapp}` → `run_research(human_channel=…)`.

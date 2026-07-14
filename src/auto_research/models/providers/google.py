@@ -89,10 +89,13 @@ def _figure_parts(figure: FigureRef, types: Any) -> list:
     """Render one figure as Gemini ``Part``s: a caption then the image bytes.
 
     Loading bytes here is the multimodal boundary — the only place a figure's pixels
-    enter a request (elsewhere figures travel as lightweight ``FigureRef``).
+    enter a request (elsewhere figures travel as lightweight ``FigureRef``). The caption is
+    rendered verbatim: the presentation layer may prefix it with the report-local number
+    ("Figure 1 — …") or the catalog handle ("[analyst_worker_0:2] …") so prose lines up
+    with the images (V-4).
     """
     return [
-        types.Part.from_text(text=f"Figure — {figure.caption} (produced by {figure.produced_by})"),
+        types.Part.from_text(text=f"{figure.caption} (produced by {figure.produced_by})"),
         types.Part.from_bytes(data=figure.path.read_bytes(), mime_type=figure.mime_type),
     ]
 

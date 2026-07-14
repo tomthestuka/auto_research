@@ -132,11 +132,14 @@ def _figure_items(figure: FigureRef) -> list[dict]:
     """Render one figure as Responses-API content items: a caption then the image bytes.
 
     Loading bytes here is the multimodal boundary — the only place a figure's pixels
-    enter a request (elsewhere figures travel as lightweight ``FigureRef``).
+    enter a request (elsewhere figures travel as lightweight ``FigureRef``). The caption is
+    rendered verbatim: the presentation layer may prefix it with the report-local number
+    ("Figure 1 — …") or the catalog handle ("[analyst_worker_0:2] …") so prose lines up
+    with the images (V-4).
     """
     data = base64.b64encode(figure.path.read_bytes()).decode("ascii")
     return [
-        {"type": "input_text", "text": f"Figure — {figure.caption} (produced by {figure.produced_by})"},
+        {"type": "input_text", "text": f"{figure.caption} (produced by {figure.produced_by})"},
         {"type": "input_image", "image_url": f"data:{figure.mime_type};base64,{data}"},
     ]
 

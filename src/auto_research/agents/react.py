@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -20,7 +21,13 @@ from typing import Any, Protocol
 
 from auto_research.observations import load_observations_config
 from auto_research.sandbox.fs_guard import GOVERNANCE_BASENAMES, PathGuard
-from auto_research.schemas import DocumentRef, FigureRef, ToolResult, document_from_file
+from auto_research.schemas import (
+    DocumentRef,
+    FigureCitation,
+    FigureRef,
+    ToolResult,
+    document_from_file,
+)
 
 
 # Figure-output arguments, by naming convention → the extension the toolkit expects.
@@ -413,6 +420,409 @@ async def execute_web_fetch(web_source: Any | None, arguments: Mapping[str, Any]
 
 
 # ----------------------------------------------------------------------------
+# Inter-LLM report authoring — edit_report / review_report (V-4). Every analyst report
+# (worker→lead, lead→reviewer) is a per-round JSONL the agent ReAct-refines through TOOLS,
+# so analysts keep their read-only discipline (the runtime writes; the agent never touches
+# disk). Figures are cited by a per-source catalog handle ([source:index]); the runtime
+# resolves cited_figures → the ordered report.figures (Figure 1 = figures[0]). Wired onto
+# both providers via a ReportWorkspace (report path + citable catalog + subordinate reports).
+# ----------------------------------------------------------------------------
+
+EDIT_REPORT_TOOL = "edit_report"
+REVIEW_REPORT_TOOL = "review_report"
+
+
+@dataclass
+class ReportWorkspace:
+    """Per-round report-authoring state wired onto a provider for edit_report/review_report.
+
+    The disciplined write path: the agent never writes files — ``edit_report`` validates its
+    args into ``report_model``, resolves ``cited_figures`` against ``catalog``, and writes the
+    per-round JSONL to ``report_path``. ``review_report`` reads the draft back and shows the
+    citable catalog (all its figures attached as images). ``catalog`` maps a source name
+    (``"self"`` for a worker; worker keys for the lead) → that source's append-only figure list;
+    ``source_reports`` holds subordinate reports for ``review_report(source)``; ``prior_report``
+    is the agent's own last-round report (the base ``review_report(None)`` shows before any edit
+    this round); ``written_report`` is set by ``edit_report`` so ``analyze``/``adjudicate`` read
+    the persisted result back.
+    """
+
+    report_path: Path
+    report_model: type  # e.g. AnalystReport — validated in execute_edit_report
+    catalog: dict[str, list[FigureRef]]
+    own_source: str = "self"
+    source_reports: dict[str, Any] = field(default_factory=dict)
+    prior_report: Any | None = None
+    written_report: Any | None = None
+    # Fields carried through edit_report from the tool args onto the report model (report-shape
+    # specific; AnalystReport today). cited_figures/figures are handled separately (FiguredReport).
+    prose_fields: tuple[str, ...] = ("summary", "findings", "uncertainty", "status", "tool_request")
+
+
+# Matches a numbered figure reference in prose — "Figure 1", "Fig. 2", "Fig 3", "figs 4" —
+# the convention the model is told to use ("refer to the k-th as 'Figure k'"). Word-boundary
+# anchored so it never fires inside words like "configure".
+_FIGURE_REF_RE = re.compile(r"\bfig(?:ure)?s?\.?\s*(\d+)", re.IGNORECASE)
+
+
+def _referenced_figure_numbers(*texts: str | None) -> set[int]:
+    """Figure numbers the prose refers to (e.g. {1, 2} for a report that says "Figure 1 … Fig. 2")."""
+    numbers: set[int] = set()
+    for text in texts:
+        if not text:
+            continue
+        for match in _FIGURE_REF_RE.findall(text):
+            try:
+                numbers.add(int(match))
+            except ValueError:  # pragma: no cover — regex guarantees digits
+                pass
+    return numbers
+
+
+def resolve_figure_citations(
+    cited: Sequence[FigureCitation], catalog: Mapping[str, list[FigureRef]]
+) -> tuple[list[FigureRef], list[str]]:
+    """Resolve ``{source, index}`` citations to real ``FigureRef``s against ``catalog``.
+
+    Out-of-range / unknown-source citations are dropped with a note (never fatal); a figure
+    cited twice keeps its first placement (first-wins). Returns ``(figures, drop_notes)`` — the
+    ordered resolved list (report-local Figure 1..M) and human-readable drop reasons.
+    """
+    figures: list[FigureRef] = []
+    notes: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for c in cited:
+        lst = catalog.get(c.source)
+        if lst is None:
+            have = ", ".join(k for k, v in catalog.items() if v) or "none"
+            notes.append(f"{c.source}:{c.index} — unknown source (citable sources: {have})")
+            continue
+        if not (1 <= c.index <= len(lst)):
+            notes.append(f"{c.source}:{c.index} — out of range (source '{c.source}' has {len(lst)})")
+            continue
+        fig = lst[c.index - 1]
+        key = (str(fig.path), fig.sha256)
+        if key in seen:
+            continue
+        seen.add(key)
+        figures.append(fig)
+    return figures, notes
+
+
+def _catalog_menu(catalog: Mapping[str, list[FigureRef]]) -> tuple[str, list[FigureRef]]:
+    """Render the citable catalog as a per-source menu (text) + display-copy images.
+
+    Each figure is addressed by its selection handle ``[source:index]`` — both in the text and
+    on the image caption — so the model picks unambiguously. Empty sources are skipped.
+    """
+    lines: list[str] = []
+    images: list[FigureRef] = []
+    for source, figs in catalog.items():
+        if not figs:
+            continue
+        lines.append(f"Source {source} ({len(figs)} figure(s)):")
+        for i, fig in enumerate(figs, 1):
+            lines.append(f"  [{source}:{i}] {fig.caption}  (from {fig.produced_by})")
+            images.append(fig.model_copy(update={"caption": f"[{source}:{i}] {fig.caption}"}))
+    return ("\n".join(lines) or "(no figures produced yet)"), images
+
+
+def _report_view(report: Any) -> tuple[str, list[FigureRef]]:
+    """Render a finished report as prose + a numbered ``Figure N`` manifest + display-copy images.
+
+    The report-local numbering (Figure 1 = ``figures[0]``) matches the prose, and each attached
+    image caption is prefixed ``Figure N —`` so the reader lines images up with the prose (V-4).
+    """
+    parts: list[str] = []
+    summary = getattr(report, "summary", None)
+    if summary:
+        parts.append(f"summary: {summary}")
+    findings = getattr(report, "findings", None)
+    if findings:
+        parts.append("findings:\n" + "\n".join(f"  - {x}" for x in findings))
+    uncertainty = getattr(report, "uncertainty", None)
+    if uncertainty:
+        parts.append(f"uncertainty: {uncertainty}")
+    status = getattr(report, "status", None)
+    if status and status != "ok":
+        parts.append(f"status: {status}")
+    images: list[FigureRef] = []
+    figures = getattr(report, "figures", None) or []
+    if figures:
+        manifest = ["figures in this report:"]
+        for n, fig in enumerate(figures, 1):
+            manifest.append(f"  Figure {n}: {fig.caption}  (from {fig.produced_by})")
+            images.append(fig.model_copy(update={"caption": f"Figure {n} — {fig.caption}"}))
+        parts.append("\n".join(manifest))
+    return ("\n\n".join(parts) or "(empty report)"), images
+
+
+def edit_report_tool_def() -> dict:
+    """Definition for ``edit_report`` — the disciplined write path for an ``AnalystReport``.
+
+    The agent supplies the whole report each call (a call overwrites the last), citing figures by
+    their ``[source:index]`` catalog handle in ``cited_figures``; the runtime resolves and places
+    exactly those, in order, and the agent refers to the k-th as "Figure k" in its prose.
+    """
+    return {
+        "name": EDIT_REPORT_TOOL,
+        "description": (
+            "Write (or rewrite) your report — this is the ONLY way it is saved; you never write "
+            "files yourself. Provide the full report each call (a call overwrites the last), so "
+            "refine across calls. Cite figures in 'cited_figures' by the [source:index] handle "
+            "from review_report, IN THE ORDER you want them shown — the runtime places exactly "
+            "those and you refer to the k-th as 'Figure k' in your prose; a figure you omit is "
+            "dropped. After writing, call review_report to see the placement and refine until "
+            "every figure is in the right place."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "The report summary (prose). Refer to figures as 'Figure 1', 'Figure 2', "
+                        "… matching the order of cited_figures."
+                    ),
+                },
+                "findings": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Key findings, each a self-contained prose string.",
+                },
+                "cited_figures": {
+                    "type": "array",
+                    "description": (
+                        "Figures to place, in citation order. Pick from review_report's catalog by "
+                        "its [source:index] handle; 'Figure k' in your prose is the k-th entry here."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source": {
+                                "type": "string",
+                                "description": "Catalog source, e.g. 'self' or 'analyst_worker_0'.",
+                            },
+                            "index": {
+                                "type": "integer",
+                                "description": "1-based slot within that source (its [source:index] number).",
+                            },
+                        },
+                        "required": ["source", "index"],
+                    },
+                },
+                "uncertainty": {
+                    "type": "string",
+                    "description": "The dominant uncertainties / caveats (optional).",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["ok", "failed", "needs_human"],
+                    "description": (
+                        "'ok' when you completed the work; 'failed' / 'needs_human' are honest, "
+                        "penalty-free outcomes — never fabricate a result to force 'ok'."
+                    ),
+                },
+                "tool_request": {
+                    "type": "object",
+                    "description": (
+                        "Raise ONLY when the toolkit lacks a capability the task needs (or an "
+                        "existing tool misbehaves); otherwise omit. The analyst lead finalises the "
+                        "tool from this."
+                    ),
+                    "properties": {
+                        "request_kind": {
+                            "type": "string",
+                            "enum": ["new_capability", "fix_existing"],
+                        },
+                        "science_context": {
+                            "type": "string",
+                            "description": "What is being measured; why the toolkit can't do it.",
+                        },
+                        "expected_behavior": {
+                            "type": "string",
+                            "description": "Prose signature + I/O the tool should provide.",
+                        },
+                        "proposed_tool_name": {
+                            "type": "string",
+                            "description": "A suggested tool/function name (the lead may rename).",
+                        },
+                        "observed_issue": {
+                            "type": "string",
+                            "description": "For fix_existing: the wrong/surprising behaviour observed.",
+                        },
+                        "validation_data": {
+                            "type": "array",
+                            "description": "At least one real ObsID the tool's checks run against.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "mission": {"type": "string"},
+                                    "obsid": {"type": "string"},
+                                    "synthetic": {"type": "boolean"},
+                                },
+                                "required": ["mission", "obsid"],
+                            },
+                        },
+                        "notes": {"type": "string"},
+                    },
+                    "required": [
+                        "science_context",
+                        "expected_behavior",
+                        "proposed_tool_name",
+                        "validation_data",
+                    ],
+                },
+            },
+            "required": ["summary"],
+        },
+    }
+
+
+def review_report_tool_def() -> dict:
+    """Definition for ``review_report`` — read a report back with its figures attached (V-4)."""
+    return {
+        "name": REVIEW_REPORT_TOOL,
+        "description": (
+            "Read a report back with its figures attached as images. Call with no argument to see "
+            "your own current draft plus every figure you can cite (each labelled [source:index]) "
+            "— use it to check that each figure is placed right, then edit_report again to refine. "
+            "Pass 'source' (e.g. 'analyst_worker_0') to read a subordinate's finished report."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "description": (
+                        "Whose report to read: omit for your own draft + your citable catalog; a "
+                        "worker key to read that worker's finished report."
+                    ),
+                },
+            },
+        },
+    }
+
+
+async def execute_edit_report(
+    workspace: ReportWorkspace | None, arguments: Mapping[str, Any]
+) -> ToolOutcome:
+    """Validate the report args, resolve figure citations, persist the per-round JSONL (V-4).
+
+    The single disciplined write path: the agent never touches disk. A shape/validation error
+    degrades to an error outcome so the model self-corrects in the loop.
+    """
+    if workspace is None:
+        return ToolOutcome(text="edit_report is not available for this role.", is_error=True)
+    cited: list[FigureCitation] = []
+    for entry in arguments.get("cited_figures") or []:
+        try:
+            cited.append(FigureCitation.model_validate(entry))
+        except Exception as exc:  # noqa: BLE001 — bad handle → tell the model to fix it
+            return ToolOutcome(
+                text=f"edit_report: bad cited_figures entry {entry!r}: {exc}", is_error=True
+            )
+    figures, drop_notes = resolve_figure_citations(cited, workspace.catalog)
+    fields: dict[str, Any] = {
+        key: arguments[key]
+        for key in workspace.prose_fields
+        if key in arguments and arguments[key] is not None
+    }
+    fields["cited_figures"] = [c.model_dump() for c in cited]
+    fields["figures"] = [f.model_dump(mode="json") for f in figures]
+    try:
+        report = workspace.report_model.model_validate(fields)
+    except Exception as exc:  # noqa: BLE001 — off-schema report → self-correct and call again
+        return ToolOutcome(
+            text=f"edit_report: the report did not validate — fix and call again: {exc}",
+            is_error=True,
+        )
+    workspace.report_path.parent.mkdir(parents=True, exist_ok=True)
+    workspace.report_path.write_text(report.model_dump_json() + "\n", encoding="utf-8")
+    workspace.written_report = report
+
+    lines = [f"Report saved — {len(report.figures)} figure(s) placed:"]
+    for n, fig in enumerate(report.figures, 1):
+        lines.append(f"  Figure {n}: {fig.caption}")
+    if drop_notes:
+        lines.append("Citations dropped (fix or re-cite): " + "; ".join(drop_notes))
+    placed = {(str(f.path), f.sha256) for f in report.figures}
+    uncited = [
+        f"[{source}:{i}] {fig.caption}"
+        for source, figs in workspace.catalog.items()
+        for i, fig in enumerate(figs, 1)
+        if (str(fig.path), fig.sha256) not in placed
+    ]
+    if uncited:
+        lines.append(
+            "Not cited (dropped from the report, still citable): " + "; ".join(uncited)
+        )
+
+    # Figure-reference guard: if the prose refers to figures the report did not place, warn so the
+    # model re-cites (a warning, not an error — the report is saved). Catches the failure where a
+    # model narrates "Figure 1 … Figure 4" in the summary but leaves cited_figures empty/short, so
+    # the referenced figures point at nothing (CLAUDE.md §13). Both tools are budget-free, so the
+    # model can immediately review_report + edit_report again to fix placement.
+    referenced = _referenced_figure_numbers(
+        getattr(report, "summary", None),
+        *(getattr(report, "findings", None) or []),
+        getattr(report, "uncertainty", None),
+    )
+    n_placed = len(report.figures)
+    if referenced and (n_placed == 0 or max(referenced) > n_placed):
+        catalog_has = any(figs for figs in workspace.catalog.values())
+        lines.append(
+            f"Note: your report seems to reference Figure(s) {sorted(referenced)} but attached "
+            f"only {n_placed}. Did you mean that? If you want those figures shown, add them to "
+            "cited_figures"
+            + (
+                " — you can call review_report to see your catalog and what will be presented."
+                if catalog_has
+                else " (there are no figures in your catalog yet)."
+            )
+        )
+    return ToolOutcome(text="\n".join(lines))
+
+
+async def execute_review_report(
+    workspace: ReportWorkspace | None, arguments: Mapping[str, Any]
+) -> ToolOutcome:
+    """Read a report back with figures attached (V-4).
+
+    No ``source`` → the agent's own current draft + its citable catalog (every figure attached,
+    ``[source:index]``-labelled). A ``source`` → that subordinate's finished report (numbered
+    ``Figure N`` images). Always attaches figures, unified for self- and upper-review.
+    """
+    if workspace is None:
+        return ToolOutcome(text="review_report is not available for this role.", is_error=True)
+    source = str(arguments.get("source") or "").strip()
+    if source and source not in ("self", workspace.own_source):
+        report = workspace.source_reports.get(source)
+        if report is None:
+            have = ", ".join(workspace.source_reports) or "none"
+            return ToolOutcome(
+                text=f"review_report: no report for source '{source}' (available: {have})",
+                is_error=True,
+            )
+        text, images = _report_view(report)
+        return ToolOutcome(text=f"Report from {source}:\n\n{text}", figures=images)
+
+    draft = workspace.written_report or workspace.prior_report
+    if draft is not None:
+        draft_text, _ = _report_view(draft)
+        header = "Your current report draft:\n\n" + draft_text
+    else:
+        header = "You have not written a report yet — call edit_report to write one."
+    menu_text, menu_images = _catalog_menu(workspace.catalog)
+    text = (
+        header
+        + "\n\n--- figures you can cite (pick by [source:index], in the order you want them shown) ---\n"
+        + menu_text
+    )
+    return ToolOutcome(text=text, figures=menu_images)
+
+
+# ----------------------------------------------------------------------------
 # Lead-only tool-authoring tools (§9.3, B-topology). The analyst lead drives a live
 # AuthoringSession: it steers the Sonnet coder (drive_coder), submits to the deterministic
 # gate + GPT co-lead review (submit_for_review), and — slice 4 — debates a review challenge
@@ -722,12 +1132,21 @@ class SandboxToolProvider:
         web_source: Any | None = None,
         asked_by: str = "analyst_worker",
         model: str = "",
+        figure_sink: list[FigureRef] | None = None,
+        report_workspace: ReportWorkspace | None = None,
     ) -> None:
         self.registry = registry
         self.sandbox = sandbox
         self.cwd = cwd
         # When a human_handler is wired, expose the shared ask_human tool (§9.7).
         self.human_handler = human_handler
+        # V-4: the agent's append-only figure catalog (its "self" source). Figures produced by
+        # tool calls are appended here (deduped by path+sha), so they persist across debate rounds
+        # and the agent can cite them by [self:index] via review_report/edit_report.
+        self.figure_sink = figure_sink
+        # V-4: the per-round report-authoring workspace. When set, exposes edit_report/review_report
+        # so the worker ReAct-refines its report through tools (never writing files itself).
+        self.report_workspace = report_workspace
         # Optional Tavily/web QuerySource — when supplied, exposes the shared web_search tool so
         # the worker can confirm an authoritative-doc point (mission threads, calibration memos)
         # rather than guessing (its prompt promises this). In-process, never in the sandbox.
@@ -753,6 +1172,9 @@ class SandboxToolProvider:
         if self.web_source is not None:
             defs.append(web_search_tool_def())
             defs.append(web_fetch_tool_def())
+        if self.report_workspace is not None:
+            defs.append(edit_report_tool_def())
+            defs.append(review_report_tool_def())
         return defs
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
@@ -766,6 +1188,10 @@ class SandboxToolProvider:
             return await execute_web_search(self.web_source, arguments)
         if name == WEB_FETCH_TOOL:
             return await execute_web_fetch(self.web_source, arguments)
+        if name == EDIT_REPORT_TOOL:
+            return await execute_edit_report(self.report_workspace, arguments)
+        if name == REVIEW_REPORT_TOOL:
+            return await execute_review_report(self.report_workspace, arguments)
         kind = self.registry.kind_for_function(name)
         args = dict(arguments)
         if kind == "mcp.builtin.bash_exec" and "cwd" not in args and self.cwd is not None:
@@ -819,6 +1245,15 @@ class SandboxToolProvider:
 
         raw = _normalize_tool_raw(raw)
         figures, figure_notes = _parse_tool_figures(raw.get("figures"))
+        # V-4: accumulate produced figures into the agent's append-only "self" catalog (deduped by
+        # path+sha), so they persist across rounds and stay citable via review_report/edit_report.
+        if self.figure_sink is not None and figures:
+            existing = {(str(f.path), f.sha256) for f in self.figure_sink}
+            for fig in figures:
+                key = (str(fig.path), fig.sha256)
+                if key not in existing:
+                    existing.add(key)
+                    self.figure_sink.append(fig)
         result = ToolResult(
             tool_name=kind,
             stdout=raw.get("stdout", ""),
@@ -936,12 +1371,17 @@ class ReadOnlyToolProvider:
         include_data_catalog: bool = False,
         include_plan_and_debate: bool = False,
         authoring_session: Any | None = None,
+        report_workspace: ReportWorkspace | None = None,
         human_handler: Any | None = None,
         asked_by: str = "agent",
         model: str = "",
     ) -> None:
         self.roots = [Path(r).resolve() for r in roots]
         self.retrieval = retrieval
+        # V-4: the analyst lead's per-round report-authoring workspace (edit_report/review_report).
+        # Set per adjudication by the lead (its per-worker figure catalog + subordinate reports);
+        # None outside adjudication (so decide_authoring/drive_authoring never see the report tools).
+        self.report_workspace = report_workspace
         # The analyst lead (only) drives tool authoring via a live AuthoringSession (§9.3
         # B-topology): drive_coder / submit_for_review. Masked to the lead alone — a session is
         # wired here only on the lead's provider; no other role sees the tools. None ⇒ disabled.
@@ -1083,6 +1523,9 @@ class ReadOnlyToolProvider:
             definitions.append(drive_coder_tool_def())
             definitions.append(submit_tool_def())
             definitions.append(respond_to_review_tool_def())
+        if self.report_workspace is not None:
+            definitions.append(edit_report_tool_def())
+            definitions.append(review_report_tool_def())
         return definitions
 
     def _allowed(self, path: Path) -> bool:
@@ -1116,6 +1559,10 @@ class ReadOnlyToolProvider:
             if self.authoring_session is None:
                 return ToolOutcome(text="authoring is not enabled for this role.", is_error=True)
             return await execute_respond_to_review(self.authoring_session, arguments)
+        if name == EDIT_REPORT_TOOL:
+            return await execute_edit_report(self.report_workspace, arguments)
+        if name == REVIEW_REPORT_TOOL:
+            return await execute_review_report(self.report_workspace, arguments)
         if name in ("read_file", "list_dir"):
             target = Path(str(arguments.get("path", "")))
             if not self._allowed(target):

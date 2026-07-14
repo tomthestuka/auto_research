@@ -32,6 +32,18 @@ carried by **reference** (`FigureRef`), never embedded
 - `FigureRef` carries only metadata: `path`, `caption`, `mime_type`,
   `produced_by`, `created_at`, `sha256`, and optional `thumbnail_b64`.
   Figure bytes are never stored in messages.
+- `FigureCitation` (V-4) is a figure *placement handle*: `source` (a catalog name — `"self"`
+  for an agent's own figures, or a worker key like `"analyst_worker_0"` for one of the lead's
+  per-worker catalogs) + `index` (1-based, `≥1`). An authoring agent emits these in
+  `edit_report`; the runtime resolves each to a real `FigureRef`, in citation order (so the
+  report-local number "Figure k" = the k-th cited). The two coordinate systems stay separate:
+  `{source, index}` is the *selection* handle (the catalog menu), "Figure k" is the *reference*
+  (the finished report).
+- `FiguredReport` is the base for inter-LLM reports carrying figures by citation:
+  `cited_figures: list[FigureCitation]` (what the model emits) + the runtime-resolved, ordered
+  `figures: list[FigureRef]`. `AnalystReport` extends it (and, from increment 5, `ResearchReport`
+  will). Citation *is* the de-duplication — cited figures are placed and ordered, uncited catalog
+  figures are dropped — so no separate figure-dedup pass exists.
 - `DocumentRef` carries only metadata: `path`, `title`, `mime_type`,
   `created_at`, and `sha256`. Document bytes are loaded only at provider-call
   boundaries for models configured with document support.
@@ -128,10 +140,11 @@ carried by **reference** (`FigureRef`), never embedded
   literature: list[SearchResult] = [],
   previous_report: AnalystReport | None = None)` — work item sent to analyst
   workers. `previous_report` carries the prior round's result on rework iterations.
-- `AnalystReport(summary: str, findings: list[str] = [],
-  figures: list[FigureRef] = [], uncertainty: str | None = None,
-  tool_request: AnalystToolRequest | None = None)` — worker or lead output, including figure
-  references. `tool_request` (Phase 2) is set when the worker raises a toolkit gap/defect.
+- `AnalystReport(FiguredReport)` — `summary: str`, `findings: list[str] = []`,
+  `uncertainty: str | None = None`, `tool_request: AnalystToolRequest | None = None`,
+  `status` — plus the inherited `cited_figures: list[FigureCitation]` and runtime-resolved
+  `figures: list[FigureRef]` (V-4). Worker or lead output. `tool_request` (Phase 2) is set when
+  the worker raises a toolkit gap/defect. Figures are placed by citation, not attached directly.
 - `ReviewVerdict(accepted: bool, rationale: str,
   needs_more_literature: bool = False, needs_analysis_rework: bool = False,
   follow_up: str | None = None, cited_paths: list[str] = [])` — reviewer decision
@@ -215,34 +228,10 @@ carried by **reference** (`FigureRef`), never embedded
   typed contract behind the injectable `human_handler` and the `ask_human` tools.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Full Pydantic v2 protocol: research/search/analysis/review messages,
-  `FigureRef`/`DocumentRef`, function-call tool envelopes, sandbox results, report + LaTeX schemas,
-  strict JSON-serializable boundaries.
-- 2026-06-12 -> 2026-06-16 — **Phase 2 schemas (steps 3–7).** `ToolSpec`/`ValidationDataset`/
-  `ProposedCheck`, `AnalystReport.tool_request`/`status`, merge-flow types (`CheckResult`,
-  `GateReport` incl. `findings`, `ToolReviewVerdict` incl. `commit_summary`, `MergeFlowResult`),
-  the raise-to-human `HumanQuery`/`HumanResponse` (§9.7), and `AuthoringDecision` (the lead's
-  decision over a worker `tool_request`, acted on by consensus).
-- 2026-06-18 -> 2026-06-24 — **Provider-strict + routing-legible fixes.** `ReviewVerdict` fields
-  carry `Field(description=…)` (the reviewer reads its dispatch/routing contract from the schema);
-  `needs_more_literature`/`needs_analysis_rework` rewritten to one-edge-each semantics (fix-list #1).
-  Split the worker→lead `AnalystToolRequest` from the lead→coder `ToolSpec` and dropped
-  `ProposedCheck.params` — the open map that 400'd GPT workers under OpenAI strict (§7). Added
-  `ReviewVerdict.cited_paths` (PDFs opened + used; `list[str]` for strict-safety).
-- 2026-06-29 — **`HumanQuery` carries one Markdown `message`** (was `question`+`context`). The
-  clarification channels carry free-form NL; connectors render per channel (CLI `rich`, Slack
-  `markdown` block). Added the `headline` property (notifications / thread label / monitor /
-  fail-safe). Typed protocol messages unchanged. `tests/test_hitl.py`.
-- 2026-07-06 — **[A8] `AuthoringDecision` carries an ordered chain.** `tool_spec: ToolSpec | None`
-  → `tool_specs: list[ToolSpec]` (the ordered dependency chain the lead plans up front; empty ⇔ not
-  authoring). Added the codebase's first pydantic `@model_validator` enforcing `should_author ⇒
-  len(tool_specs) >= 1` (partially closes [I3]'s should_author-with-no-spec contradiction). The
-  strategy authors the chain sequentially and reruns workers once (consensus/DOCS.md).
-  `tests/test_schemas.py::test_authoring_decision_round_trips` covers the chain + validator.
-- 2026-07-09 — **`ToolSpec.target_domain`/`disposition` documented as advisory intent ([A12]).**
-  No schema change: the field stays a `NonEmptyStr`, but its comment now records that the
-  deterministic gate verifies where a tool landed from the diff (the touched `*_utils` packages),
-  never from `target_domain` — so a descriptive value there degrades only the coder brief and can
-  no longer doom the gate. Fixes the run-#12 class where a label like `"xspec_utils (IXPE
-  polarimetry)"` built a nonexistent manifest path and rejected forever. Gate side in
-  `sandbox/DOCS.md` (2026-07-09) + `sandbox/gate.py` `_touched_packages`.
+- 2026-05-26 -> 2026-06-12 — Full Pydantic v2 protocol: research/search/analysis/review messages, `FigureRef`/`DocumentRef`, function-call tool envelopes, sandbox results, report + LaTeX schemas, strict JSON-serializable boundaries.
+- 2026-06-12 -> 2026-06-16 — Phase 2 schemas (steps 3–7): `ToolSpec`/`ValidationDataset`/`ProposedCheck`, `AnalystReport.tool_request`/`status`, merge-flow types (`CheckResult`, `GateReport` incl. `findings`, `ToolReviewVerdict` incl. `commit_summary`, `MergeFlowResult`), `HumanQuery`/`HumanResponse` (§9.7), and `AuthoringDecision`.
+- 2026-06-18 -> 2026-06-24 — Provider-strict + routing-legible fixes: `ReviewVerdict` fields carry `Field(description=…)` with one-edge-each `needs_more_literature`/`needs_analysis_rework` semantics; split the worker→lead `AnalystToolRequest` from the lead→coder `ToolSpec` and dropped `ProposedCheck.params` (the open map that 400'd GPT workers under OpenAI strict); added `ReviewVerdict.cited_paths`.
+- 2026-06-29 — `HumanQuery` carries one Markdown `message` (was `question`+`context`); added the `headline` property; connectors render per channel.
+- 2026-07-06 — [A8] `AuthoringDecision.tool_spec` → ordered `tool_specs: list[ToolSpec]`, with the codebase's first `@model_validator` enforcing `should_author ⇒ len(tool_specs) ≥ 1`.
+- 2026-07-09 — [A12] `ToolSpec.target_domain`/`disposition` documented as advisory intent (no schema change): the deterministic gate verifies where a tool landed from the diff, not these fields, so a descriptive value can no longer doom the gate.
+- 2026-07-14 — V-4: figures by citation. Added `FigureCitation{source, index}` and the `FiguredReport` base (`cited_figures` + runtime-resolved `figures`); `AnalystReport` extends it. Citation replaces the old figure-dedup pass, closing the "last-round-only figures" leak.

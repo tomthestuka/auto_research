@@ -29,7 +29,7 @@ from auto_research.sandbox.persistent import PersistentSandbox
 from auto_research.sandbox.registry import ToolkitRegistry
 from auto_research.agents.react import ReadOnlyToolProvider
 from auto_research.agents.roles import _model_label
-from auto_research.sandbox.workspace import create_run_workspace, memory_path, run_dir
+from auto_research.sandbox.workspace import agent_dir, create_run_workspace, memory_path, run_dir
 from auto_research.schemas import ResearchRequest, ReviewVerdict
 from auto_research.storage import Storage
 
@@ -303,10 +303,14 @@ async def run_research(
     agent_keys = ["reviewer", "analyst_lead"] + analyst_keys
     create_run_workspace(run_id, agent_keys)
 
-    # Assign memory paths to AnalystWorkerAgent instances (best-effort)
+    # Assign memory paths to AnalystWorkerAgent instances (best-effort). agent_key + report_dir
+    # give the worker a stable figure-catalog source name and a folder for its per-round report
+    # JSONLs (V-4); the lead addresses each worker's catalog by this key.
     for i, worker in enumerate(workers):
         if isinstance(worker, AnalystWorkerAgent):
             worker.memory_path = memory_path(run_id, analyst_keys[i])
+            worker.agent_key = analyst_keys[i]
+            worker.report_dir = agent_dir(run_id, analyst_keys[i])
 
     # Give the reviewer and lead a read-only inspection loop (run artifacts +
     # knowledge base), unless a caller pre-wired their own tools.
@@ -352,6 +356,13 @@ async def run_research(
             )
         except Exception:  # noqa: BLE001
             pass
+
+    # V-4: give the lead a stable key + report folder for its per-round adjudicated report JSONLs.
+    try:
+        lead.agent_key = "analyst_lead"
+        lead.report_dir = agent_dir(run_id, "analyst_lead")
+    except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it
+        pass
 
     _attach_monitor(reviewer, run_monitor)
     _attach_monitor(io_agent, run_monitor)

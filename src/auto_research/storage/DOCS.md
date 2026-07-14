@@ -107,22 +107,14 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   local paper ingestion utility.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — SQLite storage built and kept stable: papers, memory with
-  `mem_abbrev`, query log, reserved embedding columns/table, paper ingestion/upserts,
-  no-PDF metadata records, memory replacement, local PDF ingestion, deterministic tests, and
-  config-driven runtime DB path.
-- 2026-06-12 — Compacted changelog and refreshed deferred vector-search references.
-- 2026-06-22 — **Paper identity is now the PDF content hash.** `papers.sha256` became
-  `NOT NULL` with `UNIQUE(sha256)` (was `UNIQUE(source, source_id)`); `_upsert_paper`
-  dedups `ON CONFLICT(sha256)`, refreshing metadata/`local_path` but preserving the first
-  ingester's `source`/`source_id`. The same PDF reached via two sources now collapses to
-  one row. A no-PDF search result no longer becomes a paper row — `paper_record_from_result`
-  was removed and `LibrarianIOAgent.ingest_results` records such results as orphan `memory`
-  notes (`paper_id = NULL`). Requires a fresh DB (`CREATE TABLE IF NOT EXISTS` does not alter
-  an existing table).
-- 2026-06-23 — Added `check_database_health()` (+ `EXPECTED_TABLES`), registered in the
-  launch preflight as `database_health`. The schema was previously created only lazily (by
-  an ingest or report run), so a fresh run whose first DB access was `text_search` died on
-  `no such table: papers` against a 0-byte DB. The check now makes the schema a launch
-  precondition — creating the DB/tables if missing (idempotent) and verifying them — so a
-  fresh run is self-healing.
+- 2026-05-26 -> 2026-06-12 — SQLite storage built: papers, memory with `mem_abbrev`, query log,
+  reserved embedding columns/table, paper ingestion/upserts, no-PDF metadata records, memory
+  replacement, local PDF ingestion, config-driven runtime DB path.
+- 2026-06-22 — Paper identity became the PDF content hash: `papers.sha256` is `NOT NULL` with
+  `UNIQUE(sha256)` (was `UNIQUE(source, source_id)`) and `_upsert_paper` dedups
+  `ON CONFLICT(sha256)`, so the same PDF via two sources collapses to one row; a no-PDF result is
+  now recorded as an orphan `memory` note rather than a paper row (`paper_record_from_result`
+  removed). Requires a fresh DB.
+- 2026-06-23 — Added `check_database_health()` (+ `EXPECTED_TABLES`), registered in the launch
+  preflight as `database_health`: creates the schema if absent and verifies tables, so a fresh
+  run's first `text_search` no longer dies on `no such table: papers`.

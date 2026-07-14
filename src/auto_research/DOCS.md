@@ -106,22 +106,18 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   it. Each check is a zero-arg fn that raises on failure and lives in its own module.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Phase 1 completed and verified (schemas, providers, observability,
+- 2026-05-26 -> 2026-06-12 — Phase 1 completed (schemas, providers, observability,
   storage/retrieval, sources, prompts, agents, consensus, graph/runtime, sandbox, report, CLI,
-  notebook, env checks, config-driven `runtime_dir`). Phase 2 active: off-repo scratch,
-  `ToolSpec`/merge-flow/gate scaffolding, `research_toolkit` the only runtime-authored repo.
-- 2026-06-12 -> 2026-06-18 — **Launch preflight + `hitl` + observations (steps 5–7).** Centralized
-  `.env` loading in `check_required_env`; `preflight.py` (`Preflight` checklist owning every no-LLM
-  launch check, run by `run_checklist`; `run_research`/CLI call `run_preflight`); made it **async**
-  with the `human_channel` ping; added the `hitl` raise-to-human channel + `human_handler`/
-  `human_channel`. `papers_dir()` helper. Registered toolkit git-identity/branch-clean checks.
-  `observations.py` read-side data catalog (`DataCatalog`/`read_catalog`/`local_obsids`, written by
-  authored tools, JSON contract in `prompts/coder.md`) + `check_catalog_health` (delegates to
-  `research_toolkit`'s detect-only healthcheck; hard-blocks launch on drift). `observations.yaml`
-  → single `obs_db_root`, missions discovered from disk. Analyst env spec `environment-analyst.yml`.
-- 2026-06-22 -> 2026-06-25 — **Resilience + preflight UX.** `__init__` mutes two non-actionable
-  Pydantic v2 warning families (narrowly). `env.sandbox_call_timeout_default()`. `database_health`
-  preflight (creates the SQLite schema if absent, so first `text_search` doesn't die).
-  `toolkit_root_configured` preflight (fix-list #2); `run_checklist` prints one progress line per
-  check (legible blocking-ping). `check_catalog_health` renders a friendly per-mission drift summary
-  (`_summarize_drift`) instead of a raw dict.
+  notebook, env checks, config-driven `runtime_dir`); Phase 2 begun (off-repo scratch,
+  `ToolSpec`/merge-flow/gate scaffolding, `research_toolkit` the only runtime-authored repo).
+- 2026-06-12 -> 2026-06-18 — Launch preflight + `hitl` + observations (steps 5–7): centralized
+  `.env` loading in `check_required_env`; `preflight.py` (`Preflight`/`run_preflight`, made async
+  with the `human_channel` ping); the `hitl` raise-to-human channel + `human_handler`/
+  `human_channel`; `papers_dir()`; toolkit git-identity/branch-clean checks; `observations.py`
+  read-side data catalog (`DataCatalog`/`read_catalog`/`local_obsids`) + `check_catalog_health`
+  (delegates to `research_toolkit`'s detect-only healthcheck); `observations.yaml` → single
+  `obs_db_root` with missions discovered from disk; analyst env `environment-analyst.yml`.
+- 2026-06-22 -> 2026-06-25 — Resilience + preflight UX: `__init__` mutes two Pydantic v2 warning
+  families; `env.sandbox_call_timeout_default()`; `database_health` and `toolkit_root_configured`
+  preflight checks; `run_checklist` prints one progress line per check; `check_catalog_health`
+  renders a per-mission drift summary (`_summarize_drift`).

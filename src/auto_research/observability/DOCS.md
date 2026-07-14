@@ -56,7 +56,6 @@ standalone CLI visualiser for monitor JSONL files.
   ledger logging.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — LangSmith tracing, JSONL cost ledger, config-priced
-  per-call costing, config-driven runtime data dir, deterministic tests, opt-in live
-  LangSmith verification, and `plot_run.py` for monitor Gantt/cost visualization.
-- 2026-06-12 — Compacted changelog; no observability behavior changes.
+- 2026-05-26 -> 2026-06-12 — LangSmith tracing, JSONL cost ledger, config-priced per-call costing,
+  config-driven runtime data dir, opt-in live LangSmith verification, and `plot_run.py` for
+  monitor Gantt/cost visualization.

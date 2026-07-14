@@ -179,10 +179,13 @@ def _figure_blocks(figure: FigureRef) -> list[dict[str, Any]]:
     """Render one figure as Anthropic content blocks: a caption then the image bytes.
 
     Loading bytes here is the multimodal boundary — the only place a figure's pixels
-    enter a request (elsewhere figures travel as lightweight ``FigureRef``).
+    enter a request (elsewhere figures travel as lightweight ``FigureRef``). The caption is
+    rendered verbatim: the presentation layer may prefix it with the report-local number
+    ("Figure 1 — …") or the catalog handle ("[analyst_worker_0:2] …"), so prose references
+    line up with the images (V-4).
     """
     return [
-        {"type": "text", "text": f"Figure — {figure.caption} (produced by {figure.produced_by})"},
+        {"type": "text", "text": f"{figure.caption} (produced by {figure.produced_by})"},
         {
             "type": "image",
             "source": {

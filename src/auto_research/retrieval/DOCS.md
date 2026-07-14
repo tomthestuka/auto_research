@@ -67,20 +67,12 @@ Live retrieval verification is opt-in:
   tool; Phase 2 stub.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Pure-Python local retrieval built: backend protocol,
-  SQLite text search over papers/memory/`mem_abbrev`, deterministic ordering/tests, opt-in
-  live test, and `vector_search()` retained as a deferred stub.
-- 2026-06-12 — Compacted changelog; no retrieval behavior changes.
-- 2026-06-22 — Unified retrieval items by paper: a paper and its memory
-  abstraction are now **one hit keyed by paper id**, with the PDF and the joined
-  memory text as attributes (previously a paper surfaced twice — once as a
-  `paper` hit, once as a `memory` hit with `local_path=None` — so high-scoring
-  abstractions crowded the paper rows past the `limit` and `text_search_paths`
-  returned 0). Memory text is now folded into the paper's search haystack, and
-  `text_search(..., require_local_path=True)` filters to PDF-backed papers before
-  the `limit`. Orphan memories (no `paper_id`) remain standalone hits. Added two
-  regression tests.
-- 2026-06-22 — Storage now keys papers by `UNIQUE(sha256)` (see `storage/DOCS.md`), so the
-  same PDF reached via two sources is a single paper row — `text_search_paths` can no longer
-  return the same paper as two different file paths. No retrieval code change; the per-paper
-  hit model already returns one item per row.
+- 2026-05-26 -> 2026-06-12 — Pure-Python local retrieval built: backend protocol, SQLite text
+  search over papers/memory/`mem_abbrev`, deterministic ordering, opt-in live test,
+  `vector_search()` retained as a deferred stub.
+- 2026-06-22 — Retrieval items unified by paper: a paper and its memory abstraction are now one
+  hit keyed by paper id (PDF + joined memory text as attributes, folded into the search
+  haystack), fixing the double-surfacing that let abstractions crowd papers past the `limit`;
+  `require_local_path=True` filters to PDF-backed papers before the `limit` and orphan memories
+  stay standalone. Paired with storage's new `UNIQUE(sha256)` paper identity (no retrieval code
+  change), the same PDF via two sources can no longer return as two paths.

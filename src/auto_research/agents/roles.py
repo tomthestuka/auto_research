@@ -14,9 +14,12 @@ from pydantic import BaseModel, ValidationError
 from auto_research.agents.prompts import PromptRole, load_prompt
 from auto_research.agents.react import (
     DRIVE_CODER_TOOL,
+    EDIT_REPORT_TOOL,
     PLAN_AND_DEBATE_TOOL,
+    REVIEW_REPORT_TOOL,
     RESPOND_TO_REVIEW_TOOL,
     ReadOnlyToolProvider,
+    ReportWorkspace,
     SUBMIT_TOOL,
     SandboxToolProvider,
     SourceToolProvider,
@@ -33,7 +36,7 @@ from auto_research.models import (
     ToolResultPart,
     resolve,
 )
-from auto_research.sandbox.workspace import append_memory, read_memory
+from auto_research.sandbox.workspace import append_memory, read_memory, round_report_path
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -914,6 +917,17 @@ class AnalystWorkerAgent(AgentRole):
         # When wired, the worker can raise a clarification to a human via ask_human (§9.7).
         self.human_handler = human_handler
         self.last_tool_results: list[ToolResult] = []
+        # V-4: this agent's stable working-folder key + report dir (set by runtime; defaults derive
+        # from memory_path). agent_key is the figure-catalog source key the lead addresses it by.
+        self.agent_key: str | None = None
+        self.report_dir: Path | None = None
+        # V-4: append-only figure catalog (source "self" = figures this worker's tools produced),
+        # persisting across debate rounds and rework iterations so nothing is dropped; the per-round
+        # report (ReAct-refined via edit_report) cites from it. Monotonic debate-round counter names
+        # the per-round report file; last report seeds the next round's review_report(None).
+        self._figure_catalog: dict[str, list[FigureRef]] = {"self": []}
+        self._round = 0
+        self._last_report: AnalystReport | None = None
 
     @property
     def is_alive(self) -> bool:
@@ -931,6 +945,7 @@ class AnalystWorkerAgent(AgentRole):
         structured call when no sandbox+registry is attached.
         """
         self.last_tool_results = []
+        self._figure_catalog.setdefault("self", [])
         memory = read_memory(self.memory_path) if self.memory_path else ""
         payload = {
             "task": task.model_dump(mode="json"),
@@ -947,33 +962,72 @@ class AnalystWorkerAgent(AgentRole):
         if not self.sandbox.is_alive:
             await self.sandbox.start()
 
+        self._round += 1
         cwd = self.memory_path.parent if self.memory_path is not None else None
+        workspace = self._make_report_workspace()
         provider = SandboxToolProvider(
             self.registry, self.sandbox, cwd=cwd,
             human_handler=self.human_handler, web_source=WebSource(),
             asked_by="analyst_worker",
             model=_model_label(self.model) or "",
+            figure_sink=self._figure_catalog["self"],
+            report_workspace=workspace,
         )
         seed = [
             ModelMessage(role="system", content=self.prompt),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
+        # edit_report/review_report are budget-free (report authoring, not evidence gathering),
+        # so refining figure placement never starves the tool-iteration budget (absolute_cap backstops).
         messages, react_figures, _ = await self._react(
             seed_messages=seed,
             tools=provider,
             action="analyze",
             cap=_react_loop_cap(),
             images=peer_figures,
+            free_tools=frozenset({EDIT_REPORT_TOOL, REVIEW_REPORT_TOOL}),
+            absolute_cap=_react_loop_absolute_cap(),
         )
         self.last_tool_results = provider.results
         if self.memory_path and provider.results:
             _append_tool_results_to_memory(self.memory_path, provider.results)
 
-        report = await self._call_over_messages(messages, AnalystReport, action="analyze")
-        # The model can't reliably reproduce FigureRefs; attach the loop's real ones.
-        if react_figures:
-            report = report.model_copy(update={"figures": _dedup_figures(react_figures)})
+        # V-4: the report is what the worker persisted via edit_report this round (figures cited by
+        # index from its catalog, resolved by the runtime). Safety net: a loop that ended without an
+        # edit_report call gets one terminal structured compose, with its catalog figures attached.
+        report = workspace.written_report if workspace is not None else None
+        if report is None:
+            report = await self._call_over_messages(messages, AnalystReport, action="analyze")
+            if self._figure_catalog["self"]:
+                report = report.model_copy(
+                    update={"figures": _dedup_figures(self._figure_catalog["self"]), "cited_figures": []}
+                )
+        self._last_report = report
         return report
+
+    def _make_report_workspace(self) -> ReportWorkspace | None:
+        """Build this round's report workspace (V-4), or None when no report dir is wired.
+
+        The report dir is the agent's working folder (``report_dir``, else ``memory_path.parent``);
+        the per-round JSONL path is derived from role + model + the monotonic debate round.
+        """
+        report_dir = self.report_dir or (
+            self.memory_path.parent if self.memory_path is not None else None
+        )
+        if report_dir is None:
+            return None
+        return ReportWorkspace(
+            report_path=round_report_path(
+                report_dir,
+                role=self.role,
+                model=_model_label(self.model) or "model",
+                round_n=self._round,
+            ),
+            report_model=AnalystReport,
+            catalog=self._figure_catalog,
+            own_source="self",
+            prior_report=self._last_report,
+        )
 
 
 class AnalystLeadAgent(AgentRole):
@@ -999,34 +1053,119 @@ class AnalystLeadAgent(AgentRole):
             monitor=monitor,
         )
         self.available_toolkits = tuple(available_toolkits)
+        # V-4: stable working-folder key + report dir (set by runtime). The lead's figure catalog is
+        # keyed by *worker* source (one list per worker), accumulated append-only across debate rounds
+        # AND rework iterations (the lead instance persists), so a figure produced any round stays
+        # citable — closing the "last-round-only" leak. Monotonic debate-round counter names the
+        # per-round report; last report seeds the next round's review_report(None).
+        self.agent_key: str | None = None
+        self.report_dir: Path | None = None
+        self._figure_catalog: dict[str, list[FigureRef]] = {}
+        self._round = 0
+        self._last_report: AnalystReport | None = None
 
-    async def adjudicate(self, task: AnalysisTask, reports: Sequence[AnalystReport]) -> AnalystReport:
-        """Synthesize a final analysis report from worker reports.
+    async def adjudicate(
+        self,
+        task: AnalysisTask,
+        reports: Sequence[AnalystReport],
+        *,
+        sources: Sequence[str] | None = None,
+    ) -> AnalystReport:
+        """Synthesize a final analysis report from worker reports (V-4).
 
-        When a read-only ToolProvider is attached, the lead may first inspect the
-        run artifacts / knowledge base (seeing the workers' figures) before
-        synthesizing; otherwise it makes a plain structured call.
+        Each worker's cited figures are accumulated into a per-worker catalog source (append-only,
+        across rounds/iterations), so the lead can cite any worker's figure from any round. With a
+        read-only ToolProvider attached, the lead ReAct-refines the report through edit_report /
+        review_report (citing figures by ``{worker, index}``); the report it persists is returned.
+        Otherwise it makes a plain structured call and attaches the accumulated figures directly.
         """
+
+        self._round += 1
+        source_keys = list(sources) if sources is not None else [
+            f"analyst_worker_{i}" for i in range(len(reports))
+        ]
+        # Accumulate each worker's cited figures into its catalog source (append-only, deduped).
+        source_reports: dict[str, AnalystReport] = {}
+        for key, report in zip(source_keys, reports):
+            slot = self._figure_catalog.setdefault(key, [])
+            existing = {(str(f.path), f.sha256) for f in slot}
+            for fig in report.figures:
+                sig = (str(fig.path), fig.sha256)
+                if sig not in existing:
+                    existing.add(sig)
+                    slot.append(fig)
+            source_reports[key] = report  # latest report per source (for review_report(source))
 
         payload = {
             "task": task.model_dump(mode="json"),
             "worker_reports": [report.model_dump(mode="json") for report in reports],
+            "worker_sources": source_keys,
             "available_toolkits": list(self.available_toolkits),
         }
-        figures = [figure for report in reports for figure in report.figures]
+        all_figures = [fig for slot in self._figure_catalog.values() for fig in slot]
         if self.tools is None:
-            return await self._call(payload, AnalystReport, images=figures, action="adjudicate")
+            report = await self._call(payload, AnalystReport, images=all_figures, action="adjudicate")
+            return report.model_copy(
+                update={"figures": _dedup_figures(all_figures), "cited_figures": []}
+            )
 
+        workspace = self._make_report_workspace(source_reports)
         seed = [
             ModelMessage(role="system", content=self.prompt),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
-        messages, _, _ = await self._react(
-            seed_messages=seed, tools=self.tools, action="adjudicate",
-            cap=_react_loop_cap(), images=figures,
-        )
-        return await self._call_over_messages(
-            messages, AnalystReport, action="adjudicate", images=figures,
+        # Wire the per-round report workspace onto the shared provider ONLY for this adjudication
+        # (cleared in finally, so decide_authoring/drive_authoring never see edit_report/review_report).
+        previous_ws = getattr(self.tools, "report_workspace", None)
+        try:
+            if workspace is not None:
+                self.tools.report_workspace = workspace
+            messages, _, _ = await self._react(
+                seed_messages=seed, tools=self.tools, action="adjudicate",
+                cap=_react_loop_cap(),
+                free_tools=frozenset({EDIT_REPORT_TOOL, REVIEW_REPORT_TOOL}),
+                absolute_cap=_react_loop_absolute_cap(),
+            )
+        finally:
+            if hasattr(self.tools, "report_workspace"):
+                self.tools.report_workspace = previous_ws
+
+        report = workspace.written_report if workspace is not None else None
+        if report is None:
+            # Safety net: no edit_report written — compose terminally, attaching the catalog figures.
+            report = await self._call_over_messages(
+                messages, AnalystReport, action="adjudicate", images=all_figures,
+            )
+            report = report.model_copy(
+                update={"figures": _dedup_figures(all_figures), "cited_figures": []}
+            )
+        self._last_report = report
+        return report
+
+    def _make_report_workspace(
+        self, source_reports: dict[str, AnalystReport]
+    ) -> ReportWorkspace | None:
+        """Build this adjudication's report workspace (V-4), or None with no report dir wired.
+
+        The catalog is the lead's per-worker figure catalog (source = worker key); ``source_reports``
+        lets ``review_report(worker_key)`` read that worker's finished report. ``own_source='self'``
+        (the lead produces no figures) keeps ``review_report(worker_key)`` on the subordinate branch.
+        """
+        report_dir = self.report_dir
+        if report_dir is None:
+            return None
+        return ReportWorkspace(
+            report_path=round_report_path(
+                report_dir,
+                role=self.role,
+                model=_model_label(self.model) or "model",
+                round_n=self._round,
+            ),
+            report_model=AnalystReport,
+            catalog=self._figure_catalog,
+            own_source="self",
+            source_reports=source_reports,
+            prior_report=self._last_report,
         )
 
     async def clarify_for_author(self, message: str, *, kind: str = "clarify_code") -> str:
@@ -1311,11 +1450,16 @@ class AnalystLeadAgent(AgentRole):
                 "report real results, or report none. Do not request the tool again."
             ),
         }
-        figures = [figure for report in reports for figure in report.figures]
+        # Honest-failure terminal report: attach the workers' real (cited) figures directly and
+        # clear cited_figures — the model can't reproduce FigureRefs, and this path does not run the
+        # citation catalog (it composes terminally rather than via edit_report). _dedup_figures keeps
+        # the reviewer from a duplicate/garbage figure set (V-4 keeps the failure path honest too).
+        figures = _dedup_figures([figure for report in reports for figure in report.figures])
         if self.tools is None:
-            return await self._call(
+            report = await self._call(
                 payload, AnalystReport, images=figures, action="finalize_authoring_outcome"
             )
+            return report.model_copy(update={"figures": figures, "cited_figures": []})
         seed = [
             ModelMessage(role="system", content=self.prompt),
             ModelMessage(role="user", content=_payload_text(payload)),
@@ -1324,9 +1468,10 @@ class AnalystLeadAgent(AgentRole):
             seed_messages=seed, tools=self.tools, action="finalize_authoring_outcome",
             cap=_react_loop_cap(), images=figures,
         )
-        return await self._call_over_messages(
+        report = await self._call_over_messages(
             messages, AnalystReport, action="finalize_authoring_outcome", images=figures,
         )
+        return report.model_copy(update={"figures": figures, "cited_figures": []})
 
 
 class AnalystColeadAgent(AgentRole):

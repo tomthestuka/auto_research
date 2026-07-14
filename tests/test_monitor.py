@@ -134,7 +134,7 @@ def test_consensus_records_worker_and_lead_events() -> None:
         async def judge_convergence(self, task, reports, *, round_index, max_rounds):
             return ReviewVerdict(accepted=True, rationale="done")
 
-        async def adjudicate(self, task, reports):
+        async def adjudicate(self, task, reports, *, sources=None):
             return AnalystReport(summary="lead summary", findings=["final"])
 
     report = asyncio.run(

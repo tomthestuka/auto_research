@@ -2,7 +2,13 @@
 
 from auto_research.schemas.analysis import AnalysisTask, AnalystReport
 from auto_research.schemas.base import MessageModel
-from auto_research.schemas.figures import DocumentRef, FigureRef, document_from_file
+from auto_research.schemas.figures import (
+    DocumentRef,
+    FigureCitation,
+    FigureRef,
+    FiguredReport,
+    document_from_file,
+)
 from auto_research.schemas.hitl import HumanQuery, HumanQueryKind, HumanResponse
 from auto_research.schemas.merge import (
     CheckResult,
@@ -30,6 +36,8 @@ __all__ = [
     "AuthoringDecision",
     "CheckResult",
     "FigureRef",
+    "FigureCitation",
+    "FiguredReport",
     "DocumentRef",
     "FullTextLink",
     "GateReport",

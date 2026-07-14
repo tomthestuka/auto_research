@@ -46,8 +46,9 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `analyze(task, *, peer_reports=()) -> AnalystReport`.
 - Lead objects for analyst debate must provide
   `judge_convergence(task, reports, *, round_index, max_rounds) ->
-  ReviewVerdict`, `adjudicate(task, reports) -> AnalystReport`, and (for the
-  authoring path) `decide_authoring(reports) -> AuthoringDecision`,
+  ReviewVerdict`, `adjudicate(task, reports, *, sources=None) -> AnalystReport` (V-4: `sources` names
+  each report's worker so the lead keys its per-worker figure catalog and owns figure citation), and
+  (for the authoring path) `decide_authoring(reports) -> AuthoringDecision`,
   `drive_authoring(tool_spec, *, toolkit_root, worktree_base, direct_branch, colead, human_handler)
   -> MergeFlowResult`, and `finalize_authoring_outcome(task, reports, tool_spec, result) ->
   AnalystReport`.
@@ -116,43 +117,9 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `run(workers, lead, document)`.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Consensus strategies built and ReAct-aligned:
-  `DebateToConverge` cap-3 analyst debate with lead adjudication, cross-worker
-  `last_tool_results` summaries, final figure propagation, and `IODebateToConverge` for
-  PDF memory abstraction. `registry`/`tool_retry_cap` remain accepted but unused.
-- 2026-06-12 — Compacted changelog and removed stale consensus-owned tool-execution text.
-- 2026-06-16 — Phase 2 step 7: `DebateToConverge` drives lead-driven tool authoring/resume.
-  New optional fields (`tool_author_cap`, `toolkit_root`, `worktree_base`, `direct_branch`,
-  `human_handler`, `colead`); `LeadLike` gained `decide_authoring`; `run()` restructured with a
-  separate `debate_round`/`author_budget` and a `_maybe_author_and_resume` helper. A committed
-  tool reloads the registry, restarts sandboxes, augments the task with provenance, and reruns
-  workers — bounded by `tool_author_cap`, not counted against `max_rounds`. Phase-1 behaviour is
-  unchanged when `toolkit_root` is unset. Coverage: `tests/test_consensus_authoring.py`.
-- 2026-06-26 — **Honest finalize on a non-committed authoring attempt (handoff #4).** A
-  non-committed `propose_and_pr` result no longer falls through to debate (where workers
-  re-requested the tool and the lead re-authored — the cap-exhausted *spin* of the 2026-06-26
-  run). `_maybe_author_and_resume` now returns `(resumed, final_report, …)`; on a non-committed
-  result it calls the new `lead.finalize_authoring_outcome(task, reports, tool_spec, result)` and
-  `run()` returns that terminal report immediately. The report flows to the reviewer (the sole
-  I/O, no bypass — graph change), which adjudicates finalize vs. bounded rework. `should_author=false`
-  still falls through to debate. `LeadLike` gained `finalize_authoring_outcome`. Coverage:
-  `tests/test_consensus_authoring.py`.
-- 2026-06-29 — **A1 slice 3: the lead drives authoring (B-topology, §9.3).**
-  `_maybe_author_and_resume` no longer calls `merge_flow.propose_and_pr`; it calls
-  `lead.drive_authoring(tool_spec, toolkit_root=…, worktree_base=…, direct_branch=…, colead=…,
-  human_handler=…)`, which builds + connects an `AuthoringSession`, runs the lead's ReAct loop over
-  `drive_coder`/`submit_for_review` (the lead diagnoses each gate/review verdict and re-steers), and
-  returns the terminal `MergeFlowResult` (committed → resume; failed → `finalize_authoring_outcome`).
-  `LeadLike` gained `drive_authoring`. Budget: `tool_author_submit_cap` (orchestration.yaml) bounds
-  `submit_for_review`; the loop ceiling is `react_loop_absolute_cap`. The committed/failed routing,
-  reload/restart/rerun, and `tool_author_cap` bound are unchanged — `test_consensus_authoring.py`
-  stubs `drive_authoring`'s outcome (no SDK) instead of monkeypatching `propose_and_pr`. Suite 373.
-- 2026-07-06 — **[A8] author the whole tool chain before re-running workers.** `_maybe_author_and_resume`
-  now iterates the lead's ordered `AuthoringDecision.tool_specs` (was a single `tool_spec`), authoring
-  each tool sequentially via `drive_authoring` and moving `registry.reload()` + `sandbox.restart()` +
-  `_initial_reports` rerun to **once, after the whole chain** (was per tool). Each tool sees the prior
-  tool's committed code (direct-branch mode). A mid-chain non-commit stops the chain → honest
-  `finalize_authoring_outcome` terminal (§9.6); `tool_author_cap` now bounds total tools across the
-  chain; the outer `run()` loop stays the safety net for a gap the plan missed. New tests in
-  `test_consensus_authoring.py`: `test_chain_authored_sequentially_reruns_once`,
-  `test_chain_midchain_failure_stops_and_finalizes`, `test_chain_budget_caps_total_tools`.
+- 2026-05-26 -> 2026-06-12 — Consensus strategies built: `DebateToConverge` (cap-3 analyst debate, lead adjudication, cross-worker `last_tool_results` summaries, final figure propagation) and `IODebateToConverge` (PDF memory abstraction). `registry`/`tool_retry_cap` accepted but unused.
+- 2026-06-16 — Phase 2 step 7: `DebateToConverge` drives lead tool authoring/resume — new `tool_author_cap`/`toolkit_root`/`worktree_base`/`direct_branch`/`human_handler`/`colead`, `LeadLike.decide_authoring`; a committed tool reloads the registry, restarts sandboxes, and reruns workers, bounded by `tool_author_cap` (not `max_rounds`); Phase-1 behaviour unchanged when `toolkit_root` unset.
+- 2026-06-26 — Honest finalize on a non-committed authoring attempt: `_maybe_author_and_resume` returns a terminal report via the new `lead.finalize_authoring_outcome` instead of spinning in debate; the report flows to the reviewer (sole I/O), which adjudicates finalize vs. rework.
+- 2026-06-29 — A1: the lead drives authoring (B-topology, §9.3) via `lead.drive_authoring` (builds/connects an `AuthoringSession`, runs its own ReAct loop over `drive_coder`/`submit_for_review`, diagnosing each verdict) instead of `merge_flow.propose_and_pr`; bounded by `tool_author_submit_cap`.
+- 2026-07-06 — [A8] author the whole ordered `AuthoringDecision.tool_specs` chain sequentially (each tool sees the prior's committed code), then reload/restart/rerun workers once (was per tool); a mid-chain non-commit stops the chain → honest terminal; `tool_author_cap` bounds total tools.
+- 2026-07-14 — V-4: the lead owns figures; `_deduplicated` removed. `run()` no longer force-carries the last round's figures; it calls `adjudicate(task, reports, sources=_source_keys(workers))` and the lead accumulates a per-worker figure catalog and cites the subset.

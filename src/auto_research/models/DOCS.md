@@ -135,34 +135,8 @@ Google by editing YAML alone
   decoding); `tools=` uses `messages.create`.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Provider abstraction built and made fully native across
-  OpenAI, Anthropic, and Google: config-driven role groups, structured output, function
-  calling, ReAct tool-turn replay, prefix caching, vision/document gates, usage normalization,
-  and `priceMTk` cost metadata.
-- 2026-06-12 — Compacted changelog; no provider behavior changes.
-- 2026-06-15 — `REQUIRED_ROLES` now includes the Phase-2 authoring roles `coder` and
-  `analyst_colead`; all configured roles are required (validated at registry load, and
-  early via the launch preflight).
-- 2026-06-16 — Anthropic `cache_prefix` now marks both the stable prefix and the rolling
-  conversation tail with native `cache_control: ephemeral`, so ReAct/structured-loop turns can
-  read prior history from Anthropic's server-side prompt cache instead of re-prefilling it at
-  full price.
-- 2026-06-22 — Anthropic adapter places `documents` at the **front** (right after `system`)
-  with a `cache_control` breakpoint on the last document block, instead of appending them after
-  the (mid-growing) conversation. Documents the reviewer opens via `open_paper` accumulate
-  append-only, so this turns "every opened PDF re-billed every ReAct turn" into "each PDF
-  cache-written once, cache-read thereafter" — the front position also keeps them inside the
-  20-block lookback window. Figure-reference text blocks remain at the end. Confirmed against
-  Anthropic prompt-caching docs (prefix match, ≤4 breakpoints, 20-block lookback).
-- 2026-07-06 — **Figures now carry pixels to the model ([FIG-VIEW] + [V2]).** All three adapters
-  previously serialized `images` as the text line `"Figure reference: <path>"` — every "vision"
-  review of a plot was blind. Fixed two figure flows: (1) **cross-agent** figures on the call-time
-  `images=` channel now load bytes into a native image block (Anthropic `image`, OpenAI
-  `input_image`, Google `from_bytes`), via a shared per-adapter `_figure_blocks`/`_figure_items`/
-  `_figure_parts` helper; (2) **a tool's own** figures ride the new `ToolResultPart.figures` and
-  render **inline at their tool-result turn** (Anthropic: same user turn as `tool_result`;
-  OpenAI/Google: a user turn right after), so they persist in history, cache with the growing
-  prefix, and stay visible every round and in the terminal report call. Gemini stays on
-  `generateContent` (the Interactions-API migration was scoped out as a separate, lower-priority
-  task — stateful-first API vs. our stateless-neutral design; generateContent is not deprecated).
-  Coverage: `tests/test_providers.py` (inline + `images=` bytes, per provider).
+- 2026-05-26 -> 2026-06-12 — Provider abstraction built and made fully native across OpenAI, Anthropic, and Google: config-driven role groups, structured output, function calling, ReAct tool-turn replay, prefix caching, vision/document gates, usage normalization, `priceMTk` cost metadata.
+- 2026-06-15 — `REQUIRED_ROLES` adds the Phase-2 authoring roles `coder` and `analyst_colead`; all configured roles required (validated at load + launch preflight).
+- 2026-06-16 -> 2026-06-22 — Anthropic prompt-cache tuning: `cache_prefix` marks both the stable prefix and the rolling conversation tail with `cache_control: ephemeral`; `documents` placed at the front (after `system`) with a breakpoint on the last, so opened PDFs are cache-written once and cache-read thereafter (kept inside the 20-block lookback).
+- 2026-07-06 — Figures now carry pixels to the model ([FIG-VIEW]+[V2]): all three adapters load figure bytes into native image blocks — cross-agent figures on the call-time `images=` channel, a tool's own figures via `ToolResultPart.figures` rendered inline at their tool-result turn — replacing the old `"Figure reference: <path>"` text. Gemini stays on `generateContent`.
+- 2026-07-14 — V-4: figure caption rendered verbatim; `_figure_blocks`/`_figure_items`/`_figure_parts` dropped the hardcoded `"Figure — "` prefix (the presentation layer now numbers/handles captions).

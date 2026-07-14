@@ -184,6 +184,7 @@ def create_run_workspace(run_id: str, agent_keys: list[str]) -> dict[str, Path]
 def memory_path(run_id: str, agent_key: str) -> Path
 def figures_dir(run_id: str, agent_key: str) -> Path
 def run_dir(run_id: str) -> Path
+def round_report_path(agent_dir_path: Path, *, role: str, model: str, round_n: int) -> Path
 def append_memory(path: Path, text: str) -> None
 def read_memory(path: Path) -> str
 ```
@@ -191,6 +192,9 @@ def read_memory(path: Path) -> str
 - `create_run_workspace()` creates `<runtime_dir>/runs/{run_id}/{key}/figures/`
   for each agent key and returns `{key: agent_dir}`.
 - `memory_path()` returns `{agent_dir}/memory.md` (parent created if absent).
+- `round_report_path()` returns `{agent_dir}/<role>_<model-slug>_round<n>_report.jsonl` — the
+  per-round inter-LLM report JSONL an analyst writes via `edit_report` (V-4), distinct from the
+  private `memory.md`. `n` is the monotonic debate round; the model label is slugified (`_slug`).
 - `append_memory()` appends bare terminal text; `read_memory()` returns contents or `""`.
 
 ### `MCPToolClient`
@@ -622,111 +626,43 @@ the hook mapping a fake-model verdict — no live LLM).
 
 ## Changelog
 - 2026-05-26 -> 2026-06-12 — **Phase 1 sandbox/tooling** built and hardened: manifest-based
-  `ToolkitRegistry` (disabled-tool filtering, provider-native tool defs), persistent JSON-line
-  sandbox (fd capture, XSPEC non-interactive boot), per-run workspace/memory/figures layout,
-  built-in MCP server/client, config-driven runtime paths.
-- 2026-06-12 -> 2026-06-16 — **Phase 2 steps 0–7 built** — the author→gate→review→commit flow.
-  Writes pinned under the runtime data dir. `merge_flow.propose_and_pr()` (isolated-worktree /
-  `direct_branch="ai"` Sonnet author, runtime-safe structure context, `ask_lead`/`ask_human`
-  escalation, bounded L0–L4 rework, typed no-commit failure); `gate.run_gate` (Layer-A structural/
-  provenance/determinism + configurable no-fabrication scan, Layer-B test runner; extension-agnostic
-  over `*_utils` via `collect_targets`/`scan_text_source`); `review.make_review_hook` (provider-
-  decorrelated GPT co-lead); `approve_edit(worktree, *, message)` (one atomic commit, explicit-path
-  staging of `gate.collect_targets`, never `git add -A`). Dynamic `*_utils` discovery + `reload()`.
-  Launch preflights (`check_author_reviewer_decorrelation`, `check_toolkit_git_identity`/
-  `_branch_clean`). Coverage in `tests/test_{merge_flow,gate,review,registry,preflight}.py`.
-- 2026-06-18 -> 2026-06-26 — **Live-run hardening (fix-lists #1–#11).** Resilience: the gate
-  survives a slow/erroring test (`_default_test_runner` catches `TimeoutExpired`; `propose_and_pr`
-  exception backstop → `MergeFlowResult(status="failed")`, re-raising only `HumanInputRequired`); the
-  SDK author's `Bash` runs in the analyst code-exec env (`_author_env`) to run the real science
-  tests; `bash_exec` rescoped to read-only inspection. **Timeouts** decoupled from the model: per-
-  tool/-package `sandbox_call_timeout_s` ceiling (`ToolkitRegistry.call_timeout_ceiling`, no clamp)
-  + configurable gate `gate_test_timeout_s`. **Legibility:** `propose_and_pr(monitor=…)` emits the
-  full `coder.*`/`gate.*`/`review`/`commit` stream. **FS jail (#3):** `fs_guard.PathGuard` +
-  `agent_fs_allow`, installed as a `PreToolUse` hook (`_make_fs_guard_hook`; `can_use_tool`
-  `_make_path_confiner` deprecated/unwired). **Path-hints (#2):** `_build_structure_context` takes
-  the real `worktree`, absolute paths; `check_toolkit_root_configured`. **Git discipline (#6/#7/#8):**
-  non-committed attempts auto-reset to a per-attempt `base_ref` (`_reset_direct_tree`, saving a
-  `tool_author_failed_*.patch`, dropping any coder commit); a coder Bash deny-rule
-  (`["Bash(git:*)","Bash(git)"]`); gate-entry auto-revert (`_gated` `reset --mixed base_ref` on a
-  moved HEAD + `coder.committed`). **Gate fixes:** `_manifest_keys` handles annotated `TOOL_MANIFEST`
-  (#11); `finding_vocabulary` Tier-3 (stub/not-implemented = co-lead finding, not hard-fail, #9a);
-  determinism = per-test JUnit outcome maps not a byte-compare (#2, the confirmed blocker;
-  `_parse_junit_outcomes`/`_outcomes_determinism`, `_strip_volatile` removed); reproducibility is a
-  science-tool-only LLM-planned `test_repro…` Layer-B check; `_gate_feedback_message` demands ALL
-  issues fixed, jargon dropped (#3). Env-gated live batteries `tests/test_live_{merge_flow,fs_guard,
-  path_hints}.py`.
-- 2026-06-29 — **Coder escalation tools take one Markdown `message`** (was `question`+`context`):
-  `_make_escalation_server`, `_make_ask_lead_handler`→`clarify_for_author(message, kind=…)`,
-  `_make_ask_human_handler`→`HumanQuery(message=…)`; `coder.ask_lead`/`coder.ask_human` log
-  `message` (CLAUDE.md §9.7). Tests in `tests/test_merge_flow.py`.
-- 2026-06-29 — **Authoring refactor A1 slice 1: `AuthoringSession` decomposition (behaviour-
-  preserving).** Extracted the author/gate/review/commit/cleanup primitives out of
-  `propose_and_pr`'s inline loop into an `AuthoringSession` class (`drive`/`run_gate_step`/
-  `run_review_step`/`commit`/`aclose` + `initial_message`/`connect`), built by
-  `build_authoring_session()`. `propose_and_pr` is now a thin driver running the same L2/L3
-  auto-loop over those primitives — `tests/test_merge_flow.py` green unchanged (34 pass; full
-  suite 365 pass / 24 skip). This is the scaffold for the lead-driven authoring ReAct tools
-  (`drive_coder`/`submit`/`respond_to_review`) that drive the same session directly so the
-  analyst lead — the plan owner — diagnoses each gate/review verdict (CLAUDE.md §9.3 mental model:
-  lead = the user's clone driving Claude Code CLI; GPT co-lead = challenger; Sonnet = executor).
-- 2026-06-29 — **A1 slices 3–4: lead-driven authoring + the co-lead debate.** `AuthoringSession`
-  gains `submit_cap`/`debate_cap` + `submits_used`/`debates_used` + `last_gate`/`last_review`/
-  `last_commit_sha` (so a lead loop builds the terminal `MergeFlowResult` from session state and
-  bounds the expensive steps); `run_review_step(gate, *, lead_rebuttal=None)` carries the lead's
-  rebuttal on the debate path only (the auto-loop / injected 3-arg hooks stay compatible).
-  `make_review_hook`'s `run_review` gained `*, prior_review=None, lead_rebuttal=None`, forwarded to
-  `review_tool`. `build_authoring_session` resolves `tool_author_submit_cap`/`tool_author_debate_cap`.
-  The consensus strategy now drives authoring via `lead.drive_authoring` (not `propose_and_pr`,
-  which stays for tests/non-lead callers). Commit still ⇔ gate ∧ review; `approve_edit` unchanged.
-- 2026-06-30 — **`bash_exec` non-interactive isolation + MCP-await backstop (fixes a whole-run
-  hang).** A live IXPE P1 run wedged: a worker ran an interactive HEASoft FTOOL (`fdump` without
-  full PIL params) via `bash_exec`; the FTOOL prompted, blocked on stdin, was orphaned past
-  `subprocess.run`'s timeout (no process-group kill), and — because `bash_exec` left **stdin
-  inherited** — sat on the MCP server's own stdio *command channel*, stealing the next request's
-  bytes so the server never replied. `MCPToolClient.call_tool` awaited that reply with **no
-  timeout** → the whole asyncio run hung; killing the orphan couldn't recover the lost request.
-  Three co-located fixes: (1) `bash_exec` now uses `subprocess.Popen(..., stdin=DEVNULL,
-  start_new_session=True)` + `communicate(timeout)`; on `TimeoutExpired` it `_kill_process_group`s
-  the session then drains (EOF is prompt once the group is dead) → `exit_code` 124. (2) The
-  `bash_exec` tool **description** now instructs the model to invoke commands non-interactively
-  (all params up front; stdin is closed → a prompting command gets EOF). (3) `MCPToolClient.
-  call_tool` bounds the await with `asyncio.wait_for(timeout_s=900)` — a backstop so no wedged
-  server can hang a run. Regression tests: `tests/test_sandbox.py::TestBashExecIsolation`
-  (stdin-closed; timeout kills a backgrounded grandchild). Full suite 380 pass / 25 skip.
-- 2026-07-06 — **Gate Layer-B no longer passes an all-skipped suite ([G2]).** `_default_test_runner`
-  routed its verdict through a new pure `_layer_b_verdict(rc1, outcomes, out1)`: pass ⇔ pytest exited 0
-  **and ≥1 test PASSED**. `rc==0` alone also holds when every test is SKIPPED — the normal-path case when
-  the validation ObsID is absent or a test hardcodes an off-host path (`skipif(not path.exists(...))` all
-  fire) — which merged a tool that never ran, breaking §9.4. An all-SKIPPED/empty outcome map now fails with
-  a specific "no test PASSED — not verified (§9.4)" reason (→ rework / honest failure), not a silent pass.
-  Adversarial staged-change blindness ([G1]) stays deferred (git is banned in the coder sandbox; the gate's
-  git backstops normalize a deny-rule slip). Tests: `test_gate.py::test_layer_b_verdict_*`; suite green.
-- 2026-07-06 — **No-fab scan: bare ambiguous words are soft findings, not hard-fails ([C1]).**
-  Via `code_gate.yaml`, `synthetic`/`synthesized`/`illustrative` moved from `hard_fail_vocabulary`
-  to `finding_vocabulary` (they recurred in honest §9.5 fixture prose, taxing every authoring run
-  a rework round); explicit fabrication phrases + RNG patterns stay hard, and the co-lead still
-  judges the soft findings (§9.4 two-pass). No `gate.py` change (config-driven); `test_gate.py`
-  updated (`test_synthetic_is_soft_finding_not_hard_fail`).
+  `ToolkitRegistry` (disabled-tool filtering, provider-native tool defs), persistent JSON-line sandbox
+  (fd capture, XSPEC non-interactive boot), per-run workspace/memory/figures layout, built-in MCP
+  server/client, config-driven runtime paths.
+- 2026-06-12 -> 2026-06-16 — **Phase 2 steps 0–7 built** — the author→gate→review→commit flow, writes
+  pinned under the runtime data dir. `merge_flow.propose_and_pr()` (isolated-worktree / `direct_branch`
+  Sonnet author, runtime-safe context, `ask_lead`/`ask_human`, bounded L0–L4 rework, typed no-commit
+  failure); `gate.run_gate` (Layer-A structural/provenance/determinism + no-fabrication scan, Layer-B
+  test runner, extension-agnostic over `*_utils`); `review.make_review_hook` (provider-decorrelated GPT
+  co-lead); `approve_edit` (one atomic commit, explicit-path staging, never `git add -A`); launch
+  preflights (`check_author_reviewer_decorrelation`, `check_toolkit_git_identity`/`_branch_clean`).
+- 2026-06-18 -> 2026-06-26 — **Live-run hardening (fix-lists #1–#11).** Gate survives slow/erroring
+  tests (`TimeoutExpired` caught; `propose_and_pr` exception backstop → `status="failed"`); SDK author's
+  `Bash` runs in the analyst code-exec env; `bash_exec` rescoped read-only; timeouts decoupled from the
+  model (`call_timeout_ceiling`, `gate_test_timeout_s`); `propose_and_pr(monitor=…)` streams events; FS
+  jail (`fs_guard.PathGuard` + `agent_fs_allow` `PreToolUse` hook, `_make_path_confiner` deprecated); git
+  discipline (auto-reset to per-attempt `base_ref` via `_reset_direct_tree` + `tool_author_failed_*.patch`,
+  coder Bash deny-rule, gate-entry auto-revert); gate fixes (`_manifest_keys` handles annotated manifests;
+  stub/not-implemented → co-lead finding; determinism = per-test JUnit outcome maps not a byte-compare,
+  `_strip_volatile` removed; reproducibility a science-tool `test_repro…` check).
+- 2026-06-29 -> 2026-06-30 — **Authoring refactor (A1) + `bash_exec` hang fix.** Coder escalation tools
+  take one Markdown `message`; `propose_and_pr`'s inline loop decomposed into an `AuthoringSession`
+  (`drive`/`run_gate_step`/`run_review_step`/`commit`/`aclose`, via `build_authoring_session`) it now
+  thinly drives; the session gained `submit_cap`/`debate_cap` + the co-lead debate path (`lead_rebuttal`),
+  and consensus drives authoring via `lead.drive_authoring` (commit still ⇔ gate ∧ review). `bash_exec`
+  now runs `stdin=DEVNULL, start_new_session=True` + process-group kill on timeout (its description demands
+  non-interactive invocation), and `MCPToolClient.call_tool` bounds the await (`asyncio.wait_for`, 900 s) —
+  fixing a whole-run hang from an interactive FTOOL wedging the MCP command channel.
+- 2026-07-06 — **Gate Layer-B fixes.** [G2] Layer-B passes only if pytest exits 0 AND ≥1 test PASSED
+  (`_layer_b_verdict`); an all-SKIPPED suite fails with a specific reason instead of merging an untested
+  tool. [C1] bare ambiguous words (`synthetic`/`synthesized`/`illustrative`) moved from hard-fail to soft
+  `finding_vocabulary` via `code_gate.yaml` (the co-lead still judges them).
 - 2026-07-09 — **Gate derives the manifest/timeout target from the diff, not the brief ([A12]).**
-  The `structural.tool_manifest_entry` check and `_gate_test_timeout` no longer build paths from
-  `tool_spec.target_domain` (an unvalidated, lead-free-filled field). A new helper
-  `_touched_packages(worktree, targets)` derives the `*_utils` packages the changeset actually
-  touched from `collect_targets`; the manifest search runs over *those* packages'
-  `skills/__init__.py`, and the timeout is the `max` of the orchestration default and every
-  touched package's `tool_config.yaml`. Root cause: run #12 wrote a descriptive `target_domain`
-  (`"xspec_utils (IXPE polarimetry)"`) → the old check built a nonexistent manifest path →
-  rejected forever with a misleading "no entry" message, un-fixable in-run (the ToolSpec is frozen
-  after `decide_authoring`). Deriving from the diff removes the whole failure class; `target_domain`
-  is now purely advisory (coder-brief prose only). The rejection detail lists the manifest keys
-  actually present per touched package, so a name mismatch is diagnosable in round 1 (part 2).
-  `_gate_test_timeout` signature `(worktree, tool_spec)` → `(worktree, targets)`; `run_gate`
-  computes `targets` before binding the timeout. `test_gate.py`: two regressions
-  (`test_structural_entry_found_despite_descriptive_target_domain`,
-  `test_structural_missing_entry_detail_lists_found_keys`) + the four timeout tests pass `targets`.
-- 2026-07-13 — **[I1] co-lead web_search: dropped the best-effort resolver.** `make_review_hook`'s
-  private `_resolve_web_source` (a `try/except` that silently returned `None` when Tavily creds were
-  missing) was removed; the co-lead now uses `web_source or WebSource()` directly. It was unnecessary:
-  `TAVILY_API_KEY` is a required launch preflight var, and `WebSource`'s client is now lazy
-  (`sources/web_source.py`), so construction can't fail on a missing key. Behaviour unchanged on the
-  happy path; a run missing the key already fails at preflight, not here.
+  `structural.tool_manifest_entry` and `_gate_test_timeout` no longer build paths from the unvalidated
+  `tool_spec.target_domain`; new `_touched_packages` derives the `*_utils` packages the changeset touched,
+  the manifest search runs over those, and the timeout is the `max` over their `tool_config.yaml`. Removes
+  the run-#12 doomed-loop; the rejection now lists the manifest keys actually present. `_gate_test_timeout`
+  signature `(worktree, targets)`.
+- 2026-07-13 — **[I1] co-lead `web_search`: dropped the best-effort resolver.** `_resolve_web_source`
+  removed; the co-lead uses `web_source or WebSource()` directly (`TAVILY_API_KEY` is a required preflight
+  var and `WebSource`'s client is now lazy, so construction can't fail on a missing key).

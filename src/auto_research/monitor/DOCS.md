@@ -67,28 +67,17 @@ diagnostic trace, while terminal/notebook output is filtered by `chatter`.
   live progress-line streamer.
 
 ## Changelog
-- 2026-05-28 -> 2026-06-12 — `RunMonitor` provides async-safe, full-fidelity JSONL
-  streaming, chatter-filtered in-memory events, grouped Markdown rendering, offline JSONL
-  reconstruction, and config-driven runtime paths.
-- 2026-06-12 — Compacted changelog; no monitor behavior changes.
-- 2026-06-15 — Added optional live progress-line streaming for visible monitor events;
-  JSONL remains full fidelity while Markdown and live output stay chatter-filtered.
-- 2026-06-15 — Live progress lines now prefix visible events with `team(model)`
-  when model metadata is present and include compact per-tool result details
-  (`tool`, `status`, `chars`, `figures`) without dumping tool output bodies.
-- 2026-06-22 — **Full-fidelity diagnostic capture** (the monitor itself is unchanged; emitters
-  now populate richer `data`). ReAct `*.analyze.tool_result` events carry the tool-call `args`
-  and the returned `text` (capped — see `agents/DOCS.md`); the tool-authoring flow emits a
-  `tooling`-team stream — `coder.session_start`/`coder.tool_use`/`coder.tool_result`/
-  `coder.text`/`coder.turn_end` (the SDK author session), `coder.ask_lead`/`coder.ask_human`
-  (escalations), and `gate.result`/`review.result`/`commit` (see `sandbox/DOCS.md`). The terminal
-  renderer still surfaces only its select keys, so this heavy text lands in the JSONL only — the
-  log is now a complete trace of a run (incl. the previously-opaque coder/gate phases) without
-  flooding the terminal.
-- 2026-06-23 — **Tool input/output are now separate events.** `_react` emits
-  `*.{action}.tool_call` (the input) **before** dispatching each call — carrying the
-  tool-call `args` and a `tool_call_id` — and `*.{action}.tool_result` (the output) when the
-  call returns, carrying the returned `text` and the same `tool_call_id`. Because `record()`
-  flushes each event to the JSONL immediately, a tool that hangs and never returns now leaves
-  a `tool_call` with no matching `tool_result`, so a stalled run is diagnosable down to the
-  exact command from the log alone. (`args` moved off `tool_result` onto `tool_call`.)
+- 2026-05-28 -> 2026-06-12 — `RunMonitor` built: async-safe full-fidelity JSONL streaming,
+  chatter-filtered in-memory events, grouped Markdown rendering, offline JSONL reconstruction,
+  config-driven runtime paths.
+- 2026-06-15 — Optional live progress-line streaming for visible events (JSONL stays full
+  fidelity; Markdown/live stay chatter-filtered); lines prefix `team(model)` when model metadata
+  is present and carry compact per-tool result details (`tool`, `status`, `chars`, `figures`)
+  without dumping tool bodies.
+- 2026-06-22 — Full-fidelity diagnostic capture (monitor unchanged; emitters populate richer
+  `data`): ReAct `*.tool_result` events carry the tool-call `args` and returned `text`; the
+  tool-authoring flow emits a `tooling`-team stream (`coder.*`, `gate.result`, `review.result`,
+  `commit`), heavy text landing in the JSONL only.
+- 2026-06-23 — Tool input/output split into separate events: `*.{action}.tool_call` (input,
+  `args` + `tool_call_id`) emitted before dispatch and `*.{action}.tool_result` (output, `text`
+  + the same id) on return, so a hung tool leaves an unmatched `tool_call` in the log.
