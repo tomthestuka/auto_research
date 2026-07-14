@@ -87,7 +87,13 @@ def load_observations_config(
 ) -> ObservationsConfig:
     """Load and validate observation locations from YAML."""
 
-    with Path(path).open("r", encoding="utf-8") as stream:
+    path = Path(path)
+    if not path.exists():
+        raise RuntimeError(
+            f"Config not found: {path}. Run `bash install.sh` from the repo root, or copy "
+            f"{path.name}.example to {path.name} and edit it."
+        )
+    with path.open("r", encoding="utf-8") as stream:
         data = yaml.safe_load(stream)
     return ObservationsConfig.model_validate(data)
 

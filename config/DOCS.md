@@ -17,6 +17,14 @@ Each concern is a single YAML file in this directory. Code in
 a Pydantic schema, and hands the resolved object to whoever needs it. Adding a new
 role or swapping a provider is a YAML edit; no Python change.
 
+**Machine-local config vs. tracked templates.** `models.yaml` and `code_gate.yaml` are
+machine-independent and tracked. The machine-specific files — `orchestration.yaml`,
+`observations.yaml`, plus the sandbox `analyst_env.sh` and `repl_init.py` hooks — are
+**gitignored**; the repo tracks a `*.example` template for each. A fresh clone runs
+`bash install.sh` (writes the live copies) or copies each `*.example` by hand. The launch
+config loaders (`graph.runtime.load_orchestration_config`, `observations.load_observations_config`)
+raise a "copy the `.example` / run install.sh" message when a live file is absent.
+
 ## Interfaces / Contracts
 - `models.yaml` — role → non-empty `members` list. Each member has `name`,
   `provider`, `model`, `vision`, `parameters`, and optional `documents` and
@@ -31,7 +39,8 @@ role or swapping a provider is a YAML edit; no Python change.
   because the coder is Claude (the §6/§9.3 provider-decorrelation invariant), backed by
   GPT-5.5 reasoning xhigh.
 - `observations.yaml` — a single `obs_db_root`: the **one folder** the obs database lives
-  in. Loaded by `auto_research.observations`, which discovers missions from disk — a subdir
+  in. Machine-local (gitignored; tracked as `observations.yaml.example`).
+  Loaded by `auto_research.observations`, which discovers missions from disk — a subdir
   `<obs_db_root>/<MISSION>` is a mission iff it holds a `catalog.json` (the marker that
   separates real mission folders from unrelated working dirs sharing the root). The subdir
   basename lowercases to the mission name (`research_toolkit` derives it the same way); a
@@ -40,9 +49,10 @@ role or swapping a provider is a YAML edit; no Python change.
   `research_toolkit` tools (`xspec_utils.load_data`, `heasarc_utils.acquire`) already take a
   per-mission directory and are unchanged.
 - `orchestration.yaml` — runtime data dir, graph iteration caps, debate round cap,
-  ReAct/structured retry caps, toolkit root, analyst sandbox environment, report settings,
-  Phase-2 authoring caps, the raise-to-human channel default + ping timeout, and MCP server
-  configuration.
+  ReAct/structured retry caps, toolkit root, analyst sandbox environment (env script +
+  REPL-init hook + env probe), report settings, Phase-2 authoring caps, the raise-to-human
+  channel default + ping timeout, and MCP server configuration. Machine-local (gitignored;
+  tracked as `orchestration.yaml.example`).
 - `code_gate.yaml` — the no-fabrication scan lists for the Phase-2 deterministic gate
   (`sandbox/gate.py`, §9.4/§9.5): `hard_fail_vocabulary`, `hard_fail_code_patterns` (RNG),
   `finding_vocabulary` + `finding_code_patterns` (soft flags → co-lead review, not fail),
@@ -139,6 +149,16 @@ role or swapping a provider is a YAML edit; no Python change.
   `_source_ini_env()` in `sandbox/runner.py` before each persistent REPL subprocess
   is spawned. Sets HEADAS, CALDB, CALDBCONFIG, CALDBALIAS, GEOMAG_PATH. No SSH
   agent, no conda activation (the sandbox invokes `analyze_env/bin/python` directly).
+- `orchestration.yaml.repl_init_py` — path to a Python file exec'd once at each analyst REPL
+  subprocess boot (`sandbox/persistent.py`), inside `analyze_env`, for domain **session** setup
+  (imports, non-interactive settings, model/table loads). Best-effort — a failure is swallowed
+  so a missing optional model never kills the REPL. Empty/absent ⇒ bare REPL (no-op). Template:
+  `src/auto_research/sandbox/repl_init.py.example`. Replaces the formerly-hardcoded XSPEC/relxill
+  boot, so the sandbox core carries no domain code (§9.2/S1).
+- `orchestration.yaml.analyze_probe` — a one-line Python snippet run under `analyze_env` to
+  smoke-test the analysis stack (e.g. `import xspec, xspec_utils`). Used by the installer and the
+  preflight env-probe check, and it supplies the model-facing probe text in the `bash_exec`
+  description. Empty/absent ⇒ probe skipped.
 - `orchestration.yaml.analyze_env` — conda/venv prefix whose `bin/python` is used
   for analyst sandbox subprocesses (must have PyXSPEC + analysis stack installed,
   including `astroquery` for `heasarc_utils` HEASARC downloads).
@@ -203,3 +223,13 @@ role or swapping a provider is a YAML edit; no Python change.
   ignored) and already reasons at the SDK default. `effort` deliberately not set —
   `output_config.effort` collides with the `.parse()` structured-output path; `thinking` alone is
   safe on both paths.
+- 2026-07-14 — **Install-script increment 0: machine-local config as gitignored + tracked
+  `*.example`.** `orchestration.yaml`, `observations.yaml`, `sandbox/analyst_env.sh`, and the new
+  `sandbox/repl_init.py` are now gitignored; each ships a tracked `*.example` template. Added two
+  `orchestration.yaml` keys: `repl_init_py` (path to a Python file exec'd at REPL-subprocess boot
+  for domain session setup — replaces the hardcoded XSPEC/relxill boot in `persistent.py`, closing
+  the deepest domain leak S1) and `analyze_probe` (a one-line stack smoke-test used by the
+  installer, preflight, and the `bash_exec` description). Launch config loaders now raise a
+  "copy the `.example` / run install.sh" message on a missing live file. Migration for an existing
+  checkout: `git rm --cached config/orchestration.yaml config/observations.yaml
+  src/auto_research/sandbox/analyst_env.sh` (the live files stay on disk).

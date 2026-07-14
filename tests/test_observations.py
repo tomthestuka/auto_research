@@ -19,8 +19,46 @@ from auto_research.observations import (
 TOOLKIT_ROOT = _toolkit_root()
 
 
-def test_load_observations_config_from_project_file():
-    config = load_observations_config()
+def _obsdb_available() -> bool:
+    """Whether ``obsdb_catalog`` is importable from ``toolkit_root`` (a provisioned machine).
+
+    The catalog-health tests exercise the wrapper around ``research_toolkit``'s real
+    ``obsdb_catalog.healthcheck``; on an unprovisioned checkout (no toolkit, or a scaffolded one)
+    that package is absent, so they skip rather than fail — keeping the suite portable.
+    """
+    import importlib
+    import sys
+
+    root = str(TOOLKIT_ROOT)
+    if not root or not (TOOLKIT_ROOT / "obsdb_catalog").exists():
+        return False
+    inserted = root not in sys.path
+    if inserted:
+        sys.path.insert(0, root)
+    try:
+        importlib.import_module("obsdb_catalog.healthcheck")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        if inserted and root in sys.path:
+            sys.path.remove(root)
+
+
+_needs_obsdb = pytest.mark.skipif(
+    not _obsdb_available(), reason="obsdb_catalog not in toolkit_root (unprovisioned machine)"
+)
+
+
+def test_load_observations_config_discovers_missions(tmp_path):
+    """Discovery from a hermetic tmp obs-db (a `<root>/IXPE` subdir with a catalog.json marker)."""
+    root = tmp_path / "obsdb"
+    (root / "IXPE").mkdir(parents=True)
+    (root / "IXPE" / "catalog.json").write_text("{}", encoding="utf-8")
+    cfg = tmp_path / "observations.yaml"
+    cfg.write_text(yaml.safe_dump({"obs_db_root": str(root)}), encoding="utf-8")
+
+    config = load_observations_config(cfg)
 
     assert config.missions
     assert config.mission("ixpe").obs_db_path.name == "IXPE"
@@ -111,11 +149,13 @@ def _health_config(tmp_path, mission="probe"):
     return cfg, obs_db
 
 
+@_needs_obsdb
 def test_check_catalog_health_absent_catalog_passes(tmp_path):
     cfg, _ = _health_config(tmp_path)
     check_catalog_health(config_path=cfg, toolkit_root=TOOLKIT_ROOT)  # no raise
 
 
+@_needs_obsdb
 def test_check_catalog_health_good_catalog_passes(tmp_path):
     cfg, obs_db = _health_config(tmp_path)
     (obs_db / "01" / "evt").mkdir(parents=True)
@@ -131,6 +171,7 @@ def test_check_catalog_health_good_catalog_passes(tmp_path):
     check_catalog_health(config_path=cfg, toolkit_root=TOOLKIT_ROOT)  # no raise
 
 
+@_needs_obsdb
 def test_check_catalog_health_malformed_raises(tmp_path):
     cfg, obs_db = _health_config(tmp_path)
     (obs_db / "catalog.json").write_text("{ not valid json")
@@ -138,6 +179,7 @@ def test_check_catalog_health_malformed_raises(tmp_path):
         check_catalog_health(config_path=cfg, toolkit_root=TOOLKIT_ROOT)
 
 
+@_needs_obsdb
 def test_check_catalog_health_missing_product_raises(tmp_path):
     cfg, obs_db = _health_config(tmp_path)
     (obs_db / "catalog.json").write_text(json.dumps({

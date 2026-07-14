@@ -47,12 +47,20 @@ def test_forbidden_in_command(tmp_path):
 
 
 def test_real_config_denies_auto_research_allows_toolkit():
-    """The repo's orchestration.yaml agent_fs_allow includes research_toolkit but NOT
-    auto_research — so the orchestration repo is denied via either mount path."""
+    """The configured agent_fs_allow includes the toolkit_root but NOT auto_research — so the
+    orchestration repo is denied. Paths derive from the live config, so the test is portable."""
+    from pathlib import Path
+
+    from auto_research.graph.runtime import load_orchestration_config
+
     roots = load_fs_allowlist()
     if not roots:
         pytest.skip("agent_fs_allow not configured")
     g = PathGuard(roots)
-    assert not g.is_allowed("/data/fzhou/auto_research/src/auto_research/sandbox/gate.py")
-    assert not g.is_allowed("/nfsdata1/fzhou/auto_research/src/auto_research/sandbox/gate.py")
-    assert g.is_allowed("/data/fzhou/research_toolkit/xspec_utils/lib/red_ixpe.py")
+    # This test's repo IS auto_research; its root is deliberately absent from the allow-list.
+    repo_root = Path(__file__).resolve().parents[1]
+    assert not g.is_allowed(repo_root / "src" / "auto_research" / "sandbox" / "gate.py")
+    # The configured toolkit_root is allowed (same config that produced `roots`).
+    toolkit_root = load_orchestration_config().get("toolkit_root")
+    if toolkit_root:
+        assert g.is_allowed(Path(toolkit_root) / "xspec_utils" / "lib" / "red_ixpe.py")

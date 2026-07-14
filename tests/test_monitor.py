@@ -162,6 +162,21 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path, mon
 
     monkeypatch.setattr("auto_research.graph.runtime.run_preflight", _noop_preflight)
 
+    # Hermetic orchestration config so the wiring runs on any machine (no real analyze_env /
+    # toolkit): analyze_env=None ⇒ the builtin MCP server uses sys.executable; an empty tmp
+    # toolkit and a no-op env script keep it independent of the live config + repo state.
+    _ini = tmp_path / "env.sh"
+    _ini.write_text("#!/bin/bash\n", encoding="utf-8")
+    _tk = tmp_path / "toolkit"
+    _tk.mkdir()
+    _hermetic_orch = {
+        "toolkit_root": str(_tk), "analyze_env": None, "analyze_ini_sh": str(_ini),
+        "disabled_tools": [], "mcp_servers": [],
+    }
+    monkeypatch.setattr(
+        "auto_research.graph.runtime.load_orchestration_config", lambda *a, **k: _hermetic_orch
+    )
+
     class IO:
         async def compose_search_strategy(self, request, *, follow_up=None):
             return SearchRequest(query=request.question, sources=["local"])

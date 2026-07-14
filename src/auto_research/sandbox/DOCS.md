@@ -238,7 +238,11 @@ Tools:
   returning `exit_code` 124. Both matter: a prompting/forking grandchild (e.g. an interactive
   HEASoft FTOOL) can neither read this server's MCP stdio transport (which would starve the
   protocol and wedge the run) nor outlive the timeout. The tool description also instructs the
-  model to invoke commands non-interactively (all parameters supplied up front).
+  model to invoke commands non-interactively (all parameters supplied up front). The description
+  is **built at server startup** by `_bash_exec_description()` and is **domain-neutral**: the
+  concrete stack-probe example is injected from `AR_ANALYZE_PROBE` (config `analyze_probe`, wired
+  by `graph.runtime._builtin_server_config`); absent ⇒ a generic "import your toolkit package"
+  line. No domain string (FITS/xspec) is hardcoded in source.
 - `list_dir(path)` → `{"path": str, "entries": list[str]}` — alphabetically sorted
   directory listing.
 - `read_file(path, max_bytes=65536)` → `{"content": str, "truncated": bool, "size_bytes": int}`
@@ -495,8 +499,12 @@ the hook mapping a fake-model verdict — no live LLM).
     (`{name, description, input_schema}`) for native function calling.
   - `.kind_for_function(name)` → `str` — map a sanitized tool-call name back to
     the canonical dotted `kind`.
-- `PersistentSandbox(toolkit_root, workdir, *, analyze_env, analyze_ini_sh, default_timeout_s)` —
-  long-lived REPL subprocess per analyst worker.
+- `PersistentSandbox(toolkit_root, workdir, *, analyze_env, analyze_ini_sh, repl_init_py, default_timeout_s)` —
+  long-lived REPL subprocess per analyst worker. `repl_init_py` (config `repl_init_py`) is a path
+  exec'd once at REPL boot for domain **session** setup (imports, non-interactive settings, model
+  loads); passed to the subprocess via `AR_REPL_INIT_PY` and run best-effort (failures swallowed).
+  Empty/absent ⇒ bare REPL. This replaced the formerly-hardcoded XSPEC/relxill boot, so the sandbox
+  core carries no domain code (S1); the XSPEC body now lives in `sandbox/repl_init.py.example`.
   - `.start()` — spawn; idempotent.
   - `.restart()` — kill the current subprocess, if any, and spawn a fresh REPL.
   - `.call_tool(module, fn, args, *, timeout_s)` → `dict` — one tool call.
@@ -666,3 +674,13 @@ the hook mapping a fake-model verdict — no live LLM).
 - 2026-07-13 — **[I1] co-lead `web_search`: dropped the best-effort resolver.** `_resolve_web_source`
   removed; the co-lead uses `web_source or WebSource()` directly (`TAVILY_API_KEY` is a required preflight
   var and `WebSource`'s client is now lazy, so construction can't fail on a missing key).
+- 2026-07-14 — **Install-script increment 1: domain-agnostic REPL-init + env-probe.**
+  `PersistentSandbox` gained a `repl_init_py` param — a config-pointed Python file exec'd once at REPL
+  boot (via `AR_REPL_INIT_PY`, best-effort) for domain session setup; it **replaces the hardcoded
+  XSPEC/relxill `_configure_xspec_once()`** in `_REPL_SCRIPT` (the XSPEC body now ships as
+  `repl_init.py.example`), closing the deepest domain leak S1/P3. `builtin_server` builds the `bash_exec`
+  description at startup via `_bash_exec_description()`, injecting the concrete probe from
+  `AR_ANALYZE_PROBE` (config `analyze_probe`, wired by `graph.runtime._builtin_server_config`) and
+  neutralizing the FITS/xspec hardcodes. New `runner.check_analyze_probe()` preflight check runs the
+  configured probe under `analyze_env` (skips when unset). `graph.runtime` threads `repl_init_py` +
+  `analyze_probe` from config. Tests: `tests/test_sandbox_hooks.py` (8).

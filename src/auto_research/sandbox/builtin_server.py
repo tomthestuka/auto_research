@@ -34,29 +34,41 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
             pass
 
 
-@mcp.tool()
+def _bash_exec_description() -> str:
+    """Build the LLM-facing bash_exec description, injecting the configured stack probe.
+
+    The concrete probe example comes from AR_ANALYZE_PROBE (config: analyze_probe) so no
+    domain-specific string lives in this orchestration source; absent ⇒ a neutral probe line.
+    """
+    probe = os.environ.get("AR_ANALYZE_PROBE", "").strip()
+    probe_line = (
+        f'Probe the analysis env with `python -c "{probe}; print(\'OK\')"`.'
+        if probe
+        else "Probe the analysis env by importing your toolkit package."
+    )
+    return (
+        "Run a shell command for read-only inspection; returns stdout, stderr, and exit_code.\n\n"
+        "Scope this to inspection: list files, read a data-file header, check an array shape\n"
+        "or a path, and probe the analysis environment. Every real analysis step —\n"
+        "reduction, fitting, computation, figure production — and any result that\n"
+        "persists run through the toolkit tools; a capability the toolkit lacks is raised\n"
+        "as a `tool_request` so the coder authors a tested tool, rather than computed here.\n"
+        "Keep the filesystem as you found it (the toolkit tools own what lands on disk).\n\n"
+        "Invoke every command so it runs to completion on its own, with each parameter\n"
+        "supplied up front — stdin is closed, so a command that waits for prompted input\n"
+        "receives EOF immediately and exits. Run any interactive analysis tool\n"
+        "non-interactively: pass all parameters on the command line, or set the tool's\n"
+        "hidden/batch mode, rather than relying on it to prompt.\n\n"
+        "Inline Python via `python -c \"...\"` is for inspection too. Separate multiple\n"
+        "statements with a semicolon — an escaped newline is a literal two-character\n"
+        "sequence, not a newline, and raises SyntaxError (good: `python -c \"import os;\n"
+        "print(os.getcwd())\"`). " + probe_line
+    )
+
+
+@mcp.tool(description=_bash_exec_description())
 def bash_exec(command: str, cwd: str | None = None, timeout_s: int = 60) -> dict:
-    """Run a shell command for read-only inspection; returns stdout, stderr, and exit_code.
-
-    Scope this to inspection: list files, read a FITS header, check an array shape
-    or a path, and probe the analysis environment. Every real analysis step —
-    reduction, fitting, computation, figure production — and any result that
-    persists run through the toolkit tools; a capability the toolkit lacks is raised
-    as a `tool_request` so the coder authors a tested tool, rather than computed here.
-    Keep the filesystem as you found it (the toolkit tools own what lands on disk).
-
-    Invoke every command so it runs to completion on its own, with each parameter
-    supplied up front — stdin is closed, so a command that waits for prompted input
-    receives EOF immediately and exits. Run HEASoft/FTOOLS non-interactively: pass all
-    parameters on the command line (e.g. `fdump infile=… columns=… rows=…`) or set the
-    tool's hidden mode, rather than relying on it to prompt.
-
-    Inline Python via `python -c "..."` is for inspection too. Separate multiple
-    statements with a semicolon — an escaped newline is a literal two-character
-    sequence, not a newline, and raises SyntaxError (good: `python -c "import os;
-    print(os.getcwd())"`). Probe the analysis env with
-    `python -c "import xspec, xspec_utils; print('OK')"` (the xspec module has
-    no __version__ attribute)."""
+    """Run a shell command for read-only inspection; returns stdout, stderr, and exit_code."""
     proc: subprocess.Popen | None = None
     try:
         # start_new_session isolates the command (and any children it forks) into

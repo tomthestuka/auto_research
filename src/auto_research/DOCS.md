@@ -16,7 +16,8 @@ and the active Phase 2 build order in
 | Submodule | Step | Role |
 |---|---|---|
 | `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`). |
-| `preflight.py` | — | Launch-time deterministic **checklist** (`Preflight` / async `run_preflight()`): runs every no-LLM precondition (`.env` shape, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, human-channel ping) before any model client is built. |
+| `setup.py` | — | The install-script Python stage (`python -m auto_research.setup`, run by `install.sh`): discovers defaults, prompts (interactive `questionary`) or reads `--answers` (headless), then writes the gitignored `config/orchestration.yaml` + `observations.yaml` from their `*.example` templates (deriving `agent_fs_allow` from the answered paths) and runs the preflight smoke test. |
+| `preflight.py` | — | Launch-time deterministic **checklist** (`Preflight` / async `run_preflight()`): runs every no-LLM precondition (`.env` shape, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, `analyze_probe` stack smoke-test, human-channel ping) before any model client is built. |
 | `hitl` | 5 | Raise-to-human clarification channel: the injectable `HumanHandler`, the CLI/Slack/WhatsApp connectors, the CLI-vs-library resolver, and the launch-time channel ping. |
 | `schemas` | 1 | Pydantic v2 message protocol between agents. |
 | `models` | 2 | Provider abstraction + role→model registry from `config/models.yaml`. |
@@ -56,7 +57,9 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `sandbox.merge_flow.check_toolkit_git_identity` (the `research_toolkit` checkout has a git
   commit identity, so a runtime tool commit can't fail mid-flow),
   `observations.check_catalog_health` (every mission's local data catalog is healthy via
-  `research_toolkit`'s detect-only `obsdb_catalog.healthcheck`), and — when a channel is
+  `research_toolkit`'s detect-only `obsdb_catalog.healthcheck`),
+  `sandbox.runner.check_analyze_probe` (runs the configured `analyze_probe` stack smoke-test under
+  `analyze_env`; skips when unset — the domain/lit-only escape hatch), and — when a channel is
   resolved — `hitl.make_human_channel_check` (pings the channel, green only on a reply). `run_research()`
   resolves the handler then awaits this before any LLM; aggregates every failure into one
   `PreflightError`.
@@ -104,6 +107,28 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   checks — and aggregates failures into `PreflightError`). `build_default_preflight(human_handler=None)`
   assembles the project checklist; async `run_preflight(*, human_handler=None)` builds and runs
   it. Each check is a zero-arg fn that raises on failure and lives in its own module.
+- `setup.derive_fs_allow(values, extra_paths=None) -> list[str]` — the `agent_fs_allow` allow-list
+  derived from the answered paths (toolkit_root/obs_db_root/analyze_env/runtime_dir + domain-dep
+  `extra_paths` + `/tmp`); placeholders dropped, deduped, `auto_research` never included.
+- `setup.render_orchestration(template_text, values, fs_allow) -> str` /
+  `setup.render_observations(template_text, obs_db_root) -> str` — line-based renderers that fill the
+  `*.example` template values while preserving comments (the `agent_fs_allow` block is regenerated).
+- `setup.seed_defaults() -> dict` — default answers: prior live-config values (upgrade) over template
+  placeholders. `setup.Answers` resolves each value from the answers file → interactive prompt →
+  default, else raises `SetupError` (headless fail-loud). `setup.main(argv)` is the CLI entry.
+- `setup` domain-dependency (page 3) helpers: `render_analyst_env(entries)` / `render_repl_init(entries)`
+  materialize the two sandbox hooks from typed entries (`shell_init`/`env_var`/`license_tool` →
+  `analyst_env.sh`; `python_init` → `repl_init.py`); `domain_fs_paths(entries)` collects the extra
+  `agent_fs_allow` roots (bucket A/D/E); `domain_probe(entries, existing)` assembles `analyze_probe`;
+  `package_specs(entries)` splits conda/pip installs; `discover_domain_deps()` suggests from `$HEADAS`/
+  `$CALDB`; `seed_extra_fs_paths()` preserves prior domain roots when the page is skipped.
+- `setup` research_toolkit (page 4) helpers: `scaffold_toolkit_package(toolkit_root, domain)` writes a
+  fresh `<domain>_utils` skeleton mirroring the §9.2 layout (human-half `lib/`, pure-data ai-half
+  `skills/`, `tests/`); `init_toolkit_git(toolkit_root, branch="ai")` git-inits + sets identity +
+  checks out the runtime's `ai` branch (§9.9); `stage_raw_code(src, runtime_dir, name)` copies raw
+  domain code into `<runtime_dir>/staging/` (outside the worktree so `git clean -fd` can't delete it);
+  `discover_toolkit()` suggests prior/sibling checkouts; `page_toolkit(...)` resolves `toolkit_root`
+  via point / clone / start-fresh.
 
 ## Changelog
 - 2026-05-26 -> 2026-06-12 — Phase 1 completed (schemas, providers, observability,
@@ -121,3 +146,36 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   families; `env.sandbox_call_timeout_default()`; `database_health` and `toolkit_root_configured`
   preflight checks; `run_checklist` prints one progress line per check; `check_catalog_health`
   renders a per-mission drift summary (`_summarize_drift`).
+- 2026-07-14 — **Install-script increment 0/1.** Machine-local config (`orchestration.yaml`,
+  `observations.yaml`, `sandbox/analyst_env.sh`, new `sandbox/repl_init.py`) is now gitignored with
+  tracked `*.example` templates; launch config loaders raise a "copy the `.example` / run install.sh"
+  message when a live file is missing. New `orchestration.yaml` keys `repl_init_py` (domain REPL
+  session-setup hook, replacing the hardcoded XSPEC boot) and `analyze_probe` (stack smoke-test). Added
+  the `sandbox.runner.check_analyze_probe` preflight check (runs `analyze_probe` under `analyze_env`;
+  skips when unset). See `sandbox/DOCS.md` + `config/DOCS.md` for detail.
+- 2026-07-14 — **Install-script increment 2: installer core.** Added `install.sh` (repo root; thin
+  bash — bootstraps conda + the `auto_research` env, then execs the Python stage) and `setup.py`
+  (`python -m auto_research.setup`): pages 1 (conda), 2 (analyst env from `environment-analyst.yml`),
+  5 (paths), 6 (write configs from `*.example`, deriving `agent_fs_allow` — closes P4), 7 (preflight
+  smoke test). Interactive via `questionary` (added to `environment.yml`), headless via `--answers`
+  (fail-loud on a missing value). Pure renderers/`derive_fs_allow` are unit-tested
+  (`tests/test_setup.py`). Pages 3 (domain deps + licensed/vendor tools) and 4 (research_toolkit) land
+  in later increments; until then their keys keep prior/template values.
+- 2026-07-14 — **Install-script increment 3: domain deps + bucket E.** `setup.py` page 3 collects typed
+  domain-dependency entries (`shell_init`/`env_var`/`conda_pkg`/`pip_pkg`/`python_init`/`license_tool`)
+  — headless from an answers `domain_deps` list, interactive via a discovery-seeded add loop — and
+  materializes them: `analyst_env.sh` (boot commands, `$VAR`-expansion preserved) + `repl_init.py`
+  (session snippets), installs conda/pip specs into `analyze_env`, contributes the `agent_fs_allow`
+  domain roots (so HEADAS/CALDB/license dirs are auto-listed, not hand-synced), and assembles
+  `analyze_probe`. **Bucket E** (`license_tool`) captures a human-installed vendor binary + license
+  var/path (prompt-then-point). When the page is skipped, prior hooks + domain roots are preserved
+  (`seed_extra_fs_paths`). Renderers/collectors unit-tested (`tests/test_setup.py`).
+- 2026-07-14 — **Install-script increment 4: research_toolkit page.** `setup.py` page 4 resolves
+  `toolkit_root` by scan → **point** (existing checkout) / **clone** (git URL) / **start-fresh**
+  (scaffold a `<domain>_utils` skeleton mirroring the §9.2 layout, `git init` + `ai` branch, and stage
+  the user's raw code under `<runtime_dir>/staging/` — *outside* the worktree). Scaffold templates live
+  in `auto_research` and are written into the toolkit only at install-runtime (the build agent never
+  edits `research_toolkit`). start-fresh prints the kickoff for the deferred (increment 5)
+  `onboard_toolkit` authoring pipeline. Scaffold/git/staging tested into a temp dir
+  (`tests/test_setup.py`). Increment 5 (`onboard_toolkit`) is deferred — it needs cross-domain
+  collaborators.

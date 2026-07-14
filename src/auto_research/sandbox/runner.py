@@ -54,6 +54,57 @@ def _source_ini_env(ini_sh: str) -> dict[str, str]:
     return env
 
 
+_DEFAULT_ORCH_CONFIG = Path(__file__).resolve().parents[2] / "config" / "orchestration.yaml"
+
+
+def check_analyze_probe(*, config_path: str | Path = _DEFAULT_ORCH_CONFIG) -> None:
+    """Preflight: run the configured stack smoke-test under ``analyze_env`` (skip if unset).
+
+    Reads ``analyze_probe``/``analyze_env``/``analyze_ini_sh``/``toolkit_root`` from
+    ``config/orchestration.yaml``, sources the analyst env + sets PYTHONPATH the same way the
+    sandbox does, then runs ``{analyze_env}/bin/python -c "{analyze_probe}"``. A non-zero exit
+    (broken or missing analysis stack) fails the launch with the captured error. An empty or
+    absent ``analyze_probe`` is a no-op — the escape hatch for a domain (or a literature-only
+    deployment) that configures no probe.
+    """
+    import yaml  # local — keep the preflight import-light
+
+    try:
+        with Path(config_path).open("r", encoding="utf-8") as stream:
+            orch = yaml.safe_load(stream) or {}
+    except OSError:
+        return  # missing live config is reported by the config-loader checks, not here
+    probe = (orch.get("analyze_probe") or "").strip()
+    if not probe:
+        return
+    analyze_env = orch.get("analyze_env")
+    analyze_ini_sh = orch.get("analyze_ini_sh") or None
+    toolkit_root = orch.get("toolkit_root")
+    python_exec = str(Path(analyze_env) / "bin" / "python") if analyze_env else sys.executable
+    base_env = _source_ini_env(analyze_ini_sh) if analyze_ini_sh else dict(os.environ)
+    if toolkit_root:
+        existing = base_env.get("PYTHONPATH", "")
+        base_env = {
+            **base_env,
+            "PYTHONPATH": str(toolkit_root) + (":" + existing if existing else ""),
+        }
+    try:
+        completed = subprocess.run(
+            [python_exec, "-c", probe],
+            capture_output=True,
+            text=True,
+            env=base_env,
+            timeout=120,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"analyze_probe failed to run ({python_exec}): {exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()[-800:]
+        raise RuntimeError(
+            f"analyze_probe `{probe}` exited {completed.returncode} under {python_exec}:\n{detail}"
+        )
+
+
 async def run_tool(
     module: str,
     fn: str,

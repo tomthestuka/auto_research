@@ -556,12 +556,17 @@ class TestBashExecInterpreterConsistency:
             load_orchestration_config,
         )
 
-        orch = load_orchestration_config()
+        try:
+            orch = load_orchestration_config()
+        except RuntimeError:
+            pytest.skip("orchestration.yaml not configured (unprovisioned machine)")
         analyze_env = orch.get("analyze_env")
         analyze_ini_sh = orch.get("analyze_ini_sh")
         toolkit_root = orch.get("toolkit_root")
         if not (analyze_env and analyze_ini_sh and toolkit_root):
             pytest.skip("analyze_env / analyze_ini_sh / toolkit_root not configured")
+        if not (Path(analyze_env) / "bin" / "python").exists():
+            pytest.skip(f"analyze_env python absent ({analyze_env}) — unprovisioned machine")
         try:
             cfg = _builtin_server_config(
                 Path(analyze_env), analyze_ini_sh, Path(toolkit_root)

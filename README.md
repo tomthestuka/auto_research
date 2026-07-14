@@ -220,84 +220,82 @@ Current role/tool surfaces:
 
 ## Setup
 
-There are **two environments**, and you only need the second one to run the analyst
-XSPEC tools:
+Requires **Linux or macOS** (the sandbox uses POSIX process groups / signals). The fastest
+path is the installer; a manual path follows for full control.
 
-1. **Orchestration env** (`auto_research` conda env) — required for everything: the
-   LangGraph graph, LLM calls, librarians, reviewer, report composition. Pure Python +
-   API keys.
-2. **Analysis sandbox env** — required only so analyst workers can execute the
-   `research_toolkit` tools: the XSPEC tools (`xspec_utils.load_data`, `fit_*`, `plot_*`) and
-   the archive **acquire** tool (`heasarc_utils.acquire`). This is HEASoft / PyXSPEC /
-   `ixpeobssim` / `relxill` / `astroquery` (for `heasarc_utils` HEASARC downloads) plus the
-   `research_toolkit` repo and the observation data. Heavy and host-specific. **Without it
-   the graph still runs end-to-end** — only the analyst tool calls fail (caught by the
-   error-feedback loop).
-
-### 1. Orchestration env (everyone)
+### Quick start — `bash install.sh`
 
 ```bash
-conda env create -f environment.yml      # creates the `auto_research` env (Python 3.13)
-conda activate auto_research             # pip section installs -e ., langgraph-cli, claude-agent-sdk
-cp .env.example .env                     # then fill in your keys (see Configuration)
+git clone <this repo> && cd auto_research
+cp .env.example .env      # fill in your API keys (see Configuration)
+bash install.sh           # from the repo root, in a real terminal
 ```
 
-> `claude-agent-sdk` (Phase 2 — tool authoring) and `langgraph-cli` (Studio) are pip-only;
-> they are installed automatically from the `pip:` block in `environment.yml`.
+`install.sh` bootstraps conda (offers to install Miniforge if none is found), creates/updates
+the `auto_research` orchestration env from `environment.yml`, then runs the interactive Python
+stage (`python -m auto_research.setup`). That stage walks you, page by page, through: **conda**,
+the **analysis env** (from `environment-analyst.yml`), your **domain dependencies** (init
+scripts / env vars / conda-pip packages / a REPL session hook / **licensed vendor tools**), the
+machine **paths** (runtime dir, data root), and the **`research_toolkit`** checkout — then writes
+the machine-local `config/orchestration.yaml` + `config/observations.yaml` (deriving
+`agent_fs_allow` for you), copies the sandbox hooks, and runs the launch preflight as a smoke
+test. A re-run is an **upgrade**: it seeds every prompt from your existing config.
 
-Verify it imports and the deterministic tests pass (these need **no** API keys, no XSPEC):
+Machine-local files (`config/orchestration.yaml`, `config/observations.yaml`,
+`src/auto_research/sandbox/{analyst_env.sh,repl_init.py}`) are **gitignored**; the repo tracks a
+`*.example` template for each. The installer writes the live copies; a fresh clone that skips the
+installer must copy each `*.example` by hand.
+
+Headless (CI / an agent): `bash install.sh --answers answers.yaml` (a YAML/JSON file of the
+prompt values) — a missing value fails loudly rather than hanging.
+
+Verify the deterministic tests pass (no API keys, no XSPEC needed):
 
 ```bash
-pytest -q          # ~150 deterministic tests; live/XSPEC tests are opt-in and skipped
+conda activate auto_research
+pytest -q          # ~477 deterministic tests; no API keys needed
 ```
 
-### 2a. On our cluster (fastest)
+The suite is **portable**: tests that need a fully-provisioned machine (a real `analyze_env`
+interpreter, `obsdb_catalog` in the toolkit, a populated data root) **skip** gracefully when those
+are absent, rather than failing — so a fresh clone reports passes + skips, not errors. Live/XSPEC
+tests are opt-in and env-gated.
 
-The analysis env and data already exist and work — point the config at them and you are
-done. The committed `config/orchestration.yaml` and `config/observations.yaml` already
-reference these paths:
+### The two environments
 
-| What | Path (already present on the cluster) |
-|---|---|
-| Analysis Python env (PyXSPEC, ixpeobssim, astroquery) | `/grad/fzhou/.conda/envs/astropy` |
-| HEASoft/CALDB init script | `src/auto_research/sandbox/analyst_env.sh` (HEASoft 6.34) |
-| `research_toolkit` repo (`toolkit_root`) | `/data/fzhou/research_toolkit` |
-| `relxill` model tables | `/data/fzhou/XSPEC/relxill/` |
-| Cyg X-1 observations | `/data/fzhou/XSPEC/Cyg_X-1/{IXPE,NICER,NuSTAR}` |
+1. **Orchestration env** (`auto_research`) — required for everything: the LangGraph graph, LLM
+   calls, librarians, reviewer, report composition. Pure Python + API keys. `claude-agent-sdk`
+   (tool authoring) and `langgraph-cli` (Studio) come from the `pip:` block in `environment.yml`.
+2. **Analysis sandbox env** (`analyze_env`) — required only so analyst workers can execute the
+   `research_toolkit` tools (XSPEC `xspec_utils.*`, archive `heasarc_utils.acquire`). This is
+   HEASoft / PyXSPEC / `ixpeobssim` / `relxill` / `astroquery` plus the `research_toolkit` repo and
+   the observation data. Heavy and host-specific. **Without it the graph still runs end-to-end** —
+   only the analyst tool calls fail (caught by the error-feedback loop).
 
-So on the cluster you only need: your own `auto_research` conda env (step 1), your own
-`.env` with API keys, and a writable `runtime_dir` in `config/orchestration.yaml`. Leave
-the analysis paths as-is.
+### Manual setup (or what the installer automates)
 
-### 2b. On your own machine
+Everything the installer does, by hand:
 
-To run the analyst XSPEC tools off-cluster you must reproduce the analysis stack and
-repoint the config. Roughly:
+1. **Orchestration env** — `conda env create -f environment.yml && conda activate auto_research`.
+2. **Config** — `cp config/orchestration.yaml.example config/orchestration.yaml` and
+   `cp config/observations.yaml.example config/observations.yaml`; edit the paths. Keep
+   `agent_fs_allow` in sync with them (the installer derives it).
+3. **HEASoft (incl. PyXSPEC)** — install HEASoft; `cp src/auto_research/sandbox/analyst_env.sh.example
+   src/auto_research/sandbox/analyst_env.sh` and edit `HEADAS`/`CALDB`; point `analyze_ini_sh` at it.
+4. **Analysis Python env** — `conda env create -f environment-analyst.yml -p <prefix>`; set
+   `analyze_env: <prefix>`. (This env excludes PyXSPEC/CALDB/`relxill` — those come from the HEASoft
+   build + `analyst_env.sh`.)
+5. **`relxill` / REPL session setup** — `cp src/auto_research/sandbox/repl_init.py.example
+   src/auto_research/sandbox/repl_init.py`, set the `relxill` path inside it, and point `repl_init_py`
+   at it. (This file is exec'd at each analyst REPL boot — the domain session hook.)
+6. **`research_toolkit`** — clone the sibling repo, `git checkout -b ai` (the branch the runtime
+   commits authored tools onto), ensure a git `user.name`/`user.email`, and set `toolkit_root`.
+7. **Observation data** — put data under one folder with a `<MISSION>` subdirectory per mission;
+   set `obs_db_root`. Missions are discovered from disk (a subdir with a `catalog.json` is a mission).
 
-1. **HEASoft (incl. PyXSPEC)** — install HEASoft and confirm `python -c "import xspec"`
-   works under its Python. Edit `src/auto_research/sandbox/analyst_env.sh` so `HEADAS`,
-   `CALDB`, etc. point at your install.
-2. **Analysis Python env** — the pure-Python analysis stack (`ixpeobssim` for IXPE
-   reduction/response, `astroquery` for `heasarc_utils` HEASARC downloads, plus
-   `astropy`/`numpy`/`scipy`/`matplotlib`) is captured in `environment-analyst.yml`:
-   ```bash
-   conda env create -f environment-analyst.yml -p <prefix>
-   ```
-   Then set `analyze_env` in `config/orchestration.yaml` to `<prefix>`. Note: this env does
-   **not** include PyXSPEC/`heasoftpy`/CALDB/`relxill` — those come from the HEASoft build
-   (step 1) and `analyst_env.sh`, not from conda/pip.
-3. **`relxill`** — install the model tables; the boot policy loads them from
-   `/data/fzhou/XSPEC/relxill/` in `src/auto_research/sandbox/persistent.py` — change that
-   path to yours.
-4. **`research_toolkit`** — clone the sibling repo and set `toolkit_root` in
-   `config/orchestration.yaml`.
-5. **Observation data** — put your data under one folder with a `<MISSION>` subdirectory
-   per mission (e.g. `IXPE/`, `NICER/`, `NuSTAR/`), and set `obs_db_root` to that folder in
-   `config/observations.yaml`. Missions are discovered from disk (a subdir with a
-   `catalog.json` is a mission).
-
-If you only care about the literature/reviewer loop, skip step 2 entirely — the analyst
-tools simply won't be available.
+If you only care about the literature/reviewer loop, you still need `research_toolkit` present on
+its `ai` branch (the launch preflight checks it); set `analyze_probe: ""` to skip the analysis-stack
+smoke test.
 
 ---
 

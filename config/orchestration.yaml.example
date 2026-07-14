@@ -1,0 +1,63 @@
+# Orchestration config template. Copy to `orchestration.yaml` (gitignored) and edit the
+# paths, or run `bash install.sh` which writes it for you. Each comment says what the key
+# does (+ unit/default). Design rationale lives in CLAUDE.md, not here.
+
+# ── Paths (outside both repos; not committed) ──
+runtime_dir: /path/to/ar_runtime            # SQLite DB, figures, run logs, cost ledger, reports
+papers_dir: /path/to/ar_runtime/papers      # downloaded paper PDFs (default: <runtime_dir>/papers)
+toolkit_root: /path/to/research_toolkit     # research_toolkit checkout (the coder's worktree)
+analyze_env: /path/to/conda/envs/analyze    # conda prefix with the analysis stack
+analyze_ini_sh: /path/to/analyst_env.sh     # headless env sourced per tool subprocess (copy analyst_env.sh.example)
+repl_init_py: /path/to/repl_init.py         # python exec'd at REPL-subprocess boot (domain session setup; copy repl_init.py.example); empty/absent ⇒ no-op
+analyze_probe: ""                           # one-line python smoke-test run under analyze_env (installer + preflight); empty ⇒ skip
+
+# ── Feedback-loop caps (hard backstops against pathology, not workflow budgets) ──
+max_iterations: 3            # reviewer→work send-backs per feedback edge (literature / analysis)
+debate_max_rounds: 3         # analyst debate rounds before the lead adjudicates
+io_search_max_iterations: 1  # Phase-2 stub — evaluate_search_results() returns accepted=True
+tool_retry_cap: 3            # legacy, unused (the ReAct loop self-corrects)
+
+# ── ReAct loop caps (per-role step-count backstops; a token/cost budget is the intended future primary guard) ──
+react_loop_cap: 100            # budget-consuming tool iterations per agent loop
+react_loop_absolute_cap: 200   # hard ceiling incl. budget-free iterations (lead's §5.5 plan_and_debate rounds count only here)
+librarian_react_loop_cap: 1   # tighter — each librarian search re-sends the growing paper context
+structured_retry_cap: 2       # off-schema retries for a structured _call before raising
+
+# ── Sandbox / gate timeouts (seconds; a package may raise its own in <domain>_utils/tool_config.yaml, which wins — no upper clamp, trusted infra, never LLM-set) ──
+sandbox_call_timeout_s: 300   # per tool-call wall-clock; SIGTERM (exit 124) past this
+gate_test_timeout_s: 900      # per pytest invocation in the gate's Layer-B (run twice)
+
+# ── Filesystem allow-list for EVERY runtime agent (fs_guard.PathGuard) ──
+# The complete set of absolute roots an agent may read/write. auto_research is deliberately ABSENT
+# (§2/§4 trust boundary). The installer derives this from the paths above; edit when moving machines.
+# empty/unset ⇒ guard off. Governance basenames (CLAUDE.md/DOCS.md/AGENTS.md) are denied even inside an allowed root.
+agent_fs_allow:
+  - /path/to/research_toolkit     # toolkit_root
+  - /path/to/obs_db_root          # obs_db_root (observations.yaml)
+  - /path/to/conda/envs/analyze   # analyze_env
+  - /tmp
+
+# ── Tool discovery ──
+mcp_servers: []      # extra MCP servers for workers ({name,command,args}); empty ⇒ built-in only (bash_exec/list_dir/read_file)
+disabled_tools: []   # tool names to hide from the catalogue regardless of what the toolkit exposes
+
+# ── Report composition (compose_report node, on accepted verdicts) ──
+report_formats: [tex]   # output handles: jsonl (machine), tex (LaTeX+PDF)
+report_retry_cap: 2            # LaTeX compile+ref-check iterations before accepting residual errors
+
+# ── Phase-2 tool authoring (backstops, not budgets; §9.3/§9.9) ──
+tool_author_max_turns: 999            # Sonnet author's own SDK self-correction turns (L0)
+tool_author_submit_cap: 5             # lead's submit_for_review calls (each = gate ×2 + co-lead review)
+tool_author_debate_cap: 5             # lead↔co-lead respond_to_review turns per tool
+tool_author_gate_rework_cap: 5        # legacy propose_and_pr auto-loop (unused on the lead-driven path)
+tool_author_review_rework_cap: 5      # legacy propose_and_pr auto-loop (unused on the lead-driven path)
+tool_author_branch: ai                # branch the runtime commits onto directly; never merged to master; preflight asserts it's checked out + clean
+tool_author_cap: 12                   # authoring attempts per analysis (bounds the acquire→reduce→analyse chain)
+
+# ── Raise-to-human channel (§9.8) ──
+# human_channel: default connector for an UNATTENDED run (library/notebook/server) when none is passed
+#   — cli|slack|whatsapp|none. `none` ⇒ headless, never blocks. An interactive CLI auto-detects the
+#   terminal regardless. Pass run_research(human_channel=...) to wire a library run.
+human_channel: none
+human_channel_ping_timeout_s: 60      # preflight wait for the channel to reply before failing launch
+human_response_timeout_s: 43200       # 12h — mid-run wait for a human reply before failing (all channels, in-process blocking)

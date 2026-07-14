@@ -701,6 +701,13 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   **literature**, a **persistent-memory** store (runtime LLMs lay down useful findings, RAG-retrieved),
   and a **tool** index mirroring `TOOL_MANIFEST` (synced after every commit; tools loaded lazily by
   relevance). Embedding model is config-driven.
+- **`onboard_toolkit` mini-pipeline (install-script increment 5):** the lead drafts a `ToolSpec`
+  chain from a start-fresh toolkit's staged raw code + a user description, then runs the existing
+  `propose_and_pr` → gate → co-lead review → `approve_edit` flow (`human_channel=cli`) to turn
+  undisciplined everyday analysis code into gated, tested tools. Deferred (decided 2026-07-14) — it
+  needs cross-domain collaborators to supply the raw code + validation datasets. The installer's
+  start-fresh option already scaffolds the package, `ai` branch, and staging dir and prints the
+  kickoff; only the pipeline entry point is unbuilt.
 - **Lead-scientist group:** an idea-generation team that mines the knowledge base to propose
   new research requests, routed through the same reviewer gate.
 - **Librarian IO ingest consensus:** activate `IODebateToConverge` and replace the
@@ -832,3 +839,30 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   "did you mean that?" note when the prose references more figures than placed (§13; caught a live
   Sonnet under-cite that degraded gracefully). Suite green (456); live `test_live_report_rounds.py`
   (two-round Cyg X-1 replay — the lead's round-2 report carried figures from both rounds).
+- 2026-07-14 — **Domain-agnostic install script (increments 0–4; increment 5 deferred).** A portability
+  + science-agnosticism review (`tmp_code_review_070726.md` §4/§5) and a cross-domain setup-taxonomy
+  study (§6) motivated an installer that turns hardcoded machine + domain paths into pointed-to,
+  validated inputs. **Incr 0:** machine-local config (`orchestration.yaml`, `observations.yaml`,
+  `sandbox/{analyst_env.sh,repl_init.py}`) is gitignored with tracked `*.example` templates; new
+  `orchestration.yaml` keys `repl_init_py` + `analyze_probe`; loaders raise a helpful missing-config
+  message. **Incr 1:** `PersistentSandbox` execs `repl_init_py` at REPL boot (replacing the hardcoded
+  XSPEC/relxill boot — the deepest domain leak), `bash_exec`'s description injects the probe from config
+  (no FITS/xspec hardcode), and a `check_analyze_probe` preflight runs the stack smoke-test. **Incr 2:**
+  `install.sh` (thin bash: conda + `auto_research` env, then the Python stage) + `python -m
+  auto_research.setup` (pages 1 conda, 2 analyst env, 5 paths, 6 write-config-from-template deriving
+  `agent_fs_allow`, 7 preflight; interactive `questionary`, headless `--answers`). **Incr 3:** page 3
+  typed domain-dependency entries → materialize `analyst_env.sh` + `repl_init.py`, install conda/pip
+  specs, contribute `agent_fs_allow` roots, assemble the probe; **bucket E** (`license_tool`) captures a
+  human-installed vendor binary + license (prompt-then-point). **Incr 4:** page 4 research_toolkit scan
+  → point / clone / start-fresh (scaffold a §9.2 `<domain>_utils` skeleton + `ai` branch + stage raw
+  code outside the worktree; templates live in `auto_research`, written into the toolkit only at
+  install-runtime). Setup taxonomy A–E: A boot commands, B package install, C python session preload,
+  D data roots, E license pointer; build-from-source documented out-of-scope; the python-REPL sandbox's
+  non-python-runtime reach and the `onboard_toolkit` pipeline (increment 5) deferred (§12). Deterministic
+  tests: `tests/test_sandbox_hooks.py` + `tests/test_setup.py`. Suite green (477). A clean-clone install
+  was verified end-to-end in a throwaway conda env (no container runtime available here). **Test
+  portability (P9):** the 8 suite tests that assumed a fully-provisioned cluster machine (real
+  `analyze_env` python, `obsdb_catalog` in the toolkit, populated data root, literal `/data/fzhou` paths)
+  are now hermetic (tmp fixtures / config-derived) or skip gracefully when the resource is absent — a
+  fresh clone reports passes + skips, not failures; provisioned runs are unchanged. The `obsdb`→generic-
+  database rename (S2) stays deferred.

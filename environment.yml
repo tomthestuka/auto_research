@@ -1,4 +1,4 @@
-1name: auto_research
+name: auto_research
 channels:
   - conda-forge
 dependencies:
@@ -27,6 +27,7 @@ dependencies:
   - slack-bolt>=1.18
   - python-telegram-bot>=22
   - rich >= 15.0.0
+  - questionary>=2.0   # interactive install.sh prompts (arrow-menus/path entry); lazy-imported
   # tests
   - pytest>=8
   # langgraph-cli and claude-agent-sdk are not on conda-forge.

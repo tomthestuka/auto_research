@@ -7,6 +7,8 @@ papers_dir: /data/fzhou/ar_runtime/papers          # downloaded paper PDFs (defa
 toolkit_root: /data/fzhou/research_toolkit          # research_toolkit checkout (the coder's worktree)
 analyze_env: /grad/fzhou/.conda/envs/astropy        # conda prefix with the analysis stack (XSPEC/HEASoft/ixpeobssim)
 analyze_ini_sh: /nfsdata1/fzhou/auto_research/src/auto_research/sandbox/analyst_env.sh  # headless env sourced per tool subprocess (HEADAS/CALDB, no interactive cruft)
+repl_init_py: /nfsdata1/fzhou/auto_research/src/auto_research/sandbox/repl_init.py       # python exec'd at REPL-subprocess boot (domain session setup); empty/absent ⇒ no-op
+analyze_probe: "import xspec, xspec_utils"  # one-line python smoke-test run under analyze_env (installer + preflight); empty ⇒ skip
 
 # ── Feedback-loop caps (hard backstops against pathology, not workflow budgets) ──
 max_iterations: 3            # reviewer→work send-backs per feedback edge (literature / analysis)

@@ -1,0 +1,12 @@
+# Observation database location template. Copy to `observations.yaml` (gitignored) and edit
+# `obs_db_root`, or run `bash install.sh` which writes it for you.
+#
+# The obs database is ONE folder. Set `obs_db_root` to it; each mission lives in a
+# subdirectory `<obs_db_root>/<MISSION>` (e.g. <root>/IXPE, <root>/NICER, <root>/NuSTAR).
+# Missions are discovered from disk by `auto_research.observations`: a subdirectory is a
+# mission iff it contains a `catalog.json` (the marker that distinguishes mission folders
+# from unrelated working dirs sharing the root). The subdir basename lowercases to the
+# mission name (research_toolkit derives it the same way); each mission's catalog.json stays
+# under its own subdir. research_toolkit tools (xspec_utils.load_data, heasarc_utils.acquire)
+# already take a per-mission directory and need no change.
+obs_db_root: /path/to/obs_db_root

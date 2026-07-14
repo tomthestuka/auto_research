@@ -1,0 +1,21 @@
+# REPL-init hook template. Copy to `repl_init.py` (gitignored) and edit, or run `bash
+# install.sh` which writes it for you. Point `repl_init_py` in config/orchestration.yaml at
+# your copy.
+#
+# This file is exec'd once, at the top of each analyst REPL subprocess (persistent.py), inside
+# the analyze_env interpreter with the science stack importable. Use it for domain SESSION
+# setup: imports, non-interactive settings, model/table loads. Keep it best-effort — a failure
+# here is swallowed so a missing optional model never kills the REPL.
+#
+# This worked example configures a non-interactive XSPEC session. A different domain replaces
+# the body entirely (or leaves the file empty / unset for a bare REPL).
+try:
+    from xspec import AllModels, Fit, Plot, Xset
+
+    Fit.query = "no"
+    Xset.allowPrompting = False
+    Xset.chatter = 5
+    Plot.xAxis = "keV"
+    AllModels.lmod("relxill", "/path/to/XSPEC/relxill/")
+except Exception:
+    pass

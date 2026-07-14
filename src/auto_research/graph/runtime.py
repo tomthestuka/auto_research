@@ -59,7 +59,13 @@ class ResearchRun:
 
 def load_orchestration_config(path: str | Path = DEFAULT_ORCHESTRATION_CONFIG) -> dict:
     """Load iteration caps from orchestration.yaml."""
-    with Path(path).open("r", encoding="utf-8") as stream:
+    path = Path(path)
+    if not path.exists():
+        raise RuntimeError(
+            f"Config not found: {path}. Run `bash install.sh` from the repo root, or copy "
+            f"{path.name}.example to {path.name} and edit it."
+        )
+    with path.open("r", encoding="utf-8") as stream:
         return yaml.safe_load(stream) or {}
 
 
@@ -68,6 +74,7 @@ def _builtin_server_config(
     analyze_ini_sh: str | None,
     toolkit_root: Path,
     cwd: Path | None = None,
+    analyze_probe: str | None = None,
 ) -> dict:
     """Build the default builtin-MCP-server config dict.
 
@@ -112,6 +119,11 @@ def _builtin_server_config(
     # so inline inspection breaks the moment the orchestrator env lacks the science stack.
     if analyze_env:
         env["PATH"] = str(analyze_env / "bin") + os.pathsep + env.get("PATH", "")
+
+    # The configured stack smoke-test (config: analyze_probe) supplies the concrete probe
+    # example in the bash_exec description the worker reads — no domain string in source.
+    if analyze_probe:
+        env["AR_ANALYZE_PROBE"] = analyze_probe
 
     return {
         "name": "builtin",
@@ -267,6 +279,8 @@ async def run_research(
     analyze_env_str = orch.get("analyze_env")
     analyze_env = Path(analyze_env_str) if analyze_env_str else None
     analyze_ini_sh: str | None = orch.get("analyze_ini_sh") or None
+    repl_init_py: str | None = orch.get("repl_init_py") or None
+    analyze_probe: str | None = orch.get("analyze_probe") or None
     disabled_tools: list[str] = orch.get("disabled_tools") or []
     report_retry_cap = int(orch.get("report_retry_cap", 2))
     default_formats: list[str] = orch.get("report_formats") or ["jsonl", "tex"]
@@ -378,7 +392,10 @@ async def run_research(
     mcp_server_configs: list[dict] | None = orch.get("mcp_servers") or None
     if not mcp_server_configs:
         mcp_server_configs = [
-            _builtin_server_config(analyze_env, analyze_ini_sh, toolkit_root, cwd=run_dir(run_id))
+            _builtin_server_config(
+                analyze_env, analyze_ini_sh, toolkit_root,
+                cwd=run_dir(run_id), analyze_probe=analyze_probe,
+            )
         ]
     mcp_client = MCPToolClient(servers=mcp_server_configs)
     await mcp_client.start()
@@ -409,6 +426,7 @@ async def run_research(
                 workdir=memory_path(run_id, analyst_keys[i]).parent,
                 analyze_env=analyze_env,
                 analyze_ini_sh=analyze_ini_sh,
+                repl_init_py=repl_init_py,
                 mcp_client=mcp_client,
             )
             worker.sandbox = sandbox

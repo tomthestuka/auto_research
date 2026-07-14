@@ -43,19 +43,23 @@ _REPL_SCRIPT = textwrap.dedent("""
                 return v
         return v
 
-    def _configure_xspec_once():
-        \"\"\"Make the REPL's XSPEC session non-interactive at subprocess boot.\"\"\"
-        try:
-            from xspec import AllModels, Fit, Plot, Xset
-        except Exception:
-            return
-        Fit.query = "no"
-        Xset.allowPrompting = False
-        Xset.chatter = 5
-        Plot.xAxis = "keV"
-        AllModels.lmod('relxill', '/data/fzhou/XSPEC/relxill/')
+    def _run_repl_init():
+        \"\"\"Exec the configured domain REPL-init file at subprocess boot (best-effort).
 
-    _configure_xspec_once()
+        Path comes from AR_REPL_INIT_PY (config: repl_init_py); empty/absent ⇒ bare REPL.
+        A failure is swallowed so a missing optional model never kills the REPL — the
+        domain owns what its session setup does.\"\"\"
+        _init = os.environ.get("AR_REPL_INIT_PY", "").strip()
+        if not _init:
+            return
+        try:
+            with open(_init, "r") as _f:
+                _src = _f.read()
+            exec(compile(_src, _init, "exec"), {"__name__": "__repl_init__"})
+        except Exception:
+            pass
+
+    _run_repl_init()
 
     # Private duplicate of the real stdout — used ONLY for JSON protocol lines.
     _proto = os.fdopen(os.dup(1), "w")
@@ -135,6 +139,7 @@ class PersistentSandbox:
         *,
         analyze_env: Path | str | None = None,
         analyze_ini_sh: str | None = None,
+        repl_init_py: Path | str | None = None,
         default_timeout_s: int = 300,
         mcp_client: Any | None = None,
     ) -> None:
@@ -142,6 +147,7 @@ class PersistentSandbox:
         self._workdir = Path(workdir)
         self._analyze_env = Path(analyze_env) if analyze_env else None
         self._analyze_ini_sh = analyze_ini_sh
+        self._repl_init_py = str(repl_init_py) if repl_init_py else None
         self._default_timeout_s = default_timeout_s
         self._proc: asyncio.subprocess.Process | None = None
         self._alive = False
@@ -172,6 +178,8 @@ class PersistentSandbox:
         existing = base_env.get("PYTHONPATH", "")
         pythonpath = str(self._toolkit_root) + (":" + existing if existing else "")
         env = {**base_env, "PYTHONPATH": pythonpath}
+        if self._repl_init_py:
+            env["AR_REPL_INIT_PY"] = self._repl_init_py
         self._proc = await asyncio.create_subprocess_exec(
             python_exec,
             "-c",

@@ -94,6 +94,7 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
         check_toolkit_root_configured,
     )
     from auto_research.sandbox.review import check_author_reviewer_decorrelation
+    from auto_research.sandbox.runner import check_analyze_probe
     from auto_research.storage import check_database_health
 
     preflight = Preflight()
@@ -104,6 +105,7 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     preflight.register("toolkit_git_identity", check_toolkit_git_identity)
     preflight.register("toolkit_branch_clean", check_toolkit_branch_clean)
     preflight.register("catalog_health", check_catalog_health)
+    preflight.register("analyze_probe", check_analyze_probe)
     if human_handler is not None:
         from auto_research.hitl import make_human_channel_check
 
