@@ -23,6 +23,11 @@ react_loop_absolute_cap: 200   # hard ceiling incl. budget-free iterations (lead
 librarian_react_loop_cap: 1   # tighter — each librarian search re-sends the growing paper context
 structured_retry_cap: 2       # off-schema retries for a structured _call before raising
 
+# ── Internet stability (transient LLM-provider failures: overloaded / rate-limit / 5xx / connection drops) ──
+provider_retry_max: 8                # retries per model call after the first failure; non-transient errors raise at once
+provider_retry_base_cooldown_s: 60   # first cooldown; doubles each retry, jittered down so agents desynchronize
+provider_retry_max_cooldown_s: 600   # cooldown ceiling
+
 # ── Sandbox / gate timeouts (seconds; a package may raise its own in <domain>_utils/tool_config.yaml, which wins — no upper clamp, trusted infra, never LLM-set) ──
 sandbox_call_timeout_s: 300   # per tool-call wall-clock; SIGTERM (exit 124) past this
 gate_test_timeout_s: 900      # per pytest invocation in the gate's Layer-B (run twice)

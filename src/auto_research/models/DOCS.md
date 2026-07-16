@@ -65,7 +65,9 @@ Google by editing YAML alone
   records token counts with zero calculated dollar cost.
 
 ## Dependencies
-- External: `anthropic`, `openai`, `google-genai`, `pyyaml`, `pydantic`.
+- External: `anthropic`, `openai`, `google-genai`, `pyyaml`, `pydantic`, `httpx`
+  (error classification in `retry.py`).
+- Internal: `auto_research.env` (`provider_retry_policy` — the transient-retry knobs).
 - Imported by: `auto_research.agents`, `auto_research.observability`.
 
 ## Dictionary-level reference
@@ -114,7 +116,24 @@ Google by editing YAML alone
   resolved callable handle for one role member. Method:
   `async call(messages, *, schema=None, tools=None, tool_choice="auto",
   images=(), documents=()) -> ModelResponse`. Raises `ValueError` if both
-  `schema` and `tools` are passed.
+  `schema` and `tools` are passed. Every call is wrapped in
+  `retry.call_with_transient_retry`, so transient provider failures are waited out
+  here — the single choke point all roles share — before the exception can reach
+  the graph.
+- `retry.is_transient_provider_error(exc) -> bool` — True for provider errors worth
+  waiting out: HTTP 408/409/429/5xx (read from the SDK error's `status_code`,
+  Anthropic/OpenAI, or `code`, Google genai) and connection/timeout drops
+  (`httpx.TransportError`, the SDKs' `APIConnectionError`). Auth/bad-request/other
+  exceptions are not transient.
+- `retry.call_with_transient_retry(provider_call, *, describe, policy=None,
+  sleep=asyncio.sleep) -> Any` — awaits `provider_call()`, retrying transient
+  failures up to `policy.max_retries` with cooldowns growing exponentially from
+  `base_cooldown_s` to `max_cooldown_s`, jittered to 50–100% so concurrent agents
+  desynchronize. Policy defaults from `env.provider_retry_policy()`
+  (`config/orchestration.yaml: provider_retry_*`, "Internet stability" section).
+  Each wait logs a WARNING carrying `describe`; a non-transient error or an
+  exhausted budget re-raises the original exception unchanged. `policy`/`sleep`
+  are injectable for deterministic tests.
 - `ModelGroupHandle(role: str, handles: tuple[ModelHandle, ...])` — resolved
   model group. Method: `member(name: str) -> ModelHandle`.
 - `REQUIRED_ROLES` — required role names that must appear in config: `reviewer`,
@@ -140,3 +159,4 @@ Google by editing YAML alone
 - 2026-06-16 -> 2026-06-22 — Anthropic prompt-cache tuning: `cache_prefix` marks both the stable prefix and the rolling conversation tail with `cache_control: ephemeral`; `documents` placed at the front (after `system`) with a breakpoint on the last, so opened PDFs are cache-written once and cache-read thereafter (kept inside the 20-block lookback).
 - 2026-07-06 — Figures now carry pixels to the model ([FIG-VIEW]+[V2]): all three adapters load figure bytes into native image blocks — cross-agent figures on the call-time `images=` channel, a tool's own figures via `ToolResultPart.figures` rendered inline at their tool-result turn — replacing the old `"Figure reference: <path>"` text. Gemini stays on `generateContent`.
 - 2026-07-14 — V-4: figure caption rendered verbatim; `_figure_blocks`/`_figure_items`/`_figure_parts` dropped the hardcoded `"Figure — "` prefix (the presentation layer now numbers/handles captions).
+- 2026-07-16 — Transient-provider retry layer (`retry.py`), closing the F6 class that killed two live runs on Anthropic 529s: `ModelHandle.call` wraps every provider call in `call_with_transient_retry` — overloaded/429/5xx/connection errors retried with config-driven exponential-jittered cooldowns (`orchestration.yaml: provider_retry_*`, defaults 8 retries / 60 s base / 600 s cap); non-transient errors and budget exhaustion re-raise unchanged. Deterministic tests in `tests/test_provider_retry.py`.

@@ -866,3 +866,23 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   are now hermetic (tmp fixtures / config-derived) or skip gracefully when the resource is absent — a
   fresh clone reports passes + skips, not failures; provisioned runs are unchanged. The `obsdb`→generic-
   database rename (S2) stays deferred.
+- 2026-07-16 — **Transient-provider retry layer (an [F6] run-killer slice).** Two consecutive live
+  runs (#21) died on unhandled Anthropic 529 `OverloadedError`s: the SDKs' default retry budget
+  (2 attempts, seconds of backoff) cannot span a capacity incident, and the exception propagated to
+  `run.error`. Fix: every role's model call already funnels through `ModelHandle.call`
+  (`models/types.py`); it now wraps the provider call in `models/retry.call_with_transient_retry` —
+  transient errors only (overloaded/429/5xx/connection drops; auth/bad-request raise at once) retried
+  with exponential jittered cooldowns from the new `orchestration.yaml` "Internet stability" section
+  (`provider_retry_max` 8, `provider_retry_base_cooldown_s` 60, `provider_retry_max_cooldown_s` 600;
+  defaults apply when keys are absent), each wait logged. An outage outlasting the budget still
+  re-raises honestly (durable suspend/resume stays §12). Deterministic tests
+  `tests/test_provider_retry.py`; keys in both the live config and the tracked `.example` template.
+- 2026-07-16 — **Gate scan: emptied config sections legal; RNG demoted hard-fail → finding (human
+  policy decision).** An emptied `code_gate.yaml` list parses to YAML None and now means "nothing to
+  flag in that category" (it crashed the scan before). `finding_code_patterns` is dual-purpose —
+  `literal_array_*` entries switch on built-in detectors, any other entry is a dotted code pattern
+  matched like the hard tier but recorded as a co-lead-judged finding — so severity is decided by
+  which list a pattern sits in. Motivation: Monte-Carlo tools (e.g. the #21 DCF null resampling)
+  need randomness inside them; the human moved all RNG patterns to the finding tier, accepting that
+  RNG-based fabrication now rests on the co-lead's judgment rather than an auto-reject
+  (`config/code_gate.yaml`, `sandbox/gate.py`, `tests/test_gate.py`).

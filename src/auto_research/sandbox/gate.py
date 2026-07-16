@@ -177,6 +177,13 @@ def _dotted_name(node: ast.AST) -> str:
     return ".".join(reversed(parts))
 
 
+# The built-in AST detectors `finding_code_patterns` can switch on by name; every
+# other entry in that list is a dotted code pattern (matched by _matches_code_pattern).
+_FINDING_DETECTORS = frozenset(
+    {"literal_array_return", "literal_array_plot", "literal_array_dataframe"}
+)
+
+
 def _matches_code_pattern(dotted: str, pattern: str) -> bool:
     if not dotted:
         return False
@@ -256,11 +263,20 @@ def scan_python_source(
     added set are reported (a modified file). Pure: no filesystem/git access.
     """
     cfg = config if config is not None else _code_gate_config()
-    vocab = [v.lower() for v in cfg.get("hard_fail_vocabulary", [])]
-    finding_vocab = [v.lower() for v in cfg.get("finding_vocabulary", [])]
-    rng_patterns = list(cfg.get("hard_fail_code_patterns", []))
-    finding_patterns = set(cfg.get("finding_code_patterns", []))
-    allow_res = [re.compile(p) for p in cfg.get("allowlist_obsid_tokens", [])]
+    # `or []`: an emptied YAML section parses to None — it means "nothing to flag
+    # in this category", never a crash.
+    vocab = [v.lower() for v in cfg.get("hard_fail_vocabulary") or []]
+    finding_vocab = [v.lower() for v in cfg.get("finding_vocabulary") or []]
+    hard_code_patterns = list(cfg.get("hard_fail_code_patterns") or [])
+    # `finding_code_patterns` is dual-purpose: an entry naming a built-in detector
+    # switches it on; any other entry is a dotted code pattern matched like the hard
+    # tier but recorded as a finding. Which list a pattern sits in decides its
+    # severity — e.g. RNG demoted to a co-lead-judged finding (Monte-Carlo tools
+    # need randomness, 2026-07-16).
+    finding_cfg = set(cfg.get("finding_code_patterns") or [])
+    finding_detectors = finding_cfg & _FINDING_DETECTORS
+    finding_code_patterns = sorted(finding_cfg - _FINDING_DETECTORS)
+    allow_res = [re.compile(p) for p in cfg.get("allowlist_obsid_tokens") or []]
 
     hard: list[CheckResult] = []
     findings: list[CheckResult] = []
@@ -318,34 +334,41 @@ def scan_python_source(
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             _scan_text(node.value, getattr(node, "lineno", 0))
 
-    # ── RNG (hard-fail) + literal-array findings + placeholder bodies (AST) ──────
-    rng_lines: set[int] = set()  # one RNG report per line (nested attrs would double up)
+    # ── Code patterns (hard + finding tiers) + literal-array findings + placeholder bodies (AST) ──
+    pattern_lines: set[int] = set()  # one pattern report per line (nested attrs would double up)
     for node in ast.walk(tree):
         lineno = getattr(node, "lineno", None)
         if lineno is None or not _in_scope(lineno, added):
             continue
 
-        if isinstance(node, (ast.Attribute, ast.Name)) and lineno not in rng_lines:
+        if isinstance(node, (ast.Attribute, ast.Name)) and lineno not in pattern_lines:
             dotted = _dotted_name(node) if isinstance(node, ast.Attribute) else node.id
-            for pat in rng_patterns:
+            for pat in hard_code_patterns:
                 if _matches_code_pattern(dotted, pat):
-                    rng_lines.add(lineno)
-                    _hard("no_fabrication.rng", lineno, f"randomness is banned in toolkit code ({dotted})")
+                    pattern_lines.add(lineno)
+                    _hard("no_fabrication.code_pattern", lineno, f"banned code pattern ({dotted})")
                     break
+            else:
+                for pat in finding_code_patterns:
+                    if _matches_code_pattern(dotted, pat):
+                        pattern_lines.add(lineno)
+                        _find("no_fabrication.code_pattern_finding", lineno,
+                              f"flagged code pattern ({dotted}) — the co-lead judges intent")
+                        break
 
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_placeholder_body(node):
             _hard("no_fabrication.placeholder_body", lineno, f"function {node.name!r} has a placeholder body")
 
         # Tier-3 findings
-        if "literal_array_return" in finding_patterns and isinstance(node, ast.Return):
+        if "literal_array_return" in finding_detectors and isinstance(node, ast.Return):
             if node.value is not None and _is_numeric_literal_seq(node.value):
                 _find("finding.literal_array_return", lineno, "returns a numeric-literal array")
         if isinstance(node, ast.Call):
             fname = _dotted_name(node.func)
-            if "literal_array_plot" in finding_patterns and fname.split(".")[-1] in {"plot", "scatter", "errorbar"}:
+            if "literal_array_plot" in finding_detectors and fname.split(".")[-1] in {"plot", "scatter", "errorbar"}:
                 if any(_is_numeric_literal_seq(a) for a in node.args):
                     _find("finding.literal_array_plot", lineno, f"numeric literals plotted via {fname}")
-            if "literal_array_dataframe" in finding_patterns and fname.split(".")[-1] == "DataFrame":
+            if "literal_array_dataframe" in finding_detectors and fname.split(".")[-1] == "DataFrame":
                 for a in node.args:
                     if isinstance(a, ast.Dict) and any(_is_numeric_literal_seq(v) for v in a.values):
                         _find("finding.literal_array_dataframe", lineno, "DataFrame built from numeric literals")
@@ -370,9 +393,9 @@ def scan_text_source(
     allowlist and ``added`` scoping match :func:`scan_python_source`. Pure.
     """
     cfg = config if config is not None else _code_gate_config()
-    vocab = [v.lower() for v in cfg.get("hard_fail_vocabulary", [])]
-    finding_vocab = [v.lower() for v in cfg.get("finding_vocabulary", [])]
-    allow_res = [re.compile(p) for p in cfg.get("allowlist_obsid_tokens", [])]
+    vocab = [v.lower() for v in cfg.get("hard_fail_vocabulary") or []]
+    finding_vocab = [v.lower() for v in cfg.get("finding_vocabulary") or []]
+    allow_res = [re.compile(p) for p in cfg.get("allowlist_obsid_tokens") or []]
 
     hard: list[CheckResult] = []
     findings: list[CheckResult] = []

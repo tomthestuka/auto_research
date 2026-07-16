@@ -387,7 +387,7 @@ The **trust boundary** (§9.4) — code, not an LLM opinion. Two layers:
   (shell reduction scripts and other text artifacts are part of the tool and must be gated
   and staged too, §9.2). Each target is dispatched by type: `.py` → the full AST scan
   (`scan_python_source`) + provenance; other **text** (e.g. `.sh`) → `scan_text_source` (the
-  banned-vocabulary scan only — RNG/placeholder/provenance are Python-AST concepts);
+  banned-vocabulary scan only — code patterns/placeholder/provenance are Python-AST concepts);
   **binary / undecodable** → a `no_fabrication.binary` hard-fail (data never belongs in the
   toolkit, §9.5) that is fed back to the author through the rework loop, never an exception.
   The **structural** checks (`check_structural`) assert: only `*_utils` paths were touched; a
@@ -425,13 +425,21 @@ numeric arrays — XSPEC param vectors, energy bins):
 
 - **Tier 1 HARD-FAIL** — banned **vocabulary** in comments/docstrings/strings: explicit
   fabrication phrases (`example data`, `fake data`, `in operational mode this would`,
-  `placeholder`, `TODO`, … whole-word/phrase matched); **any RNG**, seeded or not
-  (`np.random`, `default_rng`, `.rvs`, …) — §9.5 made absolute; **placeholder function
-  bodies** (`pass`/`...`/`raise NotImplementedError`).
+  `placeholder`, `TODO`, … whole-word/phrase matched); dotted **code patterns** listed in
+  `hard_fail_code_patterns` (matched against attribute/name AST nodes, one report per
+  line); **placeholder function bodies** (`pass`/`...`/`raise NotImplementedError`).
 - **Tier 3 FINDING** — recorded on `GateReport.findings` (does **not** flip `passed`); the
-  step-4 co-lead judges intent: numeric-literal arrays `return`ed / plotted / framed; **and
-  bare ambiguous descriptors** (`synthetic`, `synthesized`, `illustrative`, `stub`, `not
-  implemented`) that recur in honest §9.5 disclosures — soft-flagged, not blocked (C1).
+  step-4 co-lead judges intent: numeric-literal arrays `return`ed / plotted / framed;
+  **bare ambiguous descriptors** (`synthetic`, `synthesized`, `illustrative`, `stub`, `not
+  implemented`) that recur in honest §9.5 disclosures — soft-flagged, not blocked (C1);
+  and dotted **code patterns** listed in `finding_code_patterns` — that list is
+  dual-purpose: an entry naming a built-in literal-array detector switches it on, any
+  other entry is matched like the hard tier but recorded as a finding. **Which list a
+  pattern sits in decides its severity.** Policy since 2026-07-16: the RNG patterns
+  (`np.random`, `default_rng`, `.rvs`, …) live in the finding tier — Monte-Carlo tools
+  need randomness inside them, so RNG is co-lead-judged, not auto-rejected. A hard match
+  suppresses a duplicate finding on the same line; an emptied YAML section reads as
+  "nothing to flag in that category" (never a crash).
 
 All scan lists live in **`config/code_gate.yaml`** (tunable without a code edit). A line
 referencing a marked `synth…` ObsID is allowlisted so §9.5 fixtures stay legal.
@@ -587,7 +595,7 @@ the hook mapping a fake-model verdict — no live LLM).
   Registered in `auto_research.preflight`.
 - `scan_text_source(rel, source, *, added=None, config=None)` → `(hard_fails, findings)` —
   the banned-vocabulary no-fabrication scan for a **non-Python text** file (e.g. a shell
-  script); no AST, so RNG/placeholder/provenance do not apply and `findings` is always empty.
+  script); no AST, so code patterns/placeholder/provenance do not apply and `findings` is always empty.
 - `HumanInputRequired(RuntimeError)` — typed headless fail-safe raised when the author
   needs a human but no `human_handler` is wired (§9.8). Now defined in `auto_research.hitl`
   and re-exported here for back-compat; the author's `ask_human` builds a typed `HumanQuery`
@@ -684,3 +692,14 @@ the hook mapping a fake-model verdict — no live LLM).
   neutralizing the FITS/xspec hardcodes. New `runner.check_analyze_probe()` preflight check runs the
   configured probe under `analyze_env` (skips when unset). `graph.runtime` threads `repl_init_py` +
   `analyze_probe` from config. Tests: `tests/test_sandbox_hooks.py` (8).
+- 2026-07-16 — **Scan config robustness + RNG demoted to a finding (human policy change).**
+  (1) Every `code_gate.yaml` list read is now `or []`-guarded: an emptied YAML section parses
+  to None and means "nothing to flag in that category" — it crashed the scan (`list(None)`
+  TypeError) before. (2) `finding_code_patterns` is dual-purpose: entries naming a built-in
+  `literal_array_*` detector switch it on; any other entry is a dotted code pattern matched
+  like the hard tier (AST attribute/name nodes, once per line, hard match wins) but recorded
+  as a `no_fabrication.code_pattern_finding`. Which list a pattern sits in decides severity —
+  previously the finding tier silently ignored non-detector entries, so the human's RNG
+  demotion (Monte-Carlo tools need randomness inside them; co-lead judges intent) did nothing.
+  Hard-tier check name generalized `no_fabrication.rng` → `no_fabrication.code_pattern`.
+  Tests: `tests/test_gate.py` (emptied-sections, finding-tier RNG, hard-tier machinery kept).

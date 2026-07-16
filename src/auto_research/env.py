@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import NamedTuple
 
 from dotenv import load_dotenv
 
@@ -78,6 +79,44 @@ def papers_dir() -> Path:
     if "papers_dir" in cfg:
         return Path(cfg["papers_dir"]).expanduser()
     return runtime_data_dir() / "papers"
+
+
+class ProviderRetryPolicy(NamedTuple):
+    """Retry budget for transient LLM-provider failures (``provider_retry_*`` keys)."""
+
+    max_retries: int
+    base_cooldown_s: float
+    max_cooldown_s: float
+
+
+_RETRY_DEFAULTS = ProviderRetryPolicy(max_retries=8, base_cooldown_s=60.0, max_cooldown_s=600.0)
+
+
+def provider_retry_policy() -> ProviderRetryPolicy:
+    """Transient-provider retry policy from config/orchestration.yaml.
+
+    Keys (the "Internet stability" section): ``provider_retry_max`` (default 8),
+    ``provider_retry_base_cooldown_s`` (default 60), ``provider_retry_max_cooldown_s``
+    (default 600). A missing or malformed value falls back per-field, so an older
+    config keeps working.
+    """
+    cfg = _orch_config()
+
+    def _read(key: str, fallback, cast):
+        try:
+            return cast(cfg.get(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+
+    return ProviderRetryPolicy(
+        max_retries=_read("provider_retry_max", _RETRY_DEFAULTS.max_retries, int),
+        base_cooldown_s=_read(
+            "provider_retry_base_cooldown_s", _RETRY_DEFAULTS.base_cooldown_s, float
+        ),
+        max_cooldown_s=_read(
+            "provider_retry_max_cooldown_s", _RETRY_DEFAULTS.max_cooldown_s, float
+        ),
+    )
 
 
 def sandbox_call_timeout_default() -> int:

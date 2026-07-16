@@ -62,6 +62,22 @@ def test_vocabulary_explicit_fabrication_phrases_fail():
     assert all(c.name == "no_fabrication.vocabulary" for c in hard)
 
 
+def test_emptied_config_sections_scan_as_nothing_to_flag():
+    # A human-tuned code_gate.yaml may empty a whole category (e.g. every RNG pattern
+    # moved to findings). YAML parses an empty key to None; the scan treats that as
+    # "nothing to flag in this category", never a crash.
+    emptied = {
+        "hard_fail_vocabulary": None,
+        "finding_vocabulary": None,
+        "hard_fail_code_patterns": None,
+        "finding_code_patterns": None,
+        "allowlist_obsid_tokens": None,
+    }
+    src = 'x = np.random.normal(0, 1)  # fake data for now\n'
+    hard, findings = scan_python_source("lib/x.py", src, config=emptied)
+    assert hard == [] and findings == []
+
+
 def test_synthetic_is_soft_finding_not_hard_fail():
     # C1: bare "synthetic"/"illustrative" recur in honest §9.5 disclosures, so they are Tier-3
     # findings (co-lead judges intent), not hard-fails. Explicit fabrication phrases stay hard.
@@ -97,7 +113,9 @@ def test_incompleteness_markers_are_findings_not_hard_fails():
     assert all(c.name == "no_fabrication.vocabulary_finding" and c.passed for c in findings)
 
 
-# ── pure scanner: RNG hard-fails (seeded or not) ────────────────────────────────
+# ── pure scanner: code patterns (severity = which config list holds the pattern) ──
+# Policy since 2026-07-16: RNG lives in `finding_code_patterns` — a co-lead-judged
+# finding, not a hard-fail — because Monte-Carlo tools need randomness inside them.
 
 
 @pytest.mark.parametrize(
@@ -110,16 +128,30 @@ def test_incompleteness_markers_are_findings_not_hard_fails():
         "from scipy import stats\ndef g():\n    return stats.norm.rvs(size=3)\n",
     ],
 )
-def test_any_rng_is_hard_fail(src):
-    hard, _ = scan_python_source("lib/x.py", src)
-    assert any(c.name == "no_fabrication.rng" for c in hard), src
+def test_any_rng_is_finding_not_hard_fail(src):
+    hard, findings = scan_python_source("lib/x.py", src)
+    assert not any(c.name == "no_fabrication.code_pattern" for c in hard), src
+    assert any(c.name == "no_fabrication.code_pattern_finding" for c in findings), src
 
 
-def test_rng_reported_once_per_line():
+def test_rng_finding_reported_once_per_line():
     src = "import numpy as np\ndef g():\n    np.random.seed(0)\n"
-    hard, _ = scan_python_source("lib/x.py", src)
-    rng = [c for c in hard if c.name == "no_fabrication.rng"]
-    assert len(rng) == 1
+    _, findings = scan_python_source("lib/x.py", src)
+    flagged = [c for c in findings if c.name == "no_fabrication.code_pattern_finding"]
+    assert len(flagged) == 1
+
+
+def test_hard_tier_pattern_still_hard_fails():
+    # The hard machinery is intact: a pattern listed in `hard_fail_code_patterns`
+    # rejects, and the hard match suppresses a duplicate finding for the same line.
+    cfg = {
+        "hard_fail_code_patterns": ["np.random"],
+        "finding_code_patterns": ["np.random"],
+    }
+    src = "import numpy as np\ndef g():\n    return np.random.normal()\n"
+    hard, findings = scan_python_source("lib/x.py", src, config=cfg)
+    assert any(c.name == "no_fabrication.code_pattern" for c in hard)
+    assert not any(c.name == "no_fabrication.code_pattern_finding" for c in findings)
 
 
 # ── pure scanner: placeholder bodies ────────────────────────────────────────────
@@ -366,12 +398,14 @@ def test_run_gate_fabrication_fails_with_reason(tmp_path):
     assert "synthetic" in report.reason or "vocabulary" in report.reason
 
 
-def test_run_gate_rng_fails(tmp_path):
+def test_run_gate_rng_passes_with_finding(tmp_path):
+    # RNG in a tool is mergeable (Monte-Carlo needs randomness inside tools) and is
+    # surfaced to the co-lead as a finding on the gate report.
     repo = _make_repo(tmp_path)
     _write_pkg(repo, lib_body="    import numpy as np\n    return np.random.normal()\n")
     report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
-    assert not report.passed
-    assert any(c.name == "no_fabrication.rng" for c in report.layer_a)
+    assert report.passed
+    assert any(c.name == "no_fabrication.code_pattern_finding" for c in report.findings)
 
 
 def test_run_gate_missing_test_fails_before_running_tests(tmp_path):

@@ -54,23 +54,6 @@ hard_fail_vocabulary:
 # Toolkit code computes deterministic transforms of real data; synthetic data is DATA (a marked
 # ObsID), never code (§9.5). A genuine stochastic need surfaces as a rejection the lead/human handles.
 hard_fail_code_patterns:
-  - np.random
-  - numpy.random
-  - random.random
-  - random.randint
-  - random.uniform
-  - random.normalvariate
-  - random.gauss
-  - random.choice
-  - random.shuffle
-  - random.sample
-  - random.seed
-  - default_rng
-  - .rvs            # scipy.stats.<dist>.rvs
-  - torch.rand
-  - torch.randn
-  - torch.randint
-  - tf.random
 
 # ── Tier 3: vocabulary (FINDINGS → co-lead review, not hard-fail) ──
 # Incompleteness markers + bare ambiguous descriptors that recur in honest §9.5 disclosures.
@@ -88,10 +71,30 @@ finding_vocabulary:
 # Numeric-literal arrays into return / plot / DataFrame — the XSPEC param-vector / energy-bin
 # landmine: usually legit parameters, occasionally a fabricated result. Attribute assignments
 # (`m.par.values = [...]`) are excluded (never findings).
+# Dual-purpose list: `literal_array_*` entries switch on built-in detectors; any other
+# entry is a dotted code pattern matched like the hard tier but recorded as a finding.
 finding_code_patterns:
   - literal_array_return       # `return [<numeric literals>]`
   - literal_array_plot         # `plt.plot([...], [...])`, scatter, errorbar
   - literal_array_dataframe    # `pd.DataFrame({<hardcoded numbers>})`
+  # randomness for monte carlo
+  - np.random
+  - numpy.random
+  - random.random
+  - random.randint
+  - random.uniform
+  - random.normalvariate
+  - random.gauss
+  - random.choice
+  - random.shuffle
+  - random.sample
+  - random.seed
+  - default_rng
+  - .rvs            # scipy.stats.<dist>.rvs
+  - torch.rand
+  - torch.randn
+  - torch.randint
+  - tf.random
 
 # ── Allowlist: ObsID/path tokens exempt from the vocabulary scan (regex, per line) ──
 # Belt-and-suspenders so a marked synth ObsID (§9.5, `synth<YYMMDD>-<sha>`) never trips the scan.

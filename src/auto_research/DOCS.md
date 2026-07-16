@@ -15,7 +15,7 @@ and the active Phase 2 build order in
 
 | Submodule | Step | Role |
 |---|---|---|
-| `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`). |
+| `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`); small `orchestration.yaml` accessors (`runtime_data_dir`, `papers_dir`, `sandbox_call_timeout_default`, `provider_retry_policy`). |
 | `setup.py` | — | The install-script Python stage (`python -m auto_research.setup`, run by `install.sh`): discovers defaults, prompts (interactive `questionary`) or reads `--answers` (headless), then writes the gitignored `config/orchestration.yaml` + `observations.yaml` from their `*.example` templates (deriving `agent_fs_allow` from the answered paths) and runs the preflight smoke test. |
 | `preflight.py` | — | Launch-time deterministic **checklist** (`Preflight` / async `run_preflight()`): runs every no-LLM precondition (`.env` shape, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, `analyze_probe` stack smoke-test, human-channel ping) before any model client is built. |
 | `hitl` | 5 | Raise-to-human clarification channel: the injectable `HumanHandler`, the CLI/Slack/WhatsApp connectors, the CLI-vs-library resolver, and the launch-time channel ping. |
@@ -102,6 +102,12 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - `sandbox_call_timeout_default() -> int` — resolves `sandbox_call_timeout_s` from
   `orchestration.yaml` (default 300): the global sandbox per-tool-call timeout a tool's
   `tool_config.yaml` overrides per tool (`auto_research.sandbox.registry`).
+- `ProviderRetryPolicy(max_retries, base_cooldown_s, max_cooldown_s)` /
+  `provider_retry_policy() -> ProviderRetryPolicy` — the transient-provider retry knobs
+  from `orchestration.yaml` (`provider_retry_max` 8, `provider_retry_base_cooldown_s` 60,
+  `provider_retry_max_cooldown_s` 600 — the "Internet stability" section; per-field
+  fallback on missing/malformed values). Consumed by `models.retry` at the
+  `ModelHandle.call` choke point.
 - `preflight.Preflight` — an ordered registry of launch-time checks. `.register(name, fn)`
   (also usable as a decorator), `.names()`, async `.run_checklist()` (runs all — sync or async
   checks — and aggregates failures into `PreflightError`). `build_default_preflight(human_handler=None)`
@@ -179,3 +185,9 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `onboard_toolkit` authoring pipeline. Scaffold/git/staging tested into a temp dir
   (`tests/test_setup.py`). Increment 5 (`onboard_toolkit`) is deferred — it needs cross-domain
   collaborators.
+- 2026-07-16 — `env.ProviderRetryPolicy` + `env.provider_retry_policy()`: config accessors for the
+  new `orchestration.yaml` "Internet stability" section (`provider_retry_max` /
+  `provider_retry_base_cooldown_s` / `provider_retry_max_cooldown_s`), backing the
+  `models.retry` transient-provider retry layer (two live runs were killed by unhandled
+  Anthropic 529s riding on the SDKs' seconds-scale default retries). Tests:
+  `tests/test_provider_retry.py`.

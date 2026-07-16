@@ -204,21 +204,25 @@ class ModelHandle:
             raise ValueError(
                 f"role {self.role!r} member {self.config.name!r} is not configured for document inputs"
             )
+        from auto_research.models.retry import call_with_transient_retry
         from auto_research.observability import traced_model_call
 
-        return await traced_model_call(
-            role=self.role,
-            config=self.config,
-            provider_call=lambda: self.provider.call(
-                normalized,
-                self.config,
-                schema=schema,
-                tools=tools,
-                tool_choice=tool_choice,
-                images=images,
-                documents=documents,
-                cache_prefix=cache_prefix,
+        return await call_with_transient_retry(
+            lambda: traced_model_call(
+                role=self.role,
+                config=self.config,
+                provider_call=lambda: self.provider.call(
+                    normalized,
+                    self.config,
+                    schema=schema,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    images=images,
+                    documents=documents,
+                    cache_prefix=cache_prefix,
+                ),
             ),
+            describe=f"{self.role}/{self.config.name}",
         )
 
 
