@@ -12,6 +12,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,25 @@ def test_liveness_pid_reuse_guarded(tmp_path, sleeper):
     rd = tmp_path / "r"
     _write_pid(rd, p.pid, (_proc_create_time(p.pid) or 0) + 999)  # pid alive, start-time mismatched
     assert not is_run_alive(rd)   # a recycled pid must not read as the original run
+
+
+def test_liveness_zombie_is_dead(tmp_path, sleeper):
+    # A backend that died (e.g. at preflight) lingers as a zombie until its spawner reaps
+    # it; /proc/<pid>/stat still exists with a matching start-time, but the run is dead and
+    # must not block overwrite=True.
+    p = sleeper()
+    rd = tmp_path / "r"
+    _write_pid(rd, p.pid, _proc_create_time(p.pid))
+    p.kill()
+    deadline = time.time() + 5.0
+    while time.time() < deadline:   # wait for state Z without reaping (no p.poll()/wait())
+        stat = Path(f"/proc/{p.pid}/stat").read_text()
+        if stat.rsplit(")", 1)[1].split()[0] == "Z":
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("child never became a zombie")
+    assert not is_run_alive(rd) and run_status(rd) == "dead"
 
 
 def test_status_absent_and_done(tmp_path):

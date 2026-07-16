@@ -119,8 +119,9 @@ verdicts, two iteration counters, and the cap.
   re-running the same call **reconnects** by a deterministic `run_id` (`'auto'` = `sha256`
   of the request; a named string forces a distinct run, validated path-safe). `overwrite=True`
   erases an existing run and starts fresh but **refuses if it is still alive**. Liveness is
-  process existence (`backend.pid` = pid + `/proc` start-time, PID-reuse-safe), never log
-  freshness. **Live progress streams to `stream`** (default: the current cell's `sys.stdout`,
+  process existence (`backend.pid` = pid + `/proc` start-time, PID-reuse-safe; a **zombie**
+  reads as dead — a backend that died at preflight lingers unreaped in its spawner's process
+  table and must not block overwrite), never log freshness. **Live progress streams to `stream`** (default: the current cell's `sys.stdout`,
   resolved at call time so it follows ipykernel's per-cell rebinding; pass `None` to silence)
   by following the run's `monitor.jsonl` chatter-filtered — identical to a non-detached live
   run — so detaching does not cost the live view. Output is reconstructed from that `monitor.jsonl`
@@ -201,3 +202,4 @@ verdicts, two iteration counters, and the cap.
 - 2026-06-22 -> 2026-06-24 — Reviewer-driven retrieval + env/path fixes: the `literature` node only ingests, the reviewer pulls literature via its own `text_search`/`open_paper` (`_resolve_cited_paths`); `bash_exec` PATH pinned to `{analyze_env}/bin`; hardcoded `toolkit_root` fallbacks removed; lead built with `include_plan_and_debate=True`.
 - 2026-06-26 — Reviewer is the sole I/O (§9.6): `analysis → review_analysis` unconditional (the `after_analysis` bypass removed); `finalize_run` forwards the reviewer's verdict (records `run.honest_failure`); on finalize a report is always composed so an honest failure is documented, not silent.
 - 2026-07-06 — Detached runs `run_research_nohup` (E5, partial): pipeline runs in a detached `python -m auto_research` child (own session) surviving kernel death, reconnect by deterministic `run_id`, `overwrite` guarded by process-based liveness, `RunDied` on a dead run; streams live `monitor.jsonl` chatter to `stream`. Additive `run_id` + CLI `--run-id`/`--max-iterations`/`result.json`. Not true mid-run resume (§12 deferred).
+- 2026-07-16 — Liveness treats a **zombie** as dead (`_proc_create_time` returns None on state `Z`): a backend that died at preflight stays unreaped in the notebook kernel's process table, and `overwrite=True` refused with a useless "kill <pid>" hint (a zombie ignores signals; only reaping clears it). Observed live on the #21 relaunch after a Telegram-ping preflight failure. Test: `test_detached.py::test_liveness_zombie_is_dead`.

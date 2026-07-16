@@ -78,7 +78,10 @@ def resolve_run_id(request: ResearchRequest | str, run_id: str = "auto") -> str:
 
 def _proc_create_time(pid: int) -> int | None:
     """Linux ``/proc/<pid>/stat`` start-time (clock ticks since boot), or ``None`` if the
-    process is gone. Paired with the recorded value it makes liveness PID-reuse-safe."""
+    process is gone **or a zombie**. A zombie is dead for every purpose here — a backend
+    that died at preflight lingers as one until the spawning kernel reaps it, and it must
+    not block ``overwrite=True`` or read as alive. Paired with the recorded value the
+    start-time makes liveness PID-reuse-safe."""
     try:
         data = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except (OSError, ValueError):
@@ -87,6 +90,8 @@ def _proc_create_time(pid: int) -> int | None:
         # comm (field 2) is parenthesized and may contain spaces/parens — split on the LAST
         # ')'. In the remainder rhs[0] is field 3 (state), so field 22 (starttime) is rhs[19].
         rhs = data.rsplit(")", 1)[1].split()
+        if rhs[0] == "Z":
+            return None
         return int(rhs[19])
     except (IndexError, ValueError):
         return None
