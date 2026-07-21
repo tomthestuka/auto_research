@@ -81,6 +81,16 @@ def papers_dir() -> Path:
     return runtime_data_dir() / "papers"
 
 
+def toolkit_root() -> Path:
+    """Return the ``research_toolkit`` checkout from config/orchestration.yaml.
+
+    Key: ``toolkit_root``. Empty when absent (callers that need it to import a
+    toolkit read — e.g. the in-process ``catalog_utils`` data-catalog read — handle
+    an unreadable root gracefully).
+    """
+    return Path(_orch_config().get("toolkit_root", "")).expanduser()
+
+
 class ProviderRetryPolicy(NamedTuple):
     """Retry budget for transient LLM-provider failures (``provider_retry_*`` keys)."""
 

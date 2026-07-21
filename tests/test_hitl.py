@@ -126,8 +126,9 @@ def test_sandbox_provider_offers_ask_human_only_with_handler():
 
     with_handler = SandboxToolProvider(registry, sandbox=None, human_handler=lambda q: "ok")
     names = {d["name"] for d in with_handler.tool_definitions()}
-    # data_catalog is always exposed (read-only local-data check); ask_human only with a handler.
-    assert names == {"xspec_fit", "data_catalog", "ask_human"}
+    # data_catalog is now a research_toolkit.catalog_utils registry tool (it arrives via
+    # registry.tool_definitions(), not a built-in add here); ask_human only with a handler.
+    assert names == {"xspec_fit", "ask_human"}
     out = asyncio.run(with_handler.execute("ask_human", {"message": "blocked"}))
     assert out.text == "ok"
 

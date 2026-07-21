@@ -897,3 +897,19 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   token in the URL, so backend logs carried the credential; `TelegramHandler.start()` now pins
   httpx/httpcore to WARNING (rotating the exposed token = the human's out-of-band step).
   `graph/detached.py`, `hitl/telegram.py`, `tests/test_detached.py`.
+- 2026-07-20 — **Receive-parse run-killer fix + catalog-read relocation (during a live #21 run).**
+  A #21 run died when a GPT co-lead's structured reply carried trailing text and `openai.py`'s bare
+  `json.loads(output_text)` raised an unhandled `JSONDecodeError` (an [F6] run-killer). Fixed
+  **B-hybrid**: new `models/providers/_json.loads_first_json_object` (takes the first complete JSON
+  value, tolerates surrounding content, returns None → structured-retry) on the OpenAI + Google
+  receive paths; the send-side strict-schema sanitizers stay — an offline diff proved the SDK's own
+  `responses.parse` conversion emits `format: path`/defaults that OpenAI strict mode 400-rejects on all
+  five structured schemas. Separately, per the §2 boundary, the **catalog READ moved to
+  `research_toolkit`**: new `catalog_utils` package (AI-facing `data_catalog` over
+  `obsdb_catalog.neutral.read`); `observations.py` shrank to obs-db-location config + the health
+  preflight; `data_catalog` is now a registry tool taking `obs_db_path` (in the sandbox for workers,
+  in-process for the sandbox-less lead), so auto_research stays pure orchestration + infra. On the
+  encrypted-data question: `heasarc_utils` acquire stays a plain downloader (never blocks re-download);
+  instead the local listing flags a present-but-GPG-encrypted ObsID **LOCKED ON DISK**, and the analyst
+  prompts route it to a re-acquire-if-remote-unlocked-else-honest-`needs_human` decision. Suites green
+  (auto_research 492; research_toolkit 22).

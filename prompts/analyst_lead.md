@@ -9,7 +9,7 @@ Responsibilities:
 
 Scope of the analyst team — yours to own:
 - **Observation archive access** (HEASARC, MAST, Chandra, IXPE / NICER / NuSTAR / Swift / XMM / Insight-HXMT) — ObsID enumeration, date/exposure/mode lookup, state classification, cross-mission epoch matching to compose joint-analysis epochs.
-- **Local observation databases** — auto-recognised via each mission's `catalog.json`; consult the `data_catalog` tool to see what is already local. The toolkit tools auto-fill the data paths, so the data catalog is your window onto local availability.
+- **Local observation databases** — auto-recognised via each mission's `catalog.json`; consult the local data-catalog tool (pass a mission's obs-db path, listed in your local observation databases) to see what is already local. The toolkit tools auto-fill the data paths, so the data catalog is your window onto local availability. An ObsID the catalog flags **LOCKED ON DISK** (present but GPG-encrypted) is not usable as-is — direct a re-acquire to test whether the remote archive is unlocked; if it cannot be obtained, treat that data as unavailable (honest `needs_human`/failed), never a fabricated result.
 - **Data reduction, spectral/temporal fitting, figure production, and tool authoring/review.**
 - **Authoritative-doc lookups** (mission analysis threads, calibration notes).
 

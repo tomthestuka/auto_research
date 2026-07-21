@@ -172,68 +172,86 @@ def plan_and_debate_tool_def() -> dict:
 # Local data catalog — a read-only tool for the analyst worker + lead (§9.10 step 7).
 # ----------------------------------------------------------------------------
 
-DATA_CATALOG_TOOL = "data_catalog"
+# The local-data-catalog READ lives in research_toolkit's ``catalog_utils`` package (CLAUDE.md
+# §2: domain reads belong to the toolkit). Workers reach it through ``ToolkitRegistry`` (it runs
+# in the sandbox like any toolkit tool); the analyst lead, which has no sandbox, is handed this
+# def and runs the same pure-standard-library read in-process. Its agent-facing name is the
+# registry-sanitized manifest kind, so both paths present the identical tool.
+_CATALOG_UTILS_KIND = "research_toolkit.catalog_utils.data_catalog"
+DATA_CATALOG_TOOL = re.sub(r"[^A-Za-z0-9_-]", "_", _CATALOG_UTILS_KIND)
+_catalog_read_fn = None  # memoized in-process catalog_utils.lib.catalog_read.data_catalog
 
 
-def data_catalog_tool_def() -> dict:
-    """The provider-neutral definition for the shared read-only ``data_catalog`` tool."""
+def _import_from_toolkit(module_path: str, attr: str):
+    """Import ``attr`` from a research_toolkit module with ``toolkit_root`` on sys.path.
+
+    ``catalog_utils`` (and ``obsdb_catalog`` beneath it) live in ``research_toolkit``; the
+    analyst lead runs the catalog read in-process, so we import it the transient way
+    ``ToolkitRegistry`` does — prepend ``toolkit_root`` for the import, then remove it (the
+    module stays cached in ``sys.modules``).
+    """
+    import importlib
+    import sys
+
+    from auto_research.env import toolkit_root
+
+    root = str(toolkit_root())
+    inserted = bool(root) and root not in sys.path
+    if inserted:
+        sys.path.insert(0, root)
+    try:
+        module = importlib.import_module(module_path)
+    finally:
+        if inserted:
+            sys.path.remove(root)
+    return getattr(module, attr)
+
+
+def data_catalog_tool_def() -> dict | None:
+    """Provider-neutral definition for the read-only ``data_catalog`` tool.
+
+    The tool is defined in ``research_toolkit``'s ``catalog_utils`` manifest; its description
+    + args_schema are sourced from there so orchestration never restates them. Returns None if
+    ``catalog_utils`` cannot be imported (a misconfigured toolkit), so a role's tool set still
+    builds — the preflight is where a missing toolkit fails loudly.
+    """
+    try:
+        manifest = _import_from_toolkit("catalog_utils", "TOOL_MANIFEST")
+        spec = manifest[_CATALOG_UTILS_KIND]
+    except Exception:  # noqa: BLE001 — toolkit absent/misconfigured; skip the tool, don't crash
+        return None
     return {
         "name": DATA_CATALOG_TOOL,
-        "description": (
-            "List locally-available observation data for a mission — which ObsIDs are already "
-            "on disk, their processing level (HEASARC supplies up to level 2), and the data "
-            "products produced from them — read from the mission data catalog. Use this BEFORE "
-            "requesting data acquisition so you only acquire what is genuinely missing. Omit "
-            "'mission' to list the configured missions."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "mission": {
-                    "type": "string",
-                    "description": "Mission key, e.g. 'ixpe', 'nicer', 'nustar'.",
-                },
-                "min_level": {
-                    "type": "integer",
-                    "description": "Only count ObsIDs available at or above this processing level.",
-                },
-            },
-        },
+        "description": spec["description"],
+        "input_schema": spec.get("args_schema") or {"type": "object", "properties": {}},
     }
 
 
 async def execute_data_catalog(arguments: Mapping[str, Any]) -> ToolOutcome:
-    """Read the per-mission local data catalog (``<obs_db_path>/catalog.json``).
+    """Run the ``catalog_utils`` local-data read in-process (the analyst-lead path).
 
-    A read-only window onto what is already local so a role requests *acquire* only for
-    genuinely-missing data (CLAUDE.md §9.10). Absent catalog ⇒ "(no local data catalogued)".
+    The mission's ``obs_db_path`` is supplied by the caller — it is listed in the analyst's
+    local-observation-databases context, exactly as ``acquire`` receives it. Delegates the read
+    + listing to ``catalog_utils.lib.catalog_read`` (the single domain read); a malformed catalog
+    raises there and is surfaced as a recoverable error. (Workers run the same tool in the sandbox
+    via ``ToolkitRegistry``; this in-process path serves the sandbox-less lead.)
     """
-    from auto_research.observations import load_observations_config, read_catalog
-
-    mission = str(arguments.get("mission") or "").strip()
-    if not mission:
-        try:
-            cfg = load_observations_config()
-        except Exception as exc:  # noqa: BLE001
-            return ToolOutcome(text=f"could not load observations config: {exc}", is_error=True)
-        return ToolOutcome(text="configured missions: " + (", ".join(cfg.missions) or "(none)"))
-
+    global _catalog_read_fn
+    obs_db_path = str(arguments.get("obs_db_path") or "").strip()
+    if not obs_db_path:
+        return ToolOutcome(
+            text="data_catalog needs obs_db_path — a mission directory from your local "
+            "observation databases list (e.g. the IXPE obs-db path).",
+            is_error=True,
+        )
     try:
-        catalog = read_catalog(mission)
-    except Exception as exc:  # noqa: BLE001 — unknown mission / malformed catalog
+        if _catalog_read_fn is None:
+            _catalog_read_fn = _import_from_toolkit("catalog_utils.lib.catalog_read", "data_catalog")
+        raw_min = arguments.get("min_level")
+        text = _catalog_read_fn(obs_db_path, min_level=int(raw_min) if raw_min is not None else None)
+    except Exception as exc:  # noqa: BLE001 — malformed catalog / missing toolkit → recoverable
         return ToolOutcome(text=f"{type(exc).__name__}: {exc}", is_error=True)
-
-    raw_min = arguments.get("min_level")
-    min_level = int(raw_min) if raw_min is not None else None
-    lines: list[str] = []
-    for obsid in catalog.obsids():
-        if min_level is not None and not catalog.has(obsid, min_level=min_level):
-            continue
-        entry = catalog.entries[obsid]
-        products = ", ".join(sorted({p.kind for p in entry.products})) or "(none)"
-        lines.append(f"- {obsid}: max_level={entry.max_level}, products=[{products}]")
-    body = "\n".join(lines) or "(no local data catalogued)"
-    return ToolOutcome(text=f"Local {mission} data ({len(lines)} ObsIDs):\n{body}")
+    return ToolOutcome(text=text)
 
 
 async def execute_ask_human(
@@ -1165,8 +1183,9 @@ class SandboxToolProvider:
         self._guard = PathGuard.from_config()
 
     def tool_definitions(self) -> list[dict]:
+        # ``data_catalog`` (research_toolkit.catalog_utils) is one of the registry tools, so it
+        # is already included and runs in the sandbox like any toolkit tool — no built-in add.
         defs = list(self.registry.tool_definitions())
-        defs.append(data_catalog_tool_def())
         if self.human_handler is not None:
             defs.append(ask_human_tool_def())
         if self.web_source is not None:
@@ -1178,8 +1197,8 @@ class SandboxToolProvider:
         return defs
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
-        if name == DATA_CATALOG_TOOL:
-            return await execute_data_catalog(arguments)
+        # ``data_catalog`` is a registry tool here — it falls through to the sandbox path below,
+        # not a special in-process branch (only the sandbox-less lead runs it in-process).
         if name == ASK_HUMAN_TOOL:
             return await execute_ask_human(
                 self.human_handler, self.asked_by, arguments, model=self.model
@@ -1514,7 +1533,9 @@ class ReadOnlyToolProvider:
             definitions.append(web_search_tool_def())
             definitions.append(web_fetch_tool_def())
         if self.include_data_catalog:
-            definitions.append(data_catalog_tool_def())
+            catalog_def = data_catalog_tool_def()  # sourced from research_toolkit.catalog_utils
+            if catalog_def is not None:
+                definitions.append(catalog_def)
         if self.human_handler is not None:
             definitions.append(ask_human_tool_def())
             if self.include_plan_and_debate:

@@ -346,3 +346,12 @@ Role wrappers:
   reads the draft + catalog back. `AnalystWorkerAgent.analyze` writes via `edit_report` (its `self`
   catalog); `AnalystLeadAgent.adjudicate(…, sources=)` cites by `{worker, index}`. Citation replaces
   figure-dedup, closing the last-round-only leak.
+- 2026-07-20 — **`data_catalog` sourced from `research_toolkit.catalog_utils` (read relocation).**
+  The tool is no longer an auto_research built-in: its def (description + `{obs_db_path, min_level}`
+  schema) comes from `catalog_utils`'s `TOOL_MANIFEST`, and its read is `catalog_utils.lib.catalog_read`.
+  Workers get it via `ToolkitRegistry` and run it in the sandbox like any toolkit tool (the built-in
+  add + special in-process branch in `SandboxToolProvider` are gone). The sandbox-less analyst lead
+  runs the same pure-stdlib read in-process (`ReadOnlyToolProvider` when `include_data_catalog`), via
+  `_import_from_toolkit` (toolkit_root on sys.path) + `execute_data_catalog`, now taking `obs_db_path`
+  (agent-supplied, from its local-observation-databases context) rather than `mission`. Agent-facing
+  name is the registry-sanitized `research_toolkit_catalog_utils_data_catalog`. Reviewer still excluded.

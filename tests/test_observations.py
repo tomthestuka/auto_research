@@ -1,4 +1,11 @@
-"""Tests for observation-location configuration and the local data catalog."""
+"""Tests for observation-location configuration and the catalog health check.
+
+The catalog READ (parsing/listing) moved to research_toolkit's ``catalog_utils`` (its
+tests live there, ``catalog_utils/tests/test_catalog_read.py``); this module now covers
+the orchestration-side pieces: obs-db-location config, the launch-time health check
+(delegating to ``obsdb_catalog.healthcheck``), and the ``data_catalog`` tool wiring
+(sourced from ``catalog_utils`` and run in-process for the lead).
+"""
 
 import json
 
@@ -6,37 +13,34 @@ import pytest
 import yaml
 
 from auto_research.observations import (
-    DataCatalog,
     _toolkit_root,
     check_catalog_health,
     load_observations_config,
-    local_obsids,
-    read_catalog,
 )
 
-# obsdb_catalog ships with the research_toolkit checkout (pure stdlib); its location is
-# config-driven (orchestration.yaml: toolkit_root), resolved the same way the check does.
+# obsdb_catalog / catalog_utils ship with the research_toolkit checkout (pure stdlib); their
+# location is config-driven (orchestration.yaml: toolkit_root), resolved the same way the
+# check + the data_catalog tool do.
 TOOLKIT_ROOT = _toolkit_root()
 
 
-def _obsdb_available() -> bool:
-    """Whether ``obsdb_catalog`` is importable from ``toolkit_root`` (a provisioned machine).
+def _toolkit_pkg_available(pkg: str) -> bool:
+    """Whether ``pkg`` is importable from ``toolkit_root`` (a provisioned machine).
 
-    The catalog-health tests exercise the wrapper around ``research_toolkit``'s real
-    ``obsdb_catalog.healthcheck``; on an unprovisioned checkout (no toolkit, or a scaffolded one)
-    that package is absent, so they skip rather than fail — keeping the suite portable.
+    On an unprovisioned checkout (no toolkit, or a scaffolded one) the package is absent,
+    so the tests that need it skip rather than fail — keeping the suite portable.
     """
     import importlib
     import sys
 
     root = str(TOOLKIT_ROOT)
-    if not root or not (TOOLKIT_ROOT / "obsdb_catalog").exists():
+    if not root or not (TOOLKIT_ROOT / pkg).exists():
         return False
     inserted = root not in sys.path
     if inserted:
         sys.path.insert(0, root)
     try:
-        importlib.import_module("obsdb_catalog.healthcheck")
+        importlib.import_module(pkg)
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -46,7 +50,12 @@ def _obsdb_available() -> bool:
 
 
 _needs_obsdb = pytest.mark.skipif(
-    not _obsdb_available(), reason="obsdb_catalog not in toolkit_root (unprovisioned machine)"
+    not _toolkit_pkg_available("obsdb_catalog"),
+    reason="obsdb_catalog not in toolkit_root (unprovisioned machine)",
+)
+_needs_catalog_utils = pytest.mark.skipif(
+    not _toolkit_pkg_available("catalog_utils"),
+    reason="catalog_utils not in toolkit_root (unprovisioned machine)",
 )
 
 
@@ -74,60 +83,6 @@ def test_load_observations_config_rejects_unknown_mission(tmp_path):
 
     with pytest.raises(KeyError, match="unknown mission"):
         config.mission("missing")
-
-
-# ── data catalog (read side) ────────────────────────────────────────────────
-
-
-def _config_with_obs_db(tmp_path):
-    """A single-root config whose IXPE subdir is the mission (discovered from disk)."""
-    root = tmp_path / "obsdb"
-    obs_db = root / "IXPE"
-    obs_db.mkdir(parents=True)
-    cfg = tmp_path / "observations.yaml"
-    cfg.write_text(yaml.safe_dump({"obs_db_root": str(root)}))
-    return cfg, obs_db
-
-
-def test_read_catalog_absent_returns_empty(tmp_path):
-    cfg, _ = _config_with_obs_db(tmp_path)
-    catalog = read_catalog("ixpe", config_path=cfg)
-    assert isinstance(catalog, DataCatalog)
-    assert catalog.obsids() == []
-
-
-def test_read_catalog_parses_levels_and_products(tmp_path):
-    cfg, obs_db = _config_with_obs_db(tmp_path)
-    (obs_db / "catalog.json").write_text(json.dumps({
-        "entries": {
-            "01002901": {
-                "obsid": "01002901", "max_level": 3, "levels_present": [1, 2, 3],
-                "products": [
-                    {"kind": "level2_evt", "path": "01002901/evt2", "produced_by": "heasarc"},
-                    {"kind": "pcube", "path": "01002901/pcube", "produced_by": "pcube_tool",
-                     "params": {"ebinning": [2, 5, 8], "src_rad": 60}},
-                ],
-            },
-            "02001901": {"obsid": "02001901", "max_level": 2, "levels_present": [1, 2]},
-        }
-    }))
-
-    catalog = read_catalog("ixpe", config_path=cfg)
-    assert catalog.obsids() == ["01002901", "02001901"]
-    assert catalog.has("01002901", min_level=3)
-    assert not catalog.has("02001901", min_level=3)
-    pcube = [p for p in catalog.entries["01002901"].products if p.kind == "pcube"][0]
-    assert pcube.params["src_rad"] == 60
-
-    assert local_obsids("ixpe", config_path=cfg) == ["01002901", "02001901"]
-    assert local_obsids("ixpe", min_level=3, config_path=cfg) == ["01002901"]
-
-
-def test_read_catalog_malformed_raises(tmp_path):
-    cfg, obs_db = _config_with_obs_db(tmp_path)
-    (obs_db / "catalog.json").write_text("{ not valid json")
-    with pytest.raises(ValueError, match="malformed data catalog"):
-        read_catalog("ixpe", config_path=cfg)
 
 
 # ── catalog health check (preflight) ────────────────────────────────────────
@@ -200,45 +155,58 @@ def test_check_catalog_health_missing_product_raises(tmp_path):
     assert "{'" not in msg and "[{" not in msg  # no raw dict/list dump
 
 
-# ── data_catalog ReAct tool (worker + lead) ─────────────────────────────────
+# ── data_catalog ReAct tool (now sourced from research_toolkit.catalog_utils) ──
 
 
-def test_data_catalog_tool_lists_local_obsids(monkeypatch):
+def test_execute_data_catalog_delegates_to_catalog_utils(monkeypatch):
+    """The in-process executor passes obs_db_path to the catalog_utils read and wraps the text.
+
+    Monkeypatches the memoized read fn so the wiring is tested without a provisioned toolkit.
+    """
     import asyncio
 
     from auto_research.agents import react
-    from auto_research.observations import CatalogEntry, DataCatalog, DataProduct
 
-    fake = DataCatalog(mission="ixpe", entries={
-        "01002901": CatalogEntry(
-            obsid="01002901", max_level=3, levels_present=[1, 2, 3],
-            products=[DataProduct(kind="level2_evt", path="x"), DataProduct(kind="pcube", path="y")],
-        ),
-    })
-    monkeypatch.setattr("auto_research.observations.read_catalog", lambda mission: fake)
+    captured = {}
 
-    out = asyncio.run(react.execute_data_catalog({"mission": "ixpe"}))
+    def _fake_read(obs_db_path, min_level=None):
+        captured["obs_db_path"] = obs_db_path
+        captured["min_level"] = min_level
+        return "Local ixpe data (1 ObsIDs):\n- 01002901: max_level=3, products=[level2_evt, pcube]"
+
+    monkeypatch.setattr(react, "_catalog_read_fn", _fake_read)
+
+    out = asyncio.run(react.execute_data_catalog({"obs_db_path": "/data/x/IXPE", "min_level": 2}))
     assert not out.is_error
-    assert "01002901" in out.text
-    assert "pcube" in out.text
+    assert "01002901" in out.text and "pcube" in out.text
+    assert captured == {"obs_db_path": "/data/x/IXPE", "min_level": 2}
 
 
-def test_data_catalog_tool_exposed_on_worker_and_lead_only():
-    from auto_research.agents.react import (
-        DATA_CATALOG_TOOL,
-        ReadOnlyToolProvider,
-        SandboxToolProvider,
-    )
+def test_execute_data_catalog_requires_obs_db_path(monkeypatch):
+    import asyncio
 
-    class _Reg:
-        def tool_definitions(self):
-            return []
+    from auto_research.agents import react
 
-    worker_defs = SandboxToolProvider(_Reg(), object()).tool_definitions()
-    assert DATA_CATALOG_TOOL in {d["name"] for d in worker_defs}
+    out = asyncio.run(react.execute_data_catalog({}))
+    assert out.is_error and "obs_db_path" in out.text
+
+
+def test_data_catalog_reviewer_excluded():
+    """The reviewer's read-only provider must not carry the data_catalog tool (lead-only)."""
+    from auto_research.agents.react import DATA_CATALOG_TOOL, ReadOnlyToolProvider
+
+    reviewer = ReadOnlyToolProvider(roots=[])  # default: include_data_catalog=False
+    assert DATA_CATALOG_TOOL not in {d["name"] for d in reviewer.tool_definitions()}
+
+
+@_needs_catalog_utils
+def test_data_catalog_lead_sources_def_from_catalog_utils():
+    """The lead gets the data_catalog def sourced from research_toolkit.catalog_utils, with the
+    registry-sanitized name and the obs_db_path arg (not the old mission arg)."""
+    from auto_research.agents.react import DATA_CATALOG_TOOL, ReadOnlyToolProvider
 
     lead = ReadOnlyToolProvider(roots=[], include_data_catalog=True)
-    assert DATA_CATALOG_TOOL in {d["name"] for d in lead.tool_definitions()}
-
-    reviewer = ReadOnlyToolProvider(roots=[])  # default: no catalog tool
-    assert DATA_CATALOG_TOOL not in {d["name"] for d in reviewer.tool_definitions()}
+    defs = {d["name"]: d for d in lead.tool_definitions()}
+    assert DATA_CATALOG_TOOL in defs
+    props = defs[DATA_CATALOG_TOOL]["input_schema"]["properties"]
+    assert "obs_db_path" in props and "mission" not in props

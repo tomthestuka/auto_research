@@ -25,7 +25,7 @@ and the active Phase 2 build order in
 | `storage` | 4 | SQLite layer (papers, memory, query_log; embedding column reserved for Phase 2). |
 | `sources` | 5 | `QuerySource` interface + `arxiv`, `nasa_ads`, `web` (Tavily) modules. |
 | `retrieval` | 6 | `RetrievalBackend` (text search now, vector search stubbed). |
-| `observations.py` | 8 | Single `obs_db_root` loader (`config/observations.yaml`) that discovers per-mission `<root>/<MISSION>` subdirs from disk, plus the read-side data catalog and the `catalog_health` preflight check. |
+| `observations.py` | 8 | Single `obs_db_root` loader (`config/observations.yaml`) that discovers per-mission `<root>/<MISSION>` subdirs from disk, plus the `catalog_health` preflight check. (The catalog **read** moved to `research_toolkit`'s `catalog_utils` — the `data_catalog` tool.) |
 | `agents` | 7-8 | Runtime prompt loader plus thin per-role wrappers that load `prompts/<role>.md`, call configured model groups, and validate schema JSON. |
 | `consensus` | 9 | `ConsensusStrategy` — debate-to-converge with lead convergence checks and adjudication. |
 | `graph` | 10 | LangGraph assembly + the two capped feedback edges. |
@@ -67,9 +67,10 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   from config and discovers missions from disk (`<root>/<MISSION>` subdirs marked by a
   `catalog.json`); mission names are not hardcoded in agent wrappers. `config.missions` is
   the discovered map; `config.mission(name)` resolves one mission's path by case-insensitive
-  subdir match. `read_catalog(mission)` / `local_obsids(mission, min_level=…)` read the
-  per-mission data catalog (`<obs_db_path>/catalog.json`, a `DataCatalog`/`CatalogEntry`/
-  `DataProduct` model) — the read side of the data inventory the authored toolkit tools write.
+  subdir match. The catalog **read** (parsing/listing `<obs_db_path>/catalog.json`) moved to
+  `research_toolkit`'s `catalog_utils` package — surfaced as the `data_catalog` tool — alongside
+  the `obsdb_catalog` writer (§2: domain reads belong to the toolkit). This module keeps only the
+  obs-db-location config and the launch-time health check.
   `check_catalog_health()` is the launch-time preflight check: it runs `research_toolkit`'s
   detect-only `obsdb_catalog.healthcheck` (pure stdlib, never writes) over every configured
   mission and raises on any drift (malformed/missing/regressed/level-inconsistent/uncatalogued),
@@ -145,8 +146,9 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `.env` loading in `check_required_env`; `preflight.py` (`Preflight`/`run_preflight`, made async
   with the `human_channel` ping); the `hitl` raise-to-human channel + `human_handler`/
   `human_channel`; `papers_dir()`; toolkit git-identity/branch-clean checks; `observations.py`
-  read-side data catalog (`DataCatalog`/`read_catalog`/`local_obsids`) + `check_catalog_health`
-  (delegates to `research_toolkit`'s detect-only healthcheck); `observations.yaml` → single
+  obs-db-location config + `check_catalog_health` (delegates to `research_toolkit`'s detect-only
+  healthcheck); the catalog **read** now lives in `research_toolkit`'s `catalog_utils` (the
+  `data_catalog` tool), not here; `observations.yaml` → single
   `obs_db_root` with missions discovered from disk; analyst env `environment-analyst.yml`.
 - 2026-06-22 -> 2026-06-25 — Resilience + preflight UX: `__init__` mutes two Pydantic v2 warning
   families; `env.sandbox_call_timeout_default()`; `database_health` and `toolkit_root_configured`
@@ -191,3 +193,13 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `models.retry` transient-provider retry layer (two live runs were killed by unhandled
   Anthropic 529s riding on the SDKs' seconds-scale default retries). Tests:
   `tests/test_provider_retry.py`.
+- 2026-07-20 — **Catalog READ relocated to `research_toolkit` (option c).** The domain read of a
+  mission's `catalog.json` (the old `DataCatalog`/`read_catalog`/`local_obsids` in `observations.py`)
+  moved into `research_toolkit`'s new `catalog_utils` package (its `lib/catalog_read.py` reuses the
+  trusted `obsdb_catalog.neutral.read`), surfaced as the `data_catalog` tool via `TOOL_MANIFEST`.
+  `observations.py` now keeps only the obs-db-location config (`ObservationsConfig`/
+  `load_observations_config`) + `check_catalog_health` (unchanged, still delegates to
+  `obsdb_catalog.healthcheck`); its read side and the `json`/`datetime` imports are gone. New
+  `env.toolkit_root()` accessor. Rationale: auto_research stays pure orchestration + generic infra;
+  domain reads live in the toolkit beside the writer (§2). Read tests moved to
+  `catalog_utils/tests`; `test_observations.py` keeps config/health + the tool-wiring tests.
