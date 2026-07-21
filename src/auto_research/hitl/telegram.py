@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import html as _html
+import logging
 import os
 import re
 from typing import Any
@@ -106,6 +107,12 @@ class TelegramHandler:
     async def start(self) -> None:
         if self._started:
             return
+        # Telegram's API embeds the bot token in every request URL, and httpx logs full
+        # URLs at INFO ("HTTP Request: POST https://api.telegram.org/bot<token>/…") —
+        # which would write the credential into every backend log. Keep httpx/httpcore
+        # at WARNING for the whole process while a Telegram connector is in use.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
         if self.app is None:  # real connector: build the Application inside the running loop
             self.app = _build_telegram_app(self._token)
             self._register_listener()

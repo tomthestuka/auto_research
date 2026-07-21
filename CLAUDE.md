@@ -886,3 +886,14 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   need randomness inside them; the human moved all RNG patterns to the finding tier, accepting that
   RNG-based fabrication now rests on the co-lead's judgment rather than an auto-reject
   (`config/code_gate.yaml`, `sandbox/gate.py`, `tests/test_gate.py`).
+- 2026-07-16 — **Detached-run hardening (three live #21 relaunch failures, same afternoon).**
+  (1) Liveness treats a zombie as dead — a backend that died at preflight lingers unreaped in the
+  kernel's process table and blocked `overwrite=True` with a useless "kill <pid>" hint.
+  (2) **Double-fork spawn**: a real logout killed a live detached run — graceful VSCode/Jupyter
+  teardown kills process trees by walking parent→child `/proc` links, which `start_new_session`
+  does not sever ([E5] had only verified SIGKILLed kernels); `_spawn_orphaned` starts the backend
+  via a short-lived intermediary so it is reparented to init at spawn (verified adopted by pid 1).
+  (3) **Telegram token leak**: httpx logs full request URLs at INFO and Telegram embeds the bot
+  token in the URL, so backend logs carried the credential; `TelegramHandler.start()` now pins
+  httpx/httpcore to WARNING (rotating the exposed token = the human's out-of-band step).
+  `graph/detached.py`, `hitl/telegram.py`, `tests/test_detached.py`.

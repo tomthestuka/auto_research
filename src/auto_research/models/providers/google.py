@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from auto_research.models.providers._json import loads_first_json_object
 from auto_research.models.types import (
     AssistantToolUse,
     ConversationMessage,
@@ -231,7 +232,7 @@ class GoogleProvider:
                 parsed = parsed_obj
             else:
                 text = getattr(response, "text", "") or ""
-                parsed = json.loads(text) if text else None
+                parsed = loads_first_json_object(text)
 
         tool_calls = []
         if tools is not None:

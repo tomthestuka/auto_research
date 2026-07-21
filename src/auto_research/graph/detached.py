@@ -178,6 +178,33 @@ def reconstruct_run(request: ResearchRequest | str, run_directory: Path, run_id:
     )
 
 
+# Runs in a short-lived intermediary interpreter: spawn the backend in its own session,
+# report its pid on stdout, exit. The intermediary's death orphans the backend at once.
+_ORPHAN_SPAWNER = """\
+import json, subprocess, sys
+argv = json.loads(sys.argv[1])
+with open(sys.argv[2], "w", encoding="utf-8") as log:
+    proc = subprocess.Popen(argv, stdout=log, stderr=log, start_new_session=True)
+print(proc.pid, flush=True)
+"""
+
+
+def _spawn_orphaned(argv: list[str], log_path: Path) -> int:
+    """Spawn ``argv`` detached **and orphaned** (double-fork) and return its pid.
+
+    ``start_new_session`` alone shields the backend from signals and from the kernel
+    dying, but leaves the parent→child ``/proc`` link intact — and a graceful
+    VSCode/Jupyter teardown kills process TREES by walking exactly that link (observed
+    2026-07-16: a logout killed a live detached run seconds before reconnect, while
+    unrelated user processes survived). A short-lived intermediary starts the backend
+    and exits immediately, reparenting it to init: no ancestry, nothing to walk."""
+    helper = subprocess.run(
+        [sys.executable, "-c", _ORPHAN_SPAWNER, json.dumps(argv), str(log_path)],
+        capture_output=True, text=True, timeout=60, check=True,
+    )
+    return int(helper.stdout.strip())
+
+
 def _default_launcher(
     request: ResearchRequest | str,
     run_id: str,
@@ -188,8 +215,9 @@ def _default_launcher(
     human_channel: str | None,
     max_iterations: int | None,
 ) -> int:
-    """Spawn ``python -m auto_research`` **detached** (own session, so a killed kernel does
-    not reach it), record ``backend.pid``, and return the child pid."""
+    """Spawn ``python -m auto_research`` detached and orphaned (``_spawn_orphaned``, so
+    neither a killed kernel nor a logout's tree-walking cleanup reaches it), record
+    ``backend.pid``, and return the child pid."""
     req = _normalize_request(request)
     run_directory.mkdir(parents=True, exist_ok=True)
     argv = [
@@ -205,13 +233,12 @@ def _default_launcher(
         argv += ["--report-format", fmt]
     if max_iterations is not None:
         argv += ["--max-iterations", str(max_iterations)]
-    log = (run_directory / _BACKEND_LOG).open("w", encoding="utf-8")
-    proc = subprocess.Popen(argv, stdout=log, stderr=log, start_new_session=True)
+    pid = _spawn_orphaned(argv, run_directory / _BACKEND_LOG)
     (run_directory / _PID_FILE).write_text(
-        json.dumps({"pid": proc.pid, "create_time": _proc_create_time(proc.pid)}),
+        json.dumps({"pid": pid, "create_time": _proc_create_time(pid)}),
         encoding="utf-8",
     )
-    return proc.pid
+    return pid
 
 
 # Sentinel so `stream` resolves to sys.stdout at CALL time — ipykernel rebinds sys.stdout per

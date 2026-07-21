@@ -7,6 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from auto_research.models.providers._json import loads_first_json_object
+
 from auto_research.models.types import (
     AssistantToolUse,
     ConversationMessage,
@@ -23,10 +25,16 @@ from auto_research.schemas import DocumentRef, FigureRef
 class OpenAIProvider:
     """Thin adapter around the OpenAI Responses API.
 
-    Native structured output uses ``responses.parse(text_format=schema)`` (the
-    SDK converts the Pydantic model to a strict JSON schema and deserializes the
-    result). Function calling passes per-tool function definitions and reads
-    ``function_call`` items from the response output. ``AssistantToolUse`` /
+    Structured output uses ``responses.create`` with a hand-sanitized strict JSON
+    schema (``_strict_json_schema_format``), not the SDK's ``responses.parse``:
+    the SDK's own Pydantic-to-strict conversion keeps ``format: path`` and
+    ``default`` values that OpenAI strict mode rejects, so we scrub those on the
+    send side ourselves. The response is deserialized with
+    ``loads_first_json_object`` — which takes the first complete JSON value and
+    tolerates any leading/trailing content a reasoning model may add (a bare
+    ``json.loads`` on that surplus once crashed a run). Function calling passes
+    per-tool function definitions and reads ``function_call`` items from the
+    response output. ``AssistantToolUse`` /
     ``ToolResultMessage`` turns are replayed as ``function_call`` /
     ``function_call_output`` input items so a ReAct loop can carry its trajectory.
     Prefix caching is automatic on the Responses API; ``cache_prefix`` additionally
@@ -83,7 +91,7 @@ class OpenAIProvider:
                 **config.parameters,
             )
             text = getattr(response, "output_text", "") or ""
-            parsed = json.loads(text) if text else None
+            parsed = loads_first_json_object(text)
             return _response(content=text, parsed=parsed, raw=response)
 
         if tools is not None:

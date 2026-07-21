@@ -306,6 +306,49 @@ def test_sanitizers_preserve_field_named_title():
     assert set(o["required"]) == set(o["properties"])  # strict: all properties required
 
 
+def test_loads_first_json_object_handles_surrounding_content():
+    """The receive-side parser: clean input round-trips; leading/trailing content
+    is tolerated (the first complete value wins); no-JSON returns None so the
+    caller's structured-retry loop re-prompts instead of the call crashing."""
+    from auto_research.models.providers._json import loads_first_json_object
+
+    obj = {"accepted": True, "rationale": "ok"}
+    # clean — identical to json.loads
+    assert loads_first_json_object(json.dumps(obj)) == obj
+    # trailing content after the object (the live GPT-co-lead 'Extra data' crash)
+    assert loads_first_json_object(json.dumps(obj) + '\n\nNote: done.\n{"stray": 1}') == obj
+    # leading prose before the object
+    assert loads_first_json_object("Here is the verdict:\n" + json.dumps(obj)) == obj
+    # a top-level list value
+    assert loads_first_json_object("[1, 2] trailing") == [1, 2]
+    # no JSON at all / empty → None (caller retries, no raise)
+    assert loads_first_json_object("sorry, I cannot comply") is None
+    assert loads_first_json_object("") is None
+
+
+class _TrailingResponses(_FakeResponses):
+    async def create(self, **kw):
+        _FakeResponses.last = kw
+        return SimpleNamespace(
+            output_text=json.dumps({"accepted": True, "rationale": "ok"}) + "\n\nNote: extra.",
+            usage=SimpleNamespace(input_tokens=5, output_tokens=2),
+        )
+
+
+class _TrailingOpenAI:
+    def __init__(self, *a, **k):
+        self.responses = _TrailingResponses()
+
+
+def test_openai_structured_output_tolerates_trailing_data(monkeypatch):
+    """A valid JSON object followed by extra content (a reasoning-model quirk that
+    crashed a live run via a bare json.loads) must parse to the object, not raise."""
+    monkeypatch.setattr("openai.AsyncOpenAI", _TrailingOpenAI)
+    resp = asyncio.run(OpenAIProvider().call(_messages(), _cfg(), schema=_Verdict))
+    assert resp.parsed == {"accepted": True, "rationale": "ok"}
+    assert _Verdict.model_validate(resp.parsed).accepted is True
+
+
 def test_openai_function_calling(monkeypatch):
     monkeypatch.setattr("openai.AsyncOpenAI", _FakeOpenAI)
     tools = [{"name": "research_toolkit_xspec_utils_plot_fit", "description": "d",

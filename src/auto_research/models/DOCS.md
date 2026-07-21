@@ -51,13 +51,23 @@ Google by editing YAML alone
   requests provider-native **structured output** (OpenAI Responses `text.format`
   json_schema, Google `response_schema`, Anthropic `messages.parse(output_format=)`);
   the parsed object is returned as a dict in `ModelResponse.parsed`.
+  **Send side — schema:** Anthropic uses the SDK-native `messages.parse`, but OpenAI
+  and Google hand-build their strict schema (`_strict_json_schema_format`,
+  `_to_gemini_schema`) rather than using the SDK's own `parse` conversion, because
+  that conversion keeps `format: path` and `default` values which OpenAI/Gemini strict
+  mode reject (verified: all five structured schemas would 400). **Receive side —
+  parse:** OpenAI and Google deserialize with `providers/_json.loads_first_json_object`,
+  which takes the *first complete JSON value* and tolerates any leading/trailing content
+  a reasoning model may append (a bare `json.loads` on that surplus crashed a live run,
+  2026-07-20); it returns `None` when no JSON is present so the structured-retry loop
+  re-prompts instead of raising.
   `call(..., tools=[...], tool_choice=...)`
   requests provider-native **function calling**; the model's tool calls are
   returned in `ModelResponse.tool_calls`. `schema` and `tools` are mutually
   exclusive in one call (the two are separate provider mechanisms). Each tool is
   a provider-neutral dict `{"name", "description", "input_schema"}`. There is no
-  prompt-injected JSON schema and no salvage JSON parsing — agents validate the
-  parsed result with Pydantic and fail loudly on mismatch.
+  prompt-injected JSON schema; agents validate the parsed dict with Pydantic
+  (`_structured_loop`) and retry on an off-schema shape, failing loudly on cap exhaustion.
 - Provider calls return a normalized `ModelResponse` with `content`, `parsed`,
   `tool_calls`, `usage`, and the raw SDK response for later observability.
 - `priceMTk` is optional per model member and stores USD rates per million
@@ -160,3 +170,4 @@ Google by editing YAML alone
 - 2026-07-06 — Figures now carry pixels to the model ([FIG-VIEW]+[V2]): all three adapters load figure bytes into native image blocks — cross-agent figures on the call-time `images=` channel, a tool's own figures via `ToolResultPart.figures` rendered inline at their tool-result turn — replacing the old `"Figure reference: <path>"` text. Gemini stays on `generateContent`.
 - 2026-07-14 — V-4: figure caption rendered verbatim; `_figure_blocks`/`_figure_items`/`_figure_parts` dropped the hardcoded `"Figure — "` prefix (the presentation layer now numbers/handles captions).
 - 2026-07-16 — Transient-provider retry layer (`retry.py`), closing the F6 class that killed two live runs on Anthropic 529s: `ModelHandle.call` wraps every provider call in `call_with_transient_retry` — overloaded/429/5xx/connection errors retried with config-driven exponential-jittered cooldowns (`orchestration.yaml: provider_retry_*`, defaults 8 retries / 60 s base / 600 s cap); non-transient errors and budget exhaustion re-raise unchanged. Deterministic tests in `tests/test_provider_retry.py`.
+- 2026-07-20 — Structured-output receive hardened (F6-class run-killer): a GPT co-lead tool review returned a valid JSON object followed by extra content, and `openai.py`'s bare `json.loads(output_text)` raised an unhandled `JSONDecodeError: Extra data` that killed a ~4 h live run at Tool-2 review. New `providers/_json.loads_first_json_object` takes the first complete JSON value, tolerates leading/trailing content, logs the surplus, and returns `None` (→ structured-retry) when no JSON is present; wired into the OpenAI structured path and Google's `json.loads` fallback. **Send side unchanged** — an offline diff proved the SDK's own `responses.parse`/`to_strict_json_schema` conversion keeps `format: path` + `default`s on all five structured schemas (which OpenAI strict mode 400-rejects), so the hand-rolled `_strict_json_schema_format` sanitizer stays necessary (hence B-hybrid, not full native). Stale `OpenAIProvider` docstring corrected (it claimed `responses.parse`). Tests: `tests/test_providers.py::test_loads_first_json_object_handles_surrounding_content`, `::test_openai_structured_output_tolerates_trailing_data`.

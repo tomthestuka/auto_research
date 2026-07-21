@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -98,6 +100,22 @@ def test_liveness_pid_reuse_guarded(tmp_path, sleeper):
     rd = tmp_path / "r"
     _write_pid(rd, p.pid, (_proc_create_time(p.pid) or 0) + 999)  # pid alive, start-time mismatched
     assert not is_run_alive(rd)   # a recycled pid must not read as the original run
+
+
+def test_spawn_orphaned_breaks_ancestry(tmp_path):
+    # Double-fork: the backend must NOT be our child — a graceful VSCode/Jupyter
+    # teardown kills process trees by walking parent→child /proc links, which
+    # start_new_session alone does not sever (a real logout killed a live run).
+    log = tmp_path / "backend.log"
+    pid = d._spawn_orphaned([sys.executable, "-c", "import time; time.sleep(30)"], log)
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        ppid = int(stat.rsplit(")", 1)[1].split()[1])  # field 4 (ppid) = rhs[1]
+        assert ppid != os.getpid(), "backend is still our direct child"
+        assert d._proc_create_time(pid) is not None    # liveness fields readable
+        assert log.exists()                            # intermediary wired the log file
+    finally:
+        os.kill(pid, signal.SIGKILL)
 
 
 def test_liveness_zombie_is_dead(tmp_path, sleeper):
