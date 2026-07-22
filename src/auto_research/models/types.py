@@ -23,12 +23,33 @@ class ModelMessage(BaseModel):
 
 
 class ModelUsage(BaseModel):
-    """Provider-neutral token usage for one model call."""
+    """Provider-neutral token usage for one model call.
+
+    Token classes are **non-overlapping** so cost is a plain weighted sum (no
+    subtraction at pricing time). Each adapter normalizes its provider's usage
+    object into these buckets ([I5]):
+
+    - ``input_tokens`` — full-price *uncached* prompt tokens. Anthropic reports
+      this directly; OpenAI/Google report a total that includes the cached
+      subset, so those adapters subtract ``cache_read_tokens``.
+    - ``cache_read_tokens`` — prompt tokens served from the provider cache
+      (billed ~0.1x input).
+    - ``cache_write_tokens`` — prompt tokens written to the cache (Anthropic
+      cache-creation, billed ~1.25x input; 0 where the provider caches
+      implicitly with no write premium).
+    - ``output_tokens`` — all generated tokens, **including** reasoning/thinking
+      (providers bill thinking as output and count it here).
+    - ``reasoning_tokens`` — the reasoning/thinking subset of ``output_tokens``,
+      informational only (already priced within ``output_tokens``).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
+    cache_read_tokens: int = Field(default=0, ge=0)
+    cache_write_tokens: int = Field(default=0, ge=0)
+    reasoning_tokens: int = Field(default=0, ge=0)
 
 
 class ToolCall(BaseModel):

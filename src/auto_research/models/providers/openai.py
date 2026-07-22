@@ -250,14 +250,32 @@ def _sanitize_strict(node: object) -> None:
 
 
 def _response(*, content="", parsed=None, tool_calls=None, raw=None) -> ModelResponse:
-    usage = getattr(raw, "usage", None)
     return ModelResponse(
         content=content or "",
         parsed=parsed,
         tool_calls=tool_calls or [],
-        usage=ModelUsage(
-            input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
-            output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
-        ),
+        usage=_openai_usage(getattr(raw, "usage", None)),
         raw=raw,
+    )
+
+
+def _openai_usage(usage: Any) -> ModelUsage:
+    """Map an OpenAI Responses ``usage`` object into the neutral non-overlapping buckets ([I5]).
+
+    ``usage.input_tokens`` is the TOTAL prompt tokens (cached + uncached); the cached subset is
+    ``input_tokens_details.cached_tokens`` (billed at a reduced rate), so uncached full-price
+    input = total - cached. ``output_tokens`` already includes reasoning tokens (billed as output);
+    ``output_tokens_details.reasoning_tokens`` is surfaced for visibility only. OpenAI caches
+    implicitly with no write premium, so ``cache_write_tokens`` stays 0.
+    """
+    if usage is None:
+        return ModelUsage()
+    total_input = getattr(usage, "input_tokens", 0) or 0
+    cached = getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0) or 0
+    reasoning = getattr(getattr(usage, "output_tokens_details", None), "reasoning_tokens", 0) or 0
+    return ModelUsage(
+        input_tokens=max(total_input - cached, 0),
+        output_tokens=getattr(usage, "output_tokens", 0) or 0,
+        cache_read_tokens=cached,
+        reasoning_tokens=reasoning,
     )

@@ -41,6 +41,30 @@ def _to_gemini_schema(model: type[BaseModel]) -> dict:
     return resolved
 
 
+def _gemini_usage(usage: Any) -> ModelUsage:
+    """Map a Gemini ``usage_metadata`` object into the neutral non-overlapping buckets ([I5]).
+
+    ``prompt_token_count`` is the TOTAL prompt tokens (cached + uncached); ``cached_content_token_count``
+    is the cached subset (billed at a reduced rate), so uncached full-price input = total - cached.
+    ``candidates_token_count`` excludes thinking, which Gemini reports separately as
+    ``thoughts_token_count`` and bills as output — so output = candidates + thoughts, with thoughts
+    surfaced as ``reasoning_tokens``. Implicit caching has no write premium, so ``cache_write_tokens``
+    stays 0.
+    """
+    if usage is None:
+        return ModelUsage()
+    total_input = getattr(usage, "prompt_token_count", 0) or 0
+    cached = getattr(usage, "cached_content_token_count", 0) or 0
+    candidates = getattr(usage, "candidates_token_count", 0) or 0
+    thoughts = getattr(usage, "thoughts_token_count", 0) or 0
+    return ModelUsage(
+        input_tokens=max(total_input - cached, 0),
+        output_tokens=candidates + thoughts,
+        cache_read_tokens=cached,
+        reasoning_tokens=thoughts,
+    )
+
+
 def _inline_refs(node: Any, defs: dict) -> Any:
     """Return a deep copy of ``node`` with every ``$ref`` to ``$defs`` inlined."""
     if isinstance(node, dict):
@@ -250,9 +274,6 @@ class GoogleProvider:
             content=getattr(response, "text", "") or "",
             parsed=parsed,
             tool_calls=tool_calls,
-            usage=ModelUsage(
-                input_tokens=getattr(usage, "prompt_token_count", 0) if usage else 0,
-                output_tokens=getattr(usage, "candidates_token_count", 0) if usage else 0,
-            ),
+            usage=_gemini_usage(usage),
             raw=response,
         )

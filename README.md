@@ -191,6 +191,18 @@ python -m auto_research.observability.plot_run <monitor.jsonl> [output.png]
 # default output: <stem>.viz.png in the current directory
 ```
 
+**Spend rollup** — cumulative cost across all runs (no provider admin panel needed):
+
+```bash
+python -m auto_research.observability.usage [--since YYYY-MM-DD] [--top N]
+# total + by provider/model/role/day from <runtime_dir>/cost_ledger.jsonl
+```
+
+Cost is priced **litellm-first, config-fallback**: litellm's community price map (incl. cache/reasoning
+tokens) prices what it knows, `config/models.yaml: priceMTk` fills the gaps. When `LANGCHAIN_TRACING_V2`
+is on, each call's tokens + cost are also attached to its LangSmith run. The number is an estimate
+against list prices — it cannot reconcile to an org's negotiated bill (that needs an admin key).
+
 **Tests** — `pytest -q` for deterministic checks. Live API / XSPEC tests are opt-in via
 env flags (e.g. `AUTO_RESEARCH_LIVE_FULL_SUITE_TESTS=1`) and write logs under
 `logs/dev/step-N/`.

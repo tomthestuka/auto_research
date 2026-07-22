@@ -72,19 +72,29 @@ def _load_models_yaml(path: Path = _MODELS_CONFIG) -> dict:
         return yaml.safe_load(f) or {}
 
 
-def _build_pricing(roles: dict) -> dict[str, dict[str, float]]:
-    """Return {model_id: {"in": float, "out": float}} from models.yaml roles."""
-    pricing: dict[str, dict[str, float]] = {}
+def _build_rates(roles: dict) -> dict:
+    """Return {model_id: TokenRates} — the same litellm-first / config-fallback per-token rates the
+    cost ledger uses, so this chart matches the ledger (incl. cache/reasoning tokens)."""
+    from auto_research.models.types import RoleModelConfig
+    from auto_research.observability.costs import token_rates_for
+
+    rates: dict = {}
     for group in roles.values():
         for member in group.get("members", []):
             model = member.get("model", "")
-            price = member.get("priceMTk", {})
-            if price and model and model not in pricing:
-                pricing[model] = {
-                    "in": float(price.get("input", 0.0)),
-                    "out": float(price.get("output", 0.0)),
-                }
-    return pricing
+            if not model or model in rates:
+                continue
+            try:
+                cfg = RoleModelConfig(
+                    name=member.get("name", model),
+                    provider=member["provider"],
+                    model=model,
+                    priceMTk=member.get("priceMTk", {}),
+                )
+                rates[model] = token_rates_for(cfg)
+            except Exception:  # noqa: BLE001 — a malformed member just drops out of the chart
+                continue
+    return rates
 
 
 def _build_role_maps(
@@ -141,7 +151,7 @@ def main() -> None:  # noqa: C901
 
     # Config-derived model/pricing tables
     roles = _load_models_yaml().get("roles", {})
-    pricing = _build_pricing(roles)
+    rates = _build_rates(roles)
     role_model_fixed, analyst_worker_models = _build_role_maps(roles)
     model_colors = _build_model_colors(role_model_fixed, analyst_worker_models)
     analyst_lead_model = role_model_fixed.get("analyst_lead", (None, None))[1]
@@ -201,6 +211,8 @@ def main() -> None:  # noqa: C901
                 usage = o["data"]["usage"]
                 in_tok = usage.get("input_tokens", 0)
                 out_tok = usage.get("output_tokens", 0)
+                cr_tok = usage.get("cache_read_tokens", 0)
+                cw_tok = usage.get("cache_write_tokens", 0)
 
                 if role_prefix == "analyst_worker":
                     widx = analyst_worker_index(o["sequence"])
@@ -212,9 +224,14 @@ def main() -> None:  # noqa: C901
                     team, model = "run", None
 
                 cost = 0.0
-                if model and model in pricing:
-                    p = pricing[model]
-                    cost = (in_tok * p["in"] + out_tok * p["out"]) / 1_000_000
+                if model and model in rates:
+                    r = rates[model]  # per-token rates (already scaled), matching the cost ledger
+                    cost = (
+                        in_tok * r.input
+                        + out_tok * r.output
+                        + cr_tok * r.cache_read
+                        + cw_tok * r.cache_write
+                    )
 
                 calls.append(
                     {

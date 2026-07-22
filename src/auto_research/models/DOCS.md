@@ -85,8 +85,13 @@ Google by editing YAML alone
 - `MessageRole` — one of `"system"`, `"user"`, or `"assistant"`.
 - `ModelMessage(role: MessageRole, content: str)` — provider-neutral text
   message. Unknown fields are forbidden.
-- `ModelUsage(input_tokens: int = 0, output_tokens: int = 0)` — normalized token
-  usage.
+- `ModelUsage(input_tokens=0, output_tokens=0, cache_read_tokens=0, cache_write_tokens=0,
+  reasoning_tokens=0)` — normalized token usage in **non-overlapping** classes so cost is a plain
+  weighted sum ([I5]). `input_tokens` is full-price *uncached* prompt tokens (Anthropic reports this
+  directly; OpenAI/Google adapters subtract the cached subset from their reported total);
+  `cache_read_tokens` served from cache (~0.1x); `cache_write_tokens` cache-creation (~1.25x, 0 where
+  the provider caches implicitly); `output_tokens` includes reasoning/thinking; `reasoning_tokens` is
+  the reasoning subset of output, informational only (already priced within `output_tokens`).
 - `ToolCall(id: str = "", name: str, arguments: dict[str, Any] = {})` — one
   provider-native tool/function call extracted from a model response. ``id`` is the
   provider tool-call id, used to correlate a result back to the call when replaying
@@ -171,3 +176,4 @@ Google by editing YAML alone
 - 2026-07-14 — V-4: figure caption rendered verbatim; `_figure_blocks`/`_figure_items`/`_figure_parts` dropped the hardcoded `"Figure — "` prefix (the presentation layer now numbers/handles captions).
 - 2026-07-16 — Transient-provider retry layer (`retry.py`), closing the F6 class that killed two live runs on Anthropic 529s: `ModelHandle.call` wraps every provider call in `call_with_transient_retry` — overloaded/429/5xx/connection errors retried with config-driven exponential-jittered cooldowns (`orchestration.yaml: provider_retry_*`, defaults 8 retries / 60 s base / 600 s cap); non-transient errors and budget exhaustion re-raise unchanged. Deterministic tests in `tests/test_provider_retry.py`.
 - 2026-07-20 — Structured-output receive hardened (F6-class run-killer): a GPT co-lead tool review returned a valid JSON object followed by extra content, and `openai.py`'s bare `json.loads(output_text)` raised an unhandled `JSONDecodeError: Extra data` that killed a ~4 h live run at Tool-2 review. New `providers/_json.loads_first_json_object` takes the first complete JSON value, tolerates leading/trailing content, logs the surplus, and returns `None` (→ structured-retry) when no JSON is present; wired into the OpenAI structured path and Google's `json.loads` fallback. **Send side unchanged** — an offline diff proved the SDK's own `responses.parse`/`to_strict_json_schema` conversion keeps `format: path` + `default`s on all five structured schemas (which OpenAI strict mode 400-rejects), so the hand-rolled `_strict_json_schema_format` sanitizer stays necessary (hence B-hybrid, not full native). Stale `OpenAIProvider` docstring corrected (it claimed `responses.parse`). Tests: `tests/test_providers.py::test_loads_first_json_object_handles_surrounding_content`, `::test_openai_structured_output_tolerates_trailing_data`.
+- 2026-07-22 — [I5] `ModelUsage` gains `cache_read_tokens`/`cache_write_tokens`/`reasoning_tokens` (default 0, non-overlapping classes). Each adapter now normalizes its provider usage into them via a `_..._usage()` helper: Anthropic reads `cache_read_input_tokens`/`cache_creation_input_tokens` (input already uncached); OpenAI reads `input_tokens_details.cached_tokens` + `output_tokens_details.reasoning_tokens` and subtracts cached from total input; Google reads `cached_content_token_count` + `thoughts_token_count` (output = candidates+thoughts). Closes the under-reporting where heavily-cached ReAct input (cache reads, ~0.1x) was uncounted. Pricing/rollup live in `observability` (see its DOCS).

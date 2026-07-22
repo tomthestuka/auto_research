@@ -925,3 +925,19 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   nothing committed but `tool_author_cap` credits remain → re-attempt (burn a credit). The honest §9.6
   terminal (`finalize_authoring_outcome`) now fires **only** when credits are exhausted with nothing ever
   committed. New monitor event `analyst.tool.chain_resume`. Suite green (493; +1 net test).
+- 2026-07-22 — **[I5] cost visibility — accurate accounting + rollup + LangSmith cost.** Motivated
+  by "I use org-dispensed keys with no admin panel, so I can't see spend." Community-solution-first
+  (§1 use-the-wheel): pricing is **litellm-first, config-fallback** (`observability/costs.token_rates_for`
+  reads litellm's maintained `model_cost` map — correct per-model input/output/cache-read/cache-creation
+  rates — and falls back to `config/models.yaml: priceMTk` for models litellm doesn't know yet, with
+  cache tiers defaulting to 0.1x/1.25x input). `ModelUsage` gains `cache_read_tokens`/`cache_write_tokens`/
+  `reasoning_tokens` (non-overlapping classes), normalized per provider in each adapter — fixing the
+  under-count where heavily-cached ReAct input (cache reads at ~0.1x) was recorded as **zero** cost.
+  Visibility: `traced_model_call` annotates each LangSmith run with `usage_metadata` + `cost_usd`
+  (dashboard shows spend even for models LangSmith's own map lacks); a new `python -m
+  auto_research.observability.usage` rollup (total / by provider·model·role·day / `--since`) reads the
+  cumulative `cost_ledger.jsonl`; `plot_run.py` prices via the same path. Estimate vs. list prices only
+  — cannot reconcile to a negotiated bill (needs an admin key). `litellm>=1.93` added to `environment.yml`
+  (conda-forge; lazy-imported, price-map only). Suite green (500; +7). **Residual (still [I5]):** the
+  reviewer GPT member's `max_output_tokens` vs. the Claude member's is a separate truncation-risk item,
+  untouched here.

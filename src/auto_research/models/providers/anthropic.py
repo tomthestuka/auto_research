@@ -119,10 +119,7 @@ class AnthropicProvider:
             return ModelResponse(
                 content="".join(text_parts),
                 parsed=parsed_obj.model_dump(mode="json") if parsed_obj is not None else None,
-                usage=ModelUsage(
-                    input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
-                    output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
-                ),
+                usage=_anthropic_usage(usage),
                 raw=response,
             )
 
@@ -167,12 +164,27 @@ class AnthropicProvider:
         return ModelResponse(
             content="".join(text_parts),
             tool_calls=tool_calls,
-            usage=ModelUsage(
-                input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
-                output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
-            ),
+            usage=_anthropic_usage(usage),
             raw=response,
         )
+
+
+def _anthropic_usage(usage: Any) -> ModelUsage:
+    """Map an Anthropic ``usage`` object into the neutral non-overlapping buckets ([I5]).
+
+    Anthropic's ``input_tokens`` is already the *uncached* remainder; cached volume is reported
+    separately as ``cache_read_input_tokens`` (~0.1x) and ``cache_creation_input_tokens`` (~1.25x),
+    so no subtraction is needed. Thinking is billed as output and already counted in
+    ``output_tokens``, so ``reasoning_tokens`` stays 0.
+    """
+    if usage is None:
+        return ModelUsage()
+    return ModelUsage(
+        input_tokens=getattr(usage, "input_tokens", 0) or 0,
+        output_tokens=getattr(usage, "output_tokens", 0) or 0,
+        cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+        cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+    )
 
 
 def _figure_blocks(figure: FigureRef) -> list[dict[str, Any]]:

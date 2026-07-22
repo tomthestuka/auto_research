@@ -15,6 +15,7 @@ dependencies:
   # orchestration + observability
   - langgraph>=0.2
   - langsmith>=0.1.130
+  - litellm>=1.93   # community per-model price map (incl. cache/reasoning tokens); used for cost only, lazy-imported
   # literature sources
   - arxiv>=2.1
   - ads>=0.12
