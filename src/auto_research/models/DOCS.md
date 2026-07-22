@@ -45,6 +45,22 @@ Google by editing YAML alone
   `tool_result`, OpenAI/Google as a user turn immediately after — so they replay in place
   every round and fall inside the cached prefix as the loop grows (the model keeps *seeing*
   its plots, and the terminal report call that replays the trajectory does too).
+- **Provider-native context editing (Anthropic, beta — the context-pressure valve for long
+  loops).** On the `cache_prefix` paths (the ReAct tool loop and the terminal report call),
+  when `context_mgmt_enabled` (`orchestration.yaml`, read via `env.context_editing_config`),
+  the Anthropic adapter routes through `client.beta.messages` and attaches a
+  `context_management` block (`clear_tool_uses_20250919`): once a request crosses
+  `context_mgmt_trigger_tokens` input tokens, Anthropic clears the *oldest tool results*
+  server-side (keeping the last `context_mgmt_keep_tool_uses`, clearing at least
+  `context_mgmt_clear_at_least_tokens` per pass so the unavoidable cache-prefix invalidation is
+  amortized). The applied-edits report is normalized onto `ModelResponse.context_edits` and
+  surfaced by `AgentRole` as a `<role>.<action>.context_edit` monitor event. Every other call
+  (no `cache_prefix`, or disabled) stays on the non-beta namespace, byte-identical to before —
+  minimal blast radius. Anthropic-only (OpenAI's `responses.compact` needs stateful Responses;
+  Google has no equivalent). This is a *context-window pressure valve, not a cost lever*: with
+  prompt caching raw history is cheap and any clear breaks the cached prefix. **NOT LIVE TESTED
+  as of 2026-07-22** — the beta path awaits Anthropic API credits (`tests/test_live_context_editing.py`;
+  run it before flipping `context_mgmt_enabled: true`).
 - `ModelRegistry.resolve(role)` returns a `ModelGroupHandle`; callers choose a
   member with `member(name)` or iterate through `handles`.
 - **Native structured output and function calling.** `call(..., schema=Model)`
@@ -109,8 +125,10 @@ Google by editing YAML alone
   AssistantToolUse | ToolResultMessage`; `call(messages=…)` accepts the union.
 - `ModelResponse(content: str = "", parsed: Any | None = None,
   tool_calls: list[ToolCall] = [], usage: ModelUsage = ModelUsage(),
-  raw: Any = None)` — normalized provider output. `parsed` carries native
-  structured output; `tool_calls` carries native function calls.
+  context_edits: list[dict] = [], raw: Any = None)` — normalized provider output.
+  `parsed` carries native structured output; `tool_calls` carries native function
+  calls; `context_edits` carries the provider-native context-management edits applied
+  to this call (Anthropic `applied_edits`; empty on every other provider/call).
 - `RoleModelConfig(name: str, provider: ProviderName, model: str,
   vision: bool = False, documents: bool = False, priceMTk: dict[str, float] = {},
   parameters: dict[str, Any] = {})` — one model member from YAML.
@@ -177,3 +195,4 @@ Google by editing YAML alone
 - 2026-07-16 — Transient-provider retry layer (`retry.py`), closing the F6 class that killed two live runs on Anthropic 529s: `ModelHandle.call` wraps every provider call in `call_with_transient_retry` — overloaded/429/5xx/connection errors retried with config-driven exponential-jittered cooldowns (`orchestration.yaml: provider_retry_*`, defaults 8 retries / 60 s base / 600 s cap); non-transient errors and budget exhaustion re-raise unchanged. Deterministic tests in `tests/test_provider_retry.py`.
 - 2026-07-20 — Structured-output receive hardened (F6-class run-killer): a GPT co-lead tool review returned a valid JSON object followed by extra content, and `openai.py`'s bare `json.loads(output_text)` raised an unhandled `JSONDecodeError: Extra data` that killed a ~4 h live run at Tool-2 review. New `providers/_json.loads_first_json_object` takes the first complete JSON value, tolerates leading/trailing content, logs the surplus, and returns `None` (→ structured-retry) when no JSON is present; wired into the OpenAI structured path and Google's `json.loads` fallback. **Send side unchanged** — an offline diff proved the SDK's own `responses.parse`/`to_strict_json_schema` conversion keeps `format: path` + `default`s on all five structured schemas (which OpenAI strict mode 400-rejects), so the hand-rolled `_strict_json_schema_format` sanitizer stays necessary (hence B-hybrid, not full native). Stale `OpenAIProvider` docstring corrected (it claimed `responses.parse`). Tests: `tests/test_providers.py::test_loads_first_json_object_handles_surrounding_content`, `::test_openai_structured_output_tolerates_trailing_data`.
 - 2026-07-22 — [I5] `ModelUsage` gains `cache_read_tokens`/`cache_write_tokens`/`reasoning_tokens` (default 0, non-overlapping classes). Each adapter now normalizes its provider usage into them via a `_..._usage()` helper: Anthropic reads `cache_read_input_tokens`/`cache_creation_input_tokens` (input already uncached); OpenAI reads `input_tokens_details.cached_tokens` + `output_tokens_details.reasoning_tokens` and subtracts cached from total input; Google reads `cached_content_token_count` + `thoughts_token_count` (output = candidates+thoughts). Closes the under-reporting where heavily-cached ReAct input (cache reads, ~0.1x) was uncounted. Pricing/rollup live in `observability` (see its DOCS).
+- 2026-07-22 — **Anthropic provider-native context editing (the context-pressure valve; NOT LIVE TESTED).** Aligned with the mid-2026 community consensus (Anthropic moved context management server-side; PwC "Don't Break the Cache", arXiv 2601.06007) and CLAUDE.md §1 "use the wheel" — replaced the originally-planned hand-rolled in-loop summarization. On the `cache_prefix` paths (ReAct loop + terminal report call), when `context_mgmt_enabled` (`env.context_editing_config`), `anthropic.py` routes through `client.beta.messages` with `betas=["context-management-2025-06-27"]` + a `context_management` `clear_tool_uses_20250919` edit (trigger/keep/clear_at_least from `orchestration.yaml: context_mgmt_*`); Anthropic clears the oldest tool results server-side. `_react`/adapter untouched otherwise — disabled or non-`cache_prefix` calls stay on the non-beta namespace, byte-identical. New `ModelResponse.context_edits` (normalized `applied_edits`) + `AgentRole._record_context_edit` → `<role>.<action>.context_edit` monitor event. Confirmed via SDK source/introspection that `beta.messages.parse` accepts `output_format`+`context_management`+`thinking`+`tool_choice` and `ParsedBetaMessage.parsed_output` is a property mirroring the non-beta parse; the live beta round-trip is **NOT LIVE TESTED** (blocked by an Anthropic credit-balance 400 on 2026-07-22 — `context_mgmt_enabled` defaults **false**; run `tests/test_live_context_editing.py` and flip it true once credits return). OpenAI (`responses.compact`, needs stateful Responses) / Google (none) deferred. Deterministic tests `tests/test_context_editing.py`.

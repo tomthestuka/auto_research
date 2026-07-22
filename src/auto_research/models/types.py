@@ -121,6 +121,11 @@ class ModelResponse(BaseModel):
     parsed: Any | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
     usage: ModelUsage = Field(default_factory=ModelUsage)
+    context_edits: list[dict[str, Any]] = Field(default_factory=list)
+    """Provider-native context-management edits applied to THIS call (Anthropic context
+    editing ``applied_edits``: each a plain dict with e.g. ``cleared_tool_uses`` /
+    ``cleared_input_tokens``); empty when none applied. Surfaced so the run monitor can
+    record when stale tool context was cleared. **NOT LIVE TESTED (2026-07-22).**"""
     raw: Any = None
 
 

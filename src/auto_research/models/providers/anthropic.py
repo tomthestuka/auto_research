@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from auto_research.env import context_editing_config
 from auto_research.models.types import (
     AssistantToolUse,
     ConversationMessage,
@@ -100,16 +101,48 @@ class AnthropicProvider:
         system_param = _system_param(system, cache_prefix)
         if cache_prefix:
             _mark_last_block_cacheable(provider_messages)
+
+        # Provider-native context editing (Anthropic beta): on the cache_prefix paths — the
+        # ReAct tool loop and the terminal report call — clear the oldest tool RESULTS
+        # server-side once the request crosses the token trigger, keeping the last N. This is
+        # a context-window pressure valve for long loops (with prompt caching, raw history is
+        # cheap and any clear breaks the cached prefix, so clear_at_least amortizes it). Routed
+        # through the beta.messages namespace only when active, so every other call stays
+        # byte-identical to before. NOT LIVE TESTED (2026-07-22 — pending API credits).
+        ctx_cfg = context_editing_config()
+        use_ctx_edit = cache_prefix and ctx_cfg.enabled
+        ctx_extra: dict[str, Any] = {}
+        if use_ctx_edit:
+            ctx_extra["betas"] = [ctx_cfg.beta_header]
+            ctx_extra["context_management"] = {
+                "edits": [
+                    {
+                        "type": ctx_cfg.strategy,
+                        "trigger": {"type": "input_tokens", "value": ctx_cfg.trigger_tokens},
+                        "keep": {"type": "tool_uses", "value": ctx_cfg.keep_tool_uses},
+                        "clear_at_least": {
+                            "type": "input_tokens",
+                            "value": ctx_cfg.clear_at_least_tokens,
+                        },
+                    }
+                ]
+            }
+
         client = AsyncAnthropic()
+        # beta.messages accepts betas + context_management; its response carries the same
+        # content/usage shape, and ParsedBetaMessage.parsed_output is a property mirroring the
+        # non-beta parse — so the extraction below is identical on either namespace.
+        messages_api = client.beta.messages if use_ctx_edit else client.messages
 
         if schema is not None:
-            response = await client.messages.parse(
+            response = await messages_api.parse(
                 model=config.model,
                 max_tokens=max_tokens,
                 messages=provider_messages,
                 output_format=schema,
                 **({"system": system_param} if system is not None else {}),
                 **params,
+                **ctx_extra,
             )
             parsed_obj = response.parsed_output
             text_parts = [
@@ -120,6 +153,7 @@ class AnthropicProvider:
                 content="".join(text_parts),
                 parsed=parsed_obj.model_dump(mode="json") if parsed_obj is not None else None,
                 usage=_anthropic_usage(usage),
+                context_edits=_context_edits(response),
                 raw=response,
             )
 
@@ -147,7 +181,7 @@ class AnthropicProvider:
             request["tools"] = tool_defs
             request["tool_choice"] = {"type": "any"} if tool_choice == "required" else {"type": "auto"}
 
-        response = await client.messages.create(**request)
+        response = await messages_api.create(**request, **ctx_extra)
 
         text_parts = []
         tool_calls: list[ToolCall] = []
@@ -165,6 +199,7 @@ class AnthropicProvider:
             content="".join(text_parts),
             tool_calls=tool_calls,
             usage=_anthropic_usage(usage),
+            context_edits=_context_edits(response),
             raw=response,
         )
 
@@ -185,6 +220,27 @@ def _anthropic_usage(usage: Any) -> ModelUsage:
         cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
         cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
     )
+
+
+def _context_edits(response: Any) -> list[dict[str, Any]]:
+    """Extract the provider-native context-management edits applied to ``response``.
+
+    Anthropic reports cleared context under ``response.context_management.applied_edits``
+    (present only on the beta context-management path; each edit e.g.
+    ``{"type": "clear_tool_uses_20250919", "cleared_tool_uses": N, "cleared_input_tokens": M}``).
+    Returns ``[]`` when the field is absent (every non-beta call). NOT LIVE TESTED (2026-07-22).
+    """
+    cm = getattr(response, "context_management", None)
+    applied = getattr(cm, "applied_edits", None) if cm is not None else None
+    if not applied:
+        return []
+    edits: list[dict[str, Any]] = []
+    for edit in applied:
+        try:
+            edits.append(edit.model_dump(mode="json"))
+        except Exception:  # noqa: BLE001 — a report we cannot serialize must never break the call
+            edits.append({"type": getattr(edit, "type", "unknown")})
+    return edits
 
 
 def _figure_blocks(figure: FigureRef) -> list[dict[str, Any]]:

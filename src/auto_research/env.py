@@ -129,6 +129,77 @@ def provider_retry_policy() -> ProviderRetryPolicy:
     )
 
 
+class ContextEditingConfig(NamedTuple):
+    """Anthropic provider-native context-editing settings (``context_mgmt_*`` keys).
+
+    The ``clear_tool_uses`` strategy clears the *oldest tool RESULTS* server-side once a
+    request crosses ``trigger_tokens`` input tokens, keeping the last ``keep_tool_uses``
+    tool results verbatim and clearing at least ``clear_at_least_tokens`` per pass so the
+    (unavoidable) prompt-cache invalidation is amortized over enough reclaimed tokens to be
+    worth it. It is a context-window pressure valve for long ReAct loops, not a cost lever —
+    with prompt caching, raw history is already cheap and any clear breaks the cached prefix.
+
+    Anthropic-only, and BETA. **NOT LIVE TESTED as of 2026-07-22** (the beta path is exercised
+    only once Anthropic API credits are restored — see ``tests/test_live_context_editing.py``).
+    """
+
+    enabled: bool
+    beta_header: str
+    strategy: str
+    trigger_tokens: int
+    clear_at_least_tokens: int
+    keep_tool_uses: int
+
+
+_CONTEXT_EDITING_DEFAULTS = ContextEditingConfig(
+    enabled=False,
+    beta_header="context-management-2025-06-27",
+    strategy="clear_tool_uses_20250919",
+    trigger_tokens=120000,
+    clear_at_least_tokens=20000,
+    keep_tool_uses=3,
+)
+
+
+def context_editing_config() -> ContextEditingConfig:
+    """Anthropic context-editing policy from config/orchestration.yaml.
+
+    Keys: ``context_mgmt_enabled`` (default False — a config lacking the key keeps the
+    non-beta path, byte-identical to before), ``context_mgmt_trigger_tokens`` (default
+    120000), ``context_mgmt_clear_at_least_tokens`` (default 20000), ``context_mgmt_keep_tool_uses``
+    (default 3). The protocol strings ``context_mgmt_beta_header`` and ``context_mgmt_strategy``
+    are also overridable here (they carry Anthropic's dated beta identifiers, updatable without
+    code when Anthropic bumps them) but default in code and stay out of the sample config to
+    keep it clean. Missing/malformed values fall back per-field, so an older config keeps working.
+    """
+    cfg = _orch_config()
+
+    def _read(key: str, fallback, cast):
+        try:
+            return cast(cfg.get(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+
+    return ContextEditingConfig(
+        enabled=bool(cfg.get("context_mgmt_enabled", _CONTEXT_EDITING_DEFAULTS.enabled)),
+        beta_header=_read(
+            "context_mgmt_beta_header", _CONTEXT_EDITING_DEFAULTS.beta_header, str
+        ),
+        strategy=_read("context_mgmt_strategy", _CONTEXT_EDITING_DEFAULTS.strategy, str),
+        trigger_tokens=_read(
+            "context_mgmt_trigger_tokens", _CONTEXT_EDITING_DEFAULTS.trigger_tokens, int
+        ),
+        clear_at_least_tokens=_read(
+            "context_mgmt_clear_at_least_tokens",
+            _CONTEXT_EDITING_DEFAULTS.clear_at_least_tokens,
+            int,
+        ),
+        keep_tool_uses=_read(
+            "context_mgmt_keep_tool_uses", _CONTEXT_EDITING_DEFAULTS.keep_tool_uses, int
+        ),
+    )
+
+
 def sandbox_call_timeout_default() -> int:
     """Global default sandbox per-tool-call timeout (seconds) from config/orchestration.yaml.
 

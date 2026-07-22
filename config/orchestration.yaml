@@ -27,6 +27,12 @@ provider_retry_max: 8                # retries per model call after the first fa
 provider_retry_base_cooldown_s: 60   # first cooldown; doubles each retry, jittered down so agents desynchronize
 provider_retry_max_cooldown_s: 600   # cooldown ceiling
 
+# ── Context management (Anthropic provider-native context editing; beta — clears stale tool results server-side on long loops) ──
+context_mgmt_enabled: false                # NOT LIVE TESTED (2026-07-22) — flip true after the env-gated live test passes
+context_mgmt_trigger_tokens: 120000        # clear oldest tool results once a request exceeds this many input tokens
+context_mgmt_clear_at_least_tokens: 20000  # clear at least this per pass (amortizes the cache-prefix invalidation)
+context_mgmt_keep_tool_uses: 3             # keep this many most-recent tool results verbatim
+
 # ── Sandbox / gate timeouts (seconds; a package may raise its own in <domain>_utils/tool_config.yaml, which wins — no upper clamp, trusted infra, never LLM-set) ──
 sandbox_call_timeout_s: 300   # per tool-call wall-clock; SIGTERM (exit 124) past this
 gate_test_timeout_s: 900      # per pytest invocation in the gate's Layer-B (run twice)

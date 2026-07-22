@@ -104,6 +104,19 @@ raise a "copy the `.example` / run install.sh" message when a live file is absen
   whose repeated searches re-send a growing paper context.
 - `orchestration.yaml.structured_retry_cap` — bounded off-schema structured-output retry
   count.
+- `orchestration.yaml.context_mgmt_*` — Anthropic provider-native **context editing** (the
+  context-window pressure valve for long ReAct loops; read via `env.context_editing_config`).
+  `context_mgmt_enabled` (default **false** — a config lacking the key keeps the non-beta path)
+  routes the Anthropic adapter's `cache_prefix` calls through `client.beta.messages` with a
+  `clear_tool_uses_20250919` `context_management` edit; `context_mgmt_trigger_tokens` (default
+  120000) is the input-token watermark at which the oldest tool results are cleared server-side;
+  `context_mgmt_clear_at_least_tokens` (default 20000) the minimum reclaimed per pass (amortizes
+  the cache-prefix invalidation); `context_mgmt_keep_tool_uses` (default 3) how many most-recent
+  tool results stay verbatim. Two protocol strings — `context_mgmt_beta_header`
+  (`context-management-2025-06-27`) and `context_mgmt_strategy` (`clear_tool_uses_20250919`) —
+  default in code and are overridable here when Anthropic bumps the dated beta identifiers (kept
+  out of the sample config to stay clean). **NOT LIVE TESTED as of 2026-07-22** (beta path awaits
+  API credits — `tests/test_live_context_editing.py`). Anthropic-only.
 - `orchestration.yaml.sandbox_call_timeout_s` — global default sandbox per-tool-call timeout
   (seconds, default 300): a tool call is SIGTERM-killed (exit 124) at this many seconds unless its
   package `<domain>_utils/tool_config.yaml` raises it per tool (`call_timeout_s`), which takes
@@ -233,3 +246,12 @@ raise a "copy the `.example` / run install.sh" message when a live file is absen
   "copy the `.example` / run install.sh" message on a missing live file. Migration for an existing
   checkout: `git rm --cached config/orchestration.yaml config/observations.yaml
   src/auto_research/sandbox/analyst_env.sh` (the live files stay on disk).
+- 2026-07-22 — **Context-management keys (`context_mgmt_*`) for Anthropic provider-native context
+  editing.** Added `context_mgmt_enabled` (default false), `context_mgmt_trigger_tokens` (120000),
+  `context_mgmt_clear_at_least_tokens` (20000), `context_mgmt_keep_tool_uses` (3) to
+  `orchestration.yaml` + `.example`; read via `env.context_editing_config`. Enables the long-loop
+  context-pressure valve (clear oldest tool results server-side once a request crosses the token
+  watermark — see `models/DOCS.md`). Ships **disabled** because the beta path is **NOT LIVE TESTED
+  as of 2026-07-22** (blocked by an Anthropic credit-balance 400); run `tests/test_live_context_editing.py`
+  and flip `context_mgmt_enabled: true` once credits return. Protocol strings `context_mgmt_beta_header`/
+  `context_mgmt_strategy` default in code, overridable, kept out of the sample config.

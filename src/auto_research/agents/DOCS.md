@@ -355,3 +355,9 @@ Role wrappers:
   `_import_from_toolkit` (toolkit_root on sys.path) + `execute_data_catalog`, now taking `obs_db_path`
   (agent-supplied, from its local-observation-databases context) rather than `mission`. Agent-facing
   name is the registry-sanitized `research_toolkit_catalog_utils_data_catalog`. Reviewer still excluded.
+- 2026-07-22 — `AgentRole._record_context_edit` emits a `<role>.<action>.context_edit` monitor event
+  (level 4, with cleared tool-use/token counts) when a model call reports provider-native context
+  editing (`ModelResponse.context_edits`; Anthropic only — see `models/DOCS.md`). Called right after
+  each `self.model.call` in `_react` and `_structured_loop`; a no-op when nothing was cleared, so
+  every non-Anthropic / short call is unchanged. Gives a run-watcher visibility into context pressure
+  being relieved on long loops. **NOT LIVE TESTED (2026-07-22).** Tests: `tests/test_context_editing.py`.

@@ -298,7 +298,11 @@ literature sources. The loop is bounded by `react_loop_cap`, with
 `librarian_react_loop_cap` kept tighter because repeated searches re-send a growing paper
 context. Prompt caching is a uniform `cache_prefix` knob each provider realizes natively
 (Anthropic explicit stable-prefix + rolling-tail `cache_control`; OpenAI/Google native
-automatic caching).
+automatic caching). For long loops, the same knob optionally carries Anthropic's
+provider-native **context editing** — clearing the oldest tool results server-side once a
+request crosses a token watermark (`config/orchestration.yaml: context_mgmt_*`), a
+context-window pressure valve, not a cost lever. It is Anthropic-only and ships disabled
+(beta; **not live tested** as of 2026-07-22).
 There is no prompt-injected JSON schema and no salvage parsing: results are
 Pydantic-validated and fail loudly, with bounded `structured_retry_cap` retries. Runtime
 prompts carry role and scope only; tool names, arguments, and descriptions reach the model

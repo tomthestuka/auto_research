@@ -778,6 +778,18 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   determined mis-format that also omits figure references in prose slips through); it is a source-side
   nudge at the moment of the slip, not a downstream reviewer check (which cannot see the problem — a
   misfiled report reads as complete). `tests/test_report_authoring.py::test_edit_report_warns_*`.
+- **Anthropic context editing is NOT LIVE TESTED and ships disabled.** The long-loop context-pressure
+  valve (`models/providers/anthropic.py` routes `cache_prefix` calls through `client.beta.messages` with
+  a `clear_tool_uses_20250919` `context_management` edit; `config: context_mgmt_*`) was verified only by
+  SDK source/introspection (the `beta.messages.parse` param surface + `ParsedBetaMessage.parsed_output`
+  property); the live beta round-trip was blocked by an Anthropic **credit-balance 400** on 2026-07-22.
+  `context_mgmt_enabled` defaults **false** — run `tests/test_live_context_editing.py` (env-gated) once
+  credits return, then flip it true. **Provider coverage is Anthropic-only:** it covers the lead (pure
+  Claude) + the Claude worker member; the GPT worker member relies on its large window (OpenAI's
+  `responses.compact` needs stateful Responses we don't use), and Google has no equivalent (and its
+  multi-turn tool use is broken, [I8]). Figure interaction is a watch item — clearing old tool results
+  drops their inline figures from the model's view, but the accumulated `figures` list still carries them
+  to the report; `keep_tool_uses` + a high watermark keep the common case unaffected.
 
 ---
 
@@ -941,3 +953,19 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   (conda-forge; lazy-imported, price-map only). Suite green (500; +7). **Residual (still [I5]):** the
   reviewer GPT member's `max_output_tokens` vs. the Claude member's is a separate truncation-risk item,
   untouched here.
+- 2026-07-22 — **Context-management valve = Anthropic provider-native context editing (NOT LIVE TESTED).**
+  A deep-research scan of the mid-2026 SOTA (Anthropic context editing `clear_tool_uses_20250919`, public
+  beta 2025-09-29; server-side compaction `compact_20260112`, beta 2026-01-12; the memory tool; LangChain
+  v1 `SummarizationMiddleware`; LangMem; OpenAI `responses.compact`; LlamaIndex `VectorMemoryBlock`; the
+  PwC "Don't Break the Cache" study arXiv 2601.06007) showed the field converged on **token-watermark**
+  context management and, for Anthropic, moved it **server-side** — so the plan pivoted from a hand-rolled
+  in-loop compacter to the provider-native feature (§1 use-the-wheel; `_react` untouched). Built in
+  `anthropic.py` behind the existing `cache_prefix` interface (routes to `client.beta.messages` +
+  `context_management` when `context_mgmt_enabled`), `env.context_editing_config`, new
+  `ModelResponse.context_edits` + `AgentRole._record_context_edit` monitor event, `config: context_mgmt_*`
+  (ships **disabled**; beta path blocked by an Anthropic credit 400 — verified by SDK source/introspection,
+  not a live call). Confirmed the cache framing: compaction/clearing is a **context-window pressure valve,
+  not a cost lever** (with prompt caching, raw history is cheap and any clear breaks the cached prefix;
+  `clear_at_least` amortizes it). Deterministic tests `tests/test_context_editing.py` (+10; + env-gated
+  `tests/test_live_context_editing.py`); suite green (510 passed, 36 skipped). Durable suspend (the [E5]
+  checkpointer) is the next build. See §13.

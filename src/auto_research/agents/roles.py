@@ -220,6 +220,7 @@ class AgentRole:
                     cache_prefix=cache_prefix,
                 )
                 self.last_response = response
+                await self._record_context_edit(response, action)
                 value = response.parsed
                 if value is None:
                     raise ValueError(
@@ -330,6 +331,7 @@ class AgentRole:
                 cache_prefix=True,
             )
             self.last_response = response
+            await self._record_context_edit(response, action)
             if not response.tool_calls:
                 break
             messages.append(
@@ -444,6 +446,26 @@ class AgentRole:
                 actor=self.role,
                 data=record_data,
             )
+
+    async def _record_context_edit(self, response: Any, action: str) -> None:
+        """Record when provider-native context editing cleared stale context on the last
+        model call (``ModelResponse.context_edits`` — Anthropic only, empty otherwise), so a
+        run-watcher sees context pressure relieved. A no-op when nothing was cleared. NOT LIVE
+        TESTED (2026-07-22)."""
+        edits = getattr(response, "context_edits", None)
+        if not edits:
+            return
+        cleared_tokens = sum(int(e.get("cleared_input_tokens", 0) or 0) for e in edits)
+        cleared_uses = sum(int(e.get("cleared_tool_uses", 0) or 0) for e in edits)
+        await self._record(
+            f"{self.role}.{action}.context_edit",
+            level=4,
+            summary=(
+                f"{self.role} context editing cleared {cleared_uses} tool result(s) "
+                f"(~{cleared_tokens} tokens)"
+            ),
+            data={"edits": edits},
+        )
 
 
 class ReviewerAgent(AgentRole):
