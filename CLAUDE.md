@@ -913,3 +913,15 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   instead the local listing flags a present-but-GPG-encrypted ObsID **LOCKED ON DISK**, and the analyst
   prompts route it to a re-acquire-if-remote-unlocked-else-honest-`needs_human` decision. Suites green
   (auto_research 492; research_toolkit 22).
+- 2026-07-22 — **[A11] authoring recovers, never chokes on one failed session.** `consensus/strategy.py`
+  `_maybe_author_and_resume` used to reload the registry / restart sandboxes / rerun workers **only after
+  the whole chain committed**; a mid-chain non-commit early-returned into an honest terminal, so tools that
+  committed earlier in the chain were never loaded into the reran workers' manifest (killed #21's Q–U-lag
+  census: the DCF tool committed, the leaf plotter failed → the committed DCF tool stayed invisible).
+  Now authoring stops at the first non-commit and the reload/rerun fires whenever **≥1 tool committed**
+  (everything committed is a complete, dependency-satisfied prefix). A non-commit records a task note
+  (`_augment_with_failed_tool`, so the reran workers refine their request and the lead's next
+  `decide_authoring` adapts) and loops back to **recover**: ≥1 committed → rerun on the committed prefix;
+  nothing committed but `tool_author_cap` credits remain → re-attempt (burn a credit). The honest §9.6
+  terminal (`finalize_authoring_outcome`) now fires **only** when credits are exhausted with nothing ever
+  committed. New monitor event `analyst.tool.chain_resume`. Suite green (493; +1 net test).

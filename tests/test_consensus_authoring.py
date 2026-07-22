@@ -232,10 +232,11 @@ def test_author_cap_bounds_attempts():
     assert registry.reloads == 2
 
 
-def test_failed_authoring_finalizes_honestly(monkeypatch):
-    # handoff #4: a non-committed authoring attempt no longer falls through to debate (the
-    # cap-exhausted spin). The lead composes the terminal report and run() returns it; the
-    # reviewer adjudicates it downstream (graph change). No resume, no re-authoring.
+def test_uncommittable_tool_recovers_then_finalizes_at_exhaustion(monkeypatch):
+    # A11: a non-committed attempt no longer fails immediately. With ZERO tools committed and
+    # credits remaining, the run keeps re-attempting authoring (burning tool_author_cap credits,
+    # rerunning the workers on a failure note so the lead can adapt) — the honest §9.6 terminal
+    # fires only when credits are exhausted with nothing ever committed.
     state = {"authored": 0}
     calls: list = []
     workers = [AuthoringWorker("w1", state, stop_after=99)]
@@ -254,11 +255,12 @@ def test_failed_authoring_finalizes_honestly(monkeypatch):
     assert final.summary == "authoring impossible under current construction"
     assert final.status == "failed"
     assert lead.finalized == 1
-    assert len(calls) == 1  # exactly one authoring attempt — no spin, no re-authoring
-    assert lead.judged == []  # never entered the debate phase
-    assert workers[0].calls == 1  # only the initial report; no resume/rerun
-    assert registry.reloads == 0  # failed → no reload
-    assert workers[0].sandbox.restarts == 0  # failed → no restart
+    assert len(calls) == 3  # burned all tool_author_cap credits recovering before finalizing
+    assert lead.decided == 3  # re-decided each retry (fed the failure note back)
+    assert lead.judged == []  # never entered the debate phase (nothing to adjudicate)
+    assert workers[0].calls == 3  # initial report + a rerun after each of the first two misses
+    assert registry.reloads == 0  # nothing ever committed → no reload
+    assert workers[0].sandbox.restarts == 0  # nothing committed → no restart
 
 
 def test_chain_authored_sequentially_reruns_once():
@@ -289,15 +291,22 @@ def test_chain_authored_sequentially_reruns_once():
     assert lead.judged == [1]
 
 
-def test_chain_midchain_failure_stops_and_finalizes():
-    """A8: when a chain tool cannot commit, the chain stops and the lead composes the honest
-    terminal report (downstream depends on it) — no rerun, no re-authoring."""
+def test_partial_chain_commit_reloads_and_reruns():
+    """A11: when a chain tool cannot commit, authoring stops at that tool but the committed prefix
+    is a complete, dependency-satisfied set — so it IS loaded (reload + restart) and the workers
+    rerun on it. The run does NOT choke into an honest terminal (that fires only when NOTHING ever
+    committed — see test_uncommittable_tool_recovers_then_finalizes_at_exhaustion)."""
     state = {"authored": 0}
     calls: list = []
-    workers = [AuthoringWorker("w1", state, stop_after=99)]
-    # chain of 3, but the 2nd drive_authoring returns a non-commit.
+    # Workers are satisfied once one tool is authored, so after the committed prefix loads they
+    # stop requesting and the run converges normally.
+    workers = [
+        AuthoringWorker("w1", state, stop_after=1),
+        AuthoringWorker("w2", state, stop_after=1),
+    ]
+    # chain of 2: tool 1 commits, the 2nd drive_authoring returns a non-commit.
     lead = AuthoringLead(
-        should_author=True, converge_on=99, state=state, calls=calls, chain_len=3, fail_on=2
+        should_author=True, converge_on=1, state=state, calls=calls, chain_len=2, fail_on=2
     )
     registry = FakeRegistry()
 
@@ -308,13 +317,40 @@ def test_chain_midchain_failure_stops_and_finalizes():
         ).run(workers, lead, AnalysisTask(question="q"))
     )
 
-    assert final.summary == "authoring impossible under current construction"
-    assert final.status == "failed"
-    assert lead.finalized == 1
-    assert len(calls) == 2  # tool 1 committed, tool 2 failed → chain stopped (tool 3 never attempted)
-    assert lead.judged == []  # never entered debate
-    assert workers[0].calls == 1  # no rerun
-    assert registry.reloads == 0  # stopped before the post-chain rerun
+    assert final.summary == "final"  # resumed + converged, not a finalize-terminal
+    assert lead.finalized == 0  # the run did NOT choke on the one failed session
+    assert len(calls) == 2  # tool 1 committed, tool 2 attempted+failed → chain stopped there
+    assert registry.reloads == 1  # committed prefix loaded (A11: was 0 before the fix)
+    assert all(w.sandbox.restarts == 1 for w in workers)
+    assert all(w.calls == 2 for w in workers)  # initial report + one rerun on the committed prefix
+    assert lead.judged == [1]
+
+
+def test_committed_zero_recovers_on_retry():
+    """A11: a transient first-tool failure recovers — a second authoring attempt commits, the tool
+    loads, and the analysis completes normally instead of failing on the first miss."""
+    state = {"authored": 0}
+    calls: list = []
+    workers = [AuthoringWorker("w1", state, stop_after=1)]
+    # fail_on=1 fails only the FIRST drive_authoring call; the retry commits.
+    lead = AuthoringLead(
+        should_author=True, converge_on=1, state=state, calls=calls, chain_len=1, fail_on=1
+    )
+    registry = FakeRegistry()
+
+    final = asyncio.run(
+        DebateToConverge(
+            max_rounds=3, registry=registry, tool_author_cap=12,
+            toolkit_root=TOOLKIT, direct_branch="ai",
+        ).run(workers, lead, AnalysisTask(question="q"))
+    )
+
+    assert final.summary == "final"  # recovered to a real result
+    assert lead.finalized == 0  # never finalized honestly — it succeeded on retry
+    assert len(calls) == 2  # first attempt failed, second committed
+    assert lead.decided == 2  # re-decided after the first miss (fed the failure note back)
+    assert registry.reloads == 1  # reload once the retry committed
+    assert workers[0].calls == 3  # initial + rerun after the miss + rerun after the commit
 
 
 def test_chain_budget_caps_total_tools():

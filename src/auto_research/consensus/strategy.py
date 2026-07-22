@@ -171,12 +171,13 @@ class DebateToConverge:
                     )
                 )
                 if final_report is not None:
-                    # An authoring attempt did not commit: the lead composed the terminal report
-                    # (§9.6). Return it — the reviewer adjudicates downstream (the reviewer is the
-                    # sole I/O; no debate-spin, no re-authoring, no bypass).
+                    # Authoring credits are exhausted and nothing ever committed: the lead composed
+                    # the honest §9.6 terminal report. Return it — the reviewer adjudicates
+                    # downstream (the reviewer is the sole I/O; no debate-spin, no bypass).
                     return final_report
                 if resumed:
-                    continue  # fresh reports may surface the next dependency gap
+                    continue  # workers rerun on the committed prefix / failure note; a residual
+                    #            gap re-drives a follow-up attempt, bounded by author_budget (A11)
 
             # --- debate phase ---
             debate_round += 1
@@ -255,14 +256,21 @@ class DebateToConverge:
         """Author the lead's whole tool chain; resume on commit, finalize honestly on a non-commit (§9.6).
 
         The lead plans an **ordered dependency chain** (``decision.tool_specs``); this authors the
-        tools **sequentially, one session at a time**, then reruns the workers **once** after the
-        whole chain (A8) — not one tool then a full rerun per tool. Returns
+        tools **sequentially, one session at a time**, stopping at the first non-commit, then reruns
+        the workers **once** on whatever committed (A8) — not one tool then a full rerun per tool.
+        Because authoring stops at the first failure, everything committed is a complete,
+        dependency-satisfied prefix, so the reload/rerun fires whenever ≥1 tool committed (A11).
+        Returns
         ``(resumed, final_report, reports, task, author_budget)``:
-        - ``resumed=True`` — the chain committed (or budget was hit mid-chain) and the workers were
-          rerun; loop back — a fresh gap the plan missed re-drives a follow-up chain.
-        - ``final_report`` set — a chain tool did not commit; the lead composed the terminal honest
-          report (``finalize_authoring_outcome`` on the failed tool) and ``run()`` returns it — the
-          chain stops (downstream depends on it); the reviewer adjudicates downstream.
+        - ``resumed=True`` — authoring made progress worth another loop: ≥1 tool committed (reload +
+          restart + rerun the workers on the committed prefix), OR nothing committed but credits
+          remain (rerun the workers on a failure note so they refine their request and the lead's
+          next decision adapts). Either way loop back — a residual gap / still-missing capability
+          re-drives a follow-up attempt, bounded by ``author_budget`` (A11: recover, never choke on
+          one failed session).
+        - ``final_report`` set — credits are exhausted and NOTHING ever committed; the lead composed
+          the honest §9.6 terminal report (``finalize_authoring_outcome``); ``run()`` returns it and
+          the reviewer adjudicates downstream.
         - both falsy — the lead declined to author (a mis-called tool); fall through to debate.
         The LLM never issues git — this code calls ``merge_flow.propose_and_pr`` per tool (§9.9).
         """
@@ -287,6 +295,8 @@ class DebateToConverge:
         # gate + review through its OWN ReAct loop per tool; the LLM never issues git —
         # build_authoring_session/approve_edit do (§9.9).
         committed = 0
+        failed_spec: ToolSpec | None = None
+        failed_result: MergeFlowResult | None = None
         for spec in decision.tool_specs:
             if author_budget <= 0:
                 break  # budget exhausted mid-chain — rerun workers on what did commit
@@ -308,25 +318,46 @@ class DebateToConverge:
                 data={"result": result},
             )
             if result.status != "committed":
-                # Honest failure (gate/review cap exhausted or human-block): downstream chain
-                # tools depend on this one, so stop the chain and let the lead compose the
-                # terminal report documenting the unavailable capability (§9.6) — no resume, no
-                # re-authoring, no debate-spin. The reviewer adjudicates it downstream. Tools
-                # that committed earlier in the chain stay on the branch for the human.
-                final = await lead.finalize_authoring_outcome(task, reports, spec, result)
-                return False, final, reports, task, author_budget
-            # Provenance note per committed tool so reran workers know the whole chain landed.
+                # Honest failure (gate/review cap exhausted or human-block). Authoring stops at the
+                # first failure, so anything committed earlier is a complete, dependency-satisfied
+                # prefix. Record why (a task note the reran workers see) so the next decision adapts
+                # rather than repeating the failed plan, then break — the resume logic below decides
+                # recover-vs-finalize from what committed and the remaining budget (A11).
+                failed_spec, failed_result = spec, result
+                task = _augment_with_failed_tool(task, spec, result)
+                break
+            # Provenance note per committed tool so reran workers know it landed.
             task = _augment_with_authored_tool(task, spec, result)
             committed += 1
 
-        # Whole chain committed (or budget hit mid-chain): rerun workers ONCE. Refresh discovery
-        # (orchestration env) + restart sandboxes (REPL re-imports the new code).
-        if self.registry is not None and hasattr(self.registry, "reload"):
-            self.registry.reload()
-        for worker in workers:
-            sandbox = getattr(worker, "sandbox", None)
-            if sandbox is not None and hasattr(sandbox, "restart"):
-                await sandbox.restart()
+        if committed == 0 and author_budget <= 0:
+            # Credits exhausted and NOTHING ever committed — no capability to resume on, and
+            # re-running would only re-surface the same gap. Compose the honest §9.6 terminal
+            # report; the reviewer adjudicates it downstream (sole I/O). Never fabricated.
+            final = await lead.finalize_authoring_outcome(task, reports, failed_spec, failed_result)
+            return False, final, reports, task, author_budget
+
+        # Resume (A11: recover, never choke on one failed session). Reload discovery + restart
+        # sandboxes ONLY when ≥1 tool committed (there is new code to import); a committed==0
+        # failure has nothing to reload but still loops back so the lead re-attempts on the failure
+        # note, burning a credit. Always rerun the workers ONCE — they use the freshly committed
+        # tools and/or see the failure note and refine — then loop back. Bounded by author_budget.
+        if committed >= 1:
+            if self.registry is not None and hasattr(self.registry, "reload"):
+                self.registry.reload()
+            for worker in workers:
+                sandbox = getattr(worker, "sandbox", None)
+                if sandbox is not None and hasattr(sandbox, "restart"):
+                    await sandbox.restart()
+        await _record(
+            self.monitor,
+            "analyst.tool.chain_resume",
+            level=6,
+            summary=f"Resuming after authoring: committed={committed}, budget_left={author_budget}",
+            actor="analyst_lead",
+            data={"committed": committed, "author_budget": author_budget,
+                  "failed_tool": getattr(failed_spec, "proposed_tool_name", None)},
+        )
         reports = await self._initial_reports(workers, task)
         task = self._augment_with_peer_tools(workers, task)
         return True, None, reports, task, author_budget
@@ -365,6 +396,26 @@ def _augment_with_authored_tool(task: AnalysisTask, tool_spec: Any, result: Any)
         f"disposition: {tool_spec.disposition})\n"
         f"  provenance: branch {getattr(result, 'branch', '')}, commit {sha}\n"
         f"  intent: {tool_spec.expected_behavior}"
+    )
+    new_instructions = "\n\n".join(filter(None, [task.instructions, note]))
+    return AnalysisTask(
+        question=task.question,
+        instructions=new_instructions,
+        previous_report=task.previous_report,
+    )
+
+
+def _augment_with_failed_tool(task: AnalysisTask, tool_spec: Any, result: Any) -> AnalysisTask:
+    """Append a note that an authoring attempt did NOT commit, so reran workers refine their
+    request and the lead's next ``decide_authoring`` adapts (a different approach / revised brief)
+    instead of repeating the failed plan (A11 recovery)."""
+    reason = (getattr(result, "reason", "") or "").strip()
+    note = (
+        "An attempt to author a new tool did NOT commit — the capability is still missing. "
+        "Consider a different approach or a revised brief before requesting it again:\n"
+        f"  tool: {tool_spec.proposed_tool_name} (domain: {tool_spec.target_domain})\n"
+        f"  outcome: {getattr(result, 'status', 'failed')}\n"
+        f"  reason: {reason}"
     )
     new_instructions = "\n\n".join(filter(None, [task.instructions, note]))
     return AnalysisTask(

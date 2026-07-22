@@ -60,17 +60,24 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   (`drive_coder`/`submit_for_review`), diagnosing each verdict, and owns each `AuthoringSession`
   lifecycle. The strategy never calls `propose_and_pr` (that auto-loop is kept for tests / non-lead
   callers); the LLM never issues git — `build_authoring_session`/`approve_edit` do (§9.9). **A8:**
-  after the **whole chain** commits — each tool sees the prior tool's committed code (direct-branch
-  mode: `worktree == toolkit_root` on the `ai` branch) — the strategy triggers `registry.reload()` +
-  per-worker `sandbox.restart()` + a per-tool provenance-augmented task + **one** worker rerun (a
-  *resume*), not a reload/restart/rerun per tool. `tool_author_cap` bounds **total tools** across the
-  chain (not counted against `max_rounds`); if the budget is hit mid-chain the workers still rerun on
-  what committed. `should_author=false` (empty `tool_specs`) falls through to ordinary debate (a
-  mis-called tool, not a failure). A **non-committed** chain tool (gate/review cap exhausted, or a
-  human block) is an honest failure (§9.6): the chain **stops at that tool** (downstream depends on
-  it), the lead composes a terminal report via `finalize_authoring_outcome` and `run()` **returns it**
-  immediately — no re-authoring, no debate-spin. That report flows to the reviewer, which is the sole
-  I/O and adjudicates it (finalize vs. bounded rework); never fabricated.
+  tools are authored **sequentially, stopping at the first non-commit** — each committed tool sees
+  the prior tool's committed code (direct-branch mode: `worktree == toolkit_root` on the `ai`
+  branch) — then the workers rerun **once** on what committed (a *resume*), not a
+  reload/restart/rerun per tool. `tool_author_cap` bounds **total tools** across the chain (not
+  counted against `max_rounds`). `should_author=false` (empty `tool_specs`) falls through to
+  ordinary debate (a mis-called tool, not a failure). **A11 — recover, never choke on one failed
+  session:** because authoring stops at the first failure, everything committed is a complete,
+  dependency-satisfied prefix, so `registry.reload()` + per-worker `sandbox.restart()` fire whenever
+  **≥1 tool committed** (was: only after the *whole* chain committed — the bug that left committed
+  tools out of the reran workers' manifest, #21). A **non-committed** chain tool (gate/review cap
+  exhausted, or a human block) is an honest failure (§9.6) that **stops the chain at that tool** and
+  records a task note (so the reran workers refine their request and the lead's next
+  `decide_authoring` adapts), then: with ≥1 committed the workers rerun on the committed prefix; with
+  **nothing** committed but credits remaining the workers still rerun on the failure note so the lead
+  re-attempts (burning a `tool_author_cap` credit) — the run recovers instead of failing on the first
+  miss. The honest terminal report (`finalize_authoring_outcome`, returned by `run()`) fires **only
+  when credits are exhausted with nothing ever committed**; it flows to the reviewer (sole I/O) which
+  adjudicates finalize vs. bounded rework; never fabricated.
 - Worker objects for IO debate (`IOAbstractionWorkerLike`) must provide
   `abstract_document(document, *, peer_abstracts=()) -> MemoryRecord`.
 - Lead objects for IO debate (`IOAbstractionLeadLike`) must provide
@@ -102,10 +109,12 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   onto the lead's final report so they flow to the reviewer. When `toolkit_root` is set it also
   runs the authoring/resume path (above). Method: `run(workers, lead, task)` → `AnalystReport`.
   Internals: `_initial_reports(workers, task)`; `_maybe_author_and_resume(...)` →
-  `(resumed, final_report, reports, task, author_budget)` (`final_report` set ⇔ a non-committed
-  authoring attempt — `run()` returns it as the §9.6 terminal); `_augment_with_peer_tools(workers,
-  task)`; module-level `_augment_with_authored_tool(task, tool_spec, result)`;
-  `_deduplicated(figures)`.
+  `(resumed, final_report, reports, task, author_budget)` (`resumed=True` ⇔ progress worth another
+  loop — ≥1 tool committed OR nothing committed but credits remain; `final_report` set ⇔ credits
+  exhausted with nothing ever committed — `run()` returns it as the §9.6 terminal; A11);
+  `_augment_with_peer_tools(workers, task)`; module-level
+  `_augment_with_authored_tool(task, tool_spec, result)` (committed-tool provenance note) and
+  `_augment_with_failed_tool(task, tool_spec, result)` (failed-attempt note so a retry adapts).
 - `IOAbstractionWorkerLike` — protocol for IO abstraction workers. Method:
   `abstract_document()`.
 - `IOAbstractionLeadLike` — protocol for IO abstraction lead. Methods:
@@ -123,3 +132,4 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
 - 2026-06-29 — A1: the lead drives authoring (B-topology, §9.3) via `lead.drive_authoring` (builds/connects an `AuthoringSession`, runs its own ReAct loop over `drive_coder`/`submit_for_review`, diagnosing each verdict) instead of `merge_flow.propose_and_pr`; bounded by `tool_author_submit_cap`.
 - 2026-07-06 — [A8] author the whole ordered `AuthoringDecision.tool_specs` chain sequentially (each tool sees the prior's committed code), then reload/restart/rerun workers once (was per tool); a mid-chain non-commit stops the chain → honest terminal; `tool_author_cap` bounds total tools.
 - 2026-07-14 — V-4: the lead owns figures; `_deduplicated` removed. `run()` no longer force-carries the last round's figures; it calls `adjudicate(task, reports, sources=_source_keys(workers))` and the lead accumulates a per-worker figure catalog and cites the subset.
+- 2026-07-22 — [A11] recover, never choke on one failed authoring session. `_maybe_author_and_resume` now stops the chain at the first non-commit and fires `registry.reload()`/`sandbox.restart()`/worker-rerun whenever **≥1 tool committed** (was: only after the *whole* chain committed — the bug that hid committed tools from the reran workers, blocking #21's census). A non-commit records a task note (`_augment_with_failed_tool`) and loops back: ≥1 committed → rerun on the committed prefix; nothing committed but credits remain → rerun on the failure note so the lead re-attempts (burns a `tool_author_cap` credit). The honest §9.6 terminal (`finalize_authoring_outcome`) now fires **only** when credits are exhausted with nothing ever committed. New event `analyst.tool.chain_resume`.
