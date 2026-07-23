@@ -121,6 +121,13 @@ optional raise-to-human connectors (only when selected) — **Telegram** (recomm
 (`TWILIO_ACCOUNT_SID`/`TWILIO_API_KEY_SID`/`TWILIO_API_KEY_SECRET`/`TWILIO_WHATSAPP_FROM`/`WHATSAPP_TO`);
 the terminal (`cli`) channel needs none.
 
+Over **Telegram or Slack** a human can drive a live run with slash-commands (intercepted, never
+treated as answers to an agent): `/help` (commands + the live team/role/model roster), `/status
+[question]` (a report on the run's state), `/steer <role> <message>` (nudge a role at its next
+step; `all` broadcasts), and `/stop` (wind the whole run down to an honest terminal). CLI/WhatsApp
+have no background listener, so commands aren't wired there. *(Command dispatch is tested; live
+command use is observational — not yet exercised end-to-end.)*
+
 **Runtime data dir** (`config/orchestration.yaml::runtime_dir`, defaults to
 `~/.auto_research` if omitted) lives **outside both repos** and is not committed. It holds
 the SQLite DB, figures/artifacts, per-worker sandbox scratch, run logs, cost ledger, and

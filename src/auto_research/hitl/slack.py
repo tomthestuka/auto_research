@@ -73,6 +73,8 @@ class SlackHandler:
         self._started = False
         # Map a posted message thread ts -> the Future awaiting its reply.
         self._pending: dict[str, asyncio.Future[str]] = {}
+        # HITL slash-command context (§12 Stage 3), wired by run_research via attach_commands.
+        self._cmd_ctx: Any | None = None
 
         # Defer slack_bolt construction to start(): AsyncSocketModeHandler builds an aiohttp
         # session that needs a *running* event loop, but the handler is constructed
@@ -86,7 +88,29 @@ class SlackHandler:
     def _register_listener(self) -> None:
         @self.app.event("message")
         async def _on_message(event: dict[str, Any], **_: Any) -> None:  # pragma: no cover - wiring
-            self.on_message(event)
+            text = (event.get("text") or "").strip()
+            is_ours = not (event.get("bot_id") or event.get("subtype"))
+            in_channel = event.get("channel") in (None, self.channel)
+            if self._cmd_ctx is not None and text.startswith("/") and is_ours and in_channel:
+                await self.handle_command(event)   # a slash-command is never taken as a reply
+            else:
+                self.on_message(event)
+
+    def attach_commands(self, ctx: Any) -> None:
+        """Wire the run-scoped HITL command context (§12 Stage 3); enables /help,/status,/steer,/stop."""
+        self._cmd_ctx = ctx
+
+    async def handle_command(self, event: dict[str, Any]) -> None:
+        """Dispatch a slash-command channel message and post the reply. Separated for testing."""
+        if self._cmd_ctx is None:
+            return
+        text = (event.get("text") or "").strip()
+        if not text.startswith("/"):
+            return
+        from auto_research.hitl.commands import dispatch_command
+
+        reply = await dispatch_command(text, self._cmd_ctx)
+        await self.app.client.chat_postMessage(channel=self.channel, text=reply)
 
     def on_message(self, event: dict[str, Any]) -> None:
         """Resolve a pending Future from a human reply.
@@ -148,8 +172,11 @@ class SlackHandler:
         loop = asyncio.get_event_loop()
         fut: asyncio.Future[str] = loop.create_future()
         self._pending[thread_ts] = fut
+        from auto_research.hitl.commands import wait_reply_or_stop
+
+        rc = getattr(self._cmd_ctx, "run_control", None)
         try:
-            answer = await asyncio.wait_for(fut, timeout=self.timeout_s)
+            answer = await wait_reply_or_stop(fut, rc, self.timeout_s)
         finally:
             self._pending.pop(thread_ts, None)
         return HumanResponse(query_id=query.id, answer=answer)

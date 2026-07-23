@@ -30,6 +30,20 @@ wired, `resolve_human` raises `HumanInputRequired` (the §9.8 headless fail-safe
   The Slack/Telegram/Twilio clients are injectable so the send/reply logic is unit-tested without
   those libraries or any network; the real clients are imported lazily inside their `_build_*`
   helpers, so `import auto_research.hitl` never requires `python-telegram-bot`/`twilio`/`slack_bolt`.
+- **`commands.py`** — the channel-agnostic HITL **slash-command** dispatcher (§12 Stage 3). A
+  command-capable connector recognizes a leading-`/` message and calls `dispatch_command(text, ctx)`
+  instead of routing it as a reply, so a human drives the run *any time*: `/help` (commands +
+  live team/role/model roster), `/status [q]` (LLM report over the monitor JSONL via a light
+  `status_monitor` model, deterministic-digest fallback), `/steer <role> <msg>` (queue a message
+  for a role's next step — via `RunControl`, `all` broadcasts), `/stop` (request an honest
+  run-wide wind-down). `CommandContext` carries the run-scoped `run_control`/roster/JSONL/status
+  hook, wired by `run_research` via each connector's `attach_commands`. `wait_reply_or_stop` is the
+  shared reply-wait so `/stop` releases a role blocked on `ask_human` (returns
+  `run_control.STOP_SENTINEL`). **Command-capable connectors are Telegram + Slack** (always
+  listening); CLI/WhatsApp have no background listener so commands don't fit cleanly there (§13).
+  `RunControl` itself lives in the leaf module `auto_research.run_control` (imported by agents,
+  graph, and hitl without cycles); the agents' `_react` loop reads it (steer injection + stop-break)
+  and the graph review edges + consensus authoring loop honor `/stop`.
 
 This package stays independent of `auto_research.graph` (it reads `orchestration.yaml`
 directly) so the preflight can import it without pulling the graph/LLM stack.
@@ -124,3 +138,18 @@ protocol, §7).
 - 2026-07-02 — Telegram connector added — the recommended reliable channel (§12/[E4]): `python-telegram-bot` long polling (outbound-only, no public URL, reconnect-lossless), chosen over unreliable Slack Socket Mode; multi-question reply-to routing (`message_id→Future`) with single-open plain-reply fallback; Markdown→Telegram-HTML render (`_md_to_html`, `_chunk_md`); wired into `build_human_handler`/CLI/preflight; opt-in live tests added.
 - 2026-07-06 — Telegram fixes (found live): `_md_to_html` blockquote render (escape before the structure pass); plain-reply for chunked queries dedupes by Future identity; [E4] each `message_id→Future` registered immediately after its own send so a fast mid-send reply is not dropped.
 - 2026-07-16 — **Credential-leak fix:** `TelegramHandler.start()` pins the `httpx`/`httpcore` loggers to WARNING for the process. Telegram's API embeds the bot token in every request URL and httpx logs full URLs at INFO, so every backend log was writing the credential to disk (observed in a live run's `backend.log`; rotating the exposed token is the human's out-of-band step). Suppression lives where Telegram traffic starts, covering every entry point (CLI, notebook, detached backend, preflight ping).
+- 2026-07-22 — **HITL slash-command channel (§12 Stage 3).** New `commands.py` (channel-agnostic
+  `dispatch_command` + `CommandContext` + `make_status_answer` + `wait_reply_or_stop`) and the leaf
+  `auto_research.run_control.RunControl` (`stop_requested`/`stop_event`, per-role `steer_inbox`,
+  `STOP_SENTINEL`). Commands: `/help` (+ live roster), `/status [q]` (LLM via the new light
+  `status_monitor` model role, deterministic-digest fallback), `/steer <role|all> <msg>` (cooperative
+  per-role inbox, drained at the top of `AgentRole._react` and injected as a `[Human steer]` user
+  turn), `/stop` (`RunControl.request_stop` → honest §9.6 wind-down: `_react` breaks, the consensus
+  authoring loop skips, the graph review edges route to finalize). **Telegram + Slack** gained
+  `attach_commands` + a command receive-path (Telegram a `filters.COMMAND` handler; Slack a `/`-branch
+  in `on_message`) + `wait_reply_or_stop` so `/stop` releases a blocked `ask_human`. `run_research`
+  builds the `CommandContext` (roster from the resolved roles, run's `monitor.jsonl`, `status_monitor`
+  handle) and attaches it. **CLI/WhatsApp are NOT command-wired** — no background listener, so
+  anytime-commands don't fit cleanly (§13). Command *dispatch* is deterministically tested
+  (`tests/test_hitl_commands.py`, `tests/test_run_control.py`, connector tests in `tests/test_hitl.py`);
+  live command behavior is observational during a real run. NOT LIVE TESTED end-to-end.

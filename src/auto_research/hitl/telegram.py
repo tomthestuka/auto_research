@@ -56,6 +56,10 @@ class TelegramHandler:
         # Map every posted message_id -> the Future awaiting its reply. All chunks of one query
         # point at the same Future, so a reply-to any chunk resolves it.
         self._pending: dict[int, asyncio.Future[str]] = {}
+        # HITL slash-command context (§12 Stage 3), wired by run_research via attach_commands.
+        # When set, a leading-'/' message is dispatched as a command (never a reply), and a
+        # pending ask is released when /stop fires.
+        self._cmd_ctx: Any | None = None
 
         # Defer library construction to start() (Application.initialize needs a running loop); the
         # handler itself is built synchronously in resolve_handler. An injected app (tests) wires now.
@@ -66,10 +70,40 @@ class TelegramHandler:
     def _register_listener(self) -> None:
         from telegram.ext import MessageHandler, filters
 
+        # Replies (plain text, NOT commands) resolve pending queries; slash-commands are a
+        # separate handler — so a command is structurally never taken as a reply to an LLM.
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_update))
+        self.app.add_handler(MessageHandler(filters.COMMAND, self._on_command))
 
     async def _on_update(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
         self.on_message(update)
+
+    async def _on_command(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
+        await self.handle_command(update)
+
+    def attach_commands(self, ctx: Any) -> None:
+        """Wire the run-scoped HITL command context (§12 Stage 3); enables /help,/status,/steer,/stop."""
+        self._cmd_ctx = ctx
+
+    async def handle_command(self, update: Any) -> None:
+        """Dispatch a slash-command message and post the reply. Ignores other chats / non-'/' text /
+        commands arriving before the run wired its context. Separated from the handler for testing."""
+        if self._cmd_ctx is None:
+            return
+        msg = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        if msg is None:
+            return
+        chat = getattr(update, "effective_chat", None) or getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", "") or "")
+        if self.chat_id and chat_id and chat_id != self.chat_id:
+            return  # only our chat
+        text = (getattr(msg, "text", None) or "").strip()
+        if not text.startswith("/"):
+            return
+        from auto_research.hitl.commands import dispatch_command
+
+        reply = await dispatch_command(text, self._cmd_ctx)
+        await self._send(_md_to_html(reply))
 
     def on_message(self, update: Any) -> None:
         """Resolve a pending Future from a human reply.
@@ -160,8 +194,11 @@ class TelegramHandler:
             posted = await self._send(chunk)
             self._pending[posted.message_id] = fut
             ids.append(posted.message_id)
+        from auto_research.hitl.commands import wait_reply_or_stop
+
+        rc = getattr(self._cmd_ctx, "run_control", None)
         try:
-            answer = await asyncio.wait_for(fut, timeout=self.timeout_s)
+            answer = await wait_reply_or_stop(fut, rc, self.timeout_s)
         finally:
             for mid in ids:
                 self._pending.pop(mid, None)

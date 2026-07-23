@@ -789,11 +789,22 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   per-attempt base-ref to `run_dir/authoring/current_base_ref`; the dirty-tree check raises the
   distinct `ToolkitBranchUnclean`, which the mid-run authoring path degrades to an honest terminal),
   so the resume→dirty-branch→die-again loop is closed — but end-to-end (a real killed-mid-authoring
-  run resumed and healed) is still unproven. **Remaining bundle:** Stage 3 the HITL slash-command
-  channel (`/help`, `/status`, `/steer`, `/stop` over Telegram/Slack — commands intercepted, not
-  treated as LLM replies); Stage 4 graceful cleanup (shielded teardown + a CLI/backend signal
-  handler — deprioritized since library/notebook is the real mode). Durable-HITL-suspend-at-`interrupt()`
-  stays deferred (re-runs the node on resume — infeasible mid-`_react`).
+  run resumed and healed) is still unproven. **Stage 3 (HITL slash-commands) built 2026-07-22**
+  (`/help`, `/status`, `/steer`, `/stop` over Telegram/Slack — commands intercepted, not treated as
+  LLM replies; CLI/WhatsApp unwired, see the loose-end below). **Remaining bundle:** Stage 4 graceful
+  cleanup (shielded teardown + a CLI/backend signal handler — deprioritized since library/notebook is
+  the real mode). Durable-HITL-suspend-at-`interrupt()` stays deferred (re-runs the node on resume —
+  infeasible mid-`_react`).
+- **HITL slash-commands are Telegram/Slack only; CLI + WhatsApp are not command-wired.** The
+  `/help`,`/status`,`/steer`,`/stop` channel (`hitl/commands.py`, §12 Stage 3) needs an
+  *always-listening* connector so a command lands any time. Telegram (long-poll) and Slack (socket)
+  qualify and are wired (`attach_commands` + a command receive-path + `wait_reply_or_stop`). **CLI**
+  (blocks on `input()` only at a prompt) and **WhatsApp** (Twilio, polls only *during* a pending
+  query) have no background listener, so commands would only work while a query happens to be open —
+  they don't fit cleanly and are deliberately left unwired (decision 2026-07-22). Adding them would
+  need a background receive loop per connector (a bigger change); WhatsApp is deprecated anyway (§13
+  above). Command *dispatch* is deterministically tested; end-to-end command behavior over a live
+  channel is observational (a human must type the command) — **NOT LIVE TESTED**.
 - **Anthropic context editing is NOT LIVE TESTED and ships disabled.** The long-loop context-pressure
   valve (`models/providers/anthropic.py` routes `cache_prefix` calls through `client.beta.messages` with
   a `clear_tool_uses_20250919` `context_management` edit; `config: context_mgmt_*`) was verified only by
@@ -1010,3 +1021,19 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   catches to degrade to the honest §9.6 terminal instead of crashing (an [F6] slice). Deterministic tests
   `tests/test_resume_heal.py` (+8, real git) + `test_consensus_authoring.py` (+1 degrade); suite green (527).
   Chosen behavior (user, 2026-07-22): auto-heal to the recorded base-ref. Stage 3 (HITL slash-commands) next.
+- 2026-07-22 — **Durable-suspend bundle Stage 3: HITL slash-command channel.** A human drives a live
+  run from Telegram/Slack, any time, via commands that are *intercepted* (never taken as LLM replies):
+  `/help` (commands + live team/role/model roster), `/status [q]` (a light `status_monitor` model
+  reports over the run's `monitor.jsonl`; deterministic-digest fallback), `/steer <role|all> <msg>`
+  (queues a message delivered at the role's next ReAct step), `/stop` (honest run-wide wind-down). New
+  leaf `auto_research/run_control.py` (`RunControl`: `stop_requested`/`stop_event`, per-role `steer_inbox`,
+  `STOP_SENTINEL`) threaded to every role + consensus + graph; new channel-agnostic `hitl/commands.py`
+  (`dispatch_command`, `CommandContext`, `make_status_answer`, `wait_reply_or_stop`); `AgentRole._react`
+  drains steer + honors stop each iteration; the consensus authoring loop skips new authoring under stop;
+  the graph review edges route to finalize under stop. Telegram/Slack gained `attach_commands` + a command
+  receive-path + `/stop`-aware waiting (releases a blocked `ask_human` via `STOP_SENTINEL`); `run_research`
+  builds + attaches the `CommandContext`. New optional `status_monitor` model role. **CLI/WhatsApp are NOT
+  command-wired** (no background listener — §13). Decisions (user, 2026-07-22): /status LLM-driven; /stop
+  unblocks pending; Telegram+Slack only. Deterministic tests `tests/test_run_control.py` +
+  `tests/test_hitl_commands.py` + connector tests in `tests/test_hitl.py`; suite green (552). **Live
+  command behavior is observational — NOT LIVE TESTED.** Stage 4 (graceful cleanup) is the last piece.

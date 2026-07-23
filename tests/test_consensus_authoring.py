@@ -418,3 +418,27 @@ def test_mid_run_unclean_branch_degrades_to_honest_terminal():
     assert lead.finalized == 1        # degraded to the honest terminal, not a crash
     assert final.status == "failed"   # honest failure report
     assert registry.reloads == 0      # nothing committed → no registry reload
+
+
+def test_stop_requested_skips_authoring():
+    """A human /stop (RunControl.stop_requested) skips new authoring — the lead never decides —
+    so the run winds down honestly instead of starting a tool chain (Stage 3.1)."""
+    from auto_research.run_control import RunControl
+
+    rc = RunControl()
+    rc.request_stop("human stop")
+    state = {"authored": 0}
+    workers = [AuthoringWorker("w1", state, stop_after=1)]      # requests a tool
+    lead = AuthoringLead(should_author=True, converge_on=1, state=state)
+    registry = FakeRegistry()
+
+    final = asyncio.run(
+        DebateToConverge(
+            max_rounds=2, registry=registry, tool_author_cap=3,
+            toolkit_root=TOOLKIT, direct_branch="ai", run_control=rc,
+        ).run(workers, lead, AnalysisTask(question="q"))
+    )
+
+    assert lead.decided == 0        # authoring skipped under stop
+    assert final.summary == "final"  # still produced an adjudicated report (honest wind-down)
+    assert registry.reloads == 0

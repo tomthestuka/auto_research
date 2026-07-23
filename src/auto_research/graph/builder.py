@@ -114,6 +114,7 @@ def build_graph(
     report_retry_cap: int = 2,
     report_formats: list[str] | None = None,
     checkpointer: Any | None = None,
+    run_control: Any | None = None,
 ) -> Any:
     """Compile the Phase 1 research-loop graph.
 
@@ -227,6 +228,7 @@ def build_graph(
             verdict is not None
             and verdict.needs_more_literature
             and state.get("lit_iterations", 0) < max_iterations
+            and not (run_control is not None and run_control.stop_requested)  # human /stop: advance to wind down
         ):
             return "literature"
         return "analysis"
@@ -290,6 +292,7 @@ def build_graph(
             verdict is not None
             and verdict.needs_analysis_rework
             and state.get("analysis_iterations", 0) < max_iterations
+            and not (run_control is not None and run_control.stop_requested)  # human /stop: finalize, no rework
         ):
             return "analysis"
         return "finalize_run"

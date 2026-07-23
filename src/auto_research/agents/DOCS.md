@@ -361,3 +361,11 @@ Role wrappers:
   each `self.model.call` in `_react` and `_structured_loop`; a no-op when nothing was cleared, so
   every non-Anthropic / short call is unchanged. Gives a run-watcher visibility into context pressure
   being relieved on long loops. **NOT LIVE TESTED (2026-07-22).** Tests: `tests/test_context_editing.py`.
+- 2026-07-22 — **HITL steer/stop in the ReAct loop (§12 Stage 3).** Base `AgentRole` gains
+  `run_control` + `agent_key` (defaults None → unchanged when unset). At the top of every `_react`
+  iteration, before the model call, the loop drains this role's steer inbox
+  (`run_control.drain_steer(agent_key)`) and injects each as a `[Human steer]` user turn, then
+  honors `/stop` (`run_control.stop_requested` → break, role composes its terminal from what it
+  has). Wired by `run_research` (every role keyed + given the shared `RunControl`). The steer/stop
+  source is the `hitl.commands` slash-command channel over Telegram/Slack. Tests
+  `tests/test_run_control.py`.

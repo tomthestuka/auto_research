@@ -98,6 +98,10 @@ class AgentRole:
         # Optional ToolProvider for an inner ReAct loop (reviewer/lead read-only,
         # librarian sources). When None, the role makes plain structured calls.
         self.tools = tools
+        # Run-wide control (HITL /steer, /stop) + this role's steer key, wired by run_research.
+        # Both default off so a role built without them behaves exactly as before.
+        self.run_control: Any | None = None
+        self.agent_key: str | None = None
 
     async def _call(
         self,
@@ -322,6 +326,25 @@ class AgentRole:
         budget_used = 0
         iteration = 0
         while budget_used < budget_cap and iteration < absolute_ceiling:
+            # Cooperative HITL control (§12): before the next model turn, inject any human steer
+            # for this role, and honor a /stop by ending the loop (→ the role composes its terminal
+            # from what it has). Both no-ops when run_control is unset. A steer rides as a user turn
+            # (the images= path already appends user turns after tool results, so this is safe).
+            if self.run_control is not None:
+                for steer in self.run_control.drain_steer(self.agent_key):
+                    messages.append(ModelMessage(role="user", content=f"[Human steer] {steer}"))
+                    await self._record(
+                        f"{self.role}.{action}.steer", level=3,
+                        summary=f"{self.role} received a human steer",
+                        data={"message": _cap_text(steer, _EVENT_ARG_CAP)},
+                    )
+                if self.run_control.stop_requested:
+                    await self._record(
+                        f"{self.role}.{action}.stopped", level=2,
+                        summary=f"{self.role} ending its loop — human requested stop",
+                        data={"reason": self.run_control.stop_reason},
+                    )
+                    break
             response = await self.model.call(
                 messages,
                 tools=tools.tool_definitions(),

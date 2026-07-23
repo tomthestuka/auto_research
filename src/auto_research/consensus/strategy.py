@@ -123,6 +123,11 @@ class DebateToConverge:
     direct_branch: str | None = None  # runtime authoring branch (e.g. "ai"); None ⇒ worktree mode
     human_handler: Any | None = None
     colead: Any | None = None  # GPT co-lead; None ⇒ propose_and_pr builds one from config
+    run_control: Any | None = None  # HITL /stop — consulted before authoring (workers stop in _react)
+
+    def _stop_requested(self) -> bool:
+        """True when a human has requested a run-wide stop (HITL /stop)."""
+        return self.run_control is not None and self.run_control.stop_requested
 
     async def run(
         self,
@@ -164,7 +169,11 @@ class DebateToConverge:
             # --- authoring / resume phase (§9.10 step 7, A8) — one decision per reports set; the
             # lead's whole tool chain is authored, then workers rerun once and loop back here so a
             # gap the chain plan missed can re-drive a follow-up chain (bounded by budget). ---
-            if author_budget > 0 and any(r.tool_request is not None for r in reports):
+            if (
+                author_budget > 0
+                and any(r.tool_request is not None for r in reports)
+                and not self._stop_requested()  # a human /stop skips new authoring; wind down honestly
+            ):
                 resumed, final_report, reports, task, author_budget = (
                     await self._maybe_author_and_resume(
                         workers, lead, task, reports, author_budget
@@ -300,8 +309,8 @@ class DebateToConverge:
         failed_spec: ToolSpec | None = None
         failed_result: MergeFlowResult | None = None
         for spec in decision.tool_specs:
-            if author_budget <= 0:
-                break  # budget exhausted mid-chain — rerun workers on what did commit
+            if author_budget <= 0 or self._stop_requested():
+                break  # budget exhausted or human /stop mid-chain — rerun workers on what committed
             author_budget -= 1  # an authoring attempt is expensive — bound it regardless of outcome
             try:
                 result = await lead.drive_authoring(

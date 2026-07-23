@@ -616,3 +616,78 @@ def test_telegram_render_chunks_header_hint_and_split():
     assert chunks[0].startswith("<b>Human input needed · clarify_science</b>")
     assert chunks[-1].endswith("<i>Reply to this message to answer.</i>")
     assert len(chunks) >= 2 and all(len(c) <= _TG_MSG_LIMIT for c in chunks)
+
+
+# ── HITL slash-commands over the connectors (§12 Stage 3) ──────────────────────
+
+def _cmd_ctx(rc=None):
+    from auto_research.hitl.commands import CommandContext
+    from auto_research.run_control import RunControl
+
+    return CommandContext(
+        run_control=rc or RunControl(),
+        roster=lambda: [
+            ("analyst", "analyst_lead", "claude-opus-4-8"),
+            ("analyst", "analyst_worker_0", "claude-sonnet-5"),
+        ],
+    )
+
+
+def test_telegram_command_steer_dispatch():
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
+    ctx = _cmd_ctx()
+    handler.attach_commands(ctx)
+    asyncio.run(handler.handle_command(_tg_update("/steer analyst_lead prioritize DU3")))
+    assert ctx.run_control.drain_steer("analyst_lead") == ["prioritize DU3"]
+    assert handler.app.bot.sent and "queued" in handler.app.bot.sent[-1]["text"].lower()
+
+
+def test_telegram_command_ignores_other_chat():
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
+    ctx = _cmd_ctx()
+    handler.attach_commands(ctx)
+    asyncio.run(handler.handle_command(_tg_update("/stop", chat_id="999")))  # not our chat
+    assert not ctx.run_control.stop_requested
+
+
+def test_telegram_stop_unblocks_pending_ask():
+    from auto_research.run_control import STOP_SENTINEL
+
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
+    ctx = _cmd_ctx()
+    handler.attach_commands(ctx)
+
+    async def _run():
+        task = asyncio.create_task(handler(_query(asked_by="reviewer")))
+        for _ in range(200):
+            if handler._pending:
+                break
+            await asyncio.sleep(0)
+        await handler.handle_command(_tg_update("/stop"))
+        return await task
+
+    resp = asyncio.run(_run())
+    assert resp.answer == STOP_SENTINEL and ctx.run_control.stop_requested
+
+
+def test_slack_command_steer_and_stop_unblocks():
+    from auto_research.run_control import STOP_SENTINEL
+
+    handler = SlackHandler(app=_FakeSlackApp(), socket_handler=None, channel="C0")
+    ctx = _cmd_ctx()
+    handler.attach_commands(ctx)
+    asyncio.run(handler.handle_command({"channel": "C0", "text": "/steer analyst_worker_0 focus"}))
+    assert ctx.run_control.drain_steer("analyst_worker_0") == ["focus"]
+    assert handler.app.client.posted and "queued" in handler.app.client.posted[-1]["text"].lower()
+
+    async def _run():
+        task = asyncio.create_task(handler(_query(asked_by="reviewer")))
+        for _ in range(200):
+            if handler._pending:
+                break
+            await asyncio.sleep(0)
+        await handler.handle_command({"channel": "C0", "text": "/stop"})
+        return await task
+
+    resp = asyncio.run(_run())
+    assert resp.answer == STOP_SENTINEL

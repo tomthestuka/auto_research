@@ -140,3 +140,19 @@ roles:
         parameters:
           thinking_config:
             thinking_level: high
+  # /status HITL command: a light monitor that summarizes the run's event log on demand.
+  # Optional — not in REQUIRED_ROLES; /status falls back to a deterministic digest if absent.
+  status_monitor:
+    members:
+      - name: gpt_5_4_nano
+        provider: openai
+        model: gpt-5.4-nano
+        vision: false
+        documents: false
+        priceMTk:
+          input: 0.5
+          output: 4.0
+        parameters:
+          max_output_tokens: 2048
+          reasoning:
+            effort: low

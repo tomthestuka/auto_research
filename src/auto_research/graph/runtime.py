@@ -22,6 +22,7 @@ from auto_research.agents import (
 from auto_research.consensus import ConsensusStrategy, DebateToConverge, LeadLike, WorkerLike
 from auto_research.graph.builder import IOAgentLike, ReviewerLike, build_graph
 from auto_research.graph.checkpoint import checkpoint_path, open_checkpointer
+from auto_research.run_control import RunControl
 from auto_research.monitor import RunMonitor
 from auto_research.models import resolve
 from auto_research.retrieval import RetrievalBackend, SqliteRetrievalBackend
@@ -315,6 +316,10 @@ async def run_research(
     default_formats: list[str] = orch.get("report_formats") or ["jsonl", "tex"]
     resolved_formats = _normalize_report_formats(report_formats, default_formats)
 
+    # Run-wide control (HITL /steer, /stop). Threaded onto every role + the consensus strategy +
+    # the graph edges below; the command channel (Stage 3.4) writes to it, the agents/graph read it.
+    run_control = RunControl()
+
     storage = Storage()
     reviewer = reviewer or ReviewerAgent(monitor=run_monitor)
     io_agent = io_agent or LibrarianIOAgent(storage=storage, monitor=run_monitor)
@@ -413,6 +418,64 @@ async def run_research(
     for worker in workers:
         _attach_monitor(worker, run_monitor)
 
+    # HITL /steer, /stop: give every role a stable steer key (workers/lead already keyed above)
+    # and the shared RunControl its ReAct loop consults. Best-effort so duck-typed fakes are fine.
+    for target, key in (
+        (reviewer, "reviewer"), (io_agent, "librarian_io"), (lead, "analyst_lead")
+    ):
+        try:
+            if getattr(target, "agent_key", None) is None:
+                target.agent_key = key
+            target.run_control = run_control
+        except Exception:  # noqa: BLE001
+            pass
+    for worker in workers:
+        try:
+            worker.run_control = run_control
+        except Exception:  # noqa: BLE001
+            pass
+
+    # HITL slash-commands (Telegram/Slack): give a command-capable connector a run-scoped context
+    # — the live roster (for /help + /steer targeting), the monitor JSONL (for /status), and a
+    # light status model (LLM /status). No-op for connectors without attach_commands (cli/whatsapp,
+    # none). The connector reads run_control from the ctx so /stop unblocks a pending ask.
+    if hasattr(human_handler, "attach_commands"):
+        def _roster() -> list[tuple[str, str, str]]:
+            entries = [
+                ("reviewer", getattr(reviewer, "agent_key", None) or "reviewer",
+                 _model_label(reviewer.model) or "?"),
+                ("analyst", getattr(lead, "agent_key", None) or "analyst_lead",
+                 _model_label(lead.model) or "?"),
+            ]
+            for i, w in enumerate(workers):
+                entries.append(("analyst", getattr(w, "agent_key", None) or f"analyst_worker_{i}",
+                                _model_label(w.model) or "?"))
+            entries.append(("librarian", getattr(io_agent, "agent_key", None) or "librarian_io",
+                            _model_label(io_agent.model) or "?"))
+            return entries
+
+        try:
+            status_handle = resolve("status_monitor").handles[0]
+        except Exception:  # noqa: BLE001 — optional role; /status falls back to a deterministic digest
+            status_handle = None
+        from auto_research.hitl.commands import CommandContext, make_status_answer
+
+        jsonl_path = getattr(run_monitor, "jsonl_path", None)
+        status_answer = (
+            make_status_answer(status_handle, jsonl_path) if status_handle is not None else None
+        )
+        try:
+            human_handler.attach_commands(
+                CommandContext(
+                    run_control=run_control,
+                    roster=_roster,
+                    monitor_jsonl_path=jsonl_path,
+                    status_answer=status_answer,
+                )
+            )
+        except Exception:  # noqa: BLE001 — commands are optional; never block the run
+            pass
+
     registry = ToolkitRegistry(toolkit_root, disabled_tools=disabled_tools)
 
     # Start MCP client and index its tools into the registry.
@@ -443,6 +506,7 @@ async def run_research(
             worktree_base=run_dir(run_id) / "authoring",
             direct_branch=str(orch.get("tool_author_branch", "ai")),
             human_handler=human_handler,
+            run_control=run_control,
         )
 
     # Spawn one persistent sandbox per AnalystWorkerAgent and give it the registry
@@ -510,6 +574,7 @@ async def run_research(
             report_retry_cap=report_retry_cap,
             report_formats=resolved_formats,
             checkpointer=saver,
+            run_control=run_control,
         )
 
         try:
