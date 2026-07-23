@@ -31,7 +31,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -149,6 +149,17 @@ def _is_dirty(root: Path) -> bool:
     )
 
 
+class ToolkitBranchUnclean(RuntimeError):
+    """The authoring branch has uncommitted changes when a clean, committable tree was required.
+
+    A ``RuntimeError`` subclass so the launch preflight still aggregates it normally, but a
+    distinct type so the **mid-run** authoring path can catch it specifically and degrade to an
+    honest §9.6 terminal instead of crashing the run (a generic ``except RuntimeError`` would
+    mask real bugs). At resume time the branch is healed first (``heal_toolkit_branch_if_dirty``)
+    so this should not fire; it is the defense-in-depth for a tree dirtied mid-run.
+    """
+
+
 def check_toolkit_branch_clean(root: Path | None = None, branch: str | None = None) -> None:
     """Launch-time preflight (no LLM): assert ``research_toolkit`` is on the authoring branch
     and has a clean working tree (CLAUDE.md §9.9, step 7).
@@ -173,10 +184,10 @@ def check_toolkit_branch_clean(root: Path | None = None, branch: str | None = No
             f"{branch!r}. Switch before running, e.g.:\n  git -C {root} checkout {branch}"
         )
     if _is_dirty(root):
-        raise RuntimeError(
+        raise ToolkitBranchUnclean(
             f"research_toolkit ({root}) has uncommitted changes on {branch!r}. A prior tool "
             f"authoring may have failed terminally and left edits for you to inspect (§9.9). "
-            f"Review and clean before the next run:\n"
+            f"Review and clean before the next run, or re-run with resume=True to auto-heal:\n"
             f"  git -C {root} status\n"
             f"  git -C {root} restore . && git -C {root} clean -fd   # discard, if appropriate"
         )
@@ -462,24 +473,11 @@ async def _reset_direct_tree(
     toolkit_root = Path(toolkit_root)
     reset_to = base_ref or "HEAD"
     try:
-        patch_path: Path | None = None
-        if artifact_dir is not None:
-            artifact_dir = Path(artifact_dir)
-            # Never write the artifact inside the toolkit — it would re-dirty the tree.
-            ad, tr = artifact_dir.resolve(), toolkit_root.resolve()
-            if ad != tr and tr not in ad.parents:
-                # Stage everything so the diff captures new untracked files too; diff against
-                # ``reset_to`` so a coder commit is captured as well. The ``reset --hard`` below
-                # immediately unstages it, so staging here is safe.
-                _git_in(toolkit_root, "add", "-A")
-                diff = _git_in(toolkit_root, "diff", "--cached", reset_to)
-                if diff.strip():
-                    artifact_dir.mkdir(parents=True, exist_ok=True)
-                    sid = getattr(tool_spec, "id", None) or "tool"
-                    patch_path = artifact_dir / f"tool_author_failed_{sid}_{uuid.uuid4().hex[:8]}.patch"
-                    patch_path.write_text(diff, encoding="utf-8")
-        _git_in(toolkit_root, "reset", "--hard", reset_to)
-        _git_in(toolkit_root, "clean", "-fd")
+        sid = getattr(tool_spec, "id", None) or "tool"
+        patch_path = _save_diff_and_reset(
+            toolkit_root, reset_to, artifact_dir,
+            patch_prefix="tool_author_failed", spec_id=str(sid),
+        )
         await _emit(
             monitor, "coder.tree_reset", level=4,
             summary=f"reset {toolkit_root.name} to {reset_to[:10]} after a non-committed authoring attempt",
@@ -491,6 +489,109 @@ async def _reset_direct_tree(
             summary=f"working-tree reset failed: {type(exc).__name__}: {exc}",
             data={"error": repr(exc)},
         )
+
+
+def _save_diff_and_reset(
+    toolkit_root: Path,
+    reset_to: str,
+    artifact_dir: Path | None,
+    *,
+    patch_prefix: str,
+    spec_id: str = "tool",
+) -> Path | None:
+    """Save the working-tree diff vs ``reset_to`` as a ``.patch`` under ``artifact_dir`` (outside
+    the toolkit, so the artifact never re-dirties the tree), then ``git reset --hard reset_to`` +
+    ``git clean -fd``. Returns the patch path (or ``None`` when there was nothing to save).
+
+    The shared core of the failed-attempt reset (:func:`_reset_direct_tree`) and the resume-time
+    heal (:func:`heal_toolkit_branch_if_dirty`). Everything is staged first so the diff captures
+    new untracked files (and any coder commit, diffed against ``reset_to``); the reset unstages
+    it. Raises on a git failure — the caller decides whether to swallow it.
+    """
+    toolkit_root = Path(toolkit_root)
+    patch_path: Path | None = None
+    if artifact_dir is not None:
+        artifact_dir = Path(artifact_dir)
+        ad, tr = artifact_dir.resolve(), toolkit_root.resolve()
+        if ad != tr and tr not in ad.parents:
+            _git_in(toolkit_root, "add", "-A")
+            diff = _git_in(toolkit_root, "diff", "--cached", reset_to)
+            if diff.strip():
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                patch_path = artifact_dir / f"{patch_prefix}_{spec_id}_{uuid.uuid4().hex[:8]}.patch"
+                patch_path.write_text(diff, encoding="utf-8")
+    _git_in(toolkit_root, "reset", "--hard", reset_to)
+    _git_in(toolkit_root, "clean", "-fd")
+    return patch_path
+
+
+_BASE_REF_FILE = "current_base_ref"
+
+
+def _base_ref_path(worktree_base: Path) -> Path:
+    """Where the per-attempt authoring base-ref is persisted (under the run's authoring dir), so a
+    resume after a hard-kill can reset the branch to exactly the killed attempt's start."""
+    return Path(worktree_base) / _BASE_REF_FILE
+
+
+def _read_persisted_base_ref(run_directory: Path) -> str | None:
+    """Read the base-ref persisted by :func:`build_authoring_session` for the last attempt, or None."""
+    try:
+        text = _base_ref_path(Path(run_directory) / "authoring").read_text(encoding="utf-8").strip()
+        return text or None
+    except OSError:
+        return None
+
+
+class BranchHealResult(NamedTuple):
+    """Outcome of a resume-time authoring-branch heal (for a monitor event)."""
+
+    healed: bool
+    reason: str  # "clean" | "healed" | "not_git" | "wrong_branch" | "error: <repr>"
+    base_ref: str | None = None
+    patch_path: Path | None = None
+
+
+def heal_toolkit_branch_if_dirty(
+    run_directory: Path,
+    *,
+    root: Path | None = None,
+    branch: str | None = None,
+) -> BranchHealResult:
+    """Resume-time repair (§12): tidy a dirty authoring branch left by a hard-kill *during
+    authoring* (whose in-process failure reset never ran), so a resumed run's first authoring
+    attempt does not die on :func:`check_toolkit_branch_clean` — the unrecoverable restart loop.
+
+    Runs the **same** cleanup a failed authoring session runs: reset the branch to the per-attempt
+    base-ref persisted by :func:`build_authoring_session` (``run_dir/authoring/current_base_ref``;
+    falls back to ``HEAD`` when absent), after saving the discarded work as a
+    ``resume_heal_*.patch``. Resetting to the recorded base-ref (not blindly to ``HEAD``) drops the
+    killed attempt's mess **and** any commit it slipped, while preserving tools committed earlier
+    in the chain.
+
+    No-op on a clean tree, a non-git ``root``, or a wrong current branch (a config problem the
+    preflight surfaces loudly). Best-effort/tolerant — a git failure returns ``reason="error: …"``
+    rather than raising, so resume falls through to the (loud) preflight check instead of crashing
+    here. Sync (git is subprocess-sync); the caller records a ``run.resume.heal`` monitor event
+    from the returned result once its monitor exists.
+    """
+    root = Path(root) if root is not None else _resolve_toolkit_root()
+    branch = branch or _resolve_tool_author_branch()
+    if not (root / ".git").exists():
+        return BranchHealResult(False, "not_git")
+    try:
+        if not _is_dirty(root):
+            return BranchHealResult(False, "clean")
+        if _current_branch(root) != branch:
+            return BranchHealResult(False, "wrong_branch")
+        base_ref = _read_persisted_base_ref(run_directory)
+        reset_to = base_ref or "HEAD"
+        patch_path = _save_diff_and_reset(
+            root, reset_to, Path(run_directory) / "authoring", patch_prefix="resume_heal",
+        )
+        return BranchHealResult(True, "healed", base_ref, patch_path)
+    except Exception as exc:  # noqa: BLE001 — never crash the launch; the preflight is the loud backstop
+        return BranchHealResult(False, f"error: {exc!r}")
 
 
 # Captured so ``propose_and_pr``'s ``approve_edit`` parameter (a test seam) can default to
@@ -970,6 +1071,13 @@ def build_authoring_session(
         # resets the tree back to exactly here (§9.9), dropping any commit the coder lands —
         # while preserving an earlier round's successful approve_edit commit in a multi-tool run.
         base_ref = _git_in(toolkit_root, "rev-parse", "HEAD").strip()
+        # Persist it so a resume after a hard-kill *during* this attempt can heal the branch to
+        # exactly here (heal_toolkit_branch_if_dirty), matching the in-process failure reset.
+        try:
+            worktree_base.mkdir(parents=True, exist_ok=True)
+            _base_ref_path(worktree_base).write_text(base_ref, encoding="utf-8")
+        except OSError:
+            pass  # best-effort; heal falls back to HEAD if the file is unreadable
     else:
         branch = f"tool/{tool_spec.proposed_tool_name}-{uuid.uuid4().hex[:8]}"
         worktree = worktree_factory(toolkit_root, worktree_base, branch)

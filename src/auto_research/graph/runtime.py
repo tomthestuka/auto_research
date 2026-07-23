@@ -264,10 +264,8 @@ async def run_research(
     down after the graph completes or raises.
     """
 
-    # Resolve the human-in-the-loop channel (explicit handler → channel → auto-detect),
-    # then run the full launch checklist — which pings the channel — before any LLM (§9.8).
+    # Resolve the human-in-the-loop channel (explicit handler → channel → auto-detect).
     human_handler = resolve_handler(human_handler, human_channel)
-    await run_preflight(human_handler=human_handler)
 
     if isinstance(request, str):
         request = ResearchRequest(question=request)
@@ -275,7 +273,31 @@ async def run_research(
     # A caller (e.g. the detached `run_research_nohup` backend) may pin the run_id so its
     # workspace/report/JSONL land in a known, reconnectable dir; else auto-generate.
     run_id = run_id or uuid.uuid4().hex
+
+    # Resume-time branch self-heal (§12 Stage 2): a hard-kill *during authoring* can leave the
+    # `ai` branch dirty (its in-process failure reset never ran), which the preflight clean-tree
+    # check would then refuse — an unrecoverable restart loop. On resume, tidy it to the killed
+    # attempt's recorded base-ref FIRST (no-op on a clean branch), so the preflight then passes.
+    heal_result = None
+    if resume:
+        from auto_research.sandbox.merge_flow import heal_toolkit_branch_if_dirty
+
+        heal_result = heal_toolkit_branch_if_dirty(run_dir(run_id))
+
+    # Run the full launch checklist — which pings the channel — before any LLM (§9.8).
+    await run_preflight(human_handler=human_handler)
+
     run_monitor = monitor or RunMonitor(chatter=chatter, jsonl_path=monitor_jsonl)
+    if resume and heal_result is not None and heal_result.healed:
+        await run_monitor.record(
+            "run", "run.resume.heal", level=1,
+            summary="Resume: healed a dirty authoring branch left by a prior hard-kill",
+            data={
+                "reason": heal_result.reason,
+                "base_ref": heal_result.base_ref,
+                "patch": str(heal_result.patch_path) if heal_result.patch_path else None,
+            },
+        )
     orch = load_orchestration_config()
 
     if max_iterations is None:

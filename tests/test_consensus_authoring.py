@@ -391,3 +391,30 @@ def test_no_authoring_when_toolkit_unwired():
     assert final.summary == "final"
     assert lead.decided == 0  # decide_authoring never called
     assert lead.judged == [1]
+
+
+def test_mid_run_unclean_branch_degrades_to_honest_terminal():
+    """A ToolkitBranchUnclean raised mid-run (branch dirtied at an attempt's start) degrades to
+    the honest §9.6 terminal via finalize_authoring_outcome instead of crashing the run — the
+    Stage-2 in-flow guard (F6-class). The across-a-death case is handled by the resume heal."""
+    from auto_research.sandbox.merge_flow import ToolkitBranchUnclean
+
+    class _UncleanLead(AuthoringLead):
+        async def drive_authoring(self, tool_spec, **kwargs):
+            raise ToolkitBranchUnclean("research_toolkit has uncommitted changes on 'ai'")
+
+    state = {"authored": 0}
+    workers = [AuthoringWorker("w1", state, stop_after=1)]
+    lead = _UncleanLead(should_author=True, converge_on=1, state=state)
+    registry = FakeRegistry()
+
+    final = asyncio.run(
+        DebateToConverge(
+            max_rounds=3, registry=registry, tool_author_cap=3,
+            toolkit_root=TOOLKIT, direct_branch="ai",
+        ).run(workers, lead, AnalysisTask(question="q"))
+    )
+
+    assert lead.finalized == 1        # degraded to the honest terminal, not a crash
+    assert final.status == "failed"   # honest failure report
+    assert registry.reloads == 0      # nothing committed → no registry reload

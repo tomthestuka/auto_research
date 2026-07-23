@@ -294,6 +294,8 @@ class DebateToConverge:
         # refresh, once, before they rerun). B-topology (§9.3, A1): the lead drives the coder +
         # gate + review through its OWN ReAct loop per tool; the LLM never issues git —
         # build_authoring_session/approve_edit do (§9.9).
+        from auto_research.sandbox.merge_flow import ToolkitBranchUnclean
+
         committed = 0
         failed_spec: ToolSpec | None = None
         failed_result: MergeFlowResult | None = None
@@ -301,14 +303,35 @@ class DebateToConverge:
             if author_budget <= 0:
                 break  # budget exhausted mid-chain — rerun workers on what did commit
             author_budget -= 1  # an authoring attempt is expensive — bound it regardless of outcome
-            result = await lead.drive_authoring(
-                spec,
-                toolkit_root=self.toolkit_root,
-                worktree_base=self.worktree_base or self.toolkit_root,
-                direct_branch=self.direct_branch,
-                colead=self.colead,
-                human_handler=self.human_handler,
-            )
+            try:
+                result = await lead.drive_authoring(
+                    spec,
+                    toolkit_root=self.toolkit_root,
+                    worktree_base=self.worktree_base or self.toolkit_root,
+                    direct_branch=self.direct_branch,
+                    colead=self.colead,
+                    human_handler=self.human_handler,
+                )
+            except ToolkitBranchUnclean as exc:
+                # The authoring branch was dirty when this attempt began — a tree dirtied mid-run
+                # (the across-a-death case is repaired by the resume-time heal). Degrade to the
+                # honest §9.6 terminal instead of crashing the whole run (an F6-class run-killer);
+                # the reviewer adjudicates it downstream.
+                await _record(
+                    self.monitor,
+                    "analyst.tool.branch_unclean",
+                    level=2,
+                    summary=f"Authoring branch unclean — honest terminal ({spec.proposed_tool_name})",
+                    actor="analyst_lead",
+                    data={"error": repr(exc)},
+                )
+                unclean = MergeFlowResult(
+                    tool_spec_id=getattr(spec, "id", None) or spec.proposed_tool_name,
+                    status="failed",
+                    reason=f"authoring branch was not clean at attempt start: {exc}",
+                )
+                final = await lead.finalize_authoring_outcome(task, reports, spec, unclean)
+                return False, final, reports, task, author_budget
             await _record(
                 self.monitor,
                 "analyst.tool.authored",

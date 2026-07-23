@@ -703,3 +703,15 @@ the hook mapping a fake-model verdict — no live LLM).
   demotion (Monte-Carlo tools need randomness inside them; co-lead judges intent) did nothing.
   Hard-tier check name generalized `no_fabrication.rng` → `no_fabrication.code_pattern`.
   Tests: `tests/test_gate.py` (emptied-sections, finding-tier RNG, hard-tier machinery kept).
+- 2026-07-22 — **Durable-resume Stage 2: authoring-branch self-heal (§12).** `check_toolkit_branch_clean`
+  now raises the distinct `ToolkitBranchUnclean` (a `RuntimeError` subclass) on a dirty tree, so the
+  mid-run authoring path can catch it specifically and degrade to an honest §9.6 terminal (in
+  `consensus/strategy._maybe_author_and_resume`) instead of an uncaught crash. `build_authoring_session`
+  persists the per-attempt base-ref to `<worktree_base>/current_base_ref` (`_base_ref_path`). New
+  `heal_toolkit_branch_if_dirty(run_dir, root=, branch=) -> BranchHealResult`: on resume, resets a dirty
+  authoring branch to the persisted base-ref (fallback HEAD) — dropping the killed attempt's mess + any
+  slipped commit while keeping earlier committed tools — saving the discard as `resume_heal_*.patch`;
+  no-op on clean/non-git/wrong-branch; best-effort (returns `reason="error: …"`, never raises). The reset
+  core is factored into a shared `_save_diff_and_reset` (used by `_reset_direct_tree` too). `run_research`
+  calls the heal before the launch preflight on `resume=True`. Deterministic tests `tests/test_resume_heal.py`
+  (real git) + `tests/test_consensus_authoring.py::test_mid_run_unclean_branch_degrades_to_honest_terminal`.

@@ -783,14 +783,17 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   gain `resume=`; `AsyncSqliteSaver` at `run_dir/checkpoint.sqlite`, `thread_id=run_id`,
   `durability="sync"`; `checkpointer_available` preflight — no silent non-durable run). Verified
   deterministically incl. the real `AsyncSqliteSaver` resuming across a fresh instance (process
-  boundary), but a real backend killed mid-`run_research` and resumed is unproven. **Remaining
-  bundle (not yet built):** Stage 2 dirty-`ai`-branch self-heal on resume (without it, a hard-kill
-  *during authoring* leaves the branch dirty and resume dies again on `check_toolkit_branch_clean`
-  — the unrecoverable loop); Stage 3 the HITL slash-command channel (`/help`, `/status`, `/steer`,
-  `/stop` over Telegram/Slack — commands intercepted, not treated as LLM replies); Stage 4 graceful
-  cleanup (shielded teardown + a CLI/backend signal handler — deprioritized since library/notebook
-  is the real mode). Durable-HITL-suspend-at-`interrupt()` stays deferred (re-runs the node on
-  resume — infeasible mid-`_react`).
+  boundary), but a real backend killed mid-`run_research` and resumed is unproven. **Stage 2
+  (dirty-`ai`-branch self-heal) is now also built** (`merge_flow.heal_toolkit_branch_if_dirty`;
+  `run_research(resume=True)` heals before the preflight; `build_authoring_session` persists the
+  per-attempt base-ref to `run_dir/authoring/current_base_ref`; the dirty-tree check raises the
+  distinct `ToolkitBranchUnclean`, which the mid-run authoring path degrades to an honest terminal),
+  so the resume→dirty-branch→die-again loop is closed — but end-to-end (a real killed-mid-authoring
+  run resumed and healed) is still unproven. **Remaining bundle:** Stage 3 the HITL slash-command
+  channel (`/help`, `/status`, `/steer`, `/stop` over Telegram/Slack — commands intercepted, not
+  treated as LLM replies); Stage 4 graceful cleanup (shielded teardown + a CLI/backend signal
+  handler — deprioritized since library/notebook is the real mode). Durable-HITL-suspend-at-`interrupt()`
+  stays deferred (re-runs the node on resume — infeasible mid-`_react`).
 - **Anthropic context editing is NOT LIVE TESTED and ships disabled.** The long-loop context-pressure
   valve (`models/providers/anthropic.py` routes `cache_prefix` calls through `client.beta.messages` with
   a `clear_tool_uses_20250919` `context_management` edit; `config: context_mgmt_*`) was verified only by
@@ -995,3 +998,15 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   `AsyncSqliteSaver` resuming across a process-boundary; suite green (518, +8). **Full killed-and-resumed
   `run_research` NOT LIVE TESTED.** Stages 2–4 (branch self-heal · HITL slash-commands · graceful cleanup)
   follow. See §13.
+- 2026-07-22 — **Durable mid-run resume — Stage 2 (authoring-branch self-heal).** Closes the resume footgun:
+  a hard-kill *during authoring* leaves the `ai` branch dirty (its in-process reset never ran), and a naive
+  resume would die again on the launch clean-tree check — an unrecoverable loop. Now `build_authoring_session`
+  persists the per-attempt base-ref to `run_dir/authoring/current_base_ref`; `merge_flow.heal_toolkit_branch_if_dirty`
+  (sharing `_reset_direct_tree`'s reset core via a new `_save_diff_and_reset`) resets a dirty authoring branch
+  to that base-ref (dropping the killed attempt's mess + any slipped commit, keeping earlier committed tools;
+  falls back to HEAD; saves a `resume_heal_*.patch`; no-op on clean/non-git/wrong-branch); `run_research(resume=True)`
+  runs it **before** the preflight so the clean-tree check then passes. `check_toolkit_branch_clean` now raises a
+  distinct `ToolkitBranchUnclean`, which the mid-run authoring path (`consensus/strategy._maybe_author_and_resume`)
+  catches to degrade to the honest §9.6 terminal instead of crashing (an [F6] slice). Deterministic tests
+  `tests/test_resume_heal.py` (+8, real git) + `test_consensus_authoring.py` (+1 degrade); suite green (527).
+  Chosen behavior (user, 2026-07-22): auto-heal to the recorded base-ref. Stage 3 (HITL slash-commands) next.
