@@ -113,6 +113,7 @@ def build_graph(
     storage: Storage | None = None,
     report_retry_cap: int = 2,
     report_formats: list[str] | None = None,
+    checkpointer: Any | None = None,
 ) -> Any:
     """Compile the Phase 1 research-loop graph.
 
@@ -435,7 +436,10 @@ def build_graph(
     )
     builder.add_edge("compose_report", END)
 
-    return builder.compile()
+    # A checkpointer (when supplied) makes LangGraph snapshot ResearchState after every node,
+    # keyed by the invocation's thread_id — the basis for durable mid-run resume (§12). None
+    # keeps the Studio/test path (no persistence).
+    return builder.compile(checkpointer=checkpointer)
 
 
 async def _record(

@@ -171,6 +171,12 @@ run = await run_research_nohup("your research question", human_channel="telegram
 # overwrite=True starts fresh (refuses if the run is still alive);
 # a dead run raises RunDied (carrying how far it got). human_channel='cli' is rejected
 # (a detached child has no stdin) — use a connector or 'none'.
+
+# resume=True recovers a backend that DIED mid-run (host reboot / OOM / kill): it re-launches
+# and continues from the latest on-disk checkpoint — from the last completed node (the in-flight
+# node re-runs). Needs langgraph-checkpoint-sqlite (pip; in environment.yml). Mutually exclusive
+# with overwrite. NOT LIVE TESTED end-to-end yet.
+run = await run_research_nohup("your research question", human_channel="telegram", resume=True)
 ```
 
 **LangGraph Studio** — live per-node graph state (`langgraph.json` → `graph/serve.py`):

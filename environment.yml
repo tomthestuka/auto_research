@@ -31,8 +31,9 @@ dependencies:
   - questionary>=2.0   # interactive install.sh prompts (arrow-menus/path entry); lazy-imported
   # tests
   - pytest>=8
-  # langgraph-cli and claude-agent-sdk are not on conda-forge.
+  # langgraph-cli, claude-agent-sdk, and langgraph-checkpoint-sqlite are not on conda-forge.
   - pip:
       - -e .
       - langgraph-cli[inmem]
       - claude-agent-sdk==0.2.99
+      - langgraph-checkpoint-sqlite>=3.1   # AsyncSqliteSaver for durable mid-run resume (§12); pulls aiosqlite + sqlite-vec

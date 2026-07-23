@@ -85,6 +85,14 @@ def build_parser() -> argparse.ArgumentParser:
             "backend; defaults to an auto-generated id."
         ),
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume a prior run of this --run-id from its latest checkpoint (continues from "
+            "the last completed node; the in-flight node re-runs). Requires a pinned --run-id."
+        ),
+    )
     return parser
 
 
@@ -130,6 +138,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 human_channel=args.human,
                 max_iterations=args.max_iterations,
                 run_id=args.run_id,
+                resume=args.resume,
             )
         )
     except Exception as exc:  # noqa: BLE001 — record an honest terminal marker, then re-raise

@@ -778,6 +778,19 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   determined mis-format that also omits figure references in prose slips through); it is a source-side
   nudge at the moment of the slip, not a downstream reviewer check (which cannot see the problem — a
   misfiled report reads as complete). `tests/test_report_authoring.py::test_edit_report_warns_*`.
+- **Durable resume is built through Stage 1 only; the full killed-and-resumed run is NOT LIVE
+  TESTED.** The §12 checkpointer is wired (`graph/checkpoint.py`; `run_research`/`run_research_nohup`
+  gain `resume=`; `AsyncSqliteSaver` at `run_dir/checkpoint.sqlite`, `thread_id=run_id`,
+  `durability="sync"`; `checkpointer_available` preflight — no silent non-durable run). Verified
+  deterministically incl. the real `AsyncSqliteSaver` resuming across a fresh instance (process
+  boundary), but a real backend killed mid-`run_research` and resumed is unproven. **Remaining
+  bundle (not yet built):** Stage 2 dirty-`ai`-branch self-heal on resume (without it, a hard-kill
+  *during authoring* leaves the branch dirty and resume dies again on `check_toolkit_branch_clean`
+  — the unrecoverable loop); Stage 3 the HITL slash-command channel (`/help`, `/status`, `/steer`,
+  `/stop` over Telegram/Slack — commands intercepted, not treated as LLM replies); Stage 4 graceful
+  cleanup (shielded teardown + a CLI/backend signal handler — deprioritized since library/notebook
+  is the real mode). Durable-HITL-suspend-at-`interrupt()` stays deferred (re-runs the node on
+  resume — infeasible mid-`_react`).
 - **Anthropic context editing is NOT LIVE TESTED and ships disabled.** The long-loop context-pressure
   valve (`models/providers/anthropic.py` routes `cache_prefix` calls through `client.beta.messages` with
   a `clear_tool_uses_20250919` `context_management` edit; `config: context_mgmt_*`) was verified only by
@@ -969,3 +982,16 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   `clear_at_least` amortizes it). Deterministic tests `tests/test_context_editing.py` (+10; + env-gated
   `tests/test_live_context_editing.py`); suite green (510 passed, 36 skipped). Durable suspend (the [E5]
   checkpointer) is the next build. See §13.
+- 2026-07-22 — **Durable mid-run resume — Stage 1 of the §12 bundle (checkpointer + crash recovery).** After
+  a 3-agent investigation of the coupled bundle (teardown/signals · HITL chokepoint · authoring git-reset)
+  and a scoping debate (build the core bundle 1+2+3+4a; dirty branch auto-heals to a recorded base-ref;
+  durable-HITL-at-`interrupt` deferred as infeasible mid-`_react`), Stage 1 landed: `graph/checkpoint.py`
+  (`AsyncSqliteSaver` at `run_dir/checkpoint.sqlite`, `thread_id=run_id`, `durability="sync"`); `build_graph(checkpointer=)`;
+  `run_research(resume=)` (always durable; `resume=True` → `ainvoke(None)` from the latest snapshot + a
+  `run.resume` event); `run_research_nohup(resume=)` + CLI `--resume` (re-launch a dead/`failed` backend;
+  mutually exclusive with `overwrite`); a `checkpointer_available` **preflight** enforcing "no silent
+  non-durable run." Dep: `langgraph-checkpoint-sqlite>=3.1` (pip; not conda-forge; verified compatible with
+  `langgraph-checkpoint` 4.1.1). Deterministic tests `tests/test_durable_resume.py` (+8) incl. the real
+  `AsyncSqliteSaver` resuming across a process-boundary; suite green (518, +8). **Full killed-and-resumed
+  `run_research` NOT LIVE TESTED.** Stages 2–4 (branch self-heal · HITL slash-commands · graceful cleanup)
+  follow. See §13.

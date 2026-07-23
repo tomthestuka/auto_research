@@ -214,10 +214,12 @@ def _default_launcher(
     report_formats: list[str] | None,
     human_channel: str | None,
     max_iterations: int | None,
+    resume: bool = False,
 ) -> int:
     """Spawn ``python -m auto_research`` detached and orphaned (``_spawn_orphaned``, so
     neither a killed kernel nor a logout's tree-walking cleanup reaches it), record
-    ``backend.pid``, and return the child pid."""
+    ``backend.pid``, and return the child pid. ``resume=True`` adds ``--resume`` so the
+    backend continues its ``run_id`` from the latest checkpoint."""
     req = _normalize_request(request)
     run_directory.mkdir(parents=True, exist_ok=True)
     argv = [
@@ -233,6 +235,8 @@ def _default_launcher(
         argv += ["--report-format", fmt]
     if max_iterations is not None:
         argv += ["--max-iterations", str(max_iterations)]
+    if resume:
+        argv += ["--resume"]
     pid = _spawn_orphaned(argv, run_directory / _BACKEND_LOG)
     (run_directory / _PID_FILE).write_text(
         json.dumps({"pid": pid, "create_time": _proc_create_time(pid)}),
@@ -285,6 +289,7 @@ async def run_research_nohup(
     max_iterations: int | None = None,
     run_id: str = "auto",
     overwrite: bool = False,
+    resume: bool = False,
     poll_s: float = _DEFAULT_POLL_S,
     stream: Any = _STREAM_DEFAULT,
     _launcher: Callable[..., int] = _default_launcher,
@@ -298,6 +303,12 @@ async def run_research_nohup(
     detached child has no stdin). Returns a reconstructed `ResearchRun`; raises `RunDied`
     if the run's process died without writing a result.
 
+    ``resume=True`` recovers a *backend that died* (host reboot / OOM / kill): instead of
+    raising `RunDied`, it re-launches the backend under ``--resume`` so it continues its
+    ``run_id`` from the latest checkpoint (§12). It also re-launches a run whose backend
+    crashed with a ``failed`` marker (a stale ``result.json`` is cleared first). ``resume``
+    and ``overwrite`` are mutually exclusive (overwrite wipes the checkpoint).
+
     While waiting, live progress is streamed to ``stream`` (default: the current cell's
     ``sys.stdout``; pass ``None`` to silence) by following the run's ``monitor.jsonl`` —
     chatter-filtered, identical to a non-detached live run. So detaching does not cost the
@@ -310,6 +321,9 @@ async def run_research_nohup(
             "run_research_nohup runs detached (no stdin), so human_channel='cli' cannot "
             "work — use 'telegram'/'slack'/'none'."
         )
+    if overwrite and resume:
+        raise ValueError("overwrite=True and resume=True are mutually exclusive: overwrite "
+                         "wipes the run dir (and its checkpoint), leaving nothing to resume.")
     formats = [report_formats] if isinstance(report_formats, str) else report_formats
     rid = resolve_run_id(request, run_id)
     rdir = run_dir(rid)
@@ -332,18 +346,37 @@ async def run_research_nohup(
         if stream is not None:
             offset = _drain_jsonl(jsonl, offset, chatter, stream)
 
+    def _relaunch_resume() -> None:
+        """Re-launch a dead/failed backend under --resume to continue from its checkpoint;
+        refuse if the run is somehow still alive."""
+        if is_run_alive(rdir):
+            record = _read_backend(rdir) or {}
+            raise RuntimeError(
+                f"refusing to resume run {rid}: it is still alive (pid {record.get('pid')})."
+            )
+        (rdir / _RESULT_FILE).unlink(missing_ok=True)  # clear a stale terminal marker
+        _launcher(request, rid, rdir, chatter=chatter, report_formats=formats,
+                  human_channel=human_channel, max_iterations=max_iterations, resume=True)
+
     status = run_status(rdir)
     if status == "done":
         _pump()
-        return reconstruct_run(request, rdir, rid)
-    if status == "dead":
+        try:
+            return reconstruct_run(request, rdir, rid)
+        except RunDied:
+            if not resume:
+                raise
+            _relaunch_resume()  # a crashed run (failed marker) + resume → continue from checkpoint
+    elif status == "dead":
         _pump()
-        partial, log = _partial(rdir)
-        raise RunDied(rid, "process is gone and no result was written",
-                      log_path=log, partial=partial)
-    if status == "absent":
+        if not resume:
+            partial, log = _partial(rdir)
+            raise RunDied(rid, "process is gone and no result was written",
+                          log_path=log, partial=partial)
+        _relaunch_resume()
+    elif status == "absent":
         _launcher(request, rid, rdir, chatter=chatter, report_formats=formats,
-                  human_channel=human_channel, max_iterations=max_iterations)
+                  human_channel=human_channel, max_iterations=max_iterations, resume=resume)
 
     # Alive (a prior launch still running) or just launched → tail to a terminal state,
     # streaming new monitor events as they land. Follow faster than the status poll when

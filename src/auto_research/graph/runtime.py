@@ -21,6 +21,7 @@ from auto_research.agents import (
 )
 from auto_research.consensus import ConsensusStrategy, DebateToConverge, LeadLike, WorkerLike
 from auto_research.graph.builder import IOAgentLike, ReviewerLike, build_graph
+from auto_research.graph.checkpoint import checkpoint_path, open_checkpointer
 from auto_research.monitor import RunMonitor
 from auto_research.models import resolve
 from auto_research.retrieval import RetrievalBackend, SqliteRetrievalBackend
@@ -240,8 +241,14 @@ async def run_research(
     human_handler: HumanHandler | None = None,
     human_channel: str | None = None,
     run_id: str | None = None,
+    resume: bool = False,
 ) -> ResearchRun:
     """Run the graph and return the verdict, final state, and monitor.
+
+    ``resume=True`` re-enters the run keyed by ``run_id``: if a checkpoint exists it continues
+    from the latest completed node (the in-flight node's transient ReAct history is not
+    persisted, so that node re-runs), else it starts fresh. A stable ``run_id`` (e.g. the
+    detached backend's deterministic id) is required for resume to find its checkpoint.
 
     ``max_iterations`` and ``debate_max_rounds`` are read from
     ``config/orchestration.yaml`` when not supplied explicitly.
@@ -450,47 +457,79 @@ async def run_research(
     for sandbox in sandboxes:
         await sandbox.start()
 
-    graph = build_graph(
-        reviewer=reviewer,
-        io_agent=io_agent,
-        retrieval=retrieval,
-        workers=workers,
-        lead=lead,
-        consensus=consensus,
-        max_iterations=max_iterations,
-        registry=registry,
-        monitor=run_monitor,
-        run_id=run_id,
-        storage=storage,
-        report_retry_cap=report_retry_cap,
-        report_formats=resolved_formats,
-    )
+    # Durable resume (§12): compile the graph with a per-run sqlite checkpointer keyed by
+    # run_id (thread_id). LangGraph snapshots ResearchState after every node; durability="sync"
+    # flushes before the next node so even a hard kill leaves a valid last-node checkpoint.
+    # Real runs always attach it (no silent non-durable fallback — the preflight asserts the
+    # package is present); resume=True re-enters from the latest snapshot instead of the top.
+    initial_state: dict[str, Any] = {
+        "request": request,
+        "report": None,
+        "verdict": None,
+        "verdicts": [],
+        "lit_iterations": 0,
+        "analysis_iterations": 0,
+        "max_iterations": max_iterations,
+    }
+    config = {"configurable": {"thread_id": run_id}}
+    async with open_checkpointer(checkpoint_path(run_dir(run_id))) as saver:
+        graph = build_graph(
+            reviewer=reviewer,
+            io_agent=io_agent,
+            retrieval=retrieval,
+            workers=workers,
+            lead=lead,
+            consensus=consensus,
+            max_iterations=max_iterations,
+            registry=registry,
+            monitor=run_monitor,
+            run_id=run_id,
+            storage=storage,
+            report_retry_cap=report_retry_cap,
+            report_formats=resolved_formats,
+            checkpointer=saver,
+        )
 
-    try:
-        final_state: dict[str, Any] = await graph.ainvoke(
-            {
-                "request": request,
-                "report": None,
-                "verdict": None,
-                "verdicts": [],
-                "lit_iterations": 0,
-                "analysis_iterations": 0,
-                "max_iterations": max_iterations,
-            }
-        )
-    except Exception as exc:
-        await run_monitor.record(
-            "run",
-            "run.error",
-            level=1,
-            summary="Research run failed",
-            data={"error": repr(exc)},
-        )
-        raise
-    finally:
-        for sandbox in sandboxes:
-            await sandbox.shutdown()
-        await mcp_client.shutdown()
+        try:
+            graph_input: Any = initial_state
+            if resume:
+                existing = await saver.aget_tuple(config)
+                if existing is not None:
+                    graph_input = None  # None → LangGraph continues from the latest snapshot
+                    await run_monitor.record(
+                        "run",
+                        "run.resume",
+                        level=1,
+                        summary="Resuming from the latest checkpoint",
+                        data={
+                            "run_id": run_id,
+                            "checkpoint_step": (existing.metadata or {}).get("step"),
+                        },
+                    )
+                else:
+                    await run_monitor.record(
+                        "run",
+                        "run.resume",
+                        level=1,
+                        summary="Resume requested but no checkpoint found — starting fresh",
+                        data={"run_id": run_id},
+                    )
+            final_state: dict[str, Any] = await graph.ainvoke(
+                graph_input, config=config, durability="sync"
+            )
+        except Exception as exc:
+            await run_monitor.record(
+                "run",
+                "run.error",
+                level=1,
+                summary="Research run failed",
+                data={"error": repr(exc)},
+            )
+            raise
+        finally:
+            for sandbox in sandboxes:
+                await sandbox.shutdown()
+            await mcp_client.shutdown()
 
     verdict = final_state["verdict"]
     await run_monitor.record(

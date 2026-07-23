@@ -95,7 +95,7 @@ verdicts, two iteration counters, and the cap.
   monitor=None, monitor_jsonl=None) -> ReviewVerdict` — compatibility entry.
   Runs `run_research()` and returns only the final reviewer verdict.
 - `async run_research(request, *, ..., chatter=10, monitor=None, monitor_jsonl=None,
-  report_formats=None, human_handler=None, human_channel=None, run_id=None) -> ResearchRun` — high-level
+  report_formats=None, human_handler=None, human_channel=None, run_id=None, resume=False) -> ResearchRun` — high-level
   monitored entry. Resolves the raise-to-human channel (`hitl.resolve_handler` — explicit
   `human_handler` → `human_channel` → auto-detect TTY/library) then `await run_preflight(
   human_handler=…)` immediately (the launch-time checklist: `.env` + required keys, the
@@ -112,8 +112,15 @@ verdicts, two iteration counters, and the cap.
   Returns the request, final verdict, final state, and `RunMonitor`. Optional `run_id` pins
   the workspace/report/JSONL dir (defaults to an auto-generated uuid) — used by the detached
   entry below; otherwise behavior is unchanged.
+  **Durable resume (§12):** the graph is always compiled with a per-run `AsyncSqliteSaver`
+  (`run_dir/checkpoint.sqlite`, `thread_id=run_id`, `durability="sync"`) so `ResearchState` is
+  snapshotted after every node. `resume=True` re-enters from the latest snapshot — continuing at
+  the last *completed* node (the in-flight node's transient ReAct history is not persisted, so it
+  re-runs); with no checkpoint it starts fresh. A missing `langgraph-checkpoint-sqlite` package
+  fails at the `checkpointer_available` preflight (no silent non-durable run). Resume needs a
+  stable `run_id`.
 - `async run_research_nohup(request, *, chatter=10, report_formats=None, human_channel=None,
-  max_iterations=None, run_id='auto', overwrite=False, poll_s=5.0, stream=<cell stdout>) -> ResearchRun`
+  max_iterations=None, run_id='auto', overwrite=False, resume=False, poll_s=5.0, stream=<cell stdout>) -> ResearchRun`
   (`graph/detached.py`) — runs the pipeline in a **detached** child (`python -m auto_research`
   in its own session via `start_new_session`), so a killed kernel (logout) does not kill it;
   re-running the same call **reconnects** by a deterministic `run_id` (`'auto'` = `sha256`
@@ -128,7 +135,9 @@ verdicts, two iteration counters, and the cap.
   + terminal `result.json` (written by the CLI backend); `human_channel='cli'` is rejected (a
   detached child has no stdin). Raises `RunDied` (carrying the run_id, reason, log path, and
   reconstructed partial markdown) when the process died without writing a result — honest, no
-  silent relaunch.
+  silent relaunch. **`resume=True`** turns that death into recovery instead: a dead backend (or
+  one that crashed with a `failed` marker) is **re-launched under `--resume`** to continue from
+  its checkpoint; `resume` and `overwrite` are mutually exclusive (overwrite wipes the checkpoint).
 - `RunDied(run_id, reason, *, log_path=None, partial='')` — a detached run ended without a
   usable result (process died mid-run, or the pipeline raised).
 - `ResearchState` — `TypedDict` with `request`, `cited_paths: list[Path]`,
@@ -204,3 +213,4 @@ verdicts, two iteration counters, and the cap.
 - 2026-07-06 — Detached runs `run_research_nohup` (E5, partial): pipeline runs in a detached `python -m auto_research` child (own session) surviving kernel death, reconnect by deterministic `run_id`, `overwrite` guarded by process-based liveness, `RunDied` on a dead run; streams live `monitor.jsonl` chatter to `stream`. Additive `run_id` + CLI `--run-id`/`--max-iterations`/`result.json`. Not true mid-run resume (§12 deferred).
 - 2026-07-16 — Liveness treats a **zombie** as dead (`_proc_create_time` returns None on state `Z`): a backend that died at preflight stays unreaped in the notebook kernel's process table, and `overwrite=True` refused with a useless "kill <pid>" hint (a zombie ignores signals; only reaping clears it). Observed live on the #21 relaunch after a Telegram-ping preflight failure. Test: `test_detached.py::test_liveness_zombie_is_dead`.
 - 2026-07-16 — **Double-fork spawn (`_spawn_orphaned`): detached backends survive logout.** A real VSCode logout killed a live detached run seconds before reconnect: `start_new_session` shields against signals and kernel death, but the graceful teardown kills process TREES by walking parent→child `/proc` links, which setsid does not sever (the [E5] verification had SIGKILLed the kernel — no cleanup ran — so the gap never showed). `_default_launcher` now spawns via a short-lived intermediary that starts the backend (own session, log wired) and exits, reparenting it to init immediately — verified adopted by pid 1 on the cluster host. Test: `test_detached.py::test_spawn_orphaned_breaks_ancestry`.
+- 2026-07-22 — **Durable mid-run resume — Stage 1 of the §12 bundle ([E5] backend-death recovery).** New `graph/checkpoint.py` (`open_checkpointer`/`checkpoint_path`/`check_checkpointer_available`). `build_graph(checkpointer=)` → `compile(checkpointer=)`. `run_research` always compiles with a per-run `AsyncSqliteSaver` at `run_dir/checkpoint.sqlite` (`thread_id=run_id`, `durability="sync"`) — `ResearchState` is snapshotted after every node; `resume=True` invokes with input `None` to continue from the latest snapshot (the in-flight node re-runs; its ReAct history is not persisted), else fresh; a `run.resume` monitor event records which. **No silent non-durable fallback** — a new `checkpointer_available` preflight fails the launch if `langgraph-checkpoint-sqlite` (pip; §environment.yml) is absent. `run_research_nohup(resume=True)` re-launches a dead/`failed` backend under `--resume` (mutually exclusive with `overwrite`); CLI `--resume`. Deterministic tests `tests/test_durable_resume.py` (checkpointer mechanism via `MemorySaver` + real `AsyncSqliteSaver` cross-instance/process-boundary resume + the nohup relaunch plumbing). **Full killed-and-resumed `run_research` is NOT LIVE TESTED yet** (needs a real run). Stages 2–4 (dirty-branch self-heal, HITL slash-commands, graceful cleanup) follow.
