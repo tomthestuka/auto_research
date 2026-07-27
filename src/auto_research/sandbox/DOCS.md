@@ -100,9 +100,18 @@ GEOMAG_PATH) with no SSH agent, gnome-keyring, or interactive conda activation.
 class ToolSpec(TypedDict):
     module: str       # importable module path, e.g. "xspec_utils.lib.NuSTAR"
     fn: str           # callable name within the module
-    description: str  # human-readable; injected into analyst worker prompt
+    description: str  # agent-facing; injected into analyst worker prompt
     args_schema: dict # JSON Schema for the args dict
 ```
+
+**The manifest is the agent-facing interface, verbatim.** `description` and `args_schema` are
+taken from `skills/TOOL_MANIFEST` exactly as authored — the backing `lib/` function's
+docstring never replaces them. This is the §9.2 two-halves split: `skills/` is the ai-half,
+`lib/` docstrings are the human-half. (Until 2026-07-27 `load()` overwrote the description
+with `fn.__doc__` whenever the module imported, which silently discarded the coder-authored,
+co-lead-reviewed description for any import-clean tool and made the agent-facing text depend
+on a tool's dependency footprint. Pinned by
+`tests/test_registry.py::test_manifest_description_wins_over_function_docstring`.)
 
 ### `ToolkitRegistry`
 
@@ -715,3 +724,17 @@ the hook mapping a fake-model verdict — no live LLM).
   core is factored into a shared `_save_diff_and_reset` (used by `_reset_direct_tree` too). `run_research`
   calls the heal before the launch preflight on `resume=True`. Deterministic tests `tests/test_resume_heal.py`
   (real git) + `tests/test_consensus_authoring.py::test_mid_run_unclean_branch_degrades_to_honest_terminal`.
+
+- **2026-07-27** — **Removed the docstring override in `ToolkitRegistry.load()`; the manifest is now
+  the agent-facing interface verbatim.** Since 2026-06-01 (`56e89f9`, Phase 1, before tool authoring
+  existed) `load()` replaced each `TOOL_MANIFEST` description with the backing function's `__doc__`
+  whenever the module imported successfully. That made sense when manifests were thin stubs and the
+  `lib/` docstrings held the documentation, but Phase 2 inverted it: `prompts/coder.md` instructs the
+  coder that the manifest entry *is* the agent-facing interface, and the GPT co-lead reviews that text
+  in the diff — yet the runtime discarded it for every import-clean tool, with the winner decided by
+  the tool's dependency footprint (an invisible, unchosen criterion). The override was undocumented
+  and untested, and no manifest entry relied on its fallback. Now the description is taken from the
+  manifest as authored; `lib/` docstrings stay the human-half documentation (§9.2). Measured effect
+  with the reshaped `research_toolkit` manifests: model-visible tool-block context drops a further
+  ~1,400 tokens (4 tools were showing 1,678 tokens of docstring in place of 265 tokens of brief).
+  New test `tests/test_registry.py::test_manifest_description_wins_over_function_docstring`.

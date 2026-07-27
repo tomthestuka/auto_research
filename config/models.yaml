@@ -144,9 +144,9 @@ roles:
   # Optional — not in REQUIRED_ROLES; /status falls back to a deterministic digest if absent.
   status_monitor:
     members:
-      - name: gpt_5_4_nano
+      - name: gpt_5_6_luna
         provider: openai
-        model: gpt-5.4-nano
+        model: gpt-5.6-luna
         vision: false
         documents: false
         priceMTk:

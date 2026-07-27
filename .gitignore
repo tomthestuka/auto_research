@@ -34,3 +34,6 @@ logs/dev/
 # verification tests
 tmp/
 tmp*
+
+# publication materials
+papers/

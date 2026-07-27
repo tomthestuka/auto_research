@@ -61,6 +61,27 @@ def test_load_indexes_manifest_tools(tmp_path, cleanup_modules):
     assert "alpha_utils.t1" in reg.list_tools()
 
 
+def test_manifest_description_wins_over_function_docstring(tmp_path, cleanup_modules):
+    """The manifest entry IS the agent-facing interface (§9.2): ``skills/TOOL_MANIFEST`` is
+    the ai-half and ``lib/`` docstrings are the human-half, so a ``lib/`` docstring never
+    replaces the authored description. Until 2026-07-27 the registry overrode the manifest
+    with ``fn.__doc__`` whenever the module imported, which silently discarded the coder's
+    (and the co-lead's reviewed) description for any import-clean tool.
+    """
+    _write_pkg(tmp_path, "docs_utils", {"docs_utils.t1": "the authored brief"})
+    # Give the backing lib function a docstring — the human-half documentation.
+    (tmp_path / "docs_utils" / "lib" / "help.py").write_text(
+        'def do(**kw):\n    """Long human-half docstring for a person reading lib/."""\n'
+        "    return kw\n"
+    )
+    reg = ToolkitRegistry(tmp_path)
+    reg.load()
+    assert reg.spec("docs_utils.t1")["description"] == "the authored brief"
+    # ...and it reaches the model-facing definitions too (names are sanitized there).
+    descriptions = [d["description"] for d in reg.tool_definitions()]
+    assert "the authored brief" in descriptions
+
+
 def test_reload_picks_up_modified_manifest(tmp_path, cleanup_modules):
     _write_pkg(tmp_path, "beta_utils", {"beta_utils.t1": "first"})
     reg = ToolkitRegistry(tmp_path)

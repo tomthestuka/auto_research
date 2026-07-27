@@ -106,20 +106,10 @@ class ToolkitRegistry:
             for pkg in self._manifest_packages:
                 try:
                     mod = importlib.import_module(pkg)
+                    # The manifest entry IS the agent-facing interface (§9.2 two halves):
+                    # ``skills/TOOL_MANIFEST`` is the ai-half, ``lib/`` docstrings are the
+                    # human-half. The description is taken verbatim from the manifest.
                     manifest: dict[str, ToolSpec] = getattr(mod, "TOOL_MANIFEST", {})
-                    # Enrich descriptions with function docstrings when available.
-                    for name, spec in manifest.items():
-                        try:
-                            fn_mod = importlib.import_module(spec["module"])
-                            fn = getattr(fn_mod, spec["fn"])
-                            doc = (fn.__doc__ or "").strip()
-                            if doc:
-                                spec = dict(spec)
-                                spec["description"] = doc
-                                manifest = dict(manifest)
-                                manifest[name] = spec  # type: ignore[assignment]
-                        except Exception:  # noqa: BLE001
-                            pass
                     self._tools.update(manifest)
                     self._load_tool_config(pkg, list(manifest.keys()))
                 except Exception:  # noqa: BLE001
