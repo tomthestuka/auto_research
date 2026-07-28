@@ -3,6 +3,13 @@
 These verify the native structured-output and function-calling normalization in
 each provider adapter without spending tokens. Live provider checks remain in
 ``tests/test_live_models.py``.
+
+The Anthropic fake implements **both** namespaces the adapter routes between —
+``client.messages`` and ``client.beta.messages`` (context editing selects the latter) — so these
+tests hold whichever way ``context_mgmt_enabled`` is set. Config is always pinned per test rather
+than read from the machine-local ``orchestration.yaml``, and the namespace-sensitive tests sweep
+both settings explicitly. What the beta path *does* (the ``context_management`` block, edit
+extraction, monitor event) belongs to ``tests/test_context_editing.py``; here it is only routing.
 """
 
 from __future__ import annotations
@@ -11,12 +18,40 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
 from pydantic import BaseModel
 
+from auto_research.env import ContextEditingConfig
 from auto_research.models.providers.anthropic import AnthropicProvider, _mark_last_block_cacheable
 from auto_research.models.providers.google import GoogleProvider
 from auto_research.models.providers.openai import OpenAIProvider
 from auto_research.models.types import ModelMessage, RoleModelConfig
+
+
+def _pin_context_editing(monkeypatch, *, enabled: bool):
+    """Pin the context-editing config so a test never reads machine-local `orchestration.yaml`.
+
+    Left unpinned, anything touching `cache_prefix` silently tests whichever namespace this
+    host's ``context_mgmt_enabled`` selects — passing or failing on a config value rather than
+    on the adapter's behaviour.
+    """
+    monkeypatch.setattr(
+        "auto_research.models.providers.anthropic.context_editing_config",
+        lambda: ContextEditingConfig(
+            enabled=enabled,
+            beta_header="context-management-2025-06-27",
+            strategy="clear_tool_uses_20250919",
+            trigger_tokens=120000,
+            clear_at_least_tokens=20000,
+            keep_tool_uses=3,
+        ),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _pinned_config(monkeypatch):
+    """Default the file to the base namespace; namespace-sensitive tests re-pin per-parameter."""
+    _pin_context_editing(monkeypatch, enabled=False)
 
 
 class _Verdict(BaseModel):
@@ -60,17 +95,30 @@ class _FakeAnthropic:
 
     ``parse`` serves the native-structured-output path; ``create`` serves the
     function-calling path (echoing a ``tool_use`` block, now with an ``id``).
+
+    It exposes **both** namespaces the adapter can route to — ``client.messages`` and
+    ``client.beta.messages`` — because context editing selects between them at call time
+    (`anthropic.py`: ``messages_api = client.beta.messages if use_ctx_edit else client.messages``).
+    A fake carrying only ``.messages`` silently constrains these tests to whichever branch the
+    host's ``context_mgmt_enabled`` happens to select. ``last_namespace`` records which one ran,
+    so a test can assert the routing rather than assume it.
     """
 
     last_request: dict | None = None
     last_parse: dict | None = None
+    last_namespace: str | None = None
 
     def __init__(self, *args, **kwargs):
         pass
 
     @property
     def messages(self):
+        _FakeAnthropic.last_namespace = "base"
         return self
+
+    @property
+    def beta(self):
+        return _FakeAnthropicBeta()
 
     async def parse(self, **request):
         _FakeAnthropic.last_parse = request
@@ -90,6 +138,17 @@ class _FakeAnthropic:
             SimpleNamespace(type="tool_use", id="tu_1", name=name, input={"command": "echo hi"}),
         ]
         return SimpleNamespace(content=content, usage=SimpleNamespace(input_tokens=11, output_tokens=7))
+
+
+class _FakeAnthropicBeta:
+    """``client.beta`` — the namespace context editing routes to, and the only one that accepts
+    ``betas`` + ``context_management``. It reuses the same request-capturing surface, so an
+    assertion reads identically whichever namespace the adapter chose."""
+
+    @property
+    def messages(self):
+        _FakeAnthropic.last_namespace = "beta"
+        return _FakeAnthropic()
 
 
 def test_anthropic_structured_output_uses_parse(monkeypatch):
@@ -129,14 +188,28 @@ def test_anthropic_mark_last_block_cacheable_helper():
     _mark_last_block_cacheable([])
 
 
-def test_anthropic_cache_prefix_marks_system(monkeypatch):
+@pytest.mark.parametrize(
+    "ctx_editing,namespace", [(False, "base"), (True, "beta")], ids=["base", "beta"]
+)
+def test_anthropic_cache_prefix_marks_system(monkeypatch, ctx_editing, namespace):
+    """`cache_control` placement is namespace-independent, so assert it on both.
+
+    Context editing routes `cache_prefix` calls to `client.beta.messages`; the breakpoints must
+    land identically there. Swept rather than pinned so a change to either branch is caught
+    whichever way `context_mgmt_enabled` is set on the host.
+    """
+    _pin_context_editing(monkeypatch, enabled=ctx_editing)
     monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
+    _FakeAnthropic.last_namespace = None
     tools = [{"name": "t", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
     asyncio.run(AnthropicProvider().call(_messages(), _cfg(), tools=tools, cache_prefix=True))
+    assert _FakeAnthropic.last_namespace == namespace
     system = _FakeAnthropic.last_request["system"]
     assert isinstance(system, list) and system[-1]["cache_control"] == {"type": "ephemeral"}
     tail = _FakeAnthropic.last_request["messages"][-1]["content"][-1]
     assert tail["cache_control"] == {"type": "ephemeral"}
+    # The context-management block rides only the beta namespace.
+    assert ("context_management" in _FakeAnthropic.last_request) is ctx_editing
 
 
 def test_anthropic_cache_prefix_off_leaves_messages_unmarked(monkeypatch):
@@ -149,9 +222,16 @@ def test_anthropic_cache_prefix_off_leaves_messages_unmarked(monkeypatch):
     assert "cache_control" not in req["tools"][0]
 
 
-def test_anthropic_cache_prefix_marks_schema_tail(monkeypatch):
+@pytest.mark.parametrize(
+    "ctx_editing,namespace", [(False, "base"), (True, "beta")], ids=["base", "beta"]
+)
+def test_anthropic_cache_prefix_marks_schema_tail(monkeypatch, ctx_editing, namespace):
+    """Same sweep on the structured-output path — `parse` exists on both namespaces."""
+    _pin_context_editing(monkeypatch, enabled=ctx_editing)
     monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
+    _FakeAnthropic.last_namespace = None
     asyncio.run(AnthropicProvider().call(_messages(), _cfg(), schema=_Verdict, cache_prefix=True))
+    assert _FakeAnthropic.last_namespace == namespace
     tail = _FakeAnthropic.last_parse["messages"][-1]["content"][-1]
     assert tail["cache_control"] == {"type": "ephemeral"}
 

@@ -15,22 +15,37 @@ The guard re-adds a **tombstone**: a stub definition under the same name whose d
 the tool is gone. The request then succeeds, and the model learns the capability withdrew — an
 honest tool-level failure instead of a dead run.
 
-**NOT LIVE TESTED as of 2026-07-27** — exercised by deterministic tests only; the live checks run
-once provider usage is available.
+Tool search itself is live-verified (2026-07-28); this **tombstone path specifically is exercised
+by deterministic tests only** — forcing it live needs a real failed-authoring reset mid-run.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from typing import Any
 
 from auto_research.models.types import AssistantToolUse, ConversationMessage
+
+_DATED_SUFFIX = re.compile(r"_\d{8}$")
 
 TOMBSTONE_DESCRIPTION = (
     "This tool is no longer available in the toolkit — it was discovered earlier in this "
     "conversation but has since been withdrawn (for example, an authoring attempt that did not "
     "land). Report the missing capability and continue with the tools that remain."
 )
+
+
+def anthropic_search_tool_name(tool_type: str) -> str:
+    """The ``name`` Anthropic requires beside a dated server-tool ``type``.
+
+    The API pins the name to the **undated** identifier: a ``type`` of
+    ``tool_search_tool_bm25_20251119`` must carry the ``name`` ``tool_search_tool_bm25``, and a
+    mismatch is a 400 (*"Input should be 'tool_search_tool_bm25'"*, observed live 2026-07-28).
+    Deriving the name keeps the dated type the single configured value and covers the ``regex``
+    variant on the same rule; a type carrying no dated suffix is already the name.
+    """
+    return _DATED_SUFFIX.sub("", tool_type)
 
 
 def referenced_tool_names(messages: Sequence[ConversationMessage]) -> set[str]:

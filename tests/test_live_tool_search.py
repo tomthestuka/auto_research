@@ -5,12 +5,13 @@ deferred, the harness tool resident, and a question whose answer needs a deferre
 the model searched, the discovered tool became callable, and — the point of the whole exercise —
 that resident input tokens dropped well below the all-loaded baseline.
 
-**NOT LIVE TESTED as of 2026-07-27.** Run once provider usage is available::
+**PASSED 2026-07-28 on both providers**, and it earned its keep on the first run: the Anthropic
+half caught a 400 no deterministic test could see (the server-tool ``name`` must be the undated
+``tool_search_tool_bm25`` beside the dated ``type``). Measured resident input 19,074 → 3,789
+tokens on OpenAI and 35,208 → 9,003 on Anthropic. ``tool_search_enabled`` was flipped true on
+the strength of this run; re-run it whenever the dated provider identifiers move::
 
     AUTO_RESEARCH_LIVE_MODEL_TESTS=1 pytest tests/test_live_tool_search.py -s
-
-The Anthropic half additionally needs a valid ``ANTHROPIC_API_KEY`` (401 as of 2026-07-27).
-Flip ``tool_search_enabled: true`` in ``config/orchestration.yaml`` only after this passes.
 """
 
 from __future__ import annotations

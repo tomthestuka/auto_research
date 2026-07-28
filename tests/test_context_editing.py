@@ -3,8 +3,7 @@ valve). These exercise config parsing, request construction on the beta namespac
 edit-report extraction, and the monitor event — all with a mocked SDK, no tokens spent.
 
 The live round-trip (does the real beta endpoint accept the block and clear as configured)
-is in ``tests/test_live_context_editing.py`` — NOT LIVE TESTED as of 2026-07-22 (the beta
-path awaits Anthropic API credits).
+is in ``tests/test_live_context_editing.py`` — **passed 2026-07-28**.
 """
 
 from __future__ import annotations

@@ -134,7 +134,7 @@ class ModelResponse(BaseModel):
     """Provider-native context-management edits applied to THIS call (Anthropic context
     editing ``applied_edits``: each a plain dict with e.g. ``cleared_tool_uses`` /
     ``cleared_input_tokens``); empty when none applied. Surfaced so the run monitor can
-    record when stale tool context was cleared. **NOT LIVE TESTED (2026-07-22).**"""
+    record when stale tool context was cleared. Live-verified 2026-07-28."""
     provider_blocks: list[dict[str, Any]] = Field(default_factory=list)
     """Opaque provider-native blocks this response produced that must be carried into the
     next request — see ``AssistantToolUse.provider_blocks``. ``AgentRole._react`` copies

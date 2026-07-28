@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from auto_research.env import context_editing_config, tool_search_config
 from auto_research.models.providers._tool_search import (
     TOMBSTONE_DESCRIPTION,
+    anthropic_search_tool_name,
     missing_tool_names,
 )
 from auto_research.models.types import (
@@ -136,7 +137,7 @@ class AnthropicProvider:
         # a context-window pressure valve for long loops (with prompt caching, raw history is
         # cheap and any clear breaks the cached prefix, so clear_at_least amortizes it). Routed
         # through the beta.messages namespace only when active, so every other call stays
-        # byte-identical to before. NOT LIVE TESTED (2026-07-22 — pending API credits).
+        # byte-identical to before. Live-verified 2026-07-28.
         ctx_cfg = context_editing_config()
         use_ctx_edit = cache_prefix and ctx_cfg.enabled
         ctx_extra: dict[str, Any] = {}
@@ -204,7 +205,8 @@ class AnthropicProvider:
                 }
                 # Deferred tools stay out of the system-prompt prefix; Claude pulls one in
                 # via the search tool, which appends a ``tool_reference`` inline in the
-                # conversation, so the cached prefix is untouched. NOT LIVE TESTED (2026-07-27).
+                # conversation, so the cached prefix is untouched. Live-verified 2026-07-28: the
+                # expanded definition falls inside the conversation cache breakpoint too.
                 if ts_cfg.enabled and tool.get("defer_loading"):
                     entry["defer_loading"] = True
                 tool_defs.append(entry)
@@ -228,7 +230,10 @@ class AnthropicProvider:
                     )
                 if any(t.get("defer_loading") for t in tool_defs):
                     # Anthropic requires ≥1 non-deferred tool; the harness tools are it.
-                    tool_defs.append({"type": ts_cfg.anthropic_tool, "name": "tool_search"})
+                    tool_defs.append({
+                        "type": ts_cfg.anthropic_tool,
+                        "name": anthropic_search_tool_name(ts_cfg.anthropic_tool),
+                    })
             # When there is no system block to carry the breakpoint, cache the tool
             # defs directly (they render first, so this caches the whole prefix). The
             # breakpoint must land on a NON-deferred tool: a deferred tool carrying
@@ -296,7 +301,7 @@ def _context_edits(response: Any) -> list[dict[str, Any]]:
     Anthropic reports cleared context under ``response.context_management.applied_edits``
     (present only on the beta context-management path; each edit e.g.
     ``{"type": "clear_tool_uses_20250919", "cleared_tool_uses": N, "cleared_input_tokens": M}``).
-    Returns ``[]`` when the field is absent (every non-beta call). NOT LIVE TESTED (2026-07-22).
+    Returns ``[]`` when the field is absent (every non-beta call). Live-verified 2026-07-28.
     """
     cm = getattr(response, "context_management", None)
     applied = getattr(cm, "applied_edits", None) if cm is not None else None

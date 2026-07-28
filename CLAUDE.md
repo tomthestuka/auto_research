@@ -805,35 +805,39 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   need a background receive loop per connector (a bigger change); WhatsApp is deprecated anyway (§13
   above). Command *dispatch* is deterministically tested; end-to-end command behavior over a live
   channel is observational (a human must type the command) — **NOT LIVE TESTED**.
-- **Anthropic context editing is NOT LIVE TESTED and ships disabled.** The long-loop context-pressure
-  valve (`models/providers/anthropic.py` routes `cache_prefix` calls through `client.beta.messages` with
-  a `clear_tool_uses_20250919` `context_management` edit; `config: context_mgmt_*`) was verified only by
-  SDK source/introspection (the `beta.messages.parse` param surface + `ParsedBetaMessage.parsed_output`
-  property); the live beta round-trip was blocked by an Anthropic **credit-balance 400** on 2026-07-22.
-  `context_mgmt_enabled` defaults **false** — run `tests/test_live_context_editing.py` (env-gated) once
-  credits return, then flip it true. **Provider coverage is Anthropic-only:** it covers the lead (pure
-  Claude) + the Claude worker member; the GPT worker member relies on its large window (OpenAI's
-  `responses.compact` needs stateful Responses we don't use), and Google has no equivalent (and its
-  multi-turn tool use is broken, [I8]). Figure interaction is a watch item — clearing old tool results
+- **Context editing covers Anthropic only — the other two members have no working valve.** The
+  long-loop context-pressure valve (`models/providers/anthropic.py` routes `cache_prefix` calls through
+  `client.beta.messages` with a `clear_tool_uses_20250919` `context_management` edit;
+  `config: context_mgmt_*`) is **live-verified 2026-07-28** and ships enabled. What stays open is
+  **coverage**: it protects the lead (pure Claude) + the Claude worker member, while the GPT worker
+  member relies on its large window (OpenAI's own server-side compaction 500s whenever it fires, and
+  per openai-python#3075 never emits on tool-call-only turns — our exact ReAct shape) and Google has no
+  equivalent (its multi-turn tool use is broken anyway, [I8]). A Tier-2 hand-rolled watermark compactor
+  for those two is proposed, not built. Figure interaction is a watch item — clearing old tool results
   drops their inline figures from the model's view, but the accumulated `figures` list still carries them
-  to the report; `keep_tool_uses` + a high watermark keep the common case unaffected.
-- **Tool search / lazy tool loading is NOT LIVE TESTED and ships disabled.** With
+  to the report; `keep_tool_uses` + a high watermark keep the common case unaffected. Any Tier-2
+  compactor must also **exclude tool-search discovery blocks** (see the next entry).
+- **Tool search / lazy tool loading — live-verified and enabled; four watch items remain.** With
   `config: tool_search_enabled` every `research_toolkit` tool is sent `defer_loading: true` and its
   schema stays out of the model's context until discovered through the provider's server-side search
   tool (Anthropic `tool_search_tool_bm25_20251119`; OpenAI `tool_search`, gpt-5.4+; Google has none and
-  keeps every tool resident). Harness tools stay resident. Verified by deterministic tests and by
-  offline token measurement against the real manifest (**19,004 → 2,382 resident tokens on gpt-5.5**);
-  the live round-trip — does the model actually search, does the discovered definition land inside the
-  conversation cache breakpoint — awaits provider usage, and the **Anthropic half additionally needs a
-  valid API key** (401 as of 2026-07-27). Run `tests/test_live_tool_search.py` (env-gated), then flip
-  `tool_search_enabled: true`. Watch items: (a) **activation lives in the history** — a discovered tool
-  stays callable only while its `server_tool_use`/`tool_search_tool_result` blocks survive replay, so
-  any future context compactor must exclude them or a tool silently de-activates mid-run; (b) the
-  **tombstone** path (`providers/_tool_search.py`) scans discovery blocks for `tool_name` keys, so a
-  provider payload shape it does not recognise yields no tombstone — the pre-guard behaviour, never
-  worse; (c) **provider asymmetry** — Anthropic hides a deferred tool entirely (hence the tool catalogue
-  injected into the task instructions is what tells the model the tool exists at all), while OpenAI keeps
-  names+descriptions resident and withholds only the parameter schema.
+  keeps every tool resident). Harness tools stay resident. **Live-verified 2026-07-28 on both providers**
+  (`tests/test_live_tool_search.py`): resident input **19,074 → 3,789 tokens on gpt-5.5** and **35,208 →
+  9,003 on claude-sonnet-5** against the real manifest, the model searched and called the discovered
+  tool, and a three-turn probe confirmed the expanded definition lands **inside** the conversation cache
+  breakpoint (cache-read at 0.1× thereafter). Watch items: (a) **activation lives in the history** — a
+  discovered tool stays callable only while its `server_tool_use`/`tool_search_tool_result` blocks
+  survive replay, so any future context compactor must exclude them or a tool silently de-activates
+  mid-run; (b) the **tombstone** path (`providers/_tool_search.py`) scans discovery blocks for
+  `tool_name` keys, so a provider payload shape it does not recognise yields no tombstone — the
+  pre-guard behaviour, never worse — and it is **still deterministic-only**, since forcing it live needs
+  a real failed-authoring reset mid-run; (c) **provider asymmetry** — Anthropic hides a deferred tool
+  entirely (hence the tool catalogue injected into the task instructions is what tells the model the
+  tool exists at all), while OpenAI keeps names+descriptions resident and withholds only the parameter
+  schema; (d) **Anthropic BM25 returns up to 5 references per search and expands all of them**, so a
+  broad natural-language query pulls five full schemas into the tail where the injected catalogue's
+  exact name would have pulled one — the resident-token win is real either way, but a query-shape
+  regression costs tokens silently.
 
 ---
 
@@ -997,7 +1001,7 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   (conda-forge; lazy-imported, price-map only). Suite green (500; +7). **Residual (still [I5]):** the
   reviewer GPT member's `max_output_tokens` vs. the Claude member's is a separate truncation-risk item,
   untouched here.
-- 2026-07-22 — **Context-management valve = Anthropic provider-native context editing (NOT LIVE TESTED).**
+- 2026-07-22 — **Context-management valve = Anthropic provider-native context editing** (live-verified 2026-07-28).
   A deep-research scan of the mid-2026 SOTA (Anthropic context editing `clear_tool_uses_20250919`, public
   beta 2025-09-29; server-side compaction `compact_20260112`, beta 2026-01-12; the memory tool; LangChain
   v1 `SummarizationMiddleware`; LangMem; OpenAI `responses.compact`; LlamaIndex `VectorMemoryBlock`; the
@@ -1055,7 +1059,7 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   `tests/test_hitl_commands.py` + connector tests in `tests/test_hitl.py`; suite green (552). **Live
   command behavior is observational — NOT LIVE TESTED.** Stage 4 (graceful cleanup) is the last piece.
 - 2026-07-27 — **Tool-context diet: manifest reshape + registry fix + provider-native tool search
-  (all three measured; tool search ships disabled, NOT LIVE TESTED).** Motivated by Phase 2's growing
+  (all three measured; tool search shipped disabled, live-verified and enabled 2026-07-28).** Motivated by Phase 2's growing
   tool pool (25 tools, 6 authored by run #12 alone) pushing past Anthropic's own thresholds for acting
   (≥10 tools or >10k tokens of definitions) and toward the documented 30–50-tool selection-accuracy
   cliff. Three compounding changes, each measured on `gpt-5.5` against the real manifest.
@@ -1081,3 +1085,34 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   archive (the manifest) and the menu (the injected tool catalogue), so search runs as an exact-name
   lookup rather than semantic recall. Cumulative resident tool context: **18,999 → 2,382 tokens (−87%)**.
   Suite 553 → 565 (+12 `tests/test_tool_search.py`); live stub `tests/test_live_tool_search.py`. See §13.
+- 2026-07-28 — **Both context-management features live-verified and switched on; one live-only bug
+  caught.** The `ANTHROPIC_API_KEY` was reinstated (same key, so the 2026-07-27 401 was an org-side
+  revocation, not a rotation), unblocking the two features that had been waiting on it. **Context
+  editing (E5(b), 2026-07-22) passed unchanged** — the beta path cleared tool results, reported them on
+  `ModelResponse.context_edits`, and structured output still parsed on the beta namespace. **Tool search
+  (TOOLCTX, 2026-07-27) failed first on a shape no deterministic test could see:** the Anthropic
+  server-tool declaration sent `name: "tool_search"` beside the dated `type`, and the API pins the name
+  to the **undated** identifier (400 *"Input should be 'tool_search_tool_bm25'"*). Fixed with
+  `_tool_search.anthropic_search_tool_name()`, which strips the trailing `_YYYYMMDD` so the dated type
+  remains the single configured value and the `regex` variant follows the same rule; the declaration
+  test now asserts the `name`, not only the `type` — the exact gap that let it ship. Live numbers on the
+  real 25-tool manifest: resident input **19,074 → 3,789 (−80%)** on `gpt-5.5` and **35,208 → 9,003
+  (−74%)** on `claude-sonnet-5`, with the model searching and calling the discovered tool on both. A
+  three-turn `cache_prefix` probe settled the question no provider documents: an expanded definition
+  lands **inside** the conversation cache breakpoint (turn 2 wrote 9,993 tokens, turn 3 read them at
+  0.1×) — because the expansion lives in the message tail and `_mark_last_block_cacheable` marks the last
+  block, a tool is searched once per conversation and cache-read thereafter. Also observed: Anthropic's
+  BM25 returns up to **5** references per query and expands all of them (§13 watch item (d)). Both
+  `context_mgmt_enabled` and `tool_search_enabled` flipped **true** in `orchestration.yaml` and the
+  tracked `.example`; the code-level defaults stay `false` so a key-less config is unchanged. The flip
+  also surfaced a **latent test-isolation defect** (not caused by it): two `cache_prefix` tests in
+  `test_providers.py` read the machine-local `orchestration.yaml`, so enabling context editing routed
+  them to `client.beta.messages`, which that file's fake did not implement — they had passed only
+  while the flag was false. Fixed by making the fake **shape-complete** (both `client.messages` and
+  `client.beta.messages`, recording which ran) and pinning the config per test rather than reading it,
+  with the two namespace-sensitive `cache_prefix` tests **sweeping both settings** — so they now assert
+  that `cache_control` placement is namespace-independent (the real invariant) instead of silently
+  covering whichever branch the host selected. Verified by running that file under both flag values.
+  Worth remembering as a general hazard whenever a config-read default is flipped: a green suite taken
+  before the flip says nothing about the state after it. Suite 553 → 568 (+3 net). Remaining
+  pending-live work is tracked in `tmp_remaining_livetest.md`.

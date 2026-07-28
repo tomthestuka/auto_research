@@ -135,7 +135,7 @@ class OpenAIProvider:
                 }
                 # Deferred: OpenAI keeps the name+description resident and withholds only the
                 # parameter schema until the model discovers the tool, injecting it at the END
-                # of the context window so the cache is preserved. NOT LIVE TESTED (2026-07-27).
+                # of the context window so the cache is preserved. Live-verified 2026-07-28.
                 if ts_cfg.enabled and tool.get("defer_loading"):
                     entry["defer_loading"] = True
                 function_tools.append(entry)

@@ -139,8 +139,8 @@ class ContextEditingConfig(NamedTuple):
     worth it. It is a context-window pressure valve for long ReAct loops, not a cost lever —
     with prompt caching, raw history is already cheap and any clear breaks the cached prefix.
 
-    Anthropic-only, and BETA. **NOT LIVE TESTED as of 2026-07-22** (the beta path is exercised
-    only once Anthropic API credits are restored — see ``tests/test_live_context_editing.py``).
+    Anthropic-only, and BETA. **Live-verified 2026-07-28** (``tests/test_live_context_editing.py``);
+    re-run that whenever the dated beta identifiers move.
     """
 
     enabled: bool
@@ -216,8 +216,10 @@ class ToolSearchConfig(NamedTuple):
     the exact tool name, so search runs as an exact-name lookup rather than the semantic
     recall regime tool-retrieval benchmarks show models failing at.
 
-    **NOT LIVE TESTED as of 2026-07-27** — ships disabled; flip ``tool_search_enabled`` true
-    after the env-gated live tests pass on both providers.
+    **Live-verified 2026-07-28 on both providers** (``tests/test_live_tool_search.py``): resident
+    input fell 19,074 → 3,789 tokens on OpenAI and 35,208 → 9,003 on Anthropic against the real
+    manifest, the model searched rather than stalling, and an expanded definition lands inside
+    the conversation cache breakpoint (so it is cache-read on every later turn). Ships enabled.
     """
 
     enabled: bool

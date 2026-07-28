@@ -3,9 +3,9 @@ valve). Exercises the real ``client.beta.messages`` path with a deliberately low
 trigger so clearing fires on a small trajectory, and asserts the applied-edits report comes
 back on ``ModelResponse.context_edits``.
 
-**NOT LIVE TESTED as of 2026-07-22** — first run was blocked by an Anthropic 'credit balance
-too low' 400. Run this once credits are restored, BEFORE flipping ``context_mgmt_enabled: true``
-in config:
+**PASSED 2026-07-28**, after two false starts (a 'credit balance too low' 400 on 2026-07-22,
+then an invalid API key through 2026-07-27). ``context_mgmt_enabled`` was flipped true on the
+strength of this run; re-run it whenever the beta identifiers move::
 
     AUTO_RESEARCH_LIVE_MODEL_TESTS=1 pytest tests/test_live_context_editing.py -s
 """

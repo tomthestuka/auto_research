@@ -105,18 +105,21 @@ raise a "copy the `.example` / run install.sh" message when a live file is absen
 - `orchestration.yaml.structured_retry_cap` — bounded off-schema structured-output retry
   count.
 - `orchestration.yaml.tool_search_enabled` — provider-native **tool search / lazy tool loading**
-  (default **false** — a config lacking the key keeps every tool resident, byte-identical to
-  before; read via `env.tool_search_config`). When true, every `research_toolkit` tool is sent
+  (shipped **true** since 2026-07-28; the *code* default stays **false**, so a config lacking the
+  key keeps every tool resident, byte-identical to before; read via `env.tool_search_config`).
+  When true, every `research_toolkit` tool is sent
   with `defer_loading: true` and its schema stays out of the model's context until the model
   discovers it through the provider's server-side search tool; harness tools stay resident.
   Two protocol strings — `tool_search_anthropic_tool` (default
   `tool_search_tool_bm25_20251119`) and `tool_search_openai_tool` (default `tool_search`) —
   carry dated provider identifiers and are overridable without a code change; they default in
-  code and stay out of the sample config to keep it clean. **NOT LIVE TESTED (2026-07-27)** —
-  run `tests/test_live_tool_search.py` before flipping it true.
+  code and stay out of the sample config to keep it clean. The Anthropic entry is the **dated
+  type** only — the adapter derives the undated `name` the API requires beside it. **Live-verified
+  2026-07-28 on both providers** (`tests/test_live_tool_search.py`).
 - `orchestration.yaml.context_mgmt_*` — Anthropic provider-native **context editing** (the
   context-window pressure valve for long ReAct loops; read via `env.context_editing_config`).
-  `context_mgmt_enabled` (default **false** — a config lacking the key keeps the non-beta path)
+  `context_mgmt_enabled` (shipped **true** since 2026-07-28; the *code* default stays **false**, so
+  a config lacking the key keeps the non-beta path)
   routes the Anthropic adapter's `cache_prefix` calls through `client.beta.messages` with a
   `clear_tool_uses_20250919` `context_management` edit; `context_mgmt_trigger_tokens` (default
   120000) is the input-token watermark at which the oldest tool results are cleared server-side;
@@ -125,8 +128,8 @@ raise a "copy the `.example` / run install.sh" message when a live file is absen
   tool results stay verbatim. Two protocol strings — `context_mgmt_beta_header`
   (`context-management-2025-06-27`) and `context_mgmt_strategy` (`clear_tool_uses_20250919`) —
   default in code and are overridable here when Anthropic bumps the dated beta identifiers (kept
-  out of the sample config to stay clean). **NOT LIVE TESTED as of 2026-07-22** (beta path awaits
-  API credits — `tests/test_live_context_editing.py`). Anthropic-only.
+  out of the sample config to stay clean). **Live-verified 2026-07-28**
+  (`tests/test_live_context_editing.py`). Anthropic-only.
 - `orchestration.yaml.sandbox_call_timeout_s` — global default sandbox per-tool-call timeout
   (seconds, default 300): a tool call is SIGTERM-killed (exit 124) at this many seconds unless its
   package `<domain>_utils/tool_config.yaml` raises it per tool (`call_timeout_s`), which takes
@@ -272,3 +275,4 @@ raise a "copy the `.example` / run install.sh" message when a live file is absen
   `research_toolkit` tool defers; harness tools stay resident. Measured on `gpt-5.5` with the
   real 25-tool manifest: 19,004 → 2,382 resident tokens. **NOT LIVE TESTED** — run
   `tests/test_live_tool_search.py` before flipping it true.
+- 2026-07-28 — **`context_mgmt_enabled` and `tool_search_enabled` flipped `true`** in both `orchestration.yaml` and the tracked `orchestration.yaml.example`, after each feature's env-gated live test passed on 2026-07-28 (the Anthropic key that blocked them since 2026-07-27 was reinstated). Context editing passed unchanged; tool search needed a one-value fix to the Anthropic search-tool `name` first (see `models/DOCS.md`). The two protocol-string keys (`tool_search_anthropic_tool` / `tool_search_openai_tool`) still default in code and stay out of the sample config — note that `tool_search_anthropic_tool` carries the **dated** type and the adapter derives the undated `name` from it, so overriding it needs only the dated string.

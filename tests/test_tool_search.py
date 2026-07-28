@@ -6,10 +6,10 @@ provider's server-side search tool, which appends the definition inline in the c
 both adapters, the discovery-block round-trip through the neutral types, the tombstone guard,
 and the disabled-by-default path — all against mocked SDKs, no tokens spent.
 
-**NOT LIVE TESTED as of 2026-07-27.** The live round-trips (does the real endpoint accept the
-deferred/search shape, does the model actually search, do expanded definitions land inside the
-conversation cache breakpoint) run once provider usage is available — the Anthropic half is
-additionally blocked on a valid API key.
+The live round-trips are in ``tests/test_live_tool_search.py`` — **passed 2026-07-28 on both
+providers**: the real endpoints accept the deferred/search shape, the model does search, and an
+expanded definition does land inside the conversation cache breakpoint. That run also exposed a
+gap these tests had left open — the Anthropic search tool's ``name``, asserted here since.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import pytest
 from auto_research.env import ToolSearchConfig, tool_search_config
 from auto_research.models.providers._tool_search import (
     TOMBSTONE_DESCRIPTION,
+    anthropic_search_tool_name,
     missing_tool_names,
     referenced_tool_names,
 )
@@ -205,7 +206,17 @@ def test_anthropic_declares_search_tool_and_defers(monkeypatch):
     sent = _FakeAnthropic.store["request"]["tools"]
     assert sent[0]["defer_loading"] is True          # the registry tool
     assert "defer_loading" not in sent[1]            # the harness tool stays resident
-    assert [t for t in sent if t.get("type") == _ANTHROPIC_TOOL], "search tool declared"
+    search = [t for t in sent if t.get("type") == _ANTHROPIC_TOOL]
+    assert search, "search tool declared"
+    # The name must be the UNDATED identifier beside the dated type — a mismatch is a 400
+    # ("Input should be 'tool_search_tool_bm25'"), which is how the live check first failed.
+    assert search[0]["name"] == "tool_search_tool_bm25"
+
+
+def test_anthropic_search_tool_name_strips_the_dated_suffix():
+    assert anthropic_search_tool_name("tool_search_tool_bm25_20251119") == "tool_search_tool_bm25"
+    assert anthropic_search_tool_name("tool_search_tool_regex_20251119") == "tool_search_tool_regex"
+    assert anthropic_search_tool_name("tool_search_tool_bm25") == "tool_search_tool_bm25"
 
 
 def test_anthropic_cache_breakpoint_never_on_a_deferred_tool(monkeypatch):
