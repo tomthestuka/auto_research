@@ -316,6 +316,14 @@ provider-native **context editing** — clearing the oldest tool results server-
 request crosses a token watermark (`config/orchestration.yaml: context_mgmt_*`), a
 context-window pressure valve, not a cost lever. It is Anthropic-only and ships disabled
 (beta; **not live tested** as of 2026-07-22).
+As the authored toolkit grows, **tool search / lazy loading** keeps the resident surface small:
+with `config/orchestration.yaml: tool_search_enabled`, every `research_toolkit` tool is sent
+`defer_loading` and its schema stays out of context until the model discovers it through the
+provider's server-side search tool, which appends the definition in the conversation tail so
+the cached prefix survives (Anthropic BM25 tool search; OpenAI `tool_search` on gpt-5.4+;
+Google keeps every tool resident). Harness tools stay loaded. Measured on `gpt-5.5` with the
+real 25-tool manifest: 19,004 → 2,382 resident tokens. Ships disabled (**not live tested** as
+of 2026-07-27).
 There is no prompt-injected JSON schema and no salvage parsing: results are
 Pydantic-validated and fail loudly, with bounded `structured_retry_cap` retries. Runtime
 prompts carry role and scope only; tool names, arguments, and descriptions reach the model

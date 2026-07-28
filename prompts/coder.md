@@ -117,6 +117,21 @@ the tool does, every argument, defaults, and the gotchas a caller must know — 
 the manifest entry. Keep the two in step: a clear manifest for the model, a clear README for the
 human.
 
+**Split the manifest entry the way the template does** — mirror the existing `xspec_utils`
+entries you are given:
+
+- `description` is a **single keyword-dense line**: the mission/instrument, the quantity
+  produced, and whether it is a data tool or a plotter. This line is what a caller sees when
+  browsing every tool at once, and it is what a tool search matches on, so put the words someone
+  would search for in it.
+- `args_schema` carries **all the prose**: an object-level `"description"` for the
+  cross-argument contract (units, prerequisites, procedure, output paths, return shape, failure
+  modes — sectioned, as in the template), and each argument's own text on the property it
+  governs. This half is loaded when a caller actually reaches for the tool.
+
+Both halves reach the model, so nothing is lost by moving prose into the schema — and a tool
+whose one-line brief buries its subject in a paragraph is harder to find.
+
 ## Data catalog — record acquired/produced data via `obsdb_catalog`
 
 When your tool acquires or produces data for an ObsID (download, reduction, polarization

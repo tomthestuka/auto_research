@@ -104,6 +104,16 @@ raise a "copy the `.example` / run install.sh" message when a live file is absen
   whose repeated searches re-send a growing paper context.
 - `orchestration.yaml.structured_retry_cap` — bounded off-schema structured-output retry
   count.
+- `orchestration.yaml.tool_search_enabled` — provider-native **tool search / lazy tool loading**
+  (default **false** — a config lacking the key keeps every tool resident, byte-identical to
+  before; read via `env.tool_search_config`). When true, every `research_toolkit` tool is sent
+  with `defer_loading: true` and its schema stays out of the model's context until the model
+  discovers it through the provider's server-side search tool; harness tools stay resident.
+  Two protocol strings — `tool_search_anthropic_tool` (default
+  `tool_search_tool_bm25_20251119`) and `tool_search_openai_tool` (default `tool_search`) —
+  carry dated provider identifiers and are overridable without a code change; they default in
+  code and stay out of the sample config to keep it clean. **NOT LIVE TESTED (2026-07-27)** —
+  run `tests/test_live_tool_search.py` before flipping it true.
 - `orchestration.yaml.context_mgmt_*` — Anthropic provider-native **context editing** (the
   context-window pressure valve for long ReAct loops; read via `env.context_editing_config`).
   `context_mgmt_enabled` (default **false** — a config lacking the key keeps the non-beta path)
@@ -255,3 +265,10 @@ raise a "copy the `.example` / run install.sh" message when a live file is absen
   as of 2026-07-22** (blocked by an Anthropic credit-balance 400); run `tests/test_live_context_editing.py`
   and flip `context_mgmt_enabled: true` once credits return. Protocol strings `context_mgmt_beta_header`/
   `context_mgmt_strategy` default in code, overridable, kept out of the sample config.
+
+- 2026-07-27 — Added `tool_search_enabled` (default **false**) for provider-native tool search /
+  lazy tool loading, plus the overridable protocol strings `tool_search_anthropic_tool` /
+  `tool_search_openai_tool` (defaulted in code, kept out of the sample config). Every
+  `research_toolkit` tool defers; harness tools stay resident. Measured on `gpt-5.5` with the
+  real 25-tool manifest: 19,004 → 2,382 resident tokens. **NOT LIVE TESTED** — run
+  `tests/test_live_tool_search.py` before flipping it true.

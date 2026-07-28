@@ -34,6 +34,9 @@ context_mgmt_trigger_tokens: 120000        # clear oldest tool results once a re
 context_mgmt_clear_at_least_tokens: 20000  # clear at least this per pass (amortizes the cache-prefix invalidation)
 context_mgmt_keep_tool_uses: 3             # keep this many most-recent tool results verbatim
 
+# ── Tool search / lazy loading (provider-native; toolkit tools load on demand, harness tools stay resident) ──
+tool_search_enabled: false                 # NOT LIVE TESTED (2026-07-27) — flip true after the env-gated live tests pass
+
 # ── Sandbox / gate timeouts (seconds; a package may raise its own in <domain>_utils/tool_config.yaml, which wins — no upper clamp, trusted infra, never LLM-set) ──
 sandbox_call_timeout_s: 300   # per tool-call wall-clock; SIGTERM (exit 124) past this
 gate_test_timeout_s: 900      # per pytest invocation in the gate's Layer-B (run twice)

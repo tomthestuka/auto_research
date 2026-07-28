@@ -200,6 +200,64 @@ def context_editing_config() -> ContextEditingConfig:
     )
 
 
+class ToolSearchConfig(NamedTuple):
+    """Provider-native tool-search / deferred-tool-loading policy.
+
+    Toolkit tool definitions are withheld from the model's context until it discovers them
+    through the provider's server-side search tool, which appends the definition inline in
+    the conversation **tail** and so leaves the cached prefix intact. Harness tools stay
+    resident (at least one non-deferred tool is required by both providers).
+
+    Anthropic (``tool_search_tool_bm25_20251119``) hides a deferred tool entirely; OpenAI
+    (``tool_search``, gpt-5.4+) keeps its name and description resident and withholds only
+    the parameter schema. Google has no equivalent and keeps today's fully-loaded behaviour.
+
+    BM25 over embeddings is deliberate: the injected tool catalogue already gives the model
+    the exact tool name, so search runs as an exact-name lookup rather than the semantic
+    recall regime tool-retrieval benchmarks show models failing at.
+
+    **NOT LIVE TESTED as of 2026-07-27** — ships disabled; flip ``tool_search_enabled`` true
+    after the env-gated live tests pass on both providers.
+    """
+
+    enabled: bool
+    anthropic_tool: str
+    openai_tool: str
+
+
+_TOOL_SEARCH_DEFAULTS = ToolSearchConfig(
+    enabled=False,
+    anthropic_tool="tool_search_tool_bm25_20251119",
+    openai_tool="tool_search",
+)
+
+
+def tool_search_config() -> ToolSearchConfig:
+    """Tool-search policy from config/orchestration.yaml.
+
+    Keys: ``tool_search_enabled`` (default False — a config lacking the key keeps every tool
+    resident, byte-identical to before). The provider tool-type strings
+    ``tool_search_anthropic_tool`` / ``tool_search_openai_tool`` carry dated provider
+    identifiers and are overridable without a code change; they default in code and stay out
+    of the sample config to keep it clean. Missing/malformed values fall back per-field.
+    """
+    cfg = _orch_config()
+
+    def _read(key: str, fallback, cast):
+        try:
+            return cast(cfg.get(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+
+    return ToolSearchConfig(
+        enabled=bool(cfg.get("tool_search_enabled", _TOOL_SEARCH_DEFAULTS.enabled)),
+        anthropic_tool=_read(
+            "tool_search_anthropic_tool", _TOOL_SEARCH_DEFAULTS.anthropic_tool, str
+        ),
+        openai_tool=_read("tool_search_openai_tool", _TOOL_SEARCH_DEFAULTS.openai_tool, str),
+    )
+
+
 def sandbox_call_timeout_default() -> int:
     """Global default sandbox per-tool-call timeout (seconds) from config/orchestration.yaml.
 

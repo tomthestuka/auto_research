@@ -7,8 +7,12 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from auto_research.env import tool_search_config
 from auto_research.models.providers._json import loads_first_json_object
-
+from auto_research.models.providers._tool_search import (
+    TOMBSTONE_DESCRIPTION,
+    missing_tool_names,
+)
 from auto_research.models.types import (
     AssistantToolUse,
     ConversationMessage,
@@ -20,6 +24,30 @@ from auto_research.models.types import (
     ToolResultMessage,
 )
 from auto_research.schemas import DocumentRef, FigureRef
+
+
+_DISCOVERY_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
+"""Tool-search items that must be replayed verbatim, so tools loaded on an earlier turn stay
+callable later without re-searching."""
+
+
+def _item_to_dict(item: Any) -> dict[str, Any]:
+    """Best-effort plain-dict view of a Responses output item (for verbatim replay)."""
+    for attr in ("model_dump", "to_dict", "dict"):
+        dumper = getattr(item, attr, None)
+        if callable(dumper):
+            try:
+                return dict(dumper(mode="json") if attr == "model_dump" else dumper())
+            except TypeError:
+                try:
+                    return dict(dumper())
+                except Exception:  # noqa: BLE001 — fall through to the generic path
+                    pass
+            except Exception:  # noqa: BLE001
+                pass
+    if isinstance(item, dict):
+        return dict(item)
+    return {"type": getattr(item, "type", None)}
 
 
 class OpenAIProvider:
@@ -95,16 +123,42 @@ class OpenAIProvider:
             return _response(content=text, parsed=parsed, raw=response)
 
         if tools is not None:
-            function_tools = [
-                {
+            ts_cfg = tool_search_config()
+            function_tools = []
+            for tool in tools:
+                entry: dict[str, Any] = {
                     "type": "function",
                     "name": tool["name"],
                     "description": tool.get("description", ""),
                     "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
                     "strict": False,
                 }
-                for tool in tools
-            ]
+                # Deferred: OpenAI keeps the name+description resident and withholds only the
+                # parameter schema until the model discovers the tool, injecting it at the END
+                # of the context window so the cache is preserved. NOT LIVE TESTED (2026-07-27).
+                if ts_cfg.enabled and tool.get("defer_loading"):
+                    entry["defer_loading"] = True
+                function_tools.append(entry)
+            if ts_cfg.enabled:
+                # Tombstones for tools discovered earlier in this conversation that have since
+                # left the catalog (e.g. a failed authoring attempt + registry reload). Checked
+                # independently of whether any current tool is deferred — the vanished tool may
+                # have been the only deferred one, and its stale reference still needs resolving.
+                for gone in missing_tool_names(
+                    messages, [t["name"] for t in function_tools if "name" in t]
+                ):
+                    function_tools.append(
+                        {
+                            "type": "function",
+                            "name": gone,
+                            "description": TOMBSTONE_DESCRIPTION,
+                            "parameters": {"type": "object", "properties": {}},
+                            "strict": False,
+                            "defer_loading": True,
+                        }
+                    )
+                if any(t.get("defer_loading") for t in function_tools):
+                    function_tools.append({"type": ts_cfg.openai_tool})
             response = await client.responses.create(
                 model=config.model,
                 input=input_items,
@@ -114,8 +168,10 @@ class OpenAIProvider:
                 **config.parameters,
             )
             tool_calls = []
+            provider_blocks: list[dict[str, Any]] = []
             for item in getattr(response, "output", []) or []:
-                if getattr(item, "type", None) == "function_call":
+                itype = getattr(item, "type", None)
+                if itype == "function_call":
                     try:
                         args = json.loads(item.arguments) if item.arguments else {}
                     except (json.JSONDecodeError, TypeError):
@@ -123,8 +179,15 @@ class OpenAIProvider:
                     tool_calls.append(
                         ToolCall(id=getattr(item, "call_id", "") or "", name=item.name, arguments=args)
                     )
+                elif itype in _DISCOVERY_ITEM_TYPES:
+                    # Tool-search discovery items: replayed verbatim so the loaded tools stay
+                    # callable on later turns without re-searching.
+                    provider_blocks.append(_item_to_dict(item))
             return _response(
-                content=getattr(response, "output_text", ""), tool_calls=tool_calls, raw=response
+                content=getattr(response, "output_text", ""),
+                tool_calls=tool_calls,
+                provider_blocks=provider_blocks,
+                raw=response,
             )
 
         response = await client.responses.create(
@@ -162,6 +225,10 @@ def _to_openai_input(messages: Sequence[ConversationMessage]) -> list[dict]:
     items: list[dict] = []
     for message in messages:
         if isinstance(message, AssistantToolUse):
+            # Tool-search discovery items replay verbatim, before the calls they enabled.
+            items.extend(
+                b for b in message.provider_blocks if b.get("type") in _DISCOVERY_ITEM_TYPES
+            )
             for call in message.tool_calls:
                 items.append(
                     {
@@ -249,12 +316,15 @@ def _sanitize_strict(node: object) -> None:
             _sanitize_strict(item)
 
 
-def _response(*, content="", parsed=None, tool_calls=None, raw=None) -> ModelResponse:
+def _response(
+    *, content="", parsed=None, tool_calls=None, provider_blocks=None, raw=None
+) -> ModelResponse:
     return ModelResponse(
         content=content or "",
         parsed=parsed,
         tool_calls=tool_calls or [],
         usage=_openai_usage(getattr(raw, "usage", None)),
+        provider_blocks=provider_blocks or [],
         raw=raw,
     )
 

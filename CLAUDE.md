@@ -817,6 +817,23 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   multi-turn tool use is broken, [I8]). Figure interaction is a watch item — clearing old tool results
   drops their inline figures from the model's view, but the accumulated `figures` list still carries them
   to the report; `keep_tool_uses` + a high watermark keep the common case unaffected.
+- **Tool search / lazy tool loading is NOT LIVE TESTED and ships disabled.** With
+  `config: tool_search_enabled` every `research_toolkit` tool is sent `defer_loading: true` and its
+  schema stays out of the model's context until discovered through the provider's server-side search
+  tool (Anthropic `tool_search_tool_bm25_20251119`; OpenAI `tool_search`, gpt-5.4+; Google has none and
+  keeps every tool resident). Harness tools stay resident. Verified by deterministic tests and by
+  offline token measurement against the real manifest (**19,004 → 2,382 resident tokens on gpt-5.5**);
+  the live round-trip — does the model actually search, does the discovered definition land inside the
+  conversation cache breakpoint — awaits provider usage, and the **Anthropic half additionally needs a
+  valid API key** (401 as of 2026-07-27). Run `tests/test_live_tool_search.py` (env-gated), then flip
+  `tool_search_enabled: true`. Watch items: (a) **activation lives in the history** — a discovered tool
+  stays callable only while its `server_tool_use`/`tool_search_tool_result` blocks survive replay, so
+  any future context compactor must exclude them or a tool silently de-activates mid-run; (b) the
+  **tombstone** path (`providers/_tool_search.py`) scans discovery blocks for `tool_name` keys, so a
+  provider payload shape it does not recognise yields no tombstone — the pre-guard behaviour, never
+  worse; (c) **provider asymmetry** — Anthropic hides a deferred tool entirely (hence the tool catalogue
+  injected into the task instructions is what tells the model the tool exists at all), while OpenAI keeps
+  names+descriptions resident and withholds only the parameter schema.
 
 ---
 
@@ -1037,3 +1054,30 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   unblocks pending; Telegram+Slack only. Deterministic tests `tests/test_run_control.py` +
   `tests/test_hitl_commands.py` + connector tests in `tests/test_hitl.py`; suite green (552). **Live
   command behavior is observational — NOT LIVE TESTED.** Stage 4 (graceful cleanup) is the last piece.
+- 2026-07-27 — **Tool-context diet: manifest reshape + registry fix + provider-native tool search
+  (all three measured; tool search ships disabled, NOT LIVE TESTED).** Motivated by Phase 2's growing
+  tool pool (25 tools, 6 authored by run #12 alone) pushing past Anthropic's own thresholds for acting
+  (≥10 tools or >10k tokens of definitions) and toward the documented 30–50-tool selection-accuracy
+  cliff. Three compounding changes, each measured on `gpt-5.5` against the real manifest.
+  **(1) `research_toolkit` manifest convention** — every `TOOL_MANIFEST` entry's `description` is now a
+  one-line keyword-dense brief and the prose moved into `args_schema` (object-level `"description"` for
+  the cross-argument contract, per-argument text on the property it governs); 18 entries reshaped, 7
+  already brief-shaped. Motivated by a provider asymmetry found by probe: **OpenAI keeps a deferred
+  tool's name+description resident and withholds only the schema**, so deferral alone recovered just 32%.
+  The toolkit's manifest-wiring tests now assert over the whole manifest text (brief + schema + property
+  descriptions), a convention-agnostic form. **(2) `ToolkitRegistry.load()` no longer overwrites the
+  manifest description with the backing function's `__doc__`** — a Phase-1 convenience (`56e89f9`,
+  2026-06-01, before tool authoring existed) that Phase 2 inverted: it silently discarded the
+  coder-authored, co-lead-reviewed description for any import-clean tool, with the winner decided by the
+  tool's dependency footprint. `skills/TOOL_MANIFEST` is the ai-half, `lib/` docstrings the human-half
+  (§9.2). **(3) Provider-native tool search / lazy loading** (`config: tool_search_enabled`, ships
+  **false**) — registry tools deferred, harness tools resident; new `AssistantToolUse.provider_blocks` /
+  `ModelResponse.provider_blocks` carry discovery blocks through `_react` replay (**the same seam [I8]
+  needs for Gemini's `thought_signature`**); Anthropic's `cache_control` breakpoint moved off deferred
+  tools (a 400); new `providers/_tool_search.py` tombstones a reference whose tool left the catalog
+  (the failed-authoring-reset + `registry.reload()` case — an [F6]-class run-killer). Ownership:
+  the **provider** runs the search (BM25, GA both providers, zero infra — 2026 benchmarks favour BM25
+  over dense for agent retrieval, and tool retrieval is a documented IR weak spot), while **we** own the
+  archive (the manifest) and the menu (the injected tool catalogue), so search runs as an exact-name
+  lookup rather than semantic recall. Cumulative resident tool context: **18,999 → 2,382 tokens (−87%)**.
+  Suite 553 → 565 (+12 `tests/test_tool_search.py`); live stub `tests/test_live_tool_search.py`. See §13.

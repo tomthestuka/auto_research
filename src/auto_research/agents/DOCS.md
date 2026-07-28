@@ -46,7 +46,10 @@ report call, cache-stable — rather than only on iteration 0 via `images=`. (Th
 then produces the role's structured output grounded in the trajectory (both reuse
 `_structured_loop`, the shared off-schema-retry core). Tool surfaces live behind
 the `ToolProvider` protocol in `react.py`: `SandboxToolProvider` (analyst science
-tools in the `PersistentSandbox`), `ReadOnlyToolProvider` (reviewer/lead/co-lead — in-process
+tools in the `PersistentSandbox`; when `orchestration.yaml: tool_search_enabled` is set it marks
+every *registry* tool `defer_loading: true` so its schema loads on demand via the provider's
+tool search, while the harness tools it appends stay resident — see `models/DOCS.md`.
+**NOT LIVE TESTED as of 2026-07-27**, ships disabled), `ReadOnlyToolProvider` (reviewer/lead/co-lead — in-process
 `read_file`/`list_dir` confined to its `roots` (the permitted roots are named in each tool's
 description and echoed in the `path not permitted` error so the model self-corrects instead of
 guessing). `read_file` reads **by line range** (`offset`/`limit`, default `_DEFAULT_LINE_LIMIT`=1000
@@ -369,3 +372,4 @@ Role wrappers:
   has). Wired by `run_research` (every role keyed + given the shared `RunControl`). The steer/stop
   source is the `hitl.commands` slash-command channel over Telegram/Slack. Tests
   `tests/test_run_control.py`.
+- 2026-07-27 — **Deferred tool loading in `SandboxToolProvider`** (ships disabled). Under `orchestration.yaml: tool_search_enabled`, every registry tool is emitted with `defer_loading: true` — its schema stays out of the model's context until discovered through the provider's tool search — while harness tools (`ask_human`, `web_search`/`web_fetch`, report tools, and the builtin MCP file tools) stay resident, which also satisfies both providers' "≥1 non-deferred tool" rule. No per-tool exceptions: `data_catalog` defers like the rest. `AgentRole._react` now carries `response.provider_blocks` onto the `AssistantToolUse` it appends, so tool-search discoveries survive replay and a discovered tool stays callable (the API re-expands referenced definitions from history each turn). `prompts/analyst_worker.md` gained the search step. Measured on `gpt-5.5` with the real 25-tool manifest: 19,004 → 2,382 resident tokens. **NOT LIVE TESTED (2026-07-27)** — `tests/test_tool_search.py` covers it deterministically; `tests/test_live_tool_search.py` is the env-gated live stub.

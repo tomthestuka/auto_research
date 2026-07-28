@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from auto_research.env import tool_search_config
 from auto_research.observations import load_observations_config
 from auto_research.sandbox.fs_guard import GOVERNANCE_BASENAMES, PathGuard
 from auto_research.schemas import (
@@ -1185,7 +1186,19 @@ class SandboxToolProvider:
     def tool_definitions(self) -> list[dict]:
         # ``data_catalog`` (research_toolkit.catalog_utils) is one of the registry tools, so it
         # is already included and runs in the sandbox like any toolkit tool — no built-in add.
-        defs = list(self.registry.tool_definitions())
+        #
+        # Tool search (config ``tool_search_enabled``): every *registry* tool is marked
+        # ``defer_loading``, so its schema stays out of the model's context until the model
+        # discovers it through the provider's search tool; the harness tools appended below
+        # stay resident, which also satisfies both providers' "at least one non-deferred
+        # tool" requirement. No per-tool exceptions — deferring uniformly keeps the rule
+        # legible and costs at most one search turn at the start of a run. The adapters read
+        # the flag and drop it from the wire when the provider has no tool search.
+        defer = tool_search_config().enabled
+        defs = [
+            ({**d, "defer_loading": True} if defer else d)
+            for d in self.registry.tool_definitions()
+        ]
         if self.human_handler is not None:
             defs.append(ask_human_tool_def())
         if self.web_source is not None:

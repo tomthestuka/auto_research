@@ -92,6 +92,15 @@ class AssistantToolUse(BaseModel):
     role: Literal["assistant"] = "assistant"
     content: str = ""
     tool_calls: list[ToolCall] = Field(default_factory=list)
+    provider_blocks: list[dict[str, Any]] = Field(default_factory=list)
+    """Opaque provider-native blocks from this turn that MUST be replayed verbatim on every
+    later request. Today: tool-search discovery (Anthropic ``server_tool_use`` +
+    ``tool_search_tool_result``; OpenAI ``tool_search_call`` + ``tool_search_output``), where
+    the API re-expands the referenced tool definitions from the conversation history — so
+    dropping these silently de-activates a discovered tool mid-run. Each adapter replays its
+    own blocks positionally, after any assistant text and before the ``tool_use`` blocks, and
+    ignores blocks it does not recognise. Empty for every non-discovery turn, which keeps the
+    replay byte-identical to the pre-tool-search behaviour."""
 
 
 class ToolResultMessage(BaseModel):
@@ -126,6 +135,10 @@ class ModelResponse(BaseModel):
     editing ``applied_edits``: each a plain dict with e.g. ``cleared_tool_uses`` /
     ``cleared_input_tokens``); empty when none applied. Surfaced so the run monitor can
     record when stale tool context was cleared. **NOT LIVE TESTED (2026-07-22).**"""
+    provider_blocks: list[dict[str, Any]] = Field(default_factory=list)
+    """Opaque provider-native blocks this response produced that must be carried into the
+    next request — see ``AssistantToolUse.provider_blocks``. ``AgentRole._react`` copies
+    these onto the assistant turn it appends, so tool-search discoveries survive replay."""
     raw: Any = None
 
 

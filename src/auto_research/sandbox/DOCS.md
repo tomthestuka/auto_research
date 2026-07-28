@@ -738,3 +738,28 @@ the hook mapping a fake-model verdict — no live LLM).
   with the reshaped `research_toolkit` manifests: model-visible tool-block context drops a further
   ~1,400 tokens (4 tools were showing 1,678 tokens of docstring in place of 265 tokens of brief).
   New test `tests/test_registry.py::test_manifest_description_wins_over_function_docstring`.
+
+- **2026-07-27** — **Tool search / lazy tool loading (provider-native), shipping disabled.**
+  `SandboxToolProvider.tool_definitions()` now marks every *registry* tool `defer_loading: true`
+  when `config/orchestration.yaml: tool_search_enabled` is set; harness tools (`ask_human`,
+  `web_search`/`web_fetch`, `read_file`/`list_dir`/`bash_exec`, the report tools) stay resident,
+  which also satisfies both providers' "≥1 non-deferred tool" requirement. No per-tool
+  exceptions — `data_catalog` defers like the rest. The adapters declare the provider's
+  server-side search tool (Anthropic `tool_search_tool_bm25_20251119`, OpenAI `tool_search`,
+  gpt-5.4+; Google has no equivalent and keeps today's fully-loaded behaviour), and a discovered
+  tool's definition is appended inline in the conversation **tail**, so the cached prefix is
+  untouched and the tool stays callable for the rest of the conversation without re-searching.
+  Supporting pieces: `models/types.py` gains `AssistantToolUse.provider_blocks` /
+  `ModelResponse.provider_blocks` — an opaque per-provider block carried through `_react` replay,
+  since the API re-expands referenced definitions from history and dropping them would silently
+  de-activate a discovered tool (**the same seam [I8] needs for Gemini's `thought_signature`**);
+  the Anthropic `cache_control` breakpoint now lands on the last **non-deferred** tool (a deferred
+  tool carrying it is a 400); and `models/providers/_tool_search.py` adds the **tombstone** guard —
+  a tool referenced in history but missing from the catalog (the real failed-authoring-reset +
+  `registry.reload()` case) gets a stub definition instead of a 400, turning an [F6]-class
+  run-killer into an honest tool-level failure. Measured on `gpt-5.5` with the real 25-tool
+  manifest: **19,004 → 2,382 resident tokens (−87%)**. **NOT LIVE TESTED (2026-07-27)** — ships
+  `tool_search_enabled: false`; deterministic coverage in `tests/test_tool_search.py` (+12), live
+  round-trip stub in `tests/test_live_tool_search.py` (env-gated; the Anthropic half also needs a
+  valid API key). Prompts updated: `analyst_worker.md` teaches the search step,
+  `coder.md` states the one-line-brief / prose-in-`args_schema` split for new tools.

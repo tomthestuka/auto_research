@@ -6,7 +6,11 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from auto_research.env import context_editing_config
+from auto_research.env import context_editing_config, tool_search_config
+from auto_research.models.providers._tool_search import (
+    TOMBSTONE_DESCRIPTION,
+    missing_tool_names,
+)
 from auto_research.models.types import (
     AssistantToolUse,
     ConversationMessage,
@@ -18,6 +22,30 @@ from auto_research.models.types import (
     ToolResultMessage,
 )
 from auto_research.schemas import DocumentRef, FigureRef
+
+
+_DISCOVERY_BLOCK_TYPES = frozenset({"server_tool_use", "tool_search_tool_result"})
+"""Tool-search blocks the server produces and that must be replayed verbatim, so the API can
+re-expand the referenced tool definitions from the conversation history on every later turn."""
+
+
+def _block_to_dict(block: Any) -> dict[str, Any]:
+    """Best-effort plain-dict view of an SDK content block (for verbatim replay)."""
+    for attr in ("model_dump", "to_dict", "dict"):
+        dumper = getattr(block, attr, None)
+        if callable(dumper):
+            try:
+                return dict(dumper(mode="json") if attr == "model_dump" else dumper())
+            except TypeError:
+                try:
+                    return dict(dumper())
+                except Exception:  # noqa: BLE001 — fall through to the generic path
+                    pass
+            except Exception:  # noqa: BLE001
+                pass
+    if isinstance(block, dict):
+        return dict(block)
+    return {"type": getattr(block, "type", None)}
 
 
 class AnthropicProvider:
@@ -166,18 +194,49 @@ class AnthropicProvider:
         if system is not None:
             request["system"] = system_param
         if tools is not None:
-            tool_defs = [
-                {
+            ts_cfg = tool_search_config()
+            tool_defs = []
+            for tool in tools:
+                entry: dict[str, Any] = {
                     "name": tool["name"],
                     "description": tool.get("description", ""),
                     "input_schema": tool.get("input_schema", {"type": "object", "properties": {}}),
                 }
-                for tool in tools
-            ]
+                # Deferred tools stay out of the system-prompt prefix; Claude pulls one in
+                # via the search tool, which appends a ``tool_reference`` inline in the
+                # conversation, so the cached prefix is untouched. NOT LIVE TESTED (2026-07-27).
+                if ts_cfg.enabled and tool.get("defer_loading"):
+                    entry["defer_loading"] = True
+                tool_defs.append(entry)
+            if ts_cfg.enabled:
+                # Tombstones for tools this conversation already discovered that have since
+                # left the catalog — without them the API 400s on the dangling reference.
+                # Checked independently of whether any *current* tool is deferred: the
+                # vanished tool may have been the only deferred one (exactly the failed-
+                # authoring case), and the stale reference in history still needs resolving.
+                gone_names = missing_tool_names(
+                    messages, [t["name"] for t in tool_defs if "name" in t]
+                )
+                for gone in gone_names:
+                    tool_defs.append(
+                        {
+                            "name": gone,
+                            "description": TOMBSTONE_DESCRIPTION,
+                            "input_schema": {"type": "object", "properties": {}},
+                            "defer_loading": True,
+                        }
+                    )
+                if any(t.get("defer_loading") for t in tool_defs):
+                    # Anthropic requires ≥1 non-deferred tool; the harness tools are it.
+                    tool_defs.append({"type": ts_cfg.anthropic_tool, "name": "tool_search"})
             # When there is no system block to carry the breakpoint, cache the tool
-            # defs directly (they render first, so this caches the whole prefix).
+            # defs directly (they render first, so this caches the whole prefix). The
+            # breakpoint must land on a NON-deferred tool: a deferred tool carrying
+            # ``cache_control`` is a 400, since it is not part of the prefix being cached.
             if cache_prefix and system is None and tool_defs:
-                tool_defs[-1]["cache_control"] = {"type": "ephemeral"}
+                resident = [t for t in tool_defs if not t.get("defer_loading")]
+                if resident:
+                    resident[-1]["cache_control"] = {"type": "ephemeral"}
             request["tools"] = tool_defs
             request["tool_choice"] = {"type": "any"} if tool_choice == "required" else {"type": "auto"}
 
@@ -185,6 +244,7 @@ class AnthropicProvider:
 
         text_parts = []
         tool_calls: list[ToolCall] = []
+        provider_blocks: list[dict[str, Any]] = []
         for block in response.content:
             btype = getattr(block, "type", None)
             if btype == "text":
@@ -193,6 +253,13 @@ class AnthropicProvider:
                 tool_calls.append(
                     ToolCall(id=block.id, name=block.name, arguments=dict(block.input or {}))
                 )
+            elif btype in _DISCOVERY_BLOCK_TYPES:
+                # Tool-search discovery: the server ran the search and returned
+                # ``tool_reference``s. These must be replayed verbatim on every later
+                # request — the API re-expands the referenced definitions from history, so
+                # dropping them de-activates the discovered tool. Never answer the
+                # ``srvtoolu_…`` id with a tool_result; the API rejects that.
+                provider_blocks.append(_block_to_dict(block))
 
         usage = getattr(response, "usage", None)
         return ModelResponse(
@@ -200,6 +267,7 @@ class AnthropicProvider:
             tool_calls=tool_calls,
             usage=_anthropic_usage(usage),
             context_edits=_context_edits(response),
+            provider_blocks=provider_blocks,
             raw=response,
         )
 
@@ -281,6 +349,12 @@ def _to_anthropic_messages(
             blocks: list[dict] = []
             if message.content:
                 blocks.append({"type": "text", "text": message.content})
+            # Tool-search discovery blocks replay verbatim, positioned after the assistant
+            # text and before the tool_use blocks — the order the server produced them in.
+            blocks.extend(
+                b for b in message.provider_blocks
+                if b.get("type") in _DISCOVERY_BLOCK_TYPES
+            )
             for call in message.tool_calls:
                 blocks.append(
                     {"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments}

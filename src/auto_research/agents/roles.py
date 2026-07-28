@@ -358,7 +358,14 @@ class AgentRole:
             if not response.tool_calls:
                 break
             messages.append(
-                AssistantToolUse(content=response.content, tool_calls=response.tool_calls)
+                AssistantToolUse(
+                    content=response.content,
+                    tool_calls=response.tool_calls,
+                    # Carry provider-native discovery blocks (tool search) into the replay:
+                    # the API re-expands referenced tool definitions from history, so losing
+                    # them here would de-activate a discovered tool on the next iteration.
+                    provider_blocks=response.provider_blocks,
+                )
             )
             result_parts: list[ToolResultPart] = []
             for call in response.tool_calls:
