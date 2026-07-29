@@ -57,6 +57,11 @@ class MonitorEvent(BaseModel):
     summary: str = Field(min_length=1)
     actor: str | None = None
     data: dict[str, Any] = Field(default_factory=dict)
+    cost_usd_total: float | None = None
+    """The run's accumulated LLM spend at the moment this event was recorded, read from the
+    :class:`~auto_research.observability.costs.CostMeter` wired onto the monitor. ``None`` when no
+    meter is attached (a unit test, a monitor reconstructed from an older log), which also keeps
+    the rendered line byte-identical to the pre-cost format."""
 
 
 class RunMonitor:
@@ -69,11 +74,15 @@ class RunMonitor:
         run_id: str | None = None,
         jsonl_path: str | Path | None = None,
         stream: TextIO | None = None,
+        cost_meter: Any | None = None,
     ) -> None:
         self.chatter = validate_chatter(chatter)
         self.run_id = run_id or uuid4().hex
         self.jsonl_path = Path(jsonl_path).expanduser() if jsonl_path is not None else None
         self.stream = stream
+        # Duck-typed CostMeter (kept loose so `monitor` imports nothing from `observability`):
+        # anything exposing `.total_usd`. Set by `run_research`; see costs.CostMeter.
+        self.cost_meter = cost_meter
         self._events: list[MonitorEvent] = []
         self._sequence = 0
         self._lock = Lock()
@@ -103,6 +112,8 @@ class RunMonitor:
         Always streams to JSONL at full fidelity (level 1–10).
         Only stores in memory and returns the event when level <= chatter,
         so chatter controls terminal/notebook output without affecting the log.
+        Every event carries the run's accumulated spend (``cost_usd_total``) when a cost meter
+        is attached, so cost is readable on any line of the ledger without a second log.
         """
         validate_chatter(level)
         with self._lock:
@@ -116,6 +127,7 @@ class RunMonitor:
                 summary=summary,
                 actor=actor,
                 data=_jsonable_dict(data or {}),
+                cost_usd_total=self._cost_total(),
             )
             if self.jsonl_path is not None:
                 with self.jsonl_path.open("a", encoding="utf-8") as stream:
@@ -127,6 +139,18 @@ class RunMonitor:
             if self.stream is not None:
                 _write_stream_event(self.stream, monitor_event)
         return monitor_event
+
+    def _cost_total(self) -> float | None:
+        """Read the attached cost meter's running total (guarded — a meter fault never blocks a
+        recording, mirroring [J2]: observability must not decide whether real work proceeds)."""
+
+        meter = self.cost_meter
+        if meter is None:
+            return None
+        try:
+            return float(meter.total_usd)
+        except Exception:  # noqa: BLE001
+            return None
 
     def events_by_team(self) -> OrderedDict[str, list[MonitorEvent]]:
         """Return events grouped by team, in report order."""
@@ -152,8 +176,13 @@ class RunMonitor:
             "",
             f"- Chatter: {self.chatter}",
             f"- Events: {len(self.events)}",
-            "",
         ]
+        # Derived from the events themselves (not the live meter) so a monitor reconstructed from
+        # JSONL reports the same total as the run that wrote it.
+        spend = [event.cost_usd_total for event in self.events if event.cost_usd_total is not None]
+        if spend:
+            lines.append(f"- Accumulated cost: ${max(spend):.4f}")
+        lines.append("")
         if grouped:
             for team, events in self.events_by_team().items():
                 lines.extend([f"## {TEAM_LABELS.get(team, team.title())}", ""])
@@ -202,6 +231,7 @@ class RunMonitor:
         monitor._events = events
         monitor._sequence = len(events)
         monitor._lock = Lock()
+        monitor.cost_meter = None  # a replayed run's cost lives in the events, not a live meter
         return monitor
 
 
@@ -217,6 +247,11 @@ def _render_events(events: Sequence[MonitorEvent]) -> list[str]:
                 "",
                 f"- Time: {event.created_at.isoformat()}",
                 f"- Level: {event.level}",
+                *(
+                    [f"- Cost so far: ${event.cost_usd_total:.4f}"]
+                    if event.cost_usd_total is not None
+                    else []
+                ),
                 f"- Summary: {event.summary}",
                 "",
             ]
@@ -250,13 +285,22 @@ def _write_stream_event(stream: TextIO, event: MonitorEvent) -> None:
 
 
 def _format_stream_event(event: MonitorEvent) -> str:
+    # The end-of-run summary is a block, not a line: render it in full so a live terminal, a
+    # detached follower and a notebook cell all end on the same readable digest.
+    if event.event == "run.summary" and event.data:
+        from auto_research.monitor.summary import render_run_summary
+
+        return render_run_summary(event.data)
     timestamp = event.created_at.strftime("%H:%M:%S")
     subject = _stream_subject(event)
     actor = f" {event.actor}" if event.actor else ""
     detail = _stream_detail(event.data)
     suffix = f" | {detail}" if detail else ""
+    # Accumulated spend rides in a fixed column right after the sequence, so burn rate is
+    # eyeballable down the log without a second file to correlate.
+    cost = f" ${event.cost_usd_total:,.2f}" if event.cost_usd_total is not None else ""
     return (
-        f"[{timestamp}] #{event.sequence:04d} {subject} L{event.level} "
+        f"[{timestamp}] #{event.sequence:04d}{cost} {subject} L{event.level} "
         f"{event.event}{actor}: {event.summary}{suffix}\n"
     )
 

@@ -32,8 +32,9 @@ share the backend's process group and a bare ``kill <pid>`` orphans them (§12).
 needs a human, so it is gated separately behind ``AUTO_RESEARCH_B_RUN_HITL=1``.
 
 Everything B1/B5/C2/D2 needs is already written to disk by the run, so those are **post-hoc
-assertions over the artifacts** (``monitor.jsonl`` + the cost ledger) in :func:`test_b_run_evidence`,
-which can be re-run against a finished run without spending anything.
+assertions over the artifacts** — all in the run's ``monitor.jsonl``, which since 2026-07-29 carries
+the cost record too (``cost.call`` events + an accumulated total on every line) — in
+:func:`test_b_run_evidence`, which can be re-run against a finished run without spending anything.
 
 **Preconditions** (all fail loudly here rather than halfway through a paid run): a clean toolkit
 branch, a drift-free data catalog, and ``human_channel='telegram'`` reachable.
@@ -373,30 +374,28 @@ def test_b_run_evidence() -> None:
     # nonzero cache tokens. Zero here means the accounting is still unexercised, not that the
     # run was cheap.
     #
-    # Attribution is by TIME WINDOW, not run id: `cost_ledger.jsonl` is a single cumulative file
-    # across every run and `CostLedgerEntry` carries no `run_id` column, so the only way to isolate
-    # this run's rows is "written at or after its first monitor event". Both files stamp
-    # `created_at` as ISO-8601 Z, so the comparison is a plain string compare. Slightly
-    # over-inclusive if another run overlaps — do not run two at once while measuring B1.
-    from auto_research.observability.costs import cost_ledger_path
-
-    started_at = min(e["created_at"] for e in events if e.get("created_at"))
-    rows = [
-        json.loads(line)
-        for line in cost_ledger_path().read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    fresh = [r for r in rows if (r.get("created_at") or "") >= started_at]
+    # Attribution is exact, not a time window: cost now lives in THIS run's monitor JSONL as
+    # `cost.call` events (2026-07-29), so there is no cumulative cross-run file to slice by
+    # timestamp and no risk of catching a concurrent run's rows.
+    fresh = [e.get("data") or {} for e in events if e.get("event") == "cost.call"]
     cache_read = sum(r.get("cache_read_tokens", 0) or 0 for r in fresh)
     cache_write = sum(r.get("cache_write_tokens", 0) or 0 for r in fresh)
     reasoning = sum(r.get("reasoning_tokens", 0) or 0 for r in fresh)
+    coder_usd = sum(
+        r.get("total_cost_usd", 0) or 0 for r in fresh if r.get("price_source") == "claude_sdk"
+    )
     report["B1"] = {
         "rows": len(fresh), "cache_read": cache_read,
         "cache_write": cache_write, "reasoning": reasoning,
         "cost_usd": round(sum(r.get("total_cost_usd", 0) or 0 for r in fresh), 2),
+        "coder_sdk_usd": round(coder_usd, 2),
+        # Every event carries the running total, so the last line's stamp is the run's spend.
+        "accumulated_usd": round(
+            max((e.get("cost_usd_total") or 0.0) for e in events), 2
+        ),
     }
     if not fresh:
-        failures.append(f"B1: no cost-ledger rows at/after this run's first event ({started_at})")
+        failures.append("B1: no cost.call events in this run's monitor ledger")
     elif cache_read == 0:
         failures.append(
             f"B1: {len(fresh)} rows, all with cache_read_tokens=0 — the [I5] cache accounting is "

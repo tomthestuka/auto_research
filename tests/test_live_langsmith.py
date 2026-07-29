@@ -1,7 +1,11 @@
-"""Opt-in live LangSmith + cost-ledger check.
+"""Opt-in live LangSmith + cost-recording check.
 
 Run with:
     AUTO_RESEARCH_LIVE_LANGSMITH_TESTS=1 pytest tests/test_live_langsmith.py -s
+
+Cost is recorded into a run's monitor ledger as ``cost.call`` events, so this test installs a
+:class:`~auto_research.observability.costs.CostMeter` over a throwaway monitor — the same wiring
+``run_research`` does — and asserts the events it produced.
 """
 
 import asyncio
@@ -12,7 +16,8 @@ import pytest
 from dotenv import load_dotenv
 
 from auto_research.models import ModelMessage, load_registry
-from auto_research.observability import cost_ledger_path
+from auto_research.monitor import RunMonitor
+from auto_research.observability import install_cost_meter
 from tests.dev_logs import dev_log_path
 
 
@@ -39,13 +44,14 @@ def _unique_handles():
             yield handle
 
 
-def test_live_langsmith_traces_and_cost_ledger(tmp_path, monkeypatch):
+def test_live_langsmith_traces_and_cost_records(tmp_path, monkeypatch):
     load_dotenv()
     monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path))
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
     assert os.getenv("LANGCHAIN_API_KEY"), "LANGCHAIN_API_KEY is required for live LangSmith tracing"
     response_log_path = dev_log_path("step-3", "live_langsmith_responses", ".jsonl")
-    cost_log_path = dev_log_path("step-3", "live_langsmith_cost_ledger", ".jsonl")
+    cost_log_path = dev_log_path("step-3", "live_langsmith_cost_records", ".jsonl")
+    monitor = RunMonitor(chatter=10, jsonl_path=tmp_path / "monitor.jsonl")
 
     prompt = [
         ModelMessage(
@@ -56,6 +62,8 @@ def test_live_langsmith_traces_and_cost_ledger(tmp_path, monkeypatch):
 
     async def run_all():
         failures = []
+        meter = install_cost_meter(run_id="live-langsmith", monitor=monitor)
+        monitor.cost_meter = meter
         for handle in _unique_handles():
             label = f"{handle.role}/{handle.config.name}:{handle.config.model}"
             print(f"poem {label}", flush=True)
@@ -90,11 +98,12 @@ def test_live_langsmith_traces_and_cost_ledger(tmp_path, monkeypatch):
     assert not failures, "\n".join(f"{label} failed with {error}" for label, error in failures)
 
     rows = [
-        json.loads(line)
-        for line in cost_ledger_path(tmp_path).read_text(encoding="utf-8").splitlines()
+        json.loads(line)["data"]
+        for line in (tmp_path / "monitor.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line)["event"] == "cost.call"
     ]
     assert rows
-    print("cost ledger rows:", flush=True)
+    print("cost.call rows:", flush=True)
     with cost_log_path.open("w", encoding="utf-8") as stream:
         for row in rows:
             stream.write(json.dumps(row, sort_keys=True))

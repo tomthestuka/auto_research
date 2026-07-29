@@ -1,22 +1,24 @@
-"""LangSmith tracing + per-call cost logging."""
+"""LangSmith tracing + per-call cost accounting (recorded in the run's monitor ledger)."""
 
 from auto_research.observability.costs import (
-    CostLedgerEntry,
+    CallCost,
+    CostMeter,
     TokenRates,
-    append_cost_entry,
-    cost_entry_for,
-    cost_ledger_path,
+    cost_for_call,
+    current_cost_meter,
+    install_cost_meter,
     runtime_data_dir,
     token_rates_for,
 )
 from auto_research.observability.tracing import traced_model_call
 
 __all__ = [
-    "CostLedgerEntry",
+    "CallCost",
+    "CostMeter",
     "TokenRates",
-    "append_cost_entry",
-    "cost_entry_for",
-    "cost_ledger_path",
+    "cost_for_call",
+    "current_cost_meter",
+    "install_cost_meter",
     "runtime_data_dir",
     "token_rates_for",
     "traced_model_call",

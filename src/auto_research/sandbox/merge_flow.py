@@ -754,12 +754,46 @@ def _default_sdk_client_factory(options):
     return ClaudeSDKClient(options=options)
 
 
-async def _drive_author(client: Any, message: str, *, monitor: Any | None = None) -> str:
+async def _record_coder_cost(result_message: Any, coder_model: str) -> float | None:
+    """Feed one coder turn's spend to the run's cost meter; return the turn's delta in USD.
+
+    ``ResultMessage.total_cost_usd`` is **session-cumulative** (verified against real runs: it grows
+    monotonically across a session's turns), so the meter converts it to a per-turn delta keyed by
+    ``session_id``. Returns ``None`` when the SDK reported no cost or no meter is installed.
+    """
+
+    from auto_research.observability import current_cost_meter
+
+    cumulative = getattr(result_message, "total_cost_usd", None)
+    meter = current_cost_meter()
+    if cumulative is None or meter is None:
+        return None
+    try:
+        return await meter.record_session_total(
+            role="coder",
+            member="claude_sdk",
+            provider="anthropic",
+            model=coder_model or "claude_sdk",
+            session_id=str(getattr(result_message, "session_id", "") or "coder"),
+            cumulative_usd=float(cumulative),
+        )
+    except Exception:  # noqa: BLE001 — cost accounting never breaks an authoring turn
+        return None
+
+
+async def _drive_author(
+    client: Any, message: str, *, monitor: Any | None = None, coder_model: str = ""
+) -> str:
     """Send one turn to the warm author session and drain its response (L0 runs inside).
 
     When a ``monitor`` is wired, each streamed block is mirrored to the run's JSONL so the
     otherwise-opaque SDK author session is legible: tool calls (file edits, bash, ask_*),
     tool results, narration, and the per-turn end summary. Logging never breaks the drain.
+
+    The turn-end result also carries the SDK session's **cumulative** dollar cost, which is fed to
+    the run's cost meter as a delta — the coder is a separate process making its own API calls, so
+    this is the only path by which its spend (historically the largest unaccounted line) reaches
+    the run's cost record.
     """
     from claude_agent_sdk import (
         AssistantMessage,
@@ -800,11 +834,13 @@ async def _drive_author(client: Any, message: str, *, monitor: Any | None = None
                         data={"is_error": bool(block.is_error), "text": _cap_text(text)},
                     )
         elif isinstance(msg, ResultMessage):
+            turn_usd = await _record_coder_cost(msg, coder_model)
             await _emit(
                 monitor, "coder.turn_end", level=5,
                 summary=f"coder turn ended ({msg.num_turns} turns)",
                 data={"num_turns": msg.num_turns, "stop_reason": getattr(msg, "stop_reason", None),
                       "cost_usd": getattr(msg, "total_cost_usd", None),
+                      "cost_usd_turn": turn_usd,
                       "is_error": bool(getattr(msg, "is_error", False))},
             )
     return "\n".join(chunks)
@@ -887,6 +923,7 @@ class AuthoringSession:
         submit_cap: int = 5,
         debate_cap: int = 3,
         monitor: Any | None = None,
+        coder_model: str = "",
     ) -> None:
         self.tool_spec = tool_spec
         self.worktree = worktree
@@ -912,6 +949,7 @@ class AuthoringSession:
         self._toolkit_root = toolkit_root
         self._worktree_base = worktree_base
         self._monitor = monitor
+        self._coder_model = coder_model  # attributes the SDK session's own spend on the cost meter
 
     @property
     def initial_message(self) -> str:
@@ -929,7 +967,9 @@ class AuthoringSession:
 
     async def drive(self, message: str) -> str:
         """Send one instruction to the warm coder session and drain its response (L0 inside)."""
-        return await _drive_author(self._client, message, monitor=self._monitor)
+        return await _drive_author(
+            self._client, message, monitor=self._monitor, coder_model=self._coder_model
+        )
 
     async def run_gate_step(self) -> GateReport:
         """Run the deterministic gate over the current tree (§9.4). First applies the §9.9
@@ -998,8 +1038,8 @@ class AuthoringSession:
         await _emit(
             self._monitor, "commit", level=3,
             summary=f"committed {self.tool_spec.proposed_tool_name} → {commit_sha[:10]}",
-            data={"commit_sha": commit_sha, "branch": self.branch,
-                  "message": _cap_text(message, 200)},
+            data={"tool": self.tool_spec.proposed_tool_name, "commit_sha": commit_sha,
+                  "branch": self.branch, "message": _cap_text(message, 200)},
         )
         return commit_sha
 
@@ -1106,6 +1146,7 @@ def build_authoring_session(
         structure_context=structure_context, run_gate=run_gate, run_review=run_review,
         approve_edit=approve_edit, direct_branch=direct_branch, toolkit_root=toolkit_root,
         worktree_base=worktree_base, submit_cap=submit_cap, debate_cap=debate_cap, monitor=monitor,
+        coder_model=coder_model,
     )
 
 

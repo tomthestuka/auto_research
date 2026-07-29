@@ -138,13 +138,20 @@ def jsonable(value: Any) -> Any:
 
 
 def _partial(run_directory: Path) -> tuple[str, Path | None]:
-    """Reconstruct the monitor markdown so far (for a RunDied), plus the backend log path."""
+    """Reconstruct the monitor markdown so far (for a RunDied), plus the backend log path.
+
+    The end-of-run digest leads it: a run that was hard-killed never recorded a ``run.summary``
+    event, so it is derived here from the JSONL — a died run still reports what it spent and how
+    far it got, on the same block a finished run ends with."""
     jsonl = run_directory / _MONITOR_JSONL
     log = run_directory / _BACKEND_LOG
     log_path = log if log.exists() else None
     if jsonl.exists():
         try:
-            return RunMonitor.from_jsonl(jsonl).render_markdown(grouped=True), log_path
+            from auto_research.monitor.summary import render_run_summary, summarize_jsonl
+
+            digest = f"```\n{render_run_summary(summarize_jsonl(jsonl))}```\n\n"
+            return digest + RunMonitor.from_jsonl(jsonl).render_markdown(grouped=True), log_path
         except Exception:  # noqa: BLE001 — a partial/corrupt ledger must not mask the death
             pass
     return "", log_path

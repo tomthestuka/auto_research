@@ -13,11 +13,23 @@ and `usage.py` (cumulative spend rollup CLI).
   metadata, and after the call attaches `usage_metadata` (LangSmith-standard token shape, incl.
   cache/reasoning) plus our computed `cost_usd`/breakdown to the run — so the LangSmith dashboard
   shows spend even for models its own price map doesn't know ([I5]). Attachment is best-effort and
-  never fatal. When tracing is off, it runs the provider call directly. Either way it appends one
-  cost-ledger row.
-- `costs.py` — turns normalized provider `ModelUsage` into a JSONL cost ledger row. The ledger
-  accretes across **all** runs at `<runtime_dir>/cost_ledger.jsonl` (runtime dir set in
-  `config/orchestration.yaml::runtime_dir`; defaults to `~/.auto_research`).
+  never fatal. When tracing is off, it runs the provider call directly. Either way it records the
+  call's cost on the run's cost meter.
+- `costs.py` — prices normalized provider `ModelUsage` into a `CallCost` and accumulates it on a
+  run-scoped `CostMeter`, which records **one `cost.call` monitor event per call** and stamps its
+  running total on every monitor event (`cost_usd_total`). **The monitor JSONL is the only cost
+  record** ([J1]): recording and replay read the same file, so per-run attribution is intrinsic and
+  two logs cannot drift. The pre-2026-07-29 `<runtime_dir>/cost_ledger.jsonl` — a single run-blind
+  cumulative file — is gone.
+  The meter is found through a `ContextVar` (`install_cost_meter` / `current_cost_meter`) because
+  the cost chokepoint sits far below any run object; tasks spawned after installation share the
+  same meter. A call with **no** meter installed (a probe script, an isolated live test) runs
+  unchanged and is simply not accumulated.
+- **The coder's Agent-SDK spend is included.** The tool-authoring coder is a separate process making
+  its own API calls, so it never passes through `ModelHandle.call`; its `ResultMessage` reports a
+  *session-cumulative* dollar figure, which `CostMeter.record_session_total` folds in as a per-turn
+  delta (`price_source="claude_sdk"`, no token attribution of ours). Before this it was invisible to
+  every total — historically the largest unaccounted line (~$9 in one observed session).
 - **Pricing is litellm-first, config-fallback** ([I5]): `token_rates_for` looks a model up in
   litellm's community-maintained `model_cost` map (lazy-imported once, cached; correct per-model
   input/output/cache-read/cache-creation rates) and falls back to the member's `priceMTk` config
@@ -25,24 +37,32 @@ and `usage.py` (cumulative spend rollup CLI).
   On the config path `cache_read`/`cache_write` rates are optional `priceMTk` keys defaulting to
   0.1x / 1.25x the input rate. Each row records which table priced it (`price_source`). Missing
   rates → 0 (tokens still recorded).
-- `usage.py` — reads the cumulative ledger and reports total + by provider/model/role/day, with an
-  optional `--since` cutoff. Answers "how much have I burnt" without a provider admin panel; it is
-  an **estimate vs. list prices** (cannot reconcile to a negotiated bill, which needs an admin key).
+- `usage.py` — rolls up `cost.call` events across monitor ledgers (`<runtime_dir>/runs/*/monitor.jsonl`
+  plus `<runtime_dir>/monitors/*.jsonl` by default) and reports total + by provider/model/role/day,
+  optionally by run, with an optional `--since` cutoff. Rows are de-duplicated on
+  `(run_id, sequence)` so a ledger copied to `logs/dev` is never counted twice. Answers "how much
+  have I burnt" without a provider admin panel; it is an **estimate vs. list prices** (cannot
+  reconcile to a negotiated bill, which needs an admin key).
+- `plot_run.py` — the cost pie reads the run's recorded `cost.call` events when present (true
+  member/model/cost, coder sessions included) and falls back to its pair-matched token estimate for
+  logs written before cost events existed.
 
 ## Interfaces / Contracts
-- Every `ModelHandle.call()` records one ledger row after the provider returns.
+- Every `ModelHandle.call()` records its cost on the current run's meter after the provider returns
+  (no meter installed → no cost record, the call is unaffected).
 - LangSmith tracing is opt-in via environment (`LANGCHAIN_TRACING_V2=true`) so
   offline tests and local calls do not block on tracing network behavior.
-- Cost ledger rows are append-only JSONL and contain no prompt or response text. They include role,
-  member, provider, model, the five token classes, per-class + total dollar cost, and `price_source`.
-- Spend rollup: `python -m auto_research.observability.usage [--since YYYY-MM-DD] [--ledger PATH]
-  [--top N]` — total, by provider/model/role/day; sums each row's stored `total_cost_usd` (so it is
-  correct regardless of whether litellm is installed at rollup time).
+- `cost.call` event payloads contain no prompt or response text. They include role, member,
+  provider, model, the five token classes, per-class + total dollar cost, and `price_source`.
+- Spend rollup: `python -m auto_research.observability.usage [--since YYYY-MM-DD] [--jsonl PATH]
+  [--ledger-dir DIR] [--runs] [--top N]` — total, by provider/model/role/day (+ by run with
+  `--runs`); sums each event's stored `total_cost_usd` (so it is correct regardless of whether
+  litellm is installed at rollup time).
 - Live LangSmith verification is opt-in:
   `AUTO_RESEARCH_LIVE_LANGSMITH_TESTS=1 pytest tests/test_live_langsmith.py -s`.
   It sends a short poem prompt to each unique configured model call, creates
-  LangSmith traces, prints the local cost ledger rows, and writes timestamped
-  response/cost logs under `logs/dev/step-3/`.
+  LangSmith traces, installs a meter over a throwaway monitor, prints the `cost.call` rows it
+  produced, and writes timestamped response/cost logs under `logs/dev/step-3/`.
 - Runtime LLM agents must not read this `DOCS.md`; this module only records
   runtime metadata emitted by provider calls.
 
@@ -55,19 +75,27 @@ and `usage.py` (cumulative spend rollup CLI).
 - `TokenRates(input, output, cache_read, cache_write: float, source: str)` — resolved per-token USD
   rates for one model; `source` is `"litellm"` or `"config"`.
 - `token_rates_for(config: RoleModelConfig) -> TokenRates` — litellm map first, `priceMTk` fallback.
-- `CostLedgerEntry(created_at, role, member, provider, model, input_tokens, output_tokens,
-  cache_read_tokens=0, cache_write_tokens=0, reasoning_tokens=0, input_cost_usd, output_cost_usd,
-  cache_read_cost_usd=0, cache_write_cost_usd=0, total_cost_usd, price_source="config")` — one
-  serialized ledger row. New fields default so pre-[I5] rows still validate.
+- `CallCost(role, member, provider, model, input_tokens=0, output_tokens=0, cache_read_tokens=0,
+  cache_write_tokens=0, reasoning_tokens=0, input_cost_usd=0, output_cost_usd=0,
+  cache_read_cost_usd=0, cache_write_cost_usd=0, total_cost_usd=0, price_source="config")` — one
+  priced call; the payload of a `cost.call` monitor event. Every field defaults, so a payload from
+  another build still validates. `price_source` is `litellm` | `config` | `claude_sdk`.
 - `runtime_data_dir() -> Path` — re-exported from `auto_research.env`.
-- `cost_ledger_path(data_dir=None) -> Path` — the ledger file path.
-- `cost_entry_for(role, config, usage) -> CostLedgerEntry` — prices each non-overlapping token class
-  via `token_rates_for`; `reasoning_tokens` carries no separate charge.
-- `append_cost_entry(entry, path=None) -> Path` — appends one JSONL row.
+- `cost_for_call(role, config, usage) -> CallCost` — prices each non-overlapping token class via
+  `token_rates_for`; `reasoning_tokens` carries no separate charge.
+- `CostMeter(run_id="", monitor=None)` — run-scoped accumulator. `.total_usd` / `.calls` /
+  `.snapshot()` read the running state; `await .record_call(role, config, usage) -> CallCost` prices
+  and records one provider call; `await .record_session_total(role, member, provider, model,
+  session_id, cumulative_usd) -> float` folds an externally-priced session's cumulative figure in as
+  a delta (the coder's Agent SDK) and returns it. Recording is best-effort — a monitor fault never
+  breaks a model call ([J2]).
+- `install_cost_meter(run_id="", monitor=None) -> CostMeter` / `current_cost_meter() -> CostMeter |
+  None` — install the meter for this run / read the installed one.
 - `traced_model_call(role, config, provider_call) -> ModelResponse` — optional LangSmith tracing
-  (with usage/cost annotation) + mandatory cost-ledger logging.
-- `usage.load_entries(path, since=None)` / `usage.render_report(entries, since, top)` — rollup
-  helpers behind the `python -m auto_research.observability.usage` CLI.
+  (with usage/cost annotation) + cost recording on the run's meter.
+- `usage.default_sources(data_dir=None)` / `usage.load_cost_records(paths, since=None)` /
+  `usage.render_report(rows, since, top, by_run=False)` — rollup helpers behind the
+  `python -m auto_research.observability.usage` CLI.
 
 ## Changelog
 - 2026-05-26 -> 2026-06-12 — LangSmith tracing, JSONL cost ledger, config-priced per-call costing,
@@ -80,3 +108,4 @@ and `usage.py` (cumulative spend rollup CLI).
   rollup CLI (total / by provider·model·role·day / `--since`); `plot_run.py` prices via the same
   path (cache/reasoning-aware). Fixes the under-count where cached ReAct input was uncounted. Tests
   in `tests/test_observability.py`. `litellm>=1.93` added to `environment.yml` (conda-forge).
+- 2026-07-29 — **Cost moved into the monitor ledger; the separate cost ledger deleted; the coder's SDK spend included.** `CostLedgerEntry`/`cost_entry_for`/`append_cost_entry`/`cost_ledger_path` are replaced by `CallCost`/`cost_for_call` plus a run-scoped `CostMeter` (installed by `run_research`, found via a `ContextVar`) that records one level-10 `cost.call` event per call and stamps the running total on **every** monitor event. `<runtime_dir>/cost_ledger.jsonl` is no longer written at all: it was a second, run-blind log whose rows under-counted, and everything derived from it is answerable from the event stream (the monitor JSONL is a run's single source of truth, [J1]). The tool-authoring coder's Agent-SDK spend now lands in the same stream via `record_session_total`, which converts its session-cumulative `total_cost_usd` into per-turn deltas — previously it reached no total anywhere. `usage.py` rolls up over monitor ledgers (`load_cost_records`, de-duplicated on `(run_id, sequence)`, `--jsonl`/`--ledger-dir`/`--runs` flags); `plot_run.py`'s pie prefers recorded cost and no longer drops non-analyst teams from a chart claiming a total. Tests: `tests/test_observability.py` (+4).

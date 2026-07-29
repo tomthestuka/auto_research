@@ -40,7 +40,9 @@ the run, and prints the final `ReviewVerdict`.
 - `main(argv=None) -> int` — CLI entry. Parses args (incl. `--human`), runs one monitored
   request via `run_research(human_channel=args.human)` — which owns the async launch preflight
   (env + decorrelation + channel ping; crashes with a clear aggregated message on any failure)
-  — with live stderr progress, writes monitor artifacts, and prints the final verdict.
+  — with live stderr progress, writes monitor artifacts, and prints the end-of-run summary block
+  (`ResearchRun.summary()`: cost, wall clock, tools authored, report paths) followed by the final
+  verdict fields.
 - `auto_research.__main__` — module entry point for `python -m auto_research`.
 
 ## Changelog
@@ -51,3 +53,6 @@ the run, and prints the final `ReviewVerdict`.
   (concise live stderr progress; JSON stdout preserved for `--format json`) and shares dotenv via
   `check_required_env()`; the launch checklist moved into the now-async preflight owned by
   `run_research`; added `--human {auto,cli,none,slack,whatsapp}` → `run_research(human_channel=…)`.
+- 2026-07-29 — `--format text` now leads with the derived end-of-run summary block
+  (`ResearchRun.summary()`), so a CLI run ends on the same digest as a live/detached one; the
+  verdict fields and artifact paths below it are unchanged. `--format json` is untouched.

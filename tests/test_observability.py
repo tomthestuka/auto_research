@@ -10,9 +10,10 @@ from auto_research.models.providers.anthropic import _anthropic_usage
 from auto_research.models.providers.google import _gemini_usage
 from auto_research.models.providers.openai import _openai_usage
 from auto_research.models.types import RoleModelConfig
-from auto_research.observability import cost_entry_for, cost_ledger_path, token_rates_for
-from auto_research.observability.costs import CostLedgerEntry
-from auto_research.observability.usage import _parse_since, load_entries, render_report
+from auto_research.monitor import RunMonitor
+from auto_research.observability import cost_for_call, install_cost_meter, token_rates_for
+from auto_research.observability.costs import CallCost, CostMeter
+from auto_research.observability.usage import _parse_since, load_cost_records, render_report
 
 
 def test_cost_entry_uses_configured_token_rates():
@@ -23,7 +24,7 @@ def test_cost_entry_uses_configured_token_rates():
         priceMTk={"input": 2.0, "output": 8.0},
     )
 
-    entry = cost_entry_for(
+    entry = cost_for_call(
         "reviewer",
         config,
         ModelUsage(input_tokens=1_000_000, output_tokens=500_000),
@@ -42,10 +43,8 @@ class FakeProvider:
         )
 
 
-def test_model_handle_appends_cost_ledger_row(tmp_path, monkeypatch):
-    monkeypatch.setattr("auto_research.observability.costs.runtime_data_dir", lambda: tmp_path)
-    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
-    handle = ModelHandle(
+def _metered_handle(monitor: RunMonitor) -> ModelHandle:
+    return ModelHandle(
         role="analyst_worker",
         config=RoleModelConfig(
             name="fake",
@@ -56,20 +55,69 @@ def test_model_handle_appends_cost_ledger_row(tmp_path, monkeypatch):
         provider=FakeProvider(),
     )
 
-    response = asyncio.run(handle.call([{"role": "user", "content": "hello"}]))
+
+def test_model_call_records_cost_event_in_the_monitor_ledger(tmp_path, monkeypatch):
+    """A priced call lands as one `cost.call` event — the monitor JSONL is the only cost record."""
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
+    monitor = RunMonitor(chatter=10, jsonl_path=tmp_path / "monitor.jsonl")
+
+    async def _run() -> ModelResponse:
+        meter = install_cost_meter(run_id="r1", monitor=monitor)
+        monitor.cost_meter = meter
+        return await _metered_handle(monitor).call([{"role": "user", "content": "hello"}])
+
+    response = asyncio.run(_run())
 
     assert response.content == "done"
-    ledger_path = cost_ledger_path()
-    rows = ledger_path.read_text(encoding="utf-8").splitlines()
-    assert len(rows) == 1
-    row = json.loads(rows[0])
-    assert row["role"] == "analyst_worker"
-    assert row["member"] == "fake"
-    assert row["provider"] == "anthropic"
-    assert row["model"] == "fake-model"
-    assert row["input_tokens"] == 100
-    assert row["output_tokens"] == 25
-    assert row["total_cost_usd"] == 0.000675
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "monitor.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    cost_events = [row for row in rows if row["event"] == "cost.call"]
+    assert len(cost_events) == 1
+    data = cost_events[0]["data"]
+    assert (data["role"], data["member"], data["provider"], data["model"]) == (
+        "analyst_worker", "fake", "anthropic", "fake-model"
+    )
+    assert (data["input_tokens"], data["output_tokens"]) == (100, 25)
+    assert data["total_cost_usd"] == 0.000675
+    # The accumulated total rides on the event itself (and on every event after it).
+    assert cost_events[0]["cost_usd_total"] == 0.000675
+
+
+def test_unmetered_call_runs_without_recording_cost(monkeypatch):
+    """Outside a metered run (a probe, an isolated test) a call still works, unaccumulated."""
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
+    monkeypatch.setattr("auto_research.observability.tracing.current_cost_meter", lambda: None)
+    response = asyncio.run(
+        _metered_handle(RunMonitor(chatter=10)).call([{"role": "user", "content": "hi"}])
+    )
+    assert response.content == "done"
+
+
+def test_meter_folds_coder_sdk_session_totals_as_deltas():
+    """The coder's Agent SDK reports a session-CUMULATIVE cost; the meter must add only deltas."""
+    monitor = RunMonitor(chatter=10)
+    meter = CostMeter(run_id="r1", monitor=monitor)
+    monitor.cost_meter = meter
+
+    async def _run() -> list[float]:
+        return [
+            await meter.record_session_total(
+                role="coder", member="claude_sdk", provider="anthropic", model="sonnet",
+                session_id="s1", cumulative_usd=value,
+            )
+            for value in (4.0, 6.5, 6.5, 9.25)
+        ]
+
+    deltas = asyncio.run(_run())
+
+    assert deltas == [4.0, 2.5, 0.0, 2.75]
+    assert meter.total_usd == 9.25
+    events = [e for e in monitor.events if e.event == "cost.call"]
+    assert [e.data["price_source"] for e in events] == ["claude_sdk"] * 4
+    assert events[-1].cost_usd_total == 9.25
 
 
 # --- [I5] cache/reasoning pricing (config-fallback path, litellm map forced empty) ---
@@ -81,7 +129,7 @@ def test_config_fallback_prices_all_token_classes(monkeypatch):
         name="c", provider="anthropic", model="unknown-x",
         priceMTk={"input": 10.0, "output": 20.0},
     )
-    entry = cost_entry_for(
+    entry = cost_for_call(
         "analyst_lead",
         config,
         ModelUsage(
@@ -145,45 +193,70 @@ def test_gemini_usage_adds_thoughts_to_output():
     assert u.reasoning_tokens == 50
 
 
-def test_legacy_ledger_row_validates_without_cache_fields():
-    row = {
-        "created_at": "2026-05-27T18:00:50.881082Z", "role": "analyst_worker",
-        "member": "m", "provider": "anthropic", "model": "x",
-        "input_tokens": 100, "output_tokens": 50,
-        "input_cost_usd": 0.1, "output_cost_usd": 0.2, "total_cost_usd": 0.3,
-    }
-    entry = CostLedgerEntry.model_validate(row)
+def test_partial_cost_payload_validates_via_defaults():
+    """A payload written by an older/newer build still validates — every field defaults."""
+    entry = CallCost.model_validate(
+        {
+            "role": "analyst_worker", "member": "m", "provider": "anthropic", "model": "x",
+            "input_tokens": 100, "output_tokens": 50,
+            "input_cost_usd": 0.1, "output_cost_usd": 0.2, "total_cost_usd": 0.3,
+        }
+    )
     assert entry.cache_read_tokens == 0 and entry.reasoning_tokens == 0
     assert entry.price_source == "config"
 
 
-# --- [I5] spend rollup ---
+# --- [I5] spend rollup over monitor ledgers ---
 
 
-def test_usage_rollup_aggregates_and_filters_since(tmp_path):
-    ledger = tmp_path / "cost_ledger.jsonl"
-    rows = [
-        CostLedgerEntry(
-            created_at=datetime(2026, 7, 1, tzinfo=UTC), role="reviewer", member="a",
-            provider="anthropic", model="m1", input_tokens=10, output_tokens=5,
-            input_cost_usd=1.0, output_cost_usd=2.0, total_cost_usd=3.0,
-        ),
-        CostLedgerEntry(
-            created_at=datetime(2026, 7, 20, tzinfo=UTC), role="analyst_worker", member="b",
-            provider="openai", model="m2", input_tokens=20, output_tokens=10,
-            cache_read_tokens=100, input_cost_usd=0.5, output_cost_usd=1.5,
-            cache_read_cost_usd=0.25, total_cost_usd=2.25,
-        ),
-    ]
+def _cost_event(seq: int, when: datetime, run_id: str, **payload) -> str:
+    event = {
+        "run_id": run_id, "sequence": seq, "created_at": when.isoformat(), "team": "run",
+        "event": "cost.call", "level": 10, "summary": "cost", "data": payload,
+    }
+    return json.dumps(event, sort_keys=True)
+
+
+def test_usage_rollup_aggregates_monitor_ledgers_and_filters_since(tmp_path):
+    ledger = tmp_path / "monitor.jsonl"
     ledger.write_text(
-        "\n".join(json.dumps(r.model_dump(mode="json"), sort_keys=True) for r in rows) + "\n",
+        "\n".join(
+            [
+                _cost_event(
+                    1, datetime(2026, 7, 1, tzinfo=UTC), "run-a", role="reviewer", member="a",
+                    provider="anthropic", model="m1", input_tokens=10, output_tokens=5,
+                    input_cost_usd=1.0, output_cost_usd=2.0, total_cost_usd=3.0,
+                ),
+                _cost_event(
+                    2, datetime(2026, 7, 20, tzinfo=UTC), "run-b", role="analyst_worker",
+                    member="b", provider="openai", model="m2", input_tokens=20, output_tokens=10,
+                    cache_read_tokens=100, input_cost_usd=0.5, output_cost_usd=1.5,
+                    cache_read_cost_usd=0.25, total_cost_usd=2.25,
+                ),
+            ]
+        )
+        + "\n",
         encoding="utf-8",
     )
-    report = render_report(load_entries(ledger), None, 15)
+    report = render_report(load_cost_records([ledger]), None, 15, by_run=True)
     assert "TOTAL: $5.2500" in report
     assert "anthropic" in report and "openai" in report
+    assert "run-a" in report and "2 run(s)" in report
 
     since = _parse_since("2026-07-10")
-    recent = load_entries(ledger, since)
+    recent = load_cost_records([ledger], since)
     assert len(recent) == 1
     assert "TOTAL: $2.2500" in render_report(recent, since, 15)
+
+
+def test_usage_rollup_deduplicates_a_copied_ledger(tmp_path):
+    """A run's ledger copied to logs/dev must not double-count (dedup on run_id+sequence)."""
+    row = _cost_event(
+        1, datetime(2026, 7, 1, tzinfo=UTC), "run-a", role="reviewer", member="a",
+        provider="anthropic", model="m1", total_cost_usd=3.0,
+    )
+    first = tmp_path / "monitor.jsonl"
+    second = tmp_path / "copy_monitor.jsonl"
+    first.write_text(row + "\n", encoding="utf-8")
+    second.write_text(row + "\n", encoding="utf-8")
+    assert len(load_cost_records([first, second])) == 1

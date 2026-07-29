@@ -1134,3 +1134,34 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   discarded — leaving the provider-decorrelated half of `commit ⇔ gate ∧ review` as the only
   actor in the flow with no audit trail. One kwarg, plus a regression test pinning the seam.
   Suite 568 → 573 (+5).
+- 2026-07-29 — **Accumulated cost on every log line; the separate cost ledger deleted; a derived
+  end-of-run summary.** Motivated by the next live run: spend was invisible while a run was in
+  flight, and the notebook's closing output was a bare tuple or a traceback. **(1) Cost is now part
+  of the monitor ledger** (§J1's "one source of truth", applied to money): a run-scoped `CostMeter`
+  (`observability/costs.py`, installed by `run_research` before any model client and found through a
+  `ContextVar`) accumulates every priced call, records it as one level-10 `cost.call` event, and
+  stamps its running total on **every** monitor event — so the live line reads
+  `[hh:mm:ss] #0042 $12.34 team(model) L7 …` and burn rate is readable straight down the log.
+  `<runtime_dir>/cost_ledger.jsonl` is **no longer written**: it was a second, run-blind log
+  (`CostLedgerEntry` had no `run_id`, so the B-run harness had to attribute rows by timestamp
+  window) whose rows also under-counted, and nothing derived from it that the event stream cannot
+  answer. `usage.py` now rolls up over monitor ledgers (de-duplicated on `(run_id, sequence)`,
+  `--runs` for a per-run table); `plot_run.py`'s pie prefers recorded cost over its pair-matched
+  token estimate and no longer drops non-analyst teams from a chart claiming a total.
+  **(2) The coder's Agent-SDK spend is finally counted.** The coder is a separate process making its
+  own API calls, so it never passed through `traced_model_call`; its cost sat unaggregated on
+  `coder.turn_end` and reached no total anywhere — historically the largest unaccounted line (~$9 in
+  one observed session). `ResultMessage.total_cost_usd` is session-**cumulative** (verified monotonic
+  against real logs), so `record_session_total` folds it in as a per-turn delta with
+  `price_source="claude_sdk"`. **(3) `run.summary`** (`monitor/summary.py`): the end-of-run digest —
+  status, wall clock, cost (total · by role · coder share), tools authored + commit shas,
+  gate/co-lead rework counts, HITL raises, tool-call/error counts, one labelled full path per report
+  artifact plus the run dir and the ledger (`run.start` records both, so a run with no report still
+  says where to look) — is **derived from
+  the event stream**, never assembled at a call site, recorded as one level-1 event, and rendered
+  from that stored dict by every consumer (live stream, detached follower, CLI text output,
+  `ResearchRun.summary()`, and `RunDied`'s partial). It fires on the failure path too, so a crashed
+  run ends on the same block as a finished one. Also fixed en route: `RunMonitor` minted its own
+  `uuid4`, so a real run's ledger identified itself as `e754020b…` while its directory was
+  `8c75990e…` — the monitor now carries the **run's** id, which per-run cost attribution depends on.
+  Suite 573 → 582 (+9).

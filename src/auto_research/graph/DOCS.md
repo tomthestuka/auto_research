@@ -105,6 +105,11 @@ verdicts, two iteration counters, and the cap.
   check lands in the run ledger as `preflight.<name>` — otherwise the launch state existed only
   as terminal scrollback that a detached or notebook run never sees, and a preflight failure
   produced no run artifact at all ([J1]a).
+  It also installs the run's **cost meter** (`observability.install_cost_meter`) before any model
+  client exists and pins the monitor's `run_id` to the run's, so every ledger line carries the
+  accumulated spend and names the run dir it belongs to; and it records a final `run.summary`
+  event (derived from the ledger by `monitor.summary`) after `run.finish` **and** after
+  `run.error`, so a crashed run ends on the same digest as a finished one.
   The resolved handler is threaded to the analyst workers and the reviewer/lead tool providers
   so any role can `ask_human`.
   Missing dependencies are constructed from `config/models.yaml`. Reads
@@ -204,7 +209,9 @@ verdicts, two iteration counters, and the cap.
   persistent sandbox per analyst worker, and shuts down sandboxes/MCP clients in
   `finally`.
 - `ResearchRun(request, verdict, final_state, monitor)` — result object with
-  `.markdown()` for grouped monitor output.
+  `.markdown()` for grouped monitor output and `.summary()` for the end-of-run digest block
+  (renders the recorded `run.summary` event, so a reconnected/replayed run reports exactly what
+  the run computed).
 - `_default_graph()` — synchronous; builds the compiled graph with all defaults from
   config. Called at import time by `serve.py` for LangGraph Studio.
 - `load_orchestration_config(path?)` — loads `config/orchestration.yaml`; returns dict.
@@ -229,3 +236,11 @@ verdicts, two iteration counters, and the cap.
   skips new authoring). `run_research` builds the `RunControl`, threads it to every role + the
   consensus strategy + `build_graph`, and attaches a `hitl.commands.CommandContext` (roster, monitor
   JSONL, `status_monitor` model) to a command-capable connector (Telegram/Slack).
+
+- 2026-07-29 — **Cost meter + end-of-run summary wired into the entry point.** `run_research`
+  installs the run's `CostMeter` before any model client (so every monitor line carries accumulated
+  spend, preflight included), pins the monitor's `run_id` to the **run's** id (it used to mint an
+  unrelated `uuid4`, leaving log lines untraceable to their run dir), adds `cost_usd` to
+  `run.finish`, and records a derived `run.summary` event on both the success and failure paths.
+  `ResearchRun.summary()` renders that digest; the CLI text output prints it above the verdict
+  fields; `detached._partial` prepends it to a `RunDied`'s partial so a killed run is legible too.

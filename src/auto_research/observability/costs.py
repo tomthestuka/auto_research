@@ -1,4 +1,4 @@
-"""Per-call cost ledger helpers.
+"""Per-call LLM cost accounting, accumulated per run and recorded in the monitor ledger.
 
 Cost is priced **litellm-first, config-fallback** ([I5]): litellm ships a community-maintained
 per-model price map (``litellm.model_cost``) that encodes input/output **and** cache-read /
@@ -7,15 +7,28 @@ litellm does not know a model (our bleeding-edge / renamed ids can outrun its bu
 back to ``config/models.yaml``'s ``priceMTk`` — with cache tiers defaulted from the input rate
 (0.1x read, 1.25x write) when not pinned. Either way the four neutral :class:`ModelUsage` token
 classes are non-overlapping, so cost is a plain weighted sum.
+
+**Where cost is written:** into the run's **monitor JSONL**, as one ``cost.call`` event per call
+plus a cumulative ``cost_usd_total`` stamped on *every* monitor event. The monitor JSONL is the
+single source of truth for a run ([J1]) — recording and replay both read it, so a parallel cost log
+can neither drift from it nor need per-run attribution bolted on. (The pre-2026-07-29
+``<runtime_dir>/cost_ledger.jsonl`` is gone: it was a second, run-blind log whose rows also
+under-counted, and nothing derived from it that the event stream cannot answer.)
+
+A :class:`CostMeter` is installed per run by ``run_research`` and found through a
+:class:`~contextvars.ContextVar`, because the cost chokepoint
+(:func:`~auto_research.observability.tracing.traced_model_call`) sits far below any run object.
+Calls made with no meter installed — a bare probe script, an isolated live test — are simply not
+accumulated; wire a meter (``install_cost_meter(monitor=…)``) when such a caller wants the record.
 """
 
-import json
-from datetime import UTC, datetime
-from pathlib import Path
+from contextvars import ContextVar
+from threading import Lock
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from auto_research.env import runtime_data_dir
+from auto_research.env import runtime_data_dir  # noqa: F401 — re-exported for observability callers
 from auto_research.models.types import ModelUsage, ProviderName, RoleModelConfig
 
 
@@ -31,39 +44,33 @@ class TokenRates(BaseModel):
     source: str  # "litellm" or "config" — which table priced this call
 
 
-class CostLedgerEntry(BaseModel):
-    """One JSON-serializable LLM call cost row.
+class CallCost(BaseModel):
+    """One priced LLM call — the payload of a ``cost.call`` monitor event.
 
-    Token classes mirror :class:`ModelUsage` (non-overlapping). Cost is broken out per class so the
-    rollup can attribute spend to caching vs. fresh input vs. output. New fields default to 0, so
-    rows written before [I5] still validate.
+    Token classes mirror :class:`ModelUsage` (non-overlapping). Cost is broken out per class so a
+    rollup can attribute spend to caching vs. fresh input vs. output. Every field defaults, so a
+    row recorded by an older/newer build still validates.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     role: str
     member: str
-    provider: ProviderName
+    provider: ProviderName | str
     model: str
-    input_tokens: int = Field(ge=0)
-    output_tokens: int = Field(ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
     cache_read_tokens: int = Field(default=0, ge=0)
     cache_write_tokens: int = Field(default=0, ge=0)
     reasoning_tokens: int = Field(default=0, ge=0)
-    input_cost_usd: float = Field(ge=0)
-    output_cost_usd: float = Field(ge=0)
+    input_cost_usd: float = Field(default=0.0, ge=0)
+    output_cost_usd: float = Field(default=0.0, ge=0)
     cache_read_cost_usd: float = Field(default=0.0, ge=0)
     cache_write_cost_usd: float = Field(default=0.0, ge=0)
-    total_cost_usd: float = Field(ge=0)
-    price_source: str = "config"  # which price table priced this row (litellm | config)
-
-
-def cost_ledger_path(data_dir: str | Path | None = None) -> Path:
-    """Return the JSONL cost ledger path."""
-
-    root = Path(data_dir).expanduser() if data_dir is not None else runtime_data_dir()
-    return root / "cost_ledger.jsonl"
+    total_cost_usd: float = Field(default=0.0, ge=0)
+    price_source: str = "config"
+    """Which table priced this row: ``litellm`` | ``config`` | ``claude_sdk`` (the coder's Agent-SDK
+    session reports its own dollar cost, so no token pricing of ours is involved)."""
 
 
 # Cached once: importing litellm is heavy, and its price map is static per process.
@@ -134,8 +141,8 @@ def token_rates_for(config: RoleModelConfig) -> TokenRates:
     return _rates_from_litellm(config.provider, config.model) or _rates_from_config(config)
 
 
-def cost_entry_for(role: str, config: RoleModelConfig, usage: ModelUsage) -> CostLedgerEntry:
-    """Calculate a ledger entry from resolved pricing and token usage.
+def cost_for_call(role: str, config: RoleModelConfig, usage: ModelUsage) -> CallCost:
+    """Price one call from resolved rates and token usage.
 
     Prices each non-overlapping token class at its own rate; ``reasoning_tokens`` carries no separate
     charge (it is a subset of ``output_tokens``, already priced).
@@ -146,7 +153,7 @@ def cost_entry_for(role: str, config: RoleModelConfig, usage: ModelUsage) -> Cos
     output_cost = usage.output_tokens * rates.output
     cache_read_cost = usage.cache_read_tokens * rates.cache_read
     cache_write_cost = usage.cache_write_tokens * rates.cache_write
-    return CostLedgerEntry(
+    return CallCost(
         role=role,
         member=config.name,
         provider=config.provider,
@@ -165,12 +172,136 @@ def cost_entry_for(role: str, config: RoleModelConfig, usage: ModelUsage) -> Cos
     )
 
 
-def append_cost_entry(entry: CostLedgerEntry, path: str | Path | None = None) -> Path:
-    """Append a cost entry as one JSONL row and return the path used."""
+class CostMeter:
+    """Run-scoped accumulator of LLM spend, recording each call into the monitor ledger.
 
-    ledger_path = Path(path).expanduser() if path is not None else cost_ledger_path()
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    with ledger_path.open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps(entry.model_dump(mode="json"), sort_keys=True))
-        stream.write("\n")
-    return ledger_path
+    Two producers feed it, and both land in the same ``cost.call`` event stream:
+
+    - our own provider calls, priced here from token usage (``record_call``);
+    - the tool-authoring **coder**, which is the Claude Agent SDK — a separate process making its
+      own API calls, so it never passes through our provider layer. Its ``ResultMessage``
+      reports a *session-cumulative* dollar figure, which ``record_session_total`` converts to a
+      per-turn delta (``price_source="claude_sdk"``, no token attribution of ours).
+
+    Recording is best-effort: a monitor fault degrades to "no event" rather than breaking a real
+    model call (the [J2] rationale), and the running total is kept regardless.
+    """
+
+    def __init__(self, *, run_id: str = "", monitor: Any | None = None) -> None:
+        self.run_id = run_id
+        self.monitor = monitor  # duck-typed RunMonitor (kept loose to avoid an import cycle)
+        self._lock = Lock()
+        self._total_usd = 0.0
+        self._calls = 0
+        self._session_totals: dict[str, float] = {}
+
+    @property
+    def total_usd(self) -> float:
+        """Accumulated USD spend so far in this run."""
+
+        with self._lock:
+            return self._total_usd
+
+    @property
+    def calls(self) -> int:
+        """Number of priced calls accumulated so far."""
+
+        with self._lock:
+            return self._calls
+
+    def snapshot(self) -> dict[str, float | int]:
+        """Return ``{"total_usd", "calls"}`` as one consistent reading."""
+
+        with self._lock:
+            return {"total_usd": self._total_usd, "calls": self._calls}
+
+    async def record_call(
+        self, role: str, config: RoleModelConfig, usage: ModelUsage
+    ) -> CallCost:
+        """Price one provider call, add it to the running total, and log a ``cost.call`` event."""
+
+        cost = cost_for_call(role, config, usage)
+        await self._add(cost)
+        return cost
+
+    async def record_session_total(
+        self,
+        *,
+        role: str,
+        member: str,
+        provider: str,
+        model: str,
+        session_id: str,
+        cumulative_usd: float,
+    ) -> float:
+        """Record an externally-priced session's **delta** and return it.
+
+        ``cumulative_usd`` is the session total reported so far (the Claude Agent SDK's
+        ``ResultMessage.total_cost_usd``, which grows across a session's turns), so only the
+        increment since the last reading is new spend.
+        """
+
+        with self._lock:
+            previous = self._session_totals.get(session_id, 0.0)
+            delta = max(0.0, float(cumulative_usd) - previous)
+            self._session_totals[session_id] = max(previous, float(cumulative_usd))
+        cost = CallCost(
+            role=role,
+            member=member,
+            provider=provider,
+            model=model,
+            total_cost_usd=delta,
+            price_source="claude_sdk",
+        )
+        await self._add(cost)
+        return delta
+
+    async def _add(self, cost: CallCost) -> None:
+        """Accumulate one priced call, then emit its ``cost.call`` monitor event.
+
+        The total is updated **before** the event is recorded (and the lock released before that
+        call) so the event's own stamped ``cost_usd_total`` already includes this call, and the
+        monitor can read the meter without contending for its lock.
+        """
+
+        with self._lock:
+            self._total_usd += cost.total_cost_usd
+            self._calls += 1
+        monitor = self.monitor
+        if monitor is None:
+            return
+        try:
+            await monitor.record(
+                "run",
+                "cost.call",
+                level=10,
+                summary=(
+                    f"{cost.role}/{cost.member} ${cost.total_cost_usd:.4f} "
+                    f"({cost.price_source})"
+                ),
+                data=cost.model_dump(mode="json"),
+            )
+        except Exception:  # noqa: BLE001 — cost accounting never breaks a real model call
+            pass
+
+
+_CURRENT_METER: ContextVar[CostMeter | None] = ContextVar("auto_research_cost_meter", default=None)
+
+
+def install_cost_meter(*, run_id: str = "", monitor: Any | None = None) -> CostMeter:
+    """Create a :class:`CostMeter` for this run and make it the current one.
+
+    Set from ``run_research`` before any model client exists: the meter object is shared by every
+    task spawned afterwards (a task inherits a copy of the context, and the copy holds the same
+    meter), so all of a run's spend accumulates in one place.
+    """
+
+    meter = CostMeter(run_id=run_id, monitor=monitor)
+    _CURRENT_METER.set(meter)
+    return meter
+
+
+def current_cost_meter() -> CostMeter | None:
+    """Return the meter installed for the current run, or ``None`` outside a metered run."""
+
+    return _CURRENT_METER.get()

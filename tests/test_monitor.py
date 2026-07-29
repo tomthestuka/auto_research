@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 
@@ -10,7 +11,7 @@ import pytest
 
 from auto_research.consensus import DebateToConverge
 from auto_research.graph.runtime import run_research
-from auto_research.monitor import RunMonitor
+from auto_research.monitor import MonitorEvent, RunMonitor, build_run_summary, render_run_summary
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -123,6 +124,136 @@ def test_monitor_streams_visible_event_summaries(tmp_path: Path) -> None:
     assert (tmp_path / "stream.jsonl").read_text(encoding="utf-8").count("\n") == 3
 
 
+def test_stream_line_carries_accumulated_cost_column(tmp_path: Path) -> None:
+    """With a meter attached, every line shows the run's accumulated spend after `#seq`."""
+
+    class Meter:
+        total_usd = 12.3456
+
+    stream = StringIO()
+    monitor = RunMonitor(
+        chatter=7, jsonl_path=tmp_path / "cost.jsonl", stream=stream, cost_meter=Meter()
+    )
+
+    asyncio.run(monitor.record("analyst", "analyst.step", level=5, summary="did a thing"))
+
+    assert "#0001 $12.35 analyst L5 analyst.step: did a thing" in stream.getvalue()
+    assert monitor.events[0].cost_usd_total == 12.3456
+    # Markdown carries the same figure per event plus a header total.
+    report = monitor.render_markdown()
+    assert "- Accumulated cost: $12.3456" in report
+    assert "- Cost so far: $12.3456" in report
+
+
+def test_stream_line_unchanged_without_a_meter(tmp_path: Path) -> None:
+    """No meter (unit tests, replayed old logs) → the pre-cost line format, byte for byte."""
+    stream = StringIO()
+    monitor = RunMonitor(chatter=7, jsonl_path=tmp_path / "plain.jsonl", stream=stream)
+
+    asyncio.run(monitor.record("analyst", "analyst.step", level=5, summary="did a thing"))
+
+    assert "#0001 analyst L5 analyst.step: did a thing" in stream.getvalue()
+    assert monitor.events[0].cost_usd_total is None
+    assert "Cost so far" not in monitor.render_markdown()
+
+
+def test_legacy_monitor_line_validates_without_the_cost_field() -> None:
+    """An event written before cost stamping still loads (the field defaults to None)."""
+    line = (
+        '{"run_id":"r","sequence":1,"created_at":"2026-07-01T00:00:00Z","team":"run",'
+        '"event":"run.start","level":1,"summary":"started","actor":null,"data":{}}'
+    )
+    event = MonitorEvent.model_validate_json(line)
+    assert event.cost_usd_total is None
+
+
+def test_run_summary_derives_cost_tools_and_reports_from_the_event_stream() -> None:
+    """The digest is computed from the ledger — nothing is passed in at the call site."""
+    base = datetime(2026, 7, 1, 12, 0, 0, tzinfo=UTC)
+
+    def event(seq, name, *, data=None, minutes=0, cost=None, level=5):
+        return {
+            "run_id": "run-x", "sequence": seq, "team": "run", "event": name, "level": level,
+            "summary": name, "data": data or {}, "cost_usd_total": cost,
+            "created_at": (base + timedelta(minutes=minutes)).isoformat(),
+        }
+
+    events = [
+        event(1, "run.start", cost=0.0, minutes=0,
+              data={"run_dir": "/runs/x", "monitor_jsonl": "/runs/x/monitor.jsonl"}),
+        event(2, "cost.call", data={"role": "analyst_worker", "model": "m1",
+                                    "total_cost_usd": 2.0}, cost=2.0, minutes=1, level=10),
+        event(3, "cost.call", data={"role": "coder", "model": "sonnet", "total_cost_usd": 3.0,
+                                    "price_source": "claude_sdk"}, cost=5.0, minutes=2, level=10),
+        event(4, "coder.session_start", minutes=3),
+        event(5, "gate.result", data={"passed": False}, minutes=4),
+        event(6, "gate.result", data={"passed": True}, minutes=5),
+        event(7, "review.result", data={"approved": True}, minutes=6),
+        event(8, "commit", data={"tool": "ixpe_qu_dcf", "commit_sha": "abcdef1234567"}, minutes=7),
+        event(9, "analyst.tool_result", data={"tool": "run_fit", "is_error": True}, minutes=8),
+        event(10, "analyst.tool_call", data={"tool": "ask_human"}, minutes=9),
+        event(11, "reviewer.analysis_review.verdict",
+              data={"verdict": {"accepted": True, "rationale": "sound"}}, minutes=10),
+        event(12, "run.report", data={"report_pdf": "/runs/x/report.pdf"}, minutes=11),
+        event(13, "run.finish", data={"lit_iterations": 1, "analysis_iterations": 2},
+              cost=5.0, minutes=12),
+    ]
+
+    summary = build_run_summary(events)
+
+    assert summary["status"] == "accepted"
+    assert summary["cost_usd"] == 5.0 and summary["llm_calls"] == 2
+    assert summary["coder_usd"] == 3.0
+    assert summary["cost_by_role"] == {"analyst_worker": 2.0, "coder": 3.0}
+    assert summary["tools_authored"] == [{"tool": "ixpe_qu_dcf", "commit_sha": "abcdef1234"}]
+    assert summary["authoring"] == {"sessions": 1, "gate_passed": 1, "gate_rejected": 1,
+                                    "review_approved": 1, "review_rejected": 0}
+    assert (summary["tool_calls"], summary["tool_errors"], summary["hitl_raises"]) == (1, 1, 1)
+    assert summary["analysis_iterations"] == 2
+    assert summary["wall_clock_s"] == 12 * 60
+
+    text = render_run_summary(summary)
+    assert "RUN SUMMARY  run-x  —  accepted" in text
+    assert "$5.0000 over 2 LLM calls  (coder SDK $3.00)" in text
+    assert "ixpe_qu_dcf → abcdef1234" in text
+    assert "12m 00s" in text
+    # Findable artifacts: one labelled line per report path, plus where the run itself lives.
+    assert "report pdf   /runs/x/report.pdf" in text
+    assert "run dir      /runs/x" in text
+    assert "ledger       /runs/x/monitor.jsonl" in text
+
+
+def test_run_summary_of_a_crashed_run_reports_the_error_and_the_spend() -> None:
+    events = [
+        {"run_id": "r", "sequence": 1, "created_at": "2026-07-01T12:00:00+00:00", "team": "run",
+         "event": "run.start", "level": 1, "summary": "s", "data": {}, "cost_usd_total": 0.0},
+        {"run_id": "r", "sequence": 2, "created_at": "2026-07-01T12:30:00+00:00", "team": "run",
+         "event": "run.error", "level": 1, "summary": "failed",
+         "data": {"error": "BadRequestError(...)"}, "cost_usd_total": 7.5},
+    ]
+    summary = build_run_summary(events)
+    assert summary["status"] == "error" and summary["cost_usd"] == 7.5
+    text = render_run_summary(summary)
+    assert "error" in text and "BadRequestError" in text
+
+
+def test_stream_renders_the_summary_event_as_a_block(tmp_path: Path) -> None:
+    """`run.summary` prints as the digest block, so a live/detached/notebook tail ends readable."""
+    stream = StringIO()
+    monitor = RunMonitor(chatter=10, jsonl_path=tmp_path / "s.jsonl", stream=stream)
+
+    asyncio.run(
+        monitor.record(
+            "run", "run.summary", level=1, summary="Run summary: accepted, $1.0000",
+            data={"run_id": "r", "status": "accepted", "cost_usd": 1.0, "llm_calls": 3},
+        )
+    )
+
+    text = stream.getvalue()
+    assert "RUN SUMMARY  r  —  accepted" in text
+    assert "$1.0000 over 3 LLM calls" in text
+
+
 def test_consensus_records_worker_and_lead_events() -> None:
     monitor = RunMonitor(chatter=10)
 
@@ -227,8 +358,13 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path, mon
     assert events[0] == "run.start"
     assert "librarian.search.strategy" in events
     assert "reviewer.analysis_review.verdict" in events
-    assert events[-1] == "run.finish"
+    # The run closes on the derived digest, one event after the finish record.
+    assert events[-2:] == ["run.finish", "run.summary"]
     assert "## Reviewer" in run.markdown()
+    # A summary is available for the caller (and printed to the stream) — derived, never hand-built.
+    summary = run.summary()
+    assert "RUN SUMMARY" in summary and "accepted" in summary
+    assert "cost" in summary and "wall clock" in summary
 
 
 def test_chatter_range_validation() -> None:

@@ -25,6 +25,7 @@ from auto_research.graph.checkpoint import checkpoint_path, open_checkpointer
 from auto_research.run_control import RunControl
 from auto_research.monitor import RunMonitor
 from auto_research.models import resolve
+from auto_research.observability import install_cost_meter
 from auto_research.retrieval import RetrievalBackend, SqliteRetrievalBackend
 from auto_research.sandbox.mcp_client import MCPToolClient
 from auto_research.sandbox.persistent import PersistentSandbox
@@ -57,6 +58,23 @@ class ResearchRun:
         """Return the grouped monitor report."""
 
         return self.monitor.render_markdown(grouped=True)
+
+    def summary(self) -> str:
+        """Return the end-of-run summary block (cost, wall clock, tools authored, reports).
+
+        Renders the ``run.summary`` event the run recorded, so a reconnected/replayed run reports
+        exactly what the run itself computed; falls back to deriving it from the events at hand.
+        """
+
+        from auto_research.monitor.summary import (
+            build_run_summary,
+            render_run_summary,
+            summary_from_events,
+        )
+
+        events = self.monitor.events
+        stored = summary_from_events(events)
+        return render_run_summary(stored if stored is not None else build_run_summary(events))
 
 
 def load_orchestration_config(path: str | Path = DEFAULT_ORCHESTRATION_CONFIG) -> dict:
@@ -289,7 +307,18 @@ async def run_research(
     # ledger ([J1]a): previously preflight ran first and printed only to stdout, so a detached
     # or notebook run — the primary mode — kept no record of why it refused to start, and a
     # preflight failure produced no run artifact at all.
-    run_monitor = monitor or RunMonitor(chatter=chatter, jsonl_path=monitor_jsonl)
+    # The monitor carries the RUN's id, not a fresh uuid of its own: the ledger is the run's
+    # record, so its `run_id` must name the run/workspace dir a reader can go look in (before
+    # this, `RunMonitor` minted an unrelated uuid4 and nothing tied a log line to its run).
+    run_monitor = monitor or RunMonitor(chatter=chatter, jsonl_path=monitor_jsonl, run_id=run_id)
+    run_monitor.run_id = run_id  # a caller-supplied monitor (the CLI's) gets the same guarantee
+    # Cost accounting: one meter per run, installed BEFORE any model client exists so every call
+    # (ours and the coder's Agent-SDK sessions) accumulates in one place, and every monitor event
+    # — the preflight checklist included — carries the running total. The monitor ledger is the
+    # only cost record there is (§J1); nothing writes a separate cost log.
+    cost_meter = install_cost_meter(run_id=run_id, monitor=run_monitor)
+    if getattr(run_monitor, "cost_meter", None) is None:
+        run_monitor.cost_meter = cost_meter
     if resume and heal_result is not None and heal_result.healed:
         await run_monitor.record(
             "run", "run.resume.heal", level=1,
@@ -541,6 +570,10 @@ async def run_research(
             "request": request,
             "max_iterations": max_iterations,
             "tool_retry_cap": tool_retry_cap,
+            # Recorded so the end-of-run summary can point at them without rebuilding paths from
+            # config — the digest stays derivable from the ledger alone, incl. on a replay.
+            "run_dir": str(run_dir(run_id)),
+            "monitor_jsonl": str(getattr(run_monitor, "jsonl_path", "") or ""),
         },
     )
 
@@ -617,6 +650,9 @@ async def run_research(
                 summary="Research run failed",
                 data={"error": repr(exc)},
             )
+            # A crashed run gets the same digest as a finished one — what it spent, how far it got,
+            # what it authored. Guarded: a summary fault must never mask the real exception.
+            await _record_run_summary(run_monitor)
             raise
         finally:
             for sandbox in sandboxes:
@@ -634,8 +670,10 @@ async def run_research(
             "verdict": verdict,
             "lit_iterations": final_state.get("lit_iterations", 0),
             "analysis_iterations": final_state.get("analysis_iterations", 0),
+            "cost_usd": cost_meter.total_usd,
         },
     )
+    await _record_run_summary(run_monitor)
     return ResearchRun(
         request=request,
         verdict=verdict,
@@ -646,6 +684,34 @@ async def run_research(
         report_latex=final_state.get("report_latex"),
         report_pdf=final_state.get("report_pdf"),
     )
+
+
+async def _record_run_summary(monitor: RunMonitor) -> None:
+    """Derive the end-of-run digest from the run's own event stream and record it as one
+    ``run.summary`` event, so the stream/follower/notebook all end on the same block.
+
+    Derived from the **JSONL** when there is one: ``cost.call`` events are level 10, so below
+    chatter 10 the per-role cost breakdown exists only in the log. Fully guarded — a summary
+    failure never changes a run's outcome (the [J2] rationale).
+    """
+
+    from auto_research.monitor.summary import build_run_summary, summarize_jsonl
+
+    try:
+        path = getattr(monitor, "jsonl_path", None)
+        summary = summarize_jsonl(path) if path else build_run_summary(monitor.events)
+        await monitor.record(
+            "run",
+            "run.summary",
+            level=1,
+            summary=(
+                f"Run summary: {summary.get('status', 'unknown')}, "
+                f"${float(summary.get('cost_usd', 0.0)):.4f}"
+            ),
+            data=summary,
+        )
+    except Exception:  # noqa: BLE001 — the digest is observability, never a run outcome
+        pass
 
 
 def _attach_monitor(target: object, monitor: RunMonitor) -> None:

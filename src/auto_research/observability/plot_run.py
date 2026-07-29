@@ -25,12 +25,17 @@ _TEAM_FOR_ROLE = {
     "reviewer": "reviewer",
     "analyst_lead": "analyst",
     "analyst_worker": "analyst",
+    "analyst_colead": "analyst",
     "librarian_io": "librarian",
+    "librarian_searcher": "librarian",
+    "coder": "tooling",
+    "status_monitor": "run",
 }
 _TEAM_COLORS = {
     "reviewer":  "#E05C5C",
     "analyst":   "#5B8DB8",
     "librarian": "#5BAE85",
+    "tooling":   "#C08A3E",
     "run":       "#AAAAAA",
 }
 # Per-team color palettes: analyst slot 0 = lead, slots 1+ = workers in order.
@@ -307,12 +312,24 @@ def main() -> None:  # noqa: C901
         loc="upper right", fontsize=9, framealpha=0.85, edgecolor="#CCCCCC",
     )
 
-    # Cost pie
+    # Cost pie — from the run's own `cost.call` events when the log has them (the recorded
+    # per-call cost, priced at call time with the real member/model), falling back to the
+    # pair-matched estimate above for logs written before cost events existed.
     ax2.set_facecolor("#FAFAFA")
     cost_by: dict[tuple, float] = defaultdict(float)
-    for c in calls:
-        if c["model"]:
-            cost_by[(c["team"], c["model"])] += c["cost"]
+    recorded = [e for e in events if e.get("event") == "cost.call"]
+    if recorded:
+        for e in recorded:
+            d = e.get("data") or {}
+            model = d.get("model")
+            if not model:
+                continue
+            team = _TEAM_FOR_ROLE.get(str(d.get("role", "")), "run")
+            cost_by[(team, model)] += float(d.get("total_cost_usd", 0.0) or 0.0)
+    else:
+        for c in calls:
+            if c["model"]:
+                cost_by[(c["team"], c["model"])] += c["cost"]
     total_cost = sum(cost_by.values())
 
     # Slice order: reviewer → analyst lead → analyst workers → librarian
@@ -326,6 +343,9 @@ def main() -> None:  # noqa: C901
             for m in analyst_worker_models.values()
         ]
         + [(k, cost_by[k]) for k in cost_by if k[0] == "librarian"]
+        # Everything else (the coder's SDK sessions, the status model) last, so no recorded
+        # spend is silently missing from a chart whose title claims a total.
+        + [(k, cost_by[k]) for k in cost_by if k[0] not in ("reviewer", "analyst", "librarian")]
     )
     seen: set = set()
     slices = []

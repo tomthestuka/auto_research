@@ -1,15 +1,17 @@
 """LangSmith tracing wrapper for provider calls.
 
-Every model call funnels through here, so this is where per-call cost is recorded — to the local
-``cost_ledger.jsonl`` (always) and, when tracing is on, onto the LangSmith run as ``usage_metadata``
-+ cost metadata so the LangSmith dashboard shows spend without a provider admin panel ([I5]).
+Every model call funnels through here, so this is where per-call cost is recorded — into the run's
+:class:`~auto_research.observability.costs.CostMeter`, which accumulates the run total and writes
+one ``cost.call`` event into the monitor JSONL (the run's single source of truth), and — when
+tracing is on — onto the LangSmith run as ``usage_metadata`` + cost metadata so the LangSmith
+dashboard shows spend without a provider admin panel ([I5]).
 """
 
 from collections.abc import Awaitable, Callable
 import os
 
 from auto_research.models.types import ModelResponse, RoleModelConfig
-from auto_research.observability.costs import append_cost_entry, cost_entry_for
+from auto_research.observability.costs import cost_for_call, current_cost_meter
 
 
 def _annotate_langsmith_usage(role: str, config: RoleModelConfig, response: ModelResponse) -> None:
@@ -27,7 +29,7 @@ def _annotate_langsmith_usage(role: str, config: RoleModelConfig, response: Mode
         if run is None:
             return
         usage = response.usage
-        entry = cost_entry_for(role, config, usage)
+        entry = cost_for_call(role, config, usage)
         total_input = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
         run.add_metadata(
             {
@@ -61,7 +63,11 @@ async def traced_model_call(
     config: RoleModelConfig,
     provider_call: Callable[[], Awaitable[ModelResponse]],
 ) -> ModelResponse:
-    """Run a provider call under LangSmith tracing and append a cost row."""
+    """Run a provider call under LangSmith tracing and record its cost on the run's meter.
+
+    With no meter installed (a bare probe, an isolated unit/live test), the call runs unchanged and
+    is simply not accumulated — there is no cost log outside a run's monitor ledger.
+    """
 
     if os.getenv("LANGCHAIN_TRACING_V2", "").lower() == "true":
         from langsmith import traceable
@@ -87,5 +93,7 @@ async def traced_model_call(
         response = await _call()
     else:
         response = await provider_call()
-    append_cost_entry(cost_entry_for(role, config, response.usage))
+    meter = current_cost_meter()
+    if meter is not None:
+        await meter.record_call(role, config, response.usage)
     return response

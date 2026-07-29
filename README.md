@@ -130,7 +130,8 @@ command use is observational — not yet exercised end-to-end.)*
 
 **Runtime data dir** (`config/orchestration.yaml::runtime_dir`, defaults to
 `~/.auto_research` if omitted) lives **outside both repos** and is not committed. It holds
-the SQLite DB, figures/artifacts, per-worker sandbox scratch, run logs, cost ledger, and
+the SQLite DB, figures/artifacts, per-worker sandbox scratch, run logs (each run's
+`monitor.jsonl` — the single source of truth for its trace **and** its cost), and
 reviewer reports. On an accepted verdict,
 `runs/{run_id}/reviewer/report/` holds `report.jsonl` (machine handle for upstream
 planning teams), `report.tex` + symlinked `figures/` and `papers/` (human LaTeX project;
@@ -207,14 +208,27 @@ python -m auto_research.observability.plot_run <monitor.jsonl> [output.png]
 **Spend rollup** — cumulative cost across all runs (no provider admin panel needed):
 
 ```bash
-python -m auto_research.observability.usage [--since YYYY-MM-DD] [--top N]
-# total + by provider/model/role/day from <runtime_dir>/cost_ledger.jsonl
+python -m auto_research.observability.usage [--since YYYY-MM-DD] [--top N] [--runs]
+# total + by provider/model/role/day (+ by run) from every <runtime_dir>/runs/*/monitor.jsonl
 ```
 
-Cost is priced **litellm-first, config-fallback**: litellm's community price map (incl. cache/reasoning
-tokens) prices what it knows, `config/models.yaml: priceMTk` fills the gaps. When `LANGCHAIN_TRACING_V2`
-is on, each call's tokens + cost are also attached to its LangSmith run. The number is an estimate
-against list prices — it cannot reconcile to an org's negotiated bill (that needs an admin key).
+**Cost is in the run log, on every line.** Each priced call is one `cost.call` event in the run's
+`monitor.jsonl`, and every event carries the run's accumulated spend — so a live line reads
+`[20:37:51] #0042 $10.22 analyst(claude-sonnet-4-6) L7 …` and burn rate is readable straight down the
+log, with no second file to correlate. That includes the tool-authoring coder's Agent-SDK spend, which
+previously reached no total at all. Pricing is **litellm-first, config-fallback**: litellm's community
+price map (incl. cache/reasoning tokens) prices what it knows, `config/models.yaml: priceMTk` fills the
+gaps. When `LANGCHAIN_TRACING_V2` is on, each call's tokens + cost are also attached to its LangSmith
+run. The number is an estimate against list prices — it cannot reconcile to an org's negotiated bill
+(that needs an admin key).
+
+**Every run ends on a summary block**, derived from its own event log and recorded as a `run.summary`
+event — status, wall clock, cost (total, by role, coder share), tools authored with their commit shas,
+gate/co-lead rework counts, HITL raises, tool-call/error counts, and a labelled full path for each
+report artifact plus the run dir and the ledger (so a run with no report still says where to look).
+It prints at the end
+of a live, detached or CLI run (`ResearchRun.summary()` renders it on demand), and a run that *crashed*
+gets the same block, so a failure is as legible as a success.
 
 **Tests** — `pytest -q` for deterministic checks. Live API / XSPEC tests are opt-in via
 env flags (e.g. `AUTO_RESEARCH_LIVE_FULL_SUITE_TESTS=1`) and write logs under

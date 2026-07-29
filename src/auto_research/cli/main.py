@@ -173,6 +173,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             out["report_pdf"] = str(run.report_pdf)
         print(json.dumps(out, indent=2, sort_keys=True))
     else:
+        # The derived end-of-run digest first (cost, wall clock, tools authored, reports), then
+        # the verdict fields this CLI has always printed.
+        print(run.summary())
         print(f"Accepted: {run.verdict.accepted}")
         print(f"Needs more literature: {run.verdict.needs_more_literature}")
         print(f"Needs analysis rework: {run.verdict.needs_analysis_rework}")
