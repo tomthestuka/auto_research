@@ -1116,3 +1116,21 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   Worth remembering as a general hazard whenever a config-read default is flipped: a green suite taken
   before the flip says nothing about the state after it. Suite 553 → 568 (+3 net). Remaining
   pending-live work is tracked in `tmp_remaining_livetest.md`.
+- 2026-07-29 — **Two observability wiring gaps closed: the launch checklist and the co-lead's
+  actions.** Both were dropped connections, not missing features — the plumbing existed on both
+  ends of each seam. **(1) Preflight is in the run ledger ([J1]a).** `run_research` built its
+  `RunMonitor` *after* `run_preflight`, so the checklist printed only to stdout: a detached or
+  notebook run — the primary mode — kept no record of its own launch state, and a preflight
+  failure produced no run artifact at all. The monitor is now built first and passed in;
+  `Preflight.run_checklist(monitor=…)` records `preflight.<name>` per check (level 5 pass /
+  level 1 failure, since a failure kills the launch) plus a level-3 `preflight.summary`
+  `{passed, total, failed}`. Recording is guarded — a monitor fault must never decide whether a
+  runnable launch proceeds ([J2] rationale) — and standalone callers that pass no monitor
+  (`setup.py`'s smoke test) are byte-identical to before. **(2) The co-lead's actions are
+  visible.** `build_authoring_session` called `review.make_review_hook(...)` without forwarding
+  its `monitor`, so a co-lead built from config got `monitor=None`. The symptom was deceptive:
+  the `AuthoringSession` records its own `review.result` verdict, so reviews *looked* logged
+  while every action behind the verdict (tool calls, `web_search`, reasoning steps) was
+  discarded — leaving the provider-decorrelated half of `commit ⇔ gate ∧ review` as the only
+  actor in the flow with no audit trail. One kwarg, plus a regression test pinning the seam.
+  Suite 568 → 573 (+5).

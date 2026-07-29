@@ -169,3 +169,77 @@ def test_toolkit_git_identity_raises_when_unset(tmp_path, monkeypatch):
     monkeypatch.setattr(merge_flow, "_resolve_toolkit_root", lambda: repo)
     with pytest.raises(RuntimeError, match="no git commit identity"):
         merge_flow.check_toolkit_git_identity()
+
+
+class _RecordingMonitor:
+    """Minimal RunMonitor stand-in: captures (event, level, data) tuples."""
+
+    def __init__(self, fail_on: str | None = None):
+        self.events: list[tuple[str, int, dict]] = []
+        self._fail_on = fail_on
+
+    async def record(self, team, event, *, level, summary, actor=None, data=None):
+        if self._fail_on and self._fail_on in event:
+            raise RuntimeError("monitor is broken")
+        self.events.append((event, level, dict(data or {})))
+
+
+def test_preflight_records_every_check_onto_the_monitor():
+    """The launch checklist belongs in the run ledger, not only terminal scrollback ([J1]a)."""
+    preflight = Preflight()
+    preflight.register("good", lambda: None)
+    monitor = _RecordingMonitor()
+
+    asyncio.run(preflight.run_checklist(monitor=monitor))
+
+    names = [e for e, _, _ in monitor.events]
+    assert names == ["preflight.good", "preflight.summary"]
+    assert monitor.events[0][1] == 5           # a passing check is detail-level
+    assert monitor.events[0][2]["ok"] is True
+    assert monitor.events[1][2] == {"passed": 1, "total": 1, "failed": []}
+
+
+def test_preflight_records_failures_at_level_one_and_still_raises():
+    """A failed check kills the launch, so it is recorded at the most significant level."""
+    preflight = Preflight()
+    preflight.register("good", lambda: None)
+
+    def _bad():
+        raise ValueError("nope")
+
+    preflight.register("bad", _bad)
+    monitor = _RecordingMonitor()
+
+    with pytest.raises(PreflightError):
+        asyncio.run(preflight.run_checklist(monitor=monitor))
+
+    by_name = {e: (lvl, data) for e, lvl, data in monitor.events}
+    assert by_name["preflight.good"][0] == 5
+    assert by_name["preflight.bad"][0] == 1          # launch-killing
+    assert by_name["preflight.bad"][1]["ok"] is False
+    assert "nope" in by_name["preflight.bad"][1]["error"]
+    # the tally is emitted even on failure, so the record shows how far it got
+    assert by_name["preflight.summary"][1] == {"passed": 1, "total": 2, "failed": ["bad"]}
+
+
+def test_preflight_monitor_fault_never_blocks_the_launch_decision():
+    """Observability must not become the thing that stops a runnable launch ([J2] rationale)."""
+    preflight = Preflight()
+    preflight.register("good", lambda: None)
+
+    asyncio.run(preflight.run_checklist(monitor=_RecordingMonitor(fail_on="preflight.")))
+
+    # ...and a genuinely failing check still raises, monitor fault or not.
+    def _bad():
+        raise ValueError("nope")
+
+    preflight.register("bad", _bad)
+    with pytest.raises(PreflightError):
+        asyncio.run(preflight.run_checklist(monitor=_RecordingMonitor(fail_on="preflight.")))
+
+
+def test_preflight_without_monitor_is_unchanged():
+    """Standalone callers (setup.py's smoke test) keep working with no monitor at all."""
+    preflight = Preflight()
+    preflight.register("good", lambda: None)
+    asyncio.run(preflight.run_checklist())

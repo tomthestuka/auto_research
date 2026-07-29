@@ -5,6 +5,7 @@ analyst lead, and stub gate/review hooks — so no live LLM or git is involved.
 """
 
 import asyncio
+import pathlib
 
 import pytest
 
@@ -13,6 +14,7 @@ from auto_research.sandbox.merge_flow import (
     _build_structure_context,
     _make_ask_human_handler,
     _make_ask_lead_handler,
+    build_authoring_session,
     propose_and_pr,
 )
 from auto_research.schemas import GateReport, ToolReviewVerdict, ToolSpec
@@ -704,3 +706,48 @@ def test_gate_feedback_no_tests_note_when_tests_ran():
     msg = _gate_feedback_message(report)
     assert "layer_b.pytest: 1 failed" in msg
     assert "have not run yet" not in msg
+
+
+def test_build_authoring_session_forwards_monitor_to_the_review_hook(monkeypatch, tmp_path):
+    """The co-lead's actions must reach the run ledger, not just its final verdict.
+
+    `build_authoring_session` used to call `make_review_hook(...)` without `monitor=`, so a
+    co-lead built from config got `monitor=None` and the only provider-decorrelated check in
+    `commit ⇔ gate ∧ review` was the one actor whose work was invisible in the record.
+    """
+    seen = {}
+
+    def _fake_make_review_hook(*, colead=None, author_provider=None, monitor=None, **_kw):
+        seen["monitor"] = monitor
+        seen["author_provider"] = author_provider
+
+        async def _hook(*_a, **_k):
+            raise NotImplementedError
+
+        return _hook
+
+    monkeypatch.setattr(
+        "auto_research.sandbox.review.make_review_hook", _fake_make_review_hook
+    )
+    mon = _RecordingMonitor()
+    toolkit = tmp_path / "tk"
+    (toolkit / ".git").mkdir(parents=True)
+
+    def _fake_worktree(_root, base, slug):
+        path = pathlib.Path(base) / slug
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    build_authoring_session(
+        _spec(),
+        lead=object(),
+        toolkit_root=toolkit,
+        worktree_base=tmp_path / "wt",
+        coder_model="test-model",
+        sdk_client_factory=lambda _o: object(),
+        worktree_factory=_fake_worktree,
+        run_gate=lambda *_a, **_k: None,
+        monitor=mon,
+    )
+
+    assert seen["monitor"] is mon, "the review hook was built without the run monitor"

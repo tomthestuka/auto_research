@@ -47,18 +47,23 @@ class Preflight:
         """The registered check names, in run order."""
         return [name for name, _ in self._checks]
 
-    async def run_checklist(self) -> None:
+    async def run_checklist(self, *, monitor: Any | None = None) -> None:
         """Run every registered check, aggregating failures into one ``PreflightError``.
 
         Each check is run independently so one failure never masks another; if any failed,
         the collected messages are raised together. Sync checks are called directly; async
         ones (e.g. the human-channel ping that awaits a real reply) are awaited.
 
-        One progress line is printed per check (the project has no logging framework and the
-        preflight runs before the monitor exists): ``[preflight] <name> …`` before, then
+        One progress line is printed per check: ``[preflight] <name> …`` before, then
         ``ok``/``FAILED`` after. The in-flight ``…`` makes a blocking check legible — most
         usefully the ``human_channel`` ping, which would otherwise hang silently waiting for
         a human reply.
+
+        When ``monitor`` is supplied every check is **also** recorded onto the run ledger, so
+        the launch state becomes part of the run's own record rather than terminal scrollback
+        a detached or notebook run never sees. Levels are chosen so the significant view stays
+        readable: each passing check is level 5 (detail), a failure is level 1 (it kills the
+        launch), and one level-3 tally closes the checklist out either way.
         """
         failures: list[str] = []
         for name, check in self._checks:
@@ -68,9 +73,21 @@ class Preflight:
                 if inspect.isawaitable(result):
                     await result
                 print(" ok", flush=True)
+                await _record(monitor, f"preflight.{name}", level=5,
+                              summary=f"Preflight {name}: ok", data={"check": name, "ok": True})
             except Exception as exc:  # noqa: BLE001 — any failure is a launch-blocking fault
                 print(" FAILED", flush=True)
                 failures.append(f"[{name}] {exc}")
+                await _record(monitor, f"preflight.{name}", level=1,
+                              summary=f"Preflight {name}: FAILED",
+                              data={"check": name, "ok": False, "error": str(exc)})
+        passed = len(self._checks) - len(failures)
+        await _record(
+            monitor, "preflight.summary", level=3,
+            summary=f"Preflight: {passed}/{len(self._checks)} checks passed",
+            data={"passed": passed, "total": len(self._checks),
+                  "failed": [f.split("]")[0].lstrip("[") for f in failures]},
+        )
         if failures:
             raise PreflightError(
                 "Launch preflight failed — fix these before the run can start:\n"
@@ -115,6 +132,26 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     return preflight
 
 
-async def run_preflight(*, human_handler: Any | None = None) -> None:
-    """Build the default checklist and run it — the launch-time entry point."""
-    await build_default_preflight(human_handler=human_handler).run_checklist()
+async def _record(monitor: Any | None, event: str, *, level: int, summary: str, data: dict) -> None:
+    """Record a preflight event when a monitor is present; never let logging break a launch.
+
+    Guarded because preflight's job is to decide whether the run may start — a monitor fault
+    (disk full, a stub without ``record``) must not become the thing that stops it. Mirrors
+    the ``RunMonitor.record`` guard rationale in [J2].
+    """
+    if monitor is None:
+        return
+    try:
+        await monitor.record("run", event, level=level, summary=summary, data=data)
+    except Exception:  # noqa: BLE001 — observability never blocks the launch decision
+        pass
+
+
+async def run_preflight(*, human_handler: Any | None = None, monitor: Any | None = None) -> None:
+    """Build the default checklist and run it — the launch-time entry point.
+
+    ``monitor`` is optional so the standalone callers (``setup.py``'s smoke test, an ad-hoc
+    check) keep working unchanged; ``run_research`` passes its live monitor so the launch
+    checklist lands in the run ledger.
+    """
+    await build_default_preflight(human_handler=human_handler).run_checklist(monitor=monitor)

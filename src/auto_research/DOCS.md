@@ -46,8 +46,8 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - `auto_research.env.check_required_env()` loads the repo-root `.env` with
   `override=False` and validates required provider/source keys before SDK clients
   are constructed.
-- `auto_research.preflight.run_preflight(*, human_handler=None)` (async) is the launch-time
-  entry that runs the whole deterministic checklist (registered via
+- `auto_research.preflight.run_preflight(*, human_handler=None, monitor=None)` (async) is the
+  launch-time entry that runs the whole deterministic checklist (registered via
   `build_default_preflight(human_handler)`): `check_required_env`,
   `storage.check_database_health` (the runtime SQLite DB exists with its full schema,
   created if absent — so a fresh run's first `text_search` can't hit `no such table: papers`),
@@ -110,10 +110,18 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   fallback on missing/malformed values). Consumed by `models.retry` at the
   `ModelHandle.call` choke point.
 - `preflight.Preflight` — an ordered registry of launch-time checks. `.register(name, fn)`
-  (also usable as a decorator), `.names()`, async `.run_checklist()` (runs all — sync or async
-  checks — and aggregates failures into `PreflightError`). `build_default_preflight(human_handler=None)`
-  assembles the project checklist; async `run_preflight(*, human_handler=None)` builds and runs
-  it. Each check is a zero-arg fn that raises on failure and lives in its own module.
+  (also usable as a decorator), `.names()`, async `.run_checklist(*, monitor=None)` (runs all —
+  sync or async checks — and aggregates failures into `PreflightError`).
+  `build_default_preflight(human_handler=None)` assembles the project checklist; async
+  `run_preflight(*, human_handler=None, monitor=None)` builds and runs it. Each check is a
+  zero-arg fn that raises on failure and lives in its own module.
+  **Checks are recorded onto the run ledger when a `monitor` is passed** — `preflight.<name>`
+  at level 5 for a pass, level 1 for a failure, plus a level-3 `preflight.summary` tally. The
+  stdout progress lines are unchanged; the monitor is additive, because a detached or notebook
+  run (the primary mode) never sees the terminal, and a preflight failure used to leave no run
+  artifact at all. `run_research` builds its monitor **before** the preflight to enable this;
+  standalone callers (`setup.py`'s smoke test) pass no monitor and are unaffected. A monitor
+  fault is swallowed — observability never decides whether a runnable launch proceeds.
 - `setup.derive_fs_allow(values, extra_paths=None) -> list[str]` — the `agent_fs_allow` allow-list
   derived from the answered paths (toolkit_root/obs_db_root/analyze_env/runtime_dir + domain-dep
   `extra_paths` + `/tmp`); placeholders dropped, deduped, `auto_research` never included.

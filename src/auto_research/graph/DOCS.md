@@ -97,10 +97,14 @@ verdicts, two iteration counters, and the cap.
 - `async run_research(request, *, ..., chatter=10, monitor=None, monitor_jsonl=None,
   report_formats=None, human_handler=None, human_channel=None, run_id=None, resume=False) -> ResearchRun` — high-level
   monitored entry. Resolves the raise-to-human channel (`hitl.resolve_handler` — explicit
-  `human_handler` → `human_channel` → auto-detect TTY/library) then `await run_preflight(
-  human_handler=…)` immediately (the launch-time checklist: `.env` + required keys, the
-  author↔reviewer decorrelation, and — when a channel is resolved — a **channel ping** that
-  must reply), so a misconfigured/unreachable-human run crashes before any LLM is constructed.
+  `human_handler` → `human_channel` → auto-detect TTY/library), builds the `RunMonitor`, then
+  `await run_preflight(human_handler=…, monitor=…)` (the launch-time checklist: `.env` +
+  required keys, the author↔reviewer decorrelation, and — when a channel is resolved — a
+  **channel ping** that must reply), so a misconfigured/unreachable-human run crashes before
+  any LLM is constructed. The monitor is built **before** the preflight (it was after) so each
+  check lands in the run ledger as `preflight.<name>` — otherwise the launch state existed only
+  as terminal scrollback that a detached or notebook run never sees, and a preflight failure
+  produced no run artifact at all ([J1]a).
   The resolved handler is threaded to the analyst workers and the reviewer/lead tool providers
   so any role can `ask_human`.
   Missing dependencies are constructed from `config/models.yaml`. Reads

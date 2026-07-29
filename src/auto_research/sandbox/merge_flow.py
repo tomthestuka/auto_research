@@ -1050,7 +1050,14 @@ def build_authoring_session(
     if run_review is None:
         from auto_research.sandbox.review import make_review_hook
 
-        run_review = make_review_hook(colead=colead, author_provider=_resolve_coder_provider())
+        # Forward the monitor: without it the co-lead built from config gets `monitor=None`,
+        # so its ReAct actions (tool calls, web searches, its reasoning steps) never reach the
+        # run record — only the AuthoringSession's own `review.result` verdict does. That made
+        # the one provider-decorrelated check in `commit ⇔ gate ∧ review` the only actor whose
+        # work was invisible.
+        run_review = make_review_hook(
+            colead=colead, author_provider=_resolve_coder_provider(), monitor=monitor
+        )
     max_turns = max_turns if max_turns is not None else _cap("tool_author_max_turns", 50)
     submit_cap = submit_cap if submit_cap is not None else _cap("tool_author_submit_cap", 5)
     debate_cap = debate_cap if debate_cap is not None else _cap("tool_author_debate_cap", 3)

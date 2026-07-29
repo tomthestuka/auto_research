@@ -285,9 +285,10 @@ async def run_research(
 
         heal_result = heal_toolkit_branch_if_dirty(run_dir(run_id))
 
-    # Run the full launch checklist — which pings the channel — before any LLM (§9.8).
-    await run_preflight(human_handler=human_handler)
-
+    # The monitor is built BEFORE the preflight so the launch checklist lands in the run
+    # ledger ([J1]a): previously preflight ran first and printed only to stdout, so a detached
+    # or notebook run — the primary mode — kept no record of why it refused to start, and a
+    # preflight failure produced no run artifact at all.
     run_monitor = monitor or RunMonitor(chatter=chatter, jsonl_path=monitor_jsonl)
     if resume and heal_result is not None and heal_result.healed:
         await run_monitor.record(
@@ -299,6 +300,10 @@ async def run_research(
                 "patch": str(heal_result.patch_path) if heal_result.patch_path else None,
             },
         )
+
+    # Run the full launch checklist — which pings the channel — before any LLM (§9.8).
+    await run_preflight(human_handler=human_handler, monitor=run_monitor)
+
     orch = load_orchestration_config()
 
     if max_iterations is None:

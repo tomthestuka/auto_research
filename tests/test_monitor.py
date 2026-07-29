@@ -157,7 +157,7 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path, mon
     # preflight (incl. the toolkit branch/clean check, which depends on the live
     # research_toolkit's current branch) is covered by tests/test_preflight.py and
     # tests/test_merge_flow.py. Stub it so this test stays independent of repo state.
-    async def _noop_preflight(*, human_handler=None):
+    async def _noop_preflight(*, human_handler=None, monitor=None):
         return None
 
     monkeypatch.setattr("auto_research.graph.runtime.run_preflight", _noop_preflight)

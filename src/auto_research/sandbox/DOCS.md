@@ -476,6 +476,13 @@ review-pass`). `make_review_hook` returns the default `run_review` hook (signatu
   `provider != author_provider` (the author is the Claude SDK, so the reviewer is GPT). Raises
   `ValueError` when no eligible member exists — a co-lead sharing the author's provider is a
   broken trust boundary and fails loudly. An injected `colead` is asserted decorrelated too.
+- **`monitor` is forwarded by `build_authoring_session`**, so the co-lead built from config
+  records its ReAct actions (tool calls, `web_search`, reasoning steps) onto the run ledger.
+  Until 2026-07-29 that kwarg was dropped at the call site: the co-lead got `monitor=None` and
+  only the `AuthoringSession`'s own `review.result` verdict was visible, making the single
+  provider-decorrelated check in `commit ⇔ gate ∧ review` the one actor whose work left no
+  trace. Regression-locked by
+  `test_merge_flow.py::test_build_authoring_session_forwards_monitor_to_the_review_hook`.
 - **Diff bundle** (`build_diff_bundle`): reuses `gate.collect_targets` for the file set — new
   files in full, modified files as unified `git diff` (per-file capped, `_DIFF_FILE_CAP`).
 - **The call**: `AnalystColeadAgent.review_tool(tool_spec, diff=…, gate=…, tools=…)`, with a
@@ -765,3 +772,4 @@ the hook mapping a fake-model verdict — no live LLM).
   remains deterministic-only** — forcing it live needs a real failed-authoring reset mid-run.
   Prompts updated: `analyst_worker.md` teaches the search step,
   `coder.md` states the one-line-brief / prose-in-`args_schema` split for new tools.
+- 2026-07-29 — **The co-lead's actions now reach the run ledger.** `build_authoring_session` called `review.make_review_hook(colead=…, author_provider=…)` without forwarding its `monitor`, so a co-lead built from config was constructed with `monitor=None`. Both ends of the wiring already existed (`make_review_hook` accepts `monitor`, `AnalystColeadAgent` accepts `monitor`) — only the kwarg at the seam was missing, and the symptom was subtle: the `AuthoringSession` records its own `review.result` verdict, so reviews *looked* logged while every action behind the verdict (tool calls, `web_search`, the reasoning steps) was silently discarded. That left the provider-decorrelated half of `commit ⇔ gate ∧ review` as the only actor in the flow with no audit trail — the opposite of what a trust-boundary check should be. One-line fix plus a regression test asserting the hook is built with the run monitor.
