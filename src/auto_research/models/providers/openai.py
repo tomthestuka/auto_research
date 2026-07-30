@@ -9,10 +9,6 @@ from pydantic import BaseModel
 
 from auto_research.env import tool_search_config
 from auto_research.models.providers._json import loads_first_json_object
-from auto_research.models.providers._tool_search import (
-    TOMBSTONE_DESCRIPTION,
-    missing_tool_names,
-)
 from auto_research.models.types import (
     AssistantToolUse,
     ConversationMessage,
@@ -139,26 +135,8 @@ class OpenAIProvider:
                 if ts_cfg.enabled and tool.get("defer_loading"):
                     entry["defer_loading"] = True
                 function_tools.append(entry)
-            if ts_cfg.enabled:
-                # Tombstones for tools discovered earlier in this conversation that have since
-                # left the catalog (e.g. a failed authoring attempt + registry reload). Checked
-                # independently of whether any current tool is deferred — the vanished tool may
-                # have been the only deferred one, and its stale reference still needs resolving.
-                for gone in missing_tool_names(
-                    messages, [t["name"] for t in function_tools if "name" in t]
-                ):
-                    function_tools.append(
-                        {
-                            "type": "function",
-                            "name": gone,
-                            "description": TOMBSTONE_DESCRIPTION,
-                            "parameters": {"type": "object", "properties": {}},
-                            "strict": False,
-                            "defer_loading": True,
-                        }
-                    )
-                if any(t.get("defer_loading") for t in function_tools):
-                    function_tools.append({"type": ts_cfg.openai_tool})
+            if ts_cfg.enabled and any(t.get("defer_loading") for t in function_tools):
+                function_tools.append({"type": ts_cfg.openai_tool})
             response = await client.responses.create(
                 model=config.model,
                 input=input_items,

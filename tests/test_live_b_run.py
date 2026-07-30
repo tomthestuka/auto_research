@@ -18,7 +18,7 @@ B1   [I5] cost accounting on live rows — nonzero cache_read/cache_write, reaso
 B2   Durable resume Stage 1 — kill the backend, relaunch with resume=True, continue not restart
 B3   Durable resume Stage 2 — kill **mid-authoring**, resume, dirty `ai` branch self-heals
 B5   [A11] authoring chain recovery — ≥1 tool commits, a later one fails, workers rerun anyway
-C2   Tombstone guard — a discovered tool leaves the catalog on a failed-authoring reset
+F1   Discovery-block trim — no dangling `Tool reference` 400 on a tool-less request
 D2   Model-facing effect of the manifest reshape — one-line brief → schema fetch → correct call
 E1   [E8] Telegram chunked plain-reply resolution
 B4   HITL slash-commands (`/help`, `/status`, `/steer`, `/stop`) — **needs a human at the phone**
@@ -31,7 +31,7 @@ marker event and :func:`_kill_backend_tree` then kills the **whole process tree*
 share the backend's process group and a bare ``kill <pid>`` orphans them (§12). Only B4 genuinely
 needs a human, so it is gated separately behind ``AUTO_RESEARCH_B_RUN_HITL=1``.
 
-Everything B1/B5/C2/D2 needs is already written to disk by the run, so those are **post-hoc
+Everything B1/B5/F1/D2 needs is already written to disk by the run, so those are **post-hoc
 assertions over the artifacts** — all in the run's ``monitor.jsonl``, which since 2026-07-29 carries
 the cost record too (``cost.call`` events + an accumulated total on every line) — in
 :func:`test_b_run_evidence`, which can be re-run against a finished run without spending anything.
@@ -349,7 +349,7 @@ def test_b_run_midauthoring_kill_heals() -> None:
 
 @skip_live
 def test_b_run_evidence() -> None:
-    """B1 / B5 / C2 / D2 over the artifacts the run already wrote.
+    """B1 / B5 / F1 / D2 over the artifacts the run already wrote.
 
     Split out so it can be re-run after the fact — the assertions read `monitor.jsonl` and the
     cost ledger, never the providers.
@@ -414,20 +414,18 @@ def test_b_run_evidence() -> None:
             "note": "no partial-chain failure occurred; [A11] not exercised this run",
         }
 
-    # ── C2: tombstone — only meaningful if a discovered tool actually vanished ───
-    reset = [e for e in events if e.get("event", "").startswith("coder.tree_reset")]
+    # ── F1: no discovery block replayed onto a request that declares no tools ───
+    # The 2026-07-29 run-killer: a terminal structured compose sends a schema and no tools, and
+    # replaying a discovery block there made Anthropic reject the whole request. The absence of
+    # that 400 anywhere in the ledger IS the test.
     dangling = [e for e in events if "Tool reference" in json.dumps(e)]
-    report["C2"] = {
-        "tree_resets": len(reset),
+    report["F1"] = {
         "dangling_reference_events": len(dangling),
-        "note": (
-            "a reset after a tool was discovered is the tombstone trigger; no 400 "
-            "'Tool reference not found' in the log means the guard held"
-        ),
+        "note": "no 400 'Tool reference not found' means the discovery-block trim held",
     }
     if dangling:
         failures.append(
-            "C2: a dangling tool reference reached a provider — the tombstone did not fire"
+            "F1: a dangling tool reference reached a provider — the discovery-block trim failed"
         )
 
     # ── D2: the reshape read correctly by a live model ──────────────────────────

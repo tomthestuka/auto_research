@@ -761,15 +761,14 @@ the hook mapping a fake-model verdict — no live LLM).
   since the API re-expands referenced definitions from history and dropping them would silently
   de-activate a discovered tool (**the same seam [I8] needs for Gemini's `thought_signature`**);
   the Anthropic `cache_control` breakpoint now lands on the last **non-deferred** tool (a deferred
-  tool carrying it is a 400); and `models/providers/_tool_search.py` adds the **tombstone** guard —
-  a tool referenced in history but missing from the catalog (the real failed-authoring-reset +
-  `registry.reload()` case) gets a stub definition instead of a 400, turning an [F6]-class
-  run-killer into an honest tool-level failure. Measured on `gpt-5.5` with the real 25-tool
+  tool carrying it is a 400); and `models/providers/_tool_search.py` adds a **tombstone** guard —
+  a tool referenced in history but missing from the catalog gets a stub definition instead of a 400
+  (**deleted 2026-07-30**: a code trace showed a live conversation's catalog cannot shrink under it,
+  so the guarded state is unreachable — see `models/DOCS.md`). Measured on `gpt-5.5` with the real 25-tool
   manifest: **19,004 → 2,382 resident tokens (−87%)**. Shipped `tool_search_enabled: false`, then
   **live-verified on both providers 2026-07-28 and flipped true** (resident input 19,074 → 3,789 on
   gpt-5.5, 35,208 → 9,003 on claude-sonnet-5); deterministic coverage in `tests/test_tool_search.py`
-  (+12), live round-trip in `tests/test_live_tool_search.py` (env-gated). The **tombstone path
-  remains deterministic-only** — forcing it live needs a real failed-authoring reset mid-run.
+  (+12), live round-trip in `tests/test_live_tool_search.py` (env-gated).
   Prompts updated: `analyst_worker.md` teaches the search step,
   `coder.md` states the one-line-brief / prose-in-`args_schema` split for new tools.
 - 2026-07-29 — **The co-lead's actions now reach the run ledger.** `build_authoring_session` called `review.make_review_hook(colead=…, author_provider=…)` without forwarding its `monitor`, so a co-lead built from config was constructed with `monitor=None`. Both ends of the wiring already existed (`make_review_hook` accepts `monitor`, `AnalystColeadAgent` accepts `monitor`) — only the kwarg at the seam was missing, and the symptom was subtle: the `AuthoringSession` records its own `review.result` verdict, so reviews *looked* logged while every action behind the verdict (tool calls, `web_search`, the reasoning steps) was silently discarded. That left the provider-decorrelated half of `commit ⇔ gate ∧ review` as the only actor in the flow with no audit trail — the opposite of what a trust-boundary check should be. One-line fix plus a regression test asserting the hook is built with the run monitor.

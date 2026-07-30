@@ -73,9 +73,9 @@ Google by editing YAML alone
   the Anthropic `cache_control` breakpoint moves to the last **non-deferred** tool (a deferred
   tool carrying it is a 400); discovery blocks are captured onto `ModelResponse.provider_blocks`
   and replayed verbatim from `AssistantToolUse.provider_blocks`, since the API re-expands
-  referenced definitions from history each turn; and a reference to a tool that has since left
-  the catalog gets a **tombstone** stub (`providers/_tool_search.py`) rather than a 400.
-  Providers differ in what stays resident: Anthropic hides a deferred tool entirely, OpenAI
+  referenced definitions from history each turn; and those blocks are replayed **only when the
+  request declares tools** (`include_discovery`), since a reference has nothing to point at
+  otherwise. Providers differ in what stays resident: Anthropic hides a deferred tool entirely, OpenAI
   keeps its name and description and withholds only the parameter schema. The Anthropic search
   tool is declared as the dated `type` beside its **undated** `name`
   (`anthropic_search_tool_name` derives one from the other; a mismatch is a 400). **Live-verified
@@ -241,3 +241,22 @@ Google by editing YAML alone
   per-provider live verification (Google's adapter builds schema and tools in an `if/elif`). Tests:
   `tests/test_tool_search.py` (+2, and the Anthropic fake gained the `messages.parse` shape it was
   missing).
+
+- 2026-07-30 — **The tombstone guard is deleted: it guarded a state this system cannot reach.** It
+  built a stub definition (name + "no longer available" + empty schema) for any tool a discovery
+  block referenced but the current catalog lacked, on the premise that a failed authoring attempt
+  plus `registry.reload()` drops a tool a live conversation already discovered. A code trace shows
+  that sequence is not reachable, on four independent grounds: `defer_loading` is set in exactly one
+  place (`SandboxToolProvider.tool_definitions`), so the lead, reviewer and co-lead never emit a
+  discovery block at all; every `_react` action builds a fresh seed and no role keeps a message list
+  between calls, so a discovery block never outlives one action; `ToolkitRegistry.reload()` has a
+  single non-test caller (`consensus/strategy.py`, guarded by `committed >= 1`) which runs *between*
+  actions while every worker is idle; and a tool that fails to commit was never in the catalog to be
+  discovered, since the registry reads `TOOL_MANIFEST` at load time rather than from disk per call.
+  So a live conversation's name set is fixed for its lifetime and cannot shrink under it. Removed:
+  `TOMBSTONE_DESCRIPTION`, `referenced_tool_names`, `missing_tool_names` and the two adapters'
+  stub-building branches (`_tool_search.py` keeps `anthropic_search_tool_name`), with the topology
+  argument recorded in its module docstring so a future refactor that *would* make the state
+  reachable — a mid-conversation reload, a persisted worker conversation, a reload on the rework
+  edge — has the reasoning to check against. The run-killer 400 that motivated a live check of this
+  path was the 2026-07-29 entry above, a different defect. Tests: `tests/test_tool_search.py` (−2).

@@ -7,11 +7,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from auto_research.env import context_editing_config, tool_search_config
-from auto_research.models.providers._tool_search import (
-    TOMBSTONE_DESCRIPTION,
-    anthropic_search_tool_name,
-    missing_tool_names,
-)
+from auto_research.models.providers._tool_search import anthropic_search_tool_name
 from auto_research.models.types import (
     AssistantToolUse,
     ConversationMessage,
@@ -212,30 +208,12 @@ class AnthropicProvider:
                 if ts_cfg.enabled and tool.get("defer_loading"):
                     entry["defer_loading"] = True
                 tool_defs.append(entry)
-            if ts_cfg.enabled:
-                # Tombstones for tools this conversation already discovered that have since
-                # left the catalog — without them the API 400s on the dangling reference.
-                # Checked independently of whether any *current* tool is deferred: the
-                # vanished tool may have been the only deferred one (exactly the failed-
-                # authoring case), and the stale reference in history still needs resolving.
-                gone_names = missing_tool_names(
-                    messages, [t["name"] for t in tool_defs if "name" in t]
-                )
-                for gone in gone_names:
-                    tool_defs.append(
-                        {
-                            "name": gone,
-                            "description": TOMBSTONE_DESCRIPTION,
-                            "input_schema": {"type": "object", "properties": {}},
-                            "defer_loading": True,
-                        }
-                    )
-                if any(t.get("defer_loading") for t in tool_defs):
-                    # Anthropic requires ≥1 non-deferred tool; the harness tools are it.
-                    tool_defs.append({
-                        "type": ts_cfg.anthropic_tool,
-                        "name": anthropic_search_tool_name(ts_cfg.anthropic_tool),
-                    })
+            if ts_cfg.enabled and any(t.get("defer_loading") for t in tool_defs):
+                # Anthropic requires ≥1 non-deferred tool; the harness tools are it.
+                tool_defs.append({
+                    "type": ts_cfg.anthropic_tool,
+                    "name": anthropic_search_tool_name(ts_cfg.anthropic_tool),
+                })
             # When there is no system block to carry the breakpoint, cache the tool
             # defs directly (they render first, so this caches the whole prefix). The
             # breakpoint must land on a NON-deferred tool: a deferred tool carrying

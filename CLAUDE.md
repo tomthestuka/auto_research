@@ -817,7 +817,7 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   drops their inline figures from the model's view, but the accumulated `figures` list still carries them
   to the report; `keep_tool_uses` + a high watermark keep the common case unaffected. Any Tier-2
   compactor must also **exclude tool-search discovery blocks** (see the next entry).
-- **Tool search / lazy tool loading — live-verified and enabled; four watch items remain.** With
+- **Tool search / lazy tool loading — live-verified and enabled; three watch items remain.** With
   `config: tool_search_enabled` every `research_toolkit` tool is sent `defer_loading: true` and its
   schema stays out of the model's context until discovered through the provider's server-side search
   tool (Anthropic `tool_search_tool_bm25_20251119`; OpenAI `tool_search`, gpt-5.4+; Google has none and
@@ -828,13 +828,12 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   breakpoint (cache-read at 0.1× thereafter). Watch items: (a) **activation lives in the history** — a
   discovered tool stays callable only while its `server_tool_use`/`tool_search_tool_result` blocks
   survive replay, so any future context compactor must exclude them or a tool silently de-activates
-  mid-run; (b) the **tombstone** path (`providers/_tool_search.py`) scans discovery blocks for
-  `tool_name` keys, so a provider payload shape it does not recognise yields no tombstone — the
-  pre-guard behaviour, never worse — and it is **still deterministic-only**, since forcing it live needs
-  a real failed-authoring reset mid-run; (c) **provider asymmetry** — Anthropic hides a deferred tool
+  mid-run — and it is also **why a live conversation's catalog cannot shrink under it**, the property
+  that made the tombstone guard unreachable and got it deleted (2026-07-30 changelog entry);
+  (b) **provider asymmetry** — Anthropic hides a deferred tool
   entirely (hence the tool catalogue injected into the task instructions is what tells the model the
   tool exists at all), while OpenAI keeps names+descriptions resident and withholds only the parameter
-  schema; (d) **Anthropic BM25 returns up to 5 references per search and expands all of them**, so a
+  schema; (c) **Anthropic BM25 returns up to 5 references per search and expands all of them**, so a
   broad natural-language query pulls five full schemas into the tail where the injected catalogue's
   exact name would have pulled one — the resident-token win is real either way, but a query-shape
   regression costs tokens silently.
@@ -1213,3 +1212,55 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   death* rather than the designed failed-authoring reset) and [F6] (after honoring `/stop`, the
   worker's terminal-composition call 400'd into `run.error` instead of an honest terminal); plus
   forced `/stop` + `/steer -f/-p/-c`, the tool-using summarizer, and [H9].
+- 2026-07-29 -> 2026-07-30 — **The B-run's second cluster: the discovery-replay run-killer, and human
+  control that actually lands.** (1) **The 400 that ended `b-run-q21`.** With tool search on, a
+  discovered tool leaves discovery blocks in history and both adapters replayed them on *every* later
+  request — including the terminal structured compose, which by design declares **no** tools
+  (`schema`/`tools` are mutually exclusive in `ModelHandle.call`). Anthropic rejected the whole
+  request: `400 Tool reference 'research_toolkit_heasarc_utils_acquire' not found in available tools`.
+  Both adapters now take `include_discovery`, passed as `tools is not None` — with no tools declared
+  a reference has nothing to point at, and the blocks carry nothing the model needs to write its
+  report; the trajectory itself (assistant text, `tool_use`, `tool_result`) replays untouched. This
+  sat on the path of **every** request since tool search was enabled 2026-07-28, so it fires the
+  moment any role searches for a tool and then composes a structured result. The deeper question it
+  exposes — `schema`/`tools` exclusivity conflates "no tool *calls* now" with "no tool
+  *declarations*", where `tool_choice="none"` says the former directly — is left as its own work
+  (CLOSED as not-pursued 2026-07-30: the trim covers the crash). (2) **`/stop` is forceful with no
+  modifier to remember** (user ruling): a stop that waits for a safe point is not a stop — on the live
+  run the next safe point sat behind a batch of 25-minute downloads — so `_stop` now awaits
+  `RunControl.abort_all()`, cancelling each role's in-flight call through an aborter the run
+  registered (`PersistentSandbox.abort`) and reporting how many it cancelled. Cancelling is honest
+  rather than violent: killing the REPL child makes the in-flight `call_tool` return its ordinary
+  non-zero result, so every call still gets a result, the transcript stays valid, and the next call
+  spawns a fresh REPL. (3) **Buttons replace a flag vocabulary.** `-f/-p/-c` was designed and dropped:
+  a chat platform surfaces *registered commands* in a menu and *buttons* for follow-up choices, flags
+  are invisible in both, and a dash is what a phone keyboard mangles. The typed surface stays four
+  verbs; the escalations became taps on the steer ack (`[⚡ Deliver now]`, `[🗑 Clear]`).
+  `dispatch_command` returns `CommandReply`, a **`str` subclass** carrying `.buttons` — additive by
+  construction, so CLI/Slack/WhatsApp keep sending plain text and only Telegram reads them. A tap
+  carries `steer:<now|clear>:<id>:<run_id>:<boot_nonce>` and needs no side store; the two trailing
+  fields answer "is this button still mine?" — a foreign `run_id` is another run's history, and a
+  foreign boot nonce is an **earlier segment of this run**, which `run_id` cannot detect because it is
+  deliberately stable across a resume. Telegram registers its menu from the same list `/help` prints,
+  so the two cannot drift. Suite 597 → 612.
+- 2026-07-30 — **The tombstone guard deleted — a misdiagnosis, not a fix.** It stubbed a definition
+  (name + "no longer available" + empty schema) for any tool a discovery block referenced but the
+  catalog lacked, premised on a failed authoring attempt plus `registry.reload()` dropping a tool a
+  live conversation had already discovered. The human's challenge — that the git operations are
+  topologically either before the first sandbox session or before a reload, so there is no dropped
+  tool still in an agent's menu — is correct, and a code trace confirms it on four independent
+  grounds: `defer_loading` is set in exactly one place (`SandboxToolProvider.tool_definitions`), so
+  the lead, reviewer and co-lead never emit a discovery block at all; every `_react` action builds a
+  fresh seed and no role keeps a message list between calls, so a discovery block never outlives one
+  action; `ToolkitRegistry.reload()` has a single non-test caller (`consensus/strategy.py`, guarded
+  by `committed >= 1`) which runs *between* actions with every worker idle; and a tool that fails to
+  commit was never in the catalog to be discovered, since the registry reads `TOOL_MANIFEST` at load
+  time, not from disk per call. So a live conversation's name set is fixed for its lifetime. Removed
+  `TOMBSTONE_DESCRIPTION`/`referenced_tool_names`/`missing_tool_names` and both adapters'
+  stub-building branches (`_tool_search.py` keeps `anthropic_search_tool_name`), with the topology
+  argument kept in its module docstring so a refactor that *would* make the state reachable — a
+  mid-conversation reload, a persisted worker conversation for a Tier-2 compactor, a reload on the
+  rework edge — has the reasoning to check against. The `[C2]` live-test item is dropped (it cannot
+  fire), and the B-run harness slot it occupied now checks the real thing: no dangling
+  `Tool reference` 400 anywhere in the ledger, which is the regression test for the trim above.
+  Suite 612 → 610 (−2 tests for −1 mechanism).

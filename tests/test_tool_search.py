@@ -3,8 +3,8 @@
 Toolkit tool definitions are withheld from the model's context until it discovers them via the
 provider's server-side search tool, which appends the definition inline in the conversation
 **tail** so the cached prefix survives. These exercise config parsing, request construction on
-both adapters, the discovery-block round-trip through the neutral types, the tombstone guard,
-and the disabled-by-default path — all against mocked SDKs, no tokens spent.
+both adapters, the discovery-block round-trip through the neutral types, and the
+disabled-by-default path — all against mocked SDKs, no tokens spent.
 
 The live round-trips are in ``tests/test_live_tool_search.py`` — **passed 2026-07-28 on both
 providers**: the real endpoints accept the deferred/search shape, the model does search, and an
@@ -20,12 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from auto_research.env import ToolSearchConfig, tool_search_config
-from auto_research.models.providers._tool_search import (
-    TOMBSTONE_DESCRIPTION,
-    anthropic_search_tool_name,
-    missing_tool_names,
-    referenced_tool_names,
-)
+from auto_research.models.providers._tool_search import anthropic_search_tool_name
 from auto_research.models.providers.anthropic import AnthropicProvider
 from auto_research.models.providers.openai import OpenAIProvider, _to_openai_input
 from auto_research.models.types import (
@@ -261,28 +256,6 @@ def test_anthropic_captures_and_replays_discovery_blocks(monkeypatch):
     ]
 
 
-def test_anthropic_tombstones_a_vanished_discovered_tool(monkeypatch):
-    """A failed authoring attempt + registry reload drops a tool the conversation already
-    discovered; without a tombstone the next request 400s on the dangling reference."""
-    response = _call_anthropic(monkeypatch)
-    turn = AssistantToolUse(content="", provider_blocks=response.provider_blocks)
-
-    import anthropic
-
-    monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAnthropic)
-    monkeypatch.setattr(
-        "auto_research.models.providers.anthropic.tool_search_config", _enabled
-    )
-    cfg = RoleModelConfig(name="m", provider="anthropic", model="fake-model")
-    gone = [t for t in _tools() if t["name"] != "research_toolkit_xspec_utils_ixpe_pcube"]
-    asyncio.run(
-        AnthropicProvider().call([*_messages(), turn], cfg, tools=gone)
-    )
-    sent = _FakeAnthropic.store["request"]["tools"]
-    stub = [t for t in sent if t.get("name") == "research_toolkit_xspec_utils_ixpe_pcube"]
-    assert stub and stub[0]["description"] == TOMBSTONE_DESCRIPTION
-
-
 # ── OpenAI request construction ─────────────────────────────────────────────
 
 class _FakeResponses:
@@ -368,23 +341,6 @@ def test_openai_disabled_sends_no_search_tool(monkeypatch):
     sent = _FakeOpenAI.store["request"]["tools"]
     assert all(t.get("type") == "function" for t in sent)
     assert all("defer_loading" not in t for t in sent)
-
-
-# ── the shared reference scanner ────────────────────────────────────────────
-
-def test_referenced_and_missing_tool_names():
-    turn = AssistantToolUse(
-        content="",
-        provider_blocks=[
-            {
-                "type": "tool_search_tool_result",
-                "content": {"tool_references": [{"tool_name": "alpha"}, {"tool_name": "beta"}]},
-            }
-        ],
-    )
-    assert referenced_tool_names([turn]) == {"alpha", "beta"}
-    assert missing_tool_names([turn], ["alpha"]) == ["beta"]
-    assert missing_tool_names([turn], ["alpha", "beta"]) == []
 
 
 # ── the 2026-07-29 run-killer: discovery blocks replayed on a TOOL-LESS request ──────────────
