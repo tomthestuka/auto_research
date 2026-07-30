@@ -112,3 +112,143 @@ def test_react_no_run_control_is_unchanged():
         isinstance(m, ModelMessage) and m.content.startswith("[Human steer]")
         for m in model.calls[0]
     )
+
+
+# ── mid-batch delivery: a model turn can emit MANY tool calls (2026-07-29 live finding) ───────
+
+
+class _BatchTools:
+    """Tools that record dispatches; the human acts while the first call is 'running'."""
+
+    def __init__(self, on_first=None):
+        self.dispatched: list[str] = []
+        self._on_first = on_first
+
+    def tool_definitions(self):
+        return [{"name": "slow", "description": "", "input_schema": {"type": "object"}}]
+
+    async def execute(self, name, args):
+        from auto_research.agents.react import ToolOutcome
+
+        self.dispatched.append(name)
+        if len(self.dispatched) == 1 and self._on_first is not None:
+            self._on_first()          # the human sends /stop or /steer during the first call
+        return ToolOutcome(text="ok", is_error=False)
+
+
+def _batched_response(names):
+    from auto_research.models.types import ToolCall
+
+    return ModelResponse(
+        content="",
+        tool_calls=[ToolCall(id=f"c{i}", name=n, arguments={}) for i, n in enumerate(names)],
+    )
+
+
+def test_stop_mid_batch_skips_the_remaining_tool_calls():
+    """A /stop must not have to wait out a batch of long calls — the live failure mode.
+
+    Every skipped tool_use still gets a result (providers require one per call), so the
+    transcript stays valid and the loop then ends into the honest terminal.
+    """
+    from auto_research.models.types import ToolResultMessage
+
+    rc = RunControl()
+    tools = _BatchTools(on_first=lambda: rc.request_stop("human /stop"))
+    model = _FakeModel([_batched_response(["slow", "slow", "slow"])])
+    role = _bare_role(model, run_control=rc, agent_key="w")
+
+    messages, _, _ = asyncio.run(
+        role._react(seed_messages=_seed(), tools=tools, action="analyze", cap=5)
+    )
+
+    assert tools.dispatched == ["slow"]          # only the in-flight call ran
+    results = [m for m in messages if isinstance(m, ToolResultMessage)][-1].results
+    assert len(results) == 3                     # one result per tool_use, still valid
+    assert [r.is_error for r in results] == [False, True, True]
+    assert "human requested the run to stop" in results[1].content
+    assert len(model.calls) == 1                 # stop ended the loop before another turn
+
+
+def test_steer_arriving_mid_batch_reaches_the_next_model_call():
+    """A steer queued while a batch is running is delivered right after that batch."""
+    rc = RunControl()
+    tools = _BatchTools(on_first=lambda: rc.add_steer("w", "stop downloading locked data"))
+    model = _FakeModel([_batched_response(["slow", "slow"]), ModelResponse(content="done")])
+    role = _bare_role(model, run_control=rc, agent_key="w")
+
+    asyncio.run(role._react(seed_messages=_seed(), tools=tools, action="analyze", cap=5))
+
+    assert tools.dispatched == ["slow", "slow"]  # a plain steer does not cancel the batch
+    injected = [
+        m for m in model.calls[-1]
+        if isinstance(m, ModelMessage) and m.content.startswith("[Human steer]")
+    ]
+    assert injected and "stop downloading locked data" in injected[0].content
+    assert rc.drain_steer("w") == []             # consumed, not re-delivered next iteration
+
+
+def test_events_are_actored_by_the_steerable_agent_key():
+    """A log line must name the identity `/steer` addresses, so two workers are distinguishable.
+
+    Belongs with run control: the actor is what a human reads to decide which worker to steer.
+    """
+
+    class _Recorder:
+        def __init__(self):
+            self.rows: list[tuple[str, str | None]] = []
+
+        async def record(self, team, event, *, level, summary, actor=None, data=None):
+            self.rows.append((event, actor))
+            return None
+
+    monitor = _Recorder()
+    keyed = _bare_role(_FakeModel(), agent_key="analyst_worker_1")
+    keyed.monitor = monitor
+    unkeyed = _bare_role(_FakeModel(), agent_key=None)
+    unkeyed.monitor = monitor
+
+    asyncio.run(keyed._record("analyst_worker.analyze.step", level=7, summary="s"))
+    asyncio.run(unkeyed._record("analyst_worker.analyze.step", level=7, summary="s"))
+
+    assert monitor.rows[0][1] == "analyst_worker_1"   # the key the steer channel accepts
+    assert monitor.rows[1][1] == "analyst_worker"     # no key → the role, as before
+
+
+# ── forced stop: cancel in-flight work instead of waiting for a safe point ─────────────────────
+
+
+def test_stop_cancels_in_flight_work_through_registered_aborters():
+    """A stop that waits for a safe point is not a stop (the safe point was 25 minutes away)."""
+    rc = RunControl()
+    calls: list[str] = []
+
+    async def busy_aborter():
+        calls.append("worker_0")
+        return True          # it WAS mid-call
+
+    async def idle_aborter():
+        calls.append("worker_1")
+        return False         # nothing to cancel
+
+    rc.register_aborter("analyst_worker_0", busy_aborter)
+    rc.register_aborter("analyst_worker_1", idle_aborter)
+
+    assert asyncio.run(rc.abort_all()) == 1      # one was busy
+    assert sorted(calls) == ["worker_0", "worker_1"]
+    assert asyncio.run(rc.abort("analyst_worker_0")) == 1
+    assert asyncio.run(rc.abort("nobody")) == 0  # unknown key is a no-op, not an error
+
+
+def test_a_failing_aborter_cannot_defeat_the_stop():
+    rc = RunControl()
+
+    async def broken():
+        raise RuntimeError("sandbox already gone")
+
+    async def fine():
+        return True
+
+    rc.register_aborter("a", broken)
+    rc.register_aborter("b", fine)
+    assert asyncio.run(rc.abort_all()) == 1      # the broken one is swallowed, b still runs

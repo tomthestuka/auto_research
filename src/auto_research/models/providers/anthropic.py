@@ -90,7 +90,9 @@ class AnthropicProvider:
 
         params = dict(config.parameters)
         max_tokens = params.pop("max_tokens", 1024)
-        system, provider_messages = _to_anthropic_messages(messages)
+        system, provider_messages = _to_anthropic_messages(
+            messages, include_discovery=tools is not None
+        )
 
         # Documents (e.g. PDFs the reviewer opens) go at the FRONT — a stable position
         # right after the system prompt — and grow append-only across a ReAct loop, so
@@ -340,6 +342,8 @@ def _figure_blocks(figure: FigureRef) -> list[dict[str, Any]]:
 
 def _to_anthropic_messages(
     messages: Sequence[ConversationMessage],
+    *,
+    include_discovery: bool = True,
 ) -> tuple[str | None, list[dict]]:
     """Split system text out and translate the rest into Anthropic message dicts.
 
@@ -356,10 +360,17 @@ def _to_anthropic_messages(
                 blocks.append({"type": "text", "text": message.content})
             # Tool-search discovery blocks replay verbatim, positioned after the assistant
             # text and before the tool_use blocks — the order the server produced them in.
-            blocks.extend(
-                b for b in message.provider_blocks
-                if b.get("type") in _DISCOVERY_BLOCK_TYPES
-            )
+            # They are DROPPED when this request declares no tools (``include_discovery``):
+            # a discovery block references a tool by name, and the API rejects the whole
+            # request when that name is not on the request's tool list — "Tool reference 'x'
+            # not found in available tools" (live run-killer, 2026-07-29). Terminal structured
+            # composes send a schema and no tools by design, so at that point the blocks
+            # reference tools nothing can call and carry no information the model needs.
+            if include_discovery:
+                blocks.extend(
+                    b for b in message.provider_blocks
+                    if b.get("type") in _DISCOVERY_BLOCK_TYPES
+                )
             for call in message.tool_calls:
                 blocks.append(
                     {"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments}

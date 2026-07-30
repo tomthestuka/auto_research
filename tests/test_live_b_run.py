@@ -432,10 +432,18 @@ def test_b_run_evidence() -> None:
 
     # ── D2: the reshape read correctly by a live model ──────────────────────────
     # A too-terse brief shows up as tool calls with wrong/missing arguments, which surface as
-    # tool errors. Reported rather than asserted: some tool errors are legitimate science.
-    tool_errors = [e for e in events if "error" in e.get("event", "") and "tool" in e.get("event", "")]
+    # failed tool results. Reported rather than asserted: some tool errors are legitimate science.
+    # A failure is recorded as `is_error` on a `*.tool_result` event — NOT as an event whose name
+    # contains "error" — so counting by name scored 0 while the 2026-07-29 run had four real
+    # failures. Count the results themselves, and name the tools that failed so the arguments can
+    # be inspected rather than merely tallied.
+    failed_results = [
+        e for e in events
+        if e.get("event", "").endswith(".tool_result") and (e.get("data") or {}).get("is_error")
+    ]
     report["D2"] = {
-        "tool_error_events": len(tool_errors),
+        "failed_tool_results": len(failed_results),
+        "tools": sorted({(e.get("data") or {}).get("tool", "?") for e in failed_results}),
         "note": "inspect these for wrong/missing arguments — the signature of a too-terse brief",
     }
 

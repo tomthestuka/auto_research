@@ -505,6 +505,8 @@ async def run_research(
                     roster=_roster,
                     monitor_jsonl_path=jsonl_path,
                     status_answer=status_answer,
+                    monitor=run_monitor,  # commands land in the ledger, like every other actor
+                    run_id=run_id,  # button payloads carry it, so another run's tap is refused
                 )
             )
         except Exception:  # noqa: BLE001 — commands are optional; never block the run
@@ -559,6 +561,10 @@ async def run_research(
             worker.sandbox = sandbox
             worker.registry = registry
             sandboxes.append(sandbox)
+            # A human /stop cancels this worker's in-flight tool call instead of waiting for a
+            # safe point it may not reach for hours (a long download). Keyed by the same
+            # agent_key the steer channel addresses.
+            run_control.register_aborter(analyst_keys[i], sandbox.abort)
 
     await run_monitor.record(
         "run",

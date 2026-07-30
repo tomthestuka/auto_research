@@ -368,7 +368,32 @@ class AgentRole:
                 )
             )
             result_parts: list[ToolResultPart] = []
+            # Steers that arrive WHILE this batch runs. A model turn can emit many tool calls, and
+            # the loop dispatches them all before it comes back round to the top-of-iteration
+            # drain — so a human's message could sit unseen behind a whole batch of long calls
+            # (observed 2026-07-29: two steers waited behind a pair of 25-minute downloads and
+            # landed only when the batch broke). Collected here, appended as a user turn right
+            # after this batch's results, so the very next model call sees them.
+            batch_steers: list[str] = []
+            skipped_for_stop = 0
             for call in response.tool_calls:
+                # A human /stop must not have to wait out the rest of the batch either. Skip every
+                # remaining call with an honest result — a result is still recorded for each
+                # tool_use, which the providers require, so the transcript stays valid and the
+                # top-of-iteration check then ends the loop into the §9.6 terminal.
+                if self.run_control is not None and self.run_control.stop_requested:
+                    skipped_for_stop += 1
+                    result_parts.append(
+                        ToolResultPart(
+                            tool_call_id=call.id,
+                            name=call.name,
+                            content=(
+                                "skipped: a human requested the run to stop before this call ran"
+                            ),
+                            is_error=True,
+                        )
+                    )
+                    continue
                 # Input event — written (and flushed) BEFORE the call runs, so a tool that
                 # hangs and never returns still leaves a record of exactly what was issued.
                 # Output is a separate event below, written when execute() returns; the two
@@ -430,7 +455,29 @@ class AgentRole:
                         "text": _cap_text(outcome.text, _EVENT_RESULT_CAP),
                     },
                 )
+                if self.run_control is not None:
+                    batch_steers.extend(self.run_control.drain_steer(self.agent_key))
             messages.append(ToolResultMessage(results=result_parts))
+            if skipped_for_stop:
+                await self._record(
+                    f"{self.role}.{action}.stop_skipped_calls",
+                    level=3,
+                    summary=(
+                        f"{self.role} skipped {skipped_for_stop} queued tool call(s) — human "
+                        "requested stop"
+                    ),
+                    data={"skipped": skipped_for_stop, "iteration": iteration + 1},
+                )
+            for steer in batch_steers:
+                # Ordered after the tool results (assistant → tool results → user), so the turn
+                # sequence stays valid for every provider.
+                messages.append(ModelMessage(role="user", content=f"[Human steer] {steer}"))
+                await self._record(
+                    f"{self.role}.{action}.steer",
+                    level=3,
+                    summary=f"{self.role} received a human steer (mid-batch)",
+                    data={"message": _cap_text(steer, _EVENT_ARG_CAP)},
+                )
             # Budget accounting: an iteration consumes budget unless EVERY tool it called is
             # free (e.g. plan_and_debate). Free-only iterations advance `iteration` (so the
             # absolute backstop still bounds them) but not `budget_used`.
@@ -473,7 +520,12 @@ class AgentRole:
                 event,
                 level=level,
                 summary=summary,
-                actor=self.role,
+                # The indexed agent_key when there is one, so a line names the SAME identity the
+                # steer channel addresses (`analyst_worker_0`, not the shared role
+                # `analyst_worker`). Two workers were previously indistinguishable in the log, so
+                # neither a reader nor a human deciding where to send a steer could tell them
+                # apart. Falls back to the role for roles that carry no key.
+                actor=getattr(self, "agent_key", None) or self.role,
                 data=record_data,
             )
 

@@ -26,6 +26,50 @@ TEAM_LABELS = {
 }
 
 
+def _last_sequence(path: Path) -> int:
+    """Highest ``sequence`` already recorded in a monitor JSONL (0 for absent/empty/unreadable).
+
+    Lets a resumed run continue one coherent, monotonically-numbered ledger instead of restarting
+    at 1 — numbering matters because readers key on ``(run_id, sequence)`` (the spend rollup
+    de-duplicates on it, so a restarted count would collide and drop rows from the totals).
+    """
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    highest = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            highest = max(highest, int(json.loads(line).get("sequence", 0) or 0))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue  # a torn tail line from a hard kill must not reset the count
+    return highest
+
+
+def _terminate_partial_line(path: Path) -> None:
+    """End the file on a newline before appending to it.
+
+    A hard kill can stop mid-write, leaving a truncated last line; appending straight onto it would
+    glue the next event to that fragment and cost a readable record. Adding the newline keeps the
+    fragment its own (skipped-as-corrupt) line instead.
+    """
+
+    try:
+        with path.open("rb+") as handle:
+            handle.seek(0, 2)
+            if handle.tell() == 0:
+                return
+            handle.seek(-1, 2)
+            if handle.read(1) != b"\n":
+                handle.write(b"\n")
+    except OSError:
+        pass
+
+
 def validate_chatter(chatter: int) -> int:
     """Return a validated 1-10 chatter level."""
 
@@ -88,7 +132,15 @@ class RunMonitor:
         self._lock = Lock()
         if self.jsonl_path is not None:
             self.jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-            self.jsonl_path.write_text("", encoding="utf-8")
+            # APPEND to an existing ledger, continuing its numbering — never erase it. A resumed
+            # run (`--resume`) constructs a new monitor over the SAME file, so truncating here
+            # threw away everything the run had recorded before the interruption: the durable-resume
+            # evidence (a reader looks for new events *after* the restart) and, since cost joined
+            # the ledger, all spend booked before it. Only a deliberate fresh start is destructive,
+            # and that is `run_research_nohup(overwrite=True)`, which removes the whole run dir
+            # first — so nothing here needs to clear anything.
+            self._sequence = _last_sequence(self.jsonl_path)
+            _terminate_partial_line(self.jsonl_path)
 
     @property
     def events(self) -> tuple[MonitorEvent, ...]:
@@ -192,11 +244,22 @@ class RunMonitor:
         return "\n".join(lines).rstrip() + "\n"
 
     def write_jsonl(self, path: str | Path | None = None) -> Path:
-        """Write all recorded events as JSONL and return the path."""
+        """Write the **in-memory** events as JSONL to a *copy* path and return it.
+
+        In-memory events are chatter-filtered, so this is a snapshot for export — writing it over
+        the run's own live ledger would replace the full-fidelity record with a subset (and drop
+        the level-10 ``cost.call`` events below chatter 10). Passing the live path is therefore
+        refused; the live ledger is only ever appended to, by ``record()``.
+        """
 
         target = Path(path).expanduser() if path is not None else self.jsonl_path
         if target is None:
             target = default_monitor_jsonl_path()
+        if self.jsonl_path is not None and target.resolve() == self.jsonl_path.resolve():
+            raise ValueError(
+                f"refusing to rewrite the live monitor ledger {target} from chatter-filtered "
+                "in-memory events — pass a copy path (the live file is append-only)"
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("w", encoding="utf-8") as stream:
             for event in sorted(self.events, key=lambda item: item.sequence):
@@ -229,7 +292,9 @@ class RunMonitor:
         monitor.jsonl_path = None
         monitor.stream = None
         monitor._events = events
-        monitor._sequence = len(events)
+        # Highest sequence, not the row count: a resumed ledger's numbering continues across
+        # segments and a torn line is skipped, so counting rows could hand out a used number.
+        monitor._sequence = max((event.sequence for event in events), default=0)
         monitor._lock = Lock()
         monitor.cost_meter = None  # a replayed run's cost lives in the events, not a live meter
         return monitor

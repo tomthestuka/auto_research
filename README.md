@@ -122,11 +122,16 @@ optional raise-to-human connectors (only when selected) — **Telegram** (recomm
 the terminal (`cli`) channel needs none.
 
 Over **Telegram or Slack** a human can drive a live run with slash-commands (intercepted, never
-treated as answers to an agent): `/help` (commands + the live team/role/model roster), `/status
-[question]` (a report on the run's state), `/steer <role> <message>` (nudge a role at its next
-step; `all` broadcasts), and `/stop` (wind the whole run down to an honest terminal). CLI/WhatsApp
-have no background listener, so commands aren't wired there. *(Command dispatch is tested; live
-command use is observational — not yet exercised end-to-end.)*
+treated as answers to an agent): `/help` (commands + the live roster, numbered), `/status
+[question]` (a report on the run's state), `/steer <id> <message>` (nudge one role at its next
+step, addressed by the **id** `/help` prints; `all` broadcasts), and `/stop` (wind the whole run
+down to an honest terminal). Every invalid command — unknown command, unknown id, a role name where
+an id belongs, a missing message — is refused immediately with the valid options, and nothing is
+queued on a guess. Commands are recorded in the run ledger, so a rejected command, a queued steer
+and a delivered steer are told apart after the fact. A queued steer reaches its role at that role's
+next step: a `/stop` also skips the rest of an in-flight batch of tool calls, while a plain steer
+waits for the batch to finish. CLI/WhatsApp have no background listener, so commands aren't wired
+there. *(Command dispatch is tested; live command use is observational.)*
 
 **Runtime data dir** (`config/orchestration.yaml::runtime_dir`, defaults to
 `~/.auto_research` if omitted) lives **outside both repos** and is not committed. It holds

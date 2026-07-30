@@ -68,18 +68,23 @@ class TelegramHandler:
             self._register_listener()
 
     def _register_listener(self) -> None:
-        from telegram.ext import MessageHandler, filters
+        from telegram.ext import CallbackQueryHandler, MessageHandler, filters
 
         # Replies (plain text, NOT commands) resolve pending queries; slash-commands are a
         # separate handler — so a command is structurally never taken as a reply to an LLM.
+        # A button tap arrives as a callback query, a third channel again distinct from both.
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_update))
         self.app.add_handler(MessageHandler(filters.COMMAND, self._on_command))
+        self.app.add_handler(CallbackQueryHandler(self._on_callback))
 
     async def _on_update(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
         self.on_message(update)
 
     async def _on_command(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
         await self.handle_command(update)
+
+    async def _on_callback(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
+        await self.handle_callback(update)
 
     def attach_commands(self, ctx: Any) -> None:
         """Wire the run-scoped HITL command context (§12 Stage 3); enables /help,/status,/steer,/stop."""
@@ -103,6 +108,28 @@ class TelegramHandler:
         from auto_research.hitl.commands import dispatch_command
 
         reply = await dispatch_command(text, self._cmd_ctx)
+        await self._send(_md_to_html(reply), buttons=getattr(reply, "buttons", ()))
+
+    async def handle_callback(self, update: Any) -> None:
+        """Handle a button tap: run the action, acknowledge it, and post the result.
+
+        Telegram delivers the button's hidden payload rather than a chat message, so a tap is
+        never mistaken for a reply to an agent. Separated from the handler wiring for testing.
+        """
+        if self._cmd_ctx is None:
+            return
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        data = getattr(query, "data", "") or ""
+        from auto_research.hitl.commands import dispatch_callback
+
+        reply = await dispatch_callback(data, self._cmd_ctx)
+        # Answer the tap first so the client's spinner stops even if sending the result is slow.
+        try:
+            await query.answer()
+        except Exception:  # noqa: BLE001 — an un-answered tap must not lose the action
+            pass
         await self._send(_md_to_html(reply))
 
     def on_message(self, update: Any) -> None:
@@ -154,7 +181,26 @@ class TelegramHandler:
         await self.app.start()
         # drop_pending_updates: ignore messages that predate this run's polling start.
         await self.app.updater.start_polling(drop_pending_updates=True)
+        await self._publish_command_menu()
         self._started = True
+
+    async def _publish_command_menu(self) -> None:
+        """Register the commands with Telegram so they autocomplete in the client's menu.
+
+        This is the platform's own discovery mechanism, and the reason the surface is verbs with a
+        numbered roster rather than flags: a command the client offers cannot be misremembered,
+        while a flag is invisible until someone reads the source. Best-effort — a failed
+        registration costs discoverability, never the channel."""
+        from auto_research.hitl.commands import menu_commands
+
+        try:
+            from telegram import BotCommand
+
+            await self.app.bot.set_my_commands(
+                [BotCommand(name, description) for name, description in menu_commands()]
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     async def aclose(self) -> None:
         if self._started and self.app is not None:
@@ -166,20 +212,25 @@ class TelegramHandler:
                 await self.app.shutdown()
             self._started = False
 
-    async def _send(self, text_html: str) -> Any:
+    async def _send(self, text_html: str, *, buttons: tuple = ()) -> Any:
         """Send one message as HTML; on a parse rejection, retry as plain text (tags stripped)
-        so a malformed-render never blocks the human channel."""
+        so a malformed-render never blocks the human channel.
+
+        ``buttons`` (``(label, callback_data)`` pairs) attach an inline keyboard to this message —
+        a tap sends the payload back without posting anything in the chat, which is how the
+        escalations on a steer ack need no typing and cannot be mistyped."""
         try:
             from telegram.error import BadRequest
         except Exception:  # noqa: BLE001 - library absent in unit tests
             BadRequest = ()  # type: ignore[assignment]
+        extra = {"reply_markup": _inline_keyboard(buttons)} if buttons else {}
         try:
             return await self.app.bot.send_message(
-                chat_id=self.chat_id, text=text_html, parse_mode="HTML"
+                chat_id=self.chat_id, text=text_html, parse_mode="HTML", **extra
             )
         except BadRequest:
             plain = _html.unescape(re.sub(r"<[^>]+>", "", text_html))
-            return await self.app.bot.send_message(chat_id=self.chat_id, text=plain)
+            return await self.app.bot.send_message(chat_id=self.chat_id, text=plain, **extra)
 
     async def __call__(self, query: HumanQuery) -> HumanResponse:
         await self.start()
@@ -203,6 +254,21 @@ class TelegramHandler:
             for mid in ids:
                 self._pending.pop(mid, None)
         return HumanResponse(query_id=query.id, answer=answer)
+
+
+def _inline_keyboard(buttons: tuple) -> Any:
+    """Build a one-row inline keyboard from ``(label, callback_data)`` pairs.
+
+    Returns ``None`` when the library is absent (unit tests) so the message still sends as text —
+    a missing button layer never costs the human the reply itself.
+    """
+    try:
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    except Exception:  # noqa: BLE001
+        return None
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(label, callback_data=data) for label, data in buttons]]
+    )
 
 
 def _build_telegram_app(token: str | None = None) -> Any:

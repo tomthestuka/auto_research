@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -165,6 +166,61 @@ def test_legacy_monitor_line_validates_without_the_cost_field() -> None:
     )
     event = MonitorEvent.model_validate_json(line)
     assert event.cost_usd_total is None
+
+
+def test_second_monitor_over_the_same_ledger_appends_and_continues_numbering(tmp_path: Path) -> None:
+    """A resumed run must NEVER erase its ledger — only `overwrite` (whole-dir) is destructive.
+
+    Truncating on construction threw away everything recorded before an interruption: the
+    durable-resume evidence a reader looks for *after* the restart, and (since cost joined the
+    ledger) all spend booked before it.
+    """
+    path = tmp_path / "monitor.jsonl"
+    first = RunMonitor(chatter=10, jsonl_path=path, run_id="r1")
+    asyncio.run(first.record("run", "run.start", level=1, summary="started"))
+    asyncio.run(first.record("analyst", "analyst.step", level=5, summary="working"))
+
+    resumed = RunMonitor(chatter=10, jsonl_path=path, run_id="r1")  # what --resume constructs
+    asyncio.run(resumed.record("run", "run.resume", level=1, summary="resumed"))
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [r["event"] for r in rows] == ["run.start", "analyst.step", "run.resume"]
+    assert [r["sequence"] for r in rows] == [1, 2, 3]  # monotonic: readers key on (run_id, sequence)
+
+
+def test_append_survives_a_torn_final_line(tmp_path: Path) -> None:
+    """A hard kill can stop mid-write; the fragment stays its own line, the next event is intact.
+
+    Numbering continues from the last *parseable* event (a torn record cannot be read, and no
+    reader counts it), and the new event is never glued onto the fragment.
+    """
+    path = tmp_path / "monitor.jsonl"
+    good = json.dumps({
+        "run_id": "r", "sequence": 7, "created_at": "2026-07-01T00:00:00+00:00", "team": "run",
+        "event": "analyst.step", "level": 5, "summary": "working", "data": {},
+    })
+    path.write_text(good + '\n{"run_id":"r","sequence":8,"team":"run","ev', encoding="utf-8")
+
+    monitor = RunMonitor(chatter=10, jsonl_path=path, run_id="r")
+    asyncio.run(monitor.record("run", "run.resume", level=1, summary="resumed"))
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3  # good line · the fragment, still its own line · the new event
+    assert json.loads(lines[2])["sequence"] == 8  # continued from the last readable event
+
+
+def test_write_jsonl_refuses_to_overwrite_the_live_ledger(tmp_path: Path) -> None:
+    """The export path must not replace the full-fidelity log with chatter-filtered events."""
+    path = tmp_path / "monitor.jsonl"
+    monitor = RunMonitor(chatter=4, jsonl_path=path)
+    asyncio.run(monitor.record("run", "cost.call", level=10, summary="hidden from memory"))
+
+    with pytest.raises(ValueError, match="append-only"):
+        monitor.write_jsonl(path)
+
+    copy = monitor.write_jsonl(tmp_path / "copy.jsonl")
+    assert copy.exists()
+    assert path.read_text(encoding="utf-8").count("cost.call") == 1  # live ledger untouched
 
 
 def test_run_summary_derives_cost_tools_and_reports_from_the_event_stream() -> None:
@@ -372,3 +428,27 @@ def test_chatter_range_validation() -> None:
         RunMonitor(chatter=0)
     with pytest.raises(ValueError, match="chatter"):
         RunMonitor(chatter=11)
+
+
+def test_summary_total_sums_priced_calls_across_resume_segments() -> None:
+    """The headline must not be the highest stamped total: a resumed segment restarts its stamps."""
+    def event(seq, name, *, data=None, cost=None, level=5):
+        return {
+            "run_id": "r", "sequence": seq, "team": "run", "event": name, "level": level,
+            "summary": name, "data": data or {}, "cost_usd_total": cost,
+            "created_at": datetime(2026, 7, 29, 12, 0, seq, tzinfo=UTC).isoformat(),
+        }
+
+    events = [
+        event(1, "cost.call", data={"role": "reviewer", "model": "m", "total_cost_usd": 8.80},
+              cost=8.80, level=10),
+        event(2, "run.resume", cost=0.0, level=1),                       # new process, meter at 0
+        event(3, "cost.call", data={"role": "analyst_worker", "model": "m",
+                                   "total_cost_usd": 0.18}, cost=0.18, level=10),
+    ]
+
+    summary = build_run_summary(events)
+
+    assert summary["cost_usd"] == 8.98          # summed, not max(8.80, 0.18)
+    assert summary["llm_calls"] == 2
+    assert "$8.9800 over 2 LLM calls" in render_run_summary(summary)

@@ -43,6 +43,14 @@ The monitor uses an XSPEC-style `chatter` level from 1 to 10. Higher values
 record more detail; `chatter=10` is the full-chatty mode used for live run
 inspection.
 
+**The ledger is append-only.** Constructing a monitor over an existing JSONL **appends** and
+continues its numbering (`_last_sequence`, plus a newline first if a hard kill left a torn line) —
+it never truncates. A resumed run builds a new monitor over the same file, so erasing here threw
+away everything recorded before the interruption. Only a deliberate fresh start is destructive, and
+that is `run_research_nohup(overwrite=True)`, which removes the whole run dir. `write_jsonl()`
+refuses the live path for the same reason (it writes chatter-filtered in-memory events, so it is an
+export, not the record).
+
 **JSONL vs human-visible split:** when a `jsonl_path` is set, ALL events (levels
 1–10) are always written to the JSONL file regardless of `chatter`. Only events
 at `level <= chatter` are kept in memory, rendered in Markdown, and written to
@@ -118,3 +126,13 @@ diagnostic trace, while terminal/notebook output is filtered by `chatter`.
 - 2026-07-29 (follow-up) — the summary prints one labelled line per report artifact with its full
   path, plus always-present `run dir` and `ledger` lines; `run.start` now carries `run_dir` +
   `monitor_jsonl` so those stay derivable from the ledger alone (no path rebuilt from config).
+- 2026-07-29 (follow-up 2) — **the ledger is never erased.** `__init__` truncated the
+  JSONL, so every `--resume` relaunch wiped the run's record: the durable-resume evidence (read as
+  "events after the restart") and, since this morning, all spend booked before the kill. It now
+  appends and continues numbering from the last readable event; `write_jsonl()` refuses to rewrite
+  the live ledger from chatter-filtered memory; `from_jsonl` seeds `_sequence` from the highest
+  sequence rather than the row count. Tests: +3.
+
+- 2026-07-29 (follow-up 3) — `build_run_summary`'s `cost_usd` is the **sum** of `cost.call` payloads
+  (the highest `cost_usd_total` stamp is only the fallback for a ledger with stamps but no cost
+  rows): a resumed segment restarts its stamps, so the maximum under-reported the run.

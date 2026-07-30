@@ -27,12 +27,14 @@ from auto_research.models.providers._tool_search import (
     referenced_tool_names,
 )
 from auto_research.models.providers.anthropic import AnthropicProvider
-from auto_research.models.providers.openai import OpenAIProvider
+from auto_research.models.providers.openai import OpenAIProvider, _to_openai_input
 from auto_research.models.types import (
     AssistantToolUse,
     ModelMessage,
     RoleModelConfig,
     ToolCall,
+    ToolResultMessage,
+    ToolResultPart,
 )
 
 _ANTHROPIC_TOOL = "tool_search_tool_bm25_20251119"
@@ -160,6 +162,21 @@ class _FakeAnthropicMessages:
                 ),
                 SimpleNamespace(type="tool_use", id="tu_1", name="ask_human", input={}),
             ],
+            usage=SimpleNamespace(input_tokens=11, output_tokens=7),
+            context_management=None,
+        )
+
+    async def parse(self, **request):
+        """The structured-output path (`messages.parse`), which a terminal compose uses.
+
+        Shape-complete like the real client: a fake that implements less than the client
+        silently narrows what the suite can cover (the 2026-07-28 lesson), and the tool-less
+        replay this file now guards runs through exactly this method.
+        """
+        self._store["request"] = request
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text='{"summary": "done"}')],
+            parsed_output=SimpleNamespace(summary="done", model_dump=lambda mode=None: {"summary": "done"}),
             usage=SimpleNamespace(input_tokens=11, output_tokens=7),
             context_management=None,
         )
@@ -368,3 +385,67 @@ def test_referenced_and_missing_tool_names():
     assert referenced_tool_names([turn]) == {"alpha", "beta"}
     assert missing_tool_names([turn], ["alpha"]) == ["beta"]
     assert missing_tool_names([turn], ["alpha", "beta"]) == []
+
+
+# ── the 2026-07-29 run-killer: discovery blocks replayed on a TOOL-LESS request ──────────────
+
+
+def test_anthropic_drops_discovery_blocks_when_no_tools_are_declared(monkeypatch):
+    """A terminal structured compose sends a schema and NO tools; replaying a discovery block
+    there made the API reject the whole request — "Tool reference 'x' not found in available
+    tools" — which killed a live run. With no tools on the request there is nothing for the
+    reference to point at, so the blocks are dropped and the trajectory still replays.
+    """
+    import anthropic
+    from pydantic import BaseModel
+
+    class _Out(BaseModel):
+        summary: str
+
+    response = _call_anthropic(monkeypatch)
+    turn = AssistantToolUse(
+        content="looked it up",
+        tool_calls=[ToolCall(id="tu_1", name="research_toolkit_xspec_utils_ixpe_pcube",
+                             arguments={})],
+        provider_blocks=response.provider_blocks,
+    )
+    convo = [*_messages(), turn, ToolResultMessage(results=[
+        ToolResultPart(tool_call_id="tu_1", name="research_toolkit_xspec_utils_ixpe_pcube",
+                       content="ok")
+    ])]
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAnthropic)
+    monkeypatch.setattr(
+        "auto_research.models.providers.anthropic.tool_search_config", _enabled
+    )
+    cfg = RoleModelConfig(name="m", provider="anthropic", model="fake-model")
+    asyncio.run(AnthropicProvider().call(convo, cfg, schema=_Out))
+
+    sent = _FakeAnthropic.store["request"]
+    assert "tools" not in sent or not sent["tools"]        # schema call declares no tools
+    assistant = [m for m in sent["messages"] if m["role"] == "assistant"][-1]
+    types = [b.get("type") for b in assistant["content"]]
+    assert "server_tool_use" not in types                  # the dangling reference is gone
+    assert "tool_search_tool_result" not in types
+    assert types == ["text", "tool_use"]                   # the trajectory itself is intact
+
+
+def test_openai_drops_discovery_items_when_no_tools_are_declared(monkeypatch):
+    """Same guard on the OpenAI half, so no tool-less replay path can regress."""
+    from pydantic import BaseModel
+
+    class _Out(BaseModel):
+        summary: str
+
+    turn = AssistantToolUse(
+        content="",
+        tool_calls=[ToolCall(id="call_1", name="research_toolkit_xspec_utils_ixpe_pcube",
+                            arguments={})],
+        provider_blocks=[
+            {"type": "tool_search_call", "id": "ts_1"},
+            {"type": "tool_search_output", "id": "ts_1"},
+        ],
+    )
+    items = _to_openai_input([*_messages(), turn], include_discovery=False)
+    assert not [i for i in items if i.get("type") in ("tool_search_call", "tool_search_output")]
+    assert [i for i in items if i.get("type") == "function_call"]      # calls still replay

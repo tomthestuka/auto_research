@@ -374,3 +374,18 @@ Role wrappers:
   `tests/test_run_control.py`.
 - 2026-07-27 — **Deferred tool loading in `SandboxToolProvider`** (shipped disabled; live-verified and enabled 2026-07-28 — see that entry below). Under `orchestration.yaml: tool_search_enabled`, every registry tool is emitted with `defer_loading: true` — its schema stays out of the model's context until discovered through the provider's tool search — while harness tools (`ask_human`, `web_search`/`web_fetch`, report tools, and the builtin MCP file tools) stay resident, which also satisfies both providers' "≥1 non-deferred tool" rule. No per-tool exceptions: `data_catalog` defers like the rest. `AgentRole._react` now carries `response.provider_blocks` onto the `AssistantToolUse` it appends, so tool-search discoveries survive replay and a discovered tool stays callable (the API re-expands referenced definitions from history each turn). `prompts/analyst_worker.md` gained the search step. Measured on `gpt-5.5` with the real 25-tool manifest: 19,004 → 2,382 resident tokens. Deterministic coverage `tests/test_tool_search.py`; the env-gated `tests/test_live_tool_search.py` passed 2026-07-28.
 - 2026-07-28 — **Deferred tool loading live-verified and enabled.** The env-gated live round-trip ran on both providers once the Anthropic key was reinstated (details in `models/DOCS.md`): with every registry tool deferred and the harness tools resident, the model discovered the tool it needed through the provider's search and called it, and resident input fell **19,074 → 3,789 tokens** on `gpt-5.5` / **35,208 → 9,003** on `claude-sonnet-5` against the real manifest. `_react`'s `provider_blocks` replay held up live — the discovered tool stayed callable across turns, and a three-turn probe showed the expanded definition sits inside the conversation cache breakpoint, so it is cache-read rather than re-billed. `orchestration.yaml: tool_search_enabled` flipped **true**; the worker's search step in `prompts/analyst_worker.md` is now on the live path. Still deterministic-only: the tombstone path, which needs a real failed-authoring reset mid-run to exercise.
+
+- 2026-07-29 — **Human control is honored mid-batch, and events name the steerable identity.** A
+  model turn can emit MANY tool calls, and `_react` dispatched the whole batch before returning to
+  its top-of-iteration `RunControl` poll — so on the 2026-07-29 run two queued steers and a `/stop`
+  sat unseen behind a pair of 25-minute downloads (they landed the instant the batch broke). Now the
+  loop checks between calls: a `/stop` **skips every remaining call** with an honest
+  `skipped: a human requested the run to stop` result — one result per `tool_use`, which providers
+  require, so the transcript stays valid and the loop then ends into the §9.6 terminal (recorded as
+  `<role>.<action>.stop_skipped_calls`) — and a steer arriving mid-batch is delivered as a
+  `[Human steer]` user turn right after that batch's results rather than one whole batch later.
+  Separately, `_record` now actors events with the **indexed `agent_key`** (`analyst_worker_1`)
+  instead of the shared role (`analyst_worker`): two workers were indistinguishable in the log, so
+  neither a reader nor a human choosing a `/steer` target could tell which one was working. New
+  `status_monitor` entry in `PROMPT_FILENAMES` (its prompt moved out of `hitl/commands.py`, §4).
+  Tests: `tests/test_run_control.py` (+3).

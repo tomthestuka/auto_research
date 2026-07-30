@@ -78,16 +78,23 @@ def build_run_summary(events: Iterable[Any]) -> dict[str, Any]:
         summary["wall_clock_s"] = max(0.0, (last_time - first_time).total_seconds())
 
     accepted: bool | None = None
+    # Spend is the SUM of the priced calls, not the highest stamped running total: a resumed run
+    # builds a fresh meter, so its stamps restart mid-ledger and the maximum under-reports the run
+    # (live: a $8.85 headline against a $8.98 by-role sum). The stamp maximum stays the fallback
+    # for a ledger that carries stamps but no cost.call rows.
+    stamped_max = 0.0
+    summed = 0.0
     for row in rows:
         name = str(row.get("event", ""))
         data = row.get("data") or {}
         total = row.get("cost_usd_total")
         if isinstance(total, int | float):
-            summary["cost_usd"] = max(float(summary["cost_usd"]), float(total))
+            stamped_max = max(stamped_max, float(total))
 
         if name == "cost.call":
             summary["llm_calls"] += 1
             spend = float(data.get("total_cost_usd", 0.0) or 0.0)
+            summed += spend
             for field, bucket in (("role", "cost_by_role"), ("model", "cost_by_model")):
                 key = str(data.get(field, "?"))
                 summary[bucket][key] = summary[bucket].get(key, 0.0) + spend
@@ -137,6 +144,7 @@ def build_run_summary(events: Iterable[Any]) -> dict[str, Any]:
 
     if summary["status"] == "unknown" and accepted is not None:
         summary["status"] = "accepted" if accepted else "not accepted"
+    summary["cost_usd"] = summed if summary["llm_calls"] else stamped_max
     return summary
 
 

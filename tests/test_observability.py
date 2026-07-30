@@ -260,3 +260,29 @@ def test_usage_rollup_deduplicates_a_copied_ledger(tmp_path):
     first.write_text(row + "\n", encoding="utf-8")
     second.write_text(row + "\n", encoding="utf-8")
     assert len(load_cost_records([first, second])) == 1
+
+
+def test_meter_seeds_from_an_existing_ledger_so_a_resume_keeps_counting(tmp_path):
+    """A resumed run builds a fresh meter over the SAME ledger — it must not restart at $0.00."""
+    ledger = tmp_path / "monitor.jsonl"
+    ledger.write_text(
+        "\n".join(
+            [
+                _cost_event(1, datetime(2026, 7, 29, tzinfo=UTC), "r", role="reviewer", member="a",
+                            provider="anthropic", model="m", total_cost_usd=5.0),
+                _cost_event(2, datetime(2026, 7, 29, tzinfo=UTC), "r", role="analyst_worker",
+                            member="b", provider="anthropic", model="m", total_cost_usd=3.8),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monitor = RunMonitor(chatter=10, jsonl_path=ledger, run_id="r")   # appends, never truncates
+
+    meter = install_cost_meter(run_id="r", monitor=monitor)
+
+    assert meter.total_usd == 8.8 and meter.calls == 2
+    # A fresh run's ledger has no cost.call rows → seeding is a no-op.
+    fresh = install_cost_meter(run_id="r2", monitor=RunMonitor(chatter=10,
+                                                              jsonl_path=tmp_path / "new.jsonl"))
+    assert fresh.total_usd == 0.0 and fresh.calls == 0

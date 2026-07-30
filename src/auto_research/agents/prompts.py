@@ -15,6 +15,7 @@ PromptRole = Literal[
     "analyst_lead",
     "analyst_colead",
     "coder",
+    "status_monitor",
 ]
 
 PROMPT_FILENAMES: dict[PromptRole, str] = {
@@ -28,6 +29,11 @@ PROMPT_FILENAMES: dict[PromptRole, str] = {
     # Phase 2: the Sonnet author's system prompt (CLAUDE.md §9.3). Loaded by merge_flow
     # and passed to the Claude Agent SDK; same governance check as the other prompts.
     "coder": "coder.md",
+    # The light role answering the HITL `/status` command over the run's event log. It is a
+    # runtime LLM like any other, so its prompt lives here rather than inline in `hitl/commands.py`
+    # (§4: runtime agents are configured only from `prompts/`), which also puts it under
+    # `load_prompt`'s governance-reference check.
+    "status_monitor": "status_monitor.md",
 }
 
 FORBIDDEN_RUNTIME_REFERENCES = ("CLAUDE.md", "DOCS.md", "AGENTS.md")

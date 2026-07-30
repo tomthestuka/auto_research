@@ -50,6 +50,10 @@ Runtime prompt files:
   investigation. On approval it also drafts `commit_summary` — the one-line commit subject
   `merge_flow.approve_edit` uses for the working-branch commit (step 6). The role name
   `analyst_colead` mirrors `config/models.yaml`.
+- `status_monitor.md` — the light role that answers the HITL `/status` command over the run's own
+  event log (loaded by `hitl/commands.py::make_status_answer`). A **reporter, not a participant**:
+  it describes what the ledger shows, grounds every number in an event it read, and says when the
+  log is silent rather than guessing.
 - `coder.md` — the Phase-2 tool author's system prompt (loaded by `merge_flow` and passed
   to the Claude Agent SDK): the real package layout (`lib/` + `skills/` + wrapped-asset subdirs
   + `tests/` + `README.md`), the two-halves split and design-for-extension principle, the
@@ -81,6 +85,7 @@ logic here.
 - `analyst_lead.md` — system prompt for the analyst lead role.
 - `analyst_colead.md` — system prompt for the Phase-2 provider-decorrelated co-lead reviewer.
 - `coder.md` — system prompt for the Phase-2 tool author (Claude Agent SDK).
+- `status_monitor.md` — system prompt for the `/status` reporter over the monitor ledger.
 
 ## Changelog
 - 2026-05-26 -> 2026-06-12 — Runtime prompts now cover reviewer, librarian I/O,
@@ -189,3 +194,11 @@ logic here.
   output-path arg **`save_path`**/**`save_path_prefix`** so the harness re-homes the PNG under the run's
   figures dir and tracks it — an arg by any other name is not redirected. Validation is live-only (prompt
   behaviour); examples stay domain-neutral.
+
+- 2026-07-29 — **`status_monitor.md` added.** The `/status` reporter's system prompt had been a
+  string literal inside `hitl/commands.py` — the one runtime prompt in the tree that did not come
+  from `prompts/` (§4), and therefore the one that never passed `load_prompt`'s
+  governance-reference check. Moved here verbatim in substance and rewritten to the house shape
+  (role line + `Responsibilities:`), with the reporter framing made explicit: ground every number
+  in an event actually read, and distinguish "it did not happen" from "the log does not record it"
+  — the exact gap a live `/status` hit when it could not see a verdict's content.

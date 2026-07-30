@@ -1165,3 +1165,51 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   `uuid4`, so a real run's ledger identified itself as `e754020b…` while its directory was
   `8c75990e…` — the monitor now carries the **run's** id, which per-run cost attribution depends on.
   Suite 573 → 582 (+9).
+- 2026-07-29 — **Resume no longer erases a run's own record (found pre-launch, while arming the
+  B-run).** `RunMonitor.__init__` truncated its JSONL on construction, and the detached orphan
+  spawner opened `backend.log` with `"w"` — so every `--resume` relaunch wiped both. That silently
+  broke the durable-resume evidence itself (a reader looks for events *after* the restart, and the
+  slice came up empty against a shortened file) and, after the morning's change, discarded all spend
+  booked before the kill — on the very run whose purpose is two kills. Both are now append-only:
+  the ledger continues its numbering from the last readable event (`_last_sequence`, plus a newline
+  when a hard kill left a torn line, so the fragment stays its own skipped line), and `write_jsonl()`
+  refuses the live path (it exports chatter-filtered memory — not the record). **The rule audited
+  across the run dir: only `overwrite=True` is destructive**, and it works by removing the whole run
+  dir up front, so nothing downstream needs to clear anything. Everything else in a run dir is
+  additive or intentionally rewritten (`result.json` is cleared on relaunch so a stale `failed`
+  marker cannot read as done — its reason survives as the ledger's `run.error`; the composed report
+  is rewritten per compose; patches and per-round reports are timestamped/round-keyed; agent
+  `memory.md` appends). Known derived-view gap left as-is ([J1]b): the CLI renders `monitor.md` from
+  in-memory events, so a resumed run's Markdown covers the final segment only — the JSONL is the
+  complete record. Suite 582 → 585 (+3).
+- 2026-07-29 — **The B-run's human-control findings, fixed (items before the plan-and-debate line).**
+  A live B-run (Q21, `b-run-q21`, 47 min, $8.98) verified **B1** (cost accounting: 68 rows carrying
+  the first nonzero `cache_read`/`cache_write` in the project's history) and **B2** (durable resume:
+  `run.resume` re-entered the analysis node), then exposed a cluster of human-control defects that
+  are now closed. **(1) Every control was invisible behind a batched turn.** A model turn emitting N
+  tool calls had `_react` dispatch the whole batch before its next `RunControl` poll, so two queued
+  steers and a `/stop` sat unseen behind a pair of 25-minute HEASARC downloads and landed only when
+  the batch broke. `_react` now polls between calls: a `/stop` skips every remaining call with an
+  honest `skipped:` result (one result per `tool_use`, so the transcript stays valid → `§9.6`
+  terminal), and a mid-batch steer is delivered right after that batch. **(2) The command surface was
+  a guessing game.** Targets are now **roster ids** (`/help` prints `id · team · role · model`;
+  `/steer 3 <message>`), a role *name* is rejected *and told its id*, every invalid command answers
+  immediately with the valid options, and the ack says **queued** rather than implying delivery.
+  **(3) Commands were unobservable** — a wrong token, a queued steer and a delivered steer were
+  indistinguishable in the log, which is exactly why the lost steer took an artifact hunt to
+  diagnose; they now record as `hitl.command` + `hitl.command.reply` (actor `human`), which also
+  gives the B-run's B4 check the event it waits for. **(4) Two workers were indistinguishable**:
+  events actored the shared role (`analyst_worker`) rather than the indexed `agent_key`
+  (`analyst_worker_1`) the steer channel addresses. **(5) Cost restarted at $0.00 on resume** — the
+  new process's meter now seeds from the run's own ledger, and `run.summary` sums priced calls
+  instead of taking the highest stamp (the same digest had reported an $8.85 headline against its own
+  $8.98 breakdown). **(6) §4 violation closed:** the `/status` reporter's system prompt was a string
+  literal in `hitl/commands.py` — the only runtime prompt not from `prompts/` — now
+  `prompts/status_monitor.md`, loaded via `load_prompt` and subject to the governance-reference
+  check. Also: the B-run's D2 filter counted events with "error" in the *name*, scoring 0 against
+  four real `is_error` tool results — it now counts results and names the tools. Suite 585 → 597
+  (+12). **Still open from the same run, plan-and-debate first:** the [C2] tombstone did NOT fire
+  (a 400 `Tool reference … not found in available tools` killed the run, triggered by *sandbox
+  death* rather than the designed failed-authoring reset) and [F6] (after honoring `/stop`, the
+  worker's terminal-composition call 400'd into `run.error` instead of an honest terminal); plus
+  forced `/stop` + `/steer -f/-p/-c`, the tool-using summarizer, and [H9].

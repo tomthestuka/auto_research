@@ -88,7 +88,7 @@ class OpenAIProvider:
         if schema is not None and tools is not None:
             raise ValueError("schema and tools are mutually exclusive")
 
-        input_items = _to_openai_input(messages)
+        input_items = _to_openai_input(messages, include_discovery=tools is not None)
         cache_kwargs = {"prompt_cache_key": config.name} if cache_prefix else {}
         attachment_content = []
         for document in documents:
@@ -215,7 +215,9 @@ def _figure_items(figure: FigureRef) -> list[dict]:
     ]
 
 
-def _to_openai_input(messages: Sequence[ConversationMessage]) -> list[dict]:
+def _to_openai_input(
+    messages: Sequence[ConversationMessage], *, include_discovery: bool = True
+) -> list[dict]:
     """Translate neutral conversation turns into Responses-API input items.
 
     ``AssistantToolUse`` → ``function_call`` items; ``ToolResultMessage`` →
@@ -225,10 +227,15 @@ def _to_openai_input(messages: Sequence[ConversationMessage]) -> list[dict]:
     items: list[dict] = []
     for message in messages:
         if isinstance(message, AssistantToolUse):
-            # Tool-search discovery items replay verbatim, before the calls they enabled.
-            items.extend(
-                b for b in message.provider_blocks if b.get("type") in _DISCOVERY_ITEM_TYPES
-            )
+            # Tool-search discovery items replay verbatim, before the calls they enabled —
+            # unless this request declares no tools, in which case they are dropped: a
+            # discovery item references a tool by name, and a request that offers no tools
+            # cannot honour that reference (the Anthropic half of this killed a live run on
+            # 2026-07-29). A terminal structured compose is exactly that request.
+            if include_discovery:
+                items.extend(
+                    b for b in message.provider_blocks if b.get("type") in _DISCOVERY_ITEM_TYPES
+                )
             for call in message.tool_calls:
                 items.append(
                     {

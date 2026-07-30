@@ -17,6 +17,17 @@ This is a leaf module (stdlib only) so agents, graph, and hitl can all import it
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+
+
+async def _fire(aborter: "Callable[[], Awaitable[bool]]") -> int:
+    """Run one aborter, reporting whether it cancelled live work. Never raises: a stop must not
+    be defeated by the failure of the thing it is trying to stop."""
+    try:
+        return 1 if await aborter() else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
 
 # The answer a blocked HITL wait returns when `/stop` fires (so a role awaiting `ask_human`
 # unblocks immediately); the real stop is driven by ``stop_requested``, checked in the ReAct loop.
@@ -34,6 +45,8 @@ class RunControl:
         # once. Constructed without a running loop is fine on Python ≥3.10 (Event binds lazily).
         self.stop_event: asyncio.Event = asyncio.Event()
         self._steer: dict[str, list[str]] = {}
+        # agent_key → how to cancel that role's in-flight tool call (its sandbox's `abort`).
+        self._aborters: dict[str, Callable[[], Awaitable[bool]]] = {}
 
     # ── stop ──────────────────────────────────────────────────────────────────
     def request_stop(self, reason: str = "", by: str = "human") -> None:
@@ -51,6 +64,29 @@ class RunControl:
         roster), so there is no shared "all" bucket to race — each role owns its own inbox.
         """
         self._steer.setdefault(agent_key, []).append(message)
+
+    # ── cancelling work in flight ─────────────────────────────────────────────
+    def register_aborter(self, agent_key: str, aborter: "Callable[[], Awaitable[bool]]") -> None:
+        """Register how to cancel ``agent_key``'s in-flight work (its sandbox's ``abort``).
+
+        Steer and stop are polled at safe points, which a role deep inside a long tool call does
+        not reach — so a human's stop could be hours away behind a batch of downloads. An aborter
+        is the escape hatch: it ends the current call *honestly* (the caller still gets a result),
+        rather than trying to inject anything into work already running.
+        """
+        self._aborters[agent_key] = aborter
+
+    async def abort(self, agent_key: str) -> int:
+        """Cancel one role's in-flight work; return how many aborters reported it was busy."""
+        aborter = self._aborters.get(agent_key)
+        return await _fire(aborter) if aborter is not None else 0
+
+    async def abort_all(self) -> int:
+        """Cancel every registered role's in-flight work; return how many were busy."""
+        busy = 0
+        for aborter in list(self._aborters.values()):
+            busy += await _fire(aborter)
+        return busy
 
     def drain_steer(self, agent_key: str | None) -> list[str]:
         """Pop and return the pending steer messages for ``agent_key`` (empty if none/unkeyed)."""

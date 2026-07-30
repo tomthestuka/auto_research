@@ -90,7 +90,9 @@ and `usage.py` (cumulative spend rollup CLI).
   a delta (the coder's Agent SDK) and returns it. Recording is best-effort — a monitor fault never
   breaks a model call ([J2]).
 - `install_cost_meter(run_id="", monitor=None) -> CostMeter` / `current_cost_meter() -> CostMeter |
-  None` — install the meter for this run / read the installed one.
+  None` — install the meter for this run / read the installed one. Install seeds the meter from the
+  monitor's existing ledger (`CostMeter.seed_from_ledger`), so a **resumed** run keeps counting from
+  what it had already spent instead of restarting at $0.00 mid-ledger.
 - `traced_model_call(role, config, provider_call) -> ModelResponse` — optional LangSmith tracing
   (with usage/cost annotation) + cost recording on the run's meter.
 - `usage.default_sources(data_dir=None)` / `usage.load_cost_records(paths, since=None)` /
@@ -109,3 +111,10 @@ and `usage.py` (cumulative spend rollup CLI).
   path (cache/reasoning-aware). Fixes the under-count where cached ReAct input was uncounted. Tests
   in `tests/test_observability.py`. `litellm>=1.93` added to `environment.yml` (conda-forge).
 - 2026-07-29 — **Cost moved into the monitor ledger; the separate cost ledger deleted; the coder's SDK spend included.** `CostLedgerEntry`/`cost_entry_for`/`append_cost_entry`/`cost_ledger_path` are replaced by `CallCost`/`cost_for_call` plus a run-scoped `CostMeter` (installed by `run_research`, found via a `ContextVar`) that records one level-10 `cost.call` event per call and stamps the running total on **every** monitor event. `<runtime_dir>/cost_ledger.jsonl` is no longer written at all: it was a second, run-blind log whose rows under-counted, and everything derived from it is answerable from the event stream (the monitor JSONL is a run's single source of truth, [J1]). The tool-authoring coder's Agent-SDK spend now lands in the same stream via `record_session_total`, which converts its session-cumulative `total_cost_usd` into per-turn deltas — previously it reached no total anywhere. `usage.py` rolls up over monitor ledgers (`load_cost_records`, de-duplicated on `(run_id, sequence)`, `--jsonl`/`--ledger-dir`/`--runs` flags); `plot_run.py`'s pie prefers recorded cost and no longer drops non-analyst teams from a chart claiming a total. Tests: `tests/test_observability.py` (+4).
+
+- 2026-07-29 (follow-up) — **cost totals span a resume.** A resumed run builds a fresh meter in a new
+  process, so the accumulated figure stamped on every line restarted at $0.00 mid-run (live: $8.80
+  spent, then a running total counting up from zero). `CostMeter.seed_from_ledger` reads the run's own
+  `cost.call` rows back at install time, and `monitor.summary` now takes the **sum** of priced calls
+  rather than the highest stamp — which is what made the same digest report an $8.85 headline against
+  its own $8.98 by-role breakdown. Tests: `tests/test_observability.py` (+1), `tests/test_monitor.py` (+1).

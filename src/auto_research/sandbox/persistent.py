@@ -212,6 +212,23 @@ class PersistentSandbox:
         finally:
             self._alive = False
 
+    async def abort(self) -> bool:
+        """Cancel whatever this sandbox is running right now; return True if it was busy.
+
+        The on-demand form of the timeout path, and deliberately nothing more: killing the REPL
+        child ends the in-flight ``readline`` with EOF, so ``call_tool`` returns its ordinary
+        non-zero "sandbox subprocess exited unexpectedly" result and the caller gets a real
+        result for the call it made — which is what keeps a tool_use/tool_result transcript
+        valid. The next ``call_tool`` spawns a fresh REPL at entry, so nothing inherits a dead
+        one. This is how a human ``/stop`` stops a 25-minute download instead of waiting it out
+        (live 2026-07-29: a hand-killed REPL produced exactly this result, then the loop honored
+        the stop).
+        """
+
+        was_alive = self.is_alive
+        await self._kill_current()
+        return was_alive
+
     async def _restart_for_failure(self) -> str:
         """Restart after a tool-call failure; return a suffix on restart failure."""
         try:

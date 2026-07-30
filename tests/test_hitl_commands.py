@@ -57,11 +57,39 @@ def test_botname_suffix_tolerated():
 
 # ── /steer ────────────────────────────────────────────────────────────────────
 
-def test_steer_queues_for_named_role():
+def test_steer_queues_for_a_roster_id():
+    """Targeting is by the id `/help` prints (3 = analyst_worker_0 in this roster)."""
     ctx = _ctx()
-    out = _run(dispatch_command("/steer analyst_worker_0 focus on DU3 and rerun", ctx))
-    assert "queued for `analyst_worker_0`" in out
+    out = _run(dispatch_command("/steer 3 focus on DU3 and rerun", ctx))
+    assert "queued" in out and "`analyst_worker_0`" in out and "id `3`" in out
     assert ctx.run_control.drain_steer("analyst_worker_0") == ["focus on DU3 and rerun"]
+
+
+def test_steer_ack_says_queued_not_delivered():
+    """The ack must not imply arrival: delivery waits for the role's next step."""
+    out = _run(dispatch_command("/steer 2 wrap up", _ctx()))
+    assert "**queued**" in out and "next step" in out
+
+
+def test_steer_rejects_a_role_name_and_names_its_id():
+    """A name no longer targets, and the rejection tells the human which id to use instead."""
+    ctx = _ctx()
+    out = _run(dispatch_command("/steer analyst_worker_0 hello", ctx))
+    assert "takes a roster **id**" in out and "is id `3`" in out
+    assert ctx.run_control.drain_steer("analyst_worker_0") == []  # nothing queued on a guess
+
+
+def test_steer_rejects_an_out_of_range_id_with_the_roster():
+    ctx = _ctx()
+    out = _run(dispatch_command("/steer 99 hello", ctx))
+    assert "No role with id `99`" in out and "analyst_lead" in out
+    assert ctx.run_control.drain_steer("analyst_lead") == []
+
+
+def test_help_numbers_the_roster():
+    out = _run(dispatch_command("/help", _ctx()))
+    assert "`1` · `reviewer`" in out and "`3` · `analyst`" in out
+    assert "/steer <id> <message>" in out
 
 
 def test_steer_all_broadcasts_to_every_role():
@@ -71,16 +99,32 @@ def test_steer_all_broadcasts_to_every_role():
         assert ctx.run_control.drain_steer(key) == ["wrap up soon"]
 
 
-def test_steer_unknown_role_reports_known():
-    ctx = _ctx()
-    out = _run(dispatch_command("/steer nobody hello", ctx))
-    assert "Unknown role" in out and "analyst_lead" in out
-    assert ctx.run_control.drain_steer("analyst_lead") == []   # nothing queued
-
-
 def test_steer_usage_error_on_missing_message():
-    out = _run(dispatch_command("/steer analyst_lead", _ctx()))
-    assert "Usage:" in out
+    out = _run(dispatch_command("/steer 2", _ctx()))
+    assert "Usage:" in out and "⚠️" in out
+
+
+def test_unknown_command_is_rejected_immediately_with_the_command_list():
+    out = _run(dispatch_command("/frobnicate now", _ctx()))
+    assert "⚠️" in out and "Unknown command `/frobnicate`" in out and "/steer" in out
+
+
+def test_commands_are_recorded_in_the_run_ledger():
+    """A rejected command, a queued steer and a delivered steer must be distinguishable later."""
+    from auto_research.monitor import RunMonitor
+
+    monitor = RunMonitor(chatter=10)
+    ctx = _ctx()
+    ctx.monitor = monitor
+
+    _run(dispatch_command("/steer 3 do the thing", ctx))
+    _run(dispatch_command("/steer nobody hello", ctx))
+
+    events = [(e.event, e.data.get("command"), e.data.get("accepted")) for e in monitor.events]
+    assert ("hitl.command", "steer", None) in events                 # received
+    assert ("hitl.command.reply", "steer", True) in events           # accepted
+    assert ("hitl.command.reply", "steer", False) in events          # rejected
+    assert all(e.actor == "human" for e in monitor.events)
 
 
 # ── /stop ─────────────────────────────────────────────────────────────────────
@@ -167,3 +211,95 @@ def test_wait_without_run_control_is_plain_wait_for():
         return await wait_reply_or_stop(fut, None, timeout=5)
 
     assert _run(go()) == "reply"
+
+
+def test_stop_is_forceful_and_reports_what_it_cancelled():
+    """`/stop` has no modifier to remember: it cancels in-flight calls itself (user ruling)."""
+    ctx = _ctx()
+    ctx.run_control.register_aborter("analyst_worker_0", _busy_aborter)
+
+    out = _run(dispatch_command("/stop", ctx))
+
+    assert ctx.run_control.stop_requested and ctx.run_control.stop_event.is_set()
+    assert "Cancelled 1 in-flight tool call" in out
+
+
+def test_stop_says_so_when_nothing_was_mid_call():
+    out = _run(dispatch_command("/stop", _ctx()))
+    assert "Nothing was mid-call" in out
+
+
+async def _busy_aborter() -> bool:
+    return True
+
+
+# ── buttons on the steer ack (the two escalations, one tap each) ────────────────────────────────
+
+
+def _btn_ctx(run_id="run-a"):
+    ctx = CommandContext(run_control=RunControl(), roster=_roster, run_id=run_id)
+    return ctx
+
+
+def test_steer_ack_carries_deliver_now_and_clear_buttons():
+    ctx = _btn_ctx()
+    reply = _run(dispatch_command("/steer 3 stop using locked data", ctx))
+    labels = [label for label, _ in reply.buttons]
+    assert labels == ["⚡ Deliver now", "🗑 Clear"]
+    # Payload carries only the action + target + the two staleness fields — the message is
+    # already in the inbox, so there is nothing to store and no token to expire.
+    assert reply.buttons[0][1].startswith("steer:now:3:run-a:")
+    assert reply.buttons[1][1].startswith("steer:clear:3:run-a:")
+
+
+def test_reply_is_a_plain_string_for_connectors_without_buttons():
+    """A str subclass, so a connector that only sends text is untouched."""
+    reply = _run(dispatch_command("/steer 3 hello", _btn_ctx()))
+    assert isinstance(reply, str) and "queued" in reply
+
+
+def test_deliver_now_button_cancels_the_in_flight_call():
+    from auto_research.hitl.commands import dispatch_callback
+
+    ctx = _btn_ctx()
+    ctx.run_control.register_aborter("analyst_worker_0", _busy_aborter)
+    reply = _run(dispatch_command("/steer 3 stop that", ctx))
+
+    out = _run(dispatch_callback(reply.buttons[0][1], ctx))
+
+    assert "Forcing delivery" in out and "cancelled its in-flight tool call" in out
+    # The steer itself is still queued — cancelling only removes the thing blocking delivery.
+    assert ctx.run_control.drain_steer("analyst_worker_0") == ["stop that"]
+
+
+def test_clear_button_drops_the_queued_steer():
+    from auto_research.hitl.commands import dispatch_callback
+
+    ctx = _btn_ctx()
+    reply = _run(dispatch_command("/steer 3 never mind", ctx))
+    out = _run(dispatch_callback(reply.buttons[1][1], ctx))
+    assert "Cleared 1 queued steer" in out
+    assert ctx.run_control.drain_steer("analyst_worker_0") == []
+
+
+def test_button_from_another_run_is_refused():
+    from auto_research.hitl.commands import dispatch_callback
+
+    reply = _run(dispatch_command("/steer 3 hi", _btn_ctx(run_id="run-a")))
+    out = _run(dispatch_callback(reply.buttons[0][1], _btn_ctx(run_id="run-b")))
+    assert "belongs to run `run-a`" in out
+
+
+def test_button_from_an_earlier_session_of_the_same_run_is_refused():
+    """run_id is stable across a resume, so only a per-process nonce can catch this."""
+    from auto_research.hitl.commands import dispatch_callback
+
+    ctx = _btn_ctx()
+    out = _run(dispatch_callback("steer:now:3:run-a:deadbe", ctx))   # foreign boot nonce
+    assert "earlier session of this run" in out
+
+
+def test_malformed_button_payload_is_refused():
+    from auto_research.hitl.commands import dispatch_callback
+
+    assert "Unrecognized button" in _run(dispatch_callback("nonsense", _btn_ctx()))

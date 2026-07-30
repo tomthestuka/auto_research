@@ -244,3 +244,9 @@ verdicts, two iteration counters, and the cap.
   `run.finish`, and records a derived `run.summary` event on both the success and failure paths.
   `ResearchRun.summary()` renders that digest; the CLI text output prints it above the verdict
   fields; `detached._partial` prepends it to a `RunDied`'s partial so a killed run is legible too.
+- 2026-07-29 (follow-up) — **`backend.log` is appended, not truncated.** The orphan spawner opened it
+  with `"w"`, so a `--resume` relaunch erased the dead attempt's output — the traceback a `RunDied`
+  points the human at, and the only record of why the run needed resuming. Only `overwrite=True`
+  (which removes the run dir) is destructive now. The `result.json` unlink on relaunch stays: a stale
+  `failed` marker must not make the relaunched run read as done, and the reason survives in the
+  ledger's `run.error` event.

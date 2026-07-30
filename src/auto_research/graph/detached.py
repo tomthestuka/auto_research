@@ -190,10 +190,14 @@ def reconstruct_run(request: ResearchRequest | str, run_directory: Path, run_id:
 _ORPHAN_SPAWNER = """\
 import json, subprocess, sys
 argv = json.loads(sys.argv[1])
-with open(sys.argv[2], "w", encoding="utf-8") as log:
+with open(sys.argv[2], "a", encoding="utf-8") as log:
     proc = subprocess.Popen(argv, stdout=log, stderr=log, start_new_session=True)
 print(proc.pid, flush=True)
 """
+# Opened for APPEND, not write: a resumed run re-spawns the backend over the same `backend.log`,
+# and truncating it erased the dead attempt's output — the traceback a `RunDied` points the human
+# at, and the only record of why the run needed resuming. A genuine fresh start goes through
+# `overwrite=True`, which removes the run dir first.
 
 
 def _spawn_orphaned(argv: list[str], log_path: Path) -> int:

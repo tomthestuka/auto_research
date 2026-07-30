@@ -34,9 +34,11 @@ wired, `resolve_human` raises `HumanInputRequired` (the §9.8 headless fail-safe
   command-capable connector recognizes a leading-`/` message and calls `dispatch_command(text, ctx)`
   instead of routing it as a reply, so a human drives the run *any time*: `/help` (commands +
   live team/role/model roster), `/status [q]` (LLM report over the monitor JSONL via a light
-  `status_monitor` model, deterministic-digest fallback), `/steer <role> <msg>` (queue a message
-  for a role's next step — via `RunControl`, `all` broadcasts), `/stop` (request an honest
-  run-wide wind-down). `CommandContext` carries the run-scoped `run_control`/roster/JSONL/status
+  `status_monitor` model, deterministic-digest fallback), `/steer <id> <msg>` (queue a message for a
+  role's next step — addressed by its **roster id**, the number `/help` prints; `all` broadcasts),
+  `/stop` (request an honest run-wide wind-down). Every outcome is immediate and deterministic: an
+  unknown command, an unknown/out-of-range id, a role *name* where an id belongs, or a missing
+  message answers with ⚠️ plus the valid options and queues nothing. `CommandContext` carries the run-scoped `run_control`/roster/JSONL/status
   hook, wired by `run_research` via each connector's `attach_commands`. `wait_reply_or_stop` is the
   shared reply-wait so `/stop` releases a role blocked on `ask_human` (returns
   `run_control.STOP_SENTINEL`). **Command-capable connectors are Telegram + Slack** (always
@@ -153,3 +155,46 @@ protocol, §7).
   anytime-commands don't fit cleanly (§13). Command *dispatch* is deterministically tested
   (`tests/test_hitl_commands.py`, `tests/test_run_control.py`, connector tests in `tests/test_hitl.py`);
   live command behavior is observational during a real run. NOT LIVE TESTED end-to-end.
+
+- 2026-07-29 — **Command surface reworked + commands recorded (live-driven).** A `/steer` that never
+  arrived on the B-run could not be diagnosed from the log at all, so: (1) **targets are roster
+  ids**, not internal keys — `/help` prints `id · team · role · model` and `/steer 3 <message>` is
+  what the human types (a name is rejected *and told its id*), which removes the retype-an-internal-
+  key-on-a-phone failure entirely; (2) **every invalid command fails immediately and
+  deterministically** with the valid options (`_REJECTED` ⚠️ prefix), never silently queueing;
+  (3) the ack says **queued**, not delivered, and names when it will arrive; (4) commands land in the
+  run ledger as `hitl.command` (received) + `hitl.command.reply` (accepted/rejected), actor `human`,
+  so a rejected command, a queued steer and a delivered steer are now distinguishable after the fact
+  — also giving the B-run's B4 check the event it was waiting for. (5) The `/status` system prompt
+  moved to `prompts/status_monitor.md` and loads via `load_prompt` (§4: runtime prompts live only in
+  `prompts/`, and it now passes the governance-reference check like every other role). Tests:
+  `tests/test_hitl_commands.py` (+6), connector tests updated to id targeting.
+
+- 2026-07-30 — **`/stop` is forceful, with no modifier to remember (user ruling).** A stop that waits
+  for a "safe point" is not a stop: on the 2026-07-29 run the next safe point sat behind a batch of
+  25-minute downloads, so an acknowledged stop could not take effect for hours. `_stop` now also
+  awaits `RunControl.abort_all()`, which cancels each role's in-flight tool call through an aborter
+  the run registered (the worker's `PersistentSandbox.abort`), and the reply says how many calls it
+  cancelled — or that nothing was mid-call. Cancelling is honest rather than violent: killing the REPL
+  child makes the in-flight `call_tool` return its ordinary non-zero "sandbox subprocess exited
+  unexpectedly" result, so every tool call still gets a result and the transcript stays valid, and the
+  next call spawns a fresh REPL at entry. Tests: `tests/test_hitl_commands.py` (+2),
+  `tests/test_run_control.py` (+2).
+
+- 2026-07-30 — **Buttons replace the flag vocabulary (design decided against `-f/-p/-c`).** A chat
+  channel surfaces *registered commands* in an autocomplete menu and offers *buttons* for follow-up
+  choices — flags are invisible in both, and a dash is exactly what a phone keyboard mangles when a
+  human is in a hurry. So the typed surface stays four verbs and the two escalations became taps on
+  the steer ack: `[⚡ Deliver now]` and `[🗑 Clear]`. `dispatch_command` now returns `CommandReply`, a
+  **`str` subclass** carrying `.buttons` — additive by construction, so CLI/WhatsApp/Slack keep
+  sending plain text untouched and only Telegram reads them. New `dispatch_callback` handles a tap:
+  payload `steer:<now|clear>:<id>:<run_id>:<boot>` carries no message and needs no side store (the
+  text is already in the inbox), while the two trailing fields answer "is this button still mine?" —
+  a foreign `run_id` is another run's history, and a foreign boot nonce is an **earlier session of
+  this run**, which `run_id` cannot detect because it is deliberately stable across a resume.
+  `⚡` aborts the target's in-flight call so the queued steer lands at once; `🗑` drains its queue.
+  Telegram gained a `CallbackQueryHandler` (a tap is a third channel, never a reply), inline-keyboard
+  markup on `_send`, and `setMyCommands` registration from the same list `/help` prints, so the menu
+  cannot drift from the help text. Taps record as `hitl.command.button`. Tests:
+  `tests/test_hitl_commands.py` (+7), `tests/test_hitl.py` (+2, and the Telegram fake gained the
+  `reply_markup`/`set_my_commands` shape it was missing).

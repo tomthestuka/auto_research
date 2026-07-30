@@ -22,7 +22,9 @@ Calls made with no meter installed — a bare probe script, an isolated live tes
 accumulated; wire a meter (``install_cost_meter(monitor=…)``) when such a caller wants the record.
 """
 
+import json
 from contextvars import ContextVar
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -215,6 +217,39 @@ class CostMeter:
         with self._lock:
             return {"total_usd": self._total_usd, "calls": self._calls}
 
+    def seed_from_ledger(self, path: str | Path) -> float:
+        """Start from the spend already recorded in ``path``; return the seeded total.
+
+        A resumed run builds a fresh meter in a new process, so without this the accumulated
+        figure stamped on every line restarts at $0.00 mid-run and reads as though the run had
+        spent nothing (observed 2026-07-29: $8.80 before a kill, then a running total counting up
+        from zero). The ledger is the record, so the meter reads its own history back. A fresh
+        run's ledger holds no ``cost.call`` rows, which makes this a no-op there.
+        """
+
+        total, calls = 0.0, 0
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return 0.0
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("event") != "cost.call":
+                continue
+            total += float((event.get("data") or {}).get("total_cost_usd", 0.0) or 0.0)
+            calls += 1
+        if calls:
+            with self._lock:
+                self._total_usd += total
+                self._calls += calls
+        return total
+
     async def record_call(
         self, role: str, config: RoleModelConfig, usage: ModelUsage
     ) -> CallCost:
@@ -293,10 +328,15 @@ def install_cost_meter(*, run_id: str = "", monitor: Any | None = None) -> CostM
 
     Set from ``run_research`` before any model client exists: the meter object is shared by every
     task spawned afterwards (a task inherits a copy of the context, and the copy holds the same
-    meter), so all of a run's spend accumulates in one place.
+    meter), so all of a run's spend accumulates in one place. When the monitor already has a
+    ledger, the meter seeds itself from it, so a **resumed** run keeps counting from what the run
+    had already spent instead of restarting at zero.
     """
 
     meter = CostMeter(run_id=run_id, monitor=monitor)
+    ledger = getattr(monitor, "jsonl_path", None) if monitor is not None else None
+    if ledger is not None:
+        meter.seed_from_ledger(ledger)
     _CURRENT_METER.set(meter)
     return meter
 

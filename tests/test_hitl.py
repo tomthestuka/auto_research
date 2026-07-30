@@ -410,10 +410,18 @@ class _FakeTGBot:
         self.sent = []
         self._id = 100
 
-    async def send_message(self, *, chat_id, text, parse_mode=None):
+    async def send_message(self, *, chat_id, text, parse_mode=None, reply_markup=None):
+        # Shape-complete with the real bot: `reply_markup` is how an inline keyboard rides along,
+        # and a fake that omitted it hid the button path from the suite entirely.
         self._id += 1
-        self.sent.append({"chat_id": chat_id, "text": text, "parse_mode": parse_mode})
+        self.sent.append({
+            "chat_id": chat_id, "text": text, "parse_mode": parse_mode,
+            "reply_markup": reply_markup,
+        })
         return SimpleNamespace(message_id=self._id)
+
+    async def set_my_commands(self, commands):
+        self.menu = list(commands)
 
 
 async def _tg_anoop(*a, **k):
@@ -637,7 +645,8 @@ def test_telegram_command_steer_dispatch():
     handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
     ctx = _cmd_ctx()
     handler.attach_commands(ctx)
-    asyncio.run(handler.handle_command(_tg_update("/steer analyst_lead prioritize DU3")))
+    # id 1 = analyst_lead in this roster (targeting is by the id /help prints)
+    asyncio.run(handler.handle_command(_tg_update("/steer 1 prioritize DU3")))
     assert ctx.run_control.drain_steer("analyst_lead") == ["prioritize DU3"]
     assert handler.app.bot.sent and "queued" in handler.app.bot.sent[-1]["text"].lower()
 
@@ -676,7 +685,7 @@ def test_slack_command_steer_and_stop_unblocks():
     handler = SlackHandler(app=_FakeSlackApp(), socket_handler=None, channel="C0")
     ctx = _cmd_ctx()
     handler.attach_commands(ctx)
-    asyncio.run(handler.handle_command({"channel": "C0", "text": "/steer analyst_worker_0 focus"}))
+    asyncio.run(handler.handle_command({"channel": "C0", "text": "/steer 2 focus"}))  # id 2
     assert ctx.run_control.drain_steer("analyst_worker_0") == ["focus"]
     assert handler.app.client.posted and "queued" in handler.app.client.posted[-1]["text"].lower()
 
@@ -691,3 +700,48 @@ def test_slack_command_steer_and_stop_unblocks():
 
     resp = asyncio.run(_run())
     assert resp.answer == STOP_SENTINEL
+
+
+# ── buttons: a tap is a third channel, distinct from a reply and from a command ────────────────
+
+
+def test_telegram_steer_ack_attaches_buttons_and_a_tap_acts():
+    """A tap sends the payload back without posting a chat message, so it can never be read as a
+    reply to an agent — and it needs no typing, which is the whole point on a phone."""
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
+    ctx = _cmd_ctx()
+    ctx.run_id = "run-a"
+    handler.attach_commands(ctx)
+
+    asyncio.run(handler.handle_command(_tg_update("/steer 1 stop using locked data")))
+    sent = handler.app.bot.sent[-1]
+    keyboard = sent["reply_markup"].inline_keyboard[0]
+    assert [b.text for b in keyboard] == ["⚡ Deliver now", "🗑 Clear"]
+    assert keyboard[0].callback_data.startswith("steer:now:1:run-a:")
+
+    # Drive the callback with the payload the ack would have carried.
+    from auto_research.hitl.commands import dispatch_command
+
+    reply = asyncio.run(dispatch_command("/steer 1 again", ctx))
+    tapped = SimpleNamespace(
+        callback_query=SimpleNamespace(
+            data=reply.buttons[1][1],                  # 🗑 Clear
+            answer=_noop_answer,
+        )
+    )
+    asyncio.run(handler.handle_callback(tapped))
+    assert "Cleared" in handler.app.bot.sent[-1]["text"]
+    assert ctx.run_control.drain_steer("analyst_lead") == []   # both steers dropped
+
+
+def test_telegram_publishes_the_command_menu():
+    """Telegram's own discovery mechanism: a registered command autocompletes in the client."""
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
+    asyncio.run(handler._publish_command_menu())
+    names = [c.command for c in handler.app.bot.menu]
+    assert names == ["help", "status", "steer", "stop"]
+    assert all(c.description for c in handler.app.bot.menu)
+
+
+async def _noop_answer(*a, **k):
+    return None
