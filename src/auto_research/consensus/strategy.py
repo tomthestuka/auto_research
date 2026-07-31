@@ -123,11 +123,9 @@ class DebateToConverge:
     direct_branch: str | None = None  # runtime authoring branch (e.g. "ai"); None ⇒ worktree mode
     human_handler: Any | None = None
     colead: Any | None = None  # GPT co-lead; None ⇒ propose_and_pr builds one from config
-    run_control: Any | None = None  # HITL /stop — consulted before authoring (workers stop in _react)
-
-    def _stop_requested(self) -> bool:
-        """True when a human has requested a run-wide stop (HITL /stop)."""
-        return self.run_control is not None and self.run_control.stop_requested
+    # Carried so the lead can publish its live authoring session for interrupt cleanup; a /stop is
+    # never *polled* here — it cancels the run task (``RunControl.interrupt``).
+    run_control: Any | None = None
 
     async def run(
         self,
@@ -172,7 +170,6 @@ class DebateToConverge:
             if (
                 author_budget > 0
                 and any(r.tool_request is not None for r in reports)
-                and not self._stop_requested()  # a human /stop skips new authoring; wind down honestly
             ):
                 resumed, final_report, reports, task, author_budget = (
                     await self._maybe_author_and_resume(
@@ -309,8 +306,8 @@ class DebateToConverge:
         failed_spec: ToolSpec | None = None
         failed_result: MergeFlowResult | None = None
         for spec in decision.tool_specs:
-            if author_budget <= 0 or self._stop_requested():
-                break  # budget exhausted or human /stop mid-chain — rerun workers on what committed
+            if author_budget <= 0:
+                break  # budget exhausted — rerun the workers on whatever committed
             author_budget -= 1  # an authoring attempt is expensive — bound it regardless of outcome
             try:
                 result = await lead.drive_authoring(

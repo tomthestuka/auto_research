@@ -250,3 +250,26 @@ verdicts, two iteration counters, and the cap.
   (which removes the run dir) is destructive now. The `result.json` unlink on relaunch stays: a stale
   `failed` marker must not make the relaunched run read as done, and the reason survives in the
   ledger's `run.error` event.
+
+- 2026-07-31 — **The interrupt path (§12 Stage 4, the graceful-shutdown half of the bundle).**
+  `run_research` registers its task on `RunControl` at start, so a `/stop` (or SIGINT/SIGTERM under
+  `install_signal_handlers=True`, which only the CLI and the detached backend pass) cancels it
+  wherever it is awaiting — a model call in flight, a 25-minute download, an hour-long HITL wait.
+  A `CancelledError` carrying `run_control.stop_requested` is ours: the task is `uncancel()`-ed,
+  `_interrupt_cleanup` runs under `asyncio.shield` (teardown otherwise dies with the scope it is
+  in — the hole that left sandbox children alive and the authoring branch dirty), and
+  `UserInterruptionError` is raised naming the run dir and ledger. A `CancelledError` *without* the
+  flag is re-raised untouched, never relabelled as a human stop. `_interrupt_cleanup` is three
+  ordered phases — **kill** every process that can write (each sandbox and its descendants), then
+  **repair** (the live `AuthoringSession.aclose()`, i.e. reset the branch to the attempt's base ref;
+  reversing this order lets the coder re-dirty the branch a moment after the reset), then **close
+  and record** (MCP, HITL connector, `run.interrupted`, the derived `run.summary`). Every step is
+  bounded (`_INTERRUPT_STEP_TIMEOUT_S` 10 s, 30 s for the reset) and guarded: a wedged step logs
+  `run.interrupt.step_timeout` and yields, because an interrupt that hangs in teardown is the
+  failure this design removes — a branch left dirty by a timeout is still caught by the next
+  launch's clean-tree preflight and by the resume-time heal. **No model is called on this path and
+  no report is composed.** `reconstruct_run` raises `UserInterruptionError` (not `RunDied`) for an
+  `interrupted` marker, so a detached notebook run sees the same exception as an in-process one.
+  Removed with the old design: `build_graph(run_control=)` and the two review edges' stop clauses
+  (both unreachable once a stop cancels rather than winds down). Tests:
+  `tests/test_interrupt.py` (+15).

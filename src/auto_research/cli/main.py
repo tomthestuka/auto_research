@@ -12,6 +12,7 @@ from typing import Sequence
 from auto_research.graph import run_research
 from auto_research.graph.detached import jsonable
 from auto_research.monitor import RunMonitor, default_monitor_jsonl_path, validate_chatter
+from auto_research.run_control import UserInterruptionError
 from auto_research.sandbox.workspace import run_dir
 from auto_research.schemas import ResearchRequest
 
@@ -139,8 +140,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_iterations=args.max_iterations,
                 run_id=args.run_id,
                 resume=args.resume,
+                # The CLI and the detached backend own their process, so Ctrl-C / SIGTERM route
+                # to the same interrupt `/stop` uses. A library caller never gets this.
+                install_signal_handlers=True,
             )
         )
+    except UserInterruptionError as exc:
+        # A human stopped it. Not a crash: mark the run interrupted so a detached client reports
+        # it as such, and exit non-zero without a traceback (nothing failed; someone said stop).
+        if args.run_id:
+            _write_result(args.run_id, {"status": "interrupted", "error": str(exc)})
+        print(str(exc), file=sys.stderr)
+        return 130  # conventional shell status for terminated-by-Ctrl-C
     except Exception as exc:  # noqa: BLE001 — record an honest terminal marker, then re-raise
         # A caught crash → a `failed` result.json so the detached client raises RunDied with
         # the reason (a hard kill writes nothing → the client detects a dead process instead).

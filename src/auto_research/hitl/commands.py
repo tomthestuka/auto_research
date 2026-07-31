@@ -9,7 +9,8 @@ human can drive the run at any time:
   else a deterministic digest of the monitor JSONL).
 - ``/steer <role> <message>`` — queue a message for a role (delivered at its next ReAct step);
   ``/steer all`` broadcasts to every role.
-- ``/stop`` — request an honest, run-wide wind-down.
+- ``/stop`` — interrupt the run now (the Ctrl-C a run without a terminal cannot receive):
+  cancel in-flight work, clean up deterministically, end with ``UserInterruptionError``.
 
 All state lives on the shared :class:`~auto_research.run_control.RunControl`; this module only
 parses + routes and returns Markdown to send back. ``wait_reply_or_stop`` is the shared
@@ -83,7 +84,7 @@ def _known_commands() -> list[tuple[str, str]]:
         ("/help", "List commands and the live team/role/model roster."),
         ("/status [question]", "Report the run's state; add a question to ask about it."),
         ("/steer <id> <message>", "Send a message to one role's next step (id from `/help`; `all` = every role)."),
-        ("/stop", "Wind the whole run down to an honest terminal."),
+        ("/stop", "Interrupt the run now — no report; resume=True continues it."),
     ]
 
 
@@ -165,23 +166,26 @@ def _help(ctx: CommandContext) -> str:
 
 
 async def _stop(ctx: CommandContext) -> str:
-    """Stop the run — forcefully, with no modifier to remember.
+    """Stop the run — this is Ctrl-C, for a run that has no terminal to press it in.
 
-    A stop that politely waits for a "safe point" is not a stop: on 2026-07-29 the next safe point
-    was behind a batch of 25-minute downloads, so the acknowledged stop could not take effect for
-    hours. So this also **cancels in-flight tool calls** (each returns an honest failure to its
-    caller, keeping the transcript valid), which brings every loop to its next poll immediately.
+    It interrupts: the run task is cancelled, whatever was in flight ends there, and cleanup is
+    deterministic (kill the sandbox processes and their children, reset the authoring branch,
+    close the channels, record the ledger's closing events). **No report is composed and no model
+    is called** on the way out — the run ends with ``UserInterruptionError``.
+
+    The earlier design asked the pipeline to wind itself down at each role's next safe point. It
+    did not stop the run, only its tool use: every role still made its terminal write-up call and
+    the pipeline walked every remaining stage — ~14 further model calls, several replaying a
+    100k-token trajectory — and truncating the workers' evidence made the lead judge the debate
+    unconverged and order fresh revision rounds. Stopping manufactured work, and the first
+    write-up call after the stop is what crashed the 2026-07-29 run.
     """
-    ctx.run_control.request_stop("human /stop", by="human")
-    cancelled = await ctx.run_control.abort_all()
-    detail = (
-        f" Cancelled {cancelled} in-flight tool call(s)."
-        if cancelled
-        else " Nothing was mid-call."
-    )
+    ctx.run_control.interrupt("human /stop", by="human")
     return (
-        "🛑 **Stop requested.**" + detail + " The run winds down to an honest terminal at each "
-        "role's next step, and any role waiting on your reply is being released."
+        "🛑 **Stopping now.** Cancelling in-flight work, killing sandbox processes, resetting the "
+        "authoring branch if a tool was being written, then ending the run. No report is composed "
+        "— what the run already wrote to disk is its record. Relaunch with `resume=True` to "
+        "continue from the last completed step."
     )
 
 

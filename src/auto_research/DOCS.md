@@ -86,8 +86,17 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 ## Dictionary-level reference
 - `__version__: str` — package version. `"0.0.0"` until the first non-skeleton
   release.
-- `run_research(request, ..., chatter=10, monitor_jsonl=None, report_formats=None) -> ResearchRun` —
-  monitored library entry for CLI/notebook use.
+- `run_research(request, ..., chatter=10, monitor_jsonl=None, report_formats=None,
+  install_signal_handlers=False) -> ResearchRun` — monitored library entry for CLI/notebook use.
+  Raises `run_control.UserInterruptionError` when a human stops the run (`/stop`, or SIGINT/SIGTERM
+  when `install_signal_handlers`); only a process that owns its signals may pass that flag.
+- `run_control.RunControl` — run-wide control shared by the agents and the HITL command channel.
+  Steer is cooperative (queued, delivered at the target's next ReAct turn); **stop is an
+  interrupt**: `interrupt(reason, by)` flags the run and cancels the registered run task, so it
+  needs no cooperation from the pipeline.
+- `run_control.UserInterruptionError` — raised in place of the `CancelledError` that carried a
+  human stop. Carries `reason`/`by`/`where` and the paths that exist (`artifacts`); no report is
+  composed on that path, and `resume=True` continues from the last completed node.
 - `run_request(request, ...) -> ReviewVerdict` — compatibility wrapper returning
   only the final verdict.
 - `ResearchRun` — result object with request, final verdict, final graph state,
@@ -211,3 +220,15 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `env.toolkit_root()` accessor. Rationale: auto_research stays pure orchestration + generic infra;
   domain reads live in the toolkit beside the writer (§2). Read tests moved to
   `catalog_utils/tests`; `test_observations.py` keeps config/health + the tool-wiring tests.
+
+- 2026-07-31 — **`/stop` and Ctrl-C are one interrupt; the cooperative wind-down is gone.** A stop
+  used to be a flag the pipeline polled at safe points, which stopped a role's *tool use* and
+  nothing else: every role still made its terminal write-up call and the graph walked every
+  remaining stage (measured on this config: ~14 further model calls, several replaying a
+  100k-token trajectory, plus pdflatex), and because the stop truncated the workers' evidence the
+  lead judged the debate unconverged and ordered fresh revision rounds — stopping *manufactured*
+  work. The first write-up call after the stop is also what crashed the 2026-07-29 run. Now
+  `RunControl.interrupt()` cancels the run task, `run_research` converts that cancellation into
+  `UserInterruptionError`, and cleanup is deterministic and model-free. New public symbols:
+  `run_control.UserInterruptionError`, `RunControl.interrupt`/`register_run_task`/
+  `authoring_session`; `run_research(install_signal_handlers=)`.

@@ -133,3 +133,11 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
 - 2026-07-06 — [A8] author the whole ordered `AuthoringDecision.tool_specs` chain sequentially (each tool sees the prior's committed code), then reload/restart/rerun workers once (was per tool); a mid-chain non-commit stops the chain → honest terminal; `tool_author_cap` bounds total tools.
 - 2026-07-14 — V-4: the lead owns figures; `_deduplicated` removed. `run()` no longer force-carries the last round's figures; it calls `adjudicate(task, reports, sources=_source_keys(workers))` and the lead accumulates a per-worker figure catalog and cites the subset.
 - 2026-07-22 — [A11] recover, never choke on one failed authoring session. `_maybe_author_and_resume` now stops the chain at the first non-commit and fires `registry.reload()`/`sandbox.restart()`/worker-rerun whenever **≥1 tool committed** (was: only after the *whole* chain committed — the bug that hid committed tools from the reran workers, blocking #21's census). A non-commit records a task note (`_augment_with_failed_tool`) and loops back: ≥1 committed → rerun on the committed prefix; nothing committed but credits remain → rerun on the failure note so the lead re-attempts (burns a `tool_author_cap` credit). The honest §9.6 terminal (`finalize_authoring_outcome`) now fires **only** when credits are exhausted with nothing ever committed. New event `analyst.tool.chain_resume`.
+
+
+- 2026-07-31 — **The pre-authoring stop check is gone.** `DebateToConverge` no longer polls
+  `run_control.stop_requested` before deciding to author or between chain tools: a `/stop` cancels
+  the run task, so there is no wind-down window in which the flag is set and the strategy still
+  runs. `run_control` is still carried — the lead uses it to publish its live authoring session so
+  an interrupt can reset the toolkit branch — and `_stop_requested` is removed. Tests:
+  `tests/test_consensus_authoring.py` (the skip-authoring test rewritten to pin the absence).

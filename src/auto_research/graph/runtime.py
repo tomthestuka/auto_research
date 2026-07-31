@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import signal
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -20,9 +22,9 @@ from auto_research.agents import (
     ReviewerAgent,
 )
 from auto_research.consensus import ConsensusStrategy, DebateToConverge, LeadLike, WorkerLike
-from auto_research.graph.builder import IOAgentLike, ReviewerLike, build_graph
+from auto_research.graph.builder import IOAgentLike, ReviewerLike, _record, build_graph
 from auto_research.graph.checkpoint import checkpoint_path, open_checkpointer
-from auto_research.run_control import RunControl
+from auto_research.run_control import RunControl, UserInterruptionError
 from auto_research.monitor import RunMonitor
 from auto_research.models import resolve
 from auto_research.observability import install_cost_meter
@@ -261,8 +263,15 @@ async def run_research(
     human_channel: str | None = None,
     run_id: str | None = None,
     resume: bool = False,
+    install_signal_handlers: bool = False,
 ) -> ResearchRun:
     """Run the graph and return the verdict, final state, and monitor.
+
+    ``install_signal_handlers=True`` makes SIGINT/SIGTERM interrupt the run. Only a process we
+    **own** may ask for this — the CLI and the detached backend do; a library caller must not,
+    because seizing the host's signal handling is not a runtime's business (and off the main
+    thread ``signal`` raises). A notebook gets the same capability through ``/stop``, which is
+    what Ctrl-C would be if the run had a terminal.
 
     ``resume=True`` re-enters the run keyed by ``run_id``: if a checkpoint exists it continues
     from the latest completed node (the in-flight node's transient ReAct history is not
@@ -281,6 +290,11 @@ async def run_research(
     ``<runtime_dir>/runs/{run_id}/`` (``runtime_dir`` from ``config/orchestration.yaml``) for each agent.  One
     ``PersistentSandbox`` is spawned per analyst worker; all sandboxes are torn
     down after the graph completes or raises.
+
+    A human stop (``/stop``, or a signal when ``install_signal_handlers``) **cancels** this
+    coroutine, runs the deterministic cleanup below, and raises
+    :class:`~auto_research.run_control.UserInterruptionError`. No report is composed and no model
+    is called on that path — see :func:`_interrupt_cleanup`.
     """
 
     # Resolve the human-in-the-loop channel (explicit handler → channel → auto-detect).
@@ -350,9 +364,12 @@ async def run_research(
     default_formats: list[str] = orch.get("report_formats") or ["jsonl", "tex"]
     resolved_formats = _normalize_report_formats(report_formats, default_formats)
 
-    # Run-wide control (HITL /steer, /stop). Threaded onto every role + the consensus strategy +
-    # the graph edges below; the command channel (Stage 3.4) writes to it, the agents/graph read it.
+    # Run-wide control (HITL /steer, /stop). Threaded onto every role + the consensus strategy;
+    # the command channel writes to it. A steer is read cooperatively by the ReAct loops; a stop
+    # cancels the task registered here, so it needs no cooperation from anything.
     run_control = RunControl()
+    run_control.register_run_task(asyncio.current_task())
+    _restore_signals = _install_interrupt_signals(run_control) if install_signal_handlers else None
 
     storage = Storage()
     reviewer = reviewer or ReviewerAgent(monitor=run_monitor)
@@ -618,7 +635,6 @@ async def run_research(
             report_retry_cap=report_retry_cap,
             report_formats=resolved_formats,
             checkpointer=saver,
-            run_control=run_control,
         )
 
         try:
@@ -648,6 +664,32 @@ async def run_research(
             final_state: dict[str, Any] = await graph.ainvoke(
                 graph_input, config=config, durability="sync"
             )
+        except asyncio.CancelledError:
+            if not run_control.stop_requested:
+                raise  # not ours: an outer cancel (kernel shutdown, a caller's timeout)
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()  # the cancellation was the delivery mechanism; it ends here
+            # A human stop. Cleanup is shielded because we are already inside a cancelled scope,
+            # where a bare `await` in teardown is cancelled the moment it suspends — the hole that
+            # left sandbox children running and the authoring branch dirty.
+            await asyncio.shield(
+                _interrupt_cleanup(
+                    run_control,
+                    sandboxes=sandboxes,
+                    mcp_client=mcp_client,
+                    human_handler=human_handler,
+                    monitor=run_monitor,
+                )
+            )
+            raise UserInterruptionError(
+                run_control.stop_reason,
+                by=run_control.stopped_by or "human",
+                artifacts={
+                    "run_dir": str(run_dir(run_id)),
+                    "ledger": str(run_monitor.jsonl_path or ""),
+                },
+            ) from None
         except Exception as exc:
             await run_monitor.record(
                 "run",
@@ -661,6 +703,9 @@ async def run_research(
             await _record_run_summary(run_monitor)
             raise
         finally:
+            if _restore_signals is not None:
+                _restore_signals()
+            # An interrupt already killed these; shutdown is idempotent and returns at once.
             for sandbox in sandboxes:
                 await sandbox.shutdown()
             await mcp_client.shutdown()
@@ -690,6 +735,109 @@ async def run_research(
         report_latex=final_state.get("report_latex"),
         report_pdf=final_state.get("report_pdf"),
     )
+
+
+# Per-step bounds on interrupt cleanup. Generous enough for a real kill or connector close, short
+# enough that a wedged step (a git lock, a D-state child on NFS) never turns an interrupt into a
+# hang — the failure the interrupt design exists to remove. The git reset gets more room because it
+# is the one step whose omission costs something beyond this run (a dirty authoring branch).
+_INTERRUPT_STEP_TIMEOUT_S = 10.0
+_INTERRUPT_RESET_TIMEOUT_S = 30.0
+
+
+def _install_interrupt_signals(run_control: RunControl):
+    """Route SIGINT/SIGTERM to :meth:`RunControl.interrupt`; return a restore callable.
+
+    Installed **only** when the caller owns the process (the CLI and the detached backend), never
+    by a library caller. Uses the loop's signal API rather than ``signal.signal`` so the handler
+    runs as a loop callback — a signal handler cannot await, and the interrupt needs the loop to
+    schedule the cancellation. Degrades to a no-op wherever handlers cannot be installed (a
+    non-main thread, or a platform without them) rather than refusing to run.
+    """
+    loop = asyncio.get_running_loop()
+    installed: list[int] = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(
+                sig, lambda s=sig: run_control.interrupt(f"signal {s.name}", by="signal")
+            )
+            installed.append(sig)
+        except (NotImplementedError, RuntimeError, ValueError):  # non-main thread / unsupported
+            continue
+
+    def restore() -> None:
+        for sig in installed:
+            try:
+                loop.remove_signal_handler(sig)
+            except Exception:  # noqa: BLE001 — teardown must never mask a result
+                pass
+
+    return restore
+
+
+async def _interrupt_cleanup(
+    run_control: RunControl,
+    *,
+    sandboxes: Sequence[PersistentSandbox],
+    mcp_client: MCPToolClient,
+    human_handler: HumanHandler | None,
+    monitor: RunMonitor,
+) -> None:
+    """Deterministic teardown for a human interrupt. **No model is called from here.**
+
+    Three phases, in this order for one reason: *nothing may be able to write to the toolkit when
+    the toolkit is repaired.* Resetting the authoring branch while the coder subprocess or a gate
+    pytest run is still alive just lets them dirty it again a moment later.
+
+    1. **Kill** every process that can write — each sandbox REPL and its descendants, and (via the
+       authoring session's disconnect) the coder SDK subprocess.
+    2. **Repair** — reset the authoring branch to the attempt's base ref, saving the discarded work
+       as a patch first. An interrupted attempt *is* a non-committed attempt, so this is
+       ``AuthoringSession.aclose()``'s existing failure path, reached here because its own
+       ``finally`` sits inside the cancelled scope.
+    3. **Close and record** — MCP client, HITL connector, then ``run.interrupted`` and the derived
+       ``run.summary`` (both read the event stream; neither calls a model).
+
+    Every step is bounded and guarded: a wedged step (a git lock, a D-state child on NFS, a
+    connector waiting on the network) logs and yields to the next, because an interrupt that hangs
+    in teardown is the failure this design exists to remove. A branch left dirty by a timeout is
+    caught by the next launch's clean-tree preflight and by the resume-time heal.
+    """
+
+    async def _step(name: str, coro, timeout: float | None = None) -> None:
+        try:
+            await asyncio.wait_for(coro, timeout=timeout or _INTERRUPT_STEP_TIMEOUT_S)
+        except (TimeoutError, asyncio.TimeoutError):
+            await _record(monitor, "run.interrupt.step_timeout", level=2,
+                          summary=f"Interrupt cleanup step '{name}' timed out — continuing",
+                          data={"step": name, "timeout_s": timeout})
+        except Exception as exc:  # noqa: BLE001 — one failed step never blocks the rest
+            await _record(monitor, "run.interrupt.step_error", level=2,
+                          summary=f"Interrupt cleanup step '{name}' failed — continuing",
+                          data={"step": name, "error": repr(exc)})
+
+    # 1 — kill everything that can still write to disk.
+    for index, sandbox in enumerate(sandboxes):
+        await _step(f"kill_sandbox_{index}", sandbox.kill_now())
+
+    # 2 — repair the toolkit (disconnects the coder, then resets to the attempt's base ref).
+    session = run_control.authoring_session
+    if session is not None:
+        run_control.authoring_session = None  # idempotent: never reset twice
+        await _step("authoring_reset", session.aclose(), timeout=_INTERRUPT_RESET_TIMEOUT_S)
+
+    # 3 — close the channels, then record. Recording last so the ledger carries the outcome of
+    # every step above, including any that timed out.
+    await _step("mcp_shutdown", mcp_client.shutdown())
+    closer = getattr(human_handler, "shutdown", None) or getattr(human_handler, "close", None)
+    if closer is not None:
+        await _step("hitl_shutdown", closer())
+    await _record(
+        monitor, "run.interrupted", level=1,
+        summary=f"Run interrupted by {run_control.stopped_by or 'human'} — no report composed",
+        data={"reason": run_control.stop_reason, "by": run_control.stopped_by},
+    )
+    await _record_run_summary(monitor)
 
 
 async def _record_run_summary(monitor: RunMonitor) -> None:

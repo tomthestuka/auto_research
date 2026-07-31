@@ -782,3 +782,17 @@ the hook mapping a fake-model verdict — no live LLM).
   was actually busy. `run_research` registers each worker's `abort` on `RunControl` under the worker's
   `agent_key`, which is how a human `/stop` ends a 25-minute download instead of waiting it out — the
   exact behaviour observed by hand on 2026-07-29, now a first-class path.
+
+- 2026-07-31 — **The sandbox kill takes the descendants with it.** `_kill_current` killed only the
+  REPL, so whatever it had shelled out — an XSPEC fit, a multi-GB HEASARC download — kept running
+  and kept writing into the obs-db after the caller believed the sandbox was gone (the §13 [F5]
+  note). It now collects descendants from `/proc/<pid>/task/*/children` (`_descendant_pids`,
+  breadth-first) and SIGKILLs them deepest-last before killing the REPL. Deliberately **not**
+  `killpg`: the REPL is spawned without `start_new_session` and shares the *backend's* process
+  group, so a group kill would take the run down with it — and that shared group is what lets an
+  external `kill -9 -<pgid>` reach the sandboxes when our own cleanup never runs (the §12 hard-kill
+  fallback), so it stays. New `kill_now()` is the human-interrupt entry point: no shutdown
+  handshake, no 5 s grace, because the next cleanup step (the toolkit-branch reset) is only correct
+  once nothing can write. `AuthoringSession.aclose()` is now idempotent (`_closed`), since the
+  interrupt path closes the session from shielded cleanup and `drive_authoring`'s `finally` may
+  still run afterwards. Tests: `tests/test_interrupt.py`.

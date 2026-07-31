@@ -661,32 +661,20 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
 
 - **Durable HITL suspend/resume:** a LangGraph checkpointer so a `HumanQuery` can be
   answered later without holding the process (Phase 2 ships the blocking handler only).
-- **Human-steer channel:** a way for a human end/abort/redirect steer to **bind the whole run**,
-  not just the role that happened to ask. Today the HITL handler is *blocking/reply-only*
-  (`resolve_human` only listens while an agent is awaiting a query), so a human "end with failure"
-  reply to one role (e.g. a worker) does **not** stop another (e.g. the analyst lead independently
-  re-deciding to author). A *reply-borne* steer is buildable now (capture an abort from any reply
-  at the single `resolve_human` chokepoint → a shared `RunControl` flag → the lead's authoring loop
-  and graph nodes consult it → honest §9.6 terminal); a true *anytime* interjection (steer while no
-  query is pending) depends on the durable suspend/resume above. **Graceful-shutdown is deferred
-  as one piece of this bundle (decided 2026-06-29):** rather than bolt a Ctrl-C/cleanup mechanism
-  onto each entry context separately, the SIGINT handler, the consolidated cleanup routine, the
-  `asyncio.shield`/reordering that protects the authoring-branch reset, and the OS-level
-  child-process kill are **co-designed together** with durable suspend/resume + this human-steer
-  channel, so **one** architecture serves all three entry contexts. The contexts differ enough that
-  a single naive handler does not fit: a global `KeyboardInterrupt`→cleanup handler works on the
-  **CLI** (it owns the process) but is wrong as a library (a runtime must not seize the host's
-  signal handling; off the main thread `signal.signal` raises and Ctrl-C never reaches the run) and
-  does **not** fire in a **notebook** (ipykernel keeps the interrupt and often never cancels the
-  awaited run — the observed 2026-06-26 failure). The portable spine is *idempotent cleanup run from
-  a shielded `finally` on cancellation* (CLI/library), plus a *cooperative "stop please" flag* the
-  run polls at safe points (the notebook story, = the reply-borne steer above) — built once, later.
-  **Interim stop = hard kill of the kernel's whole process tree/group**, not just its PID: sandbox
-  subprocesses share the kernel's process group (no `start_new_session`) so a terminal Ctrl-C or a
-  process-group kill reaches them, but `kill <kernel_pid>` alone orphans them (no `PR_SET_PDEATHSIG`
-  auto-reap). A hard kill skips the `finally` reset, so a dirty authoring branch may survive — caught
-  next launch by `check_toolkit_branch_clean`. (§5.5's `plan_and_debate` already gives the human a
-  veto checkpoint before *non-trivial* authoring.)
+- **Human-steer channel — BUILT (the stop half, 2026-07-31); what remains is *redirect*.** The
+  bundle's abort half is done and is no longer a flag anyone polls: `/stop` (and SIGINT/SIGTERM on a
+  process we own) calls `RunControl.interrupt`, which **cancels the run task**, runs a deterministic
+  shielded cleanup, and raises `UserInterruptionError` (contract in `graph/DOCS.md`). That closes graceful shutdown
+  (the SIGINT handler, the consolidated cleanup, the `asyncio.shield` protecting the
+  authoring-branch reset, the OS-level child kill) with **one** architecture across the three entry
+  contexts, because cancellation is the one mechanism that works in all of them: the CLI and the
+  detached backend install signal handlers (a library must not seize its host's signals, and off the
+  main thread `signal.signal` raises), while a notebook — where ipykernel keeps the interrupt and
+  often never cancels the awaited run (observed 2026-06-26) — reaches the same path through `/stop`.
+  Still open: a *redirect* steer that binds the whole run rather than one role. `/steer <id>` reaches
+  one role at its next ReAct turn, which is right for a message; what has no channel is a run-wide
+  "change course" that every role picks up. Durable HITL suspend at `interrupt()` stays deferred
+  (it re-runs the node on resume — infeasible mid-`_react`).
 - **OS-level sandbox jailing:** read-only bind-mounts / seccomp / egress control beyond the
   relocated-scratch subprocess sandbox. *(Partly mitigated: every runtime agent's file access is
   now confined to the `config/orchestration.yaml: agent_fs_allow` allow-list via
@@ -744,12 +732,15 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   a residual dirty tree is then caught at the next launch's preflight (the in-flow
   `check_toolkit_branch_clean` still *raises* mid-run — graceful-degrade is a tracked TODO). It now
   resets to the **per-attempt base ref** (HEAD at `propose_and_pr` entry), so a commit the coder
-  lands itself is dropped, not kept (§9.9). **Residual (deferred — §12 graceful-shutdown bundle):** a
-  run killed mid-attempt can skip this `finally`, leaving the coder's commit on the branch with a
-  *clean* tree — which the launch `check_toolkit_branch_clean` (dirty-tree only) does not catch; the
-  human drops it with `git reset --hard <base>` out of band. The accepted interim is a hard kill of
-  the kernel's whole process tree/group (a graceful SIGINT/cleanup path is co-designed later with
-  durable suspend/resume + human-steer, §12 — not bolted on per entry context now).
+  lands itself is dropped, not kept (§9.9). **A human interrupt now reaches it** (2026-07-31): the
+  session is published on `RunControl` while `drive_authoring` runs, and the shielded cleanup calls
+  `aclose()` itself — because that method's own `finally` sits inside the cancelled scope, where its
+  awaits die before the reset. **Residual:** a *hard* kill (SIGKILL, an OOM, a host reboot) still
+  skips it, leaving the coder's commit on the branch with a *clean* tree — which the launch
+  `check_toolkit_branch_clean` (dirty-tree only) does not catch; the human drops it with
+  `git reset --hard <base>` out of band. The reset is also bounded (30 s) on the interrupt path, so a
+  wedged git yields rather than hanging the stop; a dirty tree then falls to the next launch's
+  preflight and the resume-time heal.
 - **Coder git-ban is best-effort (deny-rule).** The coder's Bash deny-rule
   (`disallowed_tools=["Bash(git:*)", "Bash(git)"]`, §9.9) blocks the obvious `git …`, but prefix
   matching can be slipped (pipes, `$(…)`, env prefixes, `python -c subprocess`). The robust catches are
@@ -791,10 +782,12 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   so the resume→dirty-branch→die-again loop is closed — but end-to-end (a real killed-mid-authoring
   run resumed and healed) is still unproven. **Stage 3 (HITL slash-commands) built 2026-07-22**
   (`/help`, `/status`, `/steer`, `/stop` over Telegram/Slack — commands intercepted, not treated as
-  LLM replies; CLI/WhatsApp unwired, see the loose-end below). **Remaining bundle:** Stage 4 graceful
-  cleanup (shielded teardown + a CLI/backend signal handler — deprioritized since library/notebook is
-  the real mode). Durable-HITL-suspend-at-`interrupt()` stays deferred (re-runs the node on resume —
-  infeasible mid-`_react`).
+  LLM replies; CLI/WhatsApp unwired, see the loose-end below). **Stage 4 (graceful cleanup) built
+  2026-07-31** — and it turned out to be the same build as making `/stop` real: shielded teardown, a
+  CLI/backend signal handler, and the interrupt that drives both (§12). **NOT LIVE TESTED:** a real
+  `/stop` mid-authoring, whose whole point is that the branch reset runs before the process ends.
+  Durable-HITL-suspend-at-`interrupt()` stays deferred (re-runs the node on resume — infeasible
+  mid-`_react`).
 - **HITL slash-commands are Telegram/Slack only; CLI + WhatsApp are not command-wired.** The
   `/help`,`/status`,`/steer`,`/stop` channel (`hitl/commands.py`, §12 Stage 3) needs an
   *always-listening* connector so a command lands any time. Telegram (long-poll) and Slack (socket)
@@ -1264,3 +1257,43 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   fire), and the B-run harness slot it occupied now checks the real thing: no dangling
   `Tool reference` 400 anywhere in the ledger, which is the regression test for the trim above.
   Suite 612 → 610 (−2 tests for −1 mechanism).
+- 2026-07-31 — **`/stop` is Ctrl-C: the human interrupt replaces the cooperative wind-down (§12
+  Stage 4, and the abort half of the human-steer bundle).** Investigating the [F6] terminal-compose
+  crash surfaced the real defect underneath it: a stop stopped a role's *tool use* and nothing
+  else. Measured on this config (2 workers, `debate_max_rounds: 3`, `report_retry_cap: 2`), an
+  acknowledged `/stop` was followed by **~14 more model calls** — each role's terminal write-up,
+  three convergence judgements, two full revision rounds, the lead's synthesis, the reviewer's
+  verdict, the machine report and up to two LaTeX attempts — several replaying a 100k-token
+  trajectory, plus pdflatex. Worse, the stop *manufactured* that work: truncating the workers'
+  evidence made the lead judge the debate unconverged and order revision rounds of the same
+  instantly-truncated loops. And every one of those calls was an unguarded crash site, which is
+  precisely how the 2026-07-29 run died — stop honoured, next write-up call 400s, `run.error`.
+  **The redesign (user's ruling: instant kill, deterministic cleanup, no report, error raised to
+  the notebook).** `RunControl.interrupt()` flags the run and **cancels the run task**, so the stop
+  lands from whatever `await` is live — a model call in flight, a 25-minute download, an hour-long
+  HITL wait — with no safe point to reach. `run_research` converts a `CancelledError` *carrying the
+  flag* into `UserInterruptionError` (one without it is re-raised untouched — an outer cancel is
+  not ours to relabel) after a shielded `_interrupt_cleanup` in three ordered phases: **kill**
+  every process that can write (each sandbox REPL *and its descendants*, walked from
+  `/proc/<pid>/task/*/children` — not `killpg`, since the REPLs share the backend's group and a
+  group kill would take the run down with it, while that shared group is what makes the §12
+  hard-kill fallback work), then **repair** (the live `AuthoringSession.aclose()` — reset the
+  branch to the attempt's base ref, saving the discarded work as a patch; the order is load-bearing,
+  since a reset that runs while the coder is alive is undone a moment later), then **close and
+  record** (MCP, connector, `run.interrupted`, the derived `run.summary`). Each step is bounded
+  (10 s, 30 s for the reset) and guarded: an interrupt that hangs in teardown is the failure the
+  design removes, and a branch left dirty by a timeout is still caught by the launch preflight and
+  the resume heal. **No model is called and no report is composed on that path.** Cancelling
+  mid-node leaves the last completed node's checkpoint intact, so **`/stop` + `resume=True` is
+  pause-and-continue.** Ctrl-C is the same path: the CLI and the detached backend pass
+  `install_signal_handlers=True` (a library never seizes its host's signals) and exit **130** with
+  a `result.json` status of `interrupted`, which `reconstruct_run` turns back into
+  `UserInterruptionError` rather than `RunDied`. **Deleted with it** — five cooperative-stop
+  branches now unreachable: `_react`'s top-of-turn break and its mid-batch skip (built 07-29),
+  both graph review edges' stop clauses, and the consensus pre-authoring + mid-chain checks, plus
+  `build_graph(run_control=)` and `_stop_requested`. Steering is untouched: a steer is a message
+  and a message can wait. **[F6]'s terminal-compose guard (O2) was dropped rather than built** —
+  `resume=True` re-runs the failed node, and the alternative (the runtime synthesizing a report the
+  model did not write) sits closer to fabrication than the crash it prevents. Suite 610 → 627
+  (+15 `tests/test_interrupt.py`, the rest rewritten to pin the absence of the old behaviour).
+  **NOT LIVE TESTED:** a real `/stop` mid-authoring, where the branch reset is the whole point.

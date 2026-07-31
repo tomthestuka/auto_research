@@ -929,6 +929,7 @@ class AuthoringSession:
         self.worktree = worktree
         self.branch = branch
         self.committed = False  # flips True only after commit() lands; gates the failure reset
+        self._closed = False  # aclose() is idempotent — the interrupt path may beat the finally
         # Lead-driven loop state (§9.3 B-topology): the most recent gate/review/commit, so a
         # caller (the lead's drive_authoring loop) can build the terminal MergeFlowResult from
         # session state; submit_cap bounds the expensive submit_for_review calls.
@@ -1046,7 +1047,16 @@ class AuthoringSession:
     async def aclose(self) -> None:
         """Disconnect the coder; on a non-committed direct-branch attempt, reset the tree to the
         per-attempt base ref (§9.9 failure counterpart to ``approve_edit`` — saves a patch
-        artifact first, drops any coder-landed commit, leaves a clean tree at the right base)."""
+        artifact first, drops any coder-landed commit, leaves a clean tree at the right base).
+
+        Idempotent: a human interrupt closes the session from shielded cleanup (its normal
+        ``finally`` is inside the cancelled scope), and the ``finally`` may still run afterwards —
+        a second reset would discard a base ref's worth of nothing, but the disconnect and the
+        patch artifact would be repeated for no reason.
+        """
+        if self._closed:
+            return
+        self._closed = True
         await self._client.disconnect()
         if self._direct_branch is not None and not self.committed:
             await _reset_direct_tree(

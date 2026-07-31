@@ -56,3 +56,11 @@ the run, and prints the final `ReviewVerdict`.
 - 2026-07-29 — `--format text` now leads with the derived end-of-run summary block
   (`ResearchRun.summary()`), so a CLI run ends on the same digest as a live/detached one; the
   verdict fields and artifact paths below it are unchanged. `--format json` is untouched.
+
+- 2026-07-31 — **Ctrl-C is the same interrupt as `/stop`.** `main()` passes
+  `install_signal_handlers=True` (the CLI and the detached backend own their process; a library
+  caller never gets this), so SIGINT/SIGTERM route through `RunControl.interrupt`. A
+  `UserInterruptionError` is not a crash: it writes `result.json` with status `interrupted` — which
+  `reconstruct_run` turns back into the same exception for a detached caller, rather than
+  `RunDied` — prints the message without a traceback, and exits **130**, the conventional shell
+  status for terminated-by-Ctrl-C. Any other exception keeps the existing `failed` marker path.

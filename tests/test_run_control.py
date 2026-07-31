@@ -1,14 +1,19 @@
 """Deterministic tests for RunControl + its consumption in the ReAct loop (Stage 3.1, §12).
 
-RunControl is the shared object the HITL slash-commands write and the agents/graph read. Here we
-test the object itself and its two ReAct-loop effects with a fake model (no LLM): a queued
-`/steer` is injected as a user turn before the next model call, and a `/stop` ends the loop
-before any further model call.
+RunControl is the shared object the HITL slash-commands write and the agents read. Here we test
+the object itself and its ReAct-loop effect with a fake model (no LLM): a queued `/steer` is
+injected as a user turn before the next model call.
+
+A `/stop` has **no** ReAct-loop effect since 2026-07-31 — it is an interrupt that cancels the run
+task, so the tests below pin the *absence* of the old cooperative behaviour (the flag alone does
+nothing) and that a cancellation propagates out of the loop rather than being swallowed.
 """
 
 from __future__ import annotations
 
 import asyncio
+
+import pytest
 
 from auto_research.agents.roles import AgentRole
 from auto_research.models.types import ModelMessage, ModelResponse
@@ -88,18 +93,44 @@ def test_react_injects_steer_before_next_model_call():
     assert rc.drain_steer("w") == []  # consumed
 
 
-def test_react_stop_ends_loop_before_model_call():
+def test_react_does_not_consult_the_stop_flag():
+    """A stop is an interrupt, not a flag the loop polls (2026-07-31).
+
+    The cooperative wind-down this used to drive stopped a role's *tool use* and then let it —
+    and the whole pipeline behind it — keep making model calls. `/stop` now cancels the run task,
+    so `_react` has nothing to notice: with the flag set and no cancellation, the loop is
+    byte-identical to an ordinary one.
+    """
     rc = RunControl()
     rc.request_stop("human stop")
     model = _FakeModel()
     role = _bare_role(model, run_control=rc, agent_key="w")
 
-    messages, figures, docs = asyncio.run(
+    asyncio.run(
         role._react(seed_messages=_seed(), tools=_FakeTools(), action="analyze", cap=5)
     )
 
-    assert model.calls == []          # stop checked at the loop top → model never called
-    assert messages == _seed()        # trajectory unchanged (seed only)
+    assert len(model.calls) == 1  # the flag alone changes nothing
+
+
+def test_react_cancellation_propagates_out_of_the_loop():
+    """The interrupt reaches a role mid-await and is not swallowed on the way out."""
+
+    class _Hanging:
+        async def call(self, *a, **k):
+            await asyncio.sleep(3600)
+
+    async def scenario():
+        role = _bare_role(_Hanging(), run_control=RunControl(), agent_key="w")
+        task = asyncio.create_task(
+            role._react(seed_messages=_seed(), tools=_FakeTools(), action="analyze", cap=5)
+        )
+        await asyncio.sleep(0)
+        task.cancel()
+        await task
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(scenario())
 
 
 def test_react_no_run_control_is_unchanged():
@@ -145,12 +176,9 @@ def _batched_response(names):
     )
 
 
-def test_stop_mid_batch_skips_the_remaining_tool_calls():
-    """A /stop must not have to wait out a batch of long calls — the live failure mode.
-
-    Every skipped tool_use still gets a result (providers require one per call), so the
-    transcript stays valid and the loop then ends into the honest terminal.
-    """
+def test_stop_flag_mid_batch_does_not_skip_calls():
+    """The mid-batch skip went with the cooperative wind-down: an interrupt cancels the awaits
+    instead, so nothing has to synthesize a result for a call it declined to make."""
     from auto_research.models.types import ToolResultMessage
 
     rc = RunControl()
@@ -162,12 +190,9 @@ def test_stop_mid_batch_skips_the_remaining_tool_calls():
         role._react(seed_messages=_seed(), tools=tools, action="analyze", cap=5)
     )
 
-    assert tools.dispatched == ["slow"]          # only the in-flight call ran
+    assert tools.dispatched == ["slow", "slow", "slow"]  # the flag no longer short-circuits
     results = [m for m in messages if isinstance(m, ToolResultMessage)][-1].results
-    assert len(results) == 3                     # one result per tool_use, still valid
-    assert [r.is_error for r in results] == [False, True, True]
-    assert "human requested the run to stop" in results[1].content
-    assert len(model.calls) == 1                 # stop ended the loop before another turn
+    assert [r.is_error for r in results] == [False, False, False]
 
 
 def test_steer_arriving_mid_batch_reaches_the_next_model_call():

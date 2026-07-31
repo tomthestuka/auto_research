@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import signal
 import sys
 import textwrap
 import time
@@ -13,6 +15,30 @@ from pathlib import Path
 from typing import Any
 
 from auto_research.sandbox.runner import _source_ini_env
+
+
+def _descendant_pids(pid: int) -> list[int]:
+    """Every descendant of ``pid``, breadth-first (nearest child first).
+
+    Reads ``/proc/<pid>/task/*/children``, the kernel's own child list — no dependency, and it
+    sees a child regardless of which thread spawned it. Returns an empty list wherever ``/proc``
+    is unavailable or a pid has already exited, so a caller can always kill what it found and
+    treat the rest as gone.
+    """
+    found: list[int] = []
+    queue = [pid]
+    while queue:
+        current = queue.pop(0)
+        for task in Path(f"/proc/{current}/task").glob("*/children"):
+            try:
+                kids = [int(p) for p in task.read_text().split()]
+            except (OSError, ValueError):
+                continue
+            for kid in kids:
+                if kid not in found:
+                    found.append(kid)
+                    queue.append(kid)
+    return found
 
 # REPL script executed inside the persistent subprocess.
 #
@@ -198,13 +224,28 @@ class PersistentSandbox:
         await self.start()
 
     async def _kill_current(self) -> None:
-        """Terminate the current subprocess, if any."""
+        """Terminate the current subprocess **and its descendants**, if any.
+
+        Killing the REPL alone leaves whatever it shelled out still running — an XSPEC fit, a
+        multi-GB HEASARC download — and those children keep writing into the obs-db after the
+        caller believes the sandbox is gone. They are killed first (deepest last, so a parent
+        cannot spawn more while we work) and then the REPL itself.
+
+        Descendants are collected by walking ``/proc``, deliberately not by ``killpg``: the REPL
+        is spawned without ``start_new_session``, so it shares the *backend's* process group and
+        a group kill would take the run down with it. That shared group is also what lets an
+        external ``kill -9 -<pgid>`` reach the sandboxes when our own cleanup never runs (the §12
+        hard-kill fallback), which is why it stays that way.
+        """
         proc = self._proc
         if proc is None:
             self._alive = False
             return
         try:
             if proc.returncode is None:
+                for child in reversed(_descendant_pids(proc.pid)):
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.kill(child, signal.SIGKILL)
                 proc.kill()
                 await asyncio.wait_for(proc.wait(), timeout=5)
         except Exception:  # noqa: BLE001
@@ -228,6 +269,16 @@ class PersistentSandbox:
         was_alive = self.is_alive
         await self._kill_current()
         return was_alive
+
+    async def kill_now(self) -> None:
+        """Kill the REPL and its descendants immediately — the human-interrupt path.
+
+        Distinct from :meth:`shutdown`, which first writes a shutdown line and waits up to 5 s for
+        a clean exit. An interrupt has no time for a handshake and no interest in one: the point
+        is that nothing in the run can still write to disk when the next step (the toolkit-branch
+        reset) runs.
+        """
+        await self._kill_current()
 
     async def _restart_for_failure(self) -> str:
         """Restart after a tool-call failure; return a suffix on restart failure."""

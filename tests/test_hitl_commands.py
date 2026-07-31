@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 
 import pytest
@@ -52,7 +53,7 @@ def test_unknown_command_falls_back_to_help():
 def test_botname_suffix_tolerated():
     ctx = _ctx()
     out = _run(dispatch_command("/stop@my_bot", ctx))
-    assert ctx.run_control.stop_requested and "Stop requested" in out
+    assert ctx.run_control.stop_requested and "Stopping now" in out
 
 
 # ── /steer ────────────────────────────────────────────────────────────────────
@@ -133,7 +134,7 @@ def test_stop_requests_run_control():
     ctx = _ctx()
     out = _run(dispatch_command("/stop", ctx))
     assert ctx.run_control.stop_requested and ctx.run_control.stop_event.is_set()
-    assert "Stop requested" in out
+    assert "Stopping now" in out
 
 
 # ── /status ───────────────────────────────────────────────────────────────────
@@ -213,24 +214,67 @@ def test_wait_without_run_control_is_plain_wait_for():
     assert _run(go()) == "reply"
 
 
-def test_stop_is_forceful_and_reports_what_it_cancelled():
-    """`/stop` has no modifier to remember: it cancels in-flight calls itself (user ruling)."""
-    ctx = _ctx()
-    ctx.run_control.register_aborter("analyst_worker_0", _busy_aborter)
+def test_stop_cancels_the_run_task():
+    """`/stop` is Ctrl-C: it cancels the run task rather than asking the pipeline to wind down."""
 
-    out = _run(dispatch_command("/stop", ctx))
+    async def scenario():
+        ctx = _ctx()
+        started, cancelled = asyncio.Event(), asyncio.Event()
 
-    assert ctx.run_control.stop_requested and ctx.run_control.stop_event.is_set()
-    assert "Cancelled 1 in-flight tool call" in out
+        async def never_ends():
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        task = asyncio.create_task(never_ends())
+        await started.wait()
+        ctx.run_control.register_run_task(task)
+
+        out = await dispatch_command("/stop", ctx)
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return out, cancelled.is_set()
+
+    out, was_cancelled = asyncio.run(scenario())
+    assert was_cancelled
+    assert "Stopping now" in out and "No report is composed" in out
 
 
-def test_stop_says_so_when_nothing_was_mid_call():
-    out = _run(dispatch_command("/stop", _ctx()))
-    assert "Nothing was mid-call" in out
+def test_stop_replies_before_the_cancellation_lands():
+    """The ack must get out before cleanup closes the connector, so the cancel is scheduled
+    (call_soon) rather than delivered inside the command handler."""
+
+    async def scenario():
+        ctx = _ctx()
+        task = asyncio.create_task(asyncio.sleep(3600))
+        await asyncio.sleep(0)
+        ctx.run_control.register_run_task(task)
+        reply = await dispatch_command("/stop", ctx)
+        still_running = not task.done()  # not cancelled yet: the reply came first
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        return reply, still_running
+
+    reply, still_running = asyncio.run(scenario())
+    assert still_running and "Stopping now" in reply
 
 
 async def _busy_aborter() -> bool:
+    """An aborter reporting the role was mid-call — still used by the ⚡ deliver-now button,
+    which cancels one role's in-flight tool call so a queued steer lands at once."""
     return True
+
+
+def test_stop_without_a_registered_task_still_flags_the_run():
+    """A duck-typed/partial wiring must not make /stop a no-op silently."""
+    ctx = _ctx()
+    _run(dispatch_command("/stop", ctx))
+    assert ctx.run_control.stop_requested
 
 
 # ── buttons on the steer ack (the two escalations, one tap each) ────────────────────────────────

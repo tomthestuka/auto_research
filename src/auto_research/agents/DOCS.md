@@ -389,3 +389,15 @@ Role wrappers:
   neither a reader nor a human choosing a `/steer` target could tell which one was working. New
   `status_monitor` entry in `PROMPT_FILENAMES` (its prompt moved out of `hitl/commands.py`, §4).
   Tests: `tests/test_run_control.py` (+3).
+
+- 2026-07-31 — **`_react` no longer reads the stop flag.** A `/stop` is an interrupt that cancels
+  the run task, so the loop has nothing to notice: the top-of-iteration `stop_requested` break and
+  the mid-batch skip (which synthesized an error result for each remaining `tool_use` so the
+  transcript stayed valid) are both deleted, along with the `<role>.<action>.stopped` and
+  `.stop_skipped_calls` events. **Steering is untouched** — the inbox, the top-of-turn drain and
+  the mid-batch delivery all stay, because a steer is a message and a message can wait. The lead
+  now publishes its live `AuthoringSession` on `RunControl` while `drive_authoring` runs, so an
+  interrupt can reset the toolkit branch: that method's own `finally` sits inside the cancelled
+  scope, where its awaits die before the reset. Whichever path gets there first clears the handle,
+  and `aclose()` is idempotent. Tests: `tests/test_run_control.py` (rewritten to pin the absence of
+  the old behaviour + that a cancellation propagates out of the loop).

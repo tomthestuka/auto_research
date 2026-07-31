@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from auto_research.monitor import MonitorEvent, RunMonitor, write_stream_event
+from auto_research.run_control import UserInterruptionError
 from auto_research.sandbox.workspace import run_dir
 from auto_research.schemas import ResearchRequest
 from auto_research.schemas.report import ResearchReport
@@ -159,8 +160,17 @@ def _partial(run_directory: Path) -> tuple[str, Path | None]:
 
 def reconstruct_run(request: ResearchRequest | str, run_directory: Path, run_id: str) -> ResearchRun:
     """Rebuild a `ResearchRun` from ``result.json`` + the monitor JSONL. Raises `RunDied`
-    if the result records a pipeline failure (status != 'done' or no verdict)."""
+    if the result records a pipeline failure (status != 'done' or no verdict), or
+    `UserInterruptionError` if a human stopped it."""
     result = json.loads((run_directory / _RESULT_FILE).read_text(encoding="utf-8"))
+    if result.get("status") == "interrupted":
+        # A human stop is not a death: the backend cleaned up and exited on purpose, so the
+        # detached caller sees the same exception an in-process run raises rather than `RunDied`.
+        raise UserInterruptionError(
+            result.get("error") or "the run was interrupted",
+            artifacts={"run_dir": str(run_directory),
+                       "ledger": str(run_directory / _MONITOR_JSONL)},
+        )
     if result.get("status") != "done" or not result.get("verdict"):
         partial, log = _partial(run_directory)
         raise RunDied(run_id, result.get("error") or "pipeline reported failure",

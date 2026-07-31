@@ -124,14 +124,22 @@ the terminal (`cli`) channel needs none.
 Over **Telegram or Slack** a human can drive a live run with slash-commands (intercepted, never
 treated as answers to an agent): `/help` (commands + the live roster, numbered), `/status
 [question]` (a report on the run's state), `/steer <id> <message>` (nudge one role at its next
-step, addressed by the **id** `/help` prints; `all` broadcasts), and `/stop` (wind the whole run
-down to an honest terminal). Every invalid command — unknown command, unknown id, a role name where
-an id belongs, a missing message — is refused immediately with the valid options, and nothing is
-queued on a guess. Commands are recorded in the run ledger, so a rejected command, a queued steer
-and a delivered steer are told apart after the fact. A queued steer reaches its role at that role's
-next step: a `/stop` also skips the rest of an in-flight batch of tool calls, while a plain steer
-waits for the batch to finish. CLI/WhatsApp have no background listener, so commands aren't wired
-there. *(Command dispatch is tested; live command use is observational.)*
+step, addressed by the **id** `/help` prints; `all` broadcasts), and `/stop`. Every invalid
+command — unknown command, unknown id, a role name where an id belongs, a missing message — is
+refused immediately with the valid options, and nothing is queued on a guess. Commands are recorded
+in the run ledger, so a rejected command, a queued steer and a delivered steer are told apart after
+the fact. A queued steer reaches its role at that role's next step. CLI/WhatsApp have no background
+listener, so commands aren't wired there. *(Command dispatch is tested; live command use is
+observational.)*
+
+**`/stop` is Ctrl-C** — the interrupt a run has no terminal to receive. It cancels the run task
+where it stands, then cleans up deterministically: kill the sandbox processes *and their
+descendants*, reset the authoring branch if a tool was being written, close the channels, record
+the closing events. **No report is composed and no model is called on the way out**, and the run
+ends by raising `UserInterruptionError` rather than returning. What the run already wrote is its
+record — the ledger, per-round reports, figures — and `resume=True` continues from the last
+completed step, so a stop is a pause rather than a loss. On the CLI and the detached backend,
+SIGINT/SIGTERM route to the same interrupt (a library caller's signals are never touched).
 
 **Runtime data dir** (`config/orchestration.yaml::runtime_dir`, defaults to
 `~/.auto_research` if omitted) lives **outside both repos** and is not committed. It holds

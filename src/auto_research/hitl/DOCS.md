@@ -198,3 +198,14 @@ protocol, §7).
   cannot drift from the help text. Taps record as `hitl.command.button`. Tests:
   `tests/test_hitl_commands.py` (+7), `tests/test_hitl.py` (+2, and the Telegram fake gained the
   `reply_markup`/`set_my_commands` shape it was missing).
+
+- 2026-07-31 — **`/stop` is Ctrl-C.** `_stop` now calls `RunControl.interrupt()` — flag the run,
+  then cancel its task — instead of setting a flag and aborting in-flight tool calls for a
+  pipeline that then wound itself down over ~14 more model calls. The cancellation is *scheduled*
+  (`call_soon`), not delivered inside the handler, so the acknowledgement gets in flight before
+  cleanup closes the connector. The reply says what actually happens: work cancelled, sandbox
+  processes killed, authoring branch reset if a tool was being written, **no report composed**, and
+  `resume=True` continues from the last completed step. `/help` and the README match. `abort_all`
+  stays — the ⚡ deliver-now button still cancels one role's in-flight call so a queued steer lands
+  at once. Tests: `tests/test_hitl_commands.py` (the three wind-down tests replaced by cancellation
+  + reply-ordering + no-task-registered).

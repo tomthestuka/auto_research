@@ -326,10 +326,11 @@ class AgentRole:
         budget_used = 0
         iteration = 0
         while budget_used < budget_cap and iteration < absolute_ceiling:
-            # Cooperative HITL control (§12): before the next model turn, inject any human steer
-            # for this role, and honor a /stop by ending the loop (→ the role composes its terminal
-            # from what it has). Both no-ops when run_control is unset. A steer rides as a user turn
-            # (the images= path already appends user turns after tool results, so this is safe).
+            # Cooperative HITL steer (§12): before the next model turn, inject any human steer for
+            # this role. A no-op when run_control is unset. A steer rides as a user turn (the
+            # images= path already appends user turns after tool results, so this is safe).
+            # A /stop is NOT read here: it cancels the run task outright (see
+            # ``RunControl.interrupt``), so there is nothing for this loop to notice.
             if self.run_control is not None:
                 for steer in self.run_control.drain_steer(self.agent_key):
                     messages.append(ModelMessage(role="user", content=f"[Human steer] {steer}"))
@@ -338,13 +339,6 @@ class AgentRole:
                         summary=f"{self.role} received a human steer",
                         data={"message": _cap_text(steer, _EVENT_ARG_CAP)},
                     )
-                if self.run_control.stop_requested:
-                    await self._record(
-                        f"{self.role}.{action}.stopped", level=2,
-                        summary=f"{self.role} ending its loop — human requested stop",
-                        data={"reason": self.run_control.stop_reason},
-                    )
-                    break
             response = await self.model.call(
                 messages,
                 tools=tools.tool_definitions(),
@@ -375,25 +369,7 @@ class AgentRole:
             # landed only when the batch broke). Collected here, appended as a user turn right
             # after this batch's results, so the very next model call sees them.
             batch_steers: list[str] = []
-            skipped_for_stop = 0
             for call in response.tool_calls:
-                # A human /stop must not have to wait out the rest of the batch either. Skip every
-                # remaining call with an honest result — a result is still recorded for each
-                # tool_use, which the providers require, so the transcript stays valid and the
-                # top-of-iteration check then ends the loop into the §9.6 terminal.
-                if self.run_control is not None and self.run_control.stop_requested:
-                    skipped_for_stop += 1
-                    result_parts.append(
-                        ToolResultPart(
-                            tool_call_id=call.id,
-                            name=call.name,
-                            content=(
-                                "skipped: a human requested the run to stop before this call ran"
-                            ),
-                            is_error=True,
-                        )
-                    )
-                    continue
                 # Input event — written (and flushed) BEFORE the call runs, so a tool that
                 # hangs and never returns still leaves a record of exactly what was issued.
                 # Output is a separate event below, written when execute() returns; the two
@@ -458,16 +434,6 @@ class AgentRole:
                 if self.run_control is not None:
                     batch_steers.extend(self.run_control.drain_steer(self.agent_key))
             messages.append(ToolResultMessage(results=result_parts))
-            if skipped_for_stop:
-                await self._record(
-                    f"{self.role}.{action}.stop_skipped_calls",
-                    level=3,
-                    summary=(
-                        f"{self.role} skipped {skipped_for_stop} queued tool call(s) — human "
-                        "requested stop"
-                    ),
-                    data={"skipped": skipped_for_stop, "iteration": iteration + 1},
-                )
             for steer in batch_steers:
                 # Ordered after the tool results (assistant → tool results → user), so the turn
                 # sequence stays valid for every provider.
@@ -1427,9 +1393,17 @@ class AnalystLeadAgent(AgentRole):
             monitor=self.monitor,
         )
         await session.connect()
+        # Publish the live session so a human interrupt can close it: this `finally` sits inside
+        # the cancelled scope, where its awaits die before the branch reset runs, so the interrupt
+        # path calls `aclose()` itself from shielded cleanup. Whichever gets there first clears the
+        # handle, and `aclose` is idempotent.
+        if self.run_control is not None:
+            self.run_control.authoring_session = session
         try:
             return await self._drive_authoring_loop(session, tool_spec, human_handler)
         finally:
+            if self.run_control is not None and self.run_control.authoring_session is session:
+                self.run_control.authoring_session = None
             await session.aclose()
 
     async def _drive_authoring_loop(

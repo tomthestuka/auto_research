@@ -420,9 +420,13 @@ def test_mid_run_unclean_branch_degrades_to_honest_terminal():
     assert registry.reloads == 0      # nothing committed → no registry reload
 
 
-def test_stop_requested_skips_authoring():
-    """A human /stop (RunControl.stop_requested) skips new authoring — the lead never decides —
-    so the run winds down honestly instead of starting a tool chain (Stage 3.1)."""
+def test_stop_flag_no_longer_gates_authoring():
+    """The pre-authoring stop check went with the cooperative wind-down (2026-07-31).
+
+    It existed so a stopped run would not *start* a tool chain while it wound itself down. A
+    stop now cancels the run task outright, so there is no wind-down to protect and no window in
+    which the flag is set but the strategy still runs — the flag alone changes nothing here.
+    """
     from auto_research.run_control import RunControl
 
     rc = RunControl()
@@ -439,6 +443,5 @@ def test_stop_requested_skips_authoring():
         ).run(workers, lead, AnalysisTask(question="q"))
     )
 
-    assert lead.decided == 0        # authoring skipped under stop
-    assert final.summary == "final"  # still produced an adjudicated report (honest wind-down)
-    assert registry.reloads == 0
+    assert lead.decided == 1        # authoring proceeds; the flag is not consulted
+    assert final.summary == "final"
