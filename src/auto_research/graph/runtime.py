@@ -505,15 +505,13 @@ async def run_research(
                             _model_label(io_agent.model) or "?"))
             return entries
 
-        try:
-            status_handle = resolve("status_monitor").handles[0]
-        except Exception:  # noqa: BLE001 — optional role; /status falls back to a deterministic digest
-            status_handle = None
+        # `status_monitor` is a REQUIRED role (models/registry.py), so this resolves or the run
+        # never launched — there is no optional path and no deterministic fallback behind it.
         from auto_research.hitl.commands import CommandContext, make_status_answer
 
         jsonl_path = getattr(run_monitor, "jsonl_path", None)
-        status_answer = (
-            make_status_answer(status_handle, jsonl_path) if status_handle is not None else None
+        status_answer = make_status_answer(
+            resolve("status_monitor").handles[0], jsonl_path, monitor=run_monitor
         )
         try:
             human_handler.attach_commands(

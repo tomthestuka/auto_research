@@ -1297,3 +1297,37 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   model did not write) sits closer to fabrication than the crash it prevents. Suite 610 → 627
   (+15 `tests/test_interrupt.py`, the rest rewritten to pin the absence of the old behaviour).
   **NOT LIVE TESTED:** a real `/stop` mid-authoring, where the branch reset is the whole point.
+- 2026-07-31 — **`/status` investigates the ledger instead of reading a digest of it.** The
+  reporter was handed a fixed compaction — the last 80 events at *any* level, flattened to
+  `[Lx] team · event — summary`, capped at 8k chars — and the flattening dropped every event's
+  `data`. So the answers to the questions people actually ask ("what did the reviewer decide?",
+  "why did the gate reject it?") were precisely the part discarded: `/status` could see *that* a
+  verdict happened and never what it said. The window was mostly noise too (live: 44 L7 + 18 L10
+  against 6 significant events, with `cost.call` now claiming ~16 more slots). Replaced by
+  `MonitorToolProvider` (`agents/react.py`) — `brief_history` (the index, one line per event as
+  `seq · Lxx · $cost · +elapsed · team · actor · summary`, filtered by level / sequence /
+  `event_prefix` / actor / team / substring, either end), `ledger_event(sequence, max_chars, bias)`
+  (one event **with its payload**, windowed, next-offset footer, negative `bias` for the tail where
+  a long dump keeps its errors), `ledger_grep` (find by payload content; returns index rows, never
+  raw payload) — driven by a new `StatusMonitorAgent` ReAct role under `status_react_loop_cap`
+  (default 6: a human is waiting on a phone). Three properties are structural, not prompted:
+  **read-only** (no tool takes a path — the provider is built with the run's own ledger and can
+  reach nothing else), **bounded** (400 rows, 32k payload chars, clamped in code however large the
+  model asks), **fresh** (re-read per call; the run is still appending). The bound is the
+  load-bearing one: an agent reading its own run log is the one place a harness can feed itself
+  without limit, which is a filed bug in the field — openai/codex#27131, Codex self-ingesting its
+  session JSONL into runaway token growth (see also codex#24948, 700 MB–2 GB session logs, and
+  claude-code#23948, a full-size tool result making a session unloadable on resume). **Both
+  compaction paths deleted** (`_status_digest`, `_deterministic_status`) with **no fallback**, by
+  ruling: `status_monitor` joins `REQUIRED_ROLES` so a misconfigured run fails at launch;
+  transient provider errors are already retried at the model layer; and a run whose provider is
+  down cannot advance, so a second view of the same log would report on a stalled run as if it
+  were fine. `prompts/status_monitor.md` now teaches the ledger's shape, search-then-drill, and
+  the **level convention** (1 = most important … 10 = chattiest, so "important only" is a *low*
+  `max_lvl`) — the inversion a model is likeliest to get backwards. Deliberately **not** in scope:
+  bash for the reporter (grep returning a matching 130k-char line is codex#27131 in one call, and
+  read-only through a shell is prompt-level only) and raising `_EVENT_ARG_CAP`/`_EVENT_RESULT_CAP`/
+  `_CODER_TEXT_CAP` (they bound the agents' own recall surfaces — their own item, never bundled
+  here). For the record, measured while scoping: the monitor JSONL is **not** trimmed at write
+  time; `record()` writes each event whole, and those three constants are the only trims, applied
+  at six call sites before the data reaches the monitor. Suite 627 → 648 (+22 `tests/test_monitor_tools.py`).

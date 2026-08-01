@@ -19,6 +19,10 @@ REQUIRED_ROLES = frozenset(
         # built. Non-required roles will be re-introduced only as the system grows.
         "coder",
         "analyst_colead",
+        # The `/status` reporter. Required because it is the only way a human sees inside a
+        # live run: with no deterministic fallback left, a config missing this role must fail
+        # at launch rather than at the moment someone reaches for it.
+        "status_monitor",
     }
 )
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "models.yaml"

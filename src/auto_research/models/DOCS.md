@@ -260,3 +260,9 @@ Google by editing YAML alone
   reachable — a mid-conversation reload, a persisted worker conversation, a reload on the rework
   edge — has the reasoning to check against. The run-killer 400 that motivated a live check of this
   path was the 2026-07-29 entry above, a different defect. Tests: `tests/test_tool_search.py` (−2).
+
+- 2026-07-31 — **`status_monitor` joins `REQUIRED_ROLES`.** It is the only way a human sees inside
+  a live run, and with the deterministic `/status` digest deleted there is nothing behind it — so
+  a config missing the role must fail at launch, not at the moment someone reaches for it. It
+  validates where the other six do (`ModelRegistry.load`, reached from the preflight's
+  author↔reviewer decorrelation check before any model is built).

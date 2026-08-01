@@ -33,10 +33,10 @@ wired, `resolve_human` raises `HumanInputRequired` (the §9.8 headless fail-safe
 - **`commands.py`** — the channel-agnostic HITL **slash-command** dispatcher (§12 Stage 3). A
   command-capable connector recognizes a leading-`/` message and calls `dispatch_command(text, ctx)`
   instead of routing it as a reply, so a human drives the run *any time*: `/help` (commands +
-  live team/role/model roster), `/status [q]` (LLM report over the monitor JSONL via a light
-  `status_monitor` model, deterministic-digest fallback), `/steer <id> <msg>` (queue a message for a
-  role's next step — addressed by its **roster id**, the number `/help` prints; `all` broadcasts),
-  `/stop` (request an honest run-wide wind-down). Every outcome is immediate and deterministic: an
+  live team/role/model roster), `/status [q]` (the `status_monitor` reporter *investigates* the
+  run's ledger through `MonitorToolProvider` and answers — no fallback digest), `/steer <id> <msg>`
+  (queue a message for a role's next step — addressed by its **roster id**, the number `/help`
+  prints; `all` broadcasts), `/stop` (interrupt the run now — see `graph/DOCS.md`). Every outcome is immediate and deterministic: an
   unknown command, an unknown/out-of-range id, a role *name* where an id belongs, or a missing
   message answers with ⚠️ plus the valid options and queues nothing. `CommandContext` carries the run-scoped `run_control`/roster/JSONL/status
   hook, wired by `run_research` via each connector's `attach_commands`. `wait_reply_or_stop` is the
@@ -209,3 +209,18 @@ protocol, §7).
   stays — the ⚡ deliver-now button still cancels one role's in-flight call so a queued steer lands
   at once. Tests: `tests/test_hitl_commands.py` (the three wind-down tests replaced by cancellation
   + reply-ordering + no-task-registered).
+
+- 2026-07-31 — **`/status` investigates instead of being handed a digest.** `make_status_answer`
+  now builds a `StatusMonitorAgent` (a real ReAct role) over `MonitorToolProvider`, and both
+  compaction paths are deleted: `_status_digest` (last 80 events at any level, flattened to
+  `[Lx] team · event — summary`, capped at 8k chars) and `_deterministic_status`. The digest was
+  the limit — it dropped every event's `data`, so the answers to the questions people actually
+  ask ("what did the reviewer decide?", "why did the gate reject it?") were exactly the part
+  thrown away, and its window was the tail at *any* level (44 L7 + 18 L10 against 6 significant
+  events on a live run, with `cost.call` now claiming ~16 more of those slots). No fallback
+  replaces it, by ruling: `status_monitor` is a required role so a misconfigured run fails at
+  launch; transient provider errors are already retried at the model layer; and a run whose
+  provider is genuinely down cannot advance, so a second, lesser view of the same log would
+  report on a stalled run as if it were fine. `_status` therefore lets a reporter failure
+  surface. `CommandContext.status_answer` is always wired now. Tests:
+  `tests/test_hitl_commands.py` (the two digest tests replaced).

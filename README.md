@@ -123,7 +123,8 @@ the terminal (`cli`) channel needs none.
 
 Over **Telegram or Slack** a human can drive a live run with slash-commands (intercepted, never
 treated as answers to an agent): `/help` (commands + the live roster, numbered), `/status
-[question]` (a report on the run's state), `/steer <id> <message>` (nudge one role at its next
+[question]` (a reporter role reads the run's own event ledger — index, search, open an event — and
+answers), `/steer <id> <message>` (nudge one role at its next
 step, addressed by the **id** `/help` prints; `all` broadcasts), and `/stop`. Every invalid
 command — unknown command, unknown id, a role name where an id belongs, a missing message — is
 refused immediately with the valid options, and nothing is queued on a guess. Commands are recorded

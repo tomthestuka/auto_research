@@ -15,6 +15,7 @@ from auto_research.agents.prompts import PromptRole, load_prompt
 from auto_research.agents.react import (
     DRIVE_CODER_TOOL,
     EDIT_REPORT_TOOL,
+    MonitorToolProvider,
     PLAN_AND_DEBATE_TOOL,
     REVIEW_REPORT_TOOL,
     RESPOND_TO_REVIEW_TOOL,
@@ -1552,6 +1553,50 @@ class AnalystLeadAgent(AgentRole):
         return report.model_copy(update={"figures": figures, "cited_figures": []})
 
 
+class StatusMonitorAgent(AgentRole):
+    """The `/status` reporter: reads the run's own ledger and answers the human's question.
+
+    A reporter, never a participant — it holds no run state, produces no artifact, and can only
+    read. Its whole surface is :class:`MonitorToolProvider`, so "read-only" is a property of the
+    tools rather than a promise in the prompt.
+
+    It investigates rather than being handed a digest. The previous design flattened the last 80
+    events into one line each and dropped every payload, which meant a question like "what did
+    the reviewer decide?" could see *that* a verdict happened and never what it said — and, since
+    the window was the tail at any level, it was mostly chatter (44 L7 + 18 L10 against 6
+    significant events on a live run). Now it searches the index, narrows, and opens what it
+    found, bounded by a deliberately tight loop cap because a human is waiting on a phone.
+    """
+
+    role = "status_monitor"
+
+    async def report(self, question: str, *, jsonl_path: Path | None) -> str:
+        """Answer ``question`` (or give a general status) from the run's event log."""
+        self.tools = MonitorToolProvider(jsonl_path)
+        ask = question.strip() or "Give a general status report on this run."
+        seed = [
+            ModelMessage(role="system", content=self.prompt),
+            ModelMessage(role="user", content=f"Question: {ask}"),
+        ]
+        messages, _, _ = await self._react(
+            seed_messages=seed, tools=self.tools, action="status",
+            cap=_status_react_loop_cap(),
+        )
+        answer = ((self.last_response.content if self.last_response else "") or "").strip()
+        if answer:
+            return answer
+        # The loop ended on its cap with the model still calling tools, so its last turn carried
+        # no prose. Ask once more with no tools attached: it has read enough, and a human waiting
+        # on an answer should not get silence because the investigation ran long.
+        response = await self.model.call(
+            [*messages, ModelMessage(
+                role="user",
+                content="Stop searching and answer now, from what you have already read.",
+            )]
+        )
+        return (response.content or "").strip() or "(no answer produced)"
+
+
 class AnalystColeadAgent(AgentRole):
     """Analyst co-lead role: provider-decorrelated code review of an authored tool (§9.3).
 
@@ -1704,6 +1749,17 @@ def _librarian_react_loop_cap() -> int:
     """
     cfg = _orchestration_config()
     return int(cfg.get("librarian_react_loop_cap", cfg.get("react_loop_cap", 12)))
+
+
+def _status_react_loop_cap() -> int:
+    """Max tool iterations for the `/status` reporter (orchestration.yaml).
+
+    Key: ``status_react_loop_cap``. Defaults to 6 — deliberately tight. A human is waiting on a
+    phone for this answer, and the ledger it reads grows to thousands of events, so an
+    open-ended investigation would be both slow to arrive and expensive to produce. Six turns is
+    enough for the intended shape: look at the index, narrow once, open one or two events.
+    """
+    return int(_orchestration_config().get("status_react_loop_cap", 6))
 
 
 def _react_loop_absolute_cap() -> int:

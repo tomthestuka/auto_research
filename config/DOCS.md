@@ -30,7 +30,8 @@ raise a "copy the `.example` / run install.sh" message when a live file is absen
   `provider`, `model`, `vision`, `parameters`, and optional `documents` and
   `priceMTk`.
   Loaded and validated by `auto_research.models.registry`. Required roles:
-  `reviewer`, `analyst_lead`, `analyst_worker`, and `librarian_io`. Reviewer and
+  `reviewer`, `analyst_lead`, `analyst_worker`, `librarian_io`, `coder`, `analyst_colead`,
+  and `status_monitor` — the full `REQUIRED_ROLES` set, validated at launch. Reviewer and
   analyst-tier models **must** be marked `vision: true` so figure references can
   be passed at the multimodal boundary (see
   [§7](../CLAUDE.md#7-schemas--protocols)). Phase-2 tool-authoring roles (optional, not
@@ -102,6 +103,9 @@ raise a "copy the `.example` / run install.sh" message when a live file is absen
   `react_loop_cap`, only toward this runaway backstop). Defaults to 60.
 - `orchestration.yaml.librarian_react_loop_cap` — tighter cap for the literature loop,
   whose repeated searches re-send a growing paper context.
+- `orchestration.yaml.status_react_loop_cap` — cap for the `/status` reporter's ledger
+  investigation. Defaults to 6, deliberately tight: a human is waiting on a phone, and the
+  ledger it reads runs to thousands of events.
 - `orchestration.yaml.structured_retry_cap` — bounded off-schema structured-output retry
   count.
 - `orchestration.yaml.tool_search_enabled` — provider-native **tool search / lazy tool loading**

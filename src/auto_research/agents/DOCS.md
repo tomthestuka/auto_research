@@ -401,3 +401,25 @@ Role wrappers:
   scope, where its awaits die before the reset. Whichever path gets there first clears the handle,
   and `aclose()` is idempotent. Tests: `tests/test_run_control.py` (rewritten to pin the absence of
   the old behaviour + that a cancellation propagates out of the loop).
+
+- 2026-07-31 — **`MonitorToolProvider` + `StatusMonitorAgent`: the `/status` reporter reads the
+  run's own ledger.** A fourth `ToolProvider` (beside `SandboxToolProvider`, `ReadOnlyToolProvider`,
+  `SourceToolProvider`) exposing three tools over one run's `monitor.jsonl`: `brief_history`
+  (the index — one line per event as `seq · Lxx · $cost · +elapsed · team · actor · summary`,
+  filtered by `limit`/`order`/`min_lvl`/`max_lvl`/`min_seq`/`max_seq`/`event_prefix`/`actor`/
+  `team`/`contains`), `ledger_event(sequence, max_chars, bias)` (one event in full **including
+  its `data` payload**, windowed with a next-offset footer; negative `bias` reads the tail, where
+  a long tool dump keeps its errors), and `ledger_grep(pattern, limit, max_lvl)` (the only way to
+  find an event by payload content — returns index rows, never raw payload text). Three
+  properties are structural rather than prompted: **read-only** (no tool takes a path, so there is
+  nothing to confine — the provider is built with the run's own ledger), **bounded** (every cap is
+  clamped in code however large the model asks: 400 rows, 32k payload chars — an agent reading its
+  own run log is the one place a harness can feed itself without limit, cf. openai/codex#27131),
+  and **fresh** (the file is re-read per call, since the run is still appending). `StatusMonitorAgent`
+  drives them in a ReAct loop bounded by the new `status_react_loop_cap` (default 6 — a human is
+  waiting on a phone); when the loop ends on its cap with no prose, it asks once more with no tools
+  rather than returning silence. `prompts/status_monitor.md` gained the ledger's shape, the
+  search-then-drill idiom, and the **level convention** (1 = most important … 10 = chattiest, so
+  "important only" is a *low* `max_lvl` — the inversion a model is most likely to guess wrong).
+  Payloads serialize with `ensure_ascii=False` so `σ`/`±` read as themselves. Tests:
+  `tests/test_monitor_tools.py` (+22).

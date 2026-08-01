@@ -20,6 +20,7 @@ tool_retry_cap: 3            # legacy, unused (the ReAct loop self-corrects)
 react_loop_cap: 100            # budget-consuming tool iterations per agent loop
 react_loop_absolute_cap: 200   # hard ceiling incl. budget-free iterations (lead's §5.5 plan_and_debate rounds count only here)
 librarian_react_loop_cap: 1   # tighter — each librarian search re-sends the growing paper context
+status_react_loop_cap: 6      # /status reporter — tight; a human is waiting on a phone
 structured_retry_cap: 2       # off-schema retries for a structured _call before raising
 
 # ── Internet stability (transient LLM-provider failures: overloaded / rate-limit / 5xx / connection drops) ──

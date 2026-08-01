@@ -16,6 +16,7 @@ import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -1336,6 +1337,364 @@ class SandboxToolProvider:
         if touched and not self._figures_dir_ready:
             self.figures_dir.mkdir(parents=True, exist_ok=True)
             self._figures_dir_ready = True
+
+
+# ----------------------------------------------------------------------------
+# Monitor tools — the `/status` reporter reads the run's own ledger (§J1).
+# ----------------------------------------------------------------------------
+
+# Defaults chosen so every result is bounded *by construction* rather than by prompting. An
+# agent reading its own run log is the one place a harness can feed itself without limit —
+# openai/codex#27131 is exactly that, a session log re-ingested into runaway token growth — so
+# no tool here can return an unbounded slice, whatever arguments the model passes.
+_HISTORY_LIMIT = 80
+_HISTORY_MAX_LIMIT = 400
+_EVENT_WINDOW_CHARS = 8_000
+_EVENT_MAX_WINDOW_CHARS = 32_000
+_GREP_LIMIT = 40
+
+
+def _read_ledger(path: Path | None) -> list[dict]:
+    """Every event in the run's monitor JSONL, tolerant of a torn final line.
+
+    Re-read per call rather than cached: the run is still appending while `/status` is asked, so
+    a fresh read is both simpler and more current. A hard kill can leave a half-written last
+    line, which is skipped (the ledger is append-only, so nothing earlier is affected).
+    """
+    if path is None:
+        return []
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    events: list[dict] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
+def _elapsed_seconds(event: dict, origin: str | None) -> float | None:
+    """Seconds from the run's first event to this one (None when either stamp is unreadable)."""
+    stamp = event.get("created_at")
+    if not (isinstance(stamp, str) and isinstance(origin, str)):
+        return None
+    try:
+        return (
+            datetime.fromisoformat(stamp) - datetime.fromisoformat(origin)
+        ).total_seconds()
+    except ValueError:
+        return None
+
+
+def _history_row(event: dict, origin: str | None) -> str:
+    """One ledger event as one line: ``seq · Lxx · $cost · +elapsed · team · actor · summary``.
+
+    Cost and elapsed ride along because two of the three things `/status` is asked — where the
+    run is, what it has produced, what it has spent — are answerable from the index alone; without
+    them the model has to open an event to learn something the row could have told it.
+    """
+    elapsed = _elapsed_seconds(event, origin)
+    cost = event.get("cost_usd_total")
+    return " · ".join(
+        [
+            f"#{event.get('sequence', '?')}",
+            f"L{event.get('level', '?')}",
+            f"${float(cost):.2f}" if isinstance(cost, (int, float)) else "$-",
+            f"+{int(elapsed // 60)}m" if elapsed is not None else "+?",
+            str(event.get("team", "?")),
+            str(event.get("actor") or "-"),
+            f"{event.get('event', '?')} — {event.get('summary', '')}",
+        ]
+    )
+
+
+class MonitorToolProvider:
+    """Read-only tools over one run's monitor JSONL, for the `/status` reporter.
+
+    The ledger is the run's single source of truth (§J1) — every node, verdict, tool call, gate
+    result, HITL command and priced model call, in order, with its `data` payload. The old
+    `/status` flattened the last 80 events into `[Lx] team · event — summary` strings and dropped
+    every payload, so a question like "what did the reviewer decide?" could see *that* a verdict
+    happened and never what it said. These three tools let the reporter search the index and then
+    open what it found, instead of being handed a fixed window someone else chose.
+
+    Read-only by construction, not by instruction: no tool takes a path, so there is nothing to
+    confine — the provider is built with the run's own ledger path and can reach nothing else.
+    """
+
+    def __init__(self, jsonl_path: Path | None) -> None:
+        self.jsonl_path = Path(jsonl_path) if jsonl_path is not None else None
+
+    def tool_definitions(self) -> list[dict]:
+        return [
+            {
+                "name": "brief_history",
+                "description": (
+                    "Index of the run's event log: one line per event, newest last. Filter, then "
+                    "open anything interesting with ledger_event. Levels run 1 (most important) "
+                    "to 10 (chattiest), so max_lvl=4 means significant events only."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "description": (
+                        "All filters combine (AND). Start broad (max_lvl=4) to see the shape of "
+                        "the run, then narrow with event_prefix or actor."
+                    ),
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": (
+                                f"Rows to return (default {_HISTORY_LIMIT}, max "
+                                f"{_HISTORY_MAX_LIMIT}), counted from the end that `order` names."
+                            ),
+                        },
+                        "order": {
+                            "type": "string",
+                            "enum": ["tail", "head"],
+                            "description": (
+                                "Which end to take: 'tail' (default) for what just happened, "
+                                "'head' for how the run began. Rows always read oldest→newest."
+                            ),
+                        },
+                        "min_lvl": {
+                            "type": "integer",
+                            "description": "Keep events at this level or chattier (1-10).",
+                        },
+                        "max_lvl": {
+                            "type": "integer",
+                            "description": (
+                                "Keep events at this level or MORE important (1-10). 4 is the "
+                                "significant-events line: node starts, verdicts, gate results, "
+                                "commits, human questions."
+                            ),
+                        },
+                        "min_seq": {
+                            "type": "integer",
+                            "description": "Keep events with sequence >= this.",
+                        },
+                        "max_seq": {
+                            "type": "integer",
+                            "description": "Keep events with sequence <= this.",
+                        },
+                        "event_prefix": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Keep events whose dotted name starts with any of these — event "
+                                "names are hierarchical (`analyst_lead.drive_authoring."
+                                "tool_result`), so a prefix selects one role's whole activity."
+                            ),
+                        },
+                        "actor": {
+                            "type": "string",
+                            "description": (
+                                "Keep one actor's events. Actors are indexed "
+                                "(`analyst_worker_0`, `analyst_worker_1`), so this separates two "
+                                "workers a team filter would merge."
+                            ),
+                        },
+                        "team": {
+                            "type": "string",
+                            "description": "Keep one team's events (the ledger's own grouping).",
+                        },
+                        "contains": {
+                            "type": "string",
+                            "description": (
+                                "Keep events whose summary contains this text "
+                                "(case-insensitive). Searches summaries only — to search inside "
+                                "event payloads use ledger_grep."
+                            ),
+                        },
+                    },
+                },
+            },
+            {
+                "name": "ledger_event",
+                "description": (
+                    "One event in full, including its data payload — the verdict text, the gate "
+                    "reasons, the tool arguments. Windowed: a payload can be very large."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "description": (
+                        "Get the sequence number from brief_history or ledger_grep first. The "
+                        "reply names the payload's total size and the next offset, so a large "
+                        "event can be walked window by window."
+                    ),
+                    "properties": {
+                        "sequence": {
+                            "type": "integer",
+                            "description": "The event's sequence number (the #N in a history row).",
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "description": (
+                                f"Payload characters to return (default {_EVENT_WINDOW_CHARS}, "
+                                f"max {_EVENT_MAX_WINDOW_CHARS})."
+                            ),
+                        },
+                        "bias": {
+                            "type": "integer",
+                            "description": (
+                                "Character offset into the payload (default 0). Negative reads "
+                                "from the end — where a long tool dump keeps its errors and "
+                                "results."
+                            ),
+                        },
+                    },
+                    "required": ["sequence"],
+                },
+            },
+            {
+                "name": "ledger_grep",
+                "description": (
+                    "Search inside event payloads and return matching events as index rows — the "
+                    "only way to find an event by its content rather than its name."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "description": (
+                        "Returns index rows, never raw payload text: open a hit with ledger_event "
+                        "to read it. Use for names, ObsIDs, error strings, paths."
+                    ),
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Case-insensitive substring to find in the payload.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": f"Maximum matches (default {_GREP_LIMIT}).",
+                        },
+                        "max_lvl": {
+                            "type": "integer",
+                            "description": "Search only events at this level or more important.",
+                        },
+                    },
+                    "required": ["pattern"],
+                },
+            },
+        ]
+
+    async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
+        events = _read_ledger(self.jsonl_path)
+        if not events:
+            return ToolOutcome(text="The run's event log is empty or unreadable.")
+        origin = events[0].get("created_at")
+        if name == "brief_history":
+            return ToolOutcome(text=self._history(events, origin, arguments))
+        if name == "ledger_event":
+            return ToolOutcome(text=self._event(events, arguments))
+        if name == "ledger_grep":
+            return ToolOutcome(text=self._grep(events, origin, arguments))
+        return ToolOutcome(text=f"unknown tool: {name}", is_error=True)
+
+    def _history(self, events: list[dict], origin: str | None, args: Mapping[str, Any]) -> str:
+        rows = [e for e in events if _ledger_match(e, args)]
+        if not rows:
+            return "No events match those filters."
+        limit = min(max(1, int(args.get("limit") or _HISTORY_LIMIT)), _HISTORY_MAX_LIMIT)
+        head = str(args.get("order") or "tail") == "head"
+        window = rows[:limit] if head else rows[-limit:]
+        body = "\n".join(_history_row(e, origin) for e in window)
+        note = (
+            f"\n\n[{len(window)} of {len(rows)} matching events "
+            f"({'oldest' if head else 'newest'} {len(window)}); {len(events)} in the log]"
+        )
+        return body + note
+
+    def _event(self, events: list[dict], args: Mapping[str, Any]) -> str:
+        try:
+            wanted = int(args.get("sequence"))
+        except (TypeError, ValueError):
+            return "ledger_event needs a numeric `sequence` (the #N from a history row)."
+        match = next((e for e in events if e.get("sequence") == wanted), None)
+        if match is None:
+            return f"No event #{wanted} in this log (it holds {len(events)} events)."
+        # ensure_ascii=False: payloads carry σ, ±, degree signs and unit strings, and \u03c3 is
+        # both unreadable to the reporter and more tokens than the character it escapes.
+        payload = json.dumps(
+            match.get("data") or {}, indent=2, sort_keys=True, default=str, ensure_ascii=False
+        )
+        window = min(
+            max(1, int(args.get("max_chars") or _EVENT_WINDOW_CHARS)), _EVENT_MAX_WINDOW_CHARS
+        )
+        bias = int(args.get("bias") or 0)
+        start = max(0, len(payload) + bias) if bias < 0 else min(bias, len(payload))
+        chunk = payload[start : start + window]
+        header = "\n".join(
+            f"{key}: {match.get(key)}"
+            for key in ("sequence", "created_at", "level", "team", "actor", "event", "summary",
+                        "cost_usd_total")
+        )
+        footer = f"\n\n[data chars {start}–{start + len(chunk)} of {len(payload)}"
+        footer += (
+            f"; continue with bias={start + len(chunk)}]"
+            if start + len(chunk) < len(payload)
+            else "; end of payload]"
+        )
+        return f"{header}\n\ndata:\n{chunk}{footer}"
+
+    def _grep(self, events: list[dict], origin: str | None, args: Mapping[str, Any]) -> str:
+        pattern = str(args.get("pattern") or "").lower()
+        if not pattern:
+            return "ledger_grep needs a `pattern`."
+        limit = min(max(1, int(args.get("limit") or _GREP_LIMIT)), _HISTORY_MAX_LIMIT)
+        ceiling = args.get("max_lvl")
+        hits = []
+        for event in events:
+            if ceiling is not None and int(event.get("level", 10)) > int(ceiling):
+                continue
+            blob = json.dumps(
+                event.get("data") or {}, default=str, ensure_ascii=False
+            ).lower()  # match on the real characters, not their \uXXXX escapes
+            if pattern in blob:
+                hits.append(event)
+                if len(hits) >= limit:
+                    break
+        if not hits:
+            return f"No event payload contains {pattern!r}."
+        body = "\n".join(_history_row(e, origin) for e in hits)
+        return f"{body}\n\n[{len(hits)} match(es); open one with ledger_event]"
+
+
+def _ledger_match(event: dict, args: Mapping[str, Any]) -> bool:
+    """Whether one event passes every supplied `brief_history` filter (unset filters pass)."""
+    level = int(event.get("level", 10))
+    sequence = int(event.get("sequence", 0))
+    checks = (
+        (args.get("min_lvl") is None or level >= int(args["min_lvl"])),
+        (args.get("max_lvl") is None or level <= int(args["max_lvl"])),
+        (args.get("min_seq") is None or sequence >= int(args["min_seq"])),
+        (args.get("max_seq") is None or sequence <= int(args["max_seq"])),
+        (args.get("actor") is None or event.get("actor") == args["actor"]),
+        (args.get("team") is None or event.get("team") == args["team"]),
+        (
+            not args.get("event_prefix")
+            or any(
+                str(event.get("event", "")).startswith(p)
+                for p in _as_list(args["event_prefix"])
+            )
+        ),
+        (
+            args.get("contains") is None
+            or str(args["contains"]).lower() in str(event.get("summary", "")).lower()
+        ),
+    )
+    return all(checks)
+
+
+def _as_list(value: Any) -> list[str]:
+    """Accept a single string or a list — models pass either for an array-typed argument."""
+    if isinstance(value, str):
+        return [value]
+    return [str(v) for v in value or []]
 
 
 # ----------------------------------------------------------------------------

@@ -139,35 +139,29 @@ def test_stop_requests_run_control():
 
 # ── /status ───────────────────────────────────────────────────────────────────
 
-def test_status_deterministic_digest_from_jsonl(tmp_path):
-    jsonl = tmp_path / "monitor.jsonl"
-    jsonl.write_text(
-        "\n".join(
-            json.dumps(e) for e in [
-                {"team": "analysts", "event": "analyst.analysis.start", "level": 3, "summary": "started"},
-                {"team": "analysts", "event": "chatter", "level": 8, "summary": "noise"},
-                {"team": "reviewer", "event": "reviewer.analysis_review.verdict", "level": 2, "summary": "verdict"},
-            ]
-        ),
-        encoding="utf-8",
-    )
-    out = _run(dispatch_command("/status", _ctx(jsonl=jsonl)))
-    assert "3 events" in out
-    assert "analyst.analysis.start" in out and "verdict" in out
-    assert "chatter" not in out   # level 8 filtered from the significant tail
+def test_status_is_answered_by_the_reporter():
+    """`/status` has one path now: the `status_monitor` reporter reading the run's ledger. The
+    deterministic digest is gone — it dropped every event's payload, which is where the answers
+    to real questions live, and the role is required at preflight so it is always wired."""
 
-
-def test_status_uses_llm_answer_when_wired():
     async def _answer(question: str) -> str:
-        return f"LLM says: {question or 'general report'}"
+        return f"reporter says: {question or 'general report'}"
 
-    out = _run(dispatch_command("/status what is the sonnet worker doing?", _ctx(status_answer=_answer)))
-    assert out == "LLM says: what is the sonnet worker doing?"
+    out = _run(dispatch_command("/status what is the sonnet worker doing?",
+                                _ctx(status_answer=_answer)))
+    assert out == "reporter says: what is the sonnet worker doing?"
 
 
-def test_status_no_activity():
-    out = _run(dispatch_command("/status", _ctx(jsonl=None)))
-    assert "No run activity" in out
+def test_status_surfaces_a_reporter_failure_rather_than_a_lesser_view():
+    """No fallback digest: provider errors are already retried at the model layer, and a run whose
+    provider is down cannot advance — a second view of the same log would report on a stalled run
+    as if it were fine."""
+
+    async def _boom(question: str) -> str:
+        raise RuntimeError("provider unavailable")
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        _run(dispatch_command("/status", _ctx(status_answer=_boom)))
 
 
 # ── wait_reply_or_stop ─────────────────────────────────────────────────────────

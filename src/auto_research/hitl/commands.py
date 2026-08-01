@@ -5,8 +5,8 @@ message and route it here **instead of** treating it as a reply to a pending LLM
 human can drive the run at any time:
 
 - ``/help`` — list commands + the live team/role/model roster.
-- ``/status [question]`` — report the run's state (LLM-answered when a status model is wired,
-  else a deterministic digest of the monitor JSONL).
+- ``/status [question]`` — report the run's state; the ``status_monitor`` reporter reads the run's
+  own ledger through :class:`~auto_research.agents.react.MonitorToolProvider` and answers.
 - ``/steer <role> <message>`` — queue a message for a role (delivered at its next ReAct step);
   ``/steer all`` broadcasts to every role.
 - ``/stop`` — interrupt the run now (the Ctrl-C a run without a terminal cannot receive):
@@ -20,10 +20,10 @@ reply-wait every command-capable connector uses so ``/stop`` unblocks a role awa
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from auto_research.run_control import STOP_SENTINEL, RunControl
@@ -67,8 +67,9 @@ class CommandContext:
     run_control: RunControl
     roster: Callable[[], list[RosterEntry]]
     monitor_jsonl_path: Path | None = None
-    # Set in Stage 3.3: (question) -> Markdown report via a light status model. When None,
-    # /status falls back to a deterministic digest so it never dead-ends.
+    # (question) -> Markdown report from the `status_monitor` reporter. Always wired by
+    # `run_research` (the role is required at preflight); left optional here only so a test or a
+    # duck-typed harness can build a context without a model.
     status_answer: Callable[[str], Awaitable[str]] | None = None
     # The run's RunMonitor. Commands are recorded in the run ledger (§J1: the JSONL is the single
     # source of truth), because without it a rejected command, a queued steer and a delivered
@@ -300,12 +301,15 @@ async def dispatch_callback(data: str, ctx: CommandContext) -> str:
 
 
 async def _status(arg: str, ctx: CommandContext) -> str:
-    if ctx.status_answer is not None:
-        try:
-            return await ctx.status_answer(arg)
-        except Exception as exc:  # noqa: BLE001 — fall back to the deterministic digest, never dead-end
-            return f"_(status model unavailable: {exc}; showing a plain digest)_\n\n{_deterministic_status(ctx)}"
-    return _deterministic_status(ctx)
+    """Answer `/status` from the run's ledger via the `status_monitor` reporter.
+
+    There is no deterministic-digest fallback: `status_monitor` is a required role (so a
+    misconfigured run fails at launch, not here), transient provider errors are already retried
+    at the model layer, and a run whose provider is genuinely down cannot advance anyway — a
+    hand-rolled digest would report on a run that is not moving. A raise here answers with the
+    error rather than a second, lesser view of the same log.
+    """
+    return await ctx.status_answer(arg)
 
 
 def _safe_roster(ctx: CommandContext) -> list[RosterEntry]:
@@ -315,79 +319,25 @@ def _safe_roster(ctx: CommandContext) -> list[RosterEntry]:
         return []
 
 
-def _read_events(path: Path | None) -> list[dict]:
-    """Read the run's monitor JSONL into a list of event dicts (best-effort, tolerant)."""
-    if path is None:
-        return []
-    try:
-        raw = Path(path).read_text(encoding="utf-8")
-    except OSError:
-        return []
-    events: list[dict] = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return events
-
-
-def _deterministic_status(ctx: CommandContext, *, tail: int = 10) -> str:
-    """A no-LLM run digest from the monitor JSONL: totals + the last few significant events."""
-    events = _read_events(ctx.monitor_jsonl_path)
-    if not events:
-        return "No run activity recorded yet."
-    if ctx.run_control.stop_requested:
-        head = "🛑 Stop requested — the run is winding down.\n\n"
-    else:
-        head = ""
-    significant = [e for e in events if int(e.get("level", 10)) <= 4]
-    recent = significant[-tail:] or events[-tail:]
-    lines = [f"{head}**Run status** — {len(events)} events recorded."]
-    lines.append("Recent activity:")
-    for e in recent:
-        lines.append(f"- `{e.get('team', '?')}` · {e.get('event', '?')} — {e.get('summary', '')}")
-    return "\n".join(lines)
-
-
-def _status_digest(events: list[dict], *, max_events: int = 80, max_chars: int = 8000) -> str:
-    """Compact the recent monitor events into a digest string for the status model."""
-    lines = [
-        f"[L{e.get('level', '?')}] {e.get('team', '?')} · {e.get('event', '?')} — {e.get('summary', '')}"
-        for e in events[-max_events:]
-    ]
-    text = "\n".join(lines)
-    return text[-max_chars:] if len(text) > max_chars else text
-
-
 def make_status_answer(
-    model: object, jsonl_path: Path | None
+    model: object, jsonl_path: Path | None, *, monitor: Any | None = None
 ) -> Callable[[str], "Awaitable[str]"]:
-    """Build the ``/status`` answerer: a light model summarizes the run's event-log digest on
-    demand (a general report, or an answer to the trailing question). Report-only: the prompt
-    keeps it to what the log shows. Wired into :class:`CommandContext` by ``run_research``.
+    """Build the ``/status`` answerer: a :class:`StatusMonitorAgent` investigating the run's ledger.
+
+    It is handed tools over the log rather than a pre-made digest, because the digest was the
+    limit: it dropped every event's ``data``, so the answers to the questions people actually ask
+    ("what did the reviewer decide?", "why did the gate reject it?") were the part thrown away.
+    The reporter now searches the index, narrows, and opens what it found.
 
     The system prompt is loaded from ``prompts/status_monitor.md`` — this is a runtime LLM like any
     other, so its instructions live in ``prompts/`` and not in this module (§4).
     """
-    from auto_research.agents.prompts import load_prompt
-    from auto_research.models import ModelMessage
+    from auto_research.agents.roles import StatusMonitorAgent
 
-    system = load_prompt("status_monitor")
+    agent = StatusMonitorAgent(model=model, monitor=monitor)
 
     async def _answer(question: str) -> str:
-        events = _read_events(jsonl_path)
-        if not events:
-            return "No run activity recorded yet."
-        user = f"Event log digest:\n\n{_status_digest(events)}\n\n"
-        user += f"Question: {question}" if question.strip() else "Give a general status report."
-        resp = await model.call(  # type: ignore[attr-defined]
-            [ModelMessage(role="system", content=system), ModelMessage(role="user", content=user)]
-        )
-        return (getattr(resp, "content", "") or "").strip() or "(status model returned nothing)"
+        return await agent.report(question, jsonl_path=jsonl_path)
 
     return _answer
 
