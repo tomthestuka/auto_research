@@ -1366,7 +1366,10 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   read. Lifecycle (human's design): download once → on a repeat request ask the archive's
   `public_date` (new `heasarc.availability`, one metadata row, no transfer; present in all three
   master tables) → download again only once public. Caught in passing: NICER/NuSTAR globs already
-  *matched* a `.gpg` and would have recorded it as usable; and `_scan_ixpe`'s obsid-wildcard glob
+  *matched* a `.gpg` and would have recorded it as usable — **defensive only**, since (human,
+  2026-08-03) those archives withhold proprietary data entirely rather than serving it encrypted,
+  so for them the same situation appears as a download that yields no usable file, which is why
+  both analyst prompts now teach *both* shapes of "inside its proprietary period"; and `_scan_ixpe`'s obsid-wildcard glob
   (looser than its `heasarc._ixpe_level2` mirror) would have catalogued the human's quarantine
   copies `<obsid>_bad_gpg` as invented ObsIDs the moment the scan gained sight — now anchored on
   the directory's own ObsID. Only `.gpg` is recognised; an unknown suffix stays unknown rather than
