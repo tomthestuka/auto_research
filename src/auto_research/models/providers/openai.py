@@ -1,6 +1,7 @@
 """OpenAI provider adapter."""
 
 import base64
+import importlib
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -23,8 +24,74 @@ from auto_research.schemas import DocumentRef, FigureRef
 
 
 _DISCOVERY_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
-"""Tool-search items that must be replayed verbatim, so tools loaded on an earlier turn stay
-callable later without re-searching."""
+"""Tool-search items replayed on later turns, so tools loaded once stay callable without
+re-searching. The provider authors these — every other item we send, we build ourselves."""
+
+#: The item types above, mapped to the SDK type that declares their **input** shape.
+_INPUT_SHAPE_TYPES = {
+    "tool_search_call": ("openai.types.responses.response_input_item_param", "ToolSearchCall"),
+    "tool_search_output": (
+        "openai.types.responses.response_tool_search_output_item_param_param",
+        "ResponseToolSearchOutputItemParamParam",
+    ),
+}
+
+#: Fallback keep-lists, mirroring the input types above as of openai 2.38.0. Used only if the
+#: SDK's module layout moves; sending a known-good subset beats sending an output item raw.
+_INPUT_SHAPE_FALLBACK = {
+    "tool_search_call": frozenset({"arguments", "type", "id", "call_id", "execution", "status"}),
+    "tool_search_output": frozenset({"tools", "type", "id", "call_id", "execution", "status"}),
+}
+
+_input_fields_cache: dict[str, frozenset[str]] = {}
+
+
+def _input_fields(item_type: str) -> frozenset[str]:
+    """Fields the Responses API accepts for ``item_type`` when it is sent as *input*.
+
+    Read from the SDK's own input TypedDict rather than hand-listed, because the set grows:
+    OpenAI adds output-only bookkeeping to response items over time, and a hand-listed
+    blacklist rots into a mid-run 400 the next time they do.
+    """
+    cached = _input_fields_cache.get(item_type)
+    if cached is not None:
+        return cached
+    fields = _INPUT_SHAPE_FALLBACK.get(item_type, frozenset())
+    target = _INPUT_SHAPE_TYPES.get(item_type)
+    if target:
+        module_name, type_name = target
+        try:
+            module = importlib.import_module(module_name)
+            declared = getattr(getattr(module, type_name), "__annotations__", None)
+            if declared:
+                fields = frozenset(declared)
+        except Exception:  # noqa: BLE001 — the fallback above is the point
+            pass
+    _input_fields_cache[item_type] = fields
+    return fields
+
+
+def _as_input_item(item: Any) -> dict[str, Any]:
+    """Convert a Responses *output* item into the *input* item that echoes it.
+
+    The API speaks a larger language than it accepts: a response item carries bookkeeping the
+    server stamps on its own output (``created_by`` — "the identifier of the actor that created
+    the item"), and the input schema rejects it as an unknown parameter. Round-tripping the raw
+    item therefore 400s on the next turn — which killed a live run on 2026-08-03, and is a known
+    open defect in the SDK itself across several item types (openai-python #3008, #2323, #2670,
+    where the missing piece is described as an ``.as_input()`` helper). This is that helper, kept
+    deliberately narrow: only the items we actually replay.
+
+    Projection is **unconditional** — the same fields in the same order on every turn — because a
+    value-dependent rewrite (the popular ``exclude_none`` workaround) makes an item serialize one
+    way when a field is null and another way when it is not. The moment that flips mid-conversation
+    the cached prefix diverges and every later turn silently re-bills at full price.
+    """
+    raw = _item_to_dict(item)
+    allowed = _input_fields(str(raw.get("type") or ""))
+    if not allowed:
+        return raw
+    return {key: value for key, value in raw.items() if key in allowed}
 
 
 def _item_to_dict(item: Any) -> dict[str, Any]:
@@ -158,9 +225,11 @@ class OpenAIProvider:
                         ToolCall(id=getattr(item, "call_id", "") or "", name=item.name, arguments=args)
                     )
                 elif itype in _DISCOVERY_ITEM_TYPES:
-                    # Tool-search discovery items: replayed verbatim so the loaded tools stay
-                    # callable on later turns without re-searching.
-                    provider_blocks.append(_item_to_dict(item))
+                    # Tool-search discovery items: replayed so the loaded tools stay callable on
+                    # later turns without re-searching. Translated to their input shape *here*,
+                    # at capture, so the stored item is legal to send by construction and is the
+                    # same bytes on every turn that replays it (see `_as_input_item`).
+                    provider_blocks.append(_as_input_item(item))
             return _response(
                 content=getattr(response, "output_text", ""),
                 tool_calls=tool_calls,

@@ -1383,3 +1383,42 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   **390 passed / 4 failed (20 min)**, the 4 being the same pre-existing [F2] stale-`01002901`-timeseg
   casualties D1 recorded 2026-07-28 (`test_pa_pd_stability{,_plot}.py`) — no new failures.
   auto_research suite unchanged at 649.
+- 2026-08-03 — **The second half of the replay seam: an output-only field sent as input killed a
+  live run.** With tool search on, part of the transcript is authored by the *provider* (the
+  discovery items carrying a found tool's definition) and must be replayed for that tool to stay
+  callable — so for the first time we hand back items we did not build. The OpenAI adapter
+  captured them with `model_dump()` and replayed them verbatim, but the Responses API **accepts a
+  smaller vocabulary than it emits**: its items carry `created_by` ("the identifier of the actor
+  that created the item"), which the input schema rejects. The turn after any OpenAI worker
+  discovered a tool therefore died with `400 Unknown parameter: 'input[2].created_by'` — live run
+  `b-run-q21-0803`, seq 399, $8.44 in. On the live path of every OpenAI worker since 2026-07-28,
+  unfired until now because it needs an OpenAI member to discover a tool *and* take another turn
+  (the Claude worker in the same run sailed through 29 iterations on a different code path). This
+  is the **same defect as the 2026-07-29 run-killer wearing a different hat** — that one replayed
+  discovery items into a request that declared no tools; both are "what the provider said" and
+  "what I may say" treated as one object. Confirmed to be a known, open SDK-level defect rather
+  than a local slip: openai-python **#3008** (identical 400 on `status`, turn 2, when passing
+  `response.output` back as input), **#2323** (output types structurally unusable as input params),
+  **#2670** (`McpCall` rejected the same way) — three item types, one root cause, and what the
+  issues ask for is an `.as_input()` helper the SDK does not ship. Fix: `_as_input_item` in
+  `models/providers/openai.py`, applied at capture so the stored item is legal by construction and
+  byte-stable across turns. Two deliberate choices: the keep-list is **read from the SDK's own
+  input TypedDict**, not hand-listed (OpenAI keeps adding output-only fields; a hand-list rots into
+  the next mid-run 400), and the projection is **unconditional** — the popular `exclude_none`
+  workaround is value-dependent, and prompt caching keys on an exact prefix match, so an item that
+  serializes differently once a field goes non-null would silently re-bill every later turn at full
+  price. `previous_response_id` (the other published workaround) was rejected: it moves
+  conversation state onto OpenAI's servers, which our stateless multi-provider `_react` replay
+  cannot use. Suite 649 → 652. **Also on that run** (before it died, all first-time live evidence):
+  durable resume B2 passed a second time (killed mid-analysis → `run.resume` → re-entered analysis,
+  no repeated literature phase), the ledger stayed append-only across the kill (seq 253 → 266),
+  cost seeded from the ledger instead of restarting at $0.00 and `run.summary`'s headline matched
+  its own by-role breakdown, the Anthropic worker exercised the 07-29 discovery-trim fix cleanly
+  (deferred tool called, 29 iterations, report composed, no dangling `Tool reference` 400), and
+  **Anthropic context editing fired in a real analysis for the first time** (two edits, ~26k tokens
+  of tool results cleared each). Its collision with tool search (§13 watch item (a) — clearing tool
+  results may take the discovery items with them, de-activating a tool mid-run) was **not**
+  exercised: both edits landed at iteration ~29 while the worker was already writing up. Still to
+  provoke deliberately. Open from the same run: **[F3]** the filesystem guard denies `2>/dev/null`
+  as an out-of-allow-list path, costing a worker three turns on idiomatic shell — safe but stupid,
+  unfixed.

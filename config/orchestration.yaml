@@ -57,7 +57,7 @@ agent_fs_allow:
 
 # ── Tool discovery ──
 mcp_servers: []      # extra MCP servers for workers ({name,command,args}); empty ⇒ built-in only (bash_exec/list_dir/read_file)
-disabled_tools: []   # tool names to hide from the catalogue regardless of what the toolkit exposes
+disabled_tools: [research_toolkit.heasarc_utils.acquire]   # tool names to hide from the catalogue regardless of what the toolkit exposes
 
 # ── Report composition (compose_report node, on accepted verdicts) ──
 report_formats: [tex]   # output handles: jsonl (machine), tex (LaTeX+PDF)

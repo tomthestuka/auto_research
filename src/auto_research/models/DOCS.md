@@ -266,3 +266,32 @@ Google by editing YAML alone
   a config missing the role must fail at launch, not at the moment someone reaches for it. It
   validates where the other six do (`ModelRegistry.load`, reached from the preflight's
   author↔reviewer decorrelation check before any model is built).
+
+- 2026-08-03 — **The OpenAI adapter translates discovery items into their input shape before
+  replaying them** (`_as_input_item`, applied at capture). The Responses API accepts a smaller
+  vocabulary than it emits: a response item carries bookkeeping the server stamps on its own
+  output — `created_by`, *"the identifier of the actor that created the item"* — and the input
+  schema rejects it as an unknown parameter. We captured items with `model_dump()` and replayed
+  them verbatim, so the turn *after* any OpenAI worker discovered a tool died with
+  `400 Unknown parameter: 'input[2].created_by'` (live run `b-run-q21-0803`, killed at seq 399).
+  This sat on the live path of every OpenAI worker since tool search was enabled 2026-07-28; it
+  had never fired because it needs an OpenAI member to discover a tool *and* take another turn
+  (Anthropic members use a different code path and the July-29 run died earlier, on the
+  Anthropic half of the same seam — see the discovery-trim entry above). **It is a known, open
+  SDK defect, not a local mistake:** openai-python #3008 (`Unknown parameter: 'input[1].status'`
+  on turn 2 when passing `response.output` back as input), #2323 (output types are structurally
+  unusable as input params), #2670 (`McpCall` rejected the same way) — three item types, one root
+  cause, and the fix the issues ask for is an `.as_input()` helper the SDK does not provide.
+  `_as_input_item` is that helper, kept narrow (only the two items we replay). Two properties are
+  load-bearing: the keep-list is **read from the SDK's own input TypedDict** (`_input_fields`,
+  with a fallback mirroring openai 2.38.0) rather than hand-listed, because OpenAI keeps adding
+  output-only fields and a hand-list rots into the next mid-run 400; and the projection is
+  **unconditional**, because prompt caching keys on an exact prefix match — the popular
+  `exclude_none` workaround is value-dependent, so an item would serialize one way when a field
+  is null and another way when it is not, and the flip would silently re-bill every later turn at
+  full price. Translating at *capture* also means the stored item is legal to send by construction
+  and is the same bytes on every turn that replays it. The fake in `tests/test_tool_search.py` now
+  mirrors the real response items (`created_by` included) — a mock smaller than the real shape is
+  what let this reach a live run. Tests: +3 (`..._translates_discovery_items_to_their_input_shape`,
+  `..._input_fields_are_read_from_the_sdk_not_hand_listed`, `..._translation_is_stable_across_turns`);
+  suite 649 → 652.

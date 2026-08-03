@@ -264,17 +264,27 @@ class _FakeResponses:
 
     async def create(self, **request):
         self._store["request"] = request
+        # The dumps mirror the REAL response items, `created_by` included: it is an
+        # output-only field the input schema rejects as an unknown parameter, and a fake
+        # that omitted it is what let that 400 reach a live run (2026-08-03). A mock
+        # smaller than the real shape silently narrows what the suite can cover.
         return SimpleNamespace(
             output=[
                 SimpleNamespace(
                     type="tool_search_call", call_id=None,
-                    model_dump=lambda mode=None: {"type": "tool_search_call", "call_id": None},
+                    model_dump=lambda mode=None: {
+                        "type": "tool_search_call", "call_id": None, "id": "ts_1",
+                        "arguments": {"query": "pcube"}, "execution": "server",
+                        "status": "completed", "created_by": "assistant",
+                    },
                 ),
                 SimpleNamespace(
                     type="tool_search_output",
                     model_dump=lambda mode=None: {
                         "type": "tool_search_output",
                         "tools": [{"tool_name": "research_toolkit_xspec_utils_ixpe_pcube"}],
+                        "id": "tso_1", "call_id": None, "execution": "server",
+                        "status": "completed", "created_by": "assistant",
                     },
                 ),
             ],
@@ -405,3 +415,81 @@ def test_openai_drops_discovery_items_when_no_tools_are_declared(monkeypatch):
     items = _to_openai_input([*_messages(), turn], include_discovery=False)
     assert not [i for i in items if i.get("type") in ("tool_search_call", "tool_search_output")]
     assert [i for i in items if i.get("type") == "function_call"]      # calls still replay
+
+
+# ── the 2026-08-03 run-killer: an OUTPUT-ONLY field replayed as INPUT ─────────────────────────
+
+
+def test_openai_capture_translates_discovery_items_to_their_input_shape(monkeypatch):
+    """A captured discovery item carries only fields the API accepts back as input.
+
+    The provider authors these items and stamps its own bookkeeping on them; the input schema
+    rejects that stamp as an unknown parameter, so round-tripping the raw item 400s on the very
+    next turn (`Unknown parameter: 'input[2].created_by'`, live run b-run-q21-0803). Translating
+    at capture makes the stored item legal to send by construction.
+    """
+    import openai
+
+    _FakeOpenAI.store = {}
+    monkeypatch.setattr(openai, "AsyncOpenAI", _FakeOpenAI)
+    monkeypatch.setattr("auto_research.models.providers.openai.tool_search_config", _enabled)
+    cfg = RoleModelConfig(name="m", provider="openai", model="gpt-5.5")
+
+    response = asyncio.run(OpenAIProvider().call(_messages(), cfg, tools=_tools()))
+
+    assert [b["type"] for b in response.provider_blocks] == [
+        "tool_search_call", "tool_search_output"
+    ]
+    for block in response.provider_blocks:
+        assert "created_by" not in block, f"output-only field survived into {block['type']}"
+    call, output = response.provider_blocks
+    assert call["arguments"] == {"query": "pcube"}, "the search query is preserved"
+    assert output["tools"] == [{"tool_name": "research_toolkit_xspec_utils_ixpe_pcube"}], (
+        "the loaded tool definitions are preserved — they are why the item is replayed at all"
+    )
+
+
+def test_openai_input_fields_are_read_from_the_sdk_not_hand_listed():
+    """The keep-list comes from the SDK's own input type, so a new output-only field is
+    excluded automatically. Hand-listing would rot into a mid-run 400 the next time OpenAI
+    adds one — which it has done repeatedly (openai-python #3008, #2323, #2670)."""
+    from auto_research.models.providers.openai import _input_fields
+
+    call_fields = _input_fields("tool_search_call")
+    output_fields = _input_fields("tool_search_output")
+
+    assert "created_by" not in call_fields and "created_by" not in output_fields
+    assert {"arguments", "type", "id"} <= call_fields
+    assert {"tools", "type", "id"} <= output_fields
+
+
+def test_openai_translation_is_stable_across_turns():
+    """The same item translates to the same bytes every time — the cache-prefix invariant.
+
+    Prompt caching keys on an exact prefix match, so a *conditional* rewrite (the popular
+    `exclude_none` workaround) would serialize an item one way when a field is null and another
+    way when it is not; the moment that flips mid-conversation the prefix diverges and every
+    later turn silently re-bills at full price.
+    """
+    import json
+
+    from auto_research.models.providers.openai import _as_input_item
+
+    class _Item:
+        type = "tool_search_call"
+
+        def __init__(self, created_by):
+            self._created_by = created_by
+
+        def model_dump(self, mode=None):
+            return {
+                "type": "tool_search_call", "id": "ts_1", "call_id": None,
+                "arguments": {"query": "pcube"}, "execution": "server",
+                "status": "completed", "created_by": self._created_by,
+            }
+
+    populated = _as_input_item(_Item("assistant"))
+    absent = _as_input_item(_Item(None))
+
+    assert populated == absent, "translation must not depend on a field's value"
+    assert json.dumps(populated) == json.dumps(absent), "identical bytes, identical key order"
