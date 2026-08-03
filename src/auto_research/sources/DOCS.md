@@ -54,7 +54,9 @@ Each module is independent; no source imports another.
 - `resolve_ads_full_text(bibcode: str | None, token: str | None) ->
   list[FullTextLink]` — calls
   `https://api.adsabs.harvard.edu/v1/resolver/<bibcode>/esource` and returns
-  the available full-text source buttons for a record.
+  the available full-text source buttons for a record. A record ADS serves
+  malformed — a relative URL where `FullTextLink.url` wants an absolute one, or a
+  missing `link_type` — is skipped, and every well-formed link beside it is kept.
 - `WebSource.search(query: str, *, limit: int = 10) -> list[SearchResult]` —
   returns normalized Tavily web results (query-aware snippets; `search_depth="basic"`).
 - `WebSource.fetch(url: str, *, depth: str = "advanced") -> str` — reads one page's full
@@ -96,3 +98,10 @@ Each module is independent; no source imports another.
   property so construction no longer reads the key and `web_search` attaches to every role
   unconditionally) and gains `WebSource.fetch` ([I10], a page-read primitive over the Tavily
   Extract endpoint backing the agents' `web_fetch` tool).
+- 2026-08-03 — `resolve_ads_full_text` skips a malformed ADS record instead of letting its
+  `ValidationError` escape. Observed live (run `b-run-q21`, seq 18 — the run's first tool error):
+  ADS served a **relative** URL, `FullTextLink.url` (an `HttpUrl`) rejected it, and the error
+  propagated out of the whole `search_literature` call, so `nasa_ads` returned nothing for that
+  query while arxiv/web answered fine. Now a bad record costs that one link, never the source; the
+  same guard covers a missing `link_type` against `NonEmptyStr`. Recording per-source failures on
+  the librarian side stays open ([I9]). `tests/test_sources.py::test_ads_full_text_skips_malformed_records`.

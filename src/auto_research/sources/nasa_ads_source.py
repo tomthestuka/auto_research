@@ -8,6 +8,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import ads
+from pydantic import ValidationError
 
 from auto_research.schemas import FullTextLink, SearchResult
 
@@ -86,6 +87,11 @@ def resolve_ads_full_text(bibcode: str | None, token: str | None) -> list[FullTe
     but sometimes ``404`` (``{"error": "did not find any records"}``). Treat the
     404 the same as the empty case — return ``[]`` rather than propagating, so a
     single link-less paper cannot crash the literature node.
+
+    Individual records are also served malformed on occasion — a relative URL
+    where ``FullTextLink.url`` wants an absolute one, or a missing
+    ``link_type``. Such a record is skipped and every well-formed link beside it
+    is kept, so one bad link costs one link rather than the whole source.
     """
 
     if not bibcode or not token:
@@ -105,13 +111,15 @@ def resolve_ads_full_text(bibcode: str | None, token: str | None) -> list[FullTe
         record_url = record.get("url")
         if not record_url:
             continue
-        links.append(
-            FullTextLink(
+        try:
+            link = FullTextLink(
                 link_type=str(record.get("link_type", "")),
                 url=record_url,
                 title=record.get("title"),
             )
-        )
+        except ValidationError:
+            continue
+        links.append(link)
     return links
 
 

@@ -1,10 +1,12 @@
 """Deterministic tests for step-5 source normalization."""
 
 import asyncio
+import json
 from datetime import UTC, datetime
 
 from auto_research.schemas import FullTextLink
 from auto_research.sources import ArxivSource, NasaAdsSource, WebSource
+from auto_research.sources import nasa_ads_source
 from auto_research.sources.nasa_ads_source import _result_from_ads
 from auto_research.sources.downloads import download_and_ingest_result
 from auto_research.storage import Storage
@@ -94,6 +96,35 @@ def test_ads_source_prefers_resolved_pdf_link():
         "ESOURCE|EPRINT_HTML",
         "ESOURCE|EPRINT_PDF",
     ]
+
+
+def test_ads_full_text_skips_malformed_records(monkeypatch):
+    """One malformed link costs that link, never the whole source.
+
+    ADS occasionally serves a relative URL (or omits ``link_type``), which
+    ``FullTextLink`` rejects; the rejection used to propagate out of the whole
+    ``search_literature`` call, zeroing ``nasa_ads`` for that query.
+    """
+
+    payload = {
+        "links": {
+            "records": [
+                {"link_type": "ESOURCE|EPRINT_PDF", "url": "/link_gateway/2026ApJ/EPRINT_PDF"},
+                {"link_type": "", "url": "https://arxiv.org/pdf/2601.00001"},
+                {"link_type": "ESOURCE|PUB_HTML", "url": "https://doi.org/10.0000/example"},
+            ]
+        }
+    }
+    monkeypatch.setattr(
+        nasa_ads_source,
+        "urlopen",
+        lambda *a, **k: _FakeResponse(json.dumps(payload).encode("utf-8")),
+    )
+
+    links = nasa_ads_source.resolve_ads_full_text("2026ApJ...000..001A", "token")
+
+    assert [link.link_type for link in links] == ["ESOURCE|PUB_HTML"]
+    assert str(links[0].url) == "https://doi.org/10.0000/example"
 
 
 class FakeTavilyClient:

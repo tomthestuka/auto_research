@@ -1331,3 +1331,52 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   here). For the record, measured while scoping: the monitor JSONL is **not** trimmed at write
   time; `record()` writes each event whole, and those three constants are the only trims, applied
   at six call sites before the data reaches the monitor. Suite 627 → 648 (+22 `tests/test_monitor_tools.py`).
+- 2026-08-03 — **One malformed ADS record no longer zeroes the whole literature source.**
+  `resolve_ads_full_text` built a `FullTextLink` per esource record with no guard, and ADS
+  occasionally serves a **relative** URL where that schema's `url` is an `HttpUrl` — so the
+  `ValidationError` escaped the resolver, escaped `search_literature` entirely, and `nasa_ads`
+  returned nothing for that query while arxiv and web answered normally (observed live on
+  `b-run-q21`, seq 18, the run's first tool error). The record is now skipped and every
+  well-formed link beside it is kept, which also covers the second latent case on the same
+  construction: a missing `link_type` against `NonEmptyStr`. Scope is deliberately narrow — a bad
+  link costs one link, never the source. *Recording* per-source failures rather than merely
+  surviving them is the separate open [I9] item (the librarian's bare `except: pass`), and this
+  resolver has no monitor to record into. Suite 648 → 649
+  (`tests/test_sources.py::test_ads_full_text_skips_malformed_records`).
+- 2026-08-03 — **[H9] closed: a GPG-encrypted download is data, not an error** (research_toolkit
+  scope, approved; plus the two runtime prompts that taught the old behaviour). HEASARC serves an
+  observation still inside its proprietary period **GPG-encrypted**, and every layer defined "this
+  data is present" as *a filename matching a product regex* — which encryption changes. So a
+  complete download read as empty ground four ways: `heasarc._ixpe_level2` **raised before
+  `acquire` reached `neutral.new`** (a finished multi-GB transfer recorded nothing),
+  `_domain._scan_ixpe` produced no products and its `if products:` dropped the ObsID entirely,
+  `healthcheck.uncatalogued` is computed from that same scan so had nothing to compare, and
+  `catalog_read._locked_on_disk` only ran over *catalogued* entries so never fired. The agent's
+  catalog query returned **no line at all**, making re-acquisition the correct inference from what
+  it was told — a closed cycle no number of runs could break (live: SS 433 `04004001`, 46
+  encrypted files, re-fetched ~25 min to no effect). **Fix:** one shared rule
+  (`neutral.split_lock`/`is_locked`/`LOCK_SUFFIX`) in the module every layer already imports — the
+  blindness was four independent copies of the same predicate — with product patterns matching the
+  name wrapper-stripped and `_pick`/`_prefer` ranking a readable copy above an encrypted twin.
+  Encryption state is **derived from the recorded path, never stored**, since it changes out of
+  band; a decryption then surfaces as ordinary drift (recorded path missing + readable file
+  uncatalogued) that `repair` reconciles. Per the human's ruling a locked product keeps its
+  **honest level** (a level-2 event *is* level 2) and is marked `LOCKED, NOT USABLE` on its own
+  catalog line, so `min_level` is unchanged and the mark, not a demoted level, is what callers
+  read. Lifecycle (human's design): download once → on a repeat request ask the archive's
+  `public_date` (new `heasarc.availability`, one metadata row, no transfer; present in all three
+  master tables) → download again only once public. Caught in passing: NICER/NuSTAR globs already
+  *matched* a `.gpg` and would have recorded it as usable; and `_scan_ixpe`'s obsid-wildcard glob
+  (looser than its `heasarc._ixpe_level2` mirror) would have catalogued the human's quarantine
+  copies `<obsid>_bad_gpg` as invented ObsIDs the moment the scan gained sight — now anchored on
+  the directory's own ObsID. Only `.gpg` is recognised; an unknown suffix stays unknown rather than
+  guessed at (human's call — a wrong wrapper guess is hard to debug later). Folds in **O4**: the
+  `data_catalog` brief said "mission" five times against a schema with no such argument (a live
+  worker duly passed `mission="ixpe"` and got a `TypeError`). Real-disk effect: the scan goes
+  45 → 47 ObsIDs and `catalog_health` now reports the two locked ObsIDs as uncatalogued — expected,
+  and what `repair` exists for; the human runs `python -m obsdb_catalog repair_all` out of band and
+  launch is green again. Toolkit suites: obsdb_catalog 37, heasarc_utils 21, catalog_utils 8 = 66 (+17
+  new, incl. `obsdb_catalog/tests/test_locked.py`'s 10); the full toolkit suite as the regression hold is
+  **390 passed / 4 failed (20 min)**, the 4 being the same pre-existing [F2] stale-`01002901`-timeseg
+  casualties D1 recorded 2026-07-28 (`test_pa_pd_stability{,_plot}.py`) — no new failures.
+  auto_research suite unchanged at 649.
