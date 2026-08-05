@@ -107,32 +107,35 @@ diagnostic trace, while terminal/notebook output is filtered by `chatter`.
   recorded, so consumers render what the run computed instead of recomputing it.
 
 ## Changelog
-- 2026-05-28 -> 2026-06-12 — `RunMonitor` built: async-safe full-fidelity JSONL streaming,
-  chatter-filtered in-memory events, grouped Markdown rendering, offline JSONL reconstruction,
-  config-driven runtime paths.
-- 2026-06-15 — Optional live progress-line streaming for visible events (JSONL stays full
-  fidelity; Markdown/live stay chatter-filtered); lines prefix `team(model)` when model metadata
-  is present and carry compact per-tool result details (`tool`, `status`, `chars`, `figures`)
-  without dumping tool bodies.
-- 2026-06-22 — Full-fidelity diagnostic capture (monitor unchanged; emitters populate richer
-  `data`): ReAct `*.tool_result` events carry the tool-call `args` and returned `text`; the
-  tool-authoring flow emits a `tooling`-team stream (`coder.*`, `gate.result`, `review.result`,
-  `commit`), heavy text landing in the JSONL only.
-- 2026-06-23 — Tool input/output split into separate events: `*.{action}.tool_call` (input,
-  `args` + `tool_call_id`) emitted before dispatch and `*.{action}.tool_result` (output, `text`
-  + the same id) on return, so a hung tool leaves an unmatched `tool_call` in the log.
-- 2026-07-29 — **Preflight events join the ledger ([J1]a).** `Preflight.run_checklist(monitor=…)` records `preflight.<name>` per check — level 5 on a pass, level 1 on a failure (it kills the launch) — closed by a level-3 `preflight.summary` carrying `{passed, total, failed}`. `run_research` now builds its `RunMonitor` *before* calling `run_preflight` to make this possible; previously the checklist ran first and printed only to stdout, so the launch state was terminal scrollback a detached or notebook run (the primary mode) never saw, and a failed preflight produced no run artifact whatsoever. Recording is guarded and best-effort: a monitor fault is swallowed rather than allowed to block a runnable launch, mirroring [J2]'s rationale. Standalone callers that pass no monitor (`setup.py`'s smoke test) behave exactly as before. Tests: `tests/test_preflight.py` (+4).
-- 2026-07-29 — **Accumulated cost on every line + a derived end-of-run summary.** `MonitorEvent` gains `cost_usd_total` and `RunMonitor` a `cost_meter`, so each event records the run's spend so far and the live line reads `[HH:MM:SS] #0042 $12.34 team(model) L7 …`; Markdown gains a per-event `Cost so far` and a header total (derived from the events, so a replayed run reports what the original did). Each priced call is one level-10 `cost.call` event carrying the `CallCost` payload — the monitor JSONL is now the **only** cost record ([J1]); the separate `<runtime_dir>/cost_ledger.jsonl` was deleted (run-blind, and its rows under-counted). New `summary.py` derives the end-of-run digest (status, wall clock, cost incl. the coder's Agent-SDK share, tools authored + commit shas, gate/co-lead rework counts, HITL raises, tool-call/error counts, report paths) from the event stream, records it as a level-1 `run.summary` event, and renders it as a block — `_format_stream_event` special-cases that event so a live terminal, a detached follower, the CLI and a notebook all end on the same readable digest, including for a run that crashed. Also fixed: the monitor's `run_id` is now the **run's** id rather than an unrelated `uuid4` (a real run's ledger named `e754020b…` while its directory was `8c75990e…`, so no line could be traced to its run). Tests: `tests/test_monitor.py` (+7).
-- 2026-07-29 (follow-up) — the summary prints one labelled line per report artifact with its full
-  path, plus always-present `run dir` and `ledger` lines; `run.start` now carries `run_dir` +
-  `monitor_jsonl` so those stay derivable from the ledger alone (no path rebuilt from config).
-- 2026-07-29 (follow-up 2) — **the ledger is never erased.** `__init__` truncated the
-  JSONL, so every `--resume` relaunch wiped the run's record: the durable-resume evidence (read as
-  "events after the restart") and, since this morning, all spend booked before the kill. It now
-  appends and continues numbering from the last readable event; `write_jsonl()` refuses to rewrite
-  the live ledger from chatter-filtered memory; `from_jsonl` seeds `_sequence` from the highest
-  sequence rather than the row count. Tests: +3.
+Compacted 2026-08-05: the 2026-07-29 cluster folded into one entry (detail in git history).
 
-- 2026-07-29 (follow-up 3) — `build_run_summary`'s `cost_usd` is the **sum** of `cost.call` payloads
-  (the highest `cost_usd_total` stamp is only the fallback for a ledger with stamps but no cost
-  rows): a resumed segment restarts its stamps, so the maximum under-reported the run.
+- 2026-05-28 -> 2026-06-23 — `RunMonitor` built and made fully diagnostic: async-safe full-fidelity
+  JSONL streaming, chatter-filtered in-memory events, grouped Markdown rendering, offline JSONL
+  reconstruction, config-driven runtime paths; optional live progress lines prefixing `team(model)`
+  and carrying compact per-tool result details without dumping tool bodies; the tool-authoring flow
+  emitting a `tooling`-team stream (`coder.*`, `gate.result`, `review.result`, `commit`) with heavy
+  text landing in the JSONL only; and tool input/output split into `*.{action}.tool_call` (before
+  dispatch) and `*.{action}.tool_result` (on return) sharing a `tool_call_id`, so a hung tool leaves
+  an unmatched `tool_call` in the log.
+- 2026-07-29 — **The ledger becomes the run's single source of truth ([J1]): preflight, cost, and a
+  derived end-of-run summary — and it is never erased.** `Preflight.run_checklist(monitor=…)` records
+  `preflight.<name>` per check (level 5 pass / level 1 failure, since a failure kills the launch) plus
+  a level-3 `preflight.summary`; `run_research` builds the monitor *before* the preflight to make this
+  possible, since the checklist had printed only to stdout — terminal scrollback a detached or
+  notebook run never saw, with a failed preflight leaving no artifact at all. Recording is guarded: a
+  monitor fault must never block a runnable launch ([J2]). **Cost:** `MonitorEvent` gains
+  `cost_usd_total` and `RunMonitor` a `cost_meter`, so every event carries the run's spend so far
+  (`[HH:MM:SS] #0042 $12.34 team(model) L7 …`) and each priced call is one level-10 `cost.call` event
+  — the separate run-blind `cost_ledger.jsonl` is deleted. **`summary.py`** derives the end-of-run
+  digest (status, wall clock, cost incl. the coder's Agent-SDK share, tools authored + commit shas,
+  gate/co-lead rework counts, HITL raises, tool-call/error counts, one labelled full path per report
+  artifact plus the run dir and ledger — `run.start` carries both so they stay derivable from the
+  ledger alone) from the event stream, records it as a level-1 `run.summary`, and renders it as a
+  block for the live terminal, a detached follower, the CLI and a notebook, including a crashed run.
+  Its `cost_usd` is the **sum** of `cost.call` payloads, not the highest stamp — a resumed segment
+  restarts its stamps, which is what made one digest report an $8.85 headline against its own $8.98
+  by-role breakdown. Two erasure bugs fixed: the monitor's `run_id` is the **run's** id (a real run's
+  ledger named itself `e754020b…` while its directory was `8c75990e…`), and `__init__` no longer
+  truncates the JSONL — it appends and continues numbering from the last readable event, while
+  `write_jsonl()` refuses to rewrite the live ledger from chatter-filtered memory. Tests:
+  `tests/test_monitor.py`, `tests/test_preflight.py`.

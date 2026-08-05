@@ -657,142 +657,78 @@ the hook mapping a fake-model verdict — no live LLM).
     via `select_decorrelated_member`. Registered in `auto_research.preflight`.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — **Phase 1 sandbox/tooling** built and hardened: manifest-based
-  `ToolkitRegistry` (disabled-tool filtering, provider-native tool defs), persistent JSON-line sandbox
-  (fd capture, XSPEC non-interactive boot), per-run workspace/memory/figures layout, built-in MCP
-  server/client, config-driven runtime paths.
-- 2026-06-12 -> 2026-06-16 — **Phase 2 steps 0–7 built** — the author→gate→review→commit flow, writes
-  pinned under the runtime data dir. `merge_flow.propose_and_pr()` (isolated-worktree / `direct_branch`
-  Sonnet author, runtime-safe context, `ask_lead`/`ask_human`, bounded L0–L4 rework, typed no-commit
-  failure); `gate.run_gate` (Layer-A structural/provenance/determinism + no-fabrication scan, Layer-B
-  test runner, extension-agnostic over `*_utils`); `review.make_review_hook` (provider-decorrelated GPT
-  co-lead); `approve_edit` (one atomic commit, explicit-path staging, never `git add -A`); launch
-  preflights (`check_author_reviewer_decorrelation`, `check_toolkit_git_identity`/`_branch_clean`).
-- 2026-06-18 -> 2026-06-26 — **Live-run hardening (fix-lists #1–#11).** Gate survives slow/erroring
-  tests (`TimeoutExpired` caught; `propose_and_pr` exception backstop → `status="failed"`); SDK author's
-  `Bash` runs in the analyst code-exec env; `bash_exec` rescoped read-only; timeouts decoupled from the
-  model (`call_timeout_ceiling`, `gate_test_timeout_s`); `propose_and_pr(monitor=…)` streams events; FS
-  jail (`fs_guard.PathGuard` + `agent_fs_allow` `PreToolUse` hook, `_make_path_confiner` deprecated); git
-  discipline (auto-reset to per-attempt `base_ref` via `_reset_direct_tree` + `tool_author_failed_*.patch`,
-  coder Bash deny-rule, gate-entry auto-revert); gate fixes (`_manifest_keys` handles annotated manifests;
-  stub/not-implemented → co-lead finding; determinism = per-test JUnit outcome maps not a byte-compare,
-  `_strip_volatile` removed; reproducibility a science-tool `test_repro…` check).
-- 2026-06-29 -> 2026-06-30 — **Authoring refactor (A1) + `bash_exec` hang fix.** Coder escalation tools
-  take one Markdown `message`; `propose_and_pr`'s inline loop decomposed into an `AuthoringSession`
-  (`drive`/`run_gate_step`/`run_review_step`/`commit`/`aclose`, via `build_authoring_session`) it now
-  thinly drives; the session gained `submit_cap`/`debate_cap` + the co-lead debate path (`lead_rebuttal`),
-  and consensus drives authoring via `lead.drive_authoring` (commit still ⇔ gate ∧ review). `bash_exec`
-  now runs `stdin=DEVNULL, start_new_session=True` + process-group kill on timeout (its description demands
-  non-interactive invocation), and `MCPToolClient.call_tool` bounds the await (`asyncio.wait_for`, 900 s) —
-  fixing a whole-run hang from an interactive FTOOL wedging the MCP command channel.
-- 2026-07-06 — **Gate Layer-B fixes.** [G2] Layer-B passes only if pytest exits 0 AND ≥1 test PASSED
-  (`_layer_b_verdict`); an all-SKIPPED suite fails with a specific reason instead of merging an untested
-  tool. [C1] bare ambiguous words (`synthetic`/`synthesized`/`illustrative`) moved from hard-fail to soft
-  `finding_vocabulary` via `code_gate.yaml` (the co-lead still judges them).
-- 2026-07-09 — **Gate derives the manifest/timeout target from the diff, not the brief ([A12]).**
-  `structural.tool_manifest_entry` and `_gate_test_timeout` no longer build paths from the unvalidated
-  `tool_spec.target_domain`; new `_touched_packages` derives the `*_utils` packages the changeset touched,
-  the manifest search runs over those, and the timeout is the `max` over their `tool_config.yaml`. Removes
-  the run-#12 doomed-loop; the rejection now lists the manifest keys actually present. `_gate_test_timeout`
-  signature `(worktree, targets)`.
-- 2026-07-13 — **[I1] co-lead `web_search`: dropped the best-effort resolver.** `_resolve_web_source`
-  removed; the co-lead uses `web_source or WebSource()` directly (`TAVILY_API_KEY` is a required preflight
-  var and `WebSource`'s client is now lazy, so construction can't fail on a missing key).
-- 2026-07-14 — **Install-script increment 1: domain-agnostic REPL-init + env-probe.**
-  `PersistentSandbox` gained a `repl_init_py` param — a config-pointed Python file exec'd once at REPL
-  boot (via `AR_REPL_INIT_PY`, best-effort) for domain session setup; it **replaces the hardcoded
-  XSPEC/relxill `_configure_xspec_once()`** in `_REPL_SCRIPT` (the XSPEC body now ships as
-  `repl_init.py.example`), closing the deepest domain leak S1/P3. `builtin_server` builds the `bash_exec`
-  description at startup via `_bash_exec_description()`, injecting the concrete probe from
-  `AR_ANALYZE_PROBE` (config `analyze_probe`, wired by `graph.runtime._builtin_server_config`) and
-  neutralizing the FITS/xspec hardcodes. New `runner.check_analyze_probe()` preflight check runs the
-  configured probe under `analyze_env` (skips when unset). `graph.runtime` threads `repl_init_py` +
-  `analyze_probe` from config. Tests: `tests/test_sandbox_hooks.py` (8).
-- 2026-07-16 — **Scan config robustness + RNG demoted to a finding (human policy change).**
-  (1) Every `code_gate.yaml` list read is now `or []`-guarded: an emptied YAML section parses
-  to None and means "nothing to flag in that category" — it crashed the scan (`list(None)`
-  TypeError) before. (2) `finding_code_patterns` is dual-purpose: entries naming a built-in
-  `literal_array_*` detector switch it on; any other entry is a dotted code pattern matched
-  like the hard tier (AST attribute/name nodes, once per line, hard match wins) but recorded
-  as a `no_fabrication.code_pattern_finding`. Which list a pattern sits in decides severity —
-  previously the finding tier silently ignored non-detector entries, so the human's RNG
-  demotion (Monte-Carlo tools need randomness inside them; co-lead judges intent) did nothing.
-  Hard-tier check name generalized `no_fabrication.rng` → `no_fabrication.code_pattern`.
-  Tests: `tests/test_gate.py` (emptied-sections, finding-tier RNG, hard-tier machinery kept).
-- 2026-07-22 — **Durable-resume Stage 2: authoring-branch self-heal (§12).** `check_toolkit_branch_clean`
-  now raises the distinct `ToolkitBranchUnclean` (a `RuntimeError` subclass) on a dirty tree, so the
-  mid-run authoring path can catch it specifically and degrade to an honest §9.6 terminal (in
-  `consensus/strategy._maybe_author_and_resume`) instead of an uncaught crash. `build_authoring_session`
-  persists the per-attempt base-ref to `<worktree_base>/current_base_ref` (`_base_ref_path`). New
-  `heal_toolkit_branch_if_dirty(run_dir, root=, branch=) -> BranchHealResult`: on resume, resets a dirty
-  authoring branch to the persisted base-ref (fallback HEAD) — dropping the killed attempt's mess + any
-  slipped commit while keeping earlier committed tools — saving the discard as `resume_heal_*.patch`;
-  no-op on clean/non-git/wrong-branch; best-effort (returns `reason="error: …"`, never raises). The reset
-  core is factored into a shared `_save_diff_and_reset` (used by `_reset_direct_tree` too). `run_research`
-  calls the heal before the launch preflight on `resume=True`. Deterministic tests `tests/test_resume_heal.py`
-  (real git) + `tests/test_consensus_authoring.py::test_mid_run_unclean_branch_degrades_to_honest_terminal`.
+Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
 
-- **2026-07-27** — **Removed the docstring override in `ToolkitRegistry.load()`; the manifest is now
-  the agent-facing interface verbatim.** Since 2026-06-01 (`56e89f9`, Phase 1, before tool authoring
-  existed) `load()` replaced each `TOOL_MANIFEST` description with the backing function's `__doc__`
-  whenever the module imported successfully. That made sense when manifests were thin stubs and the
-  `lib/` docstrings held the documentation, but Phase 2 inverted it: `prompts/coder.md` instructs the
-  coder that the manifest entry *is* the agent-facing interface, and the GPT co-lead reviews that text
-  in the diff — yet the runtime discarded it for every import-clean tool, with the winner decided by
-  the tool's dependency footprint (an invisible, unchosen criterion). The override was undocumented
-  and untested, and no manifest entry relied on its fallback. Now the description is taken from the
-  manifest as authored; `lib/` docstrings stay the human-half documentation (§9.2). Measured effect
-  with the reshaped `research_toolkit` manifests: model-visible tool-block context drops a further
-  ~1,400 tokens (4 tools were showing 1,678 tokens of docstring in place of 265 tokens of brief).
-  New test `tests/test_registry.py::test_manifest_description_wins_over_function_docstring`.
-
-- **2026-07-27** — **Tool search / lazy tool loading (provider-native), shipping disabled.**
-  `SandboxToolProvider.tool_definitions()` now marks every *registry* tool `defer_loading: true`
-  when `config/orchestration.yaml: tool_search_enabled` is set; harness tools (`ask_human`,
-  `web_search`/`web_fetch`, `read_file`/`list_dir`/`bash_exec`, the report tools) stay resident,
-  which also satisfies both providers' "≥1 non-deferred tool" requirement. No per-tool
-  exceptions — `data_catalog` defers like the rest. The adapters declare the provider's
-  server-side search tool (Anthropic `tool_search_tool_bm25_20251119`, OpenAI `tool_search`,
-  gpt-5.4+; Google has no equivalent and keeps today's fully-loaded behaviour), and a discovered
-  tool's definition is appended inline in the conversation **tail**, so the cached prefix is
-  untouched and the tool stays callable for the rest of the conversation without re-searching.
-  Supporting pieces: `models/types.py` gains `AssistantToolUse.provider_blocks` /
-  `ModelResponse.provider_blocks` — an opaque per-provider block carried through `_react` replay,
-  since the API re-expands referenced definitions from history and dropping them would silently
-  de-activate a discovered tool (**the same seam [I8] needs for Gemini's `thought_signature`**);
-  the Anthropic `cache_control` breakpoint now lands on the last **non-deferred** tool (a deferred
-  tool carrying it is a 400); and `models/providers/_tool_search.py` adds a **tombstone** guard —
-  a tool referenced in history but missing from the catalog gets a stub definition instead of a 400
-  (**deleted 2026-07-30**: a code trace showed a live conversation's catalog cannot shrink under it,
-  so the guarded state is unreachable — see `models/DOCS.md`). Measured on `gpt-5.5` with the real 25-tool
-  manifest: **19,004 → 2,382 resident tokens (−87%)**. Shipped `tool_search_enabled: false`, then
-  **live-verified on both providers 2026-07-28 and flipped true** (resident input 19,074 → 3,789 on
-  gpt-5.5, 35,208 → 9,003 on claude-sonnet-5); deterministic coverage in `tests/test_tool_search.py`
-  (+12), live round-trip in `tests/test_live_tool_search.py` (env-gated).
-  Prompts updated: `analyst_worker.md` teaches the search step,
-  `coder.md` states the one-line-brief / prose-in-`args_schema` split for new tools.
-- 2026-07-29 — **The co-lead's actions now reach the run ledger.** `build_authoring_session` called `review.make_review_hook(colead=…, author_provider=…)` without forwarding its `monitor`, so a co-lead built from config was constructed with `monitor=None`. Both ends of the wiring already existed (`make_review_hook` accepts `monitor`, `AnalystColeadAgent` accepts `monitor`) — only the kwarg at the seam was missing, and the symptom was subtle: the `AuthoringSession` records its own `review.result` verdict, so reviews *looked* logged while every action behind the verdict (tool calls, `web_search`, the reasoning steps) was silently discarded. That left the provider-decorrelated half of `commit ⇔ gate ∧ review` as the only actor in the flow with no audit trail — the opposite of what a trust-boundary check should be. One-line fix plus a regression test asserting the hook is built with the run monitor.
-- 2026-07-29 — **The coder's Agent-SDK spend now reaches the run's cost record.** The coder is a separate process making its own API calls, so it never passes through `ModelHandle.call`/`traced_model_call` — its dollar cost appeared only as an unaggregated `cost_usd` field on each `coder.turn_end` event and reached no total anywhere (historically the largest unaccounted line; ~$9 in one observed session). `_drive_author` now feeds each `ResultMessage` to `_record_coder_cost` → `CostMeter.record_session_total`, which folds the SDK's **session-cumulative** figure in as a per-turn delta (verified monotonic against real logs) and records it as a `cost.call` event with `price_source="claude_sdk"`; the turn event gains `cost_usd_turn`. `AuthoringSession` carries `coder_model` for the attribution, and the `commit` event now carries the `tool` name so the end-of-run summary can name the tools that landed. Cost recording is guarded — it never breaks an authoring turn.
-
-- 2026-07-30 — **`PersistentSandbox.abort()`** — the on-demand form of the timeout path, and nothing
-  more: it kills the REPL child so the in-flight `readline` ends in EOF, `call_tool` returns its
-  existing non-zero "sandbox subprocess exited unexpectedly" result (the caller gets a real result for
-  the call it made, which is what keeps a tool_use/tool_result transcript valid), and the next
-  `call_tool` spawns a fresh REPL at entry so nothing inherits a dead one. Returns whether the sandbox
-  was actually busy. `run_research` registers each worker's `abort` on `RunControl` under the worker's
-  `agent_key`, which is how a human `/stop` ends a 25-minute download instead of waiting it out — the
-  exact behaviour observed by hand on 2026-07-29, now a first-class path.
-
-- 2026-07-31 — **The sandbox kill takes the descendants with it.** `_kill_current` killed only the
-  REPL, so whatever it had shelled out — an XSPEC fit, a multi-GB HEASARC download — kept running
-  and kept writing into the obs-db after the caller believed the sandbox was gone (the §13 [F5]
-  note). It now collects descendants from `/proc/<pid>/task/*/children` (`_descendant_pids`,
-  breadth-first) and SIGKILLs them deepest-last before killing the REPL. Deliberately **not**
-  `killpg`: the REPL is spawned without `start_new_session` and shares the *backend's* process
-  group, so a group kill would take the run down with it — and that shared group is what lets an
-  external `kill -9 -<pgid>` reach the sandboxes when our own cleanup never runs (the §12 hard-kill
-  fallback), so it stays. New `kill_now()` is the human-interrupt entry point: no shutdown
-  handshake, no 5 s grace, because the next cleanup step (the toolkit-branch reset) is only correct
-  once nothing can write. `AuthoringSession.aclose()` is now idempotent (`_closed`), since the
-  interrupt path closes the session from shielded cleanup and `drive_authoring`'s `finally` may
-  still run afterwards. Tests: `tests/test_interrupt.py`.
+- 2026-05-26 -> 2026-06-16 — **Phase 1 sandbox/tooling, then the whole Phase 2 authoring flow.**
+  Manifest-based `ToolkitRegistry` (disabled-tool filtering, provider-native tool defs), persistent
+  JSON-line sandbox (fd capture, non-interactive XSPEC boot), per-run workspace/memory/figures layout,
+  built-in MCP server/client, config-driven runtime paths. Then, with all writes pinned under the runtime
+  data dir: `merge_flow.propose_and_pr()` (isolated-worktree / `direct_branch` Sonnet author, runtime-safe
+  context, `ask_lead`/`ask_human`, bounded L0–L4 rework, typed no-commit failure); `gate.run_gate`
+  (Layer-A structural/provenance/determinism + no-fabrication scan, Layer-B test runner, extension-agnostic
+  over `*_utils`); `review.make_review_hook` (provider-decorrelated GPT co-lead); `approve_edit` (one atomic
+  commit, explicit-path staging, never `git add -A`); launch preflights
+  (`check_author_reviewer_decorrelation`, `check_toolkit_git_identity`/`_branch_clean`).
+- 2026-06-18 -> 2026-06-30 — **Live-run hardening (fix-lists #1–#11), the authoring refactor, and the
+  `bash_exec` hang fix.** Gate survives slow/erroring tests (`TimeoutExpired` caught; `propose_and_pr`
+  exception backstop → `status="failed"`); the SDK author's `Bash` runs in the analyst code-exec env;
+  `bash_exec` rescoped read-only; timeouts decoupled from the model (`call_timeout_ceiling`,
+  `gate_test_timeout_s`); `propose_and_pr(monitor=…)` streams events; the FS jail landed
+  (`fs_guard.PathGuard` + `agent_fs_allow` `PreToolUse` hook, `_make_path_confiner` deprecated); git
+  discipline (auto-reset to the per-attempt `base_ref` via `_reset_direct_tree` +
+  `tool_author_failed_*.patch`, coder Bash deny-rule, gate-entry auto-revert); gate fixes (annotated
+  manifests; stub/not-implemented → co-lead finding; determinism = per-test JUnit outcome maps, not a
+  byte compare). The inline authoring loop decomposed into an `AuthoringSession`
+  (`drive`/`run_gate_step`/`run_review_step`/`commit`/`aclose` via `build_authoring_session`) with
+  `submit_cap`/`debate_cap` + the co-lead debate path, driven by `lead.drive_authoring` (commit still ⇔
+  gate ∧ review); coder escalation tools take one Markdown `message`. `bash_exec` runs
+  `stdin=DEVNULL, start_new_session=True` with a process-group kill on timeout, and
+  `MCPToolClient.call_tool` bounds its await (900 s) — fixing a whole-run hang from an interactive FTOOL
+  wedging the MCP command channel.
+- 2026-07-06 -> 2026-07-16 — **Gate corrections, the domain-agnostic REPL boot, and the RNG demotion.**
+  [G2] Layer-B passes only if pytest exits 0 **and** ≥1 test PASSED (an all-SKIPPED suite fails rather
+  than merging an untested tool). [C1] bare ambiguous words (`synthetic`/`illustrative`) moved from
+  hard-fail to soft `finding_vocabulary`. **[A12]** `structural.tool_manifest_entry` and
+  `_gate_test_timeout` derive their `*_utils` targets from `_touched_packages` (the changeset) rather
+  than the unvalidated `tool_spec.target_domain`, removing the run-#12 doomed loop. [I1] the co-lead uses
+  `WebSource()` directly (lazy client, key is a preflight var), dropping `_resolve_web_source`.
+  **Installer increment 1:** `PersistentSandbox` gained `repl_init_py` — a config-pointed file exec'd once
+  at REPL boot — **replacing the hardcoded XSPEC/relxill `_configure_xspec_once()`** (the deepest domain
+  leak), and `builtin_server` builds the `bash_exec` description from the configured `analyze_probe`; new
+  `runner.check_analyze_probe()` preflight. **Scan config robustness:** every `code_gate.yaml` list read is
+  `or []`-guarded (an emptied section used to crash the scan), and `finding_code_patterns` became
+  dual-purpose so a dotted pattern there is matched like the hard tier but recorded as a finding — which
+  list a pattern sits in decides severity, and without this the human's RNG demotion (Monte-Carlo tools
+  need randomness; the co-lead judges intent) did nothing.
+- 2026-07-22 -> 2026-07-29 — **Branch self-heal, the tool-context diet, and two audit-trail fixes.**
+  Durable-resume Stage 2: `check_toolkit_branch_clean` raises the distinct `ToolkitBranchUnclean` so the
+  mid-run path degrades to an honest §9.6 terminal; `build_authoring_session` persists the per-attempt
+  base-ref; new `heal_toolkit_branch_if_dirty` resets a dirty authoring branch to it on resume (saving a
+  `resume_heal_*.patch`, best-effort, sharing `_save_diff_and_reset` with `_reset_direct_tree`).
+  **The docstring override in `ToolkitRegistry.load()` was removed** — since Phase 1 it had replaced each
+  `TOOL_MANIFEST` description with the backing function's `__doc__` whenever the module imported cleanly,
+  which Phase 2 inverts (the manifest entry *is* the agent-facing interface the coder authors and the
+  co-lead reviews), with the winner decided by the tool's dependency footprint; −~1,400 model-visible
+  tokens. **Tool search**: `SandboxToolProvider.tool_definitions()` marks every registry tool
+  `defer_loading: true` under `tool_search_enabled` while harness tools stay resident (also satisfying
+  both providers' "≥1 non-deferred tool" rule); 19,004 → 2,382 resident tokens, live-verified and enabled
+  2026-07-28. Prompts updated (`analyst_worker.md` teaches the search step; `coder.md` the one-line-brief
+  split). Audit trail: `build_authoring_session` now forwards `monitor` into `make_review_hook` (a dropped
+  kwarg had left the provider-decorrelated half of `commit ⇔ gate ∧ review` with no record of its actions
+  behind its verdict), and the coder's Agent-SDK spend reaches the cost record via
+  `_record_coder_cost` → `CostMeter.record_session_total` (session-cumulative, folded in as per-turn
+  deltas, `price_source="claude_sdk"`) — historically the largest unaccounted line.
+- 2026-07-30 -> 2026-07-31 — **The sandbox can be killed on demand, and the kill takes descendants with
+  it.** `PersistentSandbox.abort()` is the on-demand form of the timeout path: it kills the REPL so the
+  in-flight `readline` ends in EOF, `call_tool` returns its ordinary non-zero result (the caller gets a
+  real result, which is what keeps a tool_use/tool_result transcript valid), and the next call spawns a
+  fresh REPL; `run_research` registers each worker's `abort` on `RunControl`, which is how a `/stop` ends
+  a 25-minute download. `_kill_current` then gained descendants: it collects them from
+  `/proc/<pid>/task/*/children` and SIGKILLs deepest-last, since an XSPEC fit or a HEASARC download used
+  to keep writing into the obs-db after the caller believed the sandbox was gone (§13 [F5]). Deliberately
+  **not** `killpg` — the REPL shares the *backend's* process group, so a group kill would take the run
+  down, and that shared group is exactly what lets an external `kill -9 -<pgid>` reach the sandboxes when
+  our cleanup never runs (the §12 hard-kill fallback). New `kill_now()` is the human-interrupt entry point
+  (no handshake, no grace — the next cleanup step, the toolkit-branch reset, is only correct once nothing
+  can write), and `AuthoringSession.aclose()` is idempotent since the interrupt path closes it from
+  shielded cleanup. Tests: `tests/test_interrupt.py`.

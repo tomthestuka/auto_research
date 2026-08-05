@@ -126,15 +126,33 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `run(workers, lead, document)`.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Consensus strategies built: `DebateToConverge` (cap-3 analyst debate, lead adjudication, cross-worker `last_tool_results` summaries, final figure propagation) and `IODebateToConverge` (PDF memory abstraction). `registry`/`tool_retry_cap` accepted but unused.
-- 2026-06-16 — Phase 2 step 7: `DebateToConverge` drives lead tool authoring/resume — new `tool_author_cap`/`toolkit_root`/`worktree_base`/`direct_branch`/`human_handler`/`colead`, `LeadLike.decide_authoring`; a committed tool reloads the registry, restarts sandboxes, and reruns workers, bounded by `tool_author_cap` (not `max_rounds`); Phase-1 behaviour unchanged when `toolkit_root` unset.
-- 2026-06-26 — Honest finalize on a non-committed authoring attempt: `_maybe_author_and_resume` returns a terminal report via the new `lead.finalize_authoring_outcome` instead of spinning in debate; the report flows to the reviewer (sole I/O), which adjudicates finalize vs. rework.
-- 2026-06-29 — A1: the lead drives authoring (B-topology, §9.3) via `lead.drive_authoring` (builds/connects an `AuthoringSession`, runs its own ReAct loop over `drive_coder`/`submit_for_review`, diagnosing each verdict) instead of `merge_flow.propose_and_pr`; bounded by `tool_author_submit_cap`.
-- 2026-07-06 — [A8] author the whole ordered `AuthoringDecision.tool_specs` chain sequentially (each tool sees the prior's committed code), then reload/restart/rerun workers once (was per tool); a mid-chain non-commit stops the chain → honest terminal; `tool_author_cap` bounds total tools.
-- 2026-07-14 — V-4: the lead owns figures; `_deduplicated` removed. `run()` no longer force-carries the last round's figures; it calls `adjudicate(task, reports, sources=_source_keys(workers))` and the lead accumulates a per-worker figure catalog and cites the subset.
-- 2026-07-22 — [A11] recover, never choke on one failed authoring session. `_maybe_author_and_resume` now stops the chain at the first non-commit and fires `registry.reload()`/`sandbox.restart()`/worker-rerun whenever **≥1 tool committed** (was: only after the *whole* chain committed — the bug that hid committed tools from the reran workers, blocking #21's census). A non-commit records a task note (`_augment_with_failed_tool`) and loops back: ≥1 committed → rerun on the committed prefix; nothing committed but credits remain → rerun on the failure note so the lead re-attempts (burns a `tool_author_cap` credit). The honest §9.6 terminal (`finalize_authoring_outcome`) now fires **only** when credits are exhausted with nothing ever committed. New event `analyst.tool.chain_resume`.
+Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
 
-
+- 2026-05-26 -> 2026-06-16 — Consensus strategies built: `DebateToConverge` (cap-3 analyst debate,
+  lead adjudication, cross-worker `last_tool_results` summaries, final figure propagation) and
+  `IODebateToConverge` (PDF memory abstraction). Phase 2 step 7 then had `DebateToConverge` drive lead
+  tool authoring/resume (`tool_author_cap`/`toolkit_root`/`worktree_base`/`direct_branch`/
+  `human_handler`/`colead`, `LeadLike.decide_authoring`): a committed tool reloads the registry,
+  restarts sandboxes and reruns workers, bounded by `tool_author_cap` (not `max_rounds`), with Phase-1
+  behaviour unchanged when `toolkit_root` is unset.
+- 2026-06-26 -> 2026-07-14 — **Honest finalize, lead-driven authoring, whole-chain planning, V-4.**
+  A non-committed attempt returns a terminal report via `lead.finalize_authoring_outcome` instead of
+  spinning in debate, and it flows to the reviewer (sole I/O) to adjudicate finalize vs. rework (§9.6).
+  A1: the lead drives authoring itself (B-topology, §9.3) through `lead.drive_authoring` — its own
+  ReAct loop over `drive_coder`/`submit_for_review`, diagnosing each verdict — bounded by
+  `tool_author_submit_cap`. **[A8]:** the whole ordered `AuthoringDecision.tool_specs` chain is
+  authored sequentially (each tool sees the prior's committed code), then reload/restart/rerun happens
+  once. **V-4:** the lead owns figures (`_deduplicated` removed); `run()` calls
+  `adjudicate(task, reports, sources=…)` and the lead accumulates a per-worker catalog and cites a
+  subset, instead of force-carrying the last round's figures.
+- 2026-07-22 — **[A11] recover, never choke on one failed authoring session.**
+  `_maybe_author_and_resume` stops the chain at the first non-commit and fires
+  `registry.reload()`/`sandbox.restart()`/worker-rerun whenever **≥1 tool committed** — previously only
+  a whole committed chain triggered it, which hid already-committed tools from the reran workers and
+  blocked #21's census. A non-commit records a task note (`_augment_with_failed_tool`) and loops back:
+  ≥1 committed → rerun on the committed prefix; nothing committed but credits remain → re-attempt
+  (burning a `tool_author_cap` credit). The honest §9.6 terminal fires **only** at credit exhaustion
+  with nothing ever committed. New event `analyst.tool.chain_resume`.
 - 2026-07-31 — **The pre-authoring stop check is gone.** `DebateToConverge` no longer polls
   `run_control.stop_requested` before deciding to author or between chain tools: a `/stop` cancels
   the run task, so there is no wind-down window in which the flag is set and the strategy still

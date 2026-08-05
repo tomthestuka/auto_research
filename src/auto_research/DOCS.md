@@ -155,72 +155,44 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   via point / clone / start-fresh.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Phase 1 completed (schemas, providers, observability,
-  storage/retrieval, sources, prompts, agents, consensus, graph/runtime, sandbox, report, CLI,
-  notebook, env checks, config-driven `runtime_dir`); Phase 2 begun (off-repo scratch,
-  `ToolSpec`/merge-flow/gate scaffolding, `research_toolkit` the only runtime-authored repo).
-- 2026-06-12 -> 2026-06-18 — Launch preflight + `hitl` + observations (steps 5–7): centralized
-  `.env` loading in `check_required_env`; `preflight.py` (`Preflight`/`run_preflight`, made async
-  with the `human_channel` ping); the `hitl` raise-to-human channel + `human_handler`/
-  `human_channel`; `papers_dir()`; toolkit git-identity/branch-clean checks; `observations.py`
-  obs-db-location config + `check_catalog_health` (delegates to `research_toolkit`'s detect-only
-  healthcheck); the catalog **read** now lives in `research_toolkit`'s `catalog_utils` (the
-  `data_catalog` tool), not here; `observations.yaml` → single
-  `obs_db_root` with missions discovered from disk; analyst env `environment-analyst.yml`.
-- 2026-06-22 -> 2026-06-25 — Resilience + preflight UX: `__init__` mutes two Pydantic v2 warning
-  families; `env.sandbox_call_timeout_default()`; `database_health` and `toolkit_root_configured`
-  preflight checks; `run_checklist` prints one progress line per check; `check_catalog_health`
-  renders a per-mission drift summary (`_summarize_drift`).
-- 2026-07-14 — **Install-script increment 0/1.** Machine-local config (`orchestration.yaml`,
-  `observations.yaml`, `sandbox/analyst_env.sh`, new `sandbox/repl_init.py`) is now gitignored with
-  tracked `*.example` templates; launch config loaders raise a "copy the `.example` / run install.sh"
-  message when a live file is missing. New `orchestration.yaml` keys `repl_init_py` (domain REPL
-  session-setup hook, replacing the hardcoded XSPEC boot) and `analyze_probe` (stack smoke-test). Added
-  the `sandbox.runner.check_analyze_probe` preflight check (runs `analyze_probe` under `analyze_env`;
-  skips when unset). See `sandbox/DOCS.md` + `config/DOCS.md` for detail.
-- 2026-07-14 — **Install-script increment 2: installer core.** Added `install.sh` (repo root; thin
-  bash — bootstraps conda + the `auto_research` env, then execs the Python stage) and `setup.py`
-  (`python -m auto_research.setup`): pages 1 (conda), 2 (analyst env from `environment-analyst.yml`),
-  5 (paths), 6 (write configs from `*.example`, deriving `agent_fs_allow` — closes P4), 7 (preflight
-  smoke test). Interactive via `questionary` (added to `environment.yml`), headless via `--answers`
-  (fail-loud on a missing value). Pure renderers/`derive_fs_allow` are unit-tested
-  (`tests/test_setup.py`). Pages 3 (domain deps + licensed/vendor tools) and 4 (research_toolkit) land
-  in later increments; until then their keys keep prior/template values.
-- 2026-07-14 — **Install-script increment 3: domain deps + bucket E.** `setup.py` page 3 collects typed
-  domain-dependency entries (`shell_init`/`env_var`/`conda_pkg`/`pip_pkg`/`python_init`/`license_tool`)
-  — headless from an answers `domain_deps` list, interactive via a discovery-seeded add loop — and
-  materializes them: `analyst_env.sh` (boot commands, `$VAR`-expansion preserved) + `repl_init.py`
-  (session snippets), installs conda/pip specs into `analyze_env`, contributes the `agent_fs_allow`
-  domain roots (so HEADAS/CALDB/license dirs are auto-listed, not hand-synced), and assembles
-  `analyze_probe`. **Bucket E** (`license_tool`) captures a human-installed vendor binary + license
-  var/path (prompt-then-point). When the page is skipped, prior hooks + domain roots are preserved
-  (`seed_extra_fs_paths`). Renderers/collectors unit-tested (`tests/test_setup.py`).
-- 2026-07-14 — **Install-script increment 4: research_toolkit page.** `setup.py` page 4 resolves
-  `toolkit_root` by scan → **point** (existing checkout) / **clone** (git URL) / **start-fresh**
-  (scaffold a `<domain>_utils` skeleton mirroring the §9.2 layout, `git init` + `ai` branch, and stage
-  the user's raw code under `<runtime_dir>/staging/` — *outside* the worktree). Scaffold templates live
-  in `auto_research` and are written into the toolkit only at install-runtime (the build agent never
-  edits `research_toolkit`). start-fresh prints the kickoff for the deferred (increment 5)
-  `onboard_toolkit` authoring pipeline. Scaffold/git/staging tested into a temp dir
-  (`tests/test_setup.py`). Increment 5 (`onboard_toolkit`) is deferred — it needs cross-domain
-  collaborators.
-- 2026-07-16 — `env.ProviderRetryPolicy` + `env.provider_retry_policy()`: config accessors for the
-  new `orchestration.yaml` "Internet stability" section (`provider_retry_max` /
-  `provider_retry_base_cooldown_s` / `provider_retry_max_cooldown_s`), backing the
-  `models.retry` transient-provider retry layer (two live runs were killed by unhandled
-  Anthropic 529s riding on the SDKs' seconds-scale default retries). Tests:
-  `tests/test_provider_retry.py`.
-- 2026-07-20 — **Catalog READ relocated to `research_toolkit` (option c).** The domain read of a
-  mission's `catalog.json` (the old `DataCatalog`/`read_catalog`/`local_obsids` in `observations.py`)
-  moved into `research_toolkit`'s new `catalog_utils` package (its `lib/catalog_read.py` reuses the
-  trusted `obsdb_catalog.neutral.read`), surfaced as the `data_catalog` tool via `TOOL_MANIFEST`.
-  `observations.py` now keeps only the obs-db-location config (`ObservationsConfig`/
-  `load_observations_config`) + `check_catalog_health` (unchanged, still delegates to
-  `obsdb_catalog.healthcheck`); its read side and the `json`/`datetime` imports are gone. New
-  `env.toolkit_root()` accessor. Rationale: auto_research stays pure orchestration + generic infra;
-  domain reads live in the toolkit beside the writer (§2). Read tests moved to
-  `catalog_utils/tests`; `test_observations.py` keeps config/health + the tool-wiring tests.
+Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
 
+- 2026-05-26 -> 2026-06-25 — **Phase 1 completed, Phase 2 begun, launch preflight built.** Phase 1:
+  schemas, providers, observability, storage/retrieval, sources, prompts, agents, consensus,
+  graph/runtime, sandbox, report, CLI, notebook, env checks, config-driven `runtime_dir`. Phase 2
+  began with off-repo scratch, `ToolSpec`/merge-flow/gate scaffolding, and `research_toolkit` as the
+  only runtime-authored repo. Steps 5–7 added centralized `.env` loading (`check_required_env`),
+  `preflight.py` (`Preflight`/`run_preflight`, async for the `human_channel` ping), the `hitl`
+  raise-to-human channel + `human_handler`/`human_channel`, `papers_dir()`, toolkit
+  git-identity/branch-clean checks, and `observations.py` (obs-db-location config +
+  `check_catalog_health` delegating to `research_toolkit`'s detect-only healthcheck) with a single
+  `obs_db_root` and missions discovered from disk. Resilience/UX: two Pydantic v2 warning families
+  muted, `env.sandbox_call_timeout_default()`, `database_health` + `toolkit_root_configured` checks,
+  one progress line per check, and a per-mission drift summary.
+- 2026-07-14 — **Domain-agnostic installer, increments 0–4.** Machine-local config
+  (`orchestration.yaml`, `observations.yaml`, `sandbox/analyst_env.sh`, `sandbox/repl_init.py`) is
+  gitignored with tracked `*.example` templates, and loaders raise a "copy the `.example` / run
+  install.sh" message; new keys `repl_init_py` (domain REPL session-setup hook, replacing the
+  hardcoded XSPEC boot) and `analyze_probe` (stack smoke test, with a `check_analyze_probe`
+  preflight). `install.sh` (thin bash: conda + the `auto_research` env, then the Python stage) +
+  `python -m auto_research.setup` — pages 1 conda, 2 analyst env, 3 typed domain-dependency entries
+  (`shell_init`/`env_var`/`conda_pkg`/`pip_pkg`/`python_init`/`license_tool`) materialized into
+  `analyst_env.sh` + `repl_init.py` and contributing `agent_fs_allow` domain roots and the probe,
+  4 `toolkit_root` by scan → point / clone / **start-fresh** (scaffold a §9.2 `<domain>_utils`
+  skeleton, `git init` + `ai` branch, stage raw code under `<runtime_dir>/staging/` *outside* the
+  worktree), 5 paths, 6 write configs deriving `agent_fs_allow`, 7 preflight. Interactive via
+  `questionary`, headless via `--answers` (fail-loud on a missing value). Scaffold templates live in
+  `auto_research` and are written into the toolkit only at install-runtime, so the build agent never
+  edits `research_toolkit`. Increment 5 (`onboard_toolkit`) is deferred — it needs cross-domain
+  collaborators. Tests: `tests/test_setup.py`.
+- 2026-07-16 -> 2026-07-20 — **Retry policy config, and the catalog read relocated to the toolkit.**
+  `env.ProviderRetryPolicy`/`provider_retry_policy()` expose the "Internet stability" section
+  (`provider_retry_*`) backing `models.retry`, after two live runs died on unhandled Anthropic 529s
+  riding the SDKs' seconds-scale default retries. Per §2, the domain read of a mission's
+  `catalog.json` moved into `research_toolkit`'s new `catalog_utils` (reusing the trusted
+  `obsdb_catalog.neutral.read`, surfaced as the `data_catalog` tool); `observations.py` keeps only the
+  obs-db-location config + `check_catalog_health`, and `env.toolkit_root()` is the new accessor — so
+  auto_research stays pure orchestration and generic infra while domain reads live beside the writer.
 - 2026-07-31 — **`/stop` and Ctrl-C are one interrupt; the cooperative wind-down is gone.** A stop
   used to be a flag the pipeline polled at safe points, which stopped a role's *tool use* and
   nothing else: every role still made its terminal write-up call and the graph walked every

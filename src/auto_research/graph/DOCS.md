@@ -220,37 +220,51 @@ verdicts, two iteration counters, and the cap.
 - `DEFAULT_WORKER_COUNT` — default analyst worker count (currently 2).
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Graph/runtime built and ReAct-wired: six-node LangGraph incl. `compose_report`, two capped feedback edges, Studio wiring, per-run workspace, one persistent sandbox per worker, MCP client lifecycle, read-only reviewer/lead tools, required-env checks, report formats.
-- 2026-06-12 -> 2026-06-18 — Phase 2 steps 0/5/7: off-repo MCP cwd + lead read-only `toolkit_root`; `run_research` resolves the raise-to-human channel, awaits the async preflight (channel ping), threads the handler to roles; consensus authoring/resume wired (`DebateToConverge` gets `tool_author_cap`/`toolkit_root`/`worktree_base`/`direct_branch`/`human_handler`).
-- 2026-06-22 -> 2026-06-24 — Reviewer-driven retrieval + env/path fixes: the `literature` node only ingests, the reviewer pulls literature via its own `text_search`/`open_paper` (`_resolve_cited_paths`); `bash_exec` PATH pinned to `{analyze_env}/bin`; hardcoded `toolkit_root` fallbacks removed; lead built with `include_plan_and_debate=True`.
-- 2026-06-26 — Reviewer is the sole I/O (§9.6): `analysis → review_analysis` unconditional (the `after_analysis` bypass removed); `finalize_run` forwards the reviewer's verdict (records `run.honest_failure`); on finalize a report is always composed so an honest failure is documented, not silent.
-- 2026-07-06 — Detached runs `run_research_nohup` (E5, partial): pipeline runs in a detached `python -m auto_research` child (own session) surviving kernel death, reconnect by deterministic `run_id`, `overwrite` guarded by process-based liveness, `RunDied` on a dead run; streams live `monitor.jsonl` chatter to `stream`. Additive `run_id` + CLI `--run-id`/`--max-iterations`/`result.json`. Not true mid-run resume (§12 deferred).
-- 2026-07-16 — Liveness treats a **zombie** as dead (`_proc_create_time` returns None on state `Z`): a backend that died at preflight stays unreaped in the notebook kernel's process table, and `overwrite=True` refused with a useless "kill <pid>" hint (a zombie ignores signals; only reaping clears it). Observed live on the #21 relaunch after a Telegram-ping preflight failure. Test: `test_detached.py::test_liveness_zombie_is_dead`.
-- 2026-07-16 — **Double-fork spawn (`_spawn_orphaned`): detached backends survive logout.** A real VSCode logout killed a live detached run seconds before reconnect: `start_new_session` shields against signals and kernel death, but the graceful teardown kills process TREES by walking parent→child `/proc` links, which setsid does not sever (the [E5] verification had SIGKILLed the kernel — no cleanup ran — so the gap never showed). `_default_launcher` now spawns via a short-lived intermediary that starts the backend (own session, log wired) and exits, reparenting it to init immediately — verified adopted by pid 1 on the cluster host. Test: `test_detached.py::test_spawn_orphaned_breaks_ancestry`.
-- 2026-07-22 — **Durable mid-run resume — Stage 1 of the §12 bundle ([E5] backend-death recovery).** New `graph/checkpoint.py` (`open_checkpointer`/`checkpoint_path`/`check_checkpointer_available`). `build_graph(checkpointer=)` → `compile(checkpointer=)`. `run_research` always compiles with a per-run `AsyncSqliteSaver` at `run_dir/checkpoint.sqlite` (`thread_id=run_id`, `durability="sync"`) — `ResearchState` is snapshotted after every node; `resume=True` invokes with input `None` to continue from the latest snapshot (the in-flight node re-runs; its ReAct history is not persisted), else fresh; a `run.resume` monitor event records which. **No silent non-durable fallback** — a new `checkpointer_available` preflight fails the launch if `langgraph-checkpoint-sqlite` (pip; §environment.yml) is absent. `run_research_nohup(resume=True)` re-launches a dead/`failed` backend under `--resume` (mutually exclusive with `overwrite`); CLI `--resume`. Deterministic tests `tests/test_durable_resume.py` (checkpointer mechanism via `MemorySaver` + real `AsyncSqliteSaver` cross-instance/process-boundary resume + the nohup relaunch plumbing). **Full killed-and-resumed `run_research` is NOT LIVE TESTED yet** (needs a real run). Stages 2–4 (dirty-branch self-heal, HITL slash-commands, graceful cleanup) follow.
-- 2026-07-22 — **Durable resume Stage 2: authoring-branch self-heal.** `run_research(resume=True)` calls `merge_flow.heal_toolkit_branch_if_dirty(run_dir(run_id))` **before** `run_preflight` — resetting a dirty `ai` branch (left by a hard-kill mid-authoring) to the per-attempt base-ref persisted under `run_dir/authoring/current_base_ref`, so the launch clean-tree check then passes instead of looping forever; records a `run.resume.heal` event. `run_id`/request-normalization moved ahead of the preflight to enable this. See `sandbox/DOCS.md` for the heal + `ToolkitBranchUnclean` degrade. Tests `tests/test_resume_heal.py`; suite green (527).
-- 2026-07-22 — **HITL /stop honored in the graph (§12 Stage 3).** `build_graph(run_control=)`; the
-  `after_review_literature`/`after_review_analysis` edges route toward `finalize_run` (no more
-  literature / no rework) once `run_control.stop_requested`, so a human `/stop` binds the whole run
-  to an honest §9.6 terminal (workers/lead already break in `_react`; the consensus authoring loop
-  skips new authoring). `run_research` builds the `RunControl`, threads it to every role + the
-  consensus strategy + `build_graph`, and attaches a `hitl.commands.CommandContext` (roster, monitor
-  JSONL, `status_monitor` model) to a command-capable connector (Telegram/Slack).
+Compacted 2026-08-05: entries through 2026-07-29 folded into themed ranges (detail in git history).
 
-- 2026-07-29 — **Cost meter + end-of-run summary wired into the entry point.** `run_research`
+- 2026-05-26 -> 2026-06-26 — **Graph/runtime built, ReAct-wired, then made reviewer-driven.** Six-node
+  LangGraph incl. `compose_report`, two capped feedback edges, Studio wiring, per-run workspace, one
+  persistent sandbox per worker, MCP client lifecycle, read-only reviewer/lead tools, required-env
+  checks, report formats. Phase 2 steps 0/5/7: off-repo MCP cwd + lead read-only `toolkit_root`;
+  `run_research` resolves the raise-to-human channel, awaits the async preflight (channel ping) and
+  threads the handler to roles; consensus authoring/resume wired. Then: the `literature` node only
+  ingests and the reviewer pulls literature via its own `text_search`/`open_paper`; `bash_exec` PATH
+  pinned to `{analyze_env}/bin`; hardcoded `toolkit_root` fallbacks removed. **Reviewer is the sole
+  I/O (§9.6):** `analysis → review_analysis` is unconditional, `finalize_run` forwards the reviewer's
+  verdict (recording `run.honest_failure`), and a report is always composed on finalize so an honest
+  failure is documented rather than silent.
+- 2026-07-06 -> 2026-07-16 — **Detached runs, and two ways they died.** `run_research_nohup` ([E5],
+  partial) runs the pipeline in a detached child surviving kernel death, reconnecting by deterministic
+  `run_id`, with `overwrite` guarded by process-based liveness and `RunDied` on a dead run. Two live
+  failures followed: liveness now treats a **zombie** as dead (a backend that died at preflight stays
+  unreaped in the notebook kernel's process table, and `overwrite=True` refused with a useless "kill
+  <pid>" hint — a zombie ignores signals), and `_spawn_orphaned` **double-forks** so the backend is
+  reparented to init at spawn — a real VSCode logout killed a live run because graceful teardown kills
+  process *trees* by walking `/proc` parent→child links, which `start_new_session` does not sever (the
+  original verification had SIGKILLed the kernel, so no cleanup ran and the gap never showed).
+- 2026-07-22 — **Durable mid-run resume, Stages 1–3.** New `graph/checkpoint.py`; `run_research` always
+  compiles with a per-run `AsyncSqliteSaver` at `run_dir/checkpoint.sqlite` (`thread_id=run_id`,
+  `durability="sync"`), snapshotting `ResearchState` after every node; `resume=True` invokes with input
+  `None` to continue from the latest snapshot (the in-flight node re-runs; its ReAct history is not
+  persisted) and records a `run.resume` event. **No silent non-durable fallback** — a
+  `checkpointer_available` preflight fails the launch if `langgraph-checkpoint-sqlite` is absent.
+  `run_research_nohup(resume=True)` relaunches a dead/`failed` backend (mutually exclusive with
+  `overwrite`); CLI `--resume`. Stage 2: the resume calls `heal_toolkit_branch_if_dirty` **before**
+  `run_preflight`, resetting a dirty `ai` branch to the persisted per-attempt base ref so the clean-tree
+  check passes instead of looping forever (`run.resume.heal`). Stage 3: `build_graph(run_control=)` and
+  stop-aware review edges (both **deleted 2026-07-31**, below), plus the `CommandContext` attached to a
+  command-capable connector. **The full killed-and-resumed run was NOT LIVE TESTED then** (it passed
+  four times later, 2026-08-03).
+- 2026-07-29 — **Cost meter, end-of-run summary, and an append-only backend log.** `run_research`
   installs the run's `CostMeter` before any model client (so every monitor line carries accumulated
   spend, preflight included), pins the monitor's `run_id` to the **run's** id (it used to mint an
-  unrelated `uuid4`, leaving log lines untraceable to their run dir), adds `cost_usd` to
-  `run.finish`, and records a derived `run.summary` event on both the success and failure paths.
-  `ResearchRun.summary()` renders that digest; the CLI text output prints it above the verdict
-  fields; `detached._partial` prepends it to a `RunDied`'s partial so a killed run is legible too.
-- 2026-07-29 (follow-up) — **`backend.log` is appended, not truncated.** The orphan spawner opened it
-  with `"w"`, so a `--resume` relaunch erased the dead attempt's output — the traceback a `RunDied`
-  points the human at, and the only record of why the run needed resuming. Only `overwrite=True`
-  (which removes the run dir) is destructive now. The `result.json` unlink on relaunch stays: a stale
-  `failed` marker must not make the relaunched run read as done, and the reason survives in the
-  ledger's `run.error` event.
-
+  unrelated `uuid4`, leaving log lines untraceable to their run dir), adds `cost_usd` to `run.finish`,
+  and records a derived `run.summary` on both the success and failure paths — rendered by
+  `ResearchRun.summary()`, the CLI text output, and `detached._partial` for a `RunDied`. `backend.log`
+  is now appended: the orphan spawner opened it with `"w"`, so a `--resume` relaunch erased the dead
+  attempt's traceback — the very thing `RunDied` points the human at. Only `overwrite=True` (which
+  removes the run dir) is destructive; the `result.json` unlink on relaunch stays, since a stale
+  `failed` marker must not read as done and its reason survives as the ledger's `run.error`.
 - 2026-07-31 — **The interrupt path (§12 Stage 4, the graceful-shutdown half of the bundle).**
   `run_research` registers its task on `RunControl` at start, so a `/stop` (or SIGINT/SIGTERM under
   `install_signal_handlers=True`, which only the CLI and the detached backend pass) cancels it

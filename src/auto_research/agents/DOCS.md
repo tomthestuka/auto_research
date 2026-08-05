@@ -310,119 +310,73 @@ Role wrappers:
   Method: `review_tool(tool_spec, *, diff, gate, tools=None) -> ToolReviewVerdict`.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Agent wrappers built and ReAct-wired (reviewer, librarian I/O, analyst
-  worker, analyst lead): native structured output/function calling, bounded schema retries,
-  `Sandbox`/`ReadOnly`/`SourceToolProvider`, report composition, monitor hooks, `coder` prompt.
-- 2026-06-12 -> 2026-06-18 — **Phase 2 agent support (steps 4–5, 7) + polish.** Lead read-only toolkit
-  inspection + `web_search` + `clarify_for_author` (`ask_lead`); `AnalystWorkerAgent.analyze` the sole
-  tool-execution owner; `AnalystColeadAgent.review_tool → ToolReviewVerdict` + `analyst_colead` role;
-  both providers gained `ask_human`/`human_handler`; `decide_authoring → AuthoringDecision`; shared
-  `data_catalog`; self-describing `roots`; source faults degrade to recoverable `is_error`;
-  `HumanQuery.model` sender label; manifest-quality `react.py` tool descriptions.
-- 2026-06-22 -> 2026-06-24 — **Diagnosability, FS jail, lead-drives-design.** `_react` returns
+Compacted 2026-08-05: entries through 2026-07-28 folded into themed ranges (detail in git history).
+
+- 2026-05-26 -> 2026-06-18 — **Agent wrappers built, ReAct-wired, then extended for Phase 2.** Reviewer,
+  librarian I/O, analyst worker and analyst lead with native structured output / function calling,
+  bounded schema retries, `Sandbox`/`ReadOnly`/`SourceToolProvider`, report composition, monitor hooks,
+  the `coder` prompt. Phase 2 added: lead read-only toolkit inspection + `web_search` +
+  `clarify_for_author` (`ask_lead`); `AnalystWorkerAgent.analyze` as the sole tool-execution owner;
+  `AnalystColeadAgent.review_tool → ToolReviewVerdict` + the `analyst_colead` role; `ask_human`/
+  `human_handler` on both providers; `decide_authoring → AuthoringDecision`; shared `data_catalog`;
+  self-describing `roots`; source faults degrading to a recoverable `is_error`; manifest-quality
+  `react.py` tool descriptions.
+- 2026-06-22 -> 2026-06-30 — **Diagnosability, the FS jail, and lead-driven authoring.** `_react` returns
   `(messages, figures, documents)` and splits each call into `*.tool_call`/`*.tool_result` events;
-  `ReadOnlyToolProvider.open_paper` (`cited_paths`); `ingest_results` isolates each paper (bad doc →
-  orphan memory); FS jail (`ReadOnlyToolProvider` denies governance basenames, `SandboxToolProvider`
-  `PathGuard`); `_react` gained `free_tools`/`absolute_cap` (`react_loop_cap`=30,
-  `react_loop_absolute_cap`=60) + the lead-only budget-free `plan_and_debate` channel; prompts settle
-  the design and keep `bash` read-only.
-- 2026-06-26 -> 2026-06-30 — **Lead-driven authoring + honest failure.** `finalize_authoring_outcome`
-  composes ONE honest terminal `AnalystReport` (§9.6) instead of the consensus loop spinning; lead-only
-  authoring tools `drive_coder`/`submit_for_review`/`respond_to_review` + `AnalystLeadAgent.drive_authoring`
-  drive an `AuthoringSession` directly (gate → GPT review → commit; lead↔co-lead debate with
-  anti-sycophancy; commit ⇔ gate ∧ review); clarification channels take one Markdown `message` (dropped
-  `question`/`context`/`plan`); finalization is prompt-borne (`submit_for_review` the sole path, the
-  nudge loop dropped).
-- 2026-07-06 — **Malformed figure non-fatal ([F4]); whole-chain authoring ([A8]).** Returned figures
-  route through `_parse_tool_figures` (a bad figure is dropped with a note, not fatal); `decide_authoring`
-  returns the ordered `AuthoringDecision.tool_specs` chain planned up front, not a single `ToolSpec`.
-- 2026-07-09 — **`open_paper` per-PDF size limit (`_OPEN_PAPER_MAX_MB`=8 MB).** A PDF over the limit is
-  refused (stat-only, before read) with its size named — an opened PDF rides by value in every later model
-  call and one huge paper can exhaust a provider's request-size cap (a live Anthropic 413).
-- 2026-07-13 — **Web tools wired + read-by-line ([I1]/[I10]/[F8]).** `web_search` wired to reviewer +
-  lead + worker (was co-lead only) and de-capped, plus a new `web_fetch` (one page in full as Markdown,
-  paged); `ReadOnlyToolProvider.read_file` reads by line range (`_read_lines`, `cat -n` window + resume
-  footer) instead of a silent char head-cut.
-- 2026-07-14 — **V-4: inter-LLM reports authored by citation (`edit_report`/`review_report`).** Both
-  `react.py` providers grow the pair when a `ReportWorkspace` is attached; `edit_report` resolves
-  `cited_figures` ({source,index}) → ordered `figures` and persists the per-round JSONL, `review_report`
-  reads the draft + catalog back. `AnalystWorkerAgent.analyze` writes via `edit_report` (its `self`
-  catalog); `AnalystLeadAgent.adjudicate(…, sources=)` cites by `{worker, index}`. Citation replaces
-  figure-dedup, closing the last-round-only leak.
-- 2026-07-20 — **`data_catalog` sourced from `research_toolkit.catalog_utils` (read relocation).**
-  The tool is no longer an auto_research built-in: its def (description + `{obs_db_path, min_level}`
-  schema) comes from `catalog_utils`'s `TOOL_MANIFEST`, and its read is `catalog_utils.lib.catalog_read`.
-  Workers get it via `ToolkitRegistry` and run it in the sandbox like any toolkit tool (the built-in
-  add + special in-process branch in `SandboxToolProvider` are gone). The sandbox-less analyst lead
-  runs the same pure-stdlib read in-process (`ReadOnlyToolProvider` when `include_data_catalog`), via
-  `_import_from_toolkit` (toolkit_root on sys.path) + `execute_data_catalog`, now taking `obs_db_path`
-  (agent-supplied, from its local-observation-databases context) rather than `mission`. Agent-facing
-  name is the registry-sanitized `research_toolkit_catalog_utils_data_catalog`. Reviewer still excluded.
-- 2026-07-22 — `AgentRole._record_context_edit` emits a `<role>.<action>.context_edit` monitor event
-  (level 4, with cleared tool-use/token counts) when a model call reports provider-native context
-  editing (`ModelResponse.context_edits`; Anthropic only — see `models/DOCS.md`). Called right after
-  each `self.model.call` in `_react` and `_structured_loop`; a no-op when nothing was cleared, so
-  every non-Anthropic / short call is unchanged. Gives a run-watcher visibility into context pressure
-  being relieved on long loops. Live-verified 2026-07-28. Tests: `tests/test_context_editing.py`.
-- 2026-07-22 — **HITL steer/stop in the ReAct loop (§12 Stage 3).** Base `AgentRole` gains
-  `run_control` + `agent_key` (defaults None → unchanged when unset). At the top of every `_react`
-  iteration, before the model call, the loop drains this role's steer inbox
-  (`run_control.drain_steer(agent_key)`) and injects each as a `[Human steer]` user turn, then
-  honors `/stop` (`run_control.stop_requested` → break, role composes its terminal from what it
-  has). Wired by `run_research` (every role keyed + given the shared `RunControl`). The steer/stop
-  source is the `hitl.commands` slash-command channel over Telegram/Slack. Tests
-  `tests/test_run_control.py`.
-- 2026-07-27 — **Deferred tool loading in `SandboxToolProvider`** (shipped disabled; live-verified and enabled 2026-07-28 — see that entry below). Under `orchestration.yaml: tool_search_enabled`, every registry tool is emitted with `defer_loading: true` — its schema stays out of the model's context until discovered through the provider's tool search — while harness tools (`ask_human`, `web_search`/`web_fetch`, report tools, and the builtin MCP file tools) stay resident, which also satisfies both providers' "≥1 non-deferred tool" rule. No per-tool exceptions: `data_catalog` defers like the rest. `AgentRole._react` now carries `response.provider_blocks` onto the `AssistantToolUse` it appends, so tool-search discoveries survive replay and a discovered tool stays callable (the API re-expands referenced definitions from history each turn). `prompts/analyst_worker.md` gained the search step. Measured on `gpt-5.5` with the real 25-tool manifest: 19,004 → 2,382 resident tokens. Deterministic coverage `tests/test_tool_search.py`; the env-gated `tests/test_live_tool_search.py` passed 2026-07-28.
-- 2026-07-28 — **Deferred tool loading live-verified and enabled.** The env-gated live round-trip ran on both providers once the Anthropic key was reinstated (details in `models/DOCS.md`): with every registry tool deferred and the harness tools resident, the model discovered the tool it needed through the provider's search and called it, and resident input fell **19,074 → 3,789 tokens** on `gpt-5.5` / **35,208 → 9,003** on `claude-sonnet-5` against the real manifest. `_react`'s `provider_blocks` replay held up live — the discovered tool stayed callable across turns, and a three-turn probe showed the expanded definition sits inside the conversation cache breakpoint, so it is cache-read rather than re-billed. `orchestration.yaml: tool_search_enabled` flipped **true**; the worker's search step in `prompts/analyst_worker.md` is now on the live path. (The tombstone path noted here as still-unexercised was **deleted 2026-07-30** — the state it guarded is unreachable; see `models/DOCS.md`.)
-
-- 2026-07-29 — **Human control is honored mid-batch, and events name the steerable identity.** A
-  model turn can emit MANY tool calls, and `_react` dispatched the whole batch before returning to
-  its top-of-iteration `RunControl` poll — so on the 2026-07-29 run two queued steers and a `/stop`
-  sat unseen behind a pair of 25-minute downloads (they landed the instant the batch broke). Now the
-  loop checks between calls: a `/stop` **skips every remaining call** with an honest
-  `skipped: a human requested the run to stop` result — one result per `tool_use`, which providers
-  require, so the transcript stays valid and the loop then ends into the §9.6 terminal (recorded as
-  `<role>.<action>.stop_skipped_calls`) — and a steer arriving mid-batch is delivered as a
-  `[Human steer]` user turn right after that batch's results rather than one whole batch later.
-  Separately, `_record` now actors events with the **indexed `agent_key`** (`analyst_worker_1`)
-  instead of the shared role (`analyst_worker`): two workers were indistinguishable in the log, so
-  neither a reader nor a human choosing a `/steer` target could tell which one was working. New
-  `status_monitor` entry in `PROMPT_FILENAMES` (its prompt moved out of `hitl/commands.py`, §4).
-  Tests: `tests/test_run_control.py` (+3).
-
-- 2026-07-31 — **`_react` no longer reads the stop flag.** A `/stop` is an interrupt that cancels
-  the run task, so the loop has nothing to notice: the top-of-iteration `stop_requested` break and
-  the mid-batch skip (which synthesized an error result for each remaining `tool_use` so the
-  transcript stayed valid) are both deleted, along with the `<role>.<action>.stopped` and
-  `.stop_skipped_calls` events. **Steering is untouched** — the inbox, the top-of-turn drain and
-  the mid-batch delivery all stay, because a steer is a message and a message can wait. The lead
-  now publishes its live `AuthoringSession` on `RunControl` while `drive_authoring` runs, so an
-  interrupt can reset the toolkit branch: that method's own `finally` sits inside the cancelled
-  scope, where its awaits die before the reset. Whichever path gets there first clears the handle,
-  and `aclose()` is idempotent. Tests: `tests/test_run_control.py` (rewritten to pin the absence of
-  the old behaviour + that a cancellation propagates out of the loop).
-
-- 2026-07-31 — **`MonitorToolProvider` + `StatusMonitorAgent`: the `/status` reporter reads the
-  run's own ledger.** A fourth `ToolProvider` (beside `SandboxToolProvider`, `ReadOnlyToolProvider`,
-  `SourceToolProvider`) exposing three tools over one run's `monitor.jsonl`: `brief_history`
-  (the index — one line per event as `seq · Lxx · $cost · +elapsed · team · actor · summary`,
-  filtered by `limit`/`order`/`min_lvl`/`max_lvl`/`min_seq`/`max_seq`/`event_prefix`/`actor`/
-  `team`/`contains`), `ledger_event(sequence, max_chars, bias)` (one event in full **including
-  its `data` payload**, windowed with a next-offset footer; negative `bias` reads the tail, where
-  a long tool dump keeps its errors), and `ledger_grep(pattern, limit, max_lvl)` (the only way to
-  find an event by payload content — returns index rows, never raw payload text). Three
-  properties are structural rather than prompted: **read-only** (no tool takes a path, so there is
-  nothing to confine — the provider is built with the run's own ledger), **bounded** (every cap is
-  clamped in code however large the model asks: 400 rows, 32k payload chars — an agent reading its
-  own run log is the one place a harness can feed itself without limit, cf. openai/codex#27131),
-  and **fresh** (the file is re-read per call, since the run is still appending). `StatusMonitorAgent`
-  drives them in a ReAct loop bounded by the new `status_react_loop_cap` (default 6 — a human is
-  waiting on a phone); when the loop ends on its cap with no prose, it asks once more with no tools
-  rather than returning silence. `prompts/status_monitor.md` gained the ledger's shape, the
-  search-then-drill idiom, and the **level convention** (1 = most important … 10 = chattiest, so
-  "important only" is a *low* `max_lvl` — the inversion a model is most likely to guess wrong).
-  Payloads serialize with `ensure_ascii=False` so `σ`/`±` read as themselves. Tests:
-  `tests/test_monitor_tools.py` (+22).
+  `open_paper` (`cited_paths`); `ingest_results` isolates each paper; the FS jail (`ReadOnlyToolProvider`
+  denies governance basenames, `SandboxToolProvider` uses `PathGuard`); `_react` gained
+  `free_tools`/`absolute_cap` plus the lead-only budget-free `plan_and_debate` channel.
+  `finalize_authoring_outcome` composes ONE honest terminal `AnalystReport` (§9.6) instead of the
+  consensus loop spinning; lead-only `drive_coder`/`submit_for_review`/`respond_to_review` +
+  `AnalystLeadAgent.drive_authoring` drive an `AuthoringSession` directly (gate → GPT review → commit,
+  with an anti-sycophancy lead↔co-lead debate; commit ⇔ gate ∧ review); clarification channels take one
+  Markdown `message`.
+- 2026-07-06 -> 2026-07-14 — **Robustness, web tools, and V-4 citation reports.** [F4] returned figures
+  route through `_parse_tool_figures` (a bad figure is dropped with a note, never fatal); **[A8]**
+  `decide_authoring` returns the ordered `tool_specs` chain planned up front. `open_paper` refuses a PDF
+  over 8 MB (stat-only, before read) — an opened PDF rides by value in every later call and one huge
+  paper hit a live Anthropic 413. [I1]/[I10]/[F8]: `web_search` wired to reviewer + lead + worker (was
+  co-lead only) and de-capped, new paged `web_fetch`, and `read_file` reads by line range with a resume
+  footer instead of a silent char head-cut. **V-4:** `edit_report`/`review_report` appear whenever a
+  `ReportWorkspace` is attached; `edit_report` resolves `cited_figures` ({source,index}) → ordered
+  `figures` and persists the per-round JSONL; the worker writes via its `self` catalog and the lead cites
+  by `{worker, index}` — citation replaces figure-dedup, closing the last-round-only leak.
+- 2026-07-20 -> 2026-07-28 — **Catalog relocation, context-edit visibility, steer/stop, deferred tools.**
+  `data_catalog` is no longer a built-in: its definition and read come from
+  `research_toolkit.catalog_utils`, so workers get it through `ToolkitRegistry` and run it in the sandbox
+  like any toolkit tool, while the sandbox-less lead runs the same pure-stdlib read in-process
+  (`_import_from_toolkit` + `execute_data_catalog`, taking `obs_db_path`, not `mission`).
+  `_record_context_edit` emits a `<role>.<action>.context_edit` event when a call reports provider-native
+  context editing (Anthropic only; live-verified 2026-07-28). §12 Stage 3: `AgentRole` gained
+  `run_control` + `agent_key`, draining its steer inbox into a `[Human steer]` user turn at the top of
+  each `_react` iteration. **Deferred tool loading:** under `tool_search_enabled` every registry tool is
+  emitted `defer_loading: true` while harness tools stay resident (satisfying both providers' "≥1
+  non-deferred tool" rule, no per-tool exceptions), with discovery blocks carried through replay so a
+  discovered tool stays callable. Live-verified on both providers 2026-07-28 and enabled: resident input
+  19,074 → 3,789 (`gpt-5.5`) / 35,208 → 9,003 (`claude-sonnet-5`), the expanded definition sitting inside
+  the conversation cache breakpoint.
+- 2026-07-29 -> 2026-07-31 — **Human control, then its replacement by the interrupt; `/status` reads the
+  ledger.** Mid-batch control landed first (a `/stop` skipping remaining calls with honest results, a
+  steer delivered right after the batch), together with `_record` actoring events by the **indexed
+  `agent_key`** (`analyst_worker_1`) — two workers had been indistinguishable in the log, so neither a
+  reader nor a human choosing a `/steer` target could tell them apart. Two days later `_react` stopped
+  reading the stop flag altogether: a `/stop` now cancels the run task, so the loop has nothing to
+  notice, and the top-of-iteration break, the mid-batch skip and their events were deleted. **Steering is
+  untouched** — a steer is a message and a message can wait. The lead publishes its live
+  `AuthoringSession` on `RunControl` while `drive_authoring` runs, so an interrupt can reset the toolkit
+  branch (that method's own `finally` sits inside the cancelled scope, where its awaits die first);
+  whichever path gets there first clears the handle, and `aclose()` is idempotent. **`MonitorToolProvider`
+  + `StatusMonitorAgent`:** a fourth provider exposing three tools over the run's own `monitor.jsonl` —
+  `brief_history` (the index, filterable by level/sequence/prefix/actor/team/substring),
+  `ledger_event(sequence, max_chars, bias)` (one event **with its payload**, windowed, negative `bias`
+  for the tail where a long dump keeps its errors) and `ledger_grep` (find by payload content, returning
+  index rows only). Three properties are structural, not prompted: **read-only** (no tool takes a path),
+  **bounded** (400 rows, 32k payload chars, clamped in code — an agent reading its own run log is the one
+  place a harness can feed itself without limit, cf. openai/codex#27131) and **fresh** (re-read per call).
+  Driven under `status_react_loop_cap` (default 6 — a human is waiting on a phone), asking once more with
+  no tools rather than returning silence on cap. `prompts/status_monitor.md` teaches the level convention
+  (1 = most important … 10 = chattiest, so "important only" is a *low* `max_lvl`). Tests:
+  `tests/test_run_control.py`, `tests/test_monitor_tools.py`.
 - 2026-08-05 — **`_react` replays the turn it received.** The loop used to build an
   `AssistantToolUse` by copying `content`/`tool_calls`/`provider_blocks` off the response one field
   at a time; `ModelResponse` is now the neutral assistant turn itself, so the loop appends it whole

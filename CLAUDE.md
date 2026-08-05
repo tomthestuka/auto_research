@@ -835,619 +835,189 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
 
 ## Changelog
 
-- 2026-05-27 -> 2026-06-12 — **Phase 1 built, hardened, verified live.** Full LangGraph team
-  end-to-end (schemas, provider registry, observability, SQLite storage/retrieval, sources,
-  prompts, agent roles, ReAct loops, consensus, feedback edges, sandbox/registry, reports, CLI,
-  Studio, notebook); a Cyg X-1 joint-fit run produced JSONL + LaTeX/PDF. Phase 2's trust-boundary
-  spec written here (uniform `research_toolkit` layout, no-fabrication, deterministic gate, actor
-  flow, runtime git discipline, build order).
-- 2026-06-12 -> 2026-06-16 — **Phase 2 steps 0–7: the full author→gate→review→commit flow.**
-  Runtime writes confined under `runtime_dir`. Protocol: `ToolSpec`/`ValidationDataset`/
-  `ProposedCheck`/`AuthoringDecision` + `AnalystReport.tool_request`/`status`. Flow:
-  `merge_flow.propose_and_pr` (Sonnet Claude-SDK `coder`, isolated worktree, `ask_lead`/`ask_human`,
-  bounded rework) → `gate.run_gate` (Layer-A structural/provenance/determinism + `code_gate.yaml`
+Compacted 2026-08-05: entries through 2026-07-31 are folded into themed date ranges keeping tag ids,
+rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detail is in git history.
+
+- 2026-05-27 -> 2026-06-16 — **Phase 1, then Phase 2 steps 0–7: the whole author→gate→review→commit
+  flow.** Phase 1: the LangGraph team end-to-end (schemas, provider registry, observability, SQLite
+  storage/retrieval, sources, `prompts/`, roles + ReAct loops, consensus, capped feedback edges,
+  sandbox/registry, reports, CLI, Studio, notebook); a Cyg X-1 joint fit produced JSONL + LaTeX/PDF.
+  Phase 2 then built what §9 specs: runtime writes confined under `runtime_dir`;
+  `ToolSpec`/`ValidationDataset`/`ProposedCheck`/`AuthoringDecision` + `AnalystReport.tool_request`/
+  `status`; `merge_flow.propose_and_pr` (Sonnet Claude-SDK `coder`, isolated worktree,
+  `ask_lead`/`ask_human`, bounded rework) → `gate.run_gate` (Layer-A + the `code_gate.yaml`
   no-fabrication scan; Layer-B tool tests) → `review.make_review_hook` (provider-decorrelated GPT
-  co-lead) → `approve_edit` (one atomic commit, explicit-path staging, never `git add -A`; commit ⇔
-  gate ∧ review; runtime never merges to master). `preflight` runs every no-LLM check before any
-  model; the `hitl` package adds the injectable `HumanHandler`/`resolve_human` + connectors + the
-  shared `ask_human`. Lead-driven authoring/resume (`decide_authoring` → consensus issues
-  `propose_and_pr(direct_branch="ai")` → registry reload + sandbox restart + workers rerun, capped
-  by `tool_author_cap`). Live: `notebooks/usage_example.ipynb` IXPE P1.
-- 2026-06-18 -> 2026-06-29 — **Live-run polish + hardening.** Dispatch mechanics moved into the
-  `ReviewVerdict` schema + manifest-quality tool descriptions; §3 **write only positive actions**;
-  worker→lead `AnalystToolRequest` split from lead→coder `ToolSpec` (dropped the OpenAI-strict open
-  map, §7); **analysts-author-no-code** prompt policy; authoring hardened (fs jail, coder
-  git-discipline). **Gate determinism** reworked to per-test JUnit outcome maps (not a byte-compare,
-  §9.4). **Reviewer is the sole I/O (§9.6):** `finalize_authoring_outcome` composes one honest
-  terminal report instead of spinning. **Clarification channels** carry one Markdown `message` +
-  derived `headline` (`HumanQuery` drops `question`/`context`), rendered per channel (CLI `rich`,
-  Slack `markdown` block); WhatsApp/Twilio deprecated; the typed protocol stays Pydantic. Graceful
-  SIGINT/cleanup deferred into the §12 human-steer bundle.
-- 2026-07-06 — **Coding contract, robustness, [A8], RAG direction.** §3 gains **plan-and-debate
-  before coding** (first hard rule). Robustness pass (additive): figure bytes reach models at the
+  co-lead) → `approve_edit` (one atomic commit, explicit-path staging, never `git add -A`;
+  **commit ⇔ gate ∧ review**; the runtime never merges to master). `preflight` runs every no-LLM check
+  before any model; `hitl` adds the injectable `HumanHandler` + connectors + the shared `ask_human`.
+  Lead-driven authoring/resume (`decide_authoring` → `propose_and_pr(direct_branch="ai")` → registry
+  reload + sandbox restart + worker rerun, capped by `tool_author_cap`). Live: `usage_example.ipynb`
+  IXPE P1.
+
+- 2026-06-18 -> 2026-07-09 — **Live-run polish, the coding contract, and two gate corrections.**
+  Dispatch mechanics moved into the `ReviewVerdict` schema + manifest-quality tool descriptions; §3
+  gained **write only positive actions** and then **plan-and-debate before coding** (now its first hard
+  rule); worker→lead `AnalystToolRequest` split from lead→coder `ToolSpec` (dropping the OpenAI-strict
+  open map, §7); analysts-author-no-code prompt policy; authoring hardened (fs jail, coder
+  git-discipline). **Gate determinism** reworked to per-test JUnit outcome maps rather than a byte
+  compare (§9.4). **Reviewer is the sole I/O (§9.6):** `finalize_authoring_outcome` composes one honest
+  terminal report instead of spinning. Clarification channels carry one Markdown `message` + derived
+  `headline`; WhatsApp/Twilio deprecated. Robustness (additive): figure bytes reach models at the
   multimodal boundary; `\href` display escaping; gate Layer-B requires ≥1 PASSED; malformed figures
   dropped-with-note; bare no-fab descriptors → soft findings; **detached runs** (`run_research_nohup`)
-  survive a killed kernel (deterministic `run_id`; not the §12 durable resume). **[A8]** the lead
-  authors the whole ordered `tool_specs` chain (first pydantic validator `should_author ⇒ len ≥ 1`)
-  and reruns workers once, not one-tool-then-rerun. **RAG direction** set to ChromaDB for three
-  targets (literature / persistent-memory / tool index) — deferred (§12).
-- 2026-07-09 — **Gate verifies the diff not the brief ([A12]); `open_paper` size cap.** The gate's
-  manifest/timeout checks now derive the target `*_utils` packages from the touched diff
-  (`gate._touched_packages`), not the lead's advisory `ToolSpec.target_domain` — removing the
-  doomed-loop where a descriptive `target_domain` built a nonexistent path and rejected forever (killed
-  run #12's chain; `target_domain` now purely advisory; a [G6] slice). `open_paper` refuses a PDF over
-  `_OPEN_PAPER_MAX_MB`=8 MB (an oversized paper rides by value in every later call and blew Anthropic's
-  413 request cap), citing from `text_search` metadata instead.
-- 2026-07-13 -> 2026-07-14 — **[V-4] inter-LLM reports authored by figure citation (fixes the
-  last-round-only figure leak).** Every analyst report (worker→lead, lead→reviewer) is now a per-round
-  JSONL the agent refines through `edit_report`/`review_report` (analysts stay read-only — the runtime
-  writes). Figures are **cited** by a `{source, index}` handle from an append-only per-source catalog
-  (worker `self`; lead one source per worker) and resolved, in order, to `report.figures` ("Figure k"
-  = k-th cited) — **replacing figure-dedup** (`_deduplicated` removed); the catalog is append-only
-  across rounds AND rework iterations, so no figure is last-round-only. New `FigureCitation` +
-  `FiguredReport` base (`AnalystReport` extends it; `ResearchReport` deferred to reviewer unification,
-  increment 5 — deferred). Consensus passes worker `sources`; provider figure captions rendered
-  verbatim (presentation layer prefixes `Figure N —`/`[source:index]`). `edit_report` emits a soft
-  "did you mean that?" note when the prose references more figures than placed (§13; caught a live
-  Sonnet under-cite that degraded gracefully). Suite green (456); live `test_live_report_rounds.py`
-  (two-round Cyg X-1 replay — the lead's round-2 report carried figures from both rounds).
-- 2026-07-14 — **Domain-agnostic install script (increments 0–4; increment 5 deferred).** A portability
-  + science-agnosticism review (`tmp_code_review_070726.md` §4/§5) and a cross-domain setup-taxonomy
-  study (§6) motivated an installer that turns hardcoded machine + domain paths into pointed-to,
-  validated inputs. **Incr 0:** machine-local config (`orchestration.yaml`, `observations.yaml`,
-  `sandbox/{analyst_env.sh,repl_init.py}`) is gitignored with tracked `*.example` templates; new
-  `orchestration.yaml` keys `repl_init_py` + `analyze_probe`; loaders raise a helpful missing-config
-  message. **Incr 1:** `PersistentSandbox` execs `repl_init_py` at REPL boot (replacing the hardcoded
-  XSPEC/relxill boot — the deepest domain leak), `bash_exec`'s description injects the probe from config
-  (no FITS/xspec hardcode), and a `check_analyze_probe` preflight runs the stack smoke-test. **Incr 2:**
-  `install.sh` (thin bash: conda + `auto_research` env, then the Python stage) + `python -m
-  auto_research.setup` (pages 1 conda, 2 analyst env, 5 paths, 6 write-config-from-template deriving
-  `agent_fs_allow`, 7 preflight; interactive `questionary`, headless `--answers`). **Incr 3:** page 3
-  typed domain-dependency entries → materialize `analyst_env.sh` + `repl_init.py`, install conda/pip
-  specs, contribute `agent_fs_allow` roots, assemble the probe; **bucket E** (`license_tool`) captures a
-  human-installed vendor binary + license (prompt-then-point). **Incr 4:** page 4 research_toolkit scan
-  → point / clone / start-fresh (scaffold a §9.2 `<domain>_utils` skeleton + `ai` branch + stage raw
-  code outside the worktree; templates live in `auto_research`, written into the toolkit only at
-  install-runtime). Setup taxonomy A–E: A boot commands, B package install, C python session preload,
-  D data roots, E license pointer; build-from-source documented out-of-scope; the python-REPL sandbox's
-  non-python-runtime reach and the `onboard_toolkit` pipeline (increment 5) deferred (§12). Deterministic
-  tests: `tests/test_sandbox_hooks.py` + `tests/test_setup.py`. Suite green (477). A clean-clone install
-  was verified end-to-end in a throwaway conda env (no container runtime available here). **Test
-  portability (P9):** the 8 suite tests that assumed a fully-provisioned cluster machine (real
-  `analyze_env` python, `obsdb_catalog` in the toolkit, populated data root, literal `/data/fzhou` paths)
-  are now hermetic (tmp fixtures / config-derived) or skip gracefully when the resource is absent — a
-  fresh clone reports passes + skips, not failures; provisioned runs are unchanged. The `obsdb`→generic-
-  database rename (S2) stays deferred.
-- 2026-07-16 — **Transient-provider retry layer (an [F6] run-killer slice).** Two consecutive live
-  runs (#21) died on unhandled Anthropic 529 `OverloadedError`s: the SDKs' default retry budget
-  (2 attempts, seconds of backoff) cannot span a capacity incident, and the exception propagated to
-  `run.error`. Fix: every role's model call already funnels through `ModelHandle.call`
-  (`models/types.py`); it now wraps the provider call in `models/retry.call_with_transient_retry` —
-  transient errors only (overloaded/429/5xx/connection drops; auth/bad-request raise at once) retried
-  with exponential jittered cooldowns from the new `orchestration.yaml` "Internet stability" section
-  (`provider_retry_max` 8, `provider_retry_base_cooldown_s` 60, `provider_retry_max_cooldown_s` 600;
-  defaults apply when keys are absent), each wait logged. An outage outlasting the budget still
-  re-raises honestly (durable suspend/resume stays §12). Deterministic tests
-  `tests/test_provider_retry.py`; keys in both the live config and the tracked `.example` template.
-- 2026-07-16 — **Gate scan: emptied config sections legal; RNG demoted hard-fail → finding (human
-  policy decision).** An emptied `code_gate.yaml` list parses to YAML None and now means "nothing to
-  flag in that category" (it crashed the scan before). `finding_code_patterns` is dual-purpose —
-  `literal_array_*` entries switch on built-in detectors, any other entry is a dotted code pattern
-  matched like the hard tier but recorded as a co-lead-judged finding — so severity is decided by
-  which list a pattern sits in. Motivation: Monte-Carlo tools (e.g. the #21 DCF null resampling)
-  need randomness inside them; the human moved all RNG patterns to the finding tier, accepting that
-  RNG-based fabrication now rests on the co-lead's judgment rather than an auto-reject
-  (`config/code_gate.yaml`, `sandbox/gate.py`, `tests/test_gate.py`).
-- 2026-07-16 — **Detached-run hardening (three live #21 relaunch failures, same afternoon).**
-  (1) Liveness treats a zombie as dead — a backend that died at preflight lingers unreaped in the
-  kernel's process table and blocked `overwrite=True` with a useless "kill <pid>" hint.
-  (2) **Double-fork spawn**: a real logout killed a live detached run — graceful VSCode/Jupyter
-  teardown kills process trees by walking parent→child `/proc` links, which `start_new_session`
-  does not sever ([E5] had only verified SIGKILLed kernels); `_spawn_orphaned` starts the backend
-  via a short-lived intermediary so it is reparented to init at spawn (verified adopted by pid 1).
-  (3) **Telegram token leak**: httpx logs full request URLs at INFO and Telegram embeds the bot
-  token in the URL, so backend logs carried the credential; `TelegramHandler.start()` now pins
-  httpx/httpcore to WARNING (rotating the exposed token = the human's out-of-band step).
-  `graph/detached.py`, `hitl/telegram.py`, `tests/test_detached.py`.
-- 2026-07-20 — **Receive-parse run-killer fix + catalog-read relocation (during a live #21 run).**
-  A #21 run died when a GPT co-lead's structured reply carried trailing text and `openai.py`'s bare
-  `json.loads(output_text)` raised an unhandled `JSONDecodeError` (an [F6] run-killer). Fixed
-  **B-hybrid**: new `models/providers/_json.loads_first_json_object` (takes the first complete JSON
-  value, tolerates surrounding content, returns None → structured-retry) on the OpenAI + Google
-  receive paths; the send-side strict-schema sanitizers stay — an offline diff proved the SDK's own
-  `responses.parse` conversion emits `format: path`/defaults that OpenAI strict mode 400-rejects on all
-  five structured schemas. Separately, per the §2 boundary, the **catalog READ moved to
-  `research_toolkit`**: new `catalog_utils` package (AI-facing `data_catalog` over
-  `obsdb_catalog.neutral.read`); `observations.py` shrank to obs-db-location config + the health
-  preflight; `data_catalog` is now a registry tool taking `obs_db_path` (in the sandbox for workers,
-  in-process for the sandbox-less lead), so auto_research stays pure orchestration + infra. On the
-  encrypted-data question: `heasarc_utils` acquire stays a plain downloader (never blocks re-download);
-  instead the local listing flags a present-but-GPG-encrypted ObsID **LOCKED ON DISK**, and the analyst
-  prompts route it to a re-acquire-if-remote-unlocked-else-honest-`needs_human` decision. Suites green
-  (auto_research 492; research_toolkit 22).
-- 2026-07-22 — **[A11] authoring recovers, never chokes on one failed session.** `consensus/strategy.py`
-  `_maybe_author_and_resume` used to reload the registry / restart sandboxes / rerun workers **only after
-  the whole chain committed**; a mid-chain non-commit early-returned into an honest terminal, so tools that
-  committed earlier in the chain were never loaded into the reran workers' manifest (killed #21's Q–U-lag
-  census: the DCF tool committed, the leaf plotter failed → the committed DCF tool stayed invisible).
-  Now authoring stops at the first non-commit and the reload/rerun fires whenever **≥1 tool committed**
-  (everything committed is a complete, dependency-satisfied prefix). A non-commit records a task note
-  (`_augment_with_failed_tool`, so the reran workers refine their request and the lead's next
-  `decide_authoring` adapts) and loops back to **recover**: ≥1 committed → rerun on the committed prefix;
-  nothing committed but `tool_author_cap` credits remain → re-attempt (burn a credit). The honest §9.6
-  terminal (`finalize_authoring_outcome`) now fires **only** when credits are exhausted with nothing ever
-  committed. New monitor event `analyst.tool.chain_resume`. Suite green (493; +1 net test).
-- 2026-07-22 — **[I5] cost visibility — accurate accounting + rollup + LangSmith cost.** Motivated
-  by "I use org-dispensed keys with no admin panel, so I can't see spend." Community-solution-first
-  (§1 use-the-wheel): pricing is **litellm-first, config-fallback** (`observability/costs.token_rates_for`
-  reads litellm's maintained `model_cost` map — correct per-model input/output/cache-read/cache-creation
-  rates — and falls back to `config/models.yaml: priceMTk` for models litellm doesn't know yet, with
-  cache tiers defaulting to 0.1x/1.25x input). `ModelUsage` gains `cache_read_tokens`/`cache_write_tokens`/
-  `reasoning_tokens` (non-overlapping classes), normalized per provider in each adapter — fixing the
-  under-count where heavily-cached ReAct input (cache reads at ~0.1x) was recorded as **zero** cost.
-  Visibility: `traced_model_call` annotates each LangSmith run with `usage_metadata` + `cost_usd`
-  (dashboard shows spend even for models LangSmith's own map lacks); a new `python -m
-  auto_research.observability.usage` rollup (total / by provider·model·role·day / `--since`) reads the
-  cumulative `cost_ledger.jsonl`; `plot_run.py` prices via the same path. Estimate vs. list prices only
-  — cannot reconcile to a negotiated bill (needs an admin key). `litellm>=1.93` added to `environment.yml`
-  (conda-forge; lazy-imported, price-map only). Suite green (500; +7). **Residual (still [I5]):** the
-  reviewer GPT member's `max_output_tokens` vs. the Claude member's is a separate truncation-risk item,
-  untouched here.
-- 2026-07-22 — **Context-management valve = Anthropic provider-native context editing** (live-verified 2026-07-28).
-  A deep-research scan of the mid-2026 SOTA (Anthropic context editing `clear_tool_uses_20250919`, public
-  beta 2025-09-29; server-side compaction `compact_20260112`, beta 2026-01-12; the memory tool; LangChain
-  v1 `SummarizationMiddleware`; LangMem; OpenAI `responses.compact`; LlamaIndex `VectorMemoryBlock`; the
-  PwC "Don't Break the Cache" study arXiv 2601.06007) showed the field converged on **token-watermark**
-  context management and, for Anthropic, moved it **server-side** — so the plan pivoted from a hand-rolled
-  in-loop compacter to the provider-native feature (§1 use-the-wheel; `_react` untouched). Built in
-  `anthropic.py` behind the existing `cache_prefix` interface (routes to `client.beta.messages` +
-  `context_management` when `context_mgmt_enabled`), `env.context_editing_config`, new
-  `ModelResponse.context_edits` + `AgentRole._record_context_edit` monitor event, `config: context_mgmt_*`
-  (ships **disabled**; beta path blocked by an Anthropic credit 400 — verified by SDK source/introspection,
-  not a live call). Confirmed the cache framing: compaction/clearing is a **context-window pressure valve,
-  not a cost lever** (with prompt caching, raw history is cheap and any clear breaks the cached prefix;
-  `clear_at_least` amortizes it). Deterministic tests `tests/test_context_editing.py` (+10; + env-gated
-  `tests/test_live_context_editing.py`); suite green (510 passed, 36 skipped). Durable suspend (the [E5]
-  checkpointer) is the next build. See §13.
-- 2026-07-22 — **Durable mid-run resume — Stage 1 of the §12 bundle (checkpointer + crash recovery).** After
-  a 3-agent investigation of the coupled bundle (teardown/signals · HITL chokepoint · authoring git-reset)
-  and a scoping debate (build the core bundle 1+2+3+4a; dirty branch auto-heals to a recorded base-ref;
-  durable-HITL-at-`interrupt` deferred as infeasible mid-`_react`), Stage 1 landed: `graph/checkpoint.py`
-  (`AsyncSqliteSaver` at `run_dir/checkpoint.sqlite`, `thread_id=run_id`, `durability="sync"`); `build_graph(checkpointer=)`;
-  `run_research(resume=)` (always durable; `resume=True` → `ainvoke(None)` from the latest snapshot + a
-  `run.resume` event); `run_research_nohup(resume=)` + CLI `--resume` (re-launch a dead/`failed` backend;
-  mutually exclusive with `overwrite`); a `checkpointer_available` **preflight** enforcing "no silent
-  non-durable run." Dep: `langgraph-checkpoint-sqlite>=3.1` (pip; not conda-forge; verified compatible with
-  `langgraph-checkpoint` 4.1.1). Deterministic tests `tests/test_durable_resume.py` (+8) incl. the real
-  `AsyncSqliteSaver` resuming across a process-boundary; suite green (518, +8). **Full killed-and-resumed
-  `run_research` NOT LIVE TESTED.** Stages 2–4 (branch self-heal · HITL slash-commands · graceful cleanup)
-  follow. See §13.
-- 2026-07-22 — **Durable mid-run resume — Stage 2 (authoring-branch self-heal).** Closes the resume footgun:
-  a hard-kill *during authoring* leaves the `ai` branch dirty (its in-process reset never ran), and a naive
-  resume would die again on the launch clean-tree check — an unrecoverable loop. Now `build_authoring_session`
-  persists the per-attempt base-ref to `run_dir/authoring/current_base_ref`; `merge_flow.heal_toolkit_branch_if_dirty`
-  (sharing `_reset_direct_tree`'s reset core via a new `_save_diff_and_reset`) resets a dirty authoring branch
-  to that base-ref (dropping the killed attempt's mess + any slipped commit, keeping earlier committed tools;
-  falls back to HEAD; saves a `resume_heal_*.patch`; no-op on clean/non-git/wrong-branch); `run_research(resume=True)`
-  runs it **before** the preflight so the clean-tree check then passes. `check_toolkit_branch_clean` now raises a
-  distinct `ToolkitBranchUnclean`, which the mid-run authoring path (`consensus/strategy._maybe_author_and_resume`)
-  catches to degrade to the honest §9.6 terminal instead of crashing (an [F6] slice). Deterministic tests
-  `tests/test_resume_heal.py` (+8, real git) + `test_consensus_authoring.py` (+1 degrade); suite green (527).
-  Chosen behavior (user, 2026-07-22): auto-heal to the recorded base-ref. Stage 3 (HITL slash-commands) next.
-- 2026-07-22 — **Durable-suspend bundle Stage 3: HITL slash-command channel.** A human drives a live
-  run from Telegram/Slack, any time, via commands that are *intercepted* (never taken as LLM replies):
-  `/help` (commands + live team/role/model roster), `/status [q]` (a light `status_monitor` model
-  reports over the run's `monitor.jsonl`; deterministic-digest fallback), `/steer <role|all> <msg>`
-  (queues a message delivered at the role's next ReAct step), `/stop` (honest run-wide wind-down). New
-  leaf `auto_research/run_control.py` (`RunControl`: `stop_requested`/`stop_event`, per-role `steer_inbox`,
-  `STOP_SENTINEL`) threaded to every role + consensus + graph; new channel-agnostic `hitl/commands.py`
-  (`dispatch_command`, `CommandContext`, `make_status_answer`, `wait_reply_or_stop`); `AgentRole._react`
-  drains steer + honors stop each iteration; the consensus authoring loop skips new authoring under stop;
-  the graph review edges route to finalize under stop. Telegram/Slack gained `attach_commands` + a command
-  receive-path + `/stop`-aware waiting (releases a blocked `ask_human` via `STOP_SENTINEL`); `run_research`
-  builds + attaches the `CommandContext`. New optional `status_monitor` model role. **CLI/WhatsApp are NOT
-  command-wired** (no background listener — §13). Decisions (user, 2026-07-22): /status LLM-driven; /stop
-  unblocks pending; Telegram+Slack only. Deterministic tests `tests/test_run_control.py` +
-  `tests/test_hitl_commands.py` + connector tests in `tests/test_hitl.py`; suite green (552). **Live
-  command behavior is observational — NOT LIVE TESTED.** Stage 4 (graceful cleanup) is the last piece.
-- 2026-07-27 — **Tool-context diet: manifest reshape + registry fix + provider-native tool search
-  (all three measured; tool search shipped disabled, live-verified and enabled 2026-07-28).** Motivated by Phase 2's growing
-  tool pool (25 tools, 6 authored by run #12 alone) pushing past Anthropic's own thresholds for acting
-  (≥10 tools or >10k tokens of definitions) and toward the documented 30–50-tool selection-accuracy
-  cliff. Three compounding changes, each measured on `gpt-5.5` against the real manifest.
-  **(1) `research_toolkit` manifest convention** — every `TOOL_MANIFEST` entry's `description` is now a
-  one-line keyword-dense brief and the prose moved into `args_schema` (object-level `"description"` for
-  the cross-argument contract, per-argument text on the property it governs); 18 entries reshaped, 7
-  already brief-shaped. Motivated by a provider asymmetry found by probe: **OpenAI keeps a deferred
-  tool's name+description resident and withholds only the schema**, so deferral alone recovered just 32%.
-  The toolkit's manifest-wiring tests now assert over the whole manifest text (brief + schema + property
-  descriptions), a convention-agnostic form. **(2) `ToolkitRegistry.load()` no longer overwrites the
-  manifest description with the backing function's `__doc__`** — a Phase-1 convenience (`56e89f9`,
-  2026-06-01, before tool authoring existed) that Phase 2 inverted: it silently discarded the
-  coder-authored, co-lead-reviewed description for any import-clean tool, with the winner decided by the
-  tool's dependency footprint. `skills/TOOL_MANIFEST` is the ai-half, `lib/` docstrings the human-half
-  (§9.2). **(3) Provider-native tool search / lazy loading** (`config: tool_search_enabled`, ships
-  **false**) — registry tools deferred, harness tools resident; new `AssistantToolUse.provider_blocks` /
-  `ModelResponse.provider_blocks` carry discovery blocks through `_react` replay (**the same seam [I8]
-  needs for Gemini's `thought_signature`**); Anthropic's `cache_control` breakpoint moved off deferred
-  tools (a 400); new `providers/_tool_search.py` tombstones a reference whose tool left the catalog
-  (the failed-authoring-reset + `registry.reload()` case — an [F6]-class run-killer). Ownership:
-  the **provider** runs the search (BM25, GA both providers, zero infra — 2026 benchmarks favour BM25
-  over dense for agent retrieval, and tool retrieval is a documented IR weak spot), while **we** own the
-  archive (the manifest) and the menu (the injected tool catalogue), so search runs as an exact-name
-  lookup rather than semantic recall. Cumulative resident tool context: **18,999 → 2,382 tokens (−87%)**.
-  Suite 553 → 565 (+12 `tests/test_tool_search.py`); live stub `tests/test_live_tool_search.py`. See §13.
-- 2026-07-28 — **Both context-management features live-verified and switched on; one live-only bug
-  caught.** The `ANTHROPIC_API_KEY` was reinstated (same key, so the 2026-07-27 401 was an org-side
-  revocation, not a rotation), unblocking the two features that had been waiting on it. **Context
-  editing (E5(b), 2026-07-22) passed unchanged** — the beta path cleared tool results, reported them on
-  `ModelResponse.context_edits`, and structured output still parsed on the beta namespace. **Tool search
-  (TOOLCTX, 2026-07-27) failed first on a shape no deterministic test could see:** the Anthropic
-  server-tool declaration sent `name: "tool_search"` beside the dated `type`, and the API pins the name
-  to the **undated** identifier (400 *"Input should be 'tool_search_tool_bm25'"*). Fixed with
-  `_tool_search.anthropic_search_tool_name()`, which strips the trailing `_YYYYMMDD` so the dated type
-  remains the single configured value and the `regex` variant follows the same rule; the declaration
-  test now asserts the `name`, not only the `type` — the exact gap that let it ship. Live numbers on the
-  real 25-tool manifest: resident input **19,074 → 3,789 (−80%)** on `gpt-5.5` and **35,208 → 9,003
-  (−74%)** on `claude-sonnet-5`, with the model searching and calling the discovered tool on both. A
-  three-turn `cache_prefix` probe settled the question no provider documents: an expanded definition
-  lands **inside** the conversation cache breakpoint (turn 2 wrote 9,993 tokens, turn 3 read them at
-  0.1×) — because the expansion lives in the message tail and `_mark_last_block_cacheable` marks the last
-  block, a tool is searched once per conversation and cache-read thereafter. Also observed: Anthropic's
-  BM25 returns up to **5** references per query and expands all of them (§13 watch item (d)). Both
-  `context_mgmt_enabled` and `tool_search_enabled` flipped **true** in `orchestration.yaml` and the
-  tracked `.example`; the code-level defaults stay `false` so a key-less config is unchanged. The flip
-  also surfaced a **latent test-isolation defect** (not caused by it): two `cache_prefix` tests in
-  `test_providers.py` read the machine-local `orchestration.yaml`, so enabling context editing routed
-  them to `client.beta.messages`, which that file's fake did not implement — they had passed only
-  while the flag was false. Fixed by making the fake **shape-complete** (both `client.messages` and
-  `client.beta.messages`, recording which ran) and pinning the config per test rather than reading it,
-  with the two namespace-sensitive `cache_prefix` tests **sweeping both settings** — so they now assert
-  that `cache_control` placement is namespace-independent (the real invariant) instead of silently
-  covering whichever branch the host selected. Verified by running that file under both flag values.
-  Worth remembering as a general hazard whenever a config-read default is flipped: a green suite taken
-  before the flip says nothing about the state after it. Suite 553 → 568 (+3 net). Remaining
-  pending-live work is tracked in `tmp_remaining_livetest.md`.
-- 2026-07-29 — **Two observability wiring gaps closed: the launch checklist and the co-lead's
-  actions.** Both were dropped connections, not missing features — the plumbing existed on both
-  ends of each seam. **(1) Preflight is in the run ledger ([J1]a).** `run_research` built its
-  `RunMonitor` *after* `run_preflight`, so the checklist printed only to stdout: a detached or
-  notebook run — the primary mode — kept no record of its own launch state, and a preflight
-  failure produced no run artifact at all. The monitor is now built first and passed in;
-  `Preflight.run_checklist(monitor=…)` records `preflight.<name>` per check (level 5 pass /
-  level 1 failure, since a failure kills the launch) plus a level-3 `preflight.summary`
-  `{passed, total, failed}`. Recording is guarded — a monitor fault must never decide whether a
-  runnable launch proceeds ([J2] rationale) — and standalone callers that pass no monitor
-  (`setup.py`'s smoke test) are byte-identical to before. **(2) The co-lead's actions are
-  visible.** `build_authoring_session` called `review.make_review_hook(...)` without forwarding
-  its `monitor`, so a co-lead built from config got `monitor=None`. The symptom was deceptive:
-  the `AuthoringSession` records its own `review.result` verdict, so reviews *looked* logged
-  while every action behind the verdict (tool calls, `web_search`, reasoning steps) was
-  discarded — leaving the provider-decorrelated half of `commit ⇔ gate ∧ review` as the only
-  actor in the flow with no audit trail. One kwarg, plus a regression test pinning the seam.
-  Suite 568 → 573 (+5).
-- 2026-07-29 — **Accumulated cost on every log line; the separate cost ledger deleted; a derived
-  end-of-run summary.** Motivated by the next live run: spend was invisible while a run was in
-  flight, and the notebook's closing output was a bare tuple or a traceback. **(1) Cost is now part
-  of the monitor ledger** (§J1's "one source of truth", applied to money): a run-scoped `CostMeter`
-  (`observability/costs.py`, installed by `run_research` before any model client and found through a
-  `ContextVar`) accumulates every priced call, records it as one level-10 `cost.call` event, and
-  stamps its running total on **every** monitor event — so the live line reads
-  `[hh:mm:ss] #0042 $12.34 team(model) L7 …` and burn rate is readable straight down the log.
-  `<runtime_dir>/cost_ledger.jsonl` is **no longer written**: it was a second, run-blind log
-  (`CostLedgerEntry` had no `run_id`, so the B-run harness had to attribute rows by timestamp
-  window) whose rows also under-counted, and nothing derived from it that the event stream cannot
-  answer. `usage.py` now rolls up over monitor ledgers (de-duplicated on `(run_id, sequence)`,
-  `--runs` for a per-run table); `plot_run.py`'s pie prefers recorded cost over its pair-matched
-  token estimate and no longer drops non-analyst teams from a chart claiming a total.
-  **(2) The coder's Agent-SDK spend is finally counted.** The coder is a separate process making its
-  own API calls, so it never passed through `traced_model_call`; its cost sat unaggregated on
-  `coder.turn_end` and reached no total anywhere — historically the largest unaccounted line (~$9 in
-  one observed session). `ResultMessage.total_cost_usd` is session-**cumulative** (verified monotonic
-  against real logs), so `record_session_total` folds it in as a per-turn delta with
-  `price_source="claude_sdk"`. **(3) `run.summary`** (`monitor/summary.py`): the end-of-run digest —
-  status, wall clock, cost (total · by role · coder share), tools authored + commit shas,
-  gate/co-lead rework counts, HITL raises, tool-call/error counts, one labelled full path per report
-  artifact plus the run dir and the ledger (`run.start` records both, so a run with no report still
-  says where to look) — is **derived from
-  the event stream**, never assembled at a call site, recorded as one level-1 event, and rendered
-  from that stored dict by every consumer (live stream, detached follower, CLI text output,
-  `ResearchRun.summary()`, and `RunDied`'s partial). It fires on the failure path too, so a crashed
-  run ends on the same block as a finished one. Also fixed en route: `RunMonitor` minted its own
-  `uuid4`, so a real run's ledger identified itself as `e754020b…` while its directory was
-  `8c75990e…` — the monitor now carries the **run's** id, which per-run cost attribution depends on.
-  Suite 573 → 582 (+9).
-- 2026-07-29 — **Resume no longer erases a run's own record (found pre-launch, while arming the
-  B-run).** `RunMonitor.__init__` truncated its JSONL on construction, and the detached orphan
-  spawner opened `backend.log` with `"w"` — so every `--resume` relaunch wiped both. That silently
-  broke the durable-resume evidence itself (a reader looks for events *after* the restart, and the
-  slice came up empty against a shortened file) and, after the morning's change, discarded all spend
-  booked before the kill — on the very run whose purpose is two kills. Both are now append-only:
-  the ledger continues its numbering from the last readable event (`_last_sequence`, plus a newline
-  when a hard kill left a torn line, so the fragment stays its own skipped line), and `write_jsonl()`
-  refuses the live path (it exports chatter-filtered memory — not the record). **The rule audited
-  across the run dir: only `overwrite=True` is destructive**, and it works by removing the whole run
-  dir up front, so nothing downstream needs to clear anything. Everything else in a run dir is
-  additive or intentionally rewritten (`result.json` is cleared on relaunch so a stale `failed`
-  marker cannot read as done — its reason survives as the ledger's `run.error`; the composed report
-  is rewritten per compose; patches and per-round reports are timestamped/round-keyed; agent
-  `memory.md` appends). Known derived-view gap left as-is ([J1]b): the CLI renders `monitor.md` from
-  in-memory events, so a resumed run's Markdown covers the final segment only — the JSONL is the
-  complete record. Suite 582 → 585 (+3).
-- 2026-07-29 — **The B-run's human-control findings, fixed (items before the plan-and-debate line).**
-  A live B-run (Q21, `b-run-q21`, 47 min, $8.98) verified **B1** (cost accounting: 68 rows carrying
-  the first nonzero `cache_read`/`cache_write` in the project's history) and **B2** (durable resume:
-  `run.resume` re-entered the analysis node), then exposed a cluster of human-control defects that
-  are now closed. **(1) Every control was invisible behind a batched turn.** A model turn emitting N
-  tool calls had `_react` dispatch the whole batch before its next `RunControl` poll, so two queued
-  steers and a `/stop` sat unseen behind a pair of 25-minute HEASARC downloads and landed only when
-  the batch broke. `_react` now polls between calls: a `/stop` skips every remaining call with an
-  honest `skipped:` result (one result per `tool_use`, so the transcript stays valid → `§9.6`
-  terminal), and a mid-batch steer is delivered right after that batch. **(2) The command surface was
-  a guessing game.** Targets are now **roster ids** (`/help` prints `id · team · role · model`;
-  `/steer 3 <message>`), a role *name* is rejected *and told its id*, every invalid command answers
-  immediately with the valid options, and the ack says **queued** rather than implying delivery.
-  **(3) Commands were unobservable** — a wrong token, a queued steer and a delivered steer were
-  indistinguishable in the log, which is exactly why the lost steer took an artifact hunt to
-  diagnose; they now record as `hitl.command` + `hitl.command.reply` (actor `human`), which also
-  gives the B-run's B4 check the event it waits for. **(4) Two workers were indistinguishable**:
-  events actored the shared role (`analyst_worker`) rather than the indexed `agent_key`
-  (`analyst_worker_1`) the steer channel addresses. **(5) Cost restarted at $0.00 on resume** — the
-  new process's meter now seeds from the run's own ledger, and `run.summary` sums priced calls
-  instead of taking the highest stamp (the same digest had reported an $8.85 headline against its own
-  $8.98 breakdown). **(6) §4 violation closed:** the `/status` reporter's system prompt was a string
-  literal in `hitl/commands.py` — the only runtime prompt not from `prompts/` — now
-  `prompts/status_monitor.md`, loaded via `load_prompt` and subject to the governance-reference
-  check. Also: the B-run's D2 filter counted events with "error" in the *name*, scoring 0 against
-  four real `is_error` tool results — it now counts results and names the tools. Suite 585 → 597
-  (+12). **Still open from the same run, plan-and-debate first:** the [C2] tombstone did NOT fire
-  (a 400 `Tool reference … not found in available tools` killed the run, triggered by *sandbox
-  death* rather than the designed failed-authoring reset) and [F6] (after honoring `/stop`, the
-  worker's terminal-composition call 400'd into `run.error` instead of an honest terminal); plus
-  forced `/stop` + `/steer -f/-p/-c`, the tool-using summarizer, and [H9].
-- 2026-07-29 -> 2026-07-30 — **The B-run's second cluster: the discovery-replay run-killer, and human
-  control that actually lands.** (1) **The 400 that ended `b-run-q21`.** With tool search on, a
-  discovered tool leaves discovery blocks in history and both adapters replayed them on *every* later
-  request — including the terminal structured compose, which by design declares **no** tools
-  (`schema`/`tools` are mutually exclusive in `ModelHandle.call`). Anthropic rejected the whole
-  request: `400 Tool reference 'research_toolkit_heasarc_utils_acquire' not found in available tools`.
-  Both adapters now take `include_discovery`, passed as `tools is not None` — with no tools declared
-  a reference has nothing to point at, and the blocks carry nothing the model needs to write its
-  report; the trajectory itself (assistant text, `tool_use`, `tool_result`) replays untouched. This
-  sat on the path of **every** request since tool search was enabled 2026-07-28, so it fires the
-  moment any role searches for a tool and then composes a structured result. The deeper question it
-  exposes — `schema`/`tools` exclusivity conflates "no tool *calls* now" with "no tool
-  *declarations*", where `tool_choice="none"` says the former directly — is left as its own work
-  (CLOSED as not-pursued 2026-07-30: the trim covers the crash). (2) **`/stop` is forceful with no
-  modifier to remember** (user ruling): a stop that waits for a safe point is not a stop — on the live
-  run the next safe point sat behind a batch of 25-minute downloads — so `_stop` now awaits
-  `RunControl.abort_all()`, cancelling each role's in-flight call through an aborter the run
-  registered (`PersistentSandbox.abort`) and reporting how many it cancelled. Cancelling is honest
-  rather than violent: killing the REPL child makes the in-flight `call_tool` return its ordinary
-  non-zero result, so every call still gets a result, the transcript stays valid, and the next call
-  spawns a fresh REPL. (3) **Buttons replace a flag vocabulary.** `-f/-p/-c` was designed and dropped:
-  a chat platform surfaces *registered commands* in a menu and *buttons* for follow-up choices, flags
-  are invisible in both, and a dash is what a phone keyboard mangles. The typed surface stays four
-  verbs; the escalations became taps on the steer ack (`[⚡ Deliver now]`, `[🗑 Clear]`).
-  `dispatch_command` returns `CommandReply`, a **`str` subclass** carrying `.buttons` — additive by
-  construction, so CLI/Slack/WhatsApp keep sending plain text and only Telegram reads them. A tap
-  carries `steer:<now|clear>:<id>:<run_id>:<boot_nonce>` and needs no side store; the two trailing
-  fields answer "is this button still mine?" — a foreign `run_id` is another run's history, and a
-  foreign boot nonce is an **earlier segment of this run**, which `run_id` cannot detect because it is
-  deliberately stable across a resume. Telegram registers its menu from the same list `/help` prints,
-  so the two cannot drift. Suite 597 → 612.
-- 2026-07-30 — **The tombstone guard deleted — a misdiagnosis, not a fix.** It stubbed a definition
-  (name + "no longer available" + empty schema) for any tool a discovery block referenced but the
-  catalog lacked, premised on a failed authoring attempt plus `registry.reload()` dropping a tool a
-  live conversation had already discovered. The human's challenge — that the git operations are
-  topologically either before the first sandbox session or before a reload, so there is no dropped
-  tool still in an agent's menu — is correct, and a code trace confirms it on four independent
-  grounds: `defer_loading` is set in exactly one place (`SandboxToolProvider.tool_definitions`), so
-  the lead, reviewer and co-lead never emit a discovery block at all; every `_react` action builds a
-  fresh seed and no role keeps a message list between calls, so a discovery block never outlives one
-  action; `ToolkitRegistry.reload()` has a single non-test caller (`consensus/strategy.py`, guarded
-  by `committed >= 1`) which runs *between* actions with every worker idle; and a tool that fails to
-  commit was never in the catalog to be discovered, since the registry reads `TOOL_MANIFEST` at load
-  time, not from disk per call. So a live conversation's name set is fixed for its lifetime. Removed
-  `TOMBSTONE_DESCRIPTION`/`referenced_tool_names`/`missing_tool_names` and both adapters'
-  stub-building branches (`_tool_search.py` keeps `anthropic_search_tool_name`), with the topology
-  argument kept in its module docstring so a refactor that *would* make the state reachable — a
-  mid-conversation reload, a persisted worker conversation for a Tier-2 compactor, a reload on the
-  rework edge — has the reasoning to check against. The `[C2]` live-test item is dropped (it cannot
-  fire), and the B-run harness slot it occupied now checks the real thing: no dangling
-  `Tool reference` 400 anywhere in the ledger, which is the regression test for the trim above.
-  Suite 612 → 610 (−2 tests for −1 mechanism).
-- 2026-07-31 — **`/stop` is Ctrl-C: the human interrupt replaces the cooperative wind-down (§12
-  Stage 4, and the abort half of the human-steer bundle).** Investigating the [F6] terminal-compose
-  crash surfaced the real defect underneath it: a stop stopped a role's *tool use* and nothing
-  else. Measured on this config (2 workers, `debate_max_rounds: 3`, `report_retry_cap: 2`), an
-  acknowledged `/stop` was followed by **~14 more model calls** — each role's terminal write-up,
-  three convergence judgements, two full revision rounds, the lead's synthesis, the reviewer's
-  verdict, the machine report and up to two LaTeX attempts — several replaying a 100k-token
-  trajectory, plus pdflatex. Worse, the stop *manufactured* that work: truncating the workers'
-  evidence made the lead judge the debate unconverged and order revision rounds of the same
-  instantly-truncated loops. And every one of those calls was an unguarded crash site, which is
-  precisely how the 2026-07-29 run died — stop honoured, next write-up call 400s, `run.error`.
-  **The redesign (user's ruling: instant kill, deterministic cleanup, no report, error raised to
-  the notebook).** `RunControl.interrupt()` flags the run and **cancels the run task**, so the stop
-  lands from whatever `await` is live — a model call in flight, a 25-minute download, an hour-long
-  HITL wait — with no safe point to reach. `run_research` converts a `CancelledError` *carrying the
-  flag* into `UserInterruptionError` (one without it is re-raised untouched — an outer cancel is
-  not ours to relabel) after a shielded `_interrupt_cleanup` in three ordered phases: **kill**
-  every process that can write (each sandbox REPL *and its descendants*, walked from
-  `/proc/<pid>/task/*/children` — not `killpg`, since the REPLs share the backend's group and a
-  group kill would take the run down with it, while that shared group is what makes the §12
-  hard-kill fallback work), then **repair** (the live `AuthoringSession.aclose()` — reset the
-  branch to the attempt's base ref, saving the discarded work as a patch; the order is load-bearing,
-  since a reset that runs while the coder is alive is undone a moment later), then **close and
-  record** (MCP, connector, `run.interrupted`, the derived `run.summary`). Each step is bounded
-  (10 s, 30 s for the reset) and guarded: an interrupt that hangs in teardown is the failure the
-  design removes, and a branch left dirty by a timeout is still caught by the launch preflight and
-  the resume heal. **No model is called and no report is composed on that path.** Cancelling
-  mid-node leaves the last completed node's checkpoint intact, so **`/stop` + `resume=True` is
-  pause-and-continue.** Ctrl-C is the same path: the CLI and the detached backend pass
-  `install_signal_handlers=True` (a library never seizes its host's signals) and exit **130** with
-  a `result.json` status of `interrupted`, which `reconstruct_run` turns back into
-  `UserInterruptionError` rather than `RunDied`. **Deleted with it** — five cooperative-stop
-  branches now unreachable: `_react`'s top-of-turn break and its mid-batch skip (built 07-29),
-  both graph review edges' stop clauses, and the consensus pre-authoring + mid-chain checks, plus
-  `build_graph(run_control=)` and `_stop_requested`. Steering is untouched: a steer is a message
-  and a message can wait. **[F6]'s terminal-compose guard (O2) was dropped rather than built** —
-  `resume=True` re-runs the failed node, and the alternative (the runtime synthesizing a report the
-  model did not write) sits closer to fabrication than the crash it prevents. Suite 610 → 627
-  (+15 `tests/test_interrupt.py`, the rest rewritten to pin the absence of the old behaviour).
-  **NOT LIVE TESTED:** a real `/stop` mid-authoring, where the branch reset is the whole point.
-- 2026-07-31 — **`/status` investigates the ledger instead of reading a digest of it.** The
-  reporter was handed a fixed compaction — the last 80 events at *any* level, flattened to
-  `[Lx] team · event — summary`, capped at 8k chars — and the flattening dropped every event's
-  `data`. So the answers to the questions people actually ask ("what did the reviewer decide?",
-  "why did the gate reject it?") were precisely the part discarded: `/status` could see *that* a
-  verdict happened and never what it said. The window was mostly noise too (live: 44 L7 + 18 L10
-  against 6 significant events, with `cost.call` now claiming ~16 more slots). Replaced by
-  `MonitorToolProvider` (`agents/react.py`) — `brief_history` (the index, one line per event as
-  `seq · Lxx · $cost · +elapsed · team · actor · summary`, filtered by level / sequence /
-  `event_prefix` / actor / team / substring, either end), `ledger_event(sequence, max_chars, bias)`
-  (one event **with its payload**, windowed, next-offset footer, negative `bias` for the tail where
-  a long dump keeps its errors), `ledger_grep` (find by payload content; returns index rows, never
-  raw payload) — driven by a new `StatusMonitorAgent` ReAct role under `status_react_loop_cap`
-  (default 6: a human is waiting on a phone). Three properties are structural, not prompted:
-  **read-only** (no tool takes a path — the provider is built with the run's own ledger and can
-  reach nothing else), **bounded** (400 rows, 32k payload chars, clamped in code however large the
-  model asks), **fresh** (re-read per call; the run is still appending). The bound is the
-  load-bearing one: an agent reading its own run log is the one place a harness can feed itself
-  without limit, which is a filed bug in the field — openai/codex#27131, Codex self-ingesting its
-  session JSONL into runaway token growth (see also codex#24948, 700 MB–2 GB session logs, and
-  claude-code#23948, a full-size tool result making a session unloadable on resume). **Both
-  compaction paths deleted** (`_status_digest`, `_deterministic_status`) with **no fallback**, by
-  ruling: `status_monitor` joins `REQUIRED_ROLES` so a misconfigured run fails at launch;
-  transient provider errors are already retried at the model layer; and a run whose provider is
-  down cannot advance, so a second view of the same log would report on a stalled run as if it
-  were fine. `prompts/status_monitor.md` now teaches the ledger's shape, search-then-drill, and
-  the **level convention** (1 = most important … 10 = chattiest, so "important only" is a *low*
-  `max_lvl`) — the inversion a model is likeliest to get backwards. Deliberately **not** in scope:
-  bash for the reporter (grep returning a matching 130k-char line is codex#27131 in one call, and
-  read-only through a shell is prompt-level only) and raising `_EVENT_ARG_CAP`/`_EVENT_RESULT_CAP`/
-  `_CODER_TEXT_CAP` (they bound the agents' own recall surfaces — their own item, never bundled
-  here). For the record, measured while scoping: the monitor JSONL is **not** trimmed at write
-  time; `record()` writes each event whole, and those three constants are the only trims, applied
-  at six call sites before the data reaches the monitor. Suite 627 → 648 (+22 `tests/test_monitor_tools.py`).
-- 2026-08-03 — **One malformed ADS record no longer zeroes the whole literature source.**
-  `resolve_ads_full_text` built a `FullTextLink` per esource record with no guard, and ADS
-  occasionally serves a **relative** URL where that schema's `url` is an `HttpUrl` — so the
-  `ValidationError` escaped the resolver, escaped `search_literature` entirely, and `nasa_ads`
-  returned nothing for that query while arxiv and web answered normally (observed live on
-  `b-run-q21`, seq 18, the run's first tool error). The record is now skipped and every
-  well-formed link beside it is kept, which also covers the second latent case on the same
-  construction: a missing `link_type` against `NonEmptyStr`. Scope is deliberately narrow — a bad
-  link costs one link, never the source. *Recording* per-source failures rather than merely
-  surviving them is the separate open [I9] item (the librarian's bare `except: pass`), and this
-  resolver has no monitor to record into. Suite 648 → 649
-  (`tests/test_sources.py::test_ads_full_text_skips_malformed_records`).
-- 2026-08-03 — **[H9] closed: a GPG-encrypted download is data, not an error** (research_toolkit
-  scope, approved; plus the two runtime prompts that taught the old behaviour). HEASARC serves an
-  observation still inside its proprietary period **GPG-encrypted**, and every layer defined "this
-  data is present" as *a filename matching a product regex* — which encryption changes. So a
-  complete download read as empty ground four ways: `heasarc._ixpe_level2` **raised before
-  `acquire` reached `neutral.new`** (a finished multi-GB transfer recorded nothing),
-  `_domain._scan_ixpe` produced no products and its `if products:` dropped the ObsID entirely,
-  `healthcheck.uncatalogued` is computed from that same scan so had nothing to compare, and
-  `catalog_read._locked_on_disk` only ran over *catalogued* entries so never fired. The agent's
-  catalog query returned **no line at all**, making re-acquisition the correct inference from what
-  it was told — a closed cycle no number of runs could break (live: SS 433 `04004001`, 46
-  encrypted files, re-fetched ~25 min to no effect). **Fix:** one shared rule
-  (`neutral.split_lock`/`is_locked`/`LOCK_SUFFIX`) in the module every layer already imports — the
-  blindness was four independent copies of the same predicate — with product patterns matching the
-  name wrapper-stripped and `_pick`/`_prefer` ranking a readable copy above an encrypted twin.
-  Encryption state is **derived from the recorded path, never stored**, since it changes out of
-  band; a decryption then surfaces as ordinary drift (recorded path missing + readable file
-  uncatalogued) that `repair` reconciles. Per the human's ruling a locked product keeps its
-  **honest level** (a level-2 event *is* level 2) and is marked `LOCKED, NOT USABLE` on its own
-  catalog line, so `min_level` is unchanged and the mark, not a demoted level, is what callers
-  read. Lifecycle (human's design): download once → on a repeat request ask the archive's
-  `public_date` (new `heasarc.availability`, one metadata row, no transfer; present in all three
-  master tables) → download again only once public. Caught in passing: NICER/NuSTAR globs already
-  *matched* a `.gpg` and would have recorded it as usable — **defensive only**, since (human,
-  2026-08-03) those archives withhold proprietary data entirely rather than serving it encrypted,
-  so for them the same situation appears as a download that yields no usable file, which is why
-  both analyst prompts now teach *both* shapes of "inside its proprietary period"; and `_scan_ixpe`'s obsid-wildcard glob
-  (looser than its `heasarc._ixpe_level2` mirror) would have catalogued the human's quarantine
-  copies `<obsid>_bad_gpg` as invented ObsIDs the moment the scan gained sight — now anchored on
-  the directory's own ObsID. Only `.gpg` is recognised; an unknown suffix stays unknown rather than
-  guessed at (human's call — a wrong wrapper guess is hard to debug later). Folds in **O4**: the
-  `data_catalog` brief said "mission" five times against a schema with no such argument (a live
-  worker duly passed `mission="ixpe"` and got a `TypeError`). Real-disk effect: the scan goes
-  45 → 47 ObsIDs and `catalog_health` now reports the two locked ObsIDs as uncatalogued — expected,
-  and what `repair` exists for; the human runs `python -m obsdb_catalog repair_all` out of band and
-  launch is green again. Toolkit suites: obsdb_catalog 37, heasarc_utils 21, catalog_utils 8 = 66 (+17
-  new, incl. `obsdb_catalog/tests/test_locked.py`'s 10); the full toolkit suite as the regression hold is
-  **390 passed / 4 failed (20 min)**, the 4 being the same pre-existing [F2] stale-`01002901`-timeseg
-  casualties D1 recorded 2026-07-28 (`test_pa_pd_stability{,_plot}.py`) — no new failures.
-  auto_research suite unchanged at 649.
-- 2026-08-03 — **The second half of the replay seam: an output-only field sent as input killed a
-  live run.** With tool search on, part of the transcript is authored by the *provider* (the
-  discovery items carrying a found tool's definition) and must be replayed for that tool to stay
-  callable — so for the first time we hand back items we did not build. The OpenAI adapter
-  captured them with `model_dump()` and replayed them verbatim, but the Responses API **accepts a
-  smaller vocabulary than it emits**: its items carry `created_by` ("the identifier of the actor
-  that created the item"), which the input schema rejects. The turn after any OpenAI worker
-  discovered a tool therefore died with `400 Unknown parameter: 'input[2].created_by'` — live run
-  `b-run-q21-0803`, seq 399, $8.44 in. On the live path of every OpenAI worker since 2026-07-28,
-  unfired until now because it needs an OpenAI member to discover a tool *and* take another turn
-  (the Claude worker in the same run sailed through 29 iterations on a different code path). This
-  is the **same defect as the 2026-07-29 run-killer wearing a different hat** — that one replayed
-  discovery items into a request that declared no tools; both are "what the provider said" and
-  "what I may say" treated as one object. Confirmed to be a known, open SDK-level defect rather
-  than a local slip: openai-python **#3008** (identical 400 on `status`, turn 2, when passing
-  `response.output` back as input), **#2323** (output types structurally unusable as input params),
-  **#2670** (`McpCall` rejected the same way) — three item types, one root cause, and what the
-  issues ask for is an `.as_input()` helper the SDK does not ship. Fix: `_as_input_item` in
-  `models/providers/openai.py`, applied at capture so the stored item is legal by construction and
-  byte-stable across turns. Two deliberate choices: the keep-list is **read from the SDK's own
-  input TypedDict**, not hand-listed (OpenAI keeps adding output-only fields; a hand-list rots into
-  the next mid-run 400), and the projection is **unconditional** — the popular `exclude_none`
-  workaround is value-dependent, and prompt caching keys on an exact prefix match, so an item that
-  serializes differently once a field goes non-null would silently re-bill every later turn at full
-  price. `previous_response_id` (the other published workaround) was rejected: it moves
-  conversation state onto OpenAI's servers, which our stateless multi-provider `_react` replay
-  cannot use. Suite 649 → 652. **Also on that run** (before it died, all first-time live evidence):
-  durable resume B2 passed a second time (killed mid-analysis → `run.resume` → re-entered analysis,
-  no repeated literature phase), the ledger stayed append-only across the kill (seq 253 → 266),
-  cost seeded from the ledger instead of restarting at $0.00 and `run.summary`'s headline matched
-  its own by-role breakdown, the Anthropic worker exercised the 07-29 discovery-trim fix cleanly
-  (deferred tool called, 29 iterations, report composed, no dangling `Tool reference` 400), and
-  **Anthropic context editing fired in a real analysis for the first time** (two edits, ~26k tokens
-  of tool results cleared each). Its collision with tool search (§13 watch item (a) — clearing tool
-  results may take the discovery items with them, de-activating a tool mid-run) was **not**
-  exercised: both edits landed at iteration ~29 while the worker was already writing up. Still to
-  provoke deliberately. Open from the same run: **[F3]** the filesystem guard denies `2>/dev/null`
-  as an out-of-allow-list path, costing a worker three turns on idiomatic shell — safe but stupid,
-  unfixed.
-- 2026-08-03 (later) — **Carry the provider's records whole — the `created_by` shim was one field
-  of three.** Two further live 400s followed it within the hour, each the same mistake wearing a
-  new face: we re-type the provider's records into a smaller shape of our own, so anything we did
-  not think to keep is destroyed at ingest. (1) `Missing namespace for function_call '<name>'. It
-  does not exist in the default namespace. Round-trip the model's function_call item with its
-  namespace field included.` — a tool discovered through tool search is addressed by a
-  **namespace** (live: each deferred tool's namespace is its own name), and we rebuilt
-  `function_call` items from `ToolCall`'s three fields (run `b-run-q21-0803b`, seq 547, $11.03 in;
-  B2/F4/F6 had all passed again first, and the Claude worker had completed a full report).
-  (2) `Item 'tsc_…' of type 'tool_search_call' was provided without its required 'reasoning' item:
-  'rs_…'` — we carried only the two discovery types, never the reasoning item the search depended
-  on. (3) `Unknown parameter: 'input[2].status'` — `model_dump()` fabricates absent optionals as
-  null and the API rejects a null it never sent, **even for a field its own input type declares**
-  (openai-python #3008 verbatim), so filtering by declared name alone is not enough. **Fix, per the
-  human's ruling ("carry them all… trivial and additive"):** `ToolCall.provider_fields` carries the
-  provider's record of a call — additive, since an adapter setting nothing replays byte-identically,
-  and our canonical id/name/arguments overwrite on replay so the executed and the replayed call can
-  never disagree; `_UNCARRIED_ITEM_TYPES` **inverts the default** so every response item is carried
-  except the two we replay from our own state, meaning an unanticipated item type rides along
-  instead of going missing; and `_as_input_item` filters by **name and by value**, both once at
-  capture. That capture-time placement is what protects prompt caching: the hazard is applying a
-  different *rule* on different turns, not one that reads values, since the stored item is fixed for
-  the conversation's life. A tool-less request still drops the carried items wholesale — half a
-  reasoning/discovery pair is worse than neither. **The test gap that let all three ship is closed:**
-  `tests/test_live_tool_search.py` stopped after turn 1, so nothing ever exercised handing the
-  provider's own records back, which is what a ReAct loop does on every iteration after the first;
-  the new `test_live_second_turn_after_discovery` does exactly that and **passed live on both
-  providers**, catching bugs (2) and (3) for cents after (1) had cost ~$10 of live analysis to find.
-  Suite 652 → 657. The same carrier is the seam [I8] needs for Gemini's `thought_signature`.
+  survive a killed kernel. **[A8]** the lead authors the whole ordered `tool_specs` chain and reruns
+  workers once. **[A12]** the gate derives its target `*_utils` packages from the touched diff, not the
+  lead's advisory `ToolSpec.target_domain` — removing a doomed reject-forever loop. `open_paper` refuses
+  a PDF over 8 MB (an oversized paper rides by value in every later call and blew Anthropic's 413 cap).
+  **RAG direction** set to ChromaDB for three targets — deferred (§12).
+
+- 2026-07-13 -> 2026-07-16 — **[V-4] figure-cited reports, the domain-agnostic installer, and three
+  robustness fixes.** **[V-4]:** every analyst report is a per-round JSONL the agent refines through
+  `edit_report`/`review_report`; figures are **cited** by a `{source, index}` handle from an append-only
+  per-source catalog and resolved in order to `report.figures` — **replacing figure-dedup** — so no
+  figure is last-round-only; new `FigureCitation` + `FiguredReport`; `edit_report` emits a soft "did you
+  mean that?" note when the prose references more figures than it placed (§13). **Installer increments
+  0–4:** machine-local config gitignored with tracked `*.example`; new `repl_init_py` + `analyze_probe`
+  keys (the REPL boot and the bash probe stop being hardcoded XSPEC); `install.sh` + `python -m
+  auto_research.setup` (interactive `questionary`, headless `--answers`); typed domain-dependency
+  buckets **A–E** (boot commands · package install · python preload · data roots · license pointer);
+  toolkit scan → point/clone/start-fresh scaffolding a §9.2 skeleton + `ai` branch. Increment 5
+  (`onboard_toolkit`) deferred (§12); build-from-source out of scope; **P9** made 8 cluster-assuming
+  tests hermetic-or-skipping. **Transient-provider retry** (`models/retry.call_with_transient_retry` on
+  every `ModelHandle.call`; "Internet stability" config keys) after two runs died on Anthropic 529s.
+  **Gate scan:** an emptied `code_gate.yaml` section is legal, and all RNG patterns moved hard-fail →
+  co-lead-judged finding (human policy: Monte-Carlo tools need randomness inside them). **Detached-run
+  hardening:** a zombie counts as dead for liveness; **double-fork spawn** so the backend is reparented
+  to init at spawn (a graceful VSCode/Jupyter logout walks `/proc` parent→child links, which
+  `start_new_session` does not sever); httpx/httpcore pinned to WARNING so Telegram's URL-embedded bot
+  token stops reaching backend logs.
+
+- 2026-07-20 -> 2026-07-22 — **Parse robustness, [A11] recovery, cost visibility, and the context/durability
+  bundle Stages 1–3.** A GPT co-lead reply with trailing text crashed a live run on a bare `json.loads`
+  → new `providers/_json.loads_first_json_object` on the OpenAI + Google receive paths (send-side strict
+  sanitizers stay: the SDK's own conversion emits keys OpenAI strict mode 400-rejects). Per §2, the
+  **catalog read moved into `research_toolkit`** (`catalog_utils.data_catalog` over
+  `obsdb_catalog.neutral.read`); `observations.py` shrank to obs-db location + health preflight.
+  **[A11]:** the registry reload / sandbox restart / worker rerun now fires whenever **≥1 tool committed**
+  (was whole-chain), and a non-commit loops back to recover, so the §9.6 honest terminal fires only at
+  credit exhaustion with nothing committed (new `analyst.tool.chain_resume`). **[I5] cost:** litellm-first,
+  config-fallback pricing; `ModelUsage` gains cache-read/cache-write/reasoning classes (heavily-cached
+  ReAct input had been recorded as **zero**); LangSmith runs annotated with `usage_metadata` + `cost_usd`;
+  a `python -m auto_research.observability.usage` rollup. **Context editing** built as Anthropic
+  provider-native `clear_tool_uses_20250919` behind `cache_prefix` (§1 use-the-wheel; the field converged
+  on token-watermark management and moved it server-side), shipped disabled. **Durable resume Stages 1–3:**
+  `graph/checkpoint.py` (`AsyncSqliteSaver`, `thread_id=run_id`, `durability="sync"`) + `resume=` + a
+  `checkpointer_available` preflight (no silent non-durable run); `heal_toolkit_branch_if_dirty` resets a
+  hard-killed authoring branch to the recorded per-attempt base ref, with the launch check raising the
+  distinct `ToolkitBranchUnclean` that the mid-run path degrades to an honest terminal; HITL
+  slash-commands `/help /status /steer /stop` over `RunControl` + `hitl/commands.py`, intercepted rather
+  than treated as LLM replies — **Telegram/Slack only**, since CLI/WhatsApp have no background listener.
+  Durable-HITL-suspend-at-`interrupt()` stays deferred (it re-runs the node on resume — infeasible
+  mid-`_react`).
+
+- 2026-07-27 -> 2026-07-31 — **The tool-context diet (verified live), the observability rewiring, and
+  `/stop` becoming Ctrl-C.** **Tool context:** every `TOOL_MANIFEST` description became a one-line
+  keyword-dense brief with the prose in `args_schema`; `ToolkitRegistry.load()` stopped overwriting that
+  description with the backing function's `__doc__` (a Phase-1 convenience Phase 2 inverted); and
+  provider-native **tool search / `defer_loading`** landed — the provider runs the search (BM25, zero
+  infra) while we own the archive (the manifest) and the menu (the injected catalogue). Resident tool
+  context 18,999 → 2,382 tok. **Live-verified 2026-07-28 and enabled** together with context editing:
+  the Anthropic server-tool declaration needs the **undated** `name` (a 400 no deterministic test could
+  see), resident input fell 19,074 → 3,789 on `gpt-5.5` and 35,208 → 9,003 on `claude-sonnet-5`, and a
+  three-turn probe proved an expanded definition lands **inside** the conversation cache breakpoint.
+  Anthropic BM25 returns up to 5 references per query and expands all of them (§13). The flip also
+  exposed a general hazard: two tests passed only while the flag was false — **re-run the full suite
+  after any config-default flip**. **Observability:** preflight records into the run ledger; the co-lead's
+  `monitor` kwarg reached `make_review_hook` (its actions had been invisible behind its verdict);
+  accumulated cost is stamped on **every** monitor line with one `cost.call` event per call, the separate
+  run-blind `cost_ledger.jsonl` is deleted, and the coder's Agent-SDK spend is folded in as per-turn
+  deltas; `monitor/summary.py` derives `run.summary` from the event stream (fires on the failure path
+  too); the ledger and `backend.log` are append-only, and **only `overwrite=True` is destructive**.
+  **Human control:** `_react` polls between batched calls; `/steer` takes a numbered roster id; commands
+  record as `hitl.command`/`.reply`; events actor by indexed `agent_key`; `/status`'s prompt moved to
+  `prompts/status_monitor.md` (§4). **The discovery-replay run-killer:** both adapters took
+  `include_discovery = tools is not None`, since a request declaring no tools has nothing for a reference
+  to point at. **The tombstone guard was deleted** as a misdiagnosis — a live conversation's tool catalog
+  cannot shrink under it (four independent topology grounds, kept in the module docstring). **`/stop` is
+  Ctrl-C:** an acknowledged cooperative stop was still followed by ~14 model calls and *manufactured*
+  revision rounds by truncating evidence, so `RunControl.interrupt()` now cancels the run task and a
+  shielded three-phase cleanup runs — kill every REPL **and its descendants** (walked via
+  `/proc/<pid>/task/*/children`, not `killpg`, which shares the backend's group), then the authoring-branch
+  reset to the attempt's base ref, then close/record — raising `UserInterruptionError` with **no model
+  call and no report** on that path; Ctrl-C/SIGTERM take the same path on the CLI and the detached backend
+  (exit 130, `result.json` status `interrupted`); five cooperative-stop branches deleted; `/stop` +
+  `resume=True` is pause-and-continue. Rulings: stop is **force by default with no flag vocabulary**
+  (escalations became buttons on the steer ack, since a chat platform shows commands and buttons but not
+  flags), and [F6]'s terminal-compose guard was **dropped rather than built** (a runtime-synthesized report
+  sits closer to fabrication than the crash it prevents). **`/status` investigates** rather than reading a
+  digest: `MonitorToolProvider` (`brief_history` / `ledger_event` / `ledger_grep`) driven by a
+  `StatusMonitorAgent` ReAct role, read-only + bounded + re-read per call (an agent reading its own run log
+  is the one place a harness can feed itself without limit — cf. openai/codex#27131); both compaction paths
+  deleted with **no fallback**, `status_monitor` joining `REQUIRED_ROLES`. **NOT LIVE TESTED:** a real
+  `/stop` mid-authoring, where the branch reset is the whole point.
+
+- 2026-08-03 — **Two data-honesty fixes: one bad ADS record, and a GPG-encrypted download.** ADS
+  occasionally serves a **relative** URL where `FullTextLink.url` is an `HttpUrl`, and the
+  `ValidationError` escaped `search_literature` entirely — `nasa_ads` returned nothing for that query
+  while arxiv and web answered. The record is now skipped and every well-formed link beside it kept
+  (a bad link costs one link, never the source). **[H9]** (research_toolkit scope): HEASARC serves an
+  observation still inside its proprietary period **GPG-encrypted**, and four layers independently
+  defined "present" as *a filename matching a product regex* — so a complete download read as empty
+  ground, the agent's catalog query returned **no line at all**, and re-acquisition was the correct
+  inference from what it was told (live: SS 433 `04004001`, ~25 min re-fetched to no effect). Fixed with
+  **one shared rule** (`neutral.split_lock`/`is_locked`/`LOCK_SUFFIX`) in the module every layer already
+  imports, patterns matching wrapper-stripped, and a readable copy ranked above an encrypted twin.
+  Encryption state is **derived from the recorded path, never stored** (it changes out of band, so a
+  decryption surfaces as ordinary drift for `repair`). Human rulings: a locked product keeps its **honest**
+  level and is marked `LOCKED, NOT USABLE` on its catalog line (the mark, not a demoted level, is what
+  callers read); a repeat request consults the archive's `public_date` (`heasarc.availability`, one
+  metadata row) instead of re-transferring; only `.gpg` is recognised, an unknown suffix stays unknown.
+  Folded in **O4**: the `data_catalog` brief said "mission" five times against a schema with no such
+  argument. The human runs `obsdb_catalog repair_all` once, out of band.
+
+- 2026-08-03 -> 2026-08-05 — **The replay seam: three run-killers, then the unification that removes the
+  class.** With tool search on, part of the transcript is authored by the *provider*, and for the first
+  time we hand back items we did not build. Three live 400s followed in one week, each the same mistake
+  wearing a new face — we re-type a provider's record into a smaller shape of our own, so anything we did
+  not think to keep is destroyed at ingest: `Unknown parameter: 'input[2].created_by'` (the Responses API
+  **accepts a smaller vocabulary than it emits**; openai-python **#3008**/**#2323**/**#2670** ask for an
+  `.as_input()` helper the SDK does not ship), `Missing namespace for function_call` (a discovered tool is
+  addressed by a namespace we had rebuilt away), and `tool_search_call … without its required 'reasoning'
+  item`. Interim fixes carried the provider's record whole (`ToolCall.provider_fields`; an inverted
+  `_UNCARRIED_ITEM_TYPES` default so an unanticipated item type rides along; `_as_input_item` filtering by
+  **name and by value** once at capture, which is what protects prompt caching — the hazard is applying a
+  different *rule* on different turns, not one that reads values). **Then the root cause, 2026-08-05:**
+  `ModelHandle.call` treated `schema` and `tools` as mutually exclusive — **self-imposed**, asserted in
+  four places, and a live probe showed all three providers accept both in one request. That exclusivity
+  forced the terminal compose to declare no tools, which *is* the request shape behind the 2026-07-29
+  `Tool reference … not found` killer and its `include_discovery` amputation. It is gone, and **the
+  response type now IS the assistant turn:** `AssistantToolUse` deleted, `ConversationMessage =
+  ModelMessage | ModelResponse | ToolResultMessage`, and `_react` appends the response it received instead
+  of hand-copying three fields into a twin — the copy that had silently dropped tool-search blocks until
+  2026-07-27 and `thinking` until now. `provider_blocks` → **`provider_parts`, allowlist deleted** (we were
+  reading 3 of Anthropic's 16 block types; the set is never complete). **Replay follows each provider's own
+  documentation** — Anthropic *"echo the assistant message exactly as received"*, Google stateless mode
+  *"MUST always resend all `thought` blocks exactly as they were received"*, OpenAI's pass-back guidance —
+  so Anthropic and Google echo the whole array while OpenAI keeps its capture-time input projection, whose
+  field allowlist is now **derived from the SDK's own `ResponseInputItemParam` union** (27 types). Google
+  also stops using the `.text`/`.function_calls` accessors (they flatten a mixed turn and hide
+  `thought_signature`) and captures the signature onto `provider_fields` — the **[I8]** mechanism, not yet
+  live-verified. **Two rules had been wrong because they were inferred from 400s rather than read from the
+  docs** (a "thinking first" reassembly order and a "drop only tool-referencing blocks" filter — the docs
+  forbid rebuilding or filtering at all); a request declaring no tools therefore carries no provider parts
+  and rebuilds from the interpreted views. Live-verified 2026-08-05 on both providers: second-turn replay
+  of a full Anthropic turn (`thinking → server_tool_use → tool_search_tool_result → thinking → tool_use`)
+  and a tool-less structured compose over the same trajectory. The cheap live test that caught two of the
+  three 400s for cents — `test_live_tool_search.py::test_live_second_turn_after_discovery`, after the first
+  cost ~$10 of live analysis — now covers the terminal compose too. Suite 649 → 665. **Deferred, recorded:**
+  `stop_reason` is still not modelled (`_react` infers "done" from the absence of tool calls, so
+  `max_tokens`/`refusal`/`pause_turn` all read as a clean finish); tool `input_schema`s get no dialect
+  normalization; the tool_use `caller` field is dropped on a synthesized-turn rebuild; letting the terminal
+  compose declare its tools would put it back on the documented echo path. **Also observed live on those
+  runs** (all first-time evidence): durable resume re-entered the analysis node with no literature repeat,
+  the ledger stayed append-only across the kill, cost seeded from the ledger, locked-ObsID handling worked
+  end to end on both providers, and **Anthropic context editing fired in a real analysis** (two edits, ~26k
+  tokens cleared each) — though its collision with tool search (§13 watch item (a)) was not exercised, both
+  edits landing while the worker was already writing up. Open from the same runs: **[F3]** the filesystem
+  guard denies `2>/dev/null` and trains agents into `cd <dir> && <relative>` form the command check cannot
+  inspect at all.
