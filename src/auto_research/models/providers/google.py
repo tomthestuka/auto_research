@@ -2,6 +2,7 @@
 
 import copy
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -9,7 +10,6 @@ from pydantic import BaseModel
 
 from auto_research.models.providers._json import loads_first_json_object
 from auto_research.models.types import (
-    AssistantToolUse,
     ConversationMessage,
     ModelMessage,
     ModelResponse,
@@ -19,6 +19,8 @@ from auto_research.models.types import (
     ToolResultMessage,
 )
 from auto_research.schemas import DocumentRef, FigureRef
+
+_log = logging.getLogger(__name__)
 
 # String `format` values Gemini's response schema accepts (others are stripped).
 _GEMINI_SUPPORTED_FORMATS = {"date-time", "enum"}
@@ -110,6 +112,41 @@ def _clean_gemini(node: Any) -> None:
             _clean_gemini(item)
 
 
+def _response_parts(response: Any) -> list:
+    """The first candidate's content parts, or ``[]`` (a blocked/empty candidate has none)."""
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        return []
+    content = getattr(candidates[0], "content", None)
+    return list(getattr(content, "parts", None) or [])
+
+
+def _part_to_dict(part: Any) -> dict[str, Any]:
+    """Plain-dict view of a Gemini ``Part``, dropping unset fields (for verbatim replay)."""
+    try:
+        return part.model_dump(mode="json", exclude_none=True)
+    except Exception:  # noqa: BLE001 — a part we cannot serialize must never break the call
+        return {}
+
+
+def _part_from_dict(data: Mapping[str, Any], types: Any) -> Any | None:
+    """Rebuild a carried ``Part`` from its dict form; ``None`` when it cannot be rebuilt.
+
+    Unlike the other two providers, Gemini's message content is typed SDK objects rather than
+    dicts, so a carried part has to be revalidated rather than spliced in as-is. The dict came
+    from that same SDK's ``model_dump``, so a failure here means the round trip is lossy — it is
+    logged rather than swallowed, because a silently dropped part is the failure mode this whole
+    carrier exists to remove.
+    """
+    if not data:
+        return None
+    try:
+        return types.Part.model_validate(dict(data))
+    except Exception as exc:  # noqa: BLE001 — losing one part must not fail the call
+        _log.warning("dropping a carried Gemini part that would not rebuild (%s): %s", exc, data)
+        return None
+
+
 def _figure_parts(figure: FigureRef, types: Any) -> list:
     """Render one figure as Gemini ``Part``s: a caption then the image bytes.
 
@@ -128,19 +165,42 @@ def _figure_parts(figure: FigureRef, types: Any) -> list:
 def _to_gemini_contents(messages: Sequence[ConversationMessage], types: Any) -> tuple[str | None, list]:
     """Split system text out and translate the rest into Gemini ``Content`` turns.
 
-    ``AssistantToolUse`` → a ``model`` turn with ``function_call`` parts;
+    ``ModelResponse`` → a ``model`` turn rebuilt from that turn's parts;
     ``ToolResultMessage`` → a ``user`` turn with ``function_response`` parts
     (keyed by tool name); plain ``ModelMessage`` → a text turn.
+
+    A turn Gemini authored is echoed VERBATIM, for the reason its docs give: we manage
+    conversation state ourselves (stateless mode), where *"you MUST always resend all `thought`
+    blocks exactly as they were received from the model"* and *"should NOT remove or modify thought
+    blocks from the history, as they contain the signatures required for the model to continue its
+    reasoning"* (ai.google.dev/gemini-api/docs/thinking#signatures). Signatures sit on ``thought``
+    steps and on built-in tool steps, and a ``Part`` is a struct rather than a tagged union, so a
+    call's ``thought_signature`` rides on the same part as its ``function_call`` — echoing the
+    array keeps them together. Dropping it is why Gemini's multi-turn tool use breaks today
+    (``Function call is missing a thought_signature``, [I8]).
+
+    A turn we synthesized has no array to echo, so it is rebuilt from the interpreted views, with
+    the signature taken off the call's ``provider_fields``.
     """
     system_texts: list[str] = []
     contents: list = []
     for message in messages:
-        if isinstance(message, AssistantToolUse):
-            parts = []
-            if message.content:
-                parts.append(types.Part.from_text(text=message.content))
-            for call in message.tool_calls:
-                parts.append(types.Part.from_function_call(name=call.name, args=call.arguments))
+        if isinstance(message, ModelResponse):
+            if message.provider_parts:
+                parts = [_part_from_dict(part, types) for part in message.provider_parts]
+                parts = [part for part in parts if part is not None]
+            else:
+                parts = []
+                if message.content:
+                    parts.append(types.Part.from_text(text=message.content))
+                for call in message.tool_calls:
+                    signature = call.provider_fields.get("thought_signature")
+                    parts.append(
+                        types.Part(
+                            function_call=types.FunctionCall(name=call.name, args=call.arguments),
+                            **({"thought_signature": signature} if signature else {}),
+                        )
+                    )
             contents.append(types.Content(role="model", parts=parts))
         elif isinstance(message, ToolResultMessage):
             parts = [
@@ -168,13 +228,16 @@ def _to_gemini_contents(messages: Sequence[ConversationMessage], types: Any) -> 
 class GoogleProvider:
     """Thin adapter around Google Gen AI models.
 
-    Native structured output uses ``response_mime_type="application/json"`` plus
-    a ``response_schema`` (the Pydantic model). Function calling passes
-    ``FunctionDeclaration``s and reads ``response.function_calls``.
-    ``AssistantToolUse`` / ``ToolResultMessage`` turns are replayed as
-    ``function_call`` / ``function_response`` parts (Google correlates results to
-    calls by tool name). Implicit context caching is on by default for current
-    Gemini, so ``cache_prefix`` is accepted as a no-op.
+    Native structured output uses ``response_mime_type="application/json"`` plus a
+    ``response_schema`` (the Pydantic model); function calling passes ``FunctionDeclaration``s.
+    Both may be declared in one request (live-verified 2026-08-04 on ``gemini-3.5-flash``,
+    which lifts the old "function calling with a json response mime type is unsupported"
+    restriction). Responses are read part-by-part rather than through the ``.text`` /
+    ``.function_calls`` accessors, which flatten a mixed turn; parts we do not interpret ride
+    on ``ModelResponse.provider_parts``. Prior ``ModelResponse`` / ``ToolResultMessage`` turns
+    are replayed as ``function_call`` / ``function_response`` parts (Google correlates results
+    to calls by tool name). Implicit context caching is on by default for current Gemini, so
+    ``cache_prefix`` is accepted as a no-op.
     """
 
     async def call(
@@ -193,9 +256,6 @@ class GoogleProvider:
 
         from google import genai
         from google.genai import types
-
-        if schema is not None and tools is not None:
-            raise ValueError("schema and tools are mutually exclusive")
 
         system, contents = _to_gemini_contents(messages, types)
         extra_parts: list[Any] = []
@@ -220,7 +280,7 @@ class GoogleProvider:
         if schema is not None:
             params["response_mime_type"] = "application/json"
             params["response_schema"] = _to_gemini_schema(schema)
-        elif tools is not None:
+        if tools is not None:
             params["tools"] = [
                 types.Tool(
                     function_declarations=[
@@ -247,6 +307,35 @@ class GoogleProvider:
             config=generation_config,
         )
 
+        # Walk the parts rather than the `.text` / `.function_calls` accessors: a Part is a
+        # struct, not a tagged union, so those accessors flatten a mixed turn (`.text` warns
+        # and returns only the text parts when a function_call is present) and neither exposes
+        # `thought_signature`. EVERY part is carried (the array is the turn, echoed verbatim by
+        # `_to_gemini_contents`); plain text → `content` and `function_call` → `tool_calls` are
+        # views onto it for the harness.
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        provider_parts: list[dict[str, Any]] = []
+        for part in _response_parts(response):
+            provider_parts.append(_part_to_dict(part))
+            call = getattr(part, "function_call", None)
+            if call is not None:
+                signature = getattr(part, "thought_signature", None)
+                tool_calls.append(
+                    ToolCall(
+                        id=getattr(call, "id", "") or call.name,
+                        name=call.name,
+                        arguments=dict(call.args or {}),
+                        # The signature rides on this part, so it belongs to this call ([I8]).
+                        provider_fields=({"thought_signature": signature} if signature else {}),
+                    )
+                )
+            elif getattr(part, "text", None) is not None and not getattr(part, "thought", False):
+                text_parts.append(part.text)
+            else:
+                provider_parts.append(_part_to_dict(part))
+
+        content = "".join(text_parts)
         parsed = None
         if schema is not None:
             parsed_obj = getattr(response, "parsed", None)
@@ -255,25 +344,14 @@ class GoogleProvider:
             elif parsed_obj is not None:
                 parsed = parsed_obj
             else:
-                text = getattr(response, "text", "") or ""
-                parsed = loads_first_json_object(text)
-
-        tool_calls = []
-        if tools is not None:
-            for fc in getattr(response, "function_calls", None) or []:
-                tool_calls.append(
-                    ToolCall(
-                        id=getattr(fc, "id", "") or fc.name,
-                        name=fc.name,
-                        arguments=dict(fc.args or {}),
-                    )
-                )
+                parsed = loads_first_json_object(content)
 
         usage = getattr(response, "usage_metadata", None)
         return ModelResponse(
-            content=getattr(response, "text", "") or "",
+            content=content,
             parsed=parsed,
             tool_calls=tool_calls,
+            provider_parts=provider_parts,
             usage=_gemini_usage(usage),
             raw=response,
         )

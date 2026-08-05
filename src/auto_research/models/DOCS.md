@@ -71,11 +71,10 @@ Google by editing YAML alone
   conversation **tail**, so the cached prefix is untouched and the tool stays callable for the
   rest of the conversation without re-searching. Three consequences the adapters implement:
   the Anthropic `cache_control` breakpoint moves to the last **non-deferred** tool (a deferred
-  tool carrying it is a 400); discovery blocks are captured onto `ModelResponse.provider_blocks`
-  and replayed verbatim from `AssistantToolUse.provider_blocks`, since the API re-expands
-  referenced definitions from history each turn; and those blocks are replayed **only when the
-  request declares tools** (`include_discovery`), since a reference has nothing to point at
-  otherwise. Providers differ in what stays resident: Anthropic hides a deferred tool entirely, OpenAI
+  tool carrying it is a 400); discovery blocks ride on `ModelResponse.provider_parts` and are
+  replayed verbatim, since the API re-expands referenced definitions from history each turn; and
+  they are replayed **only when the request declares tools** (`include_provider_parts`), since a
+  reference has nothing to point at otherwise. Providers differ in what stays resident: Anthropic hides a deferred tool entirely, OpenAI
   keeps its name and description and withholds only the parameter schema. The Anthropic search
   tool is declared as the dated `type` beside its **undated** `name`
   (`anthropic_search_tool_name` derives one from the other; a mismatch is a 400). **Live-verified
@@ -102,13 +101,23 @@ Google by editing YAML alone
   re-prompts instead of raising.
   `call(..., tools=[...], tool_choice=...)`
   requests provider-native **function calling**; the model's tool calls are
-  returned in `ModelResponse.tool_calls`. `schema` and `tools` are mutually
-  exclusive in one call (the two are separate provider mechanisms). Each tool is
+  returned in `ModelResponse.tool_calls`. `schema` and `tools` **may be declared
+  together** — live-verified on all three providers 2026-08-04; the model then either
+  calls a tool or emits the structured answer. Each tool is
   a provider-neutral dict `{"name", "description", "input_schema"}`. There is no
   prompt-injected JSON schema; agents validate the parsed dict with Pydantic
   (`_structured_loop`) and retry on an off-schema shape, failing loudly on cap exhaustion.
-- Provider calls return a normalized `ModelResponse` with `content`, `parsed`,
-  `tool_calls`, `usage`, and the raw SDK response for later observability.
+- **`ModelResponse` is the neutral assistant turn, in both directions** — the analogue of
+  Anthropic `Message.content`, OpenAI `response.output` and Google `Content.parts`. An adapter
+  returns it and `_react` appends it straight back, so the turn replayed is the turn received
+  rather than a re-typed copy (both 2026-08-03 run-killers were fields lost in such a copy).
+  `content`/`tool_calls`/`parsed` are the interpreted views the harness acts on; everything else
+  the provider authored rides verbatim on `provider_parts`, an **open** set — the installed
+  `anthropic` `ContentBlock` union already lags its own docs, so an allowlist would be stale on
+  arrival. The neutral conversation therefore splits by **authorship**: `ModelMessage` and
+  `ToolResultMessage` are ours and we own their shape; `ModelResponse` is the provider's and we
+  carry it whole. **Carry on ingest; the adapter decides what is legal to send** — see the
+  per-provider replay rules below.
 - `priceMTk` is optional per model member and stores USD rates per million
   tokens with `input` and `output` keys. When absent, observability still
   records token counts with zero calculated dollar cost.
@@ -142,16 +151,36 @@ Google by editing YAML alone
   produced; each adapter renders them as an image turn inline at this tool-result turn
   (so they persist in history and cache), distinct from the call-time ``images=`` channel
   used for cross-agent figures.
-- `AssistantToolUse(role="assistant", content: str = "", tool_calls: list[ToolCall])`
-  and `ToolResultMessage(role="tool", results: list[ToolResultPart])` — neutral
-  conversation turns for ReAct-loop replay. `ConversationMessage = ModelMessage |
-  AssistantToolUse | ToolResultMessage`; `call(messages=…)` accepts the union.
-- `ModelResponse(content: str = "", parsed: Any | None = None,
-  tool_calls: list[ToolCall] = [], usage: ModelUsage = ModelUsage(),
-  context_edits: list[dict] = [], raw: Any = None)` — normalized provider output.
-  `parsed` carries native structured output; `tool_calls` carries native function
-  calls; `context_edits` carries the provider-native context-management edits applied
-  to this call (Anthropic `applied_edits`; empty on every other provider/call).
+- `ToolResultMessage(role="tool", results: list[ToolResultPart])` — the neutral tool-result
+  turn (ours). `ConversationMessage = ModelMessage | ModelResponse | ToolResultMessage`;
+  `call(messages=…)` accepts the union.
+- `ModelResponse(role="assistant", content: str = "", parsed: Any | None = None,
+  tool_calls: list[ToolCall] = [], provider_parts: list[dict] = [],
+  usage: ModelUsage = ModelUsage(), context_edits: list[dict] = [], raw: Any = None)` — one
+  provider-authored assistant turn, used as both the return value and the replayed input turn.
+  `parsed` carries native structured output; `tool_calls` native function calls;
+  `provider_parts` every part we do not interpret (Anthropic/Google carry the **whole** array —
+  see the replay rules below); `context_edits` the provider-native context-management edits
+  applied to this call (Anthropic `applied_edits`; empty elsewhere).
+- **Per-provider replay rules, from each provider's documentation.** Anthropic: *"echo the
+  assistant message exactly as received"*, and *"rebuilding the message or filtering out
+  `redacted_thinking` blocks triggers a 400 error"*
+  ([thinking-tool-workflows](https://platform.claude.com/docs/en/build-with-claude/thinking-tool-workflows))
+  — so its adapter carries the whole content array and hands it back unfiltered and unreordered.
+  Google, in stateless mode (ours): *"you MUST always resend all `thought` blocks exactly as they
+  were received"* and *"should NOT remove or modify thought blocks"*
+  ([thinking#signatures](https://ai.google.dev/gemini-api/docs/thinking#signatures)) — same
+  verbatim echo, and a call's `thought_signature` rides on its own part, which is why it also
+  lives on `ToolCall.provider_fields` for turns we synthesize. OpenAI documents pass-back as
+  *recommended*, not required, plus *"ensure all items between the last user message and your
+  function call output are passed into the next response untouched"*
+  ([reasoning](https://developers.openai.com/api/docs/guides/reasoning)) — so its adapter carries
+  every item except the two it rebuilds from our own state, projected into the accepted input
+  shape at capture. **A request declaring no tools carries no provider parts on any adapter** and
+  rebuilds the turn from the interpreted views: a block naming an absent tool is rejected, and
+  filtering just those blocks out is what Anthropic's rule forbids (confirmed live 2026-08-05).
+  The cost is that a terminal compose does not see its own prior reasoning; the documented way
+  out is for the compose to declare its tools.
 - `RoleModelConfig(name: str, provider: ProviderName, model: str,
   vision: bool = False, documents: bool = False, priceMTk: dict[str, float] = {},
   parameters: dict[str, Any] = {})` — one model member from YAML.
@@ -166,13 +195,13 @@ Google by editing YAML alone
   sets `cache_control: ephemeral` breakpoints on the stable prefix (system + tool defs)
   and the rolling conversation tail; OpenAI sets a `prompt_cache_key` (prefix caching is
   automatic); Google relies on implicit caching (no-op). `messages` may include
-  `AssistantToolUse`/`ToolResultMessage` turns, which each adapter translates to native
+  prior `ModelResponse`/`ToolResultMessage` turns, which each adapter translates to native
   tool_use/tool_result blocks.
 - `ModelHandle(role: str, config: RoleModelConfig, provider: ModelProvider)` —
   resolved callable handle for one role member. Method:
   `async call(messages, *, schema=None, tools=None, tool_choice="auto",
-  images=(), documents=()) -> ModelResponse`. Raises `ValueError` if both
-  `schema` and `tools` are passed. Every call is wrapped in
+  images=(), documents=()) -> ModelResponse`. `schema` and `tools` may be combined.
+  Every call is wrapped in
   `retry.call_with_transient_retry`, so transient provider failures are waited out
   here — the single choke point all roles share — before the exception can reach
   the graph.
@@ -295,3 +324,71 @@ Google by editing YAML alone
   what let this reach a live run. Tests: +3 (`..._translates_discovery_items_to_their_input_shape`,
   `..._input_fields_are_read_from_the_sdk_not_hand_listed`, `..._translation_is_stable_across_turns`);
   suite 649 → 652.
+
+- 2026-08-03 (later) — **Carry the provider's items whole; the shim above was one field of three.**
+  Two more live 400s followed it, each a different face of the same mistake — re-typing the
+  provider's records into a smaller shape of our own. (1) `Missing namespace for function_call
+  '<name>'. It does not exist in the default namespace.` — a tool discovered through tool search
+  is addressed by a **namespace** (live evidence: each deferred tool's namespace is its own
+  name), and we rebuilt `function_call` items from `ToolCall`'s three fields, destroying it at
+  ingest. (2) `Item 'tsc_…' of type 'tool_search_call' was provided without its required
+  'reasoning' item: 'rs_…'` — we carried only the two discovery types, so the reasoning item the
+  search depended on was never kept. (3) `Unknown parameter: 'input[2].status'` — `model_dump()`
+  fabricates absent optionals as null and the API rejects a null it did not send, *even for a
+  field its own input type declares* (openai-python #3008 verbatim), so filtering by name alone
+  is insufficient. **Now:** `ToolCall.provider_fields` carries the provider's own record of a call
+  (additive — an adapter that sets nothing replays byte-identically, and our canonical id/name/
+  arguments overwrite on replay so the executed and replayed call can never disagree);
+  `_UNCARRIED_ITEM_TYPES` inverts the default so **every** response item is carried except the two
+  we replay from our own state (`function_call`, rebuilt; `message`, replayed as content), which
+  means an item type nobody anticipated rides along instead of going missing; and `_as_input_item`
+  filters **by name and by value** (declared input fields, then drop nulls), both once at capture
+  so each stored item is fixed for the conversation's life and replays as identical bytes — the
+  cached prefix is protected by applying the same *rule* every turn, which a capture-time
+  value-filter satisfies. A tool-less request still drops the carried items wholesale: half a
+  reasoning/discovery pair is worse than neither. **Verified live on both providers** by a new
+  `tests/test_live_tool_search.py::test_live_second_turn_after_discovery` — the gap that let all
+  three ship, since the existing live test stopped after turn 1 and never handed the provider's
+  records back. Deterministic tests +5; suite 652 → 657. The same carrier is what [I8] needs for
+  Gemini's `thought_signature`.
+- 2026-08-05 — **`ModelResponse` is the neutral assistant turn; the provider's parts are carried whole.**
+  Motivated by asking why native structured output and our schema path ran in parallel: they were
+  **self-imposed** as mutually exclusive (asserted in four places), and a live probe showed all three
+  providers accept `schema` + `tools` in one request — the model then either calls a tool or emits the
+  answer. That exclusivity is what forced the terminal compose to declare no tools, which is the request
+  shape behind the 2026-07-29 `Tool reference … not found` run-killer and its `include_discovery`
+  amputation. The exclusivity is gone. **The response type now IS the assistant turn:**
+  `AssistantToolUse` is deleted, `ConversationMessage = ModelMessage | ModelResponse |
+  ToolResultMessage`, and `_react` appends the response it received instead of hand-copying three
+  fields into a twin — the copy that had silently dropped tool-search blocks until 2026-07-27 and
+  `thinking` until today. `provider_blocks` → **`provider_parts`, with the allowlist deleted**: we were
+  reading 3 of Anthropic's 16 block types and discarding the rest, including `thinking` on every
+  replayed turn while every Anthropic chat member runs adaptive thinking. The set is open because it is
+  never complete — `anthropic 0.104.1`'s `ContentBlock` union already lacks the documented `fallback`
+  block. **Replay follows each provider's own documentation** (Anthropic: *"echo the assistant message
+  exactly as received"*; Google stateless mode: *"MUST always resend all `thought` blocks exactly as they
+  were received"*; OpenAI: recommended, plus keep the items between the last user message and the
+  function-call output untouched), so Anthropic and Google carry and echo the whole array while OpenAI
+  keeps its capture-time input projection. That projection's field allowlist is now **derived from the
+  SDK's own `ResponseInputItemParam` union** (27 types) instead of a hand-written 4-entry map, which an
+  open carrier makes load-bearing: an unmapped item type previously got *no* filtering and would have
+  carried a server-stamped `created_by` into the next request — the 2026-08-03 400, one item type later.
+  Google also stops reading the `.text`/`.function_calls` accessors (they flatten a mixed turn and hide
+  `thought_signature`) and captures a call's `thought_signature` onto `ToolCall.provider_fields`, which
+  is the [I8] mechanism — **not yet live-verified**, since Gemini stays out of the tool loop.
+  **Two rules were wrong before the docs were read**, both encoded from live 400s: a "thinking first"
+  reassembly order (the docs forbid rebuilding at all) and a "drop only the tool-referencing blocks"
+  filter (the docs forbid filtering, and it 400s). A request declaring no tools therefore carries no
+  provider parts at all and rebuilds from the interpreted views — what shipped before any part was
+  carried. Live-verified 2026-08-05: second-turn replay on both providers (Anthropic turn shape
+  `thinking → server_tool_use → tool_search_tool_result → thinking → tool_use`, echoed intact) and a
+  tool-less structured compose over the same trajectory. Deterministic tests: `tests/test_providers.py`
+  (open carrier, verbatim echo, tool-less rebuild, synthesized-turn rebuild, schema+tools together,
+  SDK-derived allowlist, Gemini signature round trip), `tests/test_react_tools.py` (the fold),
+  `tests/test_tool_search.py` + `tests/test_context_editing.py` updated; suite 657 → 665.
+  Live: `tests/test_live_tool_search.py` gains the tool-less compose case and replays the turn whole.
+  **Deferred, recorded here:** `stop_reason` is still not modelled (`_react` infers "done" from the
+  absence of tool calls, so `max_tokens`/`refusal`/`pause_turn` all read as a clean finish); tool
+  `input_schema`s still get no dialect normalization while answer schemas do; the tool_use `caller`
+  field Anthropic returns is dropped on a synthesized-turn rebuild; and letting the terminal compose
+  declare its tools would put it back on the documented echo path.

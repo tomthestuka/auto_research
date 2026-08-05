@@ -1422,3 +1422,32 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   provoke deliberately. Open from the same run: **[F3]** the filesystem guard denies `2>/dev/null`
   as an out-of-allow-list path, costing a worker three turns on idiomatic shell — safe but stupid,
   unfixed.
+- 2026-08-03 (later) — **Carry the provider's records whole — the `created_by` shim was one field
+  of three.** Two further live 400s followed it within the hour, each the same mistake wearing a
+  new face: we re-type the provider's records into a smaller shape of our own, so anything we did
+  not think to keep is destroyed at ingest. (1) `Missing namespace for function_call '<name>'. It
+  does not exist in the default namespace. Round-trip the model's function_call item with its
+  namespace field included.` — a tool discovered through tool search is addressed by a
+  **namespace** (live: each deferred tool's namespace is its own name), and we rebuilt
+  `function_call` items from `ToolCall`'s three fields (run `b-run-q21-0803b`, seq 547, $11.03 in;
+  B2/F4/F6 had all passed again first, and the Claude worker had completed a full report).
+  (2) `Item 'tsc_…' of type 'tool_search_call' was provided without its required 'reasoning' item:
+  'rs_…'` — we carried only the two discovery types, never the reasoning item the search depended
+  on. (3) `Unknown parameter: 'input[2].status'` — `model_dump()` fabricates absent optionals as
+  null and the API rejects a null it never sent, **even for a field its own input type declares**
+  (openai-python #3008 verbatim), so filtering by declared name alone is not enough. **Fix, per the
+  human's ruling ("carry them all… trivial and additive"):** `ToolCall.provider_fields` carries the
+  provider's record of a call — additive, since an adapter setting nothing replays byte-identically,
+  and our canonical id/name/arguments overwrite on replay so the executed and the replayed call can
+  never disagree; `_UNCARRIED_ITEM_TYPES` **inverts the default** so every response item is carried
+  except the two we replay from our own state, meaning an unanticipated item type rides along
+  instead of going missing; and `_as_input_item` filters by **name and by value**, both once at
+  capture. That capture-time placement is what protects prompt caching: the hazard is applying a
+  different *rule* on different turns, not one that reads values, since the stored item is fixed for
+  the conversation's life. A tool-less request still drops the carried items wholesale — half a
+  reasoning/discovery pair is worse than neither. **The test gap that let all three ship is closed:**
+  `tests/test_live_tool_search.py` stopped after turn 1, so nothing ever exercised handing the
+  provider's own records back, which is what a ReAct loop does on every iteration after the first;
+  the new `test_live_second_turn_after_discovery` does exactly that and **passed live on both
+  providers**, catching bugs (2) and (3) for cents after (1) had cost ~$10 of live analysis to find.
+  Suite 652 → 657. The same carrier is the seam [I8] needs for Gemini's `thought_signature`.

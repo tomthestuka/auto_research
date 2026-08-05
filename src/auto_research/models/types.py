@@ -53,13 +53,24 @@ class ModelUsage(BaseModel):
 
 
 class ToolCall(BaseModel):
-    """One provider-native tool/function call extracted from a model response."""
+    """One provider-native tool/function call extracted from a model response.
+
+    ``provider_fields`` carries the provider's own record of the call, so a later turn can hand
+    it back unchanged. The three fields above are what *we* need to execute a call; a provider
+    may attach more that *it* needs to resolve one — and re-typing only our three silently
+    discarded the rest. Two live cases: OpenAI's ``namespace`` (a tool discovered through tool
+    search does not live in the default namespace, so a replay without it names a tool the API
+    cannot find), and Gemini's ``thought_signature``, which rides on the same part as the call
+    and must be echoed back or the second call of any loop hard-400s ([I8]). Adapters that set
+    nothing here are unaffected.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     id: str = ""
     name: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
+    provider_fields: dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolResultPart(BaseModel):
@@ -84,25 +95,6 @@ class ToolResultPart(BaseModel):
     the terminal report call that replays the trajectory) keeps seeing them."""
 
 
-class AssistantToolUse(BaseModel):
-    """An assistant conversation turn carrying native tool calls (for ReAct replay)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    role: Literal["assistant"] = "assistant"
-    content: str = ""
-    tool_calls: list[ToolCall] = Field(default_factory=list)
-    provider_blocks: list[dict[str, Any]] = Field(default_factory=list)
-    """Opaque provider-native blocks from this turn that MUST be replayed verbatim on every
-    later request. Today: tool-search discovery (Anthropic ``server_tool_use`` +
-    ``tool_search_tool_result``; OpenAI ``tool_search_call`` + ``tool_search_output``), where
-    the API re-expands the referenced tool definitions from the conversation history — so
-    dropping these silently de-activates a discovered tool mid-run. Each adapter replays its
-    own blocks positionally, after any assistant text and before the ``tool_use`` blocks, and
-    ignores blocks it does not recognise. Empty for every non-discovery turn, which keeps the
-    replay byte-identical to the pre-tool-search behaviour."""
-
-
 class ToolResultMessage(BaseModel):
     """A tool-result conversation turn fed back to the model (for ReAct replay)."""
 
@@ -112,34 +104,66 @@ class ToolResultMessage(BaseModel):
     results: list[ToolResultPart] = Field(default_factory=list)
 
 
-# Any turn that may appear in a ReAct conversation passed to ``call(messages=…)``.
-ConversationMessage = ModelMessage | AssistantToolUse | ToolResultMessage
-
-
 class ModelResponse(BaseModel):
-    """Provider-neutral response: free text, structured output, and/or tool calls.
+    """One **provider-authored assistant turn** — the neutral analogue of Anthropic
+    ``Message.content``, OpenAI ``response.output`` and Google ``Content.parts``.
 
-    A structured-output call (``schema=``) populates ``parsed`` with the
-    provider-parsed object. A function-calling call (``tools=``) populates
-    ``tool_calls``. A plain call populates ``content``.
+    The type flows in both directions: an adapter returns it from ``call``, and
+    ``AgentRole._react`` appends it straight back onto the conversation, where the same adapter
+    translates it into that provider's assistant-turn shape. So **the turn we replay is the turn
+    we received**, not a re-typed copy of it — both 2026-08-03 run-killers were fields lost in
+    such a copy, and the hand-copy this replaced had already dropped one part silently.
+
+    The neutral conversation is split by **authorship**, not by content: ``ModelMessage`` and
+    ``ToolResultMessage`` are ours and we own their shape; this one is the provider's, so we
+    carry it whole. Interpreted parts, which the harness acts on: ``content`` (text/message
+    parts, joined), ``tool_calls`` (tool_use/function_call parts, each keeping its own verbatim
+    record), and ``parsed`` (provider-parsed structured output, when a ``schema`` was declared).
+    Everything else rides verbatim on ``provider_parts``.
+
+    **Carry on ingest; the adapter decides what is legal to send.** Capturing a part never
+    obliges an adapter to replay it into every request: a part that references a tool cannot go
+    into a request that declares none (a live 400 on 2026-07-29), and OpenAI projects each item
+    into its accepted *input* shape at capture time.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    role: Literal["assistant"] = "assistant"
     content: str = ""
     parsed: Any | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
+    provider_parts: list[dict[str, Any]] = Field(default_factory=list)
+    """Every part of this turn we do **not** interpret, verbatim and in the order the provider
+    emitted them, so a later request can hand them back.
+
+    Anthropic calls these content *blocks*, OpenAI *items*, Google *parts*. The set is open by
+    construction because it is never complete: ``anthropic 0.104.1``'s ``ContentBlock`` union
+    already lacks the documented ``fallback`` block, so any allowlist would be stale on arrival —
+    an unrecognised part rides along instead of going missing.
+
+    Carrying them is a documented requirement, not an optimization. Anthropic: *"when you return a
+    tool result, the thinking blocks from the assistant message must come back with it"*, and
+    *"rebuilding the message or filtering out `redacted_thinking` blocks triggers a 400 error"*
+    (platform.claude.com/docs/en/build-with-claude/thinking-tool-workflows). OpenAI rejects a
+    ``tool_search_call`` whose ``reasoning`` item does not precede it. Both providers re-expand a
+    discovered tool's definition from the tool-search parts in history, so dropping those
+    de-activates the tool mid-run.
+
+    Order is preserved for the same reason. How these sit relative to the *interpreted* parts is a
+    per-provider rule and belongs to the adapter — for Anthropic it does not arise, because the
+    adapter echoes the whole array rather than reassembling it."""
     usage: ModelUsage = Field(default_factory=ModelUsage)
     context_edits: list[dict[str, Any]] = Field(default_factory=list)
     """Provider-native context-management edits applied to THIS call (Anthropic context
     editing ``applied_edits``: each a plain dict with e.g. ``cleared_tool_uses`` /
     ``cleared_input_tokens``); empty when none applied. Surfaced so the run monitor can
     record when stale tool context was cleared. Live-verified 2026-07-28."""
-    provider_blocks: list[dict[str, Any]] = Field(default_factory=list)
-    """Opaque provider-native blocks this response produced that must be carried into the
-    next request — see ``AssistantToolUse.provider_blocks``. ``AgentRole._react`` copies
-    these onto the assistant turn it appends, so tool-search discoveries survive replay."""
     raw: Any = None
+
+
+# Any turn that may appear in a ReAct conversation passed to ``call(messages=…)``.
+ConversationMessage = ModelMessage | ModelResponse | ToolResultMessage
 
 
 class RoleModelConfig(BaseModel):
@@ -187,16 +211,16 @@ class ModelProvider(Protocol):
         documents: Sequence[DocumentRef] = (),
         cache_prefix: bool = False,
     ) -> ModelResponse:
-        """Call a provider model and return normalized output.
+        """Call a provider model and return one normalized :class:`ModelResponse`.
 
-        ``schema`` and ``tools`` are mutually exclusive. ``schema`` requests
-        native structured output (result in ``ModelResponse.parsed``); ``tools``
-        requests native function calling (result in ``ModelResponse.tool_calls``).
-        Each tool is a neutral dict ``{"name", "description", "input_schema"}``.
-        ``tool_choice`` is ``"auto"`` or ``"required"``. ``messages`` may include
-        ``AssistantToolUse`` / ``ToolResultMessage`` turns for ReAct-loop replay.
-        ``cache_prefix`` asks the adapter to cache the stable prefix (system +
-        tool defs) using its provider-native mechanism.
+        ``schema`` and ``tools`` **may be declared together** — all three providers
+        accept it (live-verified 2026-08-04), and the model then either calls a tool
+        (``tool_calls``) or emits the structured answer (``parsed``). Each tool is a
+        neutral dict ``{"name", "description", "input_schema"}``; ``tool_choice`` is
+        ``"auto"`` or ``"required"``. ``messages`` may include prior ``ModelResponse``
+        / ``ToolResultMessage`` turns for ReAct-loop replay. ``cache_prefix`` asks the
+        adapter to cache the stable prefix (system + tool defs) using its
+        provider-native mechanism.
         """
 
 
@@ -221,17 +245,16 @@ class ModelHandle:
     ) -> ModelResponse:
         """Call the configured provider for this role.
 
-        ``schema`` (structured output) and ``tools`` (function calling) are
-        mutually exclusive. ``messages`` may include ``AssistantToolUse`` /
-        ``ToolResultMessage`` turns for ReAct-loop replay; ``cache_prefix``
-        requests provider-native caching of the stable prefix.
+        ``schema`` (structured output) and ``tools`` (function calling) may be declared
+        together; the model then either calls a tool or emits the structured answer.
+        ``messages`` may include prior ``ModelResponse`` / ``ToolResultMessage`` turns
+        for ReAct-loop replay; ``cache_prefix`` requests provider-native caching of the
+        stable prefix.
         """
 
-        if schema is not None and tools is not None:
-            raise ValueError("schema and tools are mutually exclusive in one call")
         normalized = [
             message
-            if isinstance(message, (ModelMessage, AssistantToolUse, ToolResultMessage))
+            if isinstance(message, (ModelMessage, ModelResponse, ToolResultMessage))
             else ModelMessage.model_validate(message)
             for message in messages
         ]

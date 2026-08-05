@@ -24,7 +24,7 @@ from auto_research.models.providers._tool_search import anthropic_search_tool_na
 from auto_research.models.providers.anthropic import AnthropicProvider
 from auto_research.models.providers.openai import OpenAIProvider, _to_openai_input
 from auto_research.models.types import (
-    AssistantToolUse,
+    ModelResponse,
     ModelMessage,
     RoleModelConfig,
     ToolCall,
@@ -240,20 +240,17 @@ def test_anthropic_cache_breakpoint_never_on_a_deferred_tool(monkeypatch):
 
 def test_anthropic_captures_and_replays_discovery_blocks(monkeypatch):
     response = _call_anthropic(monkeypatch)
-    types = [b["type"] for b in response.provider_blocks]
-    assert types == ["server_tool_use", "tool_search_tool_result"]
-
-    # Replaying that turn must re-emit the blocks verbatim — the API re-expands the
-    # referenced definitions from history, so dropping them de-activates the tool.
-    turn = AssistantToolUse(
-        content="", tool_calls=[ToolCall(id="tu_1", name="ask_human", arguments={})],
-        provider_blocks=response.provider_blocks,
-    )
-    _call_anthropic(monkeypatch, messages=[*_messages(), turn])
-    replayed = _FakeAnthropic.store["request"]["messages"][-1]["content"]
-    assert [b.get("type") for b in replayed] == [
+    # The whole turn is carried, discovery blocks included and in emission order.
+    assert [b["type"] for b in response.provider_parts] == [
         "server_tool_use", "tool_search_tool_result", "tool_use"
     ]
+
+    # Replaying the turn (whole, as `_react` appends it) must re-emit those blocks verbatim —
+    # the API re-expands the referenced definitions from history, so dropping them de-activates
+    # the discovered tool.
+    _call_anthropic(monkeypatch, messages=[*_messages(), response])
+    replayed = _FakeAnthropic.store["request"]["messages"][-1]["content"]
+    assert replayed == response.provider_parts
 
 
 # ── OpenAI request construction ─────────────────────────────────────────────
@@ -316,7 +313,7 @@ def test_openai_declares_search_tool_and_defers(monkeypatch):
     assert sent[0]["defer_loading"] is True
     assert "defer_loading" not in sent[1]
     assert [t for t in sent if t.get("type") == "tool_search"], "search tool declared"
-    assert [b["type"] for b in response.provider_blocks] == [
+    assert [b["type"] for b in response.provider_parts] == [
         "tool_search_call", "tool_search_output"
     ]
 
@@ -328,9 +325,9 @@ def test_openai_replays_discovery_items(monkeypatch):
     monkeypatch.setattr(openai, "AsyncOpenAI", _FakeOpenAI)
     monkeypatch.setattr("auto_research.models.providers.openai.tool_search_config", _enabled)
     cfg = RoleModelConfig(name="m", provider="openai", model="gpt-5.5")
-    turn = AssistantToolUse(
+    turn = ModelResponse(
         content="",
-        provider_blocks=[{"type": "tool_search_call", "call_id": None}],
+        provider_parts=[{"type": "tool_search_call", "call_id": None}],
         tool_calls=[ToolCall(id="c1", name="ask_human", arguments={})],
     )
     asyncio.run(OpenAIProvider().call([*_messages(), turn], cfg, tools=_tools()))
@@ -369,15 +366,8 @@ def test_anthropic_drops_discovery_blocks_when_no_tools_are_declared(monkeypatch
         summary: str
 
     response = _call_anthropic(monkeypatch)
-    turn = AssistantToolUse(
-        content="looked it up",
-        tool_calls=[ToolCall(id="tu_1", name="research_toolkit_xspec_utils_ixpe_pcube",
-                             arguments={})],
-        provider_blocks=response.provider_blocks,
-    )
-    convo = [*_messages(), turn, ToolResultMessage(results=[
-        ToolResultPart(tool_call_id="tu_1", name="research_toolkit_xspec_utils_ixpe_pcube",
-                       content="ok")
+    convo = [*_messages(), response, ToolResultMessage(results=[
+        ToolResultPart(tool_call_id="tu_1", name="ask_human", content="ok")
     ])]
 
     monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAnthropic)
@@ -393,7 +383,7 @@ def test_anthropic_drops_discovery_blocks_when_no_tools_are_declared(monkeypatch
     types = [b.get("type") for b in assistant["content"]]
     assert "server_tool_use" not in types                  # the dangling reference is gone
     assert "tool_search_tool_result" not in types
-    assert types == ["text", "tool_use"]                   # the trajectory itself is intact
+    assert types == ["tool_use"]                           # the trajectory itself is intact
 
 
 def test_openai_drops_discovery_items_when_no_tools_are_declared(monkeypatch):
@@ -403,16 +393,16 @@ def test_openai_drops_discovery_items_when_no_tools_are_declared(monkeypatch):
     class _Out(BaseModel):
         summary: str
 
-    turn = AssistantToolUse(
+    turn = ModelResponse(
         content="",
         tool_calls=[ToolCall(id="call_1", name="research_toolkit_xspec_utils_ixpe_pcube",
                             arguments={})],
-        provider_blocks=[
+        provider_parts=[
             {"type": "tool_search_call", "id": "ts_1"},
             {"type": "tool_search_output", "id": "ts_1"},
         ],
     )
-    items = _to_openai_input([*_messages(), turn], include_discovery=False)
+    items = _to_openai_input([*_messages(), turn], include_provider_parts=False)
     assert not [i for i in items if i.get("type") in ("tool_search_call", "tool_search_output")]
     assert [i for i in items if i.get("type") == "function_call"]      # calls still replay
 
@@ -437,12 +427,12 @@ def test_openai_capture_translates_discovery_items_to_their_input_shape(monkeypa
 
     response = asyncio.run(OpenAIProvider().call(_messages(), cfg, tools=_tools()))
 
-    assert [b["type"] for b in response.provider_blocks] == [
+    assert [b["type"] for b in response.provider_parts] == [
         "tool_search_call", "tool_search_output"
     ]
-    for block in response.provider_blocks:
+    for block in response.provider_parts:
         assert "created_by" not in block, f"output-only field survived into {block['type']}"
-    call, output = response.provider_blocks
+    call, output = response.provider_parts
     assert call["arguments"] == {"query": "pcube"}, "the search query is preserved"
     assert output["tools"] == [{"tool_name": "research_toolkit_xspec_utils_ixpe_pcube"}], (
         "the loaded tool definitions are preserved — they are why the item is replayed at all"
@@ -493,3 +483,119 @@ def test_openai_translation_is_stable_across_turns():
 
     assert populated == absent, "translation must not depend on a field's value"
     assert json.dumps(populated) == json.dumps(absent), "identical bytes, identical key order"
+
+
+# ── the 2026-08-03 second run-killer: a REQUIRED round-trip field we dropped ──────────────────
+
+
+def test_openai_round_trips_the_namespace_of_a_discovered_tool():
+    """A discovered tool is addressed by namespace; replaying without it loses the address.
+
+    A tool loaded through tool search does not live in the default namespace, so OpenAI answers
+    a replay that omits it with `Missing namespace for function_call '<name>'. It does not exist
+    in the default namespace. Round-trip the model's function_call item with its namespace field
+    included.` — which killed the live run b-run-q21-0803b at seq 547. We rebuilt the item from
+    our own three fields, so the namespace was destroyed at ingest, not at replay.
+    """
+    call = ToolCall(
+        id="call_1",
+        name="research_toolkit_catalog_utils_data_catalog",
+        arguments={"obs_db_path": "/x"},
+        provider_fields={
+            "type": "function_call", "call_id": "call_1", "id": "fc_1",
+            "name": "research_toolkit_catalog_utils_data_catalog",
+            "arguments": '{"obs_db_path": "/x"}', "namespace": "research_toolkit",
+        },
+    )
+    turn = ModelResponse(content="", tool_calls=[call])
+
+    items = _to_openai_input([*_messages(), turn], include_provider_parts=True)
+    replayed = [i for i in items if i.get("type") == "function_call"][0]
+
+    assert replayed["namespace"] == "research_toolkit"
+    assert replayed["call_id"] == "call_1" and replayed["arguments"] == '{"obs_db_path": "/x"}'
+
+
+def test_openai_canonical_fields_win_over_the_carried_record():
+    """The executed call and the replayed call can never disagree.
+
+    The provider's record rides along, but our own values overwrite it, so a stale or mismatched
+    field in the carried record cannot change which tool the transcript says was called.
+    """
+    call = ToolCall(
+        id="call_real", name="real_tool", arguments={"a": 1},
+        provider_fields={
+            "type": "function_call", "call_id": "call_STALE", "name": "stale_tool",
+            "arguments": '{"a": 999}', "namespace": "ns",
+        },
+    )
+    items = _to_openai_input([*_messages(), ModelResponse(content="", tool_calls=[call])],
+                             include_provider_parts=True)
+    replayed = [i for i in items if i.get("type") == "function_call"][0]
+
+    assert replayed["call_id"] == "call_real" and replayed["name"] == "real_tool"
+    assert replayed["arguments"] == '{"a": 1}'
+    assert replayed["namespace"] == "ns", "fields we do not interpret still ride along"
+
+
+def test_openai_call_without_provider_fields_replays_unchanged():
+    """Additive by construction: adapters that carry nothing are byte-identical to before."""
+    call = ToolCall(id="c2", name="t", arguments={})
+    items = _to_openai_input([*_messages(), ModelResponse(content="", tool_calls=[call])],
+                             include_provider_parts=True)
+    replayed = [i for i in items if i.get("type") == "function_call"][0]
+
+    assert replayed == {"type": "function_call", "call_id": "c2", "name": "t", "arguments": "{}"}
+
+
+def test_openai_carries_reasoning_items_alongside_discovery():
+    """A `tool_search_call` is rejected without the `reasoning` item that produced it.
+
+    Live: `Item 'tsc_…' of type 'tool_search_call' was provided without its required 'reasoning'
+    item: 'rs_…'`. We carried only the two discovery types, so the reasoning item was dropped at
+    ingest and the pair arrived incomplete. Carrying is now the default and exclusion the
+    exception, so an item type nobody anticipated rides along instead of going missing.
+    """
+    from auto_research.models.providers.openai import _UNCARRIED_ITEM_TYPES
+
+    assert _UNCARRIED_ITEM_TYPES == {"function_call", "message"}, (
+        "only items we replay from our own state are excluded from carrying"
+    )
+
+    turn = ModelResponse(
+        content="",
+        tool_calls=[ToolCall(id="c1", name="t", arguments={})],
+        provider_parts=[
+            {"type": "reasoning", "id": "rs_1", "summary": []},
+            {"type": "tool_search_call", "id": "tsc_1", "arguments": {}},
+            {"type": "tool_search_output", "id": "tso_1", "tools": []},
+        ],
+    )
+    items = _to_openai_input([*_messages(), turn], include_provider_parts=True)
+    carried = [i["type"] for i in items if "type" in i]
+
+    assert carried == ["reasoning", "tool_search_call", "tool_search_output", "function_call"], (
+        "provider items replay in emission order, ahead of the call they enabled"
+    )
+
+
+def test_openai_drops_fabricated_nulls():
+    """`model_dump()` invents absent optionals as null; the API rejects a null it never sent.
+
+    Live: `Unknown parameter: 'input[2].status'` — on a field the input type *does* declare, so
+    filtering by name alone is not enough (openai-python #3008). Both filters run once at capture,
+    so the stored item is fixed and replays as identical bytes on every turn.
+    """
+    from auto_research.models.providers.openai import _as_input_item
+
+    class _Item:
+        type = "reasoning"
+
+        def model_dump(self, mode=None):
+            return {"type": "reasoning", "id": "rs_1", "summary": [],
+                    "status": None, "encrypted_content": None, "content": None}
+
+    out = _as_input_item(_Item())
+
+    assert out == {"type": "reasoning", "id": "rs_1", "summary": []}
+    assert "status" not in out and "encrypted_content" not in out

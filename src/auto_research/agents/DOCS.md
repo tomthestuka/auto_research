@@ -423,3 +423,12 @@ Role wrappers:
   "important only" is a *low* `max_lvl` — the inversion a model is most likely to guess wrong).
   Payloads serialize with `ensure_ascii=False` so `σ`/`±` read as themselves. Tests:
   `tests/test_monitor_tools.py` (+22).
+- 2026-08-05 — **`_react` replays the turn it received.** The loop used to build an
+  `AssistantToolUse` by copying `content`/`tool_calls`/`provider_blocks` off the response one field
+  at a time; `ModelResponse` is now the neutral assistant turn itself, so the loop appends it whole
+  (`messages.append(response)`) and `AssistantToolUse` is gone. This deletes a class of bug rather
+  than an instance of it: that copy silently dropped tool-search discovery blocks until 2026-07-27
+  and Anthropic `thinking` blocks until today, and it would have dropped the next part type too.
+  Adapters now own their provider's replay rule, each grounded in that provider's documentation
+  (see `models/DOCS.md`). Behaviour of the loop is otherwise unchanged — it still ends when the
+  model emits no tool call. Test: `tests/test_react_tools.py::test_react_replays_the_received_turn_whole`.

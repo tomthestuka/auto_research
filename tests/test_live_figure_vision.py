@@ -37,7 +37,7 @@ from pydantic import BaseModel
 
 from auto_research.models import load_registry
 from auto_research.models.types import (
-    AssistantToolUse,
+    ModelResponse,
     ModelMessage,
     ToolCall,
     ToolResultMessage,
@@ -156,7 +156,7 @@ def test_inline_tool_result_seen():
     for role, handle in _vision_members():
         messages = [
             ModelMessage(role="user", content="Analyze the IXPE observation and plot PA/PD vs time."),
-            AssistantToolUse(
+            ModelResponse(
                 content="Producing the stability plot.",
                 tool_calls=[ToolCall(id="c1", name="ixpe_pa_pd_stability_plot", arguments={})],
             ),

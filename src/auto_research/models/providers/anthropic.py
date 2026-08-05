@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from auto_research.env import context_editing_config, tool_search_config
 from auto_research.models.providers._tool_search import anthropic_search_tool_name
 from auto_research.models.types import (
-    AssistantToolUse,
     ConversationMessage,
     ModelMessage,
     ModelResponse,
@@ -20,10 +19,6 @@ from auto_research.models.types import (
 )
 from auto_research.schemas import DocumentRef, FigureRef
 
-
-_DISCOVERY_BLOCK_TYPES = frozenset({"server_tool_use", "tool_search_tool_result"})
-"""Tool-search blocks the server produces and that must be replayed verbatim, so the API can
-re-expand the referenced tool definitions from the conversation history on every later turn."""
 
 
 def _block_to_dict(block: Any) -> dict[str, Any]:
@@ -56,10 +51,17 @@ class AnthropicProvider:
     instance. We return that instance as a plain dict in ``ModelResponse.parsed``
     for parity with the OpenAI/Google adapters.
 
-    A ``tools`` request is native function calling via ``messages.create``.
-    ``messages`` may interleave ``AssistantToolUse`` / ``ToolResultMessage`` turns
-    (translated to native ``tool_use`` / ``tool_result`` content blocks) so a
-    ReAct loop can replay its trajectory. ``cache_prefix`` sets Anthropic-native
+    A ``tools`` request is native function calling via ``messages.create``; a request may
+    declare ``schema`` and ``tools`` together, and the model then either calls a tool or
+    emits the structured answer.
+
+    ``text`` and ``tool_use`` blocks are read into typed fields as views for the harness, but
+    **every** block the model authored — those two plus ``thinking``, the tool-search discovery
+    pair, whatever Anthropic adds next — is carried verbatim on
+    ``ModelResponse.provider_parts``, which is what :func:`_assistant_blocks` replays.
+    ``messages`` may interleave prior
+    ``ModelResponse`` / ``ToolResultMessage`` turns so a ReAct loop can replay its
+    trajectory. ``cache_prefix`` sets Anthropic-native
     ``cache_control: ephemeral`` breakpoints on the stable prefix (the last system
     block, which also caches the tool defs that render before it; or the last tool
     when there is no system) and on the rolling conversation tail.
@@ -81,13 +83,10 @@ class AnthropicProvider:
 
         from anthropic import AsyncAnthropic
 
-        if schema is not None and tools is not None:
-            raise ValueError("schema and tools are mutually exclusive")
-
         params = dict(config.parameters)
         max_tokens = params.pop("max_tokens", 1024)
         system, provider_messages = _to_anthropic_messages(
-            messages, include_discovery=tools is not None
+            messages, include_provider_parts=tools is not None
         )
 
         # Documents (e.g. PDFs the reviewer opens) go at the FRONT — a stable position
@@ -229,22 +228,19 @@ class AnthropicProvider:
 
         text_parts = []
         tool_calls: list[ToolCall] = []
-        provider_blocks: list[dict[str, Any]] = []
+        provider_parts: list[dict[str, Any]] = []
         for block in response.content:
             btype = getattr(block, "type", None)
+            # EVERY block is carried, in emission order — this list is the turn, and
+            # `_assistant_blocks` replays it verbatim. The typed extractions below are views
+            # onto it for the harness, not a second source of truth.
+            provider_parts.append(_block_to_dict(block))
             if btype == "text":
                 text_parts.append(block.text)
             elif btype == "tool_use":
                 tool_calls.append(
                     ToolCall(id=block.id, name=block.name, arguments=dict(block.input or {}))
                 )
-            elif btype in _DISCOVERY_BLOCK_TYPES:
-                # Tool-search discovery: the server ran the search and returned
-                # ``tool_reference``s. These must be replayed verbatim on every later
-                # request — the API re-expands the referenced definitions from history, so
-                # dropping them de-activates the discovered tool. Never answer the
-                # ``srvtoolu_…`` id with a tool_result; the API rejects that.
-                provider_blocks.append(_block_to_dict(block))
 
         usage = getattr(response, "usage", None)
         return ModelResponse(
@@ -252,7 +248,7 @@ class AnthropicProvider:
             tool_calls=tool_calls,
             usage=_anthropic_usage(usage),
             context_edits=_context_edits(response),
-            provider_blocks=provider_blocks,
+            provider_parts=provider_parts,
             raw=response,
         )
 
@@ -318,41 +314,60 @@ def _figure_blocks(figure: FigureRef) -> list[dict[str, Any]]:
     ]
 
 
+def _assistant_blocks(turn: ModelResponse, include_provider_parts: bool) -> list[dict]:
+    """Rebuild one assistant turn's content blocks.
+
+    The documented rule for a tool-use continuation is to **echo the assistant message exactly as
+    received**: *"when you return a tool result, the thinking blocks from the assistant message
+    must come back with it"*, and *"rebuilding the message or filtering out `redacted_thinking`
+    blocks triggers a 400 error"*
+    (platform.claude.com/docs/en/build-with-claude/thinking-tool-workflows). Its sample code is
+    literally ``{"role": "assistant", "content": response.content}``. So when we hold the array
+    Anthropic authored — the normal path — it goes back whole, unfiltered and unreordered.
+
+    Two cases have no array to echo. A turn **we synthesized** (a test fake, anything built as
+    ``ModelResponse(tool_calls=[…])``) never had one. And a request declaring **no tools** — our
+    terminal structured compose — cannot echo one: a block naming a tool is rejected when that
+    tool is absent from the request (*"Tool reference 'x' not found in available tools"*,
+    run-killer 2026-07-29), and per the rule above we may not filter those blocks out either
+    (confirmed live 2026-08-05: dropping only the tool-referencing blocks still 400s). Both cases
+    fall back to rebuilding from the interpreted views, which is what this adapter did before any
+    part was carried. Note what that costs: the compose model does not see its own prior
+    reasoning. The documented way out is for the compose to declare its tools, which puts it back
+    on the echo path — a change deferred out of this one.
+    """
+    if turn.provider_parts and include_provider_parts:
+        return list(turn.provider_parts)
+    blocks: list[dict] = []
+    if turn.content:
+        blocks.append({"type": "text", "text": turn.content})
+    for call in turn.tool_calls:
+        blocks.append(
+            {"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments}
+        )
+    return blocks
+
+
 def _to_anthropic_messages(
     messages: Sequence[ConversationMessage],
     *,
-    include_discovery: bool = True,
+    include_provider_parts: bool = True,
 ) -> tuple[str | None, list[dict]]:
     """Split system text out and translate the rest into Anthropic message dicts.
 
-    ``AssistantToolUse`` → an assistant message with ``tool_use`` blocks;
+    ``ModelResponse`` → an assistant message from that turn's blocks (:func:`_assistant_blocks`);
     ``ToolResultMessage`` → a user message with ``tool_result`` blocks; plain
     ``ModelMessage`` → a text message (system text is joined and returned).
+
+    ``include_provider_parts=False`` (a request declaring no tools) replays the assistant turn
+    from the interpreted views instead of its carried blocks — see :func:`_assistant_blocks` for
+    why the two API rules leave no third option there.
     """
     system_texts: list[str] = []
     provider_messages: list[dict] = []
     for message in messages:
-        if isinstance(message, AssistantToolUse):
-            blocks: list[dict] = []
-            if message.content:
-                blocks.append({"type": "text", "text": message.content})
-            # Tool-search discovery blocks replay verbatim, positioned after the assistant
-            # text and before the tool_use blocks — the order the server produced them in.
-            # They are DROPPED when this request declares no tools (``include_discovery``):
-            # a discovery block references a tool by name, and the API rejects the whole
-            # request when that name is not on the request's tool list — "Tool reference 'x'
-            # not found in available tools" (live run-killer, 2026-07-29). Terminal structured
-            # composes send a schema and no tools by design, so at that point the blocks
-            # reference tools nothing can call and carry no information the model needs.
-            if include_discovery:
-                blocks.extend(
-                    b for b in message.provider_blocks
-                    if b.get("type") in _DISCOVERY_BLOCK_TYPES
-                )
-            for call in message.tool_calls:
-                blocks.append(
-                    {"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments}
-                )
+        if isinstance(message, ModelResponse):
+            blocks = _assistant_blocks(message, include_provider_parts)
             provider_messages.append({"role": "assistant", "content": blocks})
         elif isinstance(message, ToolResultMessage):
             content: list[dict] = [

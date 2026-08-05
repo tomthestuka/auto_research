@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from auto_research.env import ContextEditingConfig
 from auto_research.models.providers.anthropic import AnthropicProvider
 from auto_research.models.types import (
-    AssistantToolUse,
+    ModelResponse,
     ModelMessage,
     RoleModelConfig,
     ToolCall,
@@ -69,7 +69,7 @@ def _trajectory():
     ]
     for i in range(3):
         msgs.append(
-            AssistantToolUse(
+            ModelResponse(
                 content=f"Calling step {i}.",
                 tool_calls=[ToolCall(id=f"call_{i}", name="echo", arguments={"x": f"step {i}"})],
             )

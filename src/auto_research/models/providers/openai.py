@@ -1,8 +1,9 @@
 """OpenAI provider adapter."""
 
 import base64
-import importlib
 import json
+import re
+import typing
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -11,7 +12,6 @@ from pydantic import BaseModel
 from auto_research.env import tool_search_config
 from auto_research.models.providers._json import loads_first_json_object
 from auto_research.models.types import (
-    AssistantToolUse,
     ConversationMessage,
     ModelMessage,
     ModelResponse,
@@ -24,51 +24,109 @@ from auto_research.schemas import DocumentRef, FigureRef
 
 
 _DISCOVERY_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
-"""Tool-search items replayed on later turns, so tools loaded once stay callable without
-re-searching. The provider authors these — every other item we send, we build ourselves."""
+"""Tool-search items: the reason any of this exists. A tool discovered once stays callable only
+while these survive replay."""
 
-#: The item types above, mapped to the SDK type that declares their **input** shape.
-_INPUT_SHAPE_TYPES = {
-    "tool_search_call": ("openai.types.responses.response_input_item_param", "ToolSearchCall"),
-    "tool_search_output": (
-        "openai.types.responses.response_tool_search_output_item_param_param",
-        "ResponseToolSearchOutputItemParamParam",
-    ),
-}
+_UNCARRIED_ITEM_TYPES = frozenset({"function_call", "message"})
+"""The only response items we do NOT carry, because we already replay them from our own state:
+``function_call`` is rebuilt from :class:`ToolCall` (with the provider's record merged back in)
+and ``message`` text is replayed from ``ModelResponse.content``.
 
-#: Fallback keep-lists, mirroring the input types above as of openai 2.38.0. Used only if the
-#: SDK's module layout moves; sending a known-good subset beats sending an output item raw.
+Everything else is carried whole. Three run-killers in one week came from re-typing the
+provider's records into a smaller shape of our own — a forbidden field added, a required field
+dropped, and then a required *companion item* dropped (``tool_search_call`` is rejected without
+the ``reasoning`` item that produced it). Carrying by default, and excluding by exception, means
+an item type we have never heard of rides along instead of going missing."""
+
+#: Fallback keep-lists for the two item types we rebuild from our own state, mirroring the SDK's
+#: input TypedDicts as of openai 2.38.0. Used only if the union walk below finds nothing; sending
+#: a known-good subset beats sending an output item raw.
 _INPUT_SHAPE_FALLBACK = {
-    "tool_search_call": frozenset({"arguments", "type", "id", "call_id", "execution", "status"}),
-    "tool_search_output": frozenset({"tools", "type", "id", "call_id", "execution", "status"}),
+    "function_call": frozenset({"arguments", "call_id", "name", "type", "id", "namespace", "status"}),
+    "reasoning": frozenset({"content", "encrypted_content", "id", "status", "summary", "type"}),
 }
 
 _input_fields_cache: dict[str, frozenset[str]] = {}
 
 
+def _input_shapes() -> dict[str, frozenset[str]]:
+    """Map ``type`` → accepted field names, read from the SDK's own input-item union.
+
+    The Responses API speaks a larger language than it accepts, so every item we hand back has
+    to be filtered to the fields its *input* shape declares. That map used to be hand-written,
+    covering the four item types we happened to carry — which is fine only while the carried set
+    is closed. It is not: an unrecognised item now rides along verbatim
+    (``_UNCARRIED_ITEM_TYPES``), so an item type absent from a hand-written map would get **no**
+    filtering at all and take its server-stamped fields with it into the next request — the exact
+    400 that killed a run on 2026-08-03, one item type later.
+
+    So the allowlist is derived instead: walk ``ResponseInputItemParam``, the union the SDK
+    generates from the input schema, and index each member's declared fields by its ``type``
+    literal. New item types are covered the moment the SDK knows them.
+    """
+    shapes: dict[str, frozenset[str]] = {}
+
+    def visit(annotation: Any) -> None:
+        for member in typing.get_args(annotation) or ():
+            declared = getattr(member, "__annotations__", None)
+            if not declared:
+                visit(member)
+                continue
+            type_ann = declared.get("type")
+            fields = frozenset(declared)
+            for literal in _type_literals(type_ann):
+                # First writer wins: the union lists the canonical item param before the
+                # loose `EasyInputMessageParam` alias for "message".
+                shapes.setdefault(literal, fields)
+            if type_ann is None:
+                visit(member)
+
+    try:
+        from openai.types.responses.response_input_item_param import ResponseInputItemParam
+
+        visit(ResponseInputItemParam)
+    except Exception:  # noqa: BLE001 — the per-type fallback below is the point
+        pass
+    return shapes
+
+
+def _type_literals(annotation: Any) -> list[str]:
+    """The ``Literal[...]`` strings an item param's ``type`` field may take (unwrapping
+    ``Required``/``Optional``/``ForwardRef`` layers the SDK's TypedDicts wrap it in)."""
+    if annotation is None:
+        return []
+    if isinstance(annotation, str):
+        annotation = typing.ForwardRef(annotation)
+    if isinstance(annotation, typing.ForwardRef):
+        # The SDK stores these unevaluated under `from __future__ import annotations`; the
+        # literal text is all we need, so read it rather than resolving the reference.
+        text = annotation.__forward_arg__
+        return re.findall(r"'([^']+)'", text)
+    literals: list[str] = []
+    for arg in typing.get_args(annotation) or ():
+        if isinstance(arg, str):
+            literals.append(arg)
+        else:
+            literals.extend(_type_literals(arg))
+    return literals
+
+
 def _input_fields(item_type: str) -> frozenset[str]:
     """Fields the Responses API accepts for ``item_type`` when it is sent as *input*.
 
-    Read from the SDK's own input TypedDict rather than hand-listed, because the set grows:
-    OpenAI adds output-only bookkeeping to response items over time, and a hand-listed
-    blacklist rots into a mid-run 400 the next time they do.
+    Read from the SDK's own input union (see :func:`_input_shapes`) rather than hand-listed,
+    because the set grows: OpenAI adds output-only bookkeeping to response items over time, and
+    a hand-written list rots into a mid-run 400 the next time it does.
     """
     cached = _input_fields_cache.get(item_type)
-    if cached is not None:
-        return cached
-    fields = _INPUT_SHAPE_FALLBACK.get(item_type, frozenset())
-    target = _INPUT_SHAPE_TYPES.get(item_type)
-    if target:
-        module_name, type_name = target
-        try:
-            module = importlib.import_module(module_name)
-            declared = getattr(getattr(module, type_name), "__annotations__", None)
-            if declared:
-                fields = frozenset(declared)
-        except Exception:  # noqa: BLE001 — the fallback above is the point
-            pass
-    _input_fields_cache[item_type] = fields
-    return fields
+    if cached is None:
+        if not _input_fields_cache:
+            _input_fields_cache.update(_input_shapes())
+            cached = _input_fields_cache.get(item_type)
+        if cached is None:
+            cached = _INPUT_SHAPE_FALLBACK.get(item_type, frozenset())
+            _input_fields_cache[item_type] = cached
+    return cached
 
 
 def _as_input_item(item: Any) -> dict[str, Any]:
@@ -82,16 +140,23 @@ def _as_input_item(item: Any) -> dict[str, Any]:
     where the missing piece is described as an ``.as_input()`` helper). This is that helper, kept
     deliberately narrow: only the items we actually replay.
 
-    Projection is **unconditional** — the same fields in the same order on every turn — because a
-    value-dependent rewrite (the popular ``exclude_none`` workaround) makes an item serialize one
-    way when a field is null and another way when it is not. The moment that flips mid-conversation
-    the cached prefix diverges and every later turn silently re-bills at full price.
+    Two filters, both needed. **By name:** keep only what the input type declares, which drops
+    output-only bookkeeping. **By value:** drop keys whose value is ``None``, because
+    ``model_dump()`` fabricates absent optional fields as null and the API rejects a null it did
+    not send — even for a field its own input type declares (``Unknown parameter:
+    'input[2].status'``, openai-python #3008, reproduced live 2026-08-03).
+
+    Both run **once, here at capture**, so the stored item is fixed for the life of the
+    conversation and replays as identical bytes on every turn. That is what protects the cached
+    prefix: prompt caching keys on an exact prefix match, so the hazard is a rule applied
+    *differently* on different turns — not a rule that reads the values, which resolves the same
+    way every time it looks at the same item.
     """
     raw = _item_to_dict(item)
     allowed = _input_fields(str(raw.get("type") or ""))
-    if not allowed:
-        return raw
-    return {key: value for key, value in raw.items() if key in allowed}
+    if allowed:
+        raw = {key: value for key, value in raw.items() if key in allowed}
+    return {key: value for key, value in raw.items() if value is not None}
 
 
 def _item_to_dict(item: Any) -> dict[str, Any]:
@@ -125,9 +190,11 @@ class OpenAIProvider:
     tolerates any leading/trailing content a reasoning model may add (a bare
     ``json.loads`` on that surplus once crashed a run). Function calling passes
     per-tool function definitions and reads ``function_call`` items from the
-    response output. ``AssistantToolUse`` /
-    ``ToolResultMessage`` turns are replayed as ``function_call`` /
-    ``function_call_output`` input items so a ReAct loop can carry its trajectory.
+    response output; every other item it emits (``reasoning``, the tool-search
+    discovery pair, anything new) is carried verbatim on ``ModelResponse.provider_parts``,
+    projected into its accepted input shape at capture. Prior ``ModelResponse`` /
+    ``ToolResultMessage`` turns are replayed as those items plus ``function_call`` /
+    ``function_call_output`` inputs so a ReAct loop can carry its trajectory.
     Prefix caching is automatic on the Responses API; ``cache_prefix`` additionally
     sets a stable ``prompt_cache_key`` to improve hit routing.
     """
@@ -148,10 +215,7 @@ class OpenAIProvider:
 
         from openai import AsyncOpenAI
 
-        if schema is not None and tools is not None:
-            raise ValueError("schema and tools are mutually exclusive")
-
-        input_items = _to_openai_input(messages, include_discovery=tools is not None)
+        input_items = _to_openai_input(messages, include_provider_parts=tools is not None)
         cache_kwargs = {"prompt_cache_key": config.name} if cache_prefix else {}
         attachment_content = []
         for document in documents:
@@ -213,7 +277,7 @@ class OpenAIProvider:
                 **config.parameters,
             )
             tool_calls = []
-            provider_blocks: list[dict[str, Any]] = []
+            provider_parts: list[dict[str, Any]] = []
             for item in getattr(response, "output", []) or []:
                 itype = getattr(item, "type", None)
                 if itype == "function_call":
@@ -222,18 +286,28 @@ class OpenAIProvider:
                     except (json.JSONDecodeError, TypeError):
                         args = {}
                     tool_calls.append(
-                        ToolCall(id=getattr(item, "call_id", "") or "", name=item.name, arguments=args)
+                        ToolCall(
+                            id=getattr(item, "call_id", "") or "",
+                            name=item.name,
+                            arguments=args,
+                            # The provider's own record of the call, kept whole (in its input
+                            # shape) so the replay hands back fields we do not interpret —
+                            # `namespace`, which addresses a tool discovered through tool search,
+                            # and whatever OpenAI adds next.
+                            provider_fields=_as_input_item(item),
+                        )
                     )
-                elif itype in _DISCOVERY_ITEM_TYPES:
-                    # Tool-search discovery items: replayed so the loaded tools stay callable on
-                    # later turns without re-searching. Translated to their input shape *here*,
-                    # at capture, so the stored item is legal to send by construction and is the
-                    # same bytes on every turn that replays it (see `_as_input_item`).
-                    provider_blocks.append(_as_input_item(item))
+                elif itype not in _UNCARRIED_ITEM_TYPES:
+                    # Everything else the provider authored is carried whole, in output order, so
+                    # a later turn can hand it back: the discovery items (which keep a searched
+                    # tool callable) and the reasoning items they depend on. Translated to their
+                    # input shape *here*, at capture, so each is legal to send by construction and
+                    # is the same bytes on every turn that replays it (see `_as_input_item`).
+                    provider_parts.append(_as_input_item(item))
             return _response(
                 content=getattr(response, "output_text", ""),
                 tool_calls=tool_calls,
-                provider_blocks=provider_blocks,
+                provider_parts=provider_parts,
                 raw=response,
             )
 
@@ -263,29 +337,44 @@ def _figure_items(figure: FigureRef) -> list[dict]:
 
 
 def _to_openai_input(
-    messages: Sequence[ConversationMessage], *, include_discovery: bool = True
+    messages: Sequence[ConversationMessage], *, include_provider_parts: bool = True
 ) -> list[dict]:
     """Translate neutral conversation turns into Responses-API input items.
 
-    ``AssistantToolUse`` → ``function_call`` items; ``ToolResultMessage`` →
+    ``ModelResponse`` → its carried items plus ``function_call`` items; ``ToolResultMessage`` →
     ``function_call_output`` items; plain ``ModelMessage`` → a text message
     (assistant turns use ``output_text``, others ``input_text``).
     """
     items: list[dict] = []
     for message in messages:
-        if isinstance(message, AssistantToolUse):
-            # Tool-search discovery items replay verbatim, before the calls they enabled —
-            # unless this request declares no tools, in which case they are dropped: a
-            # discovery item references a tool by name, and a request that offers no tools
-            # cannot honour that reference (the Anthropic half of this killed a live run on
-            # 2026-07-29). A terminal structured compose is exactly that request.
-            if include_discovery:
-                items.extend(
-                    b for b in message.provider_blocks if b.get("type") in _DISCOVERY_ITEM_TYPES
-                )
+        if isinstance(message, ModelResponse):
+            # The provider's own items replay first, in the order it emitted them, ahead of the
+            # calls they enabled: OpenAI's rule for a tool round trip is to "ensure all items
+            # between the last user message and your function call output are passed into the
+            # next response untouched"
+            # (developers.openai.com/api/docs/guides/reasoning). A discovery item is also
+            # rejected without the reasoning item that produced it — observed live 2026-08-03,
+            # `Item 'tsc_…' of type 'tool_search_call' was provided without its required
+            # 'reasoning' item: 'rs_…'` — so order within the carried list is load-bearing.
+            #
+            # A request declaring no tools drops them all. Unlike Anthropic and Google, which
+            # document that reasoning must be resent unmodified, OpenAI documents pass-back as
+            # *recommended* rather than required and says its systems "smartly ignore any
+            # reasoning items that aren't relevant to your functions" — so omitting them is
+            # supported, while replaying a discovery item that names an undeclared tool is not
+            # (a live run-killer, 2026-07-29).
+            if include_provider_parts:
+                items.extend(message.provider_parts)
             for call in message.tool_calls:
+                # Start from the provider's own record so fields we never interpret ride along
+                # (`namespace` addresses a tool discovered through tool search — replaying without
+                # it names a tool the API cannot resolve, which killed a live run on 2026-08-03).
+                # Our canonical values then overwrite, so the executed call and the replayed call
+                # can never disagree. A call captured by an adapter that sets no provider_fields
+                # replays exactly as before.
                 items.append(
                     {
+                        **call.provider_fields,
                         "type": "function_call",
                         "call_id": call.id,
                         "name": call.name,
@@ -371,14 +460,14 @@ def _sanitize_strict(node: object) -> None:
 
 
 def _response(
-    *, content="", parsed=None, tool_calls=None, provider_blocks=None, raw=None
+    *, content="", parsed=None, tool_calls=None, provider_parts=None, raw=None
 ) -> ModelResponse:
     return ModelResponse(
         content=content or "",
         parsed=parsed,
         tool_calls=tool_calls or [],
         usage=_openai_usage(getattr(raw, "usage", None)),
-        provider_blocks=provider_blocks or [],
+        provider_parts=provider_parts or [],
         raw=raw,
     )
 

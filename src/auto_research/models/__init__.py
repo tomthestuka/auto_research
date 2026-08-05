@@ -2,7 +2,6 @@
 
 from auto_research.models.registry import DEFAULT_CONFIG_PATH, REQUIRED_ROLES, ModelRegistry, load_registry, resolve
 from auto_research.models.types import (
-    AssistantToolUse,
     ConversationMessage,
     ModelGroupHandle,
     ModelHandle,
@@ -22,7 +21,6 @@ from auto_research.models.types import (
 __all__ = [
     "DEFAULT_CONFIG_PATH",
     "REQUIRED_ROLES",
-    "AssistantToolUse",
     "ConversationMessage",
     "ModelHandle",
     "ModelGroupHandle",

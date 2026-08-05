@@ -662,3 +662,44 @@ def test_respond_to_review_exposed_with_session(tmp_path):
     sess = _FakeSession(gate=_gate(True), review=_review(True))
     p = ReadOnlyToolProvider(roots=[tmp_path], authoring_session=sess)
     assert RESPOND_TO_REVIEW_TOOL in [d["name"] for d in p.tool_definitions()]
+
+
+# ── The assistant turn IS the response (the fold) ───────────────────────────────
+
+
+def test_react_replays_the_received_turn_whole():
+    """`_react` appends the `ModelResponse` it received, rather than copying selected fields
+    into a separate assistant-turn type. That copy used to live here and lost a part every time
+    the provider part-set grew — tool-search discovery blocks until 2026-07-27, thinking blocks
+    until 2026-08-05 — so what this pins is that *no* part needs enumerating to survive."""
+
+    class _Model:
+        def __init__(self):
+            self.seen: list[list] = []
+            self._calls = 0
+
+        async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
+                       images=(), documents=(), cache_prefix=False):
+            self.seen.append(list(messages))
+            self._calls += 1
+            if self._calls == 1:
+                return ModelResponse(
+                    content="on it",
+                    tool_calls=[ToolCall(id="c1", name="t", arguments={})],
+                    provider_parts=[
+                        {"type": "thinking", "thinking": "reasoning", "signature": "sig"},
+                        {"type": "some_future_part", "payload": 1},
+                    ],
+                )
+            return ModelResponse(content="done")
+
+    model = _Model()
+    agent = ReviewerAgent(model=model, prompt="p")
+    asyncio.run(agent._react(seed_messages=[], tools=_LoopTools(), action="review", cap=3))
+
+    replayed = model.seen[1][0]                      # the turn carried into the next request
+    assert isinstance(replayed, ModelResponse)
+    assert replayed.content == "on it"
+    assert [c.name for c in replayed.tool_calls] == ["t"]
+    assert [p["type"] for p in replayed.provider_parts] == ["thinking", "some_future_part"]
+    assert replayed.provider_parts[0]["signature"] == "sig"

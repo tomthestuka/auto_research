@@ -28,7 +28,6 @@ from auto_research.agents.react import (
 from auto_research.consensus import IODebateToConverge
 from auto_research.monitor import RunMonitor
 from auto_research.models import (
-    AssistantToolUse,
     ModelGroupHandle,
     ModelHandle,
     ModelMessage,
@@ -161,7 +160,7 @@ class AgentRole:
         """Produce a terminal structured ``output_model`` over a ReAct trajectory.
 
         ``base_messages`` is the conversation gathered by :meth:`_react` (system +
-        interleaved ``AssistantToolUse``/``ToolResultMessage`` turns). A final user
+        interleaved ``ModelResponse``/``ToolResultMessage`` turns). A final user
         turn instructs the model to emit the structured result grounded in the
         tool outputs above. Same fail-loud retry as :meth:`_call`; ``cache_prefix``
         is on because the trajectory prefix is large and reused across retries.
@@ -352,16 +351,12 @@ class AgentRole:
             await self._record_context_edit(response, action)
             if not response.tool_calls:
                 break
-            messages.append(
-                AssistantToolUse(
-                    content=response.content,
-                    tool_calls=response.tool_calls,
-                    # Carry provider-native discovery blocks (tool search) into the replay:
-                    # the API re-expands referenced tool definitions from history, so losing
-                    # them here would de-activate a discovered tool on the next iteration.
-                    provider_blocks=response.provider_blocks,
-                )
-            )
+            # The turn we replay IS the turn we received: `ModelResponse` is the neutral
+            # assistant turn, so it goes back on the conversation whole rather than being
+            # re-typed field by field. That copy used to live here, and it lost a part every
+            # time the provider part-set grew (tool-search discovery blocks until 2026-07-27,
+            # thinking blocks until 2026-08-05).
+            messages.append(response)
             result_parts: list[ToolResultPart] = []
             # Steers that arrive WHILE this batch runs. A model turn can emit many tool calls, and
             # the loop dispatches them all before it comes back round to the top-of-iteration

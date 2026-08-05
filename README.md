@@ -333,7 +333,12 @@ Structured agent messages use **provider-native structured output** (OpenAI Resp
 Every agent runs an **inner ReAct loop**: it calls tools via provider-native function
 calling, sees each result in-context, and chains dependent calls to completion (e.g. the
 analyst's load → fit → run → plot in one pass), then emits its structured result grounded
-in those results. Each role's tool surface is a uniform `ToolProvider`: the analyst's
+in those results. One neutral type, `ModelResponse`, is the assistant turn in both
+directions — an adapter returns it and the loop hands it straight back — so the turn
+replayed is the turn received, parts we do not interpret (reasoning, tool-search
+discovery, anything a provider adds next) included. Each adapter follows its own
+provider's documented replay rule; the neutral layer never reshapes a turn the provider
+authored. Each role's tool surface is a uniform `ToolProvider`: the analyst's
 science sandbox, the reviewer/lead's read-only inspection tools, and the librarian's
 literature sources. The loop is bounded by `react_loop_cap`, with
 `librarian_react_loop_cap` kept tighter because repeated searches re-send a growing paper

@@ -22,10 +22,14 @@ import pytest
 from pydantic import BaseModel
 
 from auto_research.env import ContextEditingConfig
-from auto_research.models.providers.anthropic import AnthropicProvider, _mark_last_block_cacheable
+from auto_research.models.providers.anthropic import (
+    AnthropicProvider,
+    _mark_last_block_cacheable,
+    _to_anthropic_messages,
+)
 from auto_research.models.providers.google import GoogleProvider
-from auto_research.models.providers.openai import OpenAIProvider
-from auto_research.models.types import ModelMessage, RoleModelConfig
+from auto_research.models.providers.openai import OpenAIProvider, _as_input_item
+from auto_research.models.types import ModelHandle, ModelMessage, RoleModelConfig
 
 
 def _pin_context_editing(monkeypatch, *, enabled: bool):
@@ -267,15 +271,15 @@ def test_anthropic_required_maps_to_any(monkeypatch):
 
 
 def test_providers_roundtrip_tool_turns():
-    """AssistantToolUse/ToolResultMessage translate to each provider's native shape."""
+    """ModelResponse/ToolResultMessage translate to each provider's native shape."""
     from auto_research.models.providers.anthropic import _to_anthropic_messages
     from auto_research.models.providers.openai import _to_openai_input
-    from auto_research.models.types import AssistantToolUse, ToolCall, ToolResultMessage, ToolResultPart
+    from auto_research.models.types import ModelResponse, ToolCall, ToolResultMessage, ToolResultPart
 
     convo = [
         ModelMessage(role="system", content="s"),
         ModelMessage(role="user", content="u"),
-        AssistantToolUse(tool_calls=[ToolCall(id="c1", name="foo", arguments={"a": 1})]),
+        ModelResponse(tool_calls=[ToolCall(id="c1", name="foo", arguments={"a": 1})]),
         ToolResultMessage(results=[ToolResultPart(tool_call_id="c1", name="foo", content="ok")]),
     ]
     system, msgs = _to_anthropic_messages(convo)
@@ -444,24 +448,58 @@ def test_openai_function_calling(monkeypatch):
 
 # --- Google ----------------------------------------------------------------
 
-_FAKE_G_RESP = SimpleNamespace(
-    parsed=_Verdict(accepted=True, rationale="ok"),
-    function_calls=[SimpleNamespace(name="research_toolkit_xspec_utils_plot_fit", args={"indices": _NESTED})],
-    text="",
-    usage_metadata=SimpleNamespace(prompt_token_count=3, candidates_token_count=1),
+def _g_part(**fields):
+    """A fake Gemini Part: a struct where every unset field reads as None (not a tagged union),
+    so the adapter's part walk sees the same shape the SDK produces."""
+    base = {"text": None, "thought": None, "thought_signature": None, "function_call": None,
+            "function_response": None, "executable_code": None, "code_execution_result": None,
+            "inline_data": None}
+    return SimpleNamespace(**{**base, **fields},
+                           model_dump=lambda **_: {k: v for k, v in {**base, **fields}.items()
+                                                   if v is not None})
+
+
+_G_CALL_PART = _g_part(
+    function_call=SimpleNamespace(name="research_toolkit_xspec_utils_plot_fit",
+                                  args={"indices": _NESTED}),
+    thought_signature="sig-abc",
 )
+
+def _g_resp(*parts, parsed=None, text=""):
+    """Shape-complete fake response: the adapter walks candidates[0].content.parts, so a fake
+    that only implements the `.text` / `.function_calls` convenience views (which flatten a
+    mixed turn and never expose thought_signature) would hide that walk entirely."""
+    return SimpleNamespace(
+        parsed=parsed,
+        candidates=[SimpleNamespace(content=SimpleNamespace(parts=list(parts)))],
+        function_calls=[p.function_call for p in parts if p.function_call is not None],
+        text=text,
+        usage_metadata=SimpleNamespace(prompt_token_count=3, candidates_token_count=1),
+    )
+
+
+_FAKE_G_RESP = _g_resp(_G_CALL_PART)
 
 
 class _FakeGClient:
+    """Returns ``response`` (set per test); defaults to the function-calling turn."""
+
+    response = _FAKE_G_RESP
+
     def __init__(self, *a, **k):
         self.aio = SimpleNamespace(models=self)
 
     async def generate_content(self, *, model, contents, config):
-        return _FAKE_G_RESP
+        return type(self).response
 
 
 def test_google_structured_output(monkeypatch):
     monkeypatch.setattr("google.genai.Client", _FakeGClient)
+    monkeypatch.setattr(
+        _FakeGClient, "response",
+        _g_resp(_g_part(text='{"accepted": true, "rationale": "ok"}'),
+                parsed=_Verdict(accepted=True, rationale="ok")),
+    )
     cfg = RoleModelConfig(name="g", provider="google", model="fake")
     resp = asyncio.run(GoogleProvider().call(_messages(), cfg, schema=_Verdict))
     assert resp.parsed == {"accepted": True, "rationale": "ok"}
@@ -476,6 +514,32 @@ def test_google_function_calling(monkeypatch):
     resp = asyncio.run(GoogleProvider().call(_messages(), cfg, tools=tools))
     assert len(resp.tool_calls) == 1
     assert resp.tool_calls[0].arguments == {"indices": _NESTED}
+
+
+def test_google_thought_signature_survives_the_round_trip():
+    """[I8]: a Gemini call's thought_signature rides on the same Part as the function_call, so it
+    is carried on that call and re-attached on replay — Gemini 3.x 400s on the second call of a
+    loop without it."""
+    from google.genai import types
+
+    from auto_research.models.providers.google import _to_gemini_contents
+    from auto_research.models.types import ModelResponse, ToolCall
+
+    def replay(signature):
+        call = ToolCall(id="c1", name="foo", arguments={"a": 1},
+                        provider_fields={"thought_signature": signature})
+        _, contents = _to_gemini_contents([ModelResponse(tool_calls=[call])], types)
+        return contents[0].parts[0]
+
+    # The SDK types the signature as `bytes`, which is what ingest captures.
+    part = replay(b"sig-abc")
+    assert part.function_call.name == "foo"
+    assert part.thought_signature == b"sig-abc"
+
+    # And its JSON form (what a `model_dump(mode="json")` of the carried turn produces) decodes
+    # back to the same bytes — so a serialized round trip is lossless. A signature carried as an
+    # arbitrary str would NOT be: the SDK reads it as base64.
+    assert replay(base64.b64encode(b"sig-abc").decode()).thought_signature == b"sig-abc"
 
 
 # --- Figures: bytes at the multimodal boundary ([FIG-VIEW]) + inline-in-history ([V2]) ---
@@ -544,3 +608,144 @@ def test_google_tool_result_figure_inline(tmp_path):
     assert len(image_parts) == 1
     assert image_parts[0].inline_data.mime_type == "image/png"
     assert image_parts[0].inline_data.data == _PNG_BYTES
+
+
+# --- The open part carrier: ModelResponse as the neutral assistant turn ------
+#
+# `ModelResponse` is the provider-authored turn in BOTH directions: an adapter returns it, and
+# `_react` appends it straight back. So the properties worth pinning are (a) no part the model
+# authored is dropped on ingest, (b) each adapter reassembles its own dialect's order on replay,
+# and (c) a request that cannot legally carry a part drops only that part.
+
+
+def _block(btype, **fields):
+    dumped = {"type": btype, **fields}
+    return SimpleNamespace(type=btype, model_dump=lambda mode=None, d=dumped: dict(d), **fields)
+
+
+class _FakeAnthropicRichTurn(_FakeAnthropic):
+    """A turn shaped like a real one, observed live 2026-08-05 on claude-sonnet-5 under adaptive
+    thinking with tool search:
+
+        thinking → server_tool_use → tool_search_tool_result → thinking → tool_use
+
+    Two things about that layout are load-bearing. Reasoning is **interleaved** with tool use, not
+    hoisted to the front — an earlier replay that reassembled the turn thinking-first moved the
+    second block from index 3 to index 1 and the API rejected it (*"blocks must remain as they were
+    in the original response"*). And the last block type is one this code has never heard of, which
+    is the case the open carrier exists for: the installed `ContentBlock` union already lags
+    Anthropic's own docs.
+    """
+
+    async def create(self, **request):
+        _FakeAnthropic.last_request = request
+        return SimpleNamespace(
+            content=[
+                _block("thinking", thinking="first", signature="sig-1"),
+                _block("text", text="on it"),
+                _block("server_tool_use", id="srvtoolu_1"),
+                _block("tool_search_tool_result", tool_use_id="srvtoolu_1"),
+                _block("thinking", thinking="second", signature="sig-2"),
+                _block("totally_new_block", payload=1),
+                _block("tool_use", id="tu_1", name=request["tools"][0]["name"],
+                       input={"command": "echo hi"}),
+            ],
+            usage=SimpleNamespace(input_tokens=11, output_tokens=7),
+        )
+
+
+def _rich_turn(monkeypatch):
+    monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropicRichTurn)
+    tools = [{"name": "t", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
+    return asyncio.run(AnthropicProvider().call(_messages(), _cfg(), tools=tools))
+
+
+_LIVE_TURN_SHAPE = [
+    "thinking", "text", "server_tool_use", "tool_search_tool_result",
+    "thinking", "totally_new_block", "tool_use",
+]
+
+
+def test_anthropic_carries_the_whole_turn(monkeypatch):
+    """Every block is carried, in emission order — the carried list IS the turn. `content` and
+    `tool_calls` are views onto it for the harness, not a second source of truth."""
+    resp = _rich_turn(monkeypatch)
+    assert resp.content == "on it"
+    assert [c.name for c in resp.tool_calls] == ["t"]
+    assert [p["type"] for p in resp.provider_parts] == _LIVE_TURN_SHAPE
+    assert resp.provider_parts[0]["signature"] == "sig-1"   # verbatim, not re-typed
+
+
+def test_anthropic_replays_the_turn_verbatim(monkeypatch):
+    """A turn Anthropic authored goes back exactly as it came, interleaving intact.
+
+    Reassembling it from a dialect rule is what the API rejects: hoisting the second `thinking`
+    block from index 4 to index 1 returns *"blocks must remain as they were in the original
+    response"* (400, reproduced live 2026-08-05 on the second turn of a loop)."""
+    resp = _rich_turn(monkeypatch)
+    _, msgs = _to_anthropic_messages([*_messages(), resp])
+    assert [b.get("type") for b in msgs[-1]["content"]] == _LIVE_TURN_SHAPE
+    assert msgs[-1]["content"] == resp.provider_parts     # the same blocks, not rebuilt ones
+
+
+def test_anthropic_tool_less_request_rebuilds_from_the_views(monkeypatch):
+    """A request declaring no tools cannot echo the array, and may not filter it either.
+
+    Anthropic documents the continuation rule as *"echo the assistant message exactly as
+    received"*, where *"rebuilding the message or filtering out `redacted_thinking` blocks
+    triggers a 400 error"*. But a block naming a tool is rejected when that tool is absent from
+    the request (2026-07-29 run-killer), and filtering just those blocks still 400s (confirmed
+    live 2026-08-05). So the tool-less path carries no provider blocks at all and rebuilds from
+    the interpreted views — what this adapter did before any part was carried."""
+    resp = _rich_turn(monkeypatch)
+    _, msgs = _to_anthropic_messages([*_messages(), resp], include_provider_parts=False)
+    assert msgs[-1]["content"] == [
+        {"type": "text", "text": "on it"},
+        {"type": "tool_use", "id": "tu_1", "name": "t", "input": {"command": "echo hi"}},
+    ]
+
+
+def test_anthropic_reconstructs_a_turn_we_synthesized():
+    """A turn with no carried blocks — every test fake, anything built as
+    `ModelResponse(tool_calls=[…])` — is rebuilt from the typed views. This is the only case
+    where the adapter authors block order."""
+    from auto_research.models.types import ModelResponse, ToolCall
+
+    turn = ModelResponse(content="hi", tool_calls=[ToolCall(id="c1", name="t", arguments={"a": 1})])
+    _, msgs = _to_anthropic_messages([turn])
+    assert msgs[0]["content"] == [
+        {"type": "text", "text": "hi"},
+        {"type": "tool_use", "id": "c1", "name": "t", "input": {"a": 1}},
+    ]
+
+
+def test_schema_and_tools_are_not_mutually_exclusive(monkeypatch):
+    """All three providers accept a schema and tools in one request (live-verified 2026-08-04);
+    the model then either calls a tool or emits the structured answer. The exclusivity this
+    replaced was self-imposed, and it is what forced the tool-less compose."""
+    monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
+    handle = ModelHandle(role="reviewer", config=_cfg(), provider=AnthropicProvider())
+    tools = [{"name": "t", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
+    resp = asyncio.run(handle.call(_messages(), schema=_Verdict, tools=tools))
+    assert resp.parsed == {"accepted": True, "rationale": "ok"}
+
+
+def test_openai_input_allowlist_covers_types_no_hand_list_had():
+    """The allowlist is derived from the SDK's own input union, not hand-written. With an open
+    carrier an unmapped item type would get NO field filtering and take its server-stamped
+    fields into the next request — the 2026-08-03 400, one item type later."""
+    from auto_research.models.providers.openai import _input_fields, _input_shapes
+
+    shapes = _input_shapes()
+    assert len(shapes) > 20, "the union walk found the input item types"
+    # Types the old 4-entry map never covered:
+    for item_type in ("web_search_call", "mcp_call", "computer_call", "custom_tool_call"):
+        assert shapes[item_type], item_type
+        assert "created_by" not in shapes[item_type]
+
+    item = SimpleNamespace(type="web_search_call",
+                           model_dump=lambda mode=None: {"type": "web_search_call", "id": "ws_1",
+                                                         "status": "completed",
+                                                         "created_by": "assistant"})
+    assert "created_by" not in _as_input_item(item)
+    assert _input_fields("a_type_openai_has_not_shipped_yet") == frozenset()
