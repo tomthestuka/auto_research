@@ -1051,4 +1051,24 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   re-confirmed that a tool-less compose over a discovery trajectory still 400s, which is why no
   caller may use that shape. Suite 665 → 670, live 7/7 both providers. **Lesson recorded:** a
   removed assertion is not a removed behaviour, and a test that asserts the *result* of a call
-  cannot see that a parameter was ignored — assert on the request.
+  cannot see that a parameter was ignored — assert on the request. **Immediate sequel, same day:**
+  the relaunch died 80 min / $5.36 in on `NameError: name 'tools' is not defined` — two of the
+  seven compose sites were patched by pattern with `tools=tools` where the local is `self.tools`,
+  in `decide_authoring` and `clarify_for_author`, branches no deterministic test exercises. A
+  `NameError` is invisible until its branch runs, and the branches that only run deep inside a
+  live run are the expensive ones to find that way. Fixed, and the class is now closed by
+  `tests/test_no_undefined_names.py` — a scope-aware AST guard (module/function/class/closure/
+  comprehension/lambda, annotations skipped under PEP 563) that fails on any name read out of
+  scope, parametrized per module. A naive version is useless here (183 false positives from
+  closures alone); pyflakes would do it but is not in the env, and a test may not depend on a
+  linter that is not installed. Suite 670 → 760. **And the altitude mistake behind it:** the live
+  tests call `provider.call` directly, so they never execute `roles.py` — two layers were changed
+  and only one was live-exercised. Two guards close that: `tests/test_compose_declares_loop_tools.py`
+  asserts, per call site, that the compose declares **the same** `tools` expression its own
+  `_react` used (catching a correctly-spelled but wrong name, which the undefined-name guard
+  cannot), and `tests/test_live_schema_matrix.py` sends **all nine** structured schemas we can
+  emit — `ReviewVerdict`, `AnalystReport`, `AuthoringDecision`, `ToolReviewVerdict`,
+  `_ClarifyReply`, `SearchRequest`, `MemoryRecord`, `ResearchReport`, `LatexReport` — to **both**
+  providers with tools declared, validating each response against its model. Every earlier live
+  check of the structured path had used a two-field toy schema, so "big real schema alongside a
+  tools array" had never been sent to any provider; **18/18 pass** (~112 s). Suite 760 → 768.

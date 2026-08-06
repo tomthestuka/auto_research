@@ -1286,7 +1286,7 @@ class AnalystLeadAgent(AgentRole):
             cap=_react_loop_cap(),
         )
         reply = await self._call_over_messages(
-            messages, _ClarifyReply, action="clarify_for_author", tools=tools,
+            messages, _ClarifyReply, action="clarify_for_author", tools=self.tools,
         )
         return reply.answer
 
@@ -1376,7 +1376,7 @@ class AnalystLeadAgent(AgentRole):
             absolute_cap=_react_loop_absolute_cap(),
         )
         return await self._call_over_messages(
-            messages, AuthoringDecision, action="decide_authoring", tools=tools,
+            messages, AuthoringDecision, action="decide_authoring", tools=self.tools,
         )
 
     async def drive_authoring(
