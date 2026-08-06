@@ -293,7 +293,10 @@ class GoogleProvider:
                     ]
                 )
             ]
-            mode = "ANY" if tool_choice == "required" else "AUTO"
+            # ``NONE`` keeps the declarations while forbidding a call — *"Model is prohibited
+            # from making function calls"* (ai.google.dev/gemini-api/docs/function-calling) —
+            # which is what a terminal compose declares so its replayed parts still resolve.
+            mode = {"required": "ANY", "none": "NONE"}.get(tool_choice, "AUTO")
             params["tool_config"] = types.ToolConfig(
                 function_calling_config=types.FunctionCallingConfig(mode=mode)
             )

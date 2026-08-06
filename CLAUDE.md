@@ -822,7 +822,10 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   discovered tool stays callable only while its `server_tool_use`/`tool_search_tool_result` blocks
   survive replay, so any future context compactor must exclude them or a tool silently de-activates
   mid-run — and it is also **why a live conversation's catalog cannot shrink under it**, the property
-  that made the tombstone guard unreachable and got it deleted (2026-07-30 changelog entry);
+  that made the tombstone guard unreachable and got it deleted (2026-07-30 changelog entry).
+  The same blocks are why **every request that replays a trajectory declares its tools**
+  (`tool_choice="none"` on a terminal compose, 2026-08-06): a block naming an undeclared tool is a
+  400, and filtering it out is what Anthropic's echo rule forbids — re-confirmed live 2026-08-06;
   (b) **provider asymmetry** — Anthropic hides a deferred tool
   entirely (hence the tool catalogue injected into the task instructions is what tells the model the
   tool exists at all), while OpenAI keeps names+descriptions resident and withholds only the parameter
@@ -1021,3 +1024,31 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   edits landing while the worker was already writing up. Open from the same runs: **[F3]** the filesystem
   guard denies `2>/dev/null` and trains agents into `cd <dir> && <relative>` form the command check cannot
   inspect at all.
+
+- 2026-08-06 — **The unification finished, after it let a fourth run-killer through.** The
+  2026-08-05 pass deleted the `schema`/`tools` *assertions* but not the branching: both adapters
+  still ran `if schema is not None: … return` **before** `if tools is not None`, so passing both
+  silently dropped the tools (only Google merged them) — and the test named for that property
+  asserted `parsed` came back rather than that the tools reached the request, so it passed against
+  an adapter honouring neither. The terminal compose therefore still could not declare tools, the
+  tool-less request still dropped every carried provider part, and the `function_call` items a few
+  lines below still replayed unconditionally, orphaning the reasoning items they require. Live run
+  `8c75990e` (Q21) died on exactly that at **$29.50**, one step before its first commit — gate
+  passed, GPT co-lead composing its verdict — with `b-run-q21-0803c`'s 400 verbatim. **The fix is
+  the one already recorded as deferred:** each adapter builds ONE request (schema and tools
+  independent) and runs ONE extraction; `tool_choice` gains **`"none"`** (`"none"` / `{"type":
+  "none"}` / `mode="NONE"`, each read from that provider's own docs), and every request that
+  replays a trajectory declares its tools — so `include_provider_parts` is **deleted** rather than
+  narrowed. The drop rule had been inherited from the 2026-07-29 discovery-trim, where only a
+  *tool-referencing* item was ever the problem; applied to the whole part list it created the
+  orphan. `StatusMonitorAgent`'s cap-exhaustion fallback had the same shape (a plausible cause of
+  the open *"`/status` returns silence"* defect). **The probe ran before the code, for cents**
+  (`tmp_scripts/probe_tool_choice_none.py`): Anthropic's `messages.parse` accepts
+  `output_format` + `tools` + `tool_choice` + `thinking` in one call — the risk that could have
+  forced a redesign — and OpenAI accepts `tools` + `tool_choice="none"` + `text.format`. The new
+  live test covers what shipped the bug: an **ordinary function-call** trajectory, where every
+  prior live test had exercised tool-search discovery instead; re-running the file also
+  re-confirmed that a tool-less compose over a discovery trajectory still 400s, which is why no
+  caller may use that shape. Suite 665 → 670, live 7/7 both providers. **Lesson recorded:** a
+  removed assertion is not a removed behaviour, and a test that asserts the *result* of a call
+  cannot see that a parameter was ignored — assert on the request.

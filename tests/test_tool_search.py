@@ -353,11 +353,15 @@ def test_openai_disabled_sends_no_search_tool(monkeypatch):
 # ── the 2026-07-29 run-killer: discovery blocks replayed on a TOOL-LESS request ──────────────
 
 
-def test_anthropic_drops_discovery_blocks_when_no_tools_are_declared(monkeypatch):
-    """A terminal structured compose sends a schema and NO tools; replaying a discovery block
-    there made the API reject the whole request — "Tool reference 'x' not found in available
-    tools" — which killed a live run. With no tools on the request there is nothing for the
-    reference to point at, so the blocks are dropped and the trajectory still replays.
+def test_anthropic_compose_declares_its_tools_so_every_block_resolves(monkeypatch):
+    """The terminal compose declares its tools and forbids calling them.
+
+    Replaying a discovery block on a request with NO tools made the API reject the whole
+    request — "Tool reference 'x' not found in available tools" — which killed a live run
+    (2026-07-29). Dropping the blocks was the first fix; it collided with the echo rule and,
+    on OpenAI, orphaned the items that remained (run 8c75990e). Declaring the tools with
+    `tool_choice="none"` removes the dilemma: every reference resolves, nothing is filtered,
+    and the model still cannot call anything.
     """
     import anthropic
     from pydantic import BaseModel
@@ -375,36 +379,46 @@ def test_anthropic_drops_discovery_blocks_when_no_tools_are_declared(monkeypatch
         "auto_research.models.providers.anthropic.tool_search_config", _enabled
     )
     cfg = RoleModelConfig(name="m", provider="anthropic", model="fake-model")
-    asyncio.run(AnthropicProvider().call(convo, cfg, schema=_Out))
+    asyncio.run(AnthropicProvider().call(convo, cfg, schema=_Out, tools=_tools(),
+                                         tool_choice="none"))
 
     sent = _FakeAnthropic.store["request"]
-    assert "tools" not in sent or not sent["tools"]        # schema call declares no tools
+    assert sent["tools"], "the compose declares its tools"
+    assert sent["tool_choice"] == {"type": "none"}, "…and is forbidden from calling them"
     assistant = [m for m in sent["messages"] if m["role"] == "assistant"][-1]
     types = [b.get("type") for b in assistant["content"]]
-    assert "server_tool_use" not in types                  # the dangling reference is gone
-    assert "tool_search_tool_result" not in types
-    assert types == ["tool_use"]                           # the trajectory itself is intact
+    assert "server_tool_use" in types and "tool_search_tool_result" in types, (
+        "the turn is echoed whole — the documented rule, and now legal because the tools "
+        "the blocks name are declared"
+    )
 
 
-def test_openai_drops_discovery_items_when_no_tools_are_declared(monkeypatch):
-    """Same guard on the OpenAI half, so no tool-less replay path can regress."""
-    from pydantic import BaseModel
+def test_openai_never_orphans_a_carried_item():
+    """A `function_call` and the `reasoning` item it depends on always travel together.
 
-    class _Out(BaseModel):
-        summary: str
+    The 2026-08-05 run-killer (`Item 'fc_…' of type 'function_call' was provided without its
+    required 'reasoning' item: 'rs_…'`, run 8c75990e) came from dropping the carried parts on a
+    tool-less request while emitting the `function_call` items unconditionally a few lines
+    below. The projection takes no mode argument any more, so no caller can reproduce that
+    split.
+    """
+    import inspect
 
     turn = ModelResponse(
         content="",
         tool_calls=[ToolCall(id="call_1", name="research_toolkit_xspec_utils_ixpe_pcube",
                             arguments={})],
-        provider_parts=[
-            {"type": "tool_search_call", "id": "ts_1"},
-            {"type": "tool_search_output", "id": "ts_1"},
-        ],
+        provider_parts=[{"type": "reasoning", "id": "rs_1", "summary": []}],
     )
-    items = _to_openai_input([*_messages(), turn], include_provider_parts=False)
-    assert not [i for i in items if i.get("type") in ("tool_search_call", "tool_search_output")]
-    assert [i for i in items if i.get("type") == "function_call"]      # calls still replay
+    items = _to_openai_input([*_messages(), turn])
+    types = [i.get("type") for i in items if "type" in i]
+
+    assert types == ["reasoning", "function_call"], (
+        "the reasoning item replays ahead of the call that required it"
+    )
+    assert "include_provider_parts" not in inspect.signature(_to_openai_input).parameters, (
+        "the drop mode is gone, not merely unused"
+    )
 
 
 # ── the 2026-08-03 run-killer: an OUTPUT-ONLY field replayed as INPUT ─────────────────────────
@@ -509,7 +523,7 @@ def test_openai_round_trips_the_namespace_of_a_discovered_tool():
     )
     turn = ModelResponse(content="", tool_calls=[call])
 
-    items = _to_openai_input([*_messages(), turn], include_provider_parts=True)
+    items = _to_openai_input([*_messages(), turn])
     replayed = [i for i in items if i.get("type") == "function_call"][0]
 
     assert replayed["namespace"] == "research_toolkit"
@@ -529,8 +543,7 @@ def test_openai_canonical_fields_win_over_the_carried_record():
             "arguments": '{"a": 999}', "namespace": "ns",
         },
     )
-    items = _to_openai_input([*_messages(), ModelResponse(content="", tool_calls=[call])],
-                             include_provider_parts=True)
+    items = _to_openai_input([*_messages(), ModelResponse(content="", tool_calls=[call])])
     replayed = [i for i in items if i.get("type") == "function_call"][0]
 
     assert replayed["call_id"] == "call_real" and replayed["name"] == "real_tool"
@@ -541,8 +554,7 @@ def test_openai_canonical_fields_win_over_the_carried_record():
 def test_openai_call_without_provider_fields_replays_unchanged():
     """Additive by construction: adapters that carry nothing are byte-identical to before."""
     call = ToolCall(id="c2", name="t", arguments={})
-    items = _to_openai_input([*_messages(), ModelResponse(content="", tool_calls=[call])],
-                             include_provider_parts=True)
+    items = _to_openai_input([*_messages(), ModelResponse(content="", tool_calls=[call])])
     replayed = [i for i in items if i.get("type") == "function_call"][0]
 
     assert replayed == {"type": "function_call", "call_id": "c2", "name": "t", "arguments": "{}"}
@@ -571,7 +583,7 @@ def test_openai_carries_reasoning_items_alongside_discovery():
             {"type": "tool_search_output", "id": "tso_1", "tools": []},
         ],
     )
-    items = _to_openai_input([*_messages(), turn], include_provider_parts=True)
+    items = _to_openai_input([*_messages(), turn])
     carried = [i["type"] for i in items if "type" in i]
 
     assert carried == ["reasoning", "tool_search_call", "tool_search_output", "function_call"], (

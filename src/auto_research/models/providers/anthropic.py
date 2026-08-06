@@ -85,9 +85,7 @@ class AnthropicProvider:
 
         params = dict(config.parameters)
         max_tokens = params.pop("max_tokens", 1024)
-        system, provider_messages = _to_anthropic_messages(
-            messages, include_provider_parts=tools is not None
-        )
+        system, provider_messages = _to_anthropic_messages(messages)
 
         # Documents (e.g. PDFs the reviewer opens) go at the FRONT — a stable position
         # right after the system prompt — and grow append-only across a ReAct loop, so
@@ -160,29 +158,12 @@ class AnthropicProvider:
         # non-beta parse — so the extraction below is identical on either namespace.
         messages_api = client.beta.messages if use_ctx_edit else client.messages
 
-        if schema is not None:
-            response = await messages_api.parse(
-                model=config.model,
-                max_tokens=max_tokens,
-                messages=provider_messages,
-                output_format=schema,
-                **({"system": system_param} if system is not None else {}),
-                **params,
-                **ctx_extra,
-            )
-            parsed_obj = response.parsed_output
-            text_parts = [
-                block.text for block in response.content if getattr(block, "type", None) == "text"
-            ]
-            usage = getattr(response, "usage", None)
-            return ModelResponse(
-                content="".join(text_parts),
-                parsed=parsed_obj.model_dump(mode="json") if parsed_obj is not None else None,
-                usage=_anthropic_usage(usage),
-                context_edits=_context_edits(response),
-                raw=response,
-            )
-
+        # ONE request, built from whatever the caller gave us. `schema` and `tools` are
+        # independent: declaring both lets a terminal compose keep its tool declarations while
+        # `tool_choice={"type": "none"}` forbids calling them, so the trajectory's `tool_use`
+        # blocks always resolve against declared tools. `output_format` lives on `parse`, so the
+        # SDK method differs — the request and the extraction do not. Live-verified 2026-08-06:
+        # `parse` accepts `tools` + `tool_choice` + `thinking` in one call.
         request: dict[str, Any] = {
             "model": config.model,
             "max_tokens": max_tokens,
@@ -222,10 +203,19 @@ class AnthropicProvider:
                 if resident:
                     resident[-1]["cache_control"] = {"type": "ephemeral"}
             request["tools"] = tool_defs
-            request["tool_choice"] = {"type": "any"} if tool_choice == "required" else {"type": "auto"}
+            request["tool_choice"] = _tool_choice_block(tool_choice)
 
-        response = await messages_api.create(**request, **ctx_extra)
+        if schema is not None:
+            response = await messages_api.parse(
+                output_format=schema, **request, **ctx_extra
+            )
+            parsed_obj = response.parsed_output
+            parsed = parsed_obj.model_dump(mode="json") if parsed_obj is not None else None
+        else:
+            response = await messages_api.create(**request, **ctx_extra)
+            parsed = None
 
+        # ONE extraction pass over the turn the model authored, whichever method sent it.
         text_parts = []
         tool_calls: list[ToolCall] = []
         provider_parts: list[dict[str, Any]] = []
@@ -245,12 +235,27 @@ class AnthropicProvider:
         usage = getattr(response, "usage", None)
         return ModelResponse(
             content="".join(text_parts),
+            parsed=parsed,
             tool_calls=tool_calls,
             usage=_anthropic_usage(usage),
             context_edits=_context_edits(response),
             provider_parts=provider_parts,
             raw=response,
         )
+
+
+def _tool_choice_block(tool_choice: str) -> dict[str, str]:
+    """Neutral ``tool_choice`` → the Messages-API block.
+
+    ``"none"`` keeps the declarations in the request while forbidding a call; Anthropic
+    prices it alongside ``auto`` in the tool-use system-prompt table
+    (platform.claude.com/docs/en/agents-and-tools/tool-use/overview), i.e. the tools are
+    still sent. A terminal compose wants exactly that: the trajectory's ``tool_use`` blocks
+    resolve, and the model must answer rather than call again.
+    """
+    if tool_choice == "required":
+        return {"type": "any"}
+    return {"type": "none"} if tool_choice == "none" else {"type": "auto"}
 
 
 def _anthropic_usage(usage: Any) -> ModelUsage:
@@ -314,7 +319,7 @@ def _figure_blocks(figure: FigureRef) -> list[dict[str, Any]]:
     ]
 
 
-def _assistant_blocks(turn: ModelResponse, include_provider_parts: bool) -> list[dict]:
+def _assistant_blocks(turn: ModelResponse) -> list[dict]:
     """Rebuild one assistant turn's content blocks.
 
     The documented rule for a tool-use continuation is to **echo the assistant message exactly as
@@ -325,18 +330,16 @@ def _assistant_blocks(turn: ModelResponse, include_provider_parts: bool) -> list
     literally ``{"role": "assistant", "content": response.content}``. So when we hold the array
     Anthropic authored — the normal path — it goes back whole, unfiltered and unreordered.
 
-    Two cases have no array to echo. A turn **we synthesized** (a test fake, anything built as
-    ``ModelResponse(tool_calls=[…])``) never had one. And a request declaring **no tools** — our
-    terminal structured compose — cannot echo one: a block naming a tool is rejected when that
-    tool is absent from the request (*"Tool reference 'x' not found in available tools"*,
-    run-killer 2026-07-29), and per the rule above we may not filter those blocks out either
-    (confirmed live 2026-08-05: dropping only the tool-referencing blocks still 400s). Both cases
-    fall back to rebuilding from the interpreted views, which is what this adapter did before any
-    part was carried. Note what that costs: the compose model does not see its own prior
-    reasoning. The documented way out is for the compose to declare its tools, which puts it back
-    on the echo path — a change deferred out of this one.
+    Only a turn **we synthesized** (a test fake, anything built as
+    ``ModelResponse(tool_calls=[…])``) has no array to echo; it is rebuilt from the interpreted
+    views. A request declaring no tools used to take that path too, because a block naming a tool
+    is rejected when that tool is absent (*"Tool reference 'x' not found in available tools"*,
+    run-killer 2026-07-29) and filtering the offending blocks out is what the rule above forbids.
+    That dilemma is now resolved upstream rather than here: a terminal compose declares its tools
+    with ``tool_choice={"type": "none"}``, so every reference resolves and the echo path always
+    applies.
     """
-    if turn.provider_parts and include_provider_parts:
+    if turn.provider_parts:
         return list(turn.provider_parts)
     blocks: list[dict] = []
     if turn.content:
@@ -350,24 +353,18 @@ def _assistant_blocks(turn: ModelResponse, include_provider_parts: bool) -> list
 
 def _to_anthropic_messages(
     messages: Sequence[ConversationMessage],
-    *,
-    include_provider_parts: bool = True,
 ) -> tuple[str | None, list[dict]]:
     """Split system text out and translate the rest into Anthropic message dicts.
 
     ``ModelResponse`` → an assistant message from that turn's blocks (:func:`_assistant_blocks`);
     ``ToolResultMessage`` → a user message with ``tool_result`` blocks; plain
     ``ModelMessage`` → a text message (system text is joined and returned).
-
-    ``include_provider_parts=False`` (a request declaring no tools) replays the assistant turn
-    from the interpreted views instead of its carried blocks — see :func:`_assistant_blocks` for
-    why the two API rules leave no third option there.
     """
     system_texts: list[str] = []
     provider_messages: list[dict] = []
     for message in messages:
         if isinstance(message, ModelResponse):
-            blocks = _assistant_blocks(message, include_provider_parts)
+            blocks = _assistant_blocks(message)
             provider_messages.append({"role": "assistant", "content": blocks})
         elif isinstance(message, ToolResultMessage):
             content: list[dict] = [

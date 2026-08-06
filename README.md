@@ -338,7 +338,10 @@ directions — an adapter returns it and the loop hands it straight back — so 
 replayed is the turn received, parts we do not interpret (reasoning, tool-search
 discovery, anything a provider adds next) included. Each adapter follows its own
 provider's documented replay rule; the neutral layer never reshapes a turn the provider
-authored. Each role's tool surface is a uniform `ToolProvider`: the analyst's
+authored. The terminal structured call that ends a loop **declares the same tools with
+`tool_choice="none"`** — the replayed turn's parts reference those tools, so declaring
+them keeps every reference resolvable while the model is still forbidden to call one.
+Each role's tool surface is a uniform `ToolProvider`: the analyst's
 science sandbox, the reviewer/lead's read-only inspection tools, and the librarian's
 literature sources. The loop is bounded by `react_loop_cap`, with
 `librarian_react_loop_cap` kept tighter because repeated searches re-send a growing paper

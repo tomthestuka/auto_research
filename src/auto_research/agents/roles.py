@@ -156,6 +156,7 @@ class AgentRole:
         documents=(),
         overrides: dict | None = None,
         decide_instruction: str | None = None,
+        tools: Any | None = None,
     ) -> Any:
         """Produce a terminal structured ``output_model`` over a ReAct trajectory.
 
@@ -164,6 +165,15 @@ class AgentRole:
         turn instructs the model to emit the structured result grounded in the
         tool outputs above. Same fail-loud retry as :meth:`_call`; ``cache_prefix``
         is on because the trajectory prefix is large and reused across retries.
+
+        ``tools`` is the SAME provider :meth:`_react` just used, and passing it is not
+        optional bookkeeping: the trajectory being replayed contains items that reference
+        those tools, and a request that omits the declarations orphans them. That shape
+        produced two run-killers — *"Tool reference 'x' not found in available tools"*
+        (Anthropic, 2026-07-29) and *"function_call … without its required 'reasoning'
+        item"* (OpenAI, 2026-08-05, run 8c75990e). ``tool_choice="none"`` keeps the
+        declarations while forbidding a call, so the model must answer — the alternative,
+        ``"auto"``, lets it call again and return ``parsed=None``, burning a retry.
         """
         instruction = decide_instruction or (
             f"You have finished using tools. Now produce the final {output_model.__name__} "
@@ -183,7 +193,7 @@ class AgentRole:
 
         return await self._structured_loop(
             make_messages, output_model, action=action, images=images,
-            documents=documents, overrides=overrides, cache_prefix=True,
+            documents=documents, overrides=overrides, cache_prefix=True, tools=tools,
         )
 
     async def _structured_loop(
@@ -196,6 +206,7 @@ class AgentRole:
         documents=(),
         overrides: dict | None = None,
         cache_prefix: bool = False,
+        tools: Any | None = None,
     ) -> Any:
         """Shared structured-output call with a bounded off-schema retry.
 
@@ -204,6 +215,9 @@ class AgentRole:
         thereafter. Native structured output enforces the schema at the provider,
         so a bad shape is rare — but a transient off-schema result must not kill
         the run. Cap (``structured_retry_cap``) exhaustion still raises loudly.
+
+        ``tools`` (a provider, when the conversation replays a tool trajectory) is declared
+        alongside the schema with ``tool_choice="none"`` — see :meth:`_call_over_messages`.
         """
         cap = max(1, _structured_retry_cap())
         last_exc: Exception | None = None
@@ -219,6 +233,8 @@ class AgentRole:
                 response = await self.model.call(
                     make_messages(feedback),
                     schema=output_model,
+                    tools=tools.tool_definitions() if tools is not None else None,
+                    tool_choice="none",
                     images=images,
                     documents=documents,
                     cache_prefix=cache_prefix,
@@ -555,6 +571,7 @@ class ReviewerAgent(AgentRole):
         )
         return await self._call_over_messages(
             messages, ReviewVerdict, action="review", images=images, documents=docs,
+            tools=self.tools,
         )
 
     async def compose_machine_report(
@@ -1063,7 +1080,9 @@ class AnalystWorkerAgent(AgentRole):
         # edit_report call gets one terminal structured compose, with its catalog figures attached.
         report = workspace.written_report if workspace is not None else None
         if report is None:
-            report = await self._call_over_messages(messages, AnalystReport, action="analyze")
+            report = await self._call_over_messages(
+                messages, AnalystReport, action="analyze", tools=provider,
+            )
             if self._figure_catalog["self"]:
                 report = report.model_copy(
                     update={"figures": _dedup_figures(self._figure_catalog["self"]), "cited_figures": []}
@@ -1201,6 +1220,7 @@ class AnalystLeadAgent(AgentRole):
             # Safety net: no edit_report written — compose terminally, attaching the catalog figures.
             report = await self._call_over_messages(
                 messages, AnalystReport, action="adjudicate", images=all_figures,
+                tools=self.tools,
             )
             report = report.model_copy(
                 update={"figures": _dedup_figures(all_figures), "cited_figures": []}
@@ -1265,7 +1285,9 @@ class AnalystLeadAgent(AgentRole):
             seed_messages=seed, tools=self.tools, action="clarify_for_author",
             cap=_react_loop_cap(),
         )
-        reply = await self._call_over_messages(messages, _ClarifyReply, action="clarify_for_author")
+        reply = await self._call_over_messages(
+            messages, _ClarifyReply, action="clarify_for_author", tools=tools,
+        )
         return reply.answer
 
     async def judge_convergence(
@@ -1353,7 +1375,9 @@ class AnalystLeadAgent(AgentRole):
             free_tools=frozenset({PLAN_AND_DEBATE_TOOL}),
             absolute_cap=_react_loop_absolute_cap(),
         )
-        return await self._call_over_messages(messages, AuthoringDecision, action="decide_authoring")
+        return await self._call_over_messages(
+            messages, AuthoringDecision, action="decide_authoring", tools=tools,
+        )
 
     async def drive_authoring(
         self,
@@ -1544,6 +1568,7 @@ class AnalystLeadAgent(AgentRole):
         )
         report = await self._call_over_messages(
             messages, AnalystReport, action="finalize_authoring_outcome", images=figures,
+            tools=self.tools,
         )
         return report.model_copy(update={"figures": figures, "cited_figures": []})
 
@@ -1587,7 +1612,11 @@ class StatusMonitorAgent(AgentRole):
             [*messages, ModelMessage(
                 role="user",
                 content="Stop searching and answer now, from what you have already read.",
-            )]
+            )],
+            # Declared-but-forbidden, not omitted: this replays a tool trajectory, and a
+            # request that drops the declarations orphans the items referencing them.
+            tools=self.tools.tool_definitions(),
+            tool_choice="none",
         )
         return (response.content or "").strip() or "(no answer produced)"
 
@@ -1673,7 +1702,9 @@ class AnalystColeadAgent(AgentRole):
         messages, _, _ = await self._react(
             seed_messages=seed, tools=tools, action="review_tool", cap=_react_loop_cap(),
         )
-        return await self._call_over_messages(messages, ToolReviewVerdict, action="review_tool")
+        return await self._call_over_messages(
+            messages, ToolReviewVerdict, action="review_tool", tools=tools,
+        )
 
 
 class _ClarifyReply(BaseModel):

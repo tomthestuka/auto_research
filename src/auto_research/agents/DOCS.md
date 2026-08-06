@@ -386,3 +386,17 @@ Compacted 2026-08-05: entries through 2026-07-28 folded into themed ranges (deta
   Adapters now own their provider's replay rule, each grounded in that provider's documentation
   (see `models/DOCS.md`). Behaviour of the loop is otherwise unchanged — it still ends when the
   model emits no tool call. Test: `tests/test_react_tools.py::test_react_replays_the_received_turn_whole`.
+- 2026-08-06 — **The terminal compose declares the loop's tools.** `_call_over_messages` and
+  `_structured_loop` take the same `ToolProvider` `_react` just used and pass
+  `tools=…, tool_choice="none"`: the compose replays a trajectory whose provider items reference
+  those tools, and a request that omits the declarations orphans them — the 400 that killed run
+  `8c75990e` on the co-lead's `review_tool` (see `models/DOCS.md`). `"none"` rather than `"auto"`
+  because the compose must answer; a model that calls again returns `parsed=None` and burns a
+  `structured_retry_cap` attempt. All seven compose sites pass their provider (reviewer `review`,
+  worker `analyze`, lead `adjudicate`/`clarify_for_author`/`decide_authoring`/
+  `finalize_authoring_outcome`, co-lead `review_tool`), and so does `StatusMonitorAgent`'s
+  cap-exhaustion fallback, which had the identical tool-less shape on the GPT reporter — a
+  plausible cause of the open *"`/status` returns silence on cap exhaustion"* defect. Payload-only
+  `_call` is unchanged (no trajectory, so nothing to declare). Tests:
+  `tests/test_react_tools.py::test_terminal_compose_declares_the_loops_tools`,
+  `::test_compose_without_tools_declares_none`, `tests/test_monitor_tools.py` updated.

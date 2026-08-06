@@ -703,3 +703,77 @@ def test_react_replays_the_received_turn_whole():
     assert [c.name for c in replayed.tool_calls] == ["t"]
     assert [p["type"] for p in replayed.provider_parts] == ["thinking", "some_future_part"]
     assert replayed.provider_parts[0]["signature"] == "sig"
+
+
+def test_terminal_compose_declares_the_loops_tools():
+    """The structured compose after a ReAct loop declares the SAME tools, and forbids calling.
+
+    The compose replays the loop's trajectory, whose provider items reference those tools. A
+    request that omits the declarations orphans them, which is what killed two live runs — a
+    dangling `Tool reference` on Anthropic (2026-07-29) and `function_call … without its required
+    'reasoning' item` on OpenAI (2026-08-05, run 8c75990e). `tool_choice="none"` keeps the
+    declarations while forbidding another call, so the model must answer.
+    """
+    from pydantic import BaseModel
+
+    class _Out(BaseModel):
+        note: str
+
+    class _Model:
+        def __init__(self):
+            self.calls: list[dict] = []
+            self._n = 0
+
+        async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
+                       images=(), documents=(), cache_prefix=False):
+            self.calls.append({"schema": schema, "tools": tools, "tool_choice": tool_choice})
+            self._n += 1
+            if self._n == 1:
+                return ModelResponse(
+                    tool_calls=[ToolCall(id="c1", name="paid", arguments={})],
+                    provider_parts=[{"type": "reasoning", "id": "rs_1"}],
+                )
+            if schema is not None:
+                return ModelResponse(parsed={"note": "done"})
+            return ModelResponse(content="done")
+
+    model = _Model()
+    agent = ReviewerAgent(model=model, prompt="p")
+    tools = _LoopTools()
+
+    async def run():
+        messages, _, _ = await agent._react(
+            seed_messages=[], tools=tools, action="review", cap=1
+        )
+        return await agent._call_over_messages(messages, _Out, action="review", tools=tools)
+
+    result = asyncio.run(run())
+
+    assert result.note == "done"
+    loop_call, compose_call = model.calls[0], model.calls[-1]
+    assert compose_call["schema"] is _Out
+    assert compose_call["tools"] == loop_call["tools"], "the same declarations the loop used"
+    assert compose_call["tool_choice"] == "none"
+
+
+def test_compose_without_tools_declares_none():
+    """A compose over a trajectory-free conversation (`_call`) still declares nothing — the
+    threading is additive, so payload-only structured calls are unchanged."""
+    from pydantic import BaseModel
+
+    class _Out(BaseModel):
+        note: str
+
+    class _Model:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
+                       images=(), documents=(), cache_prefix=False):
+            self.calls.append({"tools": tools})
+            return ModelResponse(parsed={"note": "ok"})
+
+    model = _Model()
+    agent = ReviewerAgent(model=model, prompt="p")
+    asyncio.run(agent._call({"q": "x"}, _Out, action="review"))
+    assert model.calls[0]["tools"] is None

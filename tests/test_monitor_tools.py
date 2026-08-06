@@ -238,7 +238,11 @@ class _ScriptedModel:
         self.calls: list[dict] = []
 
     async def call(self, messages, **kwargs):
-        self.calls.append({"messages": messages, "tools": kwargs.get("tools")})
+        self.calls.append({
+            "messages": messages,
+            "tools": kwargs.get("tools"),
+            "tool_choice": kwargs.get("tool_choice"),
+        })
         return self._turns.pop(0) if self._turns else _text("")
 
 
@@ -311,4 +315,11 @@ def test_reporter_answers_even_when_the_loop_ends_on_its_cap(tmp_path, monkeypat
     answer = asyncio.run(_agent(model).report("status?", jsonl_path=path))
 
     assert answer == "Ran out of turns, but: one event so far."
-    assert model.calls[-1]["tools"] is None   # the final ask carries no tools
+    # The final ask DECLARES the tools and forbids calling them, rather than omitting them:
+    # it replays the loop's trajectory, and a request that drops the declarations orphans the
+    # provider items referencing them (`function_call … without its required 'reasoning' item`
+    # killed run 8c75990e on exactly this shape). "none" is what stops another tool call.
+    assert {t["name"] for t in model.calls[-1]["tools"]} == {
+        "brief_history", "ledger_event", "ledger_grep"
+    }
+    assert model.calls[-1]["tool_choice"] == "none"

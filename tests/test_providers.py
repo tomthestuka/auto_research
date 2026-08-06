@@ -485,11 +485,13 @@ class _FakeGClient:
     """Returns ``response`` (set per test); defaults to the function-calling turn."""
 
     response = _FAKE_G_RESP
+    last_config = None
 
     def __init__(self, *a, **k):
         self.aio = SimpleNamespace(models=self)
 
     async def generate_content(self, *, model, contents, config):
+        _FakeGClient.last_config = config
         return type(self).response
 
 
@@ -688,21 +690,20 @@ def test_anthropic_replays_the_turn_verbatim(monkeypatch):
     assert msgs[-1]["content"] == resp.provider_parts     # the same blocks, not rebuilt ones
 
 
-def test_anthropic_tool_less_request_rebuilds_from_the_views(monkeypatch):
-    """A request declaring no tools cannot echo the array, and may not filter it either.
+def test_anthropic_echoes_the_turn_whatever_the_request_declares(monkeypatch):
+    """There is no longer a request shape that drops the carried blocks.
 
     Anthropic documents the continuation rule as *"echo the assistant message exactly as
     received"*, where *"rebuilding the message or filtering out `redacted_thinking` blocks
-    triggers a 400 error"*. But a block naming a tool is rejected when that tool is absent from
-    the request (2026-07-29 run-killer), and filtering just those blocks still 400s (confirmed
-    live 2026-08-05). So the tool-less path carries no provider blocks at all and rebuilds from
-    the interpreted views — what this adapter did before any part was carried."""
+    triggers a 400 error"* — and a block naming a tool is rejected when that tool is absent
+    (2026-07-29 run-killer), with filtering just those blocks also a 400 (live 2026-08-05).
+    Those two rules used to leave a tool-less request no legal option, so it rebuilt from the
+    views. The dilemma is resolved upstream instead: a terminal compose declares its tools with
+    `tool_choice="none"`, so every reference resolves and the echo path always applies."""
     resp = _rich_turn(monkeypatch)
-    _, msgs = _to_anthropic_messages([*_messages(), resp], include_provider_parts=False)
-    assert msgs[-1]["content"] == [
-        {"type": "text", "text": "on it"},
-        {"type": "tool_use", "id": "tu_1", "name": "t", "input": {"command": "echo hi"}},
-    ]
+    _, msgs = _to_anthropic_messages([*_messages(), resp])
+    assert msgs[-1]["content"] == resp.provider_parts
+    assert [b.get("type") for b in msgs[-1]["content"]] == _LIVE_TURN_SHAPE
 
 
 def test_anthropic_reconstructs_a_turn_we_synthesized():
@@ -719,15 +720,72 @@ def test_anthropic_reconstructs_a_turn_we_synthesized():
     ]
 
 
+_BOTH_TOOLS = [
+    {"name": "t", "description": "d", "input_schema": {"type": "object", "properties": {}}}
+]
+
+
 def test_schema_and_tools_are_not_mutually_exclusive(monkeypatch):
     """All three providers accept a schema and tools in one request (live-verified 2026-08-04);
     the model then either calls a tool or emits the structured answer. The exclusivity this
     replaced was self-imposed, and it is what forced the tool-less compose."""
     monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
     handle = ModelHandle(role="reviewer", config=_cfg(), provider=AnthropicProvider())
-    tools = [{"name": "t", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
-    resp = asyncio.run(handle.call(_messages(), schema=_Verdict, tools=tools))
+    resp = asyncio.run(handle.call(_messages(), schema=_Verdict, tools=_BOTH_TOOLS))
     assert resp.parsed == {"accepted": True, "rationale": "ok"}
+
+
+def test_anthropic_sends_the_tools_alongside_the_schema(monkeypatch):
+    """Both reach the request — the assertion the test above was missing.
+
+    Until 2026-08-06 each adapter ran `if schema is not None: … return` BEFORE `if tools is not
+    None`, so passing both silently dropped the tools while still returning `parsed`. A test that
+    only checked `parsed` therefore passed against an adapter that honoured neither the parameter
+    nor the documented contract, and the terminal compose could not declare its tools — which is
+    the request shape behind two run-killers.
+    """
+    monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
+    asyncio.run(AnthropicProvider().call(_messages(), _cfg(), schema=_Verdict,
+                                         tools=_BOTH_TOOLS, tool_choice="none"))
+    sent = _FakeAnthropic.last_parse
+    assert sent["output_format"] is _Verdict, "structured output rides the parse path"
+    assert [t["name"] for t in sent["tools"]] == ["t"], "and the tools ride the same call"
+    assert sent["tool_choice"] == {"type": "none"}
+
+
+def test_openai_sends_the_tools_alongside_the_schema(monkeypatch):
+    """The OpenAI half of the same property: one `responses.create`, both parameters."""
+    monkeypatch.setattr("openai.AsyncOpenAI", _FakeOpenAI)
+    asyncio.run(OpenAIProvider().call(_messages(), _cfg(), schema=_Verdict,
+                                      tools=_BOTH_TOOLS, tool_choice="none"))
+    sent = _FakeResponses.last
+    assert sent["text"]["format"]["type"] == "json_schema"
+    assert [t["name"] for t in sent["tools"]] == ["t"]
+    assert sent["tool_choice"] == "none"
+
+
+def test_tool_choice_none_uses_each_provider_spelling(monkeypatch):
+    """`"none"` declares the tools and forbids calling them — the terminal-compose shape.
+
+    Documented on all three: OpenAI *"set `tool_choice` to `none` to imitate the behavior of
+    passing no functions"*; Anthropic prices `none` beside `auto` in the tool-use system-prompt
+    table (so the definitions are still sent); Google *"Model is prohibited from making function
+    calls"*. Live-verified on OpenAI and Anthropic 2026-08-06.
+    """
+    monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
+    asyncio.run(AnthropicProvider().call(_messages(), _cfg(), tools=_BOTH_TOOLS,
+                                         tool_choice="none"))
+    assert _FakeAnthropic.last_request["tool_choice"] == {"type": "none"}
+
+    monkeypatch.setattr("openai.AsyncOpenAI", _FakeOpenAI)
+    asyncio.run(OpenAIProvider().call(_messages(), _cfg(), tools=_BOTH_TOOLS,
+                                      tool_choice="none"))
+    assert _FakeResponses.last["tool_choice"] == "none"
+
+    monkeypatch.setattr("google.genai.Client", _FakeGClient)
+    gcfg = RoleModelConfig(name="g", provider="google", model="fake")
+    asyncio.run(GoogleProvider().call(_messages(), gcfg, tools=_BOTH_TOOLS, tool_choice="none"))
+    assert _FakeGClient.last_config.tool_config.function_calling_config.mode == "NONE"
 
 
 def test_openai_input_allowlist_covers_types_no_hand_list_had():

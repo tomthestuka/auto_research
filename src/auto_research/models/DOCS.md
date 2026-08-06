@@ -73,8 +73,9 @@ Google by editing YAML alone
   the Anthropic `cache_control` breakpoint moves to the last **non-deferred** tool (a deferred
   tool carrying it is a 400); discovery blocks ride on `ModelResponse.provider_parts` and are
   replayed verbatim, since the API re-expands referenced definitions from history each turn; and
-  they are replayed **only when the request declares tools** (`include_provider_parts`), since a
-  reference has nothing to point at otherwise. Providers differ in what stays resident: Anthropic hides a deferred tool entirely, OpenAI
+  a reference resolves only against a **declared** tool, so every request that replays a
+  trajectory declares its tools — the terminal compose with `tool_choice="none"`. Providers
+  differ in what stays resident: Anthropic hides a deferred tool entirely, OpenAI
   keeps its name and description and withholds only the parameter schema. The Anthropic search
   tool is declared as the dated `type` beside its **undated** `name`
   (`anthropic_search_tool_name` derives one from the other; a mismatch is a 400). **Live-verified
@@ -102,8 +103,11 @@ Google by editing YAML alone
   `call(..., tools=[...], tool_choice=...)`
   requests provider-native **function calling**; the model's tool calls are
   returned in `ModelResponse.tool_calls`. `schema` and `tools` **may be declared
-  together** — live-verified on all three providers 2026-08-04; the model then either
-  calls a tool or emits the structured answer. Each tool is
+  together** — live-verified on all three providers 2026-08-04 and sent together through these
+  adapters since 2026-08-06; the model then either calls a tool or emits the structured answer.
+  `tool_choice` is `"auto"` / `"required"` / `"none"`, where **`"none"` keeps the declarations
+  and forbids a call** — the terminal-compose shape, so a replayed trajectory's items still
+  resolve against declared tools. Each tool is
   a provider-neutral dict `{"name", "description", "input_schema"}`. There is no
   prompt-injected JSON schema; agents validate the parsed dict with Pydantic
   (`_structured_loop`) and retry on an off-schema shape, failing loudly on cap exhaustion.
@@ -176,11 +180,15 @@ Google by editing YAML alone
   function call output are passed into the next response untouched"*
   ([reasoning](https://developers.openai.com/api/docs/guides/reasoning)) — so its adapter carries
   every item except the two it rebuilds from our own state, projected into the accepted input
-  shape at capture. **A request declaring no tools carries no provider parts on any adapter** and
-  rebuilds the turn from the interpreted views: a block naming an absent tool is rejected, and
-  filtering just those blocks out is what Anthropic's rule forbids (confirmed live 2026-08-05).
-  The cost is that a terminal compose does not see its own prior reasoning; the documented way
-  out is for the compose to declare its tools.
+  shape at capture. **Parts are always carried; no request shape drops them.** The drop rule that
+  used to fire when a request declared no tools is gone: it was inherited from the discovery-trim,
+  where only a *tool-referencing* item was the problem, and applied to the whole list it orphaned
+  the `function_call` items that replay unconditionally (`function_call … without its required
+  'reasoning' item`, run-killer 2026-08-05). The dilemma it existed for — a block naming an absent
+  tool is rejected, yet filtering those blocks out is what Anthropic's rule forbids — is resolved
+  upstream instead: **a request that replays a trajectory declares its tools**, with
+  `tool_choice="none"` when it must not call them. Only a turn we *synthesized* (a test fake) has
+  no array to echo and is rebuilt from the interpreted views.
 - `RoleModelConfig(name: str, provider: ProviderName, model: str,
   vision: bool = False, documents: bool = False, priceMTk: dict[str, float] = {},
   parameters: dict[str, Any] = {})` — one model member from YAML.
@@ -190,7 +198,11 @@ Google by editing YAML alone
   `config/models.yaml` shape.
 - `ModelProvider` — async protocol implemented by provider adapters:
   `call(messages, config, *, schema=None, tools=None, tool_choice="auto",
-  images=(), documents=(), cache_prefix=False) -> ModelResponse`. `cache_prefix`
+  images=(), documents=(), cache_prefix=False) -> ModelResponse`. `schema` and `tools` are
+  independent — one request builder per adapter sends whichever were given, and one extraction
+  pass fills `content`/`parsed`/`tool_calls`/`provider_parts` from whatever came back.
+  `tool_choice` maps to `"none"` (OpenAI) / `{"type": "none"}` (Anthropic) /
+  `FunctionCallingConfig(mode="NONE")` (Google). `cache_prefix`
   asks the adapter to use the provider's native prompt-cache mechanism: Anthropic
   sets `cache_control: ephemeral` breakpoints on the stable prefix (system + tool defs)
   and the rolling conversation tail; OpenAI sets a `prompt_cache_key` (prefix caching is
@@ -333,3 +345,37 @@ Compacted 2026-08-05: entries through 2026-08-03 folded into themed ranges (deta
   all read as a clean finish); tool `input_schema`s get no dialect normalization; the tool_use `caller`
   field is dropped on a synthesized-turn rebuild; letting the terminal compose declare its tools would put
   it back on the documented echo path.
+- 2026-08-06 — **The unification finished: one request builder, and no tool-less replay.**
+  The 2026-08-05 pass removed the `schema`/`tools` *assertions* but not the branching: both
+  adapters still ran `if schema is not None: … return` **before** `if tools is not None`, so
+  passing both silently dropped the tools (only Google merged them), and
+  `test_schema_and_tools_are_not_mutually_exclusive` passed anyway because it asserted `parsed`
+  came back rather than that the tools reached the request. The terminal compose therefore still
+  could not declare tools, `include_provider_parts=tools is not None` still dropped every carried
+  part on that path, and the `function_call` items a few lines below still replayed
+  unconditionally — orphaning the reasoning items they require. That killed live run `8c75990e`
+  at **$29.50**, one step before its first commit, with the same 400 as `b-run-q21-0803c`
+  (`Item 'fc_…' of type 'function_call' was provided without its required 'reasoning' item`) on
+  the GPT co-lead's `review_tool` compose. **Now:** each adapter builds ONE request (schema and
+  tools independent; Anthropic keeps `parse` vs `create` only because `output_format` lives on
+  `parse`) and runs ONE extraction filling `content`/`parsed`/`tool_calls`/`provider_parts`;
+  `tool_choice` gains `"none"` — `"none"` (OpenAI), `{"type": "none"}` (Anthropic),
+  `mode="NONE"` (Google), each read from that provider's own documentation; `_call_over_messages`
+  / `_structured_loop` take the provider `_react` just used and declare it with
+  `tool_choice="none"`, so a compose keeps its declarations while being forbidden to call (with
+  `"auto"` the model can call again and return `parsed=None`, burning a `structured_retry_cap`
+  attempt); and **`include_provider_parts` is deleted** — with every replaying request declaring
+  its tools, the drop branch was dead code that could only reintroduce the bug. The same shape
+  was fixed in `StatusMonitorAgent`'s cap-exhaustion fallback, a plausible cause of the open
+  *"`/status` returns silence"* defect, since that call replayed a trajectory with no tools
+  declared on the GPT reporter. **Live-verified 2026-08-06 on both providers before any code was
+  written** (`tmp_scripts/probe_tool_choice_none.py`, cents): OpenAI accepts
+  `tools` + `tool_choice="none"` + `text.format`, and Anthropic's `messages.parse` accepts
+  `output_format` + `tools` + `tool_choice` + `thinking` in one call — the one risk that could
+  have forced a redesign. New live test `test_live_compose_declares_its_tools` covers the shape
+  that shipped this bug: an **ordinary function-call** trajectory (the co-lead's tools are
+  resident harness tools), where every prior live test had exercised tool-search discovery
+  instead. Also fixed there: `test_live_tool_search_defers_and_discovers` compared
+  `usage.input_tokens`, which is net of cache, so a warm prefix made an all-resident baseline
+  report 443 tokens against a 35k prompt — it now compares uncached + cache-read. Suite 665 → 670;
+  live 7/7 on both providers.

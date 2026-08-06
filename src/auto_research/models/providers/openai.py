@@ -178,6 +178,18 @@ def _item_to_dict(item: Any) -> dict[str, Any]:
     return {"type": getattr(item, "type", None)}
 
 
+def _tool_choice_value(tool_choice: str) -> str:
+    """Neutral ``tool_choice`` → the Responses API spelling.
+
+    ``"none"`` keeps the declarations in the request while forbidding a call —
+    *"set `tool_choice` to `none` to imitate the behavior of passing no functions"*
+    (developers.openai.com/api/docs/guides/function-calling). That is what a terminal
+    compose wants: the trajectory's items still resolve against declared tools, and the
+    model must answer rather than call again.
+    """
+    return tool_choice if tool_choice in ("required", "none") else "auto"
+
+
 class OpenAIProvider:
     """Thin adapter around the OpenAI Responses API.
 
@@ -197,6 +209,11 @@ class OpenAIProvider:
     ``function_call_output`` inputs so a ReAct loop can carry its trajectory.
     Prefix caching is automatic on the Responses API; ``cache_prefix`` additionally
     sets a stable ``prompt_cache_key`` to improve hit routing.
+
+    **One request, one extraction.** ``schema`` and ``tools`` are independent inputs, not
+    branches: both ride the same ``responses.create`` (live-verified 2026-08-06) and the
+    single pass over ``response.output`` fills whichever of ``content`` / ``parsed`` /
+    ``tool_calls`` / ``provider_parts`` the response actually carried.
     """
 
     async def call(
@@ -215,7 +232,7 @@ class OpenAIProvider:
 
         from openai import AsyncOpenAI
 
-        input_items = _to_openai_input(messages, include_provider_parts=tools is not None)
+        input_items = _to_openai_input(messages)
         cache_kwargs = {"prompt_cache_key": config.name} if cache_prefix else {}
         attachment_content = []
         for document in documents:
@@ -237,21 +254,21 @@ class OpenAIProvider:
 
         client = AsyncOpenAI()
 
+        # ONE request, built from whatever the caller gave us. `schema` and `tools` are
+        # independent: declaring both is what lets the terminal compose keep its tool
+        # declarations while `tool_choice="none"` forbids calling them, so no request ever
+        # replays a trajectory whose items reference tools it did not declare.
+        request: dict[str, Any] = {
+            "model": config.model,
+            "input": input_items,
+            **cache_kwargs,
+            **config.parameters,
+        }
         if schema is not None:
-            response = await client.responses.create(
-                model=config.model,
-                input=input_items,
-                text={"format": _strict_json_schema_format(schema)},
-                **cache_kwargs,
-                **config.parameters,
-            )
-            text = getattr(response, "output_text", "") or ""
-            parsed = loads_first_json_object(text)
-            return _response(content=text, parsed=parsed, raw=response)
-
+            request["text"] = {"format": _strict_json_schema_format(schema)}
         if tools is not None:
             ts_cfg = tool_search_config()
-            function_tools = []
+            function_tools: list[dict[str, Any]] = []
             for tool in tools:
                 entry: dict[str, Any] = {
                     "type": "function",
@@ -268,56 +285,50 @@ class OpenAIProvider:
                 function_tools.append(entry)
             if ts_cfg.enabled and any(t.get("defer_loading") for t in function_tools):
                 function_tools.append({"type": ts_cfg.openai_tool})
-            response = await client.responses.create(
-                model=config.model,
-                input=input_items,
-                tools=function_tools,
-                tool_choice="required" if tool_choice == "required" else "auto",
-                **cache_kwargs,
-                **config.parameters,
-            )
-            tool_calls = []
-            provider_parts: list[dict[str, Any]] = []
-            for item in getattr(response, "output", []) or []:
-                itype = getattr(item, "type", None)
-                if itype == "function_call":
-                    try:
-                        args = json.loads(item.arguments) if item.arguments else {}
-                    except (json.JSONDecodeError, TypeError):
-                        args = {}
-                    tool_calls.append(
-                        ToolCall(
-                            id=getattr(item, "call_id", "") or "",
-                            name=item.name,
-                            arguments=args,
-                            # The provider's own record of the call, kept whole (in its input
-                            # shape) so the replay hands back fields we do not interpret —
-                            # `namespace`, which addresses a tool discovered through tool search,
-                            # and whatever OpenAI adds next.
-                            provider_fields=_as_input_item(item),
-                        )
-                    )
-                elif itype not in _UNCARRIED_ITEM_TYPES:
-                    # Everything else the provider authored is carried whole, in output order, so
-                    # a later turn can hand it back: the discovery items (which keep a searched
-                    # tool callable) and the reasoning items they depend on. Translated to their
-                    # input shape *here*, at capture, so each is legal to send by construction and
-                    # is the same bytes on every turn that replays it (see `_as_input_item`).
-                    provider_parts.append(_as_input_item(item))
-            return _response(
-                content=getattr(response, "output_text", ""),
-                tool_calls=tool_calls,
-                provider_parts=provider_parts,
-                raw=response,
-            )
+            request["tools"] = function_tools
+            request["tool_choice"] = _tool_choice_value(tool_choice)
 
-        response = await client.responses.create(
-            model=config.model,
-            input=input_items,
-            **cache_kwargs,
-            **config.parameters,
+        response = await client.responses.create(**request)
+
+        # ONE extraction pass: the response carries what it carries, and the caller reads the
+        # view it needs. Structured output and tool calls are not alternatives here — a request
+        # declaring both can come back either way.
+        text = getattr(response, "output_text", "") or ""
+        tool_calls: list[ToolCall] = []
+        provider_parts: list[dict[str, Any]] = []
+        for item in getattr(response, "output", []) or []:
+            itype = getattr(item, "type", None)
+            if itype == "function_call":
+                try:
+                    args = json.loads(item.arguments) if item.arguments else {}
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                tool_calls.append(
+                    ToolCall(
+                        id=getattr(item, "call_id", "") or "",
+                        name=item.name,
+                        arguments=args,
+                        # The provider's own record of the call, kept whole (in its input
+                        # shape) so the replay hands back fields we do not interpret —
+                        # `namespace`, which addresses a tool discovered through tool search,
+                        # and whatever OpenAI adds next.
+                        provider_fields=_as_input_item(item),
+                    )
+                )
+            elif itype not in _UNCARRIED_ITEM_TYPES:
+                # Everything else the provider authored is carried whole, in output order, so
+                # a later turn can hand it back: the discovery items (which keep a searched
+                # tool callable) and the reasoning items they depend on. Translated to their
+                # input shape *here*, at capture, so each is legal to send by construction and
+                # is the same bytes on every turn that replays it (see `_as_input_item`).
+                provider_parts.append(_as_input_item(item))
+        return _response(
+            content=text,
+            parsed=loads_first_json_object(text) if schema is not None else None,
+            tool_calls=tool_calls,
+            provider_parts=provider_parts,
+            raw=response,
         )
-        return _response(content=getattr(response, "output_text", ""), raw=response)
 
 
 def _figure_items(figure: FigureRef) -> list[dict]:
@@ -336,9 +347,7 @@ def _figure_items(figure: FigureRef) -> list[dict]:
     ]
 
 
-def _to_openai_input(
-    messages: Sequence[ConversationMessage], *, include_provider_parts: bool = True
-) -> list[dict]:
+def _to_openai_input(messages: Sequence[ConversationMessage]) -> list[dict]:
     """Translate neutral conversation turns into Responses-API input items.
 
     ``ModelResponse`` → its carried items plus ``function_call`` items; ``ToolResultMessage`` →
@@ -352,19 +361,20 @@ def _to_openai_input(
             # calls they enabled: OpenAI's rule for a tool round trip is to "ensure all items
             # between the last user message and your function call output are passed into the
             # next response untouched"
-            # (developers.openai.com/api/docs/guides/reasoning). A discovery item is also
-            # rejected without the reasoning item that produced it — observed live 2026-08-03,
-            # `Item 'tsc_…' of type 'tool_search_call' was provided without its required
-            # 'reasoning' item: 'rs_…'` — so order within the carried list is load-bearing.
+            # (developers.openai.com/api/docs/guides/reasoning). An item is rejected without the
+            # reasoning item that produced it — observed live twice, on a discovery item
+            # (2026-08-03, `tool_search_call … without its required 'reasoning' item`) and on a
+            # plain call (2026-08-05, `function_call … without its required 'reasoning' item`,
+            # which killed run 8c75990e) — so order within the carried list is load-bearing and
+            # the parts are ALWAYS carried.
             #
-            # A request declaring no tools drops them all. Unlike Anthropic and Google, which
-            # document that reasoning must be resent unmodified, OpenAI documents pass-back as
-            # *recommended* rather than required and says its systems "smartly ignore any
-            # reasoning items that aren't relevant to your functions" — so omitting them is
-            # supported, while replaying a discovery item that names an undeclared tool is not
-            # (a live run-killer, 2026-07-29).
-            if include_provider_parts:
-                items.extend(message.provider_parts)
+            # They used to be dropped wholesale when a request declared no tools, inherited from
+            # the 2026-07-29 discovery-trim where only a *tool-referencing* item was the problem.
+            # Applied to the whole list it orphaned the `function_call` items emitted just below,
+            # which are unconditional. The trim's real fix is upstream: every caller that replays
+            # a tool trajectory declares its tools (`tool_choice="none"` on a terminal compose),
+            # so nothing dangles and nothing needs dropping.
+            items.extend(message.provider_parts)
             for call in message.tool_calls:
                 # Start from the provider's own record so fields we never interpret ride along
                 # (`namespace` addresses a tool discovered through tool search — replaying without

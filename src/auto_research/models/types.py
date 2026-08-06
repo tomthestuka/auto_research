@@ -214,10 +214,14 @@ class ModelProvider(Protocol):
         """Call a provider model and return one normalized :class:`ModelResponse`.
 
         ``schema`` and ``tools`` **may be declared together** — all three providers
-        accept it (live-verified 2026-08-04), and the model then either calls a tool
-        (``tool_calls``) or emits the structured answer (``parsed``). Each tool is a
-        neutral dict ``{"name", "description", "input_schema"}``; ``tool_choice`` is
-        ``"auto"`` or ``"required"``. ``messages`` may include prior ``ModelResponse``
+        accept it (live-verified 2026-08-04, and end-to-end through these adapters
+        2026-08-06), and the model then either calls a tool (``tool_calls``) or emits the
+        structured answer (``parsed``). Each tool is a neutral dict
+        ``{"name", "description", "input_schema"}``; ``tool_choice`` is ``"auto"``,
+        ``"required"`` or ``"none"``. ``"none"`` keeps the declarations in the request while
+        forbidding a call — what a terminal compose over a tool trajectory declares, so the
+        items it replays still resolve against declared tools.
+        ``messages`` may include prior ``ModelResponse``
         / ``ToolResultMessage`` turns for ReAct-loop replay. ``cache_prefix`` asks the
         adapter to cache the stable prefix (system + tool defs) using its
         provider-native mechanism.
@@ -247,6 +251,8 @@ class ModelHandle:
 
         ``schema`` (structured output) and ``tools`` (function calling) may be declared
         together; the model then either calls a tool or emits the structured answer.
+        ``tool_choice`` is ``"auto"``, ``"required"`` or ``"none"`` (declare the tools,
+        forbid calling them — the terminal-compose shape).
         ``messages`` may include prior ``ModelResponse`` / ``ToolResultMessage`` turns
         for ReAct-loop replay; ``cache_prefix`` requests provider-native caching of the
         stable prefix.
