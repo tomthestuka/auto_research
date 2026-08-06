@@ -25,7 +25,12 @@ from dotenv import load_dotenv
 from auto_research.agents.roles import _ClarifyReply
 from auto_research.models.providers.anthropic import AnthropicProvider
 from auto_research.models.providers.openai import OpenAIProvider
-from auto_research.models.types import ModelMessage, RoleModelConfig
+from auto_research.models.types import (
+    ModelMessage,
+    RoleModelConfig,
+    ToolResultMessage,
+    ToolResultPart,
+)
 from auto_research.schemas import (
     AnalystReport,
     AuthoringDecision,
@@ -146,3 +151,92 @@ def test_live_schema_is_accepted_with_tools_declared(
     )
     # The strong claim: what came back actually validates as the model we asked for.
     schema.model_validate(response.parsed)
+
+
+@pytest.mark.parametrize("provider_name,provider,model", PROVIDERS)
+@pytest.mark.parametrize(
+    "schema_name,schema",
+    [("AnalystReport", AnalystReport), ("ToolReviewVerdict", ToolReviewVerdict)],
+    ids=["AnalystReport", "ToolReviewVerdict"],
+)
+def test_live_compose_with_real_schema_after_a_real_trajectory(
+    provider_name, provider, model, schema_name, schema
+):
+    """The report-composition phase for real: N tool-calling turns, THEN the `none` compose.
+
+    The matrix above sends each schema over a two-message conversation — enough to prove the
+    schema converts and parses, but NOT the shape a run actually sends. The real compose replays
+    a trajectory: assistant turns carrying provider parts (reasoning on OpenAI, thinking on
+    Anthropic), `tool_use`/`function_call` items, and their results. Every run-killer at this
+    seam needed that history to reproduce; none of them would have fired on a bare conversation.
+
+    So: two `tool_choice="auto"` turns that really call a tool, then the terminal compose with a
+    REAL schema and `tool_choice="none"` over the accumulated history.
+    """
+    load_dotenv()
+    cfg = _config(provider_name, model)
+    seed = [
+        ModelMessage(
+            role="system",
+            content="You analyse IXPE X-ray polarization data. Use read_file to inspect inputs.",
+        ),
+        ModelMessage(
+            role="user",
+            content=(
+                "Assess /tmp/cygx1_qu.csv for a polarization detection. Read it first, then "
+                "read /tmp/cygx1_meta.txt, then report."
+            ),
+        ),
+    ]
+
+    async def run():
+        history = list(seed)
+        turns = []
+        for reply in ("q=0.012+/-0.009, u=-0.004+/-0.009, n_slices=40",
+                      "exposure=524389 s, source=Cyg X-1, obsid=01002901"):
+            turn = await provider.call(history, cfg, tools=_TOOLS, tool_choice="auto")
+            turns.append(turn)
+            if not turn.tool_calls:
+                break
+            history = [
+                *history,
+                turn,
+                ToolResultMessage(results=[
+                    ToolResultPart(tool_call_id=c.id, name=c.name, content=reply, is_error=False)
+                    for c in turn.tool_calls
+                ]),
+            ]
+        history.append(ModelMessage(
+            role="user",
+            content=f"Emit the final {schema_name} now, grounded only in the tool results above. "
+                    "Keep every list to at most one element.",
+        ))
+        composed = await provider.call(
+            history, cfg, schema=schema, tools=_TOOLS, tool_choice="none"
+        )
+        return turns, composed
+
+    turns, composed = asyncio.run(run())
+
+    log = dev_log_path("schema-matrix", f"{provider_name}_{schema_name}_trajectory", ".json")
+    log.write_text(
+        json.dumps(
+            {
+                "turns": [
+                    {"tool_calls": [c.name for c in t.tool_calls],
+                     "part_types": [p.get("type") for p in t.provider_parts]}
+                    for t in turns
+                ],
+                "composed_parsed": composed.parsed,
+                "composed_tool_calls": [c.name for c in composed.tool_calls],
+            },
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+
+    assert any(t.tool_calls for t in turns), "the trajectory must contain a real tool call"
+    assert not composed.tool_calls, "tool_choice='none' forbids a call"
+    assert composed.parsed is not None, "the compose produced its structured answer"
+    schema.model_validate(composed.parsed)

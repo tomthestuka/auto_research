@@ -1211,20 +1211,26 @@ class AnalystLeadAgent(AgentRole):
                 free_tools=frozenset({EDIT_REPORT_TOOL, REVIEW_REPORT_TOOL}),
                 absolute_cap=_react_loop_absolute_cap(),
             )
+            report = workspace.written_report if workspace is not None else None
+            if report is None:
+                # Safety net: no edit_report written — compose terminally, attaching the catalog
+                # figures. This sits INSIDE the try on purpose: the compose declares
+                # `self.tools`, and the `finally` below detaches the workspace, which would
+                # remove edit_report/review_report from the declared set while the trajectory
+                # being replayed can still name them — the "Tool reference 'x' not found in
+                # available tools" shape (run-killer 2026-07-29). The declarations must match
+                # the history they replay, so the compose runs while the loop's set is attached.
+                report = await self._call_over_messages(
+                    messages, AnalystReport, action="adjudicate", images=all_figures,
+                    tools=self.tools,
+                )
+                report = report.model_copy(
+                    update={"figures": _dedup_figures(all_figures), "cited_figures": []}
+                )
         finally:
             if hasattr(self.tools, "report_workspace"):
                 self.tools.report_workspace = previous_ws
 
-        report = workspace.written_report if workspace is not None else None
-        if report is None:
-            # Safety net: no edit_report written — compose terminally, attaching the catalog figures.
-            report = await self._call_over_messages(
-                messages, AnalystReport, action="adjudicate", images=all_figures,
-                tools=self.tools,
-            )
-            report = report.model_copy(
-                update={"figures": _dedup_figures(all_figures), "cited_figures": []}
-            )
         self._last_report = report
         return report
 

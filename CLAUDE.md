@@ -1072,3 +1072,22 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   providers with tools declared, validating each response against its model. Every earlier live
   check of the structured path had used a two-field toy schema, so "big real schema alongside a
   tools array" had never been sent to any provider; **18/18 pass** (~112 s). Suite 760 → 768.
+  **Then the human asked the two questions the tests still dodged — attach real history, and check
+  whether one session mixes schemas — and the first found a bug the same change had introduced.**
+  The lead's `adjudicate` attaches a report workspace (adding `edit_report`/`review_report`) for
+  its loop and detaches it in a `finally`; the safety-net compose ran *after* that, so it declared
+  `self.tools` **minus** the two tools whose `tool_use` blocks the replayed trajectory can name —
+  the 2026-07-29 `Tool reference … not found` shape, reintroduced in a new place. Source-text
+  equality could not see it (both sites say `self.tools`; the *object* mutates between them), so
+  the compose moved inside the `try` and a runtime guard joined the static one
+  (`test_react_tools.py::test_compose_declares_the_tools_the_loop_ACTUALLY_had`, a provider whose
+  surface shrinks). The worker's `analyze` was safe by construction — its provider is built with
+  the workspace and never mutated. **On schema mixing: it does not happen** — every role method
+  emits exactly one schema, its tool-less fallback included, and each action builds a fresh
+  `[system, payload]` seed, so no trajectory is ever replayed under a different schema; pinned by
+  `test_one_conversation_carries_exactly_one_schema`. New live test
+  `test_live_compose_with_real_schema_after_a_real_trajectory` sends two real tool-calling turns
+  then the `none` compose with `AnalystReport`/`ToolReviewVerdict` on both providers — and its log
+  is the confirmation the original probe missed: the OpenAI turn carried a **`reasoning`** item,
+  replayed beside its `function_call` with tools declared, and was accepted (the probe's repro leg
+  had been inconclusive because that turn emitted none). Suite 768 → 770; live 4/4.

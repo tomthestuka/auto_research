@@ -80,3 +80,32 @@ def test_compose_declares_the_same_tools_as_its_loop(
         f"its loop on `tools={react_tools}`. The compose must declare the SAME tool set, or the "
         "trajectory it replays references tools the request never declared."
     )
+
+
+def test_one_conversation_carries_exactly_one_schema() -> None:
+    """No trajectory is replayed under a schema different from the one it was built for.
+
+    Joining a history gathered while emitting schema A onto a request that asks for schema B is
+    a shape we never send today — every role method builds a FRESH seed (`[system, payload]`)
+    per action, and its tool-less fallback uses the same schema as its compose. Worth pinning:
+    the adapters' strict-schema conversion and the provider-side parse are validated per schema,
+    and a refactor that let two schemas share one conversation would be sending an untested
+    shape without anything failing locally.
+    """
+    tree = ast.parse(ROLES.read_text(encoding="utf-8"), str(ROLES))
+    offenders = []
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        schemas = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call) and getattr(node.func, "attr", None) in (
+                "_call_over_messages",
+                "_call",
+            ):
+                if len(node.args) > 1:
+                    schemas.add(ast.unparse(node.args[1]))
+        if len(schemas) > 1:
+            offenders.append(f"{fn.name}() emits {sorted(schemas)}")
+    assert not offenders, (
+        "a role method emits more than one schema; if these share a conversation, a trajectory "
+        "built under one schema is being replayed under another:\n" + "\n".join(offenders)
+    )

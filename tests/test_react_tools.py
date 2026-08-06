@@ -777,3 +777,78 @@ def test_compose_without_tools_declares_none():
     agent = ReviewerAgent(model=model, prompt="p")
     asyncio.run(agent._call({"q": "x"}, _Out, action="review"))
     assert model.calls[0]["tools"] is None
+
+
+def test_compose_declares_the_tools_the_loop_ACTUALLY_had():
+    """The declared set must match the history at RUNTIME, not just in the source text.
+
+    `test_compose_declares_loop_tools.py` proves both call sites name the same expression. That
+    is not enough when the expression is a **mutable provider**: the lead's `adjudicate` attaches
+    a report workspace (adding `edit_report`/`review_report`) for the loop and detaches it in a
+    `finally`, so `self.tools` names one object whose `tool_definitions()` shrinks in between.
+    Composing after the detach declares a set missing tools the replayed trajectory names — the
+    "Tool reference 'x' not found in available tools" run-killer (2026-07-29).
+    """
+    from pydantic import BaseModel
+
+    class _Out(BaseModel):
+        note: str
+
+    class _MutatingTools:
+        """A provider whose surface shrinks once the workspace is detached."""
+
+        def __init__(self):
+            self.report_workspace = None
+
+        def tool_definitions(self):
+            base = [{"name": "paid", "description": "d",
+                     "input_schema": {"type": "object", "properties": {}}}]
+            if self.report_workspace is not None:
+                base.append({"name": "edit_report", "description": "d",
+                             "input_schema": {"type": "object", "properties": {}}})
+            return base
+
+        async def execute(self, name, arguments):
+            return ToolOutcome(text="ok")
+
+    class _Model:
+        def __init__(self):
+            self.calls: list[dict] = []
+            self._n = 0
+
+        async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
+                       images=(), documents=(), cache_prefix=False):
+            self.calls.append({"tools": [t["name"] for t in (tools or [])], "schema": schema})
+            self._n += 1
+            if self._n == 1:
+                return ModelResponse(
+                    tool_calls=[ToolCall(id="c1", name="edit_report", arguments={})]
+                )
+            if schema is not None:
+                return ModelResponse(parsed={"note": "done"})
+            return ModelResponse(content="done")
+
+    model, tools = _Model(), _MutatingTools()
+    agent = ReviewerAgent(model=model, prompt="p")
+
+    async def run():
+        # Mirror the adjudicate shape: attach → loop → compose → detach.
+        try:
+            tools.report_workspace = object()
+            messages, _, _ = await agent._react(
+                seed_messages=[], tools=tools, action="adjudicate", cap=1
+            )
+            return await agent._call_over_messages(
+                messages, _Out, action="adjudicate", tools=tools
+            )
+        finally:
+            tools.report_workspace = None
+
+    asyncio.run(run())
+
+    loop_call, compose_call = model.calls[0], model.calls[-1]
+    assert "edit_report" in loop_call["tools"]
+    assert "edit_report" in compose_call["tools"], (
+        "the compose dropped a tool the loop had; the replayed trajectory names it"
+    )
+    assert compose_call["tools"] == loop_call["tools"]
