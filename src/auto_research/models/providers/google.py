@@ -9,6 +9,12 @@ from typing import Any
 from pydantic import BaseModel
 
 from auto_research.models.providers._json import loads_first_json_object
+from auto_research.models.providers._media import (
+    MediaLimits,
+    MediaPlan,
+    caption_with_note,
+    plan_for_call,
+)
 from auto_research.models.types import (
     ConversationMessage,
     ModelMessage,
@@ -147,7 +153,7 @@ def _part_from_dict(data: Mapping[str, Any], types: Any) -> Any | None:
         return None
 
 
-def _figure_parts(figure: FigureRef, types: Any) -> list:
+def _figure_parts(figure: FigureRef, types: Any, plan: MediaPlan | None = None) -> list:
     """Render one figure as Gemini ``Part``s: a caption then the image bytes.
 
     Loading bytes here is the multimodal boundary — the only place a figure's pixels
@@ -156,13 +162,20 @@ def _figure_parts(figure: FigureRef, types: Any) -> list:
     ("Figure 1 — …") or the catalog handle ("[analyst_worker_0:2] …") so prose lines up
     with the images (V-4).
     """
+    caption = f"{figure.caption} (produced by {figure.produced_by})"
+    resolved = (plan or MediaPlan()).resolve(figure)
+    text = types.Part.from_text(text=caption_with_note(caption, resolved))
+    if resolved.dropped:
+        return [text]
     return [
-        types.Part.from_text(text=f"{figure.caption} (produced by {figure.produced_by})"),
-        types.Part.from_bytes(data=figure.path.read_bytes(), mime_type=figure.mime_type),
+        text,
+        types.Part.from_bytes(data=resolved.data, mime_type=resolved.mime),
     ]
 
 
-def _to_gemini_contents(messages: Sequence[ConversationMessage], types: Any) -> tuple[str | None, list]:
+def _to_gemini_contents(
+    messages: Sequence[ConversationMessage], types: Any, plan: MediaPlan | None = None
+) -> tuple[str | None, list]:
     """Split system text out and translate the rest into Gemini ``Content`` turns.
 
     ``ModelResponse`` → a ``model`` turn rebuilt from that turn's parts;
@@ -214,7 +227,7 @@ def _to_gemini_contents(messages: Sequence[ConversationMessage], types: Any) -> 
             figure_parts: list = []
             for part in message.results:
                 for figure in part.figures:
-                    figure_parts.extend(_figure_parts(figure, types))
+                    figure_parts.extend(_figure_parts(figure, types, plan))
             if figure_parts:
                 contents.append(types.Content(role="user", parts=figure_parts))
         elif message.role == "system":
@@ -223,6 +236,24 @@ def _to_gemini_contents(messages: Sequence[ConversationMessage], types: Any) -> 
             role = "model" if message.role == "assistant" else "user"
             contents.append(types.Content(role=role, parts=[types.Part.from_text(text=message.content)]))
     return ("\n".join(system_texts) or None), contents
+
+
+# Gemini's documented media limits (ai.google.dev/gemini-api/docs/image-understanding and
+# .../files). Enforced per request by `_media.plan_for_call`. The binding one is the **20 MB total
+# inline** ceiling — by far the tightest of the three providers, and the reason a figure-heavy
+# ReAct loop needs the whole-request budget rather than per-item checks alone.
+_LIMITS = MediaLimits(
+    # "PNG, JPEG, WEBP, HEIC, HEIF".
+    image_mimes=frozenset(
+        {"image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"}
+    ),
+    doc_mimes=frozenset({"application/pdf", "text/plain"}),
+    # "Gemini models support a maximum of 3,600 image files per request".
+    max_images=3600,
+    # "Inline image data is capped at a total request size of 20MB (text prompts, system
+    # instructions, and inline bytes combined)." Files API would lift this — deferred (§12).
+    max_request_bytes=20 * 1024 * 1024,
+)
 
 
 class GoogleProvider:
@@ -257,17 +288,25 @@ class GoogleProvider:
         from google import genai
         from google.genai import types
 
-        system, contents = _to_gemini_contents(messages, types)
+        # One media plan for the WHOLE request (§stateless: this is the only point that sees
+        # every image in the conversation plus this call's attachments at once).
+        plan = plan_for_call(messages, images, documents, _LIMITS)
+        system, contents = _to_gemini_contents(messages, types, plan)
         extra_parts: list[Any] = []
         for document in documents:
+            resolved = plan.resolve(document)
+            if resolved.dropped:
+                # Withheld, never silent — the model is told which document it lost and why.
+                extra_parts.append(types.Part.from_text(text=resolved.note or ""))
+                continue
             extra_parts.append(
-                types.Part.from_bytes(data=document.path.read_bytes(), mime_type=document.mime_type)
+                types.Part.from_bytes(data=resolved.data, mime_type=resolved.mime)
             )
         # Cross-agent figures (from another agent's report) ride this call-time channel;
         # figures a tool produced *this* loop live inline at their tool-result turn instead
         # (see `_to_gemini_contents`).
         for figure in images:
-            extra_parts.extend(_figure_parts(figure, types))
+            extra_parts.extend(_figure_parts(figure, types, plan))
         if extra_parts:
             contents.append(types.Content(role="user", parts=extra_parts))
 

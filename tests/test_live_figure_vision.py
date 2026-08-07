@@ -271,3 +271,76 @@ def test_coder_sdk_sees_figure():
     )
     assert vision.sees_figure, f"coder SDK reported NOT seeing the figure (chart_type={vision.chart_type!r})"
     assert vision.described_content.strip()
+
+
+def test_live_many_image_request_that_used_to_400(tmp_path):
+    """21 oversized figures in one request — the shape that killed run `8c75990e`.
+
+    Anthropic tightens its per-image dimension cap to 2000 px once a request carries more than
+    20 image blocks. On 2026-08-06 a worker's plotter had produced a 2677x1554 `dcf_panels.png`,
+    each plotter call added 3 PNGs that replay inline on every later request, the count crossed
+    20, and the run died at $116.10 — one step after its fifth tool committed:
+
+        400 image.source.base64.data: At least one of the image dimensions exceed
+            max allowed size for many-image requests: 2000 pixels
+
+    The adapter now resizes on the way out. This sends that exact shape and requires it through.
+    Deterministic coverage is `tests/test_media_guards.py`; only a live round trip can prove the
+    request the guard produces is one Anthropic actually accepts.
+    """
+    from PIL import Image
+
+    from auto_research.models.providers.anthropic import AnthropicProvider
+    from auto_research.models.types import (
+        RoleModelConfig,
+        ToolCall,
+        ToolResultMessage,
+        ToolResultPart,
+    )
+
+    load_dotenv()
+    figures = []
+    for index in range(21):
+        path = tmp_path / f"panel_{index}.png"
+        # The real offender's dimensions, and enough structure that the resize has to do work.
+        Image.new("RGB", (2677, 1554), (20 * (index % 12), 90, 140)).save(path, format="PNG")
+        figures.append(
+            FigureRef(
+                path=path,
+                caption=f"DCF panel {index}",
+                mime_type="image/png",
+                produced_by="test",
+                created_at=datetime.now(),
+                sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+        )
+
+    # A real trajectory: the tool_result must answer a tool_use in the preceding assistant turn,
+    # which is also how these figures reach a request in production.
+    convo = [
+        ModelMessage(role="system", content="You review X-ray polarization figures."),
+        ModelMessage(role="user", content="How many panels did you receive? Answer with a number."),
+        ModelResponse(
+            content="",
+            tool_calls=[ToolCall(id="c1", name="qu_lag_dcf_plot", arguments={})],
+        ),
+        ToolResultMessage(
+            results=[
+                ToolResultPart(
+                    tool_call_id="c1", name="qu_lag_dcf_plot", content="21 panels", figures=figures
+                )
+            ]
+        ),
+    ]
+    cfg = RoleModelConfig(
+        name="worker",
+        provider="anthropic",
+        model="claude-sonnet-5",
+        vision=True,
+        parameters={"max_tokens": 512},
+    )
+
+    response = asyncio.run(AnthropicProvider().call(convo, cfg))
+
+    print(f"[live] 21-image request accepted; reply: {(response.content or '')[:120]}")
+    assert response.usage.input_tokens > 0, "the request reached the model"

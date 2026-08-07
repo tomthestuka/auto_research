@@ -8,6 +8,12 @@ from pydantic import BaseModel
 
 from auto_research.env import context_editing_config, tool_search_config
 from auto_research.models.providers._tool_search import anthropic_search_tool_name
+from auto_research.models.providers._media import (
+    MediaLimits,
+    MediaPlan,
+    caption_with_note,
+    plan_for_call,
+)
 from auto_research.models.types import (
     ConversationMessage,
     ModelMessage,
@@ -38,6 +44,32 @@ def _block_to_dict(block: Any) -> dict[str, Any]:
     if isinstance(block, dict):
         return dict(block)
     return {"type": getattr(block, "type", None)}
+
+
+# Anthropic's documented media limits (platform.claude.com/docs/en/build-with-claude/vision,
+# "Request limits"; .../pdf-support). Enforced per request by `_media.plan_for_call`, the only
+# place that sees every image in the conversation at once.
+_LIMITS = MediaLimits(
+    # "Claude supports JPEG, PNG, GIF, and WebP images".
+    image_mimes=frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"}),
+    doc_mimes=frozenset({"application/pdf", "text/plain"}),
+    # "100 per request on the API, for models with a 200k-token context window."
+    max_images=100,
+    # "If a single API request contains more than 20 images, a stricter per-image dimension limit
+    # applies… resize each image so that neither dimension exceeds 2000 px" — the rule that killed
+    # run 8c75990e, where a 2677x1554 figure rode a request carrying >20 image blocks.
+    strict_block_threshold=20,
+    strict_max_edge=2000,
+    # "The maximum dimensions per image are 8000x8000 px."
+    max_edge=8000,
+    # "10 MB (base64-encoded) when using the Claude API directly."
+    max_image_bytes=10 * 1024 * 1024,
+    # "Maximum request size 32 MB" — the ceiling for the whole payload, PDFs included.
+    max_request_bytes=32 * 1024 * 1024,
+    # "Maximum pages per request 600 (100 when the request's context window is under 1M tokens)":
+    # our configured models are the sub-1M tier, so 100 is the live limit.
+    max_pdf_pages=100,
+)
 
 
 class AnthropicProvider:
@@ -85,7 +117,10 @@ class AnthropicProvider:
 
         params = dict(config.parameters)
         max_tokens = params.pop("max_tokens", 1024)
-        system, provider_messages = _to_anthropic_messages(messages)
+        # One media plan for the WHOLE request: the count/dimension/payload rules are defined over
+        # everything the request carries, and this is the only point that sees all of it (§stateless).
+        plan = plan_for_call(messages, images, documents, _LIMITS)
+        system, provider_messages = _to_anthropic_messages(messages, plan)
 
         # Documents (e.g. PDFs the reviewer opens) go at the FRONT — a stable position
         # right after the system prompt — and grow append-only across a ReAct loop, so
@@ -97,20 +132,28 @@ class AnthropicProvider:
         # accumulate. (Anthropic prompt-caching: prefix match, ≤4 breakpoints, 20-block
         # lookback — the front position also keeps docs inside that lookback window.)
         if documents:
-            document_blocks: list[dict[str, Any]] = [
-                {
-                    "type": "document",
-                    "source": {
-                        "type": "base64",
-                        "media_type": document.mime_type,
-                        "data": base64.b64encode(document.path.read_bytes()).decode("ascii"),
-                    },
-                }
-                for document in documents
-            ]
-            if cache_prefix:
+            document_blocks: list[dict[str, Any]] = []
+            for document in documents:
+                resolved = plan.resolve(document)
+                if resolved.dropped:
+                    # Withheld, never silent: the model is told which document it is missing and
+                    # why, so it cites from metadata rather than reasoning as if it had read it.
+                    document_blocks.append({"type": "text", "text": resolved.note or ""})
+                    continue
+                document_blocks.append(
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": resolved.mime,
+                            "data": resolved.b64(),
+                        },
+                    }
+                )
+            if cache_prefix and document_blocks:
                 document_blocks[-1]["cache_control"] = {"type": "ephemeral"}
-            provider_messages.insert(0, {"role": "user", "content": document_blocks})
+            if document_blocks:
+                provider_messages.insert(0, {"role": "user", "content": document_blocks})
 
         # Cross-agent figures (peer plots, a worker's figures the reviewer must see) have no
         # tool-turn in *this* conversation to attach to, so they ride this call-time channel —
@@ -119,7 +162,7 @@ class AnthropicProvider:
         if images:
             image_content: list[dict[str, Any]] = []
             for figure in images:
-                image_content.extend(_figure_blocks(figure))
+                image_content.extend(_figure_blocks(figure, plan))
             provider_messages.append({"role": "user", "content": image_content})
 
         system_param = _system_param(system, cache_prefix)
@@ -297,7 +340,7 @@ def _context_edits(response: Any) -> list[dict[str, Any]]:
     return edits
 
 
-def _figure_blocks(figure: FigureRef) -> list[dict[str, Any]]:
+def _figure_blocks(figure: FigureRef, plan: MediaPlan | None = None) -> list[dict[str, Any]]:
     """Render one figure as Anthropic content blocks: a caption then the image bytes.
 
     Loading bytes here is the multimodal boundary — the only place a figure's pixels
@@ -306,14 +349,21 @@ def _figure_blocks(figure: FigureRef) -> list[dict[str, Any]]:
     ("Figure 1 — …") or the catalog handle ("[analyst_worker_0:2] …"), so prose references
     line up with the images (V-4).
     """
+    caption = f"{figure.caption} (produced by {figure.produced_by})"
+    resolved = (plan or MediaPlan()).resolve(figure)
+    text = {"type": "text", "text": caption_with_note(caption, resolved)}
+    if resolved.dropped:
+        # The caption and the reason survive even when the pixels cannot: a model told what it is
+        # missing reasons honestly about it, where a silently absent figure invites invention.
+        return [text]
     return [
-        {"type": "text", "text": f"{figure.caption} (produced by {figure.produced_by})"},
+        text,
         {
             "type": "image",
             "source": {
                 "type": "base64",
-                "media_type": figure.mime_type,
-                "data": base64.b64encode(figure.path.read_bytes()).decode("ascii"),
+                "media_type": resolved.mime,
+                "data": resolved.b64(),
             },
         },
     ]
@@ -353,6 +403,7 @@ def _assistant_blocks(turn: ModelResponse) -> list[dict]:
 
 def _to_anthropic_messages(
     messages: Sequence[ConversationMessage],
+    plan: MediaPlan | None = None,
 ) -> tuple[str | None, list[dict]]:
     """Split system text out and translate the rest into Anthropic message dicts.
 
@@ -381,7 +432,7 @@ def _to_anthropic_messages(
             # there), so they replay in place every round and cache with the growing prefix.
             for part in message.results:
                 for figure in part.figures:
-                    content.extend(_figure_blocks(figure))
+                    content.extend(_figure_blocks(figure, plan))
             provider_messages.append({"role": "user", "content": content})
         elif message.role == "system":
             system_texts.append(message.content)

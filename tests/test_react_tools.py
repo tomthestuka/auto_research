@@ -14,7 +14,6 @@ from auto_research.agents.react import (
     ReadOnlyToolProvider,
     SandboxToolProvider,
     ToolOutcome,
-    _OPEN_PAPER_MAX_MB,
 )
 from auto_research.agents.roles import ReviewerAgent
 from auto_research.models import ModelResponse, ToolCall
@@ -94,19 +93,23 @@ def test_open_paper_rejects_non_pdf(tmp_path):
     assert provider.opened_paths == []
 
 
-def test_open_paper_rejects_oversized_pdf(tmp_path):
-    """A PDF over the inline size limit is refused with its size named and NOT attached, so an
-    ultra-high-resolution paper cannot blow the provider's request-size cap (the live 413)."""
+def test_open_paper_no_longer_caps_size_itself(tmp_path):
+    """A large PDF opens; whether it *fits* is the adapter's call, not this tool's.
+
+    The old blanket 8 MB refusal lived here, where it could see neither the provider's real
+    limits (bytes, pages, and how much other media the request already carries) nor which
+    provider the caller was even using. It refused papers every provider would have accepted and
+    still missed the limit that killed a run. The gate moved to `models/providers/_media.py`,
+    which runs per request with the whole payload in view.
+    """
     big = tmp_path / "huge.pdf"
-    big.write_bytes(b"%PDF-1.5\n" + b"0" * ((_OPEN_PAPER_MAX_MB + 1) * 1024 * 1024))
+    big.write_bytes(b"%PDF-1.5\n" + b"0" * (9 * 1024 * 1024))
     provider = ReadOnlyToolProvider(roots=[tmp_path])
 
     out = asyncio.run(provider.execute("open_paper", {"path": str(big)}))
 
-    assert out.is_error
-    assert not out.documents  # nothing attached by value
-    assert "too large" in out.text and f"{_OPEN_PAPER_MAX_MB} MB" in out.text
-    assert provider.opened_paths == []  # not counted against the open cap either
+    assert not out.is_error
+    assert [d.path for d in out.documents] == [big]
 
 
 def test_react_threads_documents_into_subsequent_calls(tmp_path):

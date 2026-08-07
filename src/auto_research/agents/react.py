@@ -43,13 +43,6 @@ _FIGURE_PATH_ARGS: dict[str, str] = {"save_path": ".png", "save_path_prefix": ""
 # re-attached to every subsequent model call, so this bounds the re-sent token cost.
 _OPEN_PAPER_CAP = 6
 
-# Per-PDF inline size limit (raw MB). A PDF is attached by value (base64, ~1.33x) to
-# every subsequent model call, so one ultra-high-resolution paper can exhaust a provider's
-# whole request-size budget on its own (a 23.5 MB paper is ~31 MB base64, ~the 32 MB
-# Anthropic cap) and hard-fail the call. Papers over this open from text_search metadata
-# instead of inline. 8 MB clears every normal paper in the KB (p95 ~5.5 MB) and blocks only
-# the handful of figure-bloated outliers.
-_OPEN_PAPER_MAX_MB = 8
 
 # read_file reads a file BY LINE RANGE (offset/limit), not head-only, so the reviewer/lead can
 # page through long toolkit source rather than reading blind (F8). The line limit + per-line char
@@ -1885,9 +1878,9 @@ class ReadOnlyToolProvider:
                         "Open a local PDF (text + figures) to read it before citing. Pass a path "
                         "from text_search. The papers you open and actually use are exactly the "
                         "ones to list in the verdict's cited_paths; the report's References "
-                        f"section links to those files. Open papers up to {_OPEN_PAPER_MAX_MB} MB "
-                        "inline; for a larger paper (ultra-high-resolution figures inflate the "
-                        "file), cite it from its text_search metadata instead."
+                        "section links to those files. A paper too large for the model's provider "
+                        "is reported back with the reason, so you can cite it from its "
+                        "text_search metadata instead."
                     ),
                     "input_schema": {
                         "type": "object",
@@ -2016,21 +2009,10 @@ class ReadOnlyToolProvider:
                     is_error=True,
                 )
             try:
-                # Size guard first (stat only, before any read): a PDF is attached by value to
-                # every later model call, so an oversized one can blow the provider's request cap
-                # and hard-fail the call. Refuse it here with the size named, so the model cites it
-                # from text_search metadata instead of attaching it.
-                size_mb = target.stat().st_size / (1024 * 1024) if target.is_file() else 0.0
-                if size_mb > _OPEN_PAPER_MAX_MB:
-                    return ToolOutcome(
-                        text=(
-                            f"paper too large to open inline: {target} is {size_mb:.1f} MB, over the "
-                            f"{_OPEN_PAPER_MAX_MB} MB limit (ultra-high-resolution figures inflate the "
-                            f"file without adding readable text). Cite it from its text_search "
-                            f"metadata, or open a smaller paper."
-                        ),
-                        is_error=True,
-                    )
+                # No size cap here. Whether a PDF fits is a *provider* question — bytes, pages,
+                # and how much other media the request already carries — and only the adapter sees
+                # all of that (`models/providers/_media.py`). A blanket 8 MB rule refused papers
+                # every provider would have accepted, and still missed the limits that matter.
                 # Same %PDF- signature check the downloader uses, so only real PDFs attach.
                 if not (target.is_file() and b"%PDF-" in target.read_bytes()[:1024]):
                     return ToolOutcome(

@@ -84,6 +84,34 @@ Google by editing YAML alone
   and called the discovered tool, and a measured three-turn probe confirmed the expanded
   definition falls **inside** the conversation cache breakpoint (cache-read at 0.1× thereafter) —
   the one behaviour no provider documents. Ships enabled (`tool_search_enabled: true`).
+- **Multimodal request guards ([V-5], `providers/_media.py`).** Every request that carries figures
+  or documents passes through one media plan, computed once per call, over the **whole** request:
+  the figures replayed inline through the conversation, this call's `images=`, and its `documents=`.
+  Being stateless is what makes that possible — the adapter holds everything before it sends, and
+  provider limits are defined over exactly that set. Each adapter owns its own `_LIMITS`
+  (`MediaLimits`), every field quoting the provider doc it comes from, because the limits differ
+  enough that a shared cap would be wrong for all three:
+
+  | | Anthropic | OpenAI | Google |
+  |---|---|---|---|
+  | image mimes | jpeg/png/gif/webp | png/jpeg/webp/gif | png/jpeg/webp/heic/heif |
+  | max images | 100 | 1500 | 3600 |
+  | >20 blocks ⇒ stricter edge | **2000 px** | — | — |
+  | max edge | 8000 px | — | — |
+  | max bytes/image | 10 MB | — | — |
+  | max request | 32 MB | 512 MB | **20 MB inline** |
+  | documents | PDF ≤100 pages | ≤50 MB | within 20 MB |
+
+  Checks apply in order — mime, count, pages, per-item bytes, dimensions, then the whole-request
+  payload budget, which evicts **oldest-first** (the current turn's evidence is what the model is
+  reasoning about). An image that breaches a dimension or byte limit is **resized**; a document,
+  which cannot be, is **withheld**. Either way the block is replaced by a model-visible note naming
+  the file and the reason — never a silent absence, which is what invites invention. A resize
+  changes only the transmitted copy: the artifact and its `FigureRef.sha256` are untouched, so the
+  provenance chain still points at the file a human reproduces. **Nothing is downscaled unless a
+  limit would otherwise be breached** — providers already resize server-side to their processing
+  tier and bill the smaller version, so client-side downscaling saves no tokens and would cost real
+  fidelity on a hi-res-tier model.
 - `ModelRegistry.resolve(role)` returns a `ModelGroupHandle`; callers choose a
   member with `member(name)` or iterate through `handles`.
 - **Native structured output and function calling.** `call(..., schema=Model)`
@@ -379,3 +407,23 @@ Compacted 2026-08-05: entries through 2026-08-03 folded into themed ranges (deta
   `usage.input_tokens`, which is net of cache, so a warm prefix made an all-resident baseline
   report 443 tokens against a 35k prompt — it now compares uncached + cache-read. Suite 665 → 670;
   live 7/7 on both providers.
+
+- 2026-08-06 — **Multimodal guards, one per adapter ([V-5]).** Live run `8c75990e` died at
+  **$116.10** — after all five of its authored tools had committed — on `400 … image dimensions
+  exceed max allowed size for many-image requests: 2000 pixels`. Anthropic tightens its per-image
+  dimension cap once a request carries **more than 20 image blocks**; a worker's newly-authored
+  plotter returned 3 PNGs per call, each replays inline at its tool-result turn on every later
+  request, the count crossed 20, and `dcf_panels.png` was 2677x1554. The audit that followed found
+  **no guard of any kind** in any adapter — we base64'd whatever we were handed, checking neither
+  count, dimensions, bytes, total payload, nor mime. New `providers/_media.py` holds the mechanics
+  (walk, plan, resize, page-count); each adapter holds its own `_LIMITS` with every value quoted
+  from that provider's docs. Also closes the mime half of **[V-3]**: an unsupported mime can no
+  longer reach an image block on any provider. **Files API deferred** (§12) — it is a cost/latency
+  improvement, and by Anthropic's own docs would not have prevented this crash, since a `file_id`
+  image is still an image block, still counted against 20, still measured against 2000 px.
+  `open_paper`'s 8 MB cap is deleted in the same change: the gate belongs where the whole request
+  is visible. New deps: `pillow` (previously undeclared, transitive via matplotlib) and `pypdf`.
+  Tests: `tests/test_media_guards.py` (the 20/21 boundary, oldest-first eviction, mime routing,
+  page limit, and that an under-limit request stays **byte-identical**); live
+  `test_live_figure_vision.py::test_live_many_image_request_that_used_to_400` sends the exact
+  21-image shape that died and Anthropic now answers *"I received 21 panels."* Suite 770 → 780.

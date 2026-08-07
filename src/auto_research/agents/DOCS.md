@@ -59,10 +59,12 @@ the next `offset`, so the lead can page through long toolkit source instead of r
 truncation is signalled, never silent. It is text-only (local PDFs go through `open_paper`). Also an
 optional **knowledge-base toolset** — `text_search` (returns candidate paper
 paths) **and `open_paper`** (attaches a chosen local PDF as a document, capped at
-`_OPEN_PAPER_CAP`=6 distinct papers and `_OPEN_PAPER_MAX_MB`=8 MB per PDF — a paper over the
-size limit is refused with its size named rather than attached, since a PDF rides by value in
-every later model call and one ultra-high-resolution paper alone can exceed a provider's
-request-size cap and hard-fail the call, recording `opened_paths`) — both gated by
+`_OPEN_PAPER_CAP`=6 distinct papers, recording `opened_paths`). It applies **no size limit of its
+own**: whether a PDF fits is a provider question — bytes, page count, and how much other media the
+request already carries — answered per request by `models/providers/_media.py`, which is the only
+layer that sees all of it. A document the provider cannot take comes back as a model-visible note
+naming the file and the reason, so the caller cites it from `text_search` metadata instead. Both
+tools are gated by
 `include_text_search` (default on; the §9.3 co-lead omits it and points `roots` at the
 toolkit worktree instead), plus the shared **web pair** `web_search` + `web_fetch`, present
 whenever a `web_source` (Tavily) is attached — standard on the reviewer, analyst lead, and
@@ -400,3 +402,10 @@ Compacted 2026-08-05: entries through 2026-07-28 folded into themed ranges (deta
   `_call` is unchanged (no trajectory, so nothing to declare). Tests:
   `tests/test_react_tools.py::test_terminal_compose_declares_the_loops_tools`,
   `::test_compose_without_tools_declares_none`, `tests/test_monitor_tools.py` updated.
+- 2026-08-06 — **`open_paper` no longer caps PDF size.** `_OPEN_PAPER_MAX_MB` (8 MB) is deleted
+  along with its stat-check and the sentence advertising it. It was the wrong layer: it could see
+  neither the provider in play nor the rest of the request, so it refused papers every provider
+  would have accepted while missing the limits that actually fail a call (page count, image count,
+  total payload). Those now live per adapter in `models/providers/_media.py`. The distinct-paper cap
+  (`_OPEN_PAPER_CAP`=6) stays — that one is about attention, not provider limits. Test:
+  `tests/test_react_tools.py::test_open_paper_no_longer_caps_size_itself`.

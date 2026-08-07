@@ -1,10 +1,23 @@
-"""Visualise an auto_research monitor JSONL — Gantt timeline + cost pie.
+"""Visualise an auto_research monitor JSONL — per-role call timeline + cost pie.
 
 Usage:
     python -m auto_research.observability.plot_run <monitor.jsonl> [output.png]
 
-Pricing and model assignment are read from config/models.yaml so the chart
-stays accurate when models are swapped in config without touching this file.
+**Every priced call, every role.** The chart is driven by the run's own `cost.call` events — one
+per priced call, carrying the role, member, model, tokens and dollars the ledger recorded at call
+time. That matters because the two things this file used to do both under-reported:
+
+* The timeline paired `<role>.<action>.input` → `.output` events, which only structured composes
+  emit. On a real run that is a fraction of the calls (54 of 282 on `8c75990e`), and the **coder
+  was absent entirely** — it runs in the Agent SDK and emits `coder.turn_end`, never that pair.
+* The pie keyed slices on `(team, model)`, so two roles sharing a model merged into one slice: the
+  GPT co-lead's spend and a GPT analyst worker's were added together under "analyst /
+  gpt-5.6-terra", hiding the provider-decorrelated reviewer's real cost.
+
+Both now key on **role**, so a role is never folded into another's slice and never missing.
+
+For logs written before `cost.call` existed, the old pair-matching estimate is still used as a
+fallback, priced from `config/models.yaml` through the same litellm-first path as the ledger.
 """
 
 from __future__ import annotations
@@ -31,44 +44,40 @@ _TEAM_FOR_ROLE = {
     "coder": "tooling",
     "status_monitor": "run",
 }
-_TEAM_COLORS = {
-    "reviewer":  "#E05C5C",
-    "analyst":   "#5B8DB8",
-    "librarian": "#5BAE85",
-    "tooling":   "#C08A3E",
-    "run":       "#AAAAAA",
+
+#: One colour per role — the unit the chart groups by. Two roles on the same model must stay
+#: visually distinct (the co-lead and a GPT worker were previously indistinguishable *and*
+#: summed).
+_ROLE_COLORS = {
+    "reviewer": "#E05C5C",
+    "analyst_lead": "#3A6A98",
+    "analyst_worker": "#89BCDE",
+    "analyst_colead": "#7E5AA8",
+    "librarian_io": "#5BAE85",
+    "librarian_searcher": "#8FCFB0",
+    "coder": "#C08A3E",
+    "status_monitor": "#9A9A9A",
 }
-# Per-team color palettes: analyst slot 0 = lead, slots 1+ = workers in order.
-_TEAM_PALETTES: dict[str, list[str]] = {
-    "reviewer":  ["#E05C5C"],
-    "analyst":   ["#3A6A98", "#89BCDE", "#2D4B7A", "#7AAECF"],
-    "librarian": ["#5BAE85"],
+_ROLE_LABEL = {
+    "reviewer": "reviewer",
+    "analyst_lead": "analyst lead",
+    "analyst_worker": "analyst worker",
+    "analyst_colead": "analyst co-lead (review)",
+    "librarian_io": "librarian IO",
+    "librarian_searcher": "librarian searcher",
+    "coder": "coder (authoring)",
+    "status_monitor": "/status reporter",
 }
-_ACTIVITY_LABEL = {
-    "reviewer.review":                        "reviewer · review",
-    "reviewer.compose_machine_report":         "reviewer · machine report",
-    "reviewer.compose_latex_report":           "reviewer · LaTeX report",
-    "analyst_lead.judge_convergence":          "analyst lead · judge conv.",
-    "analyst_lead.adjudicate":                 "analyst lead · adjudicate",
-    "analyst_worker.analyze":                  "analyst worker · analyze",
-    "analyst_worker.request_tools":            "analyst worker · tool call",
-    "librarian_io.compose_search_strategy":    "librarian IO · search strategy",
-    "librarian_io.ingest_document":            "librarian IO · ingest doc",
-    "librarian_io.judge_abstract_convergence": "librarian IO · judge conv.",
-    "librarian_io.adjudicate_abstract":        "librarian IO · adjudicate",
-}
-_ACTIVITY_ORDER = [
-    "reviewer.review",
-    "reviewer.compose_machine_report",
-    "reviewer.compose_latex_report",
-    "librarian_io.compose_search_strategy",
-    "librarian_io.ingest_document",
-    "librarian_io.judge_abstract_convergence",
-    "librarian_io.adjudicate_abstract",
-    "analyst_lead.judge_convergence",
-    "analyst_lead.adjudicate",
-    "analyst_worker.analyze",
-    "analyst_worker.request_tools",
+#: Top-to-bottom lane order; anything unknown is appended, so a new role still appears.
+_ROLE_ORDER = [
+    "reviewer",
+    "librarian_io",
+    "librarian_searcher",
+    "analyst_lead",
+    "analyst_worker",
+    "analyst_colead",
+    "coder",
+    "status_monitor",
 ]
 
 
@@ -78,8 +87,10 @@ def _load_models_yaml(path: Path = _MODELS_CONFIG) -> dict:
 
 
 def _build_rates(roles: dict) -> dict:
-    """Return {model_id: TokenRates} — the same litellm-first / config-fallback per-token rates the
-    cost ledger uses, so this chart matches the ledger (incl. cache/reasoning tokens)."""
+    """{model_id: TokenRates} — the litellm-first / config-fallback rates the cost ledger uses.
+
+    Only needed for the pre-`cost.call` fallback path; a modern log carries its own prices.
+    """
     from auto_research.models.types import RoleModelConfig
     from auto_research.observability.costs import token_rates_for
 
@@ -102,45 +113,82 @@ def _build_rates(roles: dict) -> dict:
     return rates
 
 
-def _build_role_maps(
-    roles: dict,
-) -> tuple[dict[str, tuple[str, str]], dict[int, str]]:
-    """Return (role_model_fixed, analyst_worker_models) from roles config.
+def _calls_from_cost_events(events: list[dict], to_min) -> list[dict]:
+    """One record per priced call, from the run's own ledger. Complete by construction."""
+    calls = []
+    for event in events:
+        if event.get("event") != "cost.call":
+            continue
+        data = event.get("data") or {}
+        role = str(data.get("role") or "unknown")
+        calls.append(
+            {
+                "role": role,
+                "member": data.get("member") or "",
+                "model": data.get("model") or "?",
+                "at": to_min(event["created_at"]),
+                "cost": float(data.get("total_cost_usd", 0.0) or 0.0),
+                "in_tok": int(data.get("input_tokens", 0) or 0),
+                "out_tok": int(data.get("output_tokens", 0) or 0),
+                "cache_read": int(data.get("cache_read_tokens", 0) or 0),
+                "source": data.get("price_source") or "?",
+            }
+        )
+    return calls
 
-    role_model_fixed: {role -> (team, model_id)} for single-model roles.
-    analyst_worker_models: {worker_index -> model_id}.
-    """
-    role_model_fixed: dict[str, tuple[str, str]] = {}
-    for role in ("reviewer", "analyst_lead", "librarian_io"):
-        members = roles.get(role, {}).get("members", [])
+
+def _calls_from_pairs(events: list[dict], rates: dict, roles_cfg: dict, to_min) -> list[dict]:
+    """Fallback for logs predating `cost.call`: match `.input` → `.output` and price it."""
+    model_for_role: dict[str, str] = {}
+    for role, group in roles_cfg.items():
+        members = group.get("members", [])
         if members:
-            role_model_fixed[role] = (_TEAM_FOR_ROLE[role], members[0]["model"])
+            model_for_role[role] = members[0]["model"]
 
-    analyst_worker_models: dict[int, str] = {}
-    for i, member in enumerate(roles.get("analyst_worker", {}).get("members", [])):
-        analyst_worker_models[i] = member["model"]
+    calls: list[dict] = []
+    used: set[int] = set()
+    for start in events:
+        name = start.get("event", "")
+        if not name.endswith(".input"):
+            continue
+        base, role = name[:-6], name.split(".")[0]
+        for end in events:
+            if (
+                end.get("event") == base + ".output"
+                and end["sequence"] > start["sequence"]
+                and end["sequence"] not in used
+                and "usage" in (end.get("data") or {})
+            ):
+                used.add(end["sequence"])
+                usage = end["data"]["usage"]
+                model = model_for_role.get(role, "?")
+                rate = rates.get(model)
+                cost = (
+                    usage.get("input_tokens", 0) * rate.input
+                    + usage.get("output_tokens", 0) * rate.output
+                    + usage.get("cache_read_tokens", 0) * rate.cache_read
+                    + usage.get("cache_write_tokens", 0) * rate.cache_write
+                ) if rate else 0.0
+                calls.append(
+                    {
+                        "role": role,
+                        "member": "",
+                        "model": model,
+                        "at": to_min(end["created_at"]),
+                        "cost": cost,
+                        "in_tok": usage.get("input_tokens", 0),
+                        "out_tok": usage.get("output_tokens", 0),
+                        "cache_read": usage.get("cache_read_tokens", 0),
+                        "source": "estimated",
+                    }
+                )
+                break
+    return calls
 
-    return role_model_fixed, analyst_worker_models
 
-
-def _build_model_colors(
-    role_model_fixed: dict[str, tuple[str, str]],
-    analyst_worker_models: dict[int, str],
-) -> dict[tuple[str, str], str]:
-    """Map (team, model_id) → hex color from per-team palettes."""
-    colors: dict[tuple[str, str], str] = {}
-
-    for role, (team, model) in role_model_fixed.items():
-        palette = _TEAM_PALETTES.get(team, ["#AAAAAA"])
-        # analyst_lead occupies palette slot 0; other fixed roles use slot 0 of their team
-        colors[(team, model)] = palette[0]
-
-    for idx, model in analyst_worker_models.items():
-        palette = _TEAM_PALETTES.get("analyst", ["#5B8DB8"])
-        # slot 0 is analyst lead; workers start at slot 1
-        colors[("analyst", model)] = palette[min(idx + 1, len(palette) - 1)]
-
-    return colors
+def _slice_key(call: dict) -> tuple[str, str]:
+    """Pie/table key: **role first**. Two roles on one model stay separate slices."""
+    return (call["role"], call["model"])
 
 
 def main() -> None:  # noqa: C901
@@ -154,113 +202,43 @@ def main() -> None:  # noqa: C901
         sys.exit(f"File not found: {log}")
     out = Path(sys.argv[2]) if len(sys.argv) >= 3 else Path(log.stem + ".viz.png")
 
-    # Config-derived model/pricing tables
-    roles = _load_models_yaml().get("roles", {})
-    rates = _build_rates(roles)
-    role_model_fixed, analyst_worker_models = _build_role_maps(roles)
-    model_colors = _build_model_colors(role_model_fixed, analyst_worker_models)
-    analyst_lead_model = role_model_fixed.get("analyst_lead", (None, None))[1]
-
-    # Load events
     events = []
-    with open(log) as f:
-        for line in f:
+    with open(log) as handle:
+        for line in handle:
             line = line.strip()
             if line:
                 events.append(json.loads(line))
     if not events:
         sys.exit("Log file is empty.")
-
     events.sort(key=lambda e: e["sequence"])
+
     t0 = datetime.fromisoformat(events[0]["created_at"].replace("Z", "+00:00"))
 
-    def to_min(ts: str) -> float:
-        t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        return (t - t0).total_seconds() / 60
+    def to_min(stamp: str) -> float:
+        return (
+            datetime.fromisoformat(stamp.replace("Z", "+00:00")) - t0
+        ).total_seconds() / 60
 
-    # Build analyst worker attribution: worker-1/worker-2 actor events mark
-    # when worker_0/worker_1 finished a phase. Each analyst_worker output event
-    # belongs to the worker whose marker has the lowest sequence > output_seq.
-    _MARKER_ACTORS = {"worker-1": 0, "worker-2": 1}
-    worker_markers: list[tuple[int, int]] = sorted(
-        (e["sequence"], _MARKER_ACTORS[e.get("actor", "")])
-        for e in events
-        if e.get("actor", "") in _MARKER_ACTORS
-    )
+    calls = _calls_from_cost_events(events, to_min)
+    if calls:
+        print(f"Read {len(calls)} priced calls from the run's cost ledger.")
+    else:
+        roles_cfg = _load_models_yaml().get("roles", {})
+        calls = _calls_from_pairs(events, _build_rates(roles_cfg), roles_cfg, to_min)
+        print(f"No cost.call events; estimated {len(calls)} calls from .input/.output pairs.")
+    if not calls:
+        sys.exit("No priced calls found in this log.")
 
-    def analyst_worker_index(output_seq: int) -> int:
-        for marker_seq, worker_idx in worker_markers:
-            if marker_seq > output_seq:
-                return worker_idx
-        return 0
+    lanes = [r for r in _ROLE_ORDER if any(c["role"] == r for c in calls)]
+    lanes += sorted({c["role"] for c in calls} - set(lanes))
+    lane_y = {role: i for i, role in enumerate(lanes)}
 
-    # Match .input → .output pairs (level-10 events; require usage field)
-    calls = []
-    used_seqs: set[int] = set()
-    for e in events:
-        evt = e.get("event", "")
-        if not evt.endswith(".input"):
-            continue
-        base = evt[:-6]
-        out_type = base + ".output"
-        role_prefix = base.split(".")[0]
-
-        for o in events:
-            if (
-                o.get("event") == out_type
-                and o["sequence"] > e["sequence"]
-                and o["sequence"] not in used_seqs
-                and "usage" in o.get("data", {})
-            ):
-                used_seqs.add(o["sequence"])
-                usage = o["data"]["usage"]
-                in_tok = usage.get("input_tokens", 0)
-                out_tok = usage.get("output_tokens", 0)
-                cr_tok = usage.get("cache_read_tokens", 0)
-                cw_tok = usage.get("cache_write_tokens", 0)
-
-                if role_prefix == "analyst_worker":
-                    widx = analyst_worker_index(o["sequence"])
-                    team = "analyst"
-                    model = analyst_worker_models.get(widx)
-                elif role_prefix in role_model_fixed:
-                    team, model = role_model_fixed[role_prefix]
-                else:
-                    team, model = "run", None
-
-                cost = 0.0
-                if model and model in rates:
-                    r = rates[model]  # per-token rates (already scaled), matching the cost ledger
-                    cost = (
-                        in_tok * r.input
-                        + out_tok * r.output
-                        + cr_tok * r.cache_read
-                        + cw_tok * r.cache_write
-                    )
-
-                calls.append(
-                    {
-                        "base": base,
-                        "team": team,
-                        "model": model,
-                        "start": to_min(e["created_at"]),
-                        "end": to_min(o["created_at"]),
-                        "cost": cost,
-                        "in_tok": in_tok,
-                        "out_tok": out_tok,
-                    }
-                )
-                break
-
-    print(f"Matched {len(calls)} LLM call pairs.")
-
-    # Activity ordering
-    present = {c["base"] for c in calls}
-    order = [a for a in _ACTIVITY_ORDER if a in present]
-    for c in calls:
-        if c["base"] not in order:
-            order.append(c["base"])
-    yticks = {act: i for i, act in enumerate(order)}
+    cost_by: dict[tuple[str, str], float] = defaultdict(float)
+    count_by: dict[tuple[str, str], int] = defaultdict(int)
+    for call in calls:
+        cost_by[_slice_key(call)] += call["cost"]
+        count_by[_slice_key(call)] += 1
+    total_cost = sum(cost_by.values())
 
     # ── Figure ────────────────────────────────────────────────────────────────
     fig, (ax1, ax2) = plt.subplots(
@@ -268,120 +246,83 @@ def main() -> None:  # noqa: C901
     )
     fig.patch.set_facecolor("#F8F8F8")
 
-    # Gantt timeline
+    # Left: one lane per role, one mark per call, width ∝ cost. `cost.call` records when a call
+    # was priced (its completion), not a span — so these are marks in time, not durations.
     ax1.set_facecolor("#FAFAFA")
-    BAR_H = 0.65
-    for c in calls:
-        y = yticks.get(c["base"], -1)
-        if y < 0:
-            continue
-        dur = max(c["end"] - c["start"], 0.015)
+    span = max((c["at"] for c in calls), default=1.0) or 1.0
+    widest = max((c["cost"] for c in calls), default=0.0) or 1.0
+    for call in calls:
+        y = lane_y[call["role"]]
+        # Scale each mark between a visible floor and ~2% of the run, so a $12 coder turn reads
+        # heavier than a $0.02 status call without swamping the axis.
+        width = span * (0.004 + 0.016 * (call["cost"] / widest))
         ax1.broken_barh(
-            [(c["start"], dur)],
-            (y - BAR_H / 2, BAR_H),
-            facecolors=_TEAM_COLORS[c["team"]],
-            edgecolors="white",
-            linewidth=0.6,
-            alpha=0.90,
+            [(call["at"] - width / 2, width)],
+            (y - 0.32, 0.64),
+            facecolors=_ROLE_COLORS.get(call["role"], "#BBBBBB"),
+            edgecolors="none",
+            alpha=0.85,
         )
-    for i in range(len(order)):
-        ax1.axhline(i + 0.5, color="#E0E0E0", linewidth=0.5, zorder=0)
-    ax1.set_yticks(list(yticks.values()))
-    ax1.set_yticklabels([_ACTIVITY_LABEL.get(a, a) for a in order], fontsize=8.5)
-    ax1.set_xlabel("Time from run start (minutes)", fontsize=10)
-    ax1.set_title(f"LLM call timeline — {log.stem}", fontsize=11, fontweight="bold", pad=10)
-    ax1.set_ylim(-0.8, len(order) - 0.2)
-    ax1.spines[["top", "right"]].set_visible(False)
-    for c in calls:
-        y = yticks.get(c["base"], -1)
-        if y < 0:
-            continue
-        dur = c["end"] - c["start"]
-        if dur > 0.12:
-            mid = c["start"] + dur / 2
-            ax1.text(
-                mid, y, f"{dur:.1f}m", ha="center", va="center",
-                fontsize=5.5, color="white", fontweight="bold",
-            )
-    ax1.legend(
-        handles=[
-            mpatches.Patch(color=_TEAM_COLORS["reviewer"],  label="Reviewer"),
-            mpatches.Patch(color=_TEAM_COLORS["librarian"], label="Librarian IO"),
-            mpatches.Patch(color=_TEAM_COLORS["analyst"],   label="Analyst"),
-        ],
-        loc="upper right", fontsize=9, framealpha=0.85, edgecolor="#CCCCCC",
-    )
+    for i in range(len(lanes)):
+        ax1.axhline(i + 0.5, color="#E4E4E4", linewidth=0.5, zorder=0)
 
-    # Cost pie — from the run's own `cost.call` events when the log has them (the recorded
-    # per-call cost, priced at call time with the real member/model), falling back to the
-    # pair-matched estimate above for logs written before cost events existed.
+    # Cumulative spend, so "where did the money go, and when" is answerable from one glance.
+    ax_cum = ax1.twinx()
+    running, series = 0.0, []
+    for call in sorted(calls, key=lambda c: c["at"]):
+        running += call["cost"]
+        series.append((call["at"], running))
+    ax_cum.plot(
+        [p[0] for p in series], [p[1] for p in series],
+        color="#333333", linewidth=1.4, alpha=0.75, zorder=5,
+    )
+    ax_cum.set_ylabel("cumulative $", fontsize=9, color="#333333")
+    ax_cum.tick_params(labelsize=8, colors="#333333")
+    ax_cum.set_ylim(0, max(total_cost * 1.05, 0.01))
+
+    ax1.set_yticks(list(lane_y.values()))
+    ax1.set_yticklabels([_ROLE_LABEL.get(r, r) for r in lanes], fontsize=9)
+    ax1.set_xlabel("Time from run start (minutes)  ·  mark width ∝ call cost", fontsize=10)
+    ax1.set_title(
+        f"Every priced call — {log.stem}  ({len(calls)} calls)",
+        fontsize=11, fontweight="bold", pad=10,
+    )
+    ax1.set_ylim(-0.8, len(lanes) - 0.2)
+    ax1.spines[["top"]].set_visible(False)
+
+    # Right: cost by ROLE and model.
     ax2.set_facecolor("#FAFAFA")
-    cost_by: dict[tuple, float] = defaultdict(float)
-    recorded = [e for e in events if e.get("event") == "cost.call"]
-    if recorded:
-        for e in recorded:
-            d = e.get("data") or {}
-            model = d.get("model")
-            if not model:
-                continue
-            team = _TEAM_FOR_ROLE.get(str(d.get("role", "")), "run")
-            cost_by[(team, model)] += float(d.get("total_cost_usd", 0.0) or 0.0)
-    else:
-        for c in calls:
-            if c["model"]:
-                cost_by[(c["team"], c["model"])] += c["cost"]
-    total_cost = sum(cost_by.values())
-
-    # Slice order: reviewer → analyst lead → analyst workers → librarian
-    _slice_candidates = (
-        [(k, cost_by[k]) for k in cost_by if k[0] == "reviewer"]
-        + [
-            (("analyst", analyst_lead_model), cost_by.get(("analyst", analyst_lead_model), 0.0))
-        ]
-        + [
-            (("analyst", m), cost_by.get(("analyst", m), 0.0))
-            for m in analyst_worker_models.values()
-        ]
-        + [(k, cost_by[k]) for k in cost_by if k[0] == "librarian"]
-        # Everything else (the coder's SDK sessions, the status model) last, so no recorded
-        # spend is silently missing from a chart whose title claims a total.
-        + [(k, cost_by[k]) for k in cost_by if k[0] not in ("reviewer", "analyst", "librarian")]
+    slices = sorted(
+        ((k, v) for k, v in cost_by.items() if v > 0),
+        key=lambda kv: (_ROLE_ORDER.index(kv[0][0]) if kv[0][0] in _ROLE_ORDER else 99, -kv[1]),
     )
-    seen: set = set()
-    slices = []
-    for k, v in _slice_candidates:
-        if k not in seen and cost_by.get(k, 0.0) > 0:
-            seen.add(k)
-            slices.append((k, cost_by[k]))
-
-    def _pie_label(k: tuple[str, str]) -> str:
-        team, model = k
-        if team == "reviewer":
-            return f"{model}\n(reviewer)"
-        if team == "analyst" and model == analyst_lead_model:
-            return f"{model}\n(analyst lead)"
-        for idx, m in analyst_worker_models.items():
-            if m == model and team == "analyst":
-                return f"{model}\n(analyst worker {idx})"
-        return f"{model}\n({team})"
-
     if slices:
-        keys = [k for k, _ in slices]
         sizes = [v for _, v in slices]
-        colors = [model_colors.get(k, "#BBBBBB") for k in keys]
+        colors = [_ROLE_COLORS.get(role, "#BBBBBB") for (role, _), _ in slices]
+        labels = [f"{_ROLE_LABEL.get(role, role)}\n{model}" for (role, model), _ in slices]
+
+        # Below ~3% the outer label and the inner percentage collide with their neighbours and
+        # the chart stops being readable; the legend names every role, so small slices rely on it.
+        _MIN_LABEL_SHARE = 3.0
 
         def _autopct(pct: float) -> str:
-            return f"${pct / 100 * total_cost:.4f}\n({pct:.1f}%)"
+            if pct < _MIN_LABEL_SHARE:
+                return ""
+            return f"${pct / 100 * total_cost:,.2f}\n({pct:.1f}%)"
 
-        wedges, texts, autotexts = ax2.pie(
+        shown = [
+            label if 100 * size / total_cost >= _MIN_LABEL_SHARE else ""
+            for label, size in zip(labels, sizes)
+        ]
+        _, texts, autotexts = ax2.pie(
             sizes,
-            labels=[_pie_label(k) for k in keys],
+            labels=shown,
             colors=colors,
             autopct=_autopct,
             startangle=90,
             counterclock=False,
-            pctdistance=0.68,
-            labeldistance=1.28,
+            pctdistance=0.70,
+            labeldistance=1.22,
             wedgeprops={"linewidth": 1.5, "edgecolor": "white"},
         )
         for at in autotexts:
@@ -392,28 +333,40 @@ def main() -> None:  # noqa: C901
             t.set_fontsize(8.5)
 
     ax2.set_title(
-        f"Dollar cost by team & model\nTotal: ${total_cost:.4f}",
+        f"Dollar cost by role & model\nTotal: ${total_cost:,.2f}",
         fontsize=11, fontweight="bold", pad=16,
     )
     ax2.legend(
         handles=[
-            mpatches.Patch(color=_TEAM_COLORS["reviewer"],  label="Reviewer"),
-            mpatches.Patch(color=_TEAM_COLORS["analyst"],   label="Analyst"),
-            mpatches.Patch(color=_TEAM_COLORS["librarian"], label="Librarian IO"),
+            mpatches.Patch(color=_ROLE_COLORS.get(r, "#BBBBBB"), label=_ROLE_LABEL.get(r, r))
+            for r in lanes
         ],
-        loc="lower center", bbox_to_anchor=(0.5, -0.12), ncol=3,
-        fontsize=9, framealpha=0.85, edgecolor="#CCCCCC",
+        loc="lower center", bbox_to_anchor=(0.5, -0.16), ncol=3,
+        fontsize=8, framealpha=0.85, edgecolor="#CCCCCC",
     )
 
     plt.tight_layout(pad=2.5)
     plt.savefig(out, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
     print(f"Saved → {out}")
 
-    print("\nCost breakdown:")
-    for (team, model), cost in sorted(cost_by.items()):
-        pct = 100 * cost / total_cost if total_cost else 0
-        print(f"  {team:12s} / {model:22s}: ${cost:.4f}  ({pct:.1f}%)")
-    print(f"  {'TOTAL':12s}                           : ${total_cost:.4f}")
+    print(f"\nCost by role & model  ({len(calls)} calls, {span:.0f} min):")
+    print(f"  {'role':26s} {'model':18s} {'calls':>6s} {'$':>10s} {'share':>7s}")
+    for (role, model), cost in slices:
+        share = 100 * cost / total_cost if total_cost else 0.0
+        print(f"  {role:26s} {model:18s} {count_by[(role, model)]:6d} "
+              f"{cost:10.2f} {share:6.1f}%")
+    print(f"  {'TOTAL':26s} {'':18s} {len(calls):6d} {total_cost:10.2f} {100.0:6.1f}%")
+
+    tokens: dict[str, int] = defaultdict(int)
+    for call in calls:
+        tokens["input"] += call["in_tok"]
+        tokens["output"] += call["out_tok"]
+        tokens["cache_read"] += call["cache_read"]
+    by_source: dict[str, float] = defaultdict(float)
+    for call in calls:
+        by_source[call["source"]] += call["cost"]
+    print("\n  tokens: " + "  ".join(f"{k}={v:,}" for k, v in tokens.items()))
+    print("  priced by: " + "  ".join(f"{k}=${v:,.2f}" for k, v in sorted(by_source.items())))
 
 
 if __name__ == "__main__":

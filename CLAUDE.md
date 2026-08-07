@@ -682,6 +682,16 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   reviewer/lead/workers — so `auto_research` and governance files are denied. The OS jail of that
   same allow-list is what remains: it would also gate a shell subprocess's **implicit** reads,
   which the command-string `Bash` check cannot see. See §13.)*
+- **Multimodal guards are per-provider and enforce only what is documented.**
+  `models/providers/_media.py` gates every request carrying figures/documents — mime, image count,
+  PDF pages, per-item bytes, dimensions, whole-request payload — with each adapter's `_LIMITS`
+  quoting its own provider docs. Anthropic publishes the sharpest rules (>20 image blocks ⇒ 2000 px;
+  10 MB/image; 32 MB request; 100-page PDFs), so its guard is the strictest; OpenAI and Google
+  publish counts and payload ceilings but **no >N-image dimension rule**, so none is invented for
+  them — an undocumented limit stays unenforced until a doc or a live 400 says otherwise. Residual:
+  the Files API (§12) would cut payload and latency further, and Google's 20 MB inline ceiling is
+  the tightest of the three, so a Gemini member in a figure-heavy loop is the most likely next
+  eviction case.
 - **`bash_exec` figure capture:** snapshot the worker scratch `cwd` before each `bash_exec`,
   diff for new image files after, and synthesize `FigureRef`s into `ToolResult.figures`.
 - **RAG retrieval (three targets):** keep `vector_search()` stubbed; intended backend **ChromaDB**
@@ -1091,3 +1101,32 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   is the confirmation the original probe missed: the OpenAI turn carried a **`reasoning`** item,
   replayed beside its `function_call` with tools declared, and was accepted (the probe's repro leg
   had been inconclusive because that turn emitted none). Suite 768 → 770; live 4/4.
+
+- 2026-08-07 — **The multimodal boundary had no guard at all; now each adapter gates its own.**
+  Run `8c75990e` reached its **fifth commit** — five tools authored, every one gate-passed and
+  co-lead-approved first try — then died at **$116.10** on the census re-run with `400 … image
+  dimensions exceed max allowed size for many-image requests: 2000 pixels`. The rule is Anthropic's:
+  past **20 image blocks** a request's per-image dimension cap tightens to 2000 px, and a worker's
+  own newly-authored plotter returned 3 PNGs per call that replay inline on every later request, so
+  the count crossed 20 with a 2677x1554 figure aboard. **The audit was the finding:** we base64'd
+  whatever we were handed on all three providers, checking neither count, dimensions, bytes, total
+  payload, nor mime — the one guard in the system was `_OPEN_PAPER_MAX_MB = 8` in the *tool* layer,
+  which could see neither the provider nor the rest of the request, refused papers every provider
+  would have taken, and never saw a figure. **The gate belongs in the adapter** because we are
+  stateless: it holds the whole conversation plus this call's attachments before sending, which is
+  exactly the set a volume limit is defined over. New `providers/_media.py` (walk → plan → resize →
+  page-count); each adapter declares `_LIMITS` with every value quoted from its own docs, because
+  they differ enough that a shared cap would be wrong for all three (Google's **20 MB inline** total
+  is the tightest ceiling; Anthropic's >20-block rule the sharpest edge). An over-limit image is
+  **resized**, a document **withheld**, and either way a model-visible note names the file and the
+  reason — silent absence is what invites invention. A resize touches only the transmitted copy, so
+  `FigureRef.sha256` still identifies the artifact a human reproduces. **Nothing downscales unless a
+  limit would otherwise be breached** — the human caught the framing error in the first proposal:
+  providers already resize server-side and bill the smaller version, so client-side downscaling
+  saves **no tokens**, only payload. Also closes the mime half of **[V-3]** (open since July) and
+  deletes `_OPEN_PAPER_MAX_MB`. **Files API deferred** (§12) as a cost/latency change that would not
+  have prevented this: per Anthropic's docs a `file_id` image is still an image block, still counted
+  against 20, still measured against 2000 px. New deps `pillow` (previously undeclared — transitive
+  via matplotlib) and `pypdf`. Suite 770 → 780; live proof is
+  `test_live_many_image_request_that_used_to_400`, which sends the exact 21-image shape that died
+  and gets back *"I received 21 panels."*

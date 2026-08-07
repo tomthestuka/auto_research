@@ -20,6 +20,10 @@ dependencies:
   - arxiv>=2.1
   - ads>=0.12
   - tavily-python>=0.5
+  # multimodal request guards (models/providers/_media.py): pillow resizes an image that would
+  # breach a provider's dimension/byte limit, pypdf counts PDF pages against the page cap.
+  - pillow>=10
+  - pypdf>=5
   # MCP client
   - mcp>=1.27
   # human-in-the-loop connectors and renders (raise-to-human, §9.8) — optional at runtime, only

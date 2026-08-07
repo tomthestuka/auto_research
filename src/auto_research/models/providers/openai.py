@@ -11,6 +11,12 @@ from pydantic import BaseModel
 
 from auto_research.env import tool_search_config
 from auto_research.models.providers._json import loads_first_json_object
+from auto_research.models.providers._media import (
+    MediaLimits,
+    MediaPlan,
+    caption_with_note,
+    plan_for_call,
+)
 from auto_research.models.types import (
     ConversationMessage,
     ModelMessage,
@@ -190,6 +196,22 @@ def _tool_choice_value(tool_choice: str) -> str:
     return tool_choice if tool_choice in ("required", "none") else "auto"
 
 
+# OpenAI's documented media limits (developers.openai.com/api/docs/guides/images-vision and
+# .../file-inputs). Enforced per request by `_media.plan_for_call`. OpenAI publishes no
+# ">N images ⇒ stricter dimension" rule, so none is invented here — we enforce what is documented.
+_LIMITS = MediaLimits(
+    # "PNG (.png), JPEG (.jpeg and .jpg), WEBP (.webp), Non-animated GIF (.gif)".
+    image_mimes=frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"}),
+    doc_mimes=frozenset({"application/pdf", "text/plain"}),
+    # "Up to 1500 individual image inputs per request".
+    max_images=1500,
+    # "each file must be under 50 MB… combined limit across all files in the request is 50 MB".
+    max_doc_bytes=50 * 1024 * 1024,
+    # "Up to 512 MB total payload size per request".
+    max_request_bytes=512 * 1024 * 1024,
+)
+
+
 class OpenAIProvider:
     """Thin adapter around the OpenAI Responses API.
 
@@ -232,23 +254,30 @@ class OpenAIProvider:
 
         from openai import AsyncOpenAI
 
-        input_items = _to_openai_input(messages)
+        # One media plan for the WHOLE request (§stateless: this is the only point that sees
+        # every image in the conversation plus this call's attachments at once).
+        plan = plan_for_call(messages, images, documents, _LIMITS)
+        input_items = _to_openai_input(messages, plan)
         cache_kwargs = {"prompt_cache_key": config.name} if cache_prefix else {}
         attachment_content = []
         for document in documents:
-            data = base64.b64encode(document.path.read_bytes()).decode("ascii")
+            resolved = plan.resolve(document)
+            if resolved.dropped:
+                # Withheld, never silent — the model is told which document it lost and why.
+                attachment_content.append({"type": "input_text", "text": resolved.note or ""})
+                continue
             attachment_content.append(
                 {
                     "type": "input_file",
                     "filename": document.path.name,
-                    "file_data": f"data:{document.mime_type};base64,{data}",
+                    "file_data": f"data:{resolved.mime};base64,{resolved.b64()}",
                 }
             )
         # Cross-agent figures (from another agent's report) ride this call-time channel;
         # figures a tool produced *this* loop live inline at their tool-result turn instead
         # (see `_to_openai_input`).
         for figure in images:
-            attachment_content.extend(_figure_items(figure))
+            attachment_content.extend(_figure_items(figure, plan))
         if attachment_content:
             input_items.append({"role": "user", "content": attachment_content})
 
@@ -331,7 +360,7 @@ class OpenAIProvider:
         )
 
 
-def _figure_items(figure: FigureRef) -> list[dict]:
+def _figure_items(figure: FigureRef, plan: MediaPlan | None = None) -> list[dict]:
     """Render one figure as Responses-API content items: a caption then the image bytes.
 
     Loading bytes here is the multimodal boundary — the only place a figure's pixels
@@ -340,14 +369,20 @@ def _figure_items(figure: FigureRef) -> list[dict]:
     ("Figure 1 — …") or the catalog handle ("[analyst_worker_0:2] …") so prose lines up
     with the images (V-4).
     """
-    data = base64.b64encode(figure.path.read_bytes()).decode("ascii")
+    caption = f"{figure.caption} (produced by {figure.produced_by})"
+    resolved = (plan or MediaPlan()).resolve(figure)
+    text = {"type": "input_text", "text": caption_with_note(caption, resolved)}
+    if resolved.dropped:
+        return [text]
     return [
-        {"type": "input_text", "text": f"{figure.caption} (produced by {figure.produced_by})"},
-        {"type": "input_image", "image_url": f"data:{figure.mime_type};base64,{data}"},
+        text,
+        {"type": "input_image", "image_url": f"data:{resolved.mime};base64,{resolved.b64()}"},
     ]
 
 
-def _to_openai_input(messages: Sequence[ConversationMessage]) -> list[dict]:
+def _to_openai_input(
+    messages: Sequence[ConversationMessage], plan: MediaPlan | None = None
+) -> list[dict]:
     """Translate neutral conversation turns into Responses-API input items.
 
     ``ModelResponse`` → its carried items plus ``function_call`` items; ``ToolResultMessage`` →
@@ -402,7 +437,7 @@ def _to_openai_input(messages: Sequence[ConversationMessage]) -> list[dict]:
                     }
                 )
                 for figure in part.figures:
-                    figure_content.extend(_figure_items(figure))
+                    figure_content.extend(_figure_items(figure, plan))
             # A tool's figures live inline at this turn: a user message carrying the image(s)
             # placed right after the function_call_output item(s), so they replay in place
             # every round and fall inside the automatically-cached prefix as the loop grows.
