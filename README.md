@@ -121,6 +121,15 @@ optional raise-to-human connectors (only when selected) — **Telegram** (recomm
 (`TWILIO_ACCOUNT_SID`/`TWILIO_API_KEY_SID`/`TWILIO_API_KEY_SECRET`/`TWILIO_WHATSAPP_FROM`/`WHATSAPP_TO`);
 the terminal (`cli`) channel needs none.
 
+Optionally set **`ANTHROPIC_API_KEY_FALLBACK`**. A rate limit (429) and a spent credit balance
+are quotas of the *key*, not of Anthropic, so waiting cannot clear them — the first stalls a call
+through minutes of cooldown, the second used to kill the run outright. With a fallback set, either
+one switches keys and retries immediately, at no cooldown; provider-capacity failures (529/5xx)
+still wait, since every key sees the same outage. Use a key from a **different Anthropic
+organization** — rate limits are per-organization. Launch preflight (`api_key_fallbacks`) rejects a
+fallback that is blank or identical to the primary, and each switch is recorded on the run ledger
+as `provider.key_rotation` (naming the slot, never the key).
+
 Over **Telegram or Slack** a human can drive a live run with slash-commands (intercepted, never
 treated as answers to an agent): `/help` (commands + the live roster, numbered), `/status
 [question]` (a reporter role reads the run's own event ledger — index, search, open an event — and

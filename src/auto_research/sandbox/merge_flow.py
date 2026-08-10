@@ -743,9 +743,37 @@ def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, esca
         disallowed_tools=["Bash(git:*)", "Bash(git)"],
         max_turns=max_turns,
     )
+    env = _with_live_anthropic_key(env)
     if env:  # full sourced env (analyst conda + HEASoft); omit when unset so the SDK inherits.
         kwargs["env"] = env
     return ClaudeAgentOptions(**kwargs)
+
+
+def _with_live_anthropic_key(env: dict[str, str] | None) -> dict[str, str] | None:
+    """Stamp the currently-live Anthropic key onto the coder's env, when it has rotated.
+
+    The coder is the Claude Agent SDK — a **separate process** that authenticates from its
+    own environment, so a key rotation inside this process (see
+    ``auto_research.models.keys``) does not reach it. A session started after a rotation
+    would otherwise launch on the throttled or exhausted key.
+
+    Untouched in the common case: while the live key still equals ``ANTHROPIC_API_KEY``
+    there is nothing to override, so ``None`` stays ``None`` and the SDK keeps inheriting
+    the parent environment exactly as before. Only a rotated key materializes a dict.
+    A session already in flight keeps the key it launched with — the SDK owns that
+    subprocess's environment for its lifetime.
+    """
+
+    import os
+
+    from auto_research.models.keys import ANTHROPIC, active_key
+
+    live = active_key(ANTHROPIC)
+    if not live or live == os.environ.get("ANTHROPIC_API_KEY"):
+        return env
+    merged = dict(env) if env else dict(os.environ)
+    merged["ANTHROPIC_API_KEY"] = live
+    return merged
 
 
 def _default_sdk_client_factory(options):

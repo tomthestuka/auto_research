@@ -355,6 +355,14 @@ drives the bounded rework loop:
 - **L4** cap exhausted → `MergeFlowResult(status="failed")`, **no commit**, for the lead to
   raise to the human (§9.6/§9.7).
 
+**The coder authenticates from its own environment.** It is the Claude Agent SDK — a separate
+process — so an Anthropic API-key rotation inside the orchestrator (a rate limit or a spent
+balance; see `models/DOCS.md`) does not reach it. `_with_live_anthropic_key` stamps the live key
+onto the options' `env` **only when it has actually rotated**, so the ordinary path is
+byte-identical (`None` stays `None` and the SDK keeps inheriting the parent environment). A
+session already in flight keeps the key it launched with — the SDK owns that subprocess's
+environment for its lifetime.
+
 The orchestration is **code, never the LLM**. The gate/review are **injectable hooks**: the
 gate defaults to the **real deterministic gate** (`gate.run_gate`, step 3); the review
 defaults to the **real provider-decorrelated co-lead** (`review.make_review_hook`, step 4).
@@ -732,3 +740,12 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   (no handshake, no grace — the next cleanup step, the toolkit-branch reset, is only correct once nothing
   can write), and `AuthoringSession.aclose()` is idempotent since the interrupt path closes it from
   shielded cleanup. Tests: `tests/test_interrupt.py`.
+
+- 2026-08-10 — **The coder subprocess follows an Anthropic key rotation.** The Agent SDK
+  authenticates from its own process environment, so a rate limit or spent-balance rotation in the
+  orchestrator (`models/keys.py`) would otherwise launch the next coding session on the throttled
+  or exhausted key. `_build_options` now runs its `env` through `_with_live_anthropic_key`, which
+  stamps `ANTHROPIC_API_KEY` **only when the live key differs from the process environment's** —
+  so with no rotation the options are unchanged and the SDK keeps inheriting the parent env
+  exactly as before. Sessions already connected are unaffected. Tests:
+  `tests/test_provider_key_failover.py::test_coder_env_{is_untouched_while_the_primary_key_is_live,carries_the_rotated_key}`.

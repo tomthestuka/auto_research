@@ -843,6 +843,17 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   broad natural-language query pulls five full schemas into the tail where the injected catalogue's
   exact name would have pulled one — the resident-token win is real either way, but a query-shape
   regression costs tokens silently.
+- **API-key failover is per-key, and two of its edges stay best-effort.** `ANTHROPIC_API_KEY_FALLBACK`
+  rotates on a rate limit or a spent balance (`models/keys.py`), but (a) **Anthropic rate limits are
+  per-organization**, so a fallback issued by the *same* org rotates onto the same exhausted bucket —
+  the preflight check cannot see the org and rejects only what it can prove useless (blank, duplicate,
+  or primary-less); (b) **a coder session already in flight keeps the key it launched with** — the
+  Agent SDK owns that subprocess's environment for its lifetime, so only the *next* session picks up a
+  rotation; and (c) 401 `authentication_error` is deliberately **not** rotated, so a revoked primary
+  key still fails the run rather than silently running on the fallback. Only Anthropic is wired, and
+  `keys.ROTATING_PROVIDERS` is what makes that safe rather than incidental: a provider whose adapter
+  does not send `active_key` must never rotate, or the client would keep the SDK-resolved key while
+  the caller skipped its cooldown. Adding OpenAI/Google is one adapter line each **plus** that tuple.
 
 ---
 
@@ -1130,3 +1141,31 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   via matplotlib) and `pypdf`. Suite 770 → 780; live proof is
   `test_live_many_image_request_that_used_to_400`, which sends the exact 21-image shape that died
   and gets back *"I received 21 panels."*
+
+- 2026-08-10 — **A second Anthropic key, because the two failures that stall or kill a run are
+  quotas of the *key*, not of Anthropic.** One retry policy answered everything by waiting: a 429
+  cost up to ~30 min of cooldown per call across 8 attempts, and a spent credit balance — a
+  non-transient 400 — killed the run outright (2026-07-22). Neither is provider capacity, and a key
+  from another organization clears both at once, which no cooldown can do. `models/keys.py` holds a
+  process-global per-provider key pool (`ANTHROPIC_API_KEY` + optional `ANTHROPIC_API_KEY_FALLBACK`);
+  `retry.is_key_scoped_provider_error` splits that class off — 429 / `rate_limit_error`,
+  `billing_error`, and a 400 naming the credit balance — and `call_with_transient_retry` consults an
+  injected `rotate_key` **before** its cooldown, retrying immediately at no cooldown and no retry
+  budget. **The triggers were read from Anthropic's error taxonomy, not inferred from the failures we
+  happened to see** (the 2026-08-05 lesson): `.type` is what separates `billing_error` from the
+  `permission_error` sharing its 403, and 529/5xx are excluded because provider capacity is identical
+  on every key. 401 is excluded too, deliberately — a revoked key is a configuration fault a human
+  must see, not one to route around. Rotation offers each key once per call and then falls through to
+  the existing path, so a 429 on every key still waits and a balance spent on every key still raises
+  honestly; because the live key is process state, rotation is bidirectional *across* calls and
+  neither key is stranded. Three seams follow from "the SDK resolves the env var once per client":
+  the Anthropic adapter now passes `api_key=` explicitly, the coder subprocess gets the live key
+  stamped on **only after a rotation** (`merge_flow._with_live_anthropic_key`, leaving the common path
+  byte-identical), and each switch records a `provider.key_rotation` ledger event naming the slot,
+  never the key. New preflight check `api_key_fallbacks` rejects the three fallbacks the pool silently
+  deduplicates away — blank, identical to the primary, set without a primary — because each would
+  leave a human believing a run is protected when rotation has nowhere to go. **Stated limit, not
+  papered over:** rate limits are per-organization, so the fallback must be a different org for the
+  429 half to help (§13). Anthropic-only by choice (§1 minimal); the pool is provider-keyed.
+  `tests/test_provider_key_failover.py`; suite 781 → 814. **Not live-tested** — exercising it needs a
+  real throttled key.

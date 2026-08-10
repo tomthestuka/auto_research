@@ -15,6 +15,10 @@ Google by editing YAML alone
 - `providers/` — thin adapters for OpenAI, Anthropic, and Google. SDK clients
   are imported only inside `call()` so importing the package does not require
   credentials or make network calls.
+- `keys.py` — the per-provider API-key pool and its rotation rule. Anthropic only today.
+- `retry.py` — one chokepoint for provider failures, with **two** answers because there are
+  two kinds: *wait* for provider capacity (529/5xx/connection), *switch keys* for a quota of
+  the key itself (429 rate limit, spent credit balance).
 - `ModelHandle.call()` calls into `auto_research.observability` to add optional
   LangSmith tracing and append a per-call cost ledger row.
 
@@ -154,11 +158,45 @@ Google by editing YAML alone
   tokens with `input` and `output` keys. When absent, observability still
   records token counts with zero calculated dollar cost.
 
+### API-key fallback (rate limits and spent balances)
+A second key is optional; set `ANTHROPIC_API_KEY_FALLBACK` beside `ANTHROPIC_API_KEY` and
+a key-scoped failure switches to it **immediately** instead of cooling down. The design
+turns on one distinction:
+
+| Failure | Whose quota | Answer |
+|---|---|---|
+| 429 `rate_limit_error` | the key's (per **organization**) | rotate — a different org's key is not rate-limited |
+| 403 `billing_error`, or a 400 naming the credit balance | the key's | rotate — waiting never refills a spent balance; before this it **killed the run** |
+| 529 `overloaded_error`, 5xx, connection drops | Anthropic's capacity | cool down (unchanged) — every key sees the same outage |
+| 401 `authentication_error` | — | neither; a revoked key is a configuration fault a human must see |
+
+- Rotation costs **no cooldown and no retry budget** — there is nothing to wait for — and
+  offers each key at most once per call; once exhausted the same exception falls through to
+  the existing cooldown/raise path, so a 429 on every key still waits and a balance spent on
+  every key still raises honestly.
+- The live key is **process state**, so rotation is bidirectional *across* calls: a
+  per-minute bucket refills on one key while the other is in use and neither is stranded.
+- `AsyncAnthropic(api_key=active_key(ANTHROPIC))` — read explicitly, because the SDK
+  resolves `ANTHROPIC_API_KEY` once per client and the live key may no longer be that value.
+- The coder is a **separate process** (Claude Agent SDK), so `merge_flow._with_live_anthropic_key`
+  stamps the live key onto its environment — and only after a rotation, leaving the common
+  path byte-identical. A session already in flight keeps the key it launched with.
+- Each switch records one `provider.key_rotation` monitor event (level 3) naming the slot
+  (`primary`/`fallback1`), never the key value.
+- **The fallback must be a different Anthropic organization to relieve a 429** — rate limits
+  are per-organization, so a same-org second key rotates onto the same exhausted bucket.
+  `check_api_key_fallbacks` (preflight) cannot see the org; it rejects only what it can
+  prove useless: a blank fallback, one identical to the primary, or one set without a primary.
+
 ## Dependencies
 - External: `anthropic`, `openai`, `google-genai`, `pyyaml`, `pydantic`, `httpx`
   (error classification in `retry.py`).
 - Internal: `auto_research.env` (`provider_retry_policy` — the transient-retry knobs).
-- Imported by: `auto_research.agents`, `auto_research.observability`.
+  `keys.py` depends on nothing but the standard library, so the pool is safe to read from
+  any layer.
+- Imported by: `auto_research.agents`, `auto_research.observability`,
+  `auto_research.preflight` (`check_api_key_fallbacks`), `auto_research.sandbox.merge_flow`
+  (the coder's environment).
 
 ## Dictionary-level reference
 - `ProviderName` — literal provider label accepted in `config/models.yaml`.
@@ -250,15 +288,49 @@ Google by editing YAML alone
   Anthropic/OpenAI, or `code`, Google genai) and connection/timeout drops
   (`httpx.TransportError`, the SDKs' `APIConnectionError`). Auth/bad-request/other
   exceptions are not transient.
+- `retry.is_key_scoped_provider_error(exc) -> bool` — True when the failure is a quota of
+  the API **key**, not of the provider: HTTP 429, an error `type` of `rate_limit_error` or
+  `billing_error`, or a message naming the credit balance (a spent balance arrives as a 400
+  `invalid_request_error`). False for 529/5xx and connection drops (provider capacity —
+  identical on every key) and, deliberately, for 401 `authentication_error`.
 - `retry.call_with_transient_retry(provider_call, *, describe, policy=None,
-  sleep=asyncio.sleep) -> Any` — awaits `provider_call()`, retrying transient
-  failures up to `policy.max_retries` with cooldowns growing exponentially from
-  `base_cooldown_s` to `max_cooldown_s`, jittered to 50–100% so concurrent agents
-  desynchronize. Policy defaults from `env.provider_retry_policy()`
+  sleep=asyncio.sleep, rotate_key=None, on_key_rotation=None) -> Any` — awaits
+  `provider_call()`, retrying transient failures up to `policy.max_retries` with cooldowns
+  growing exponentially from `base_cooldown_s` to `max_cooldown_s`, jittered to 50–100% so
+  concurrent agents desynchronize. Policy defaults from `env.provider_retry_policy()`
   (`config/orchestration.yaml: provider_retry_*`, "Internet stability" section).
   Each wait logs a WARNING carrying `describe`; a non-transient error or an
   exhausted budget re-raises the original exception unchanged. `policy`/`sleep`
   are injectable for deterministic tests.
+  `rotate_key()` is consulted **first** and only for `is_key_scoped_provider_error`
+  failures: it switches to a key this call has not used and returns its label (or `None`
+  when exhausted), and the retry that follows spends no cooldown and no retry budget.
+  `on_key_rotation(label, exc)` is awaited for the ledger event and never affects control
+  flow (a raising hook is swallowed).
+- `keys.KeyPool(provider)` — the keys configured for one provider and which is live.
+  Reads `<PROVIDER>_API_KEY` then `<PROVIDER>_API_KEY_FALLBACK`, dropping a fallback that is
+  blank or identical to the primary. `.active()` (the key, or `None` so the SDK keeps its own
+  resolution rather than being handed an empty string), `.active_label()` (`primary` /
+  `fallback1` / `unset` — log-safe, never the value), `.has_fallback()`,
+  `.rotate(exclude=…) -> str | None`.
+- `keys.key_pool(provider)` / `keys.active_key(provider)` — the process-wide pool, built
+  lazily so it reads the environment *after* `.env` is loaded. `keys.reset_pools()` drops the
+  cache (tests, and the preflight check).
+- `keys.make_rotator(provider) -> Callable[[], str | None] | None` — a **per-call** rotation
+  callback, or `None` when no fallback is configured *or* the provider is outside
+  `ROTATING_PROVIDERS`. Offers each key once per call (the set of tried labels is per-call
+  state; the live key is process state).
+- `keys.ROTATING_PROVIDERS: tuple[str, ...]` — the providers whose adapter actually sends
+  `active_key` (Anthropic today). Rotating any other would be **worse than doing nothing**: the
+  client would keep the key the SDK resolved from the environment while the caller skipped its
+  cooldown — a failover that looks like it works and silently does not. Wiring a provider means
+  one adapter line *and* its name here; `check_api_key_fallbacks` reads the same tuple, so a
+  fallback is validated exactly where it can be honoured.
+- `keys.env_var_names(provider) -> (primary, fallback)` — the env-var pair for a provider.
+- `keys.check_api_key_fallbacks()` — preflight check. Passes when no fallback is set (it is
+  optional); raises when one is set but blank, identical to the primary, or set without a
+  primary — each a fallback that `KeyPool` silently drops, which would leave a human
+  believing a run is protected against throttling when rotation has nowhere to go.
 - `ModelGroupHandle(role: str, handles: tuple[ModelHandle, ...])` — resolved
   model group. Method: `member(name: str) -> ModelHandle`.
 - `REQUIRED_ROLES` — required role names that must appear in config: `reviewer`,
@@ -427,3 +499,33 @@ Compacted 2026-08-05: entries through 2026-08-03 folded into themed ranges (deta
   page limit, and that an under-limit request stays **byte-identical**); live
   `test_live_figure_vision.py::test_live_many_image_request_that_used_to_400` sends the exact
   21-image shape that died and Anthropic now answers *"I received 21 panels."* Suite 770 → 780.
+
+- 2026-08-10 — **A second API key, because a rate limit and a spent balance are quotas of the
+  *key*, not of Anthropic.** The one retry policy we had treats every failure as something to
+  wait out: a 429 stalled a call up to ~30 min across 8 cooldowns, and a spent credit balance —
+  a non-transient 400 — killed the run outright (observed 2026-07-22). Both clear instantly on a
+  key from another organization, which waiting cannot do. New `keys.py` holds a process-global
+  per-provider key pool (`ANTHROPIC_API_KEY` + optional `ANTHROPIC_API_KEY_FALLBACK`);
+  `retry.is_key_scoped_provider_error` splits that class off — 429 / `rate_limit_error`,
+  `billing_error`, and a 400 whose message names the credit balance, each read from Anthropic's
+  own error taxonomy rather than inferred from a live failure — and `call_with_transient_retry`
+  consults an injected `rotate_key` **before** its cooldown logic, retrying immediately at no
+  cooldown and no budget cost. 529/5xx/connection failures are explicitly *not* rotated (provider
+  capacity is identical on every key) and 401 is deliberately excluded (a revoked key is a
+  configuration fault a human must see). Rotation offers each key once per call and then falls
+  through to the existing path, so a 429 on every key still waits and a balance spent on every
+  key still raises; because the live key is process state, rotation is bidirectional across
+  calls and neither key is stranded. The Anthropic adapter now passes `api_key=` explicitly (the
+  SDK resolves the env var once per client, and after a rotation that value is stale), the coder
+  subprocess gets the live key stamped onto its environment only when it has rotated
+  (`merge_flow._with_live_anthropic_key`, so the common path is byte-identical), and each switch
+  records a `provider.key_rotation` monitor event naming the slot, never the key. New preflight
+  check `api_key_fallbacks` rejects a fallback that is blank, identical to the primary, or set
+  without a primary — the three shapes `KeyPool` silently deduplicates away, which would leave a
+  human believing a run is protected when rotation has nowhere to go. **Stated limit:** Anthropic
+  rate limits are per-organization, so the fallback must be a different org for the 429 half to
+  help; the check cannot see the org and does not pretend to. Anthropic-only by choice, and guarded
+  rather than merely intended: `ROTATING_PROVIDERS` stops a provider whose adapter ignores the pool
+  from rotating, which would keep the SDK-resolved key *and* skip the cooldown — a failover that
+  looks like it works. Adding a provider is one adapter line plus that tuple. Tests:
+  `tests/test_provider_key_failover.py` (33). Suite 781 → 814.

@@ -272,9 +272,14 @@ class ModelHandle:
             raise ValueError(
                 f"role {self.role!r} member {self.config.name!r} is not configured for document inputs"
             )
+        from auto_research.models.keys import make_rotator
         from auto_research.models.retry import call_with_transient_retry
         from auto_research.observability import traced_model_call
 
+        # A rotator exists only for a provider with a second key configured; a key-scoped
+        # failure (rate limit, spent balance) then retries on the other key immediately
+        # instead of cooling down against a quota that waiting cannot refill.
+        rotate_key = make_rotator(self.config.provider)
         return await call_with_transient_retry(
             lambda: traced_model_call(
                 role=self.role,
@@ -291,6 +296,41 @@ class ModelHandle:
                 ),
             ),
             describe=f"{self.role}/{self.config.name}",
+            rotate_key=rotate_key,
+            on_key_rotation=self._record_key_rotation if rotate_key is not None else None,
+        )
+
+    async def _record_key_rotation(self, label: str, exc: BaseException) -> None:
+        """Record a key switch on the run ledger — the monitor JSONL is the sole record [J1].
+
+        Reached through the run-scoped ``CostMeter``'s monitor for the same reason cost
+        accounting is: this sits far below any run object, and a ``ContextVar`` is the only
+        handle a provider call has on the run it belongs to. Silent when no run is installed
+        (a bare library call, a test), and the key **value** is never recorded — only which
+        slot it came from.
+        """
+
+        from auto_research.observability import current_cost_meter
+
+        meter = current_cost_meter()
+        monitor = getattr(meter, "monitor", None) if meter is not None else None
+        if monitor is None:
+            return
+        await monitor.record(
+            "run",
+            "provider.key_rotation",
+            level=3,
+            summary=(
+                f"{self.config.provider} key-scoped error on {self.role}/{self.config.name} "
+                f"— switched to the {label} API key"
+            ),
+            data={
+                "provider": self.config.provider,
+                "role": self.role,
+                "member": self.config.name,
+                "switched_to": label,
+                "error": str(exc)[:500],
+            },
         )
 
 

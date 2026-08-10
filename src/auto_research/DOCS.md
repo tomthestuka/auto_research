@@ -17,7 +17,7 @@ and the active Phase 2 build order in
 |---|---|---|
 | `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`); small `orchestration.yaml` accessors (`runtime_data_dir`, `papers_dir`, `sandbox_call_timeout_default`, `provider_retry_policy`). |
 | `setup.py` | — | The install-script Python stage (`python -m auto_research.setup`, run by `install.sh`): discovers defaults, prompts (interactive `questionary`) or reads `--answers` (headless), then writes the gitignored `config/orchestration.yaml` + `observations.yaml` from their `*.example` templates (deriving `agent_fs_allow` from the answered paths) and runs the preflight smoke test. |
-| `preflight.py` | — | Launch-time deterministic **checklist** (`Preflight` / async `run_preflight()`): runs every no-LLM precondition (`.env` shape, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, `analyze_probe` stack smoke-test, human-channel ping) before any model client is built. |
+| `preflight.py` | — | Launch-time deterministic **checklist** (`Preflight` / async `run_preflight()`): runs every no-LLM precondition (`.env` shape, API-key fallback usability, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, `analyze_probe` stack smoke-test, human-channel ping) before any model client is built. |
 | `hitl` | 5 | Raise-to-human clarification channel: the injectable `HumanHandler`, the CLI/Slack/WhatsApp connectors, the CLI-vs-library resolver, and the launch-time channel ping. |
 | `schemas` | 1 | Pydantic v2 message protocol between agents. |
 | `models` | 2 | Provider abstraction + role→model registry from `config/models.yaml`. |
@@ -49,6 +49,9 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - `auto_research.preflight.run_preflight(*, human_handler=None, monitor=None)` (async) is the
   launch-time entry that runs the whole deterministic checklist (registered via
   `build_default_preflight(human_handler)`): `check_required_env`,
+  `models.keys.check_api_key_fallbacks` (an optional `<PROVIDER>_API_KEY_FALLBACK` is usable —
+  not blank, not identical to the primary, not set without one; runs right after
+  `check_required_env`, which is what loads `.env`),
   `storage.check_database_health` (the runtime SQLite DB exists with its full schema,
   created if absent — so a fresh run's first `text_search` can't hit `no such table: papers`),
   `sandbox.review.check_author_reviewer_decorrelation`,
@@ -204,3 +207,11 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   `UserInterruptionError`, and cleanup is deterministic and model-free. New public symbols:
   `run_control.UserInterruptionError`, `RunControl.interrupt`/`register_run_task`/
   `authoring_session`; `run_research(install_signal_handlers=)`.
+
+- 2026-08-10 — **New preflight check `api_key_fallbacks`** (`models.keys.check_api_key_fallbacks`),
+  registered immediately after `required_env` because that check is what loads `.env`. A
+  `<PROVIDER>_API_KEY_FALLBACK` is optional, so an unset one passes; what fails is a fallback that
+  cannot do its job — blank after stripping, identical to the primary, or set without a primary.
+  All three are silently deduplicated away by the key pool, which would leave a human believing a
+  run is protected against throttling when rotation has nowhere to go. Full design in
+  `models/DOCS.md`.

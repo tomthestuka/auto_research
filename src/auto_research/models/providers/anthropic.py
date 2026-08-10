@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from auto_research.env import context_editing_config, tool_search_config
+from auto_research.models.keys import ANTHROPIC, active_key
 from auto_research.models.providers._tool_search import anthropic_search_tool_name
 from auto_research.models.providers._media import (
     MediaLimits,
@@ -195,7 +196,11 @@ class AnthropicProvider:
                 ]
             }
 
-        client = AsyncAnthropic()
+        # The key is read from the pool rather than left to the SDK's own environment
+        # lookup, because a key-scoped failure (rate limit, spent balance) rotates the live
+        # key mid-run and the SDK resolves `ANTHROPIC_API_KEY` once per client. `None` means
+        # no key is configured here, which hands resolution back to the SDK unchanged.
+        client = AsyncAnthropic(api_key=active_key(ANTHROPIC))
         # beta.messages accepts betas + context_management; its response carries the same
         # content/usage shape, and ParsedBetaMessage.parsed_output is a property mirroring the
         # non-beta parse — so the extraction below is identical on either namespace.
