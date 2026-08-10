@@ -49,6 +49,24 @@ _KEY_SCOPED_TYPES = frozenset({"rate_limit_error", "billing_error"})
 _KEY_SCOPED_MESSAGE_MARKERS = ("credit balance",)
 
 
+def is_exhausted_key_error(exc: BaseException) -> bool:
+    """True when the key's quota does **not** refill on its own — a spent credit balance.
+
+    The complement within the key-scoped class is a rate limit, which clears in a minute and
+    must never retire a key. This distinction is what stops rotation from returning to a dead
+    key: without it, a run whose primary is out of credit rotates back onto it the first time
+    the fallback hits a routine 429, and because a balance error is non-transient that dead
+    key's 400 becomes the exception that raises — a one-minute wait turned fatal.
+    """
+
+    if getattr(exc, "status_code", None) == 429 or getattr(exc, "type", None) == "rate_limit_error":
+        return False
+    if getattr(exc, "type", None) == "billing_error":
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in _KEY_SCOPED_MESSAGE_MARKERS)
+
+
 def is_key_scoped_provider_error(exc: BaseException) -> bool:
     """True when ``exc`` is a quota of the API **key** rather than of the provider.
 
@@ -97,7 +115,7 @@ async def call_with_transient_retry(
     describe: str,
     policy: ProviderRetryPolicy | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    rotate_key: Callable[[], str | None] | None = None,
+    rotate_key: Callable[[bool], str | None] | None = None,
     on_key_rotation: Callable[[str, BaseException], Awaitable[None]] | None = None,
 ) -> Any:
     """Await ``provider_call()``, waiting out transient provider failures.
@@ -108,12 +126,14 @@ async def call_with_transient_retry(
     budget, re-raises the original exception unchanged. ``describe`` labels the log
     line (e.g. ``role/member``); ``policy`` and ``sleep`` are injectable for tests.
 
-    ``rotate_key`` (when the provider has a second key configured) switches to a key this
-    call has not used yet and returns its label, or ``None`` once every key has been
-    tried. It is consulted **first**, and only for :func:`is_key_scoped_provider_error`
+    ``rotate_key(retire_current)`` (when the provider has a second key configured) switches
+    to a key this call has not used yet and returns its label, or ``None`` once every key has
+    been tried. It is consulted **first**, and only for :func:`is_key_scoped_provider_error`
     failures: the retry that follows is immediate and costs no cooldown and no retry
     budget, because the new key's quota is already available — there is nothing to wait
-    for. When rotation is exhausted the same exception falls through to the ordinary path,
+    for. ``retire_current`` is :func:`is_exhausted_key_error`, so a spent balance takes that
+    key out of rotation for good while a rate limit leaves it eligible. When rotation is
+    exhausted the same exception falls through to the ordinary path,
     so a 429 on every key still cools down and a spent balance on every key still raises.
     ``on_key_rotation`` observes each switch (label, the error that caused it) for the run
     ledger; it never affects control flow.
@@ -125,7 +145,8 @@ async def call_with_transient_retry(
             return await provider_call()
         except Exception as exc:
             if rotate_key is not None and is_key_scoped_provider_error(exc):
-                label = rotate_key()
+                # A spent balance retires the key it came from; a rate limit never does.
+                label = rotate_key(is_exhausted_key_error(exc))
                 if label is not None:
                     logger.warning(
                         "key-scoped provider error on %s (%r) — switching to the %s API key "

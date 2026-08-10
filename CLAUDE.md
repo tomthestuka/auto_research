@@ -850,7 +850,9 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   or primary-less); (b) **a coder session already in flight keeps the key it launched with** — the
   Agent SDK owns that subprocess's environment for its lifetime, so only the *next* session picks up a
   rotation; and (c) 401 `authentication_error` is deliberately **not** rotated, so a revoked primary
-  key still fails the run rather than silently running on the fallback. Only Anthropic is wired, and
+  key still fails the run rather than silently running on the fallback; (d) key **retirement** is
+  process-scoped, so a key retired for a spent balance is eligible again on the next run — right
+  for a topped-up key, but it means a still-dead key costs one wasted call at each run's start. Only Anthropic is wired, and
   `keys.ROTATING_PROVIDERS` is what makes that safe rather than incidental: a provider whose adapter
   does not send `active_key` must never rotate, or the client would keep the SDK-resolved key while
   the caller skipped its cooldown. Adding OpenAI/Google is one adapter line each **plus** that tuple.
@@ -1158,7 +1160,16 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   must see, not one to route around. Rotation offers each key once per call and then falls through to
   the existing path, so a 429 on every key still waits and a balance spent on every key still raises
   honestly; because the live key is process state, rotation is bidirectional *across* calls and
-  neither key is stranded. Three seams follow from "the SDK resolves the env var once per client":
+  neither key is stranded. **Bidirectional rotation is only safe for a quota that refills, which
+  the first draft missed and a pre-launch read of the actual Q21 terminal caught:** that run died
+  on the credit-balance 400 with `$231.65` spent, so its primary is *permanently* dead — and
+  rotating back onto a dead key the first time the fallback hit a routine 429 would have made that
+  key's non-transient 400 the exception that raises, converting a one-minute wait into a dead run,
+  strictly worse than having no fallback at all. So `is_exhausted_key_error` splits the
+  non-refilling subset (spent balance) from the refilling one (429), and a balance failure
+  **retires** that key for the process (`KeyPool.retire_active`); a 429 never does. Every key
+  retired ⇒ rotation returns `None` and the run fails honestly instead of looping. Three seams
+  follow from "the SDK resolves the env var once per client":
   the Anthropic adapter now passes `api_key=` explicitly, the coder subprocess gets the live key
   stamped on **only after a rotation** (`merge_flow._with_live_anthropic_key`, leaving the common path
   byte-identical), and each switch records a `provider.key_rotation` ledger event naming the slot,
@@ -1167,5 +1178,10 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   leave a human believing a run is protected when rotation has nowhere to go. **Stated limit, not
   papered over:** rate limits are per-organization, so the fallback must be a different org for the
   429 half to help (§13). Anthropic-only by choice (§1 minimal); the pool is provider-keyed.
-  `tests/test_provider_key_failover.py`; suite 781 → 814. **Not live-tested** — exercising it needs a
-  real throttled key.
+  `tests/test_provider_key_failover.py` (40); suite 781 → 821. **LIVE-VERIFIED the same day on the Q21
+  resume**, against the very failure that had killed that run: the first Anthropic call of the resumed
+  run (`analyst_worker/claude_sonnet_5`, seq 3647) took the credit-balance 400, rotated to `fallback1`,
+  retired the dead key, and the run continued — spend unchanged at $231.65, because a request refused
+  before any tokens is never billed. Preflight went 10/10 → **11/11** with `api_key_fallbacks`. What the
+  resume does *not* yet exercise is a 429 on both keys and a rotation preceding a coder session
+  (`tmp_remaining_livetest.md` K1).

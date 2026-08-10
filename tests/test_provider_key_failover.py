@@ -119,6 +119,95 @@ def test_pool_with_no_keys_returns_none_not_empty_string(monkeypatch):
     assert active_key(ANTHROPIC) is None
 
 
+def test_a_spent_balance_retires_that_key_but_a_rate_limit_does_not(monkeypatch):
+    """A balance never refills; a 429 clears in a minute. Only the first takes a key away."""
+
+    _set_keys(monkeypatch, PRIMARY, FALLBACK)
+    make_rotator(ANTHROPIC)(True)  # left the primary on a spent balance
+    assert active_key(ANTHROPIC) == FALLBACK
+    assert make_rotator(ANTHROPIC)() is None  # the retired primary is never offered back
+
+    _set_keys(monkeypatch, PRIMARY, FALLBACK)  # fresh pool
+    make_rotator(ANTHROPIC)(False)  # left the primary on a rate limit
+    assert make_rotator(ANTHROPIC)() == "primary"  # still eligible — that quota refills
+
+
+def test_a_dead_primary_does_not_turn_a_fallback_rate_limit_into_a_fatal_error(monkeypatch):
+    """The Q21 shape: primary out of credit, fallback healthy but occasionally throttled.
+
+    Without retirement the second call rotates *back* onto the dead primary, whose 400 is
+    non-transient and therefore becomes the exception that raises — a one-minute wait turned
+    into a dead run, and strictly worse than having no fallback at all.
+    """
+
+    _set_keys(monkeypatch, PRIMARY, FALLBACK)
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    # Call 1: the primary's balance is spent — rotate onto the fallback and retire it.
+    assert (
+        asyncio.run(
+            call_with_transient_retry(
+                _runner([_credit_balance()]),
+                describe="role/member",
+                policy=_NO_WAIT_POLICY,
+                sleep=sleep,
+                rotate_key=make_rotator(ANTHROPIC),
+            )
+        )
+        == "ok"
+    )
+    assert active_key(ANTHROPIC) == FALLBACK
+    assert waits == []
+
+    # Call 2: a routine 429 on the fallback. The only other key is retired, so this must
+    # cool down and succeed — never rotate back and raise the dead key's 400.
+    assert (
+        asyncio.run(
+            call_with_transient_retry(
+                _runner([_rate_limit()]),
+                describe="role/member",
+                policy=_NO_WAIT_POLICY,
+                sleep=sleep,
+                rotate_key=make_rotator(ANTHROPIC),
+            )
+        )
+        == "ok"
+    )
+    assert len(waits) == 1  # waited it out
+    assert active_key(ANTHROPIC) == FALLBACK  # never went back to the dead key
+
+
+def test_every_key_retired_raises_honestly(monkeypatch):
+    """Both balances spent: no key left, so the run fails rather than looping."""
+
+    _set_keys(monkeypatch, PRIMARY, FALLBACK)
+    with pytest.raises(_ProviderError):
+        asyncio.run(
+            call_with_transient_retry(
+                _runner([_credit_balance(), _credit_balance()]),
+                describe="role/member",
+                policy=_NO_WAIT_POLICY,
+                rotate_key=make_rotator(ANTHROPIC),
+            )
+        )
+    assert make_rotator(ANTHROPIC) is not None
+    assert make_rotator(ANTHROPIC)() is None  # nothing left to try
+
+
+@pytest.mark.parametrize(
+    "exc_factory, retires",
+    [(_credit_balance, True), (_billing, True), (_rate_limit, False), (_overloaded, False)],
+    ids=["credit", "billing", "429", "529"],
+)
+def test_only_non_refilling_quotas_retire_a_key(exc_factory, retires):
+    from auto_research.models.retry import is_exhausted_key_error
+
+    assert is_exhausted_key_error(exc_factory()) is retires
+
+
 def test_one_call_offers_each_key_at_most_once(monkeypatch):
     """The key that just failed is not re-offered inside the same call — nothing changed for it."""
 

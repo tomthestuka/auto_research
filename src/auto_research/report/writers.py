@@ -109,8 +109,19 @@ def compile_latex(
 ) -> tuple[bool, list[str]]:
     """Run pdflatex non-interactively in report_dir; return (success, error_lines).
 
-    Parses !-prefixed error lines from pdflatex output. Returns (True, []) when
-    the compiler is not on PATH so the feedback loop degrades to ref-checks only.
+    Parses !-prefixed error lines from pdflatex output, **each with the ``l.<n>`` context
+    line TeX prints beneath it**. The `!` line alone is usually not actionable — TeX says
+    *"! Undefined control sequence."* and only the context line names the macro:
+
+        ! Undefined control sequence.
+        l.110 ...restrict the peak search to $|\\tau| \\lesssim
+
+    Without it a retry is told what kind of error occurred but not where or what, so it
+    re-emits the same document; observed live on Q21 (2026-08-10), where two attempts failed
+    identically on `\\lesssim` and the run finished with no PDF.
+
+    Returns (True, []) when the compiler is not on PATH so the feedback loop degrades to
+    ref-checks only.
     """
     if not shutil.which(compiler):
         return True, []
@@ -133,11 +144,35 @@ def compile_latex(
     if result.returncode == 0:
         return True, []
 
-    errors = [
-        line.strip()
-        for line in result.stdout.splitlines()
-        if line.startswith("!")
-    ]
+    errors = _errors_with_context(result.stdout)
     if not errors:
         errors = [f"pdflatex exited with code {result.returncode}"]
     return False, errors
+
+
+# TeX prints the offending source line as `l.<number> <text>` a line or two below its `!`
+# message; nothing else in the log identifies what failed.
+_TEX_CONTEXT = re.compile(r"^l\.\d+\s")
+
+
+def _errors_with_context(stdout: str, *, lookahead: int = 4) -> list[str]:
+    """Pair each ``!`` error line with the ``l.<n>`` source line that follows it.
+
+    ``lookahead`` bounds the search so an error with no context (TeX does not always print
+    one) yields the bare message rather than swallowing an unrelated later line.
+    """
+
+    lines = stdout.splitlines()
+    errors: list[str] = []
+    for i, line in enumerate(lines):
+        if not line.startswith("!"):
+            continue
+        message = line.strip()
+        for candidate in lines[i + 1 : i + 1 + lookahead]:
+            if candidate.startswith("!"):
+                break  # the next error owns everything past here
+            if _TEX_CONTEXT.match(candidate):
+                message = f"{message} [{candidate.strip()}]"
+                break
+        errors.append(message)
+    return errors

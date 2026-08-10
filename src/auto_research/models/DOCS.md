@@ -176,6 +176,15 @@ turns on one distinction:
   every key still raises honestly.
 - The live key is **process state**, so rotation is bidirectional *across* calls: a
   per-minute bucket refills on one key while the other is in use and neither is stranded.
+- **A spent balance retires that key for the process; a rate limit never does**
+  (`is_exhausted_key_error` splits the two, `KeyPool.retire_active` applies it). The two
+  quotas differ in whether they refill, and bidirectional rotation is only safe for the one
+  that does: without retirement, a run whose primary is out of credit rotates *back* onto it
+  the first time the fallback hits a routine 429, and since a balance error is non-transient
+  that dead key's 400 becomes the exception that raises — a one-minute wait turned into a
+  dead run, strictly worse than having no fallback at all. Retirement is process-scoped, so a
+  topped-up key is live again on the next run. Pinned by
+  `test_a_dead_primary_does_not_turn_a_fallback_rate_limit_into_a_fatal_error`.
 - `AsyncAnthropic(api_key=active_key(ANTHROPIC))` — read explicitly, because the SDK
   resolves `ANTHROPIC_API_KEY` once per client and the live key may no longer be that value.
 - The coder is a **separate process** (Claude Agent SDK), so `merge_flow._with_live_anthropic_key`
@@ -302,24 +311,29 @@ turns on one distinction:
   Each wait logs a WARNING carrying `describe`; a non-transient error or an
   exhausted budget re-raises the original exception unchanged. `policy`/`sleep`
   are injectable for deterministic tests.
-  `rotate_key()` is consulted **first** and only for `is_key_scoped_provider_error`
+  `rotate_key(retire_current)` is consulted **first** and only for `is_key_scoped_provider_error`
   failures: it switches to a key this call has not used and returns its label (or `None`
   when exhausted), and the retry that follows spends no cooldown and no retry budget.
   `on_key_rotation(label, exc)` is awaited for the ledger event and never affects control
   flow (a raising hook is swallowed).
+- `retry.is_exhausted_key_error(exc) -> bool` — the non-refilling subset of the key-scoped
+  class: a spent balance (`billing_error`, or a message naming the credit balance). False for
+  429/`rate_limit_error`, which clears on its own and must never retire a key.
 - `keys.KeyPool(provider)` — the keys configured for one provider and which is live.
   Reads `<PROVIDER>_API_KEY` then `<PROVIDER>_API_KEY_FALLBACK`, dropping a fallback that is
   blank or identical to the primary. `.active()` (the key, or `None` so the SDK keeps its own
   resolution rather than being handed an empty string), `.active_label()` (`primary` /
   `fallback1` / `unset` — log-safe, never the value), `.has_fallback()`,
-  `.rotate(exclude=…) -> str | None`.
+  `.rotate(exclude=…) -> str | None` (skips retired keys), `.retire_active() -> str`
+  (takes the live key out of rotation for good — a spent balance only).
 - `keys.key_pool(provider)` / `keys.active_key(provider)` — the process-wide pool, built
   lazily so it reads the environment *after* `.env` is loaded. `keys.reset_pools()` drops the
   cache (tests, and the preflight check).
-- `keys.make_rotator(provider) -> Callable[[], str | None] | None` — a **per-call** rotation
+- `keys.make_rotator(provider) -> Callable[[bool], str | None] | None` — a **per-call** rotation
   callback, or `None` when no fallback is configured *or* the provider is outside
   `ROTATING_PROVIDERS`. Offers each key once per call (the set of tried labels is per-call
-  state; the live key is process state).
+  state; the live key is process state). Its `retire_current` argument retires the key it is
+  leaving, which the caller sets from `retry.is_exhausted_key_error`.
 - `keys.ROTATING_PROVIDERS: tuple[str, ...]` — the providers whose adapter actually sends
   `active_key` (Anthropic today). Rotating any other would be **worse than doing nothing**: the
   client would keep the key the SDK resolved from the environment while the caller skipped its

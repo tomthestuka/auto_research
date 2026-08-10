@@ -87,3 +87,18 @@ The `compose_report` graph node (in `builder.py`) orchestrates these utilities:
   `_sanitize_href_display`, wrapping each `\href` display argument in `\nolinkurl{}`, fixing the
   `_`-as-math-subscript `! Missing $ inserted.` that produced no PDF on every paper-citing run.
   No prompt change.
+
+- 2026-08-10 — **A one-symbol LaTeX failure cost a whole run's PDF; the retry could not see which
+  symbol.** Q21 (`8c75990e`) finished accepted, with `report.tex` and no `report.pdf`: both compile
+  attempts died on `! Undefined control sequence.` at `\lesssim`, `report_retry_cap: 2` was exhausted,
+  and the loop accepted the residual errors. Two independent causes, both fixed. (1) `compile_latex`
+  extracted only `!`-prefixed lines, discarding the `l.<n>` source line that is the *only* place TeX
+  names the offending macro — so the retry was told the error class and not the error, and re-emitted
+  the same document. `_errors_with_context` now pairs each `!` message with its context line, stopping
+  the lookahead at the next `!` so one error's context cannot be attributed to another. (2) The preamble
+  is written by the reviewer model, not a code template, and the only instruction was "load hyperref";
+  `graphicx`/`amsmath`/`amssymb`/`hyperref` are now mandated in both places that carry it
+  (`prompts/reviewer.md` and the `output_format_instructions` in `agents/roles.py`), with the reason
+  stated so the model extends the list when a symbol needs more. `amssymb.sty` was installed the whole
+  time — this was never an environment gap. Tests: `tests/test_report.py::test_compile_errors_carry_the_offending_source_line`
+  plus the no-context and no-leak cases.

@@ -52,7 +52,7 @@ When the analysis is **incomplete or failed** (an honest `failed`/`needs_human` 
 
 **LaTeX / human handle** (`output_format: tex`): Return a JSON object `{"latex": "..."}` containing a complete, compilable LaTeX document. Rules:
 - In JSON strings every backslash is `\\` — write LaTeX `\section{}` as `\\section{}` in the JSON value.
-- Load `\\usepackage{hyperref}` in the preamble.
+- Load these packages in the preamble: `\\usepackage{graphicx}`, `\\usepackage{amsmath}`, `\\usepackage{amssymb}`, `\\usepackage{hyperref}`. `amssymb` carries the relation symbols ordinary science prose reaches for (`\\lesssim`, `\\gtrsim`, `\\simeq`), and a symbol whose package is absent is a fatal compile error that costs the whole PDF. Add any further package a symbol you use requires.
 - Use `\\includegraphics{<relpath>}` with the **exact** relative paths supplied in `figures[*].relpath`.
 - Cite papers in prose in the body. The References section is a list of hyperlinks to the local PDFs you used: for each supplied `paper_links` relpath, emit `\\href{<relpath>}{<relpath>}` using the relpath **verbatim**. Use only the supplied relpaths; add no `\\cite`, no `\\begin{thebibliography}`, and no invented author/title text.
 - When `feedback` errors are provided, fix exactly those errors in the revised output.

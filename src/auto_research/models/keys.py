@@ -61,6 +61,7 @@ class KeyPool:
                 keys.append(value)
         self._keys = keys
         self._index = 0
+        self._retired: set[int] = set()
         self._lock = threading.Lock()
 
     def has_fallback(self) -> bool:
@@ -86,17 +87,40 @@ class KeyPool:
                 return "unset"
             return "primary" if self._index == 0 else f"fallback{self._index}"
 
+    def retire_active(self) -> str:
+        """Permanently take the live key out of rotation; return its label.
+
+        For a quota that does **not** refill on its own — a spent credit balance. A rate
+        limit must never retire a key: it clears in a minute, and retiring on one would
+        throw away a perfectly good key.
+
+        Why this exists: rotation is bidirectional, so without retirement a run whose
+        primary is out of credit would rotate *back* onto it the next time the fallback hit
+        a routine 429 — and because a balance error is non-transient, that dead key's 400
+        becomes the exception that raises, converting a one-minute wait into a fatal error.
+        Retirement is process-scoped: a topped-up key is live again for the next run.
+        """
+
+        with self._lock:
+            self._retired.add(self._index)
+            return "primary" if self._index == 0 else f"fallback{self._index}"
+
     def rotate(self, *, exclude: frozenset[str] = frozenset()) -> str | None:
-        """Advance to a key not in ``exclude``; return its label, or ``None`` if none is left.
+        """Advance to a live key not in ``exclude``; return its label, or ``None`` if none is left.
 
         ``exclude`` carries the labels already tried during the failing call, so one call
         rotates through each key at most once and then falls through to the caller's
         normal cooldown/raise behaviour instead of spinning between two exhausted keys.
+        Retired keys are skipped for the life of the process, so ``None`` — every key
+        retired — is how "there is no key left to try" reaches the caller as an honest
+        failure rather than a loop.
         """
 
         with self._lock:
             for step in range(1, len(self._keys)):
                 index = (self._index + step) % len(self._keys)
+                if index in self._retired:
+                    continue
                 label = "primary" if index == 0 else f"fallback{index}"
                 if label not in exclude:
                     self._index = index
@@ -147,6 +171,9 @@ def make_rotator(provider: str):
     labels is closed over rather than held in the pool, because it is a property of one
     in-flight call, while the live key is a property of the process.
 
+    ``retire_current=True`` first takes the live key out of rotation for good — pass it when
+    the failure was a quota that does not refill (a spent balance), never for a rate limit.
+
     ``None`` for any provider outside :data:`ROTATING_PROVIDERS`, whatever its environment
     holds.
     """
@@ -158,7 +185,9 @@ def make_rotator(provider: str):
         return None
     tried = {pool.active_label()}
 
-    def rotate() -> str | None:
+    def rotate(retire_current: bool = False) -> str | None:
+        if retire_current:
+            tried.add(pool.retire_active())
         label = pool.rotate(exclude=frozenset(tried))
         if label is not None:
             tried.add(label)

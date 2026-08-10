@@ -20,6 +20,7 @@ from auto_research.report import (
     write_report_jsonl,
     write_report_latex,
 )
+from auto_research.report.writers import _errors_with_context
 from auto_research.schemas import FigureRef
 from auto_research.schemas.report import (
     LatexReport,
@@ -310,6 +311,50 @@ def test_compile_latex_no_compiler_returns_ok(tmp_path):
         ok, errs = compile_latex(tmp_path)
     assert ok
     assert errs == []
+
+
+# An undefined macro is the one compile error a retry cannot fix from the `!` line alone:
+# TeX names the macro only on the `l.<n>` context line. Observed live on Q21 2026-08-10,
+# where two attempts failed identically on `\lesssim` and the run finished with no PDF.
+_TEX_UNDEFINED_MACRO_LOG = r"""
+This is pdfTeX, Version 3.14159265
+! Undefined control sequence.
+l.110 ...restrict the peak search to $|\tau| \lesssim
+                                                     $ half the sub-observation
+Some recovery noise here.
+! Missing $ inserted.
+<inserted text>
+                $
+l.204 \end{document}
+!  ==> Fatal error occurred, no output PDF file produced!
+"""
+
+
+def test_compile_errors_carry_the_offending_source_line():
+    """The retry is told *which* macro failed, not merely that something did."""
+
+    errors = _errors_with_context(_TEX_UNDEFINED_MACRO_LOG)
+
+    assert len(errors) == 3
+    assert errors[0].startswith("! Undefined control sequence.")
+    assert r"\lesssim" in errors[0], "the retry cannot fix what the error does not name"
+    assert "l.110" in errors[0]
+    assert "l.204" in errors[1]
+
+
+def test_compile_error_without_context_stays_bare():
+    """TeX does not always print a context line; the bare message must not absorb a later one."""
+
+    errors = _errors_with_context("! Emergency stop.\nno context here\nl.999 unrelated\n", lookahead=1)
+
+    assert errors == ["! Emergency stop."]
+
+
+def test_compile_error_context_does_not_leak_across_errors():
+    errors = _errors_with_context("! First.\n! Second.\nl.7 belongs to second\n")
+
+    assert errors[0] == "! First."
+    assert "l.7" in errors[1]
 
 
 # ---------------------------------------------------------------------------
