@@ -140,7 +140,36 @@ def _make_fs_guard_hook(guard):
     return hook
 
 
-def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, escalation_server, max_turns: int, env: dict[str, str] | None = None):
+def _jail_launcher(worktree_base: Path | None) -> str | None:
+    """A wrapper that runs the SDK's own CLI inside the OS jail, or ``None`` when the jail is off.
+
+    The SDK accepts a path to the binary (``cli_path``) and builds its own arguments after that, so
+    wrapping the *binary* keeps us out of its command line: whatever it decides to pass next
+    release still lands inside the jail. The real CLI is resolved by asking the SDK, since recent
+    versions ship a bundled one that ``PATH`` cannot see.
+    """
+    from auto_research.sandbox.jail import coder_policy, jail_available, jail_enabled, write_launcher
+
+    if not jail_enabled() or worktree_base is None:
+        return None
+    ok, _ = jail_available()
+    if not ok:
+        return None  # the launch check reports it; run as before rather than not at all
+    try:
+        from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+        real = SubprocessCLITransport._find_cli(
+            SubprocessCLITransport.__new__(SubprocessCLITransport)
+        )
+    except Exception:  # noqa: BLE001 — no CLI to wrap; the SDK will report it as it always did
+        return None
+    policy = coder_policy(label="claude_sdk", extra_rw=(str(worktree_base),))
+    launcher = Path(worktree_base)
+    launcher.mkdir(parents=True, exist_ok=True)
+    return str(write_launcher(launcher / "claude-jailed", str(real), policy))
+
+
+def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, escalation_server, max_turns: int, env: dict[str, str] | None = None, worktree_base: Path | None = None):
     from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
     from auto_research.sandbox.fs_guard import PathGuard
@@ -181,6 +210,12 @@ def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, esca
     env = _with_live_anthropic_key(env)
     if env:  # full sourced env (analyst conda + HEASoft); omit when unset so the SDK inherits.
         kwargs["env"] = env
+    launcher = _jail_launcher(worktree_base)
+    if launcher:
+        # The OS jail (§12): the guard hook above stays, since it is what tells the model *why* a
+        # path was refused, but the kernel is now what enforces it — including the reads a hook
+        # never sees.
+        kwargs["cli_path"] = launcher
     return ClaudeAgentOptions(**kwargs)
 
 

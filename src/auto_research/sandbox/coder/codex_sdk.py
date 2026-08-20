@@ -250,10 +250,13 @@ class CodexBackend:
             "forced_login_method=api",
             *_flatten_overrides(self._config_payload()),
         ]
+        codex_bin = self._codex_bin or configured_codex_bin()
+        jailed = self._jail_launcher(codex_bin)
         config = CodexConfig(
             # None lets the SDK resolve the binary it ships with, which is the version-matched
-            # one; an explicit path is the escape hatch (see coder.codex_bin).
-            codex_bin=self._codex_bin or configured_codex_bin(),
+            # one; an explicit path is the escape hatch (see coder.codex_bin). With the OS jail on,
+            # this is a wrapper that execs that same binary inside the jail.
+            codex_bin=jailed or codex_bin,
             env=env,
             cwd=str(self._worktree),
             config_overrides=tuple(overrides),
@@ -330,6 +333,40 @@ class CodexBackend:
         # DeepSeek's own Codex page sets the same key.
         config.update(dict(getattr(self._member, "parameters", None) or {}))
         return config
+
+
+    def _jail_launcher(self, codex_bin: str | None) -> str | None:
+        """A wrapper running the app-server inside the OS jail, or ``None`` when the jail is off.
+
+        This harness is the reason the jail exists: its reads are ungated by design, and a coder on
+        it read this repository's own source unprompted (§13). The write jail it already applies
+        (``writable_roots``) stays — belt and kernel — while the mount namespace is what finally
+        makes a read outside the allow-list impossible rather than merely recorded.
+        """
+        from auto_research.sandbox.jail import (
+            coder_policy,
+            jail_available,
+            jail_enabled,
+            write_launcher,
+        )
+
+        if not jail_enabled():
+            return None
+        ok, _ = jail_available()
+        if not ok:
+            return None  # reported by the launch check; run as before rather than not at all
+        real = codex_bin
+        if not real:
+            from auto_research.sandbox.coder.codex_bin import resolve_codex_bin
+
+            try:
+                real = resolve_codex_bin()
+            except Exception:  # noqa: BLE001 — let the SDK report a missing binary as it always did
+                return None
+        # CODEX_HOME lives under the worktree's authoring dir, so the wrapper goes beside it.
+        target = self._worktree if self._worktree.is_dir() else Path(".")
+        policy = coder_policy(label="codex", extra_rw=(str(target),))
+        return str(write_launcher(target / ".codex-jailed", real, policy))
 
     async def disconnect(self) -> None:
         import asyncio

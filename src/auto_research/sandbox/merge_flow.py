@@ -824,6 +824,7 @@ def _build_backend(
     *,
     worktree: Path,
     toolkit_root: Path,
+    worktree_base: Path | None = None,
     coder_model: str,
     system_prompt: str,
     ask_lead: Callable[..., Awaitable[str]],
@@ -868,6 +869,7 @@ def _build_backend(
         worktree=worktree, coder_model=coder_model, system_prompt=system_prompt,
         escalation_server=_make_escalation_server(ask_lead, ask_human), max_turns=max_turns,
         env=_author_env(toolkit_root),  # author's Bash == analyst/gate code-execution env
+        worktree_base=worktree_base,    # where the jail launcher is written, when the jail is on
     )
     return ClaudeSdkBackend(sdk_client_factory(options), monitor=monitor, coder_model=coder_model)
 
@@ -953,6 +955,7 @@ def build_authoring_session(
     backend = _build_backend(
         worktree=worktree,
         toolkit_root=toolkit_root,
+        worktree_base=worktree_base,
         coder_model=coder_model,
         system_prompt=system_prompt,
         ask_lead=ask_lead,

@@ -52,6 +52,13 @@ agent_fs_allow:
   - /path/to/conda/envs/analyze   # analyze_env
   - /tmp
 
+# ── OS-level filesystem jail (§12) ──
+agent_os_jail: false          # wrap runtime subprocesses in bwrap, confined to the lists below
+agent_fs_readonly:            # subset of agent_fs_allow the jail mounts read-only
+  - /path/to/conda/envs/analysis     # analyze_env
+  - /path/to/heasoft/x86_64-...      # HEADAS
+  - /path/to/CALDB                   # CALDB
+
 # ── Tool discovery ──
 mcp_servers: []      # extra MCP servers for workers ({name,command,args}); empty ⇒ built-in only (bash_exec/list_dir/read_file)
 disabled_tools: []   # tool names to hide from the catalogue regardless of what the toolkit exposes

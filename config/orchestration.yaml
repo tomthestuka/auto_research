@@ -50,10 +50,21 @@ agent_fs_allow:
   - /data/fzhou/XSPEC/Cyg_X-1             # obs_db_root (observations.yaml)
   - /grad/fzhou/.conda/envs/astropy       # analyze_env
   - /opt/heasoft/heasoft-6.34/x86_64-pc-linux-gnu-libc2.34   # HEADAS
+  - /opt/heasoft/heasoft-6.34                                # HEASoft release root: PyXspec's
+                                                             # files symlink out of HEADAS into
+                                                             # Xspec/… , so the jail needs both
   - /man1/CALDB                           # CALDB
   - /grad/fzhou/pfiles                    # local PFILES (HEASoft parameter files)
   - /data/fzhou/ar_runtime/test_runtime   # runtime_dir
   - /tmp
+
+# ── OS-level filesystem jail (§12) ──
+agent_os_jail: false          # wrap runtime subprocesses in bwrap, confined to the lists below
+agent_fs_readonly:            # subset of agent_fs_allow the jail mounts read-only
+  - /grad/fzhou/.conda/envs/astropy                          # analyze_env
+  - /opt/heasoft/heasoft-6.34/x86_64-pc-linux-gnu-libc2.34   # HEADAS
+  - /opt/heasoft/heasoft-6.34                                # HEASoft release root
+  - /man1/CALDB                                              # CALDB
 
 # ── Tool discovery ──
 mcp_servers: []      # extra MCP servers for workers ({name,command,args}); empty ⇒ built-in only (bash_exec/list_dir/read_file)

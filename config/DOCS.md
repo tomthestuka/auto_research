@@ -200,6 +200,31 @@ raise a "copy the `.example` / run install.sh" message when a live file is absen
   alongside manifest tools. Empty or omitted means use only the built-in MCP
   server (`bash_exec`, `list_dir`, `read_file` at present).
 
+## `agent_os_jail` and `agent_fs_readonly`
+
+`agent_fs_allow` has always been the allow-list `PathGuard` enforces on the paths a model names.
+`agent_os_jail: true` turns the same list into a **mount plan**: every runtime process that can
+touch a disk (both author harnesses, the analyst REPL, the gate's Layer-B pytest) runs under
+`bwrap`, and anything outside the list is not in its filesystem at all rather than being refused by
+a rule. `agent_fs_readonly` names the subset mounted read-only — the analysis conda environment,
+HEASoft and CALDB, which every run reads and nothing writes.
+
+Two things to know before turning it on, both learned by turning it on:
+
+- **The allow-list may be incomplete as a mount plan even though it works as a guard.** Software
+  reached through one allowed path can live behind another: every file in PyXspec's package
+  directory is a symlink four levels up into a sibling of `$HEADAS`, so the HEASoft **release root**
+  has to be listed too, not just `$HEADAS`. `check_os_jail_probe` runs the configured
+  `analyze_probe` inside the jail at launch and fails with the missing-root hint, rather than
+  letting every tool call fail separately.
+- **The gate's tests lose the network.** That is deliberate (§9.4: a mergeability verdict must
+  depend on the data on disk), and it was verified against all 30 existing Layer-B suites before
+  being wired. Author harnesses and the REPL keep the network, since one talks to a model API and
+  the other downloads observations.
+
+A host without `bwrap`, or one where user namespaces are administratively denied, warns at launch
+and runs unjailed — the configuration every run used before this existed.
+
 ## Published token rates for the harness vendors
 
 `priceMTk` on a member is the **fallback** used when litellm's maintained map does not know a
@@ -334,3 +359,9 @@ that file constructs, since a live leg needs them without being configured here.
   from aggregators because the vendor's page renders by script, labelled as unconfirmed. Also
   recorded: DeepSeek's new peak/off-peak multipliers and Model Studio's batch/caching discounts,
   neither of which a static per-model rate can express.
+
+- 2026-08-20 — **`agent_os_jail` and `agent_fs_readonly` added** (default off). The first turns
+  `agent_fs_allow` into a bwrap mount plan for every runtime process; the second names the roots
+  mounted read-only. Enabling it required one allow-list correction that only a mount plan could
+  reveal — the HEASoft release root, because PyXspec's files symlink out of `$HEADAS` — which is why
+  a launch check now runs `analyze_probe` inside the jail.

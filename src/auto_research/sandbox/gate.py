@@ -594,10 +594,15 @@ async def _default_test_runner(
     env = {**base_env, "PYTHONPATH": str(worktree) + (":" + existing if existing else "")}
 
     def _run(junit_path: str) -> tuple[int, str, dict[str, str]]:
+        argv = [python_exec, "-m", "pytest", "-p", "no:cacheprovider", "-q",
+                f"--junitxml={junit_path}", *test_paths]
+        # The OS jail, with **no network** (§12): a mergeability verdict that can reach the network
+        # is a verdict that depends on something other than the data on disk, and §9.4's premise is
+        # real local input. Verified against all 30 existing Layer-B suites before being turned on.
+        argv = _jailed_pytest(argv, junit_path=junit_path)
         try:
             proc = subprocess.run(
-                [python_exec, "-m", "pytest", "-p", "no:cacheprovider", "-q",
-                 f"--junitxml={junit_path}", *test_paths],
+                argv,
                 cwd=str(worktree), capture_output=True, text=True, env=env, timeout=timeout_s,
             )
         except subprocess.TimeoutExpired as exc:
@@ -625,6 +630,27 @@ async def _default_test_runner(
         "deterministic": deterministic,
         "determinism_detail": detail,
     }
+
+
+def _jailed_pytest(argv: list[str], *, junit_path: str) -> list[str]:
+    """Wrap the Layer-B pytest invocation in the OS jail, network denied.
+
+    The JUnit report is written to a throwaway directory outside the worktree, so that directory
+    has to be writable inside the jail too — otherwise the run succeeds and its outcome map comes
+    back empty, which the determinism compare would read as "no tests ran".
+    """
+    from auto_research.sandbox.jail import JailPolicy, jail_home, policy_from_config, wrap
+
+    base = policy_from_config(network=False, label="gate")
+    home = jail_home("gate")
+    policy = JailPolicy(
+        ro=base.ro,
+        rw=(*base.rw, str(Path(junit_path).parent), str(home)),
+        network=False,
+        home=str(home),
+        label="gate",
+    )
+    return wrap(argv, policy)
 
 
 def _parse_junit_outcomes(junit_path: Path) -> dict[str, str]:

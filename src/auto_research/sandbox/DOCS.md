@@ -388,6 +388,56 @@ failure is logged via `coder.tree_reset.error` and swallowed, never masking the 
 launch preflight (`check_toolkit_branch_clean`) still guards a dirty tree at startup — e.g. a
 run killed before `finally` ran.
 
+### `jail.py` — the OS-level filesystem jail (§12)
+
+`PathGuard` states the allow-list to the models and refuses the calls whose paths it can see. It
+cannot see everything: a shell command's implicit reads are invisible to a command-string scan, and
+the Codex harness grants full-disk **read** access by design — a DeepSeek coder read this repo's own
+`coder/codex_sdk.py`, `sandbox/DOCS.md`, the test harnessing it and `~/.codex/config.toml`
+unprompted (2026-08-19, 36 recorded crossings). This module closes that: the same allow-list,
+enforced by the kernel.
+
+```
+bwrap, unprivileged (user namespaces + Landlock)
+  --ro-bind   agent_fs_readonly            conda env · HEASoft · CALDB
+  --bind      agent_fs_allow minus those   toolkit · obs-db · pfiles · runtime dir · /tmp
+  --symlink   configured → resolved        so /data/… spellings work inside
+  --proc --dev --unshare-{user,pid,ipc,uts} --die-with-parent
+  --unshare-net                            gate only
+```
+
+| process | insertion | network |
+|---|---|---|
+| Claude coder | `ClaudeAgentOptions(cli_path=…)` → a generated launcher | yes |
+| Codex coder | `CodexConfig(codex_bin=…)` → a generated launcher | yes |
+| analyst REPL | argv prefix in `persistent.py` | yes (acquisition downloads) |
+| gate's Layer-B pytest | argv prefix in `gate.py` | **no** |
+
+Wrapping each harness's *binary* rather than its command line keeps us out of the vendors'
+argv: whatever they pass next release still lands inside the jail.
+
+**Four rules the jail learned by failing, all pinned in `tests/test_jail.py`:**
+
+- **Outermost symlink only.** bwrap creates a mount point's parents itself, so once an outer path
+  exists in the jail as a symlink, creating anything beneath it fails with "Can't mkdir parents".
+  All 30 Layer-B suites died there twice — first from recreating symlinked *ancestors*, then from a
+  nested configured root.
+- **Outermost bind first.** A later bind lands on top of an earlier one, so a read-only subtree
+  inside a writable root only means anything when the parent is applied first; otherwise the order
+  entries happen to appear in a config file decides which rule wins.
+- **The allow-list was never a mount plan.** Every file in PyXspec's package directory is a symlink
+  four levels up into a sibling of `$HEADAS`, so jailing exactly the configured roots yielded an
+  importable-looking namespace package and an `ImportError` on the first real symbol. `agent_fs_allow`
+  needed the HEASoft *release root* as well. A guard that inspects named paths could never notice
+  this; `check_os_jail_probe` now runs the configured `analyze_probe` inside the jail at launch.
+- **Die with the parent.** The jailed process is pid 1 of its own namespace, so the interrupt path's
+  kill has to take the whole tree with it (§9.9).
+
+Two failure modes are deliberately different. A missing `bwrap` or a host that forbids user
+namespaces **warns** and runs unjailed, because that is the configuration every earlier run used.
+A jail that breaks the science stack **fails the launch**, because otherwise every tool call and
+every Layer-B test fails one at a time.
+
 ### `coder/` — the author harnesses (which process writes the code)
 
 The `coder` role in `config/models.yaml` names both a model and the **harness** that drives it, so
@@ -729,6 +779,23 @@ the hook mapping a fake-model verdict — no live LLM).
   touched (`_touched_packages`), so one pytest run over an authored chain honours the slowest
   package's ceiling. No clamp (trusted infra), coder-settable; values are read (never imported)
   from the worktree. Derived from the diff, not the brief's advisory `target_domain` ([A12]).
+- `jail.wrap(argv, policy)` → `list[str]` — `argv` prefixed with the jail, or unchanged when the
+  jail is off or unavailable. The one call every insertion point makes.
+  - `jail.policy_from_config(*, network, label)` → `JailPolicy` — `agent_fs_allow` split by
+    `agent_fs_readonly` into writable and read-only roots.
+  - `jail.coder_policy(*, label, extra_rw)` → `JailPolicy` — the author-harness policy: the
+    allow-list, its own `$HOME`, and `~/.claude/.credentials.json` bound read-only as a single file
+    so the subscription path survives a hidden home.
+  - `jail.jail_argv(policy)` → `list[str]` — the bwrap prefix; `[]` when bwrap is absent.
+  - `jail.write_launcher(path, target, policy)` → `Path` — a `#!/bin/sh` wrapper that execs
+    `target` inside the jail, passing `"$@"` through; what the harnesses' binary-path options get.
+  - `jail.jail_home(label)` → `Path` — a writable `$HOME` per process kind under the runtime dir.
+  - `jail.jail_available()` → `(bool, str)` — runs a trivial jailed command, because user
+    namespaces can be present and administratively denied.
+  - `jail.check_os_jail_available()` — launch **warning** when the jail is configured on a host
+    that cannot run it. Registered in `auto_research.preflight`.
+  - `jail.check_os_jail_probe()` — launch **failure** when the configured `analyze_probe` does not
+    run inside the jail. Registered in `auto_research.preflight`.
 - `coder.backend.CoderBackend` — the author-harness protocol: `connect()`, `drive(message) -> str`,
   `disconnect()`. A backend also streams `coder.*` events and books its own spend.
 - `coder.harness.HARNESS_ENDPOINTS` → `dict[(provider, harness), str | None]` — the legal

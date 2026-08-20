@@ -685,8 +685,13 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   one role at its next ReAct turn, which is right for a message; what has no channel is a run-wide
   "change course" that every role picks up. Durable HITL suspend at `interrupt()` stays deferred
   (it re-runs the node on resume — infeasible mid-`_react`).
-- **OS-level sandbox jailing:** read-only bind-mounts / seccomp / egress control beyond the
-  relocated-scratch subprocess sandbox. *(Partly mitigated: every runtime agent's file access is
+- **OS-level sandbox jailing — BUILT 2026-08-20, shipped OFF** (`config: agent_os_jail`;
+  `sandbox/jail.py`). `bwrap` unprivileged turns `agent_fs_allow` into a mount plan for all four
+  process kinds that touch a disk (both author harnesses via their binary-path options, the analyst
+  REPL, the gate's Layer-B pytest), with `agent_fs_readonly` naming the read-only roots and the
+  gate's tests running **network-denied** (§9.4: a mergeability verdict must depend on the data on
+  disk). What remains of this item is **egress control for the other three** and turning the flag
+  on by default once a live authoring attempt has run under it. Residual detail: *(Partly mitigated: every runtime agent's file access is
   now confined to the `config/orchestration.yaml: agent_fs_allow` allow-list via
   `sandbox.fs_guard.PathGuard` — a `PreToolUse` hook for the coder, provider checks for the
   reviewer/lead/workers — so `auto_research` and governance files are denied. The OS jail of that
@@ -1366,3 +1371,34 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   turn **skips carrying that refusal** rather than failing, since nine downstream cells reporting
   nine consequences of one cause would bury the cause. Four of five legs are live-probed.
   Suite 1101 → 1112.
+
+- 2026-08-20 — **The OS-level jail is built and shipped off.** The Codex measurement made the case
+  concrete: a coder read this repository's own backend, docs, test and the harness's config file
+  unprompted, 36 crossings in one session, because that harness grants full-disk reads by design and
+  our guard only inspects the paths a model names. `sandbox/jail.py` turns `agent_fs_allow` into a
+  `bwrap` mount plan for all four process kinds that touch a disk — both author harnesses (through
+  their own binary-path options, so a vendor's argv changes cannot break the wrapping), the analyst
+  REPL, and the gate's Layer-B pytest, that last one **network-denied** because a mergeability
+  verdict must depend on the data on disk (§9.4), verified against all 30 existing suites first.
+  `agent_fs_readonly` splits the list, which makes the jail *tighter* than the guard rather than a
+  copy of it: nothing writes to the conda environment, HEASoft or CALDB.
+  **Four rules it learned by failing, each now pinned.** bwrap creates a mount point's parents
+  itself, so only the **outermost** symlinked path may get a link — recreating symlinked ancestors,
+  then a nested root, killed all 30 suites twice with "Can't mkdir parents". A later bind lands on
+  top of an earlier one, so roots are applied **outermost first** or declaration order silently
+  decides which of a nested read-only/writable pair wins. The jailed process is pid 1 of its own
+  namespace, so `--die-with-parent` is what keeps the interrupt path's kill total. And the finding
+  worth carrying: **the allow-list was never exercised as a mount plan**, so nobody had to know it
+  was incomplete — every file in PyXspec's package directory is a symlink four levels up into a
+  sibling of `$HEADAS`, which produced an importable-looking namespace package and an `ImportError`
+  on the first real symbol, thirty suites deep instead of at launch. The HEASoft release root joined
+  the list, and `check_os_jail_probe` now runs the configured `analyze_probe` **inside** the jail at
+  launch. Two failure modes on purpose: a missing `bwrap` or denied user namespaces **warns** (that
+  is the configuration every earlier run used), while a jail that breaks the science stack **fails**
+  the launch rather than failing every tool call separately. Feasibility was measured before any of
+  this was written — Landlock active, unprivileged user namespaces enabled, `bwrap` present, PyXspec
+  importing inside a jail that denies `auto_research` and `~/.claude` — and the Claude author's
+  credential file is bound as a single read-only file so the subscription path and every measured
+  cost figure survive a hidden home. Shipped **off** (`agent_os_jail: false`); what remains is a
+  live authoring attempt under it and egress control for the three processes that keep the network.
+  Tests: `tests/test_jail.py` (19). Suite 1115 → 1136.

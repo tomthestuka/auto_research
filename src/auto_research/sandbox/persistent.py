@@ -206,10 +206,20 @@ class PersistentSandbox:
         env = {**base_env, "PYTHONPATH": pythonpath}
         if self._repl_init_py:
             env["AR_REPL_INIT_PY"] = self._repl_init_py
+        # The OS jail (§12) when configured: the REPL is where toolkit tools and ``bash_exec`` run,
+        # and a shell command's implicit reads are exactly what the command-string guard cannot see.
+        # Network stays on — acquisition tools download observations.
+        from auto_research.sandbox.jail import JailPolicy, jail_home, policy_from_config, wrap
+
+        _base = policy_from_config(network=True, label="repl")
+        _home = jail_home("repl")
+        argv = wrap(
+            [python_exec, "-c", _REPL_SCRIPT],
+            JailPolicy(ro=_base.ro, rw=(*_base.rw, str(self._workdir), str(_home)),
+                       network=True, home=str(_home), label="repl"),
+        )
         self._proc = await asyncio.create_subprocess_exec(
-            python_exec,
-            "-c",
-            _REPL_SCRIPT,
+            *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

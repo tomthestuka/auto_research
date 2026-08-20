@@ -141,6 +141,7 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
         check_coder_harness_available,
         check_coder_harness_supported,
     )
+    from auto_research.sandbox.jail import check_os_jail_available, check_os_jail_probe
     from auto_research.sandbox.review import check_author_reviewer_decorrelation
     from auto_research.sandbox.runner import check_analyze_probe
     from auto_research.storage import check_database_health
@@ -153,6 +154,8 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     preflight.register("author_reviewer_decorrelation", check_author_reviewer_decorrelation)
     preflight.register("coder_harness_supported", check_coder_harness_supported)
     preflight.register("coder_harness_available", check_coder_harness_available)
+    preflight.register("os_jail_available", check_os_jail_available)
+    preflight.register("os_jail_probe", check_os_jail_probe)
     preflight.register("toolkit_root_configured", check_toolkit_root_configured)
     preflight.register("toolkit_git_identity", check_toolkit_git_identity)
     preflight.register("toolkit_branch_clean", check_toolkit_branch_clean)
