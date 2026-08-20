@@ -196,7 +196,7 @@ def test_preflight_records_every_check_onto_the_monitor():
     assert names == ["preflight.good", "preflight.summary"]
     assert monitor.events[0][1] == 5           # a passing check is detail-level
     assert monitor.events[0][2]["ok"] is True
-    assert monitor.events[1][2] == {"passed": 1, "total": 1, "failed": []}
+    assert monitor.events[1][2] == {"passed": 1, "total": 1, "failed": [], "warnings": []}
 
 
 def test_preflight_records_failures_at_level_one_and_still_raises():
@@ -219,7 +219,9 @@ def test_preflight_records_failures_at_level_one_and_still_raises():
     assert by_name["preflight.bad"][1]["ok"] is False
     assert "nope" in by_name["preflight.bad"][1]["error"]
     # the tally is emitted even on failure, so the record shows how far it got
-    assert by_name["preflight.summary"][1] == {"passed": 1, "total": 2, "failed": ["bad"]}
+    assert by_name["preflight.summary"][1] == {
+        "passed": 1, "total": 2, "failed": ["bad"], "warnings": []
+    }
 
 
 def test_preflight_monitor_fault_never_blocks_the_launch_decision():
@@ -243,3 +245,39 @@ def test_preflight_without_monitor_is_unchanged():
     preflight = Preflight()
     preflight.register("good", lambda: None)
     asyncio.run(preflight.run_checklist())
+
+def test_a_warning_check_does_not_block_the_launch_but_is_recorded():
+    """A precondition can be satisfiable and unproven at once — a pairing configured correctly
+    that has never run against the real service. Blocking that launch would be wrong; letting it
+    pass silently would make a first-time failure look like a defect."""
+    from auto_research.preflight import PreflightWarning
+
+    monitor = _RecordingMonitor()
+    preflight = Preflight()
+    preflight.register("fine", lambda: None)
+
+    def _unproven():
+        raise PreflightWarning("never exercised live")
+
+    preflight.register("unproven", _unproven)
+
+    asyncio.run(preflight.run_checklist(monitor=monitor))  # must not raise
+
+    events = {name: data for name, _, data in monitor.events}
+    assert events["preflight.unproven"]["ok"] is True
+    assert events["preflight.unproven"]["warning"] == "never exercised live"
+    assert events["preflight.summary"]["warnings"] == ["[unproven] never exercised live"]
+    # A warning is not a failure: the tally still counts every check as passed.
+    assert events["preflight.summary"]["passed"] == 2
+
+
+def test_a_warning_alongside_a_real_failure_still_fails_the_launch():
+    from auto_research.preflight import PreflightWarning
+
+    preflight = Preflight()
+    preflight.register("unproven", lambda: (_ for _ in ()).throw(PreflightWarning("unproven")))
+    preflight.register("broken", lambda: (_ for _ in ()).throw(ValueError("nope")))
+    with pytest.raises(PreflightError) as excinfo:
+        asyncio.run(preflight.run_checklist())
+    assert "broken" in str(excinfo.value)
+    assert "unproven" not in str(excinfo.value)

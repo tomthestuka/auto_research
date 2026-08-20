@@ -11,6 +11,7 @@ Run from the repository root, so that ``benchmarks`` is importable:
 
 import asyncio
 import subprocess
+from pathlib import Path
 
 import pytest
 import yaml
@@ -361,6 +362,49 @@ def test_matrix_reports_attribution_of_co_lead_catches():
     assert "1/1 co-lead rejections state the planted defect" in text
 
 
+# ── layer ablations (paper item 2) ──────────────────────────────────────────
+
+
+def test_every_ablation_names_a_real_run_gate_parameter():
+    """Both switches must be production parameters, or the ablation measures a fork."""
+    import inspect
+
+    from auto_research.sandbox.gate import run_gate
+
+    accepted = set(inspect.signature(run_gate).parameters)
+    for name, overrides in harness.ABLATIONS.items():
+        for key in overrides:
+            assert key in {"gate_config", "test_runner"}, (name, key)
+    assert {"config", "test_runner"} <= accepted
+
+
+def test_scan_off_empties_every_scan_list():
+    """A half-emptied config would leave part of the scan live and read as a full ablation."""
+    cfg = harness.SCAN_OFF_CONFIG
+    for key in ("hard_fail_vocabulary", "hard_fail_code_patterns",
+                "finding_vocabulary", "finding_code_patterns"):
+        assert cfg[key] == [], key
+
+
+def test_tests_off_runner_reports_a_passing_non_empty_layer_b():
+    """An empty Layer B fails every changeset by design, so it cannot model 'tests removed'."""
+    outcome = asyncio.run(harness._tests_off_runner(Path("/nonexistent"), []))
+    assert outcome["results"], "an empty result set would fail the gate, not ablate the layer"
+    assert all(check.passed for check in outcome["results"])
+    assert outcome["deterministic"] is True
+
+
+def test_matrix_reports_the_commit_count_and_the_configuration():
+    records = [
+        score.score_record(_record(id="a", expected="scan", ablation="scan", gate={
+            "passed": True, "layer_a": [], "layer_b": [_check("layer_b.pytest", True)],
+            "findings": [], "reason": ""})),
+    ]
+    text = score.build_matrix(records)
+    assert "1/1** planted defects reach a commit with `ablation=scan`" in text
+    assert "displaced catch here is the measurement" in text
+
+
 # ── matrix rendering ────────────────────────────────────────────────────────
 
 
@@ -394,3 +438,122 @@ def test_stamps_carry_the_scan_configuration_hash(tmp_path):
     stamps = harness.collect_stamps(tmp_path, "unused", resolve_toolkit=False)
     assert len(stamps["code_gate_sha256"]) == 64
     assert stamps["toolkit_sha"] == "(no real mutant selected)"
+
+
+# ── matched controls and the model swap ─────────────────────────────────────
+
+
+def test_every_planted_defect_has_exactly_one_matched_control():
+    """A rejection is only discrimination if the same edit made honestly is accepted."""
+    entries = corpus()
+    defects = [m for m in entries if m.family != FAM_CONTROL]
+    paired = [m for m in entries if m.pairs_with]
+    assert len(paired) == len(defects)
+    assert {m.pairs_with for m in paired} == {m.id for m in defects}
+    assert all(m.family == FAM_CONTROL and m.expected == "pass" for m in paired)
+
+
+def test_a_control_shares_its_mutants_base_and_tool_name():
+    """A control built on the other base, or naming another tool, is not matched."""
+    by_mutant = {m.id: m for m in corpus()}
+    for control in [m for m in corpus() if m.pairs_with]:
+        mutant = by_mutant[control.pairs_with]
+        assert control.base == mutant.base, control.id
+        assert control.tool_name == mutant.tool_name, control.id
+
+
+def test_clean_base_repeats_are_labelled_as_such():
+    """Repeats are honest repeats: they must not be presented as distinct matched controls."""
+    notes = {m.notes for m in corpus() if m.pairs_with}
+    assert notes == {"matched", "clean-base repeat"}
+
+
+def test_reviewer_roster_members_are_distinct_models():
+    handles = harness.reviewer_handles()
+    assert len(handles) >= 2
+    assert len({h.config.model for h in handles.values()}) == len(handles)
+
+
+def test_reviewer_roster_harmonises_the_output_budget():
+    """A member left at its production role setting would measure a config, not a model."""
+    for name, handle in harness.reviewer_handles().items():
+        params = handle.config.parameters
+        budget = params.get("max_output_tokens") or params.get("max_tokens")
+        assert budget and budget >= 16000, (name, params)
+
+
+def test_the_swap_declares_that_there_is_no_author():
+    """The corpus plants its defects by hand, so decorrelation has nothing to bind."""
+    assert "no author" in harness.NO_AUTHOR.lower()
+
+
+def test_pair_discrimination_needs_the_control_accepted():
+    """Rejecting a defect and its honest twin alike is suspicion, not discrimination."""
+    from benchmarks.gate_bench import swap
+
+    def rec(mutant_id, family, approved, pairs_with=None):
+        return {"id": mutant_id, "family": family, "pairs_with": pairs_with,
+                "caught_by": ["review"] if approved is False else [],
+                "review": {"ran": True, "approved": approved}, "cost_usd": 0.0,
+                "duration_s": 0.0}
+
+    discriminating = swap.summarise("m", [
+        rec("d", "Silent capability bound", False),
+        rec("ctl_d", FAM_CONTROL, True, pairs_with="d"),
+    ])
+    assert discriminating["pairs_discriminated"] == 1
+
+    suspicious = swap.summarise("m", [
+        rec("d", "Silent capability bound", False),
+        rec("ctl_d", FAM_CONTROL, False, pairs_with="d"),
+    ])
+    assert suspicious["pairs_discriminated"] == 0
+    assert suspicious["controls_rejected"] == 1
+
+
+def test_swap_report_carries_every_models_verbatim_verdict():
+    """The audit trail is the point: a claim of a catch must be checkable against the words."""
+    from benchmarks.gate_bench import swap
+
+    def run(reviewer, rationale):
+        return (reviewer, [{
+            "id": "d", "family": "Silent capability bound", "description": "a hidden clamp",
+            "pairs_with": None, "caught_by": ["review"], "cost_usd": 0.01, "duration_s": 1.0,
+            "review": {"ran": True, "reviewer": reviewer, "approved": False,
+                       "checks_adequate": False, "issues": ["names the clamp"],
+                       "rationale": rationale},
+        }])
+
+    text = swap.build_swap_report([run("model_a", "A said this"), run("model_b", "B said that")])
+    assert "A said this" in text and "B said that" in text
+    assert "names the clamp" in text
+    assert "no author" in text.lower()
+
+
+def test_attribution_is_keyed_per_reviewer():
+    """Two models reviewing the same mutant are two separate readings."""
+    base = _review_catch()
+    base["review"]["reviewer"] = "model_a"
+    key = score.roster_key(base)
+    assert key == "model_a::m"
+    roster = {key: {"attribution": "on_target",
+                    "verdict_fingerprint": score.review_fingerprint(base)}}
+    assert score.score_record(base, roster)["review_attribution"] == "on_target"
+
+    other = _review_catch()
+    other["review"]["reviewer"] = "model_b"
+    assert score.score_record(other, roster)["review_attribution"] == "undecided"
+
+
+def test_concurrent_runs_get_distinct_output_directories():
+    """Runs launched together land in the same second; one shared records.jsonl interleaves
+    appends and can corrupt records past the 4 KB atomic-write size (observed 2026-08-18)."""
+    from benchmarks.gate_bench.__main__ import run_dir_name
+
+    stamp = "20260818T023238Z"
+    a = run_dir_name(stamp, reviewer="gpt_5_6_sol", pid=1)
+    b = run_dir_name(stamp, reviewer="claude_opus_5", pid=1)
+    assert a != b, "same-second runs of different reviewers must not share a directory"
+    same_reviewer = run_dir_name(stamp, reviewer="gpt_5_6_sol", pid=2)
+    assert a != same_reviewer, "even one reviewer twice over must not collide"
+    assert "nolive" in run_dir_name(stamp, reviewer=None, pid=1)

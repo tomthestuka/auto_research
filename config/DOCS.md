@@ -35,9 +35,13 @@ raise a "copy the `.example` / run install.sh" message when a live file is absen
   analyst-tier models **must** be marked `vision: true` so figure references can
   be passed at the multimodal boundary (see
   [§7](../CLAUDE.md#7-schemas--protocols)). Phase-2 tool-authoring roles (optional, not
-  in the required set): `coder` — the Sonnet Claude author (`merge_flow` resolves its
-  model id here); `analyst_colead` — the tool reviewer, which **must stay non-Anthropic**
-  because the coder is Claude (the §6/§9.3 provider-decorrelation invariant), backed by
+  in the required set): `coder` — the tool author, which names **both a model and the harness
+  that drives it** (`harness: claude_sdk | codex`, plus `base_url`/`key_env` when the vendor is
+  not that harness's native one; legal pairings and their documented endpoints are in
+  `sandbox/coder/harness.py`, checked at launch by `coder_harness_supported` /
+  `coder_harness_available`). Exactly one member: one harness drives one model.
+  `analyst_colead` — the tool reviewer, which **must stay decorrelated from the author's
+  provider** (the §6/§9.3 invariant, non-Anthropic while the author is Claude), backed by
   GPT-5.5 reasoning xhigh.
 - `observations.yaml` — a single `obs_db_root`: the **one folder** the obs database lives
   in. Machine-local (gitignored; tracked as `observations.yaml.example`).
@@ -196,6 +200,48 @@ raise a "copy the `.example` / run install.sh" message when a live file is absen
   alongside manifest tools. Empty or omitted means use only the built-in MCP
   server (`bash_exec`, `list_dir`, `read_file` at present).
 
+## Published token rates for the harness vendors
+
+`priceMTk` on a member is the **fallback** used when litellm's maintained map does not know a
+model (`observability/costs.token_rates_for` is litellm-first). It takes `input` and `output` in
+USD per million tokens, plus optional `cache_read` / `cache_write` (defaulted to 0.1x and 1.25x
+of input). Omitting it for an unknown model is not neutral: the run books real usage against a
+zero rate and the cost column reads `$0.00` with nothing to show it lied. Observed 2026-08-19 —
+a Z.AI leg booked 40 calls at $0.00.
+
+litellm knows **Anthropic, OpenAI and DeepSeek**, so members for those need no `priceMTk`, and
+adding one would shadow a maintained rate with a hand-copied one. The two that need it:
+
+| model | input | output | cache read | source |
+|---|---|---|---|---|
+| `glm-5.3` | 1.40 | 4.40 | 0.26 | docs.z.ai/guides/overview/pricing, read 2026-08-19 |
+| `glm-5.2` | 1.40 | 4.40 | 0.26 | same |
+| `glm-5-turbo` | 1.20 | 4.00 | 0.24 | same |
+| `qwen3.7-plus` | 0.32 | 1.28 | — | aggregators, **not vendor-confirmed** |
+| `qwen3.6-flash` | 0.19 | 1.13 | — | aggregators, **not vendor-confirmed** |
+
+Only the Qwen Plus and Flash tiers are here: litellm carries real rates for `qwen3.8-max`
+(2.00/6.00) and `qwen3.7-max` (2.50/7.50), and a hand-copied rate that shadows a maintained one is
+a liability rather than a safety net. The two rows above carry a caveat of their own — QwenCloud's
+pricing page renders its table by script, so the vendor's own numbers could not be read directly.
+Confirm them in the console before quoting a Qwen cost anywhere it matters, and note that a plan
+discount would appear there too.
+
+**A known id with no rates is the trap to watch.** litellm *knows* `qwen3.7-plus` and carries no
+prices for it, which used to be worse than an unknown model: the resolver accepted the entry, priced
+every token at zero, and reported `source="litellm"` while the member's own `priceMTk` could never
+engage. Since 2026-08-19 a rate-less entry is treated as absent so the fallback works. A model that
+is genuinely free (Z.AI's Flash tiers are) says so explicitly with `priceMTk: {input: 0, output: 0}`,
+which at least labels the zero as ours.
+
+Two rate structures no static table can express, worth knowing before a cost column is trusted:
+DeepSeek moved to **peak / off-peak** multipliers (effective 2026-08-16), so a recorded DeepSeek
+cost is a lower bound during peak hours; and Model Studio applies a 50 per cent batch discount and
+a context-caching discount that cannot be combined.
+
+The same numbers are kept in `tests/test_live_coder_matrix.py: _PRICES` for the throwaway members
+that file constructs, since a live leg needs them without being configured here.
+
 ## Changelog
 - 2026-05-26 -> 2026-06-12 — Configuration now covers model groups/pricing,
   vision/document flags, mission observation roots, runtime data dir, ReAct/structured caps,
@@ -280,3 +326,11 @@ raise a "copy the `.example` / run install.sh" message when a live file is absen
   real 25-tool manifest: 19,004 → 2,382 resident tokens. **NOT LIVE TESTED** — run
   `tests/test_live_tool_search.py` before flipping it true.
 - 2026-07-28 — **`context_mgmt_enabled` and `tool_search_enabled` flipped `true`** in both `orchestration.yaml` and the tracked `orchestration.yaml.example`, after each feature's env-gated live test passed on 2026-07-28 (the Anthropic key that blocked them since 2026-07-27 was reinstated). Context editing passed unchanged; tool search needed a one-value fix to the Anthropic search-tool `name` first (see `models/DOCS.md`). The two protocol-string keys (`tool_search_anthropic_tool` / `tool_search_openai_tool`) still default in code and stay out of the sample config — note that `tool_search_anthropic_tool` carries the **dated** type and the adapter derives the undated `name` from it, so overriding it needs only the dated string.
+
+- 2026-08-19 — **Published token rates written down for the harness vendors.** litellm prices
+  Anthropic, OpenAI and DeepSeek; it does not know `glm-*` or `qwen*`, so a member for either books
+  real usage at a zero rate and reports `$0.00` (observed: a Z.AI leg, 40 calls, $0.00). The rates
+  now live in a table above with their source and date — Z.AI's from their own pricing page, Qwen's
+  from aggregators because the vendor's page renders by script, labelled as unconfirmed. Also
+  recorded: DeepSeek's new peak/off-peak multipliers and Model Studio's batch/caching discounts,
+  neither of which a static per-model rate can express.

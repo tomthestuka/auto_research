@@ -68,8 +68,9 @@ roles:
   #   because the coder is Claude — two independent checks, not one provider checking its
   #   own family. Backed by GPT-5.5 reasoning xhigh (cheapest eligible, capable enough).
   coder:
-    members: # only 1 allowed here
+    members: # exactly 1 — one author harness drives one model
       - name: claude_sonnet_5
+        harness: claude_sdk       # author process; legal harness/provider pairs: sandbox/coder/harness.py
         provider: anthropic
         model: claude-sonnet-5
         vision: true

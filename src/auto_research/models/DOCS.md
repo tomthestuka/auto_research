@@ -185,8 +185,9 @@ turns on one distinction:
   dead run, strictly worse than having no fallback at all. Retirement is process-scoped, so a
   topped-up key is live again on the next run. Pinned by
   `test_a_dead_primary_does_not_turn_a_fallback_rate_limit_into_a_fatal_error`.
-- `AsyncAnthropic(api_key=active_key(ANTHROPIC))` — read explicitly, because the SDK
-  resolves `ANTHROPIC_API_KEY` once per client and the live key may no longer be that value.
+- `AsyncAnthropic(api_key=active_key(ANTHROPIC))` and `AsyncOpenAI(api_key=active_key(OPENAI))`
+  — read explicitly, because each SDK resolves its `*_API_KEY` once per client and the live key
+  may no longer be that value.
 - The coder is a **separate process** (Claude Agent SDK), so `merge_flow._with_live_anthropic_key`
   stamps the live key onto its environment — and only after a rotation, leaving the common
   path byte-identical. A session already in flight keeps the key it launched with.
@@ -208,7 +209,13 @@ turns on one distinction:
   (the coder's environment).
 
 ## Dictionary-level reference
-- `ProviderName` — literal provider label accepted in `config/models.yaml`.
+- `ProviderName` — literal provider label accepted in `config/models.yaml`. The three chat
+  providers (`anthropic`, `google`, `openai`) plus the vendors reachable only through a coder
+  harness (`deepseek`, `zai`, `dashscope`), which have no chat adapter.
+- `CHAT_PROVIDERS` — the subset with a real adapter; anything outside it resolves to a
+  `HarnessOnlyProvider`.
+- `HarnessName` — which author harness drives a `coder` member: `claude_sdk` or `codex`. Legal
+  `(provider, harness)` pairs live in `sandbox/coder/harness.py`, checked at launch.
 - `MessageRole` — one of `"system"`, `"user"`, or `"assistant"`.
 - `ModelMessage(role: MessageRole, content: str)` — provider-neutral text
   message. Unknown fields are forbidden.
@@ -266,7 +273,11 @@ turns on one distinction:
   no array to echo and is rebuilt from the interpreted views.
 - `RoleModelConfig(name: str, provider: ProviderName, model: str,
   vision: bool = False, documents: bool = False, priceMTk: dict[str, float] = {},
-  parameters: dict[str, Any] = {})` — one model member from YAML.
+  parameters: dict[str, Any] = {}, harness: HarnessName | None = None,
+  base_url: str | None = None, key_env: str | None = None)` — one model member from YAML. The
+  last three are the **coder-role** fields and are ignored by chat roles: which harness drives
+  this model, the endpoint it is reached at when the vendor is not the harness's native one, and
+  the environment variable holding that vendor's key.
 - `RoleModelGroup(members: list[RoleModelConfig])` — non-empty model group for
   one role.
 - `ModelsConfig(roles: dict[str, RoleModelGroup])` — validated
@@ -297,11 +308,15 @@ turns on one distinction:
   Anthropic/OpenAI, or `code`, Google genai) and connection/timeout drops
   (`httpx.TransportError`, the SDKs' `APIConnectionError`). Auth/bad-request/other
   exceptions are not transient.
-- `retry.is_key_scoped_provider_error(exc) -> bool` — True when the failure is a quota of
-  the API **key**, not of the provider: HTTP 429, an error `type` of `rate_limit_error` or
-  `billing_error`, or a message naming the credit balance (a spent balance arrives as a 400
-  `invalid_request_error`). False for 529/5xx and connection drops (provider capacity —
-  identical on every key) and, deliberately, for 401 `authentication_error`.
+- `retry.is_key_scoped_provider_error(exc, provider) -> bool` — True when the failure is a
+  quota of the API **key**, not of the provider, judged in **that provider's own vocabulary**
+  (`retry._PROVIDER_KEY_ERROR_RULES`, each entry citing the provider's error documentation).
+  Anthropic: HTTP 429, a `type` of `rate_limit_error` or `billing_error`, or a message naming
+  the credit balance. OpenAI: any 429, which is how it reports every key quota it has. False
+  for 529/5xx and connection drops (provider capacity — identical on every key), deliberately
+  for 401 `authentication_error`, and for any provider with no cited rules. `provider` is
+  required with no default: defaulting it would apply one provider's mapping to another,
+  which is the specific error the table exists to prevent.
 - `retry.call_with_transient_retry(provider_call, *, describe, policy=None,
   sleep=asyncio.sleep, rotate_key=None, on_key_rotation=None) -> Any` — awaits
   `provider_call()`, retrying transient failures up to `policy.max_retries` with cooldowns
@@ -316,9 +331,14 @@ turns on one distinction:
   when exhausted), and the retry that follows spends no cooldown and no retry budget.
   `on_key_rotation(label, exc)` is awaited for the ledger event and never affects control
   flow (a raising hook is swallowed).
-- `retry.is_exhausted_key_error(exc) -> bool` — the non-refilling subset of the key-scoped
-  class: a spent balance (`billing_error`, or a message naming the credit balance). False for
-  429/`rate_limit_error`, which clears on its own and must never retire a key.
+- `retry.is_exhausted_key_error(exc, provider) -> bool` — the non-refilling subset of the
+  key-scoped class, again per provider. Anthropic: `billing_error`, or a message naming the
+  credit balance; its 429 always refills. OpenAI: a `type` of `insufficient_quota` or a `code`
+  of `credit_balance_exhausted` / `organization_spend_limit_exceeded` /
+  `project_spend_limit_exceeded` / `organization_usage_limit_exceeded` — **all of which arrive
+  as 429s**, so "a 429 refills" is true for Anthropic and false for OpenAI. A failure in this
+  class also **raises rather than cooling down** once rotation is exhausted: a quota that does
+  not refill cannot be waited out, and OpenAI's reads as transient by status alone.
 - `keys.KeyPool(provider)` — the keys configured for one provider and which is live.
   Reads `<PROVIDER>_API_KEY` then `<PROVIDER>_API_KEY_FALLBACK`, dropping a fallback that is
   blank or identical to the primary. `.active()` (the key, or `None` so the SDK keeps its own
@@ -335,11 +355,16 @@ turns on one distinction:
   state; the live key is process state). Its `retire_current` argument retires the key it is
   leaving, which the caller sets from `retry.is_exhausted_key_error`.
 - `keys.ROTATING_PROVIDERS: tuple[str, ...]` — the providers whose adapter actually sends
-  `active_key` (Anthropic today). Rotating any other would be **worse than doing nothing**: the
-  client would keep the key the SDK resolved from the environment while the caller skipped its
-  cooldown — a failover that looks like it works and silently does not. Wiring a provider means
-  one adapter line *and* its name here; `check_api_key_fallbacks` reads the same tuple, so a
-  fallback is validated exactly where it can be honoured.
+  `active_key` (Anthropic and OpenAI). Rotating any other would be **worse than doing nothing**:
+  the client would keep the key the SDK resolved from the environment while the caller skipped
+  its cooldown — a failover that looks like it works and silently does not. Wiring a provider
+  takes **three** things, not one: a cited error taxonomy in `retry`, the adapter line, and its
+  name here; `check_api_key_fallbacks` reads the same tuple, so a fallback is validated exactly
+  where it can be honoured. **Google is absent deliberately**: its troubleshooting guide and its
+  error reference disagree on the vocabulary (`RESOURCE_EXHAUSTED` against `quota_exceeded` /
+  `rate_limit_exceeded`), neither publishes the response body, and its SDK's `APIError.code` is
+  the HTTP status **integer** where OpenAI's `.code` is a **string** error code — so a shared
+  field read would misclassify silently. No rule is guessed for it.
 - `keys.env_var_names(provider) -> (primary, fallback)` — the env-var pair for a provider.
 - `keys.check_api_key_fallbacks()` — preflight check. Passes when no fallback is set (it is
   optional); raises when one is set but blank, identical to the primary, or set without a
@@ -357,7 +382,10 @@ turns on one distinction:
 - `resolve(role: str, path: str | Path = DEFAULT_CONFIG_PATH) ->
   ModelGroupHandle` — convenience role resolver.
 - `provider_for(name: ProviderName) -> ModelProvider` — construct a provider
-  adapter for a config provider.
+  adapter for a config provider. A provider outside `CHAT_PROVIDERS` gets a
+  `HarnessOnlyProvider`: the role still resolves (for stamps, decorrelation and the launch
+  checks) and a chat call against it raises stating that its model is driven by an author
+  harness.
 - `OpenAIProvider.call(...)`, `AnthropicProvider.call(...)`,
   `GoogleProvider.call(...)` — provider-specific SDK calls returning
   `ModelResponse`. The Anthropic `schema=` path uses `messages.parse(output_format=)`
@@ -543,3 +571,36 @@ Compacted 2026-08-05: entries through 2026-08-03 folded into themed ranges (deta
   from rotating, which would keep the SDK-resolved key *and* skip the cooldown — a failover that
   looks like it works. Adding a provider is one adapter line plus that tuple. Tests:
   `tests/test_provider_key_failover.py` (33). Suite 781 → 814.
+
+- 2026-08-18 — **Key failover generalized to OpenAI, and the taxonomy split per provider.** An
+  authoring-benchmark batch died on `429 insufficient_quota` / `credit_balance_exhausted` with the
+  co-lead unable to review, after 48 minutes of backoff against a balance no wait could restore.
+  The pool was already provider-generic; what was not is the **error vocabulary**. Anthropic
+  reports a spent balance as a 400/403 `billing_error`, so `is_exhausted_key_error` short-circuited
+  "any 429 refills" — true for Anthropic, false for OpenAI, where every key quota is a 429 and only
+  `code` separates the one that refills from the four that do not. Adding OpenAI to
+  `ROTATING_PROVIDERS` alone would therefore have rotated onto the fallback, never retired the dead
+  primary, and bounced back onto it at the fallback's next routine rate limit — the exact failure
+  retirement exists to prevent. So both predicates now take a **required** `provider` and read a
+  per-provider rules table, each entry citing that provider's own error documentation; the shapes
+  are version-exact from the SDKs (openai 2.38.0 parses `.type`/`.code` out of `body["error"]`) and
+  were confirmed against the live failure. A second change follows from the same reading: an
+  unrefillable quota **raises once rotation is exhausted** instead of taking the transient path,
+  since OpenAI's arrives as a 429 and reads as retryable by status alone. `AsyncOpenAI` now sends
+  `api_key=` explicitly. **Google stays out**: its troubleshooting guide says `RESOURCE_EXHAUSTED`
+  while its error reference says `quota_exceeded`/`rate_limit_exceeded`, neither publishes the
+  response body, and google-genai's `APIError.code` is the HTTP status integer where OpenAI's is a
+  string code — a shared field read would misclassify silently, and it is off the critical path
+  (§6). Tests: `tests/test_provider_key_failover.py` 40 → 49, including the same 429 classified
+  oppositely under each provider. Suite 948 → 957.
+
+- 2026-08-19 — **`ProviderName` widened to the harness-only vendors, and the coder member gained a
+  harness handle.** A `coder` model can now be served by DeepSeek, Z.AI or Alibaba Model Studio and
+  driven by an author harness, so the registry has to resolve members whose provider has no chat
+  adapter: `provider_for` returns a `HarnessOnlyProvider` for those, which answers the one question
+  the registry asks (which vendor serves it) and raises with the reason if anything ever tries to
+  hold a conversation with it. `RoleModelConfig` gained `harness`, `base_url` and `key_env`, all
+  optional, so every existing chat member is unchanged. Decorrelation needed no new rule: a
+  DeepSeek-served coder reads as provider `deepseek`, which the existing
+  `select_decorrelated_member` already separates from the GPT co-lead. The legality table and its
+  two launch checks live in `sandbox/coder/harness.py` (see `sandbox/DOCS.md`).

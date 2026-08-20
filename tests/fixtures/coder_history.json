@@ -1,0 +1,50 @@
+{
+  "provenance": {
+    "ledgers": [
+      "logs/dev/author-bench/20260819T011004Z-rerun/trial-05/monitor.jsonl",
+      "logs/dev/author-bench/20260819T011004Z-rerun/trial-06/monitor.jsonl",
+      "logs/dev/author-bench/20260819T011004Z-rerun/trial-07/monitor.jsonl",
+      "logs/dev/author-bench/20260819T011004Z-rerun/trial-08/monitor.jsonl",
+      "logs/dev/author-bench/20260819T011004Z-rerun/trial-09/monitor.jsonl",
+      "logs/dev/author-bench/20260819T011004Z-rerun/trial-10/monitor.jsonl",
+      "logs/dev/author-bench/20260818T214525Z/trial-01/monitor.jsonl",
+      "logs/dev/author-bench/20260818T214525Z/trial-02/monitor.jsonl",
+      "logs/dev/author-bench/20260818T214525Z/trial-03/monitor.jsonl",
+      "logs/dev/author-bench/20260818T214525Z/trial-04/monitor.jsonl"
+    ],
+    "note": "Real stimuli recorded by the production authoring flow. The brief itself is benchmarks/author_bench's frozen ToolSpec, so it is not duplicated here."
+  },
+  "stimuli": {
+    "coder_question": {
+      "source": "trial-05",
+      "seq": 60,
+      "message": "Architecture question for `ixpe_pa_pd_stability` (extend_existing, xspec_utils).\n\nThe brief requires `lib/pa_pd_stability.py` to be a \"pure-numpy/scipy human-half module\" that \"must NOT import xspec or ixpeobssim\", but also says to \"reuse `red_ixpe._read_existing_timeseg_csv` to obtain provenance + rows_by_segid + integrated\".\n\nProblem: `red_ixpe.py` does `import ixpeobssim.core.pipeline as pipeline` and `from xspec import AllData, Spectrum, AllModels` unconditionally at module top level. So `import red_ixpe` (or `from xspec_utils.lib import red_ixpe`) inside `pa_pd_stability.py` \u2014 even just to call the pure-Python `_read_existing_timeseg_csv` helper \u2014 transitively pulls in xspec/ixpeobssim the moment the module is loaded, which seems to violate the \"must NOT import xspec/ixpeobssim\" requirement in spirit (this new tool is pure CSV post-processing and shouldn't need the full science stack loaded just to read numbers back).\n\nThree options I see:\n1. Do a deferred import inside the function body (`from xspec_utils.lib import red_ixpe` called lazily when actually reading a CSV) \u2014 keeps `pa_pd_stability.py`'s module-level namespace clean, genuinely reuses the canonical parser, but still requires the science stack to be importable at call time (same as today, since `red_ixpe` already needs it to exist in this environment).\n2. Duplicate the small (~15-line) pure-stdlib CSV/provenance-parsing logic directly into `pa_pd_stability.py`, with zero dependency on `red_ixpe` ever \u2014 safest against the constraint but duplicates logic that could drift from `red_ixpe`'s format if that ever changes.\n3. Refactor: extract `_TIMESEG_FIELDS`, `_PROVENANCE_HEADER_PREFIX`, `_read_existing_timeseg_csv` (and friends) out of `red_ixpe.py` into a new pure-stdlib shared module (e.g. `lib/timeseg_io.py`), have `red_ixpe.py` import from it, and `pa_pd_stability.py` import from it too. Touches `red_ixpe.py` (existing, working tool) but is the most structurally correct de-duplication.\n\nWhich do you w\u2026 [+194 chars]",
+      "answer": "Go with option 3 (the refactor), not option 1.\n\nRationale, from reading `xspec_utils/lib/red_ixpe.py` directly:\n\n- The module top matter is exactly as you describe: lines 11-14 do `import ixpeobssim.core.pipeline as pipeline`, `from ixpeobssim.binning.polarization import xBinnedPolarizationCube`, and `from xspec import AllData, Spectrum, AllModels` unconditionally, plus `import find_src`. So any import of `red_ixpe` \u2014 deferred or not \u2014 instantiates the full science stack. Option 1 satisfies the letter of \"no module-level xspec/ixpeobssim import\" but not the intent of the brief: the point of making `pa_pd_stability.py` a pure-numpy/scipy module is that PA/PD post-processing must be testable and runnable without XSPEC or ixpeobssim present (that is also what makes the reproducibility check cheap to run). A lazy import just moves the hard dependency to call time.\n\n- Option 2 is the one to avoid. The pieces you would copy are not incidental: `_TIMESEG_FIELDS` (line 421) is the 14-column contract, `_PROVENANCE_HEADER_PREFIX` (line 509) plus `_provenance_line` define the first-line JSON comment, and `_read_existing_timeseg_csv` (lines 515-538) encodes two real conventions \u2014 a missing/unrecognised provenance header returns `None` (treated as absent, not an error), and `segment_id == -1` is the integrated whole-observation row split out from `rows_by_segid`. Duplicating those invites exactly the silent drift that would break resume/consumer agreement.\n\n- Option 3 is a clean lift-and-shift. `_TIMESEG_FIELDS`, `_PROVENANCE_HEADER_PREFIX`, `_provenance_line`, `_read_existing_timeseg_csv`, `_write_timeseg_csv_header`, `_append_timeseg_csv_row` (lines 540-550) use only `os`, `csv`, `json` \u2014 all already imported at the top of `red_ixpe.py` and all stdlib. None of them touch `pipeline`, `xBinnedPolarizationCube`, `fits`, or `xspec`. So they move into `lib/timeseg_io.py` with no behaviour change.\n\nWhat I want authored:\n\n1. New `xspec_utils/lib/timeseg_io.py`, stdlib-only (`os`, `cs\u2026 [+2,322 chars]"
+    },
+    "gate_rejection": {
+      "source": "trial-01",
+      "seq": 392,
+      "failing_checks": [
+        "[A] no_fabrication.vocabulary",
+        "[A] no_fabrication.vocabulary",
+        "[A] no_fabrication.vocabulary"
+      ],
+      "reason": "no_fabrication.vocabulary: xspec_utils/README.md:608 \u2014 banned phrase 'fabricated'; no_fabrication.vocabulary: xspec_utils/skills/__init__.py:409 \u2014 banned phrase 'fabricated'; no_fabrication.vocabulary: xspec_utils/lib/pa_pd_stability.py:336 \u2014 banned phrase 'fabricated'"
+    },
+    "lead_instruction": {
+      "source": "trial-02",
+      "seq": 1097,
+      "text": "The review found a genuine statistical bug in `_intrinsic_scatter` and it is correct. Here is the reasoning, so you implement the right thing rather than a literal patch.\n\n**Why the current code is biased.** For the model `x_i = mu + intrinsic_i + noise_i` with `Var(intrinsic)=sigma_int^2` and `Var(noise_i)=sigma_i^2`, the ordinary sample variance satisfies `E[s^2] = sigma_int^2 + mean(sigma_i^2)` where `s^2 = sum((x_i - xbar_arith)^2)/(N-1)`. That identity is the *entire* justification for the moment estimator `sigma_int^2 = sigma_obs^2 - mean(sigma_i^2)`, and it holds only when the residuals are centred on the **ordinary arithmetic mean**. The code instead centres on the inverse-variance weighted mean, and\n`sum((x_i - xbar_w)^2) = sum((x_i - xbar_arith)^2) + N*(xbar_arith - xbar_w)^2`,\nso the estimator is inflated by a strictly positive `N/(N-1) * (xbar_arith - xbar_w)^2`. With heteroscedastic errors `xbar_w` moves away from `xbar_arith` and the inflation can convert a genuine upper limit into a claimed resolved scatter.\n\n## 1. Fix `lib/pa_pd_stability.py::_intrinsic_scatter`\n\nReplace the `sum(resid**2)/(n-1)` term with the ordinary sample variance of the residual array, `np.var(resid, ddof=1)` (variance is shift-invariant, so for PD this is exactly the sample variance of the PD values themselves; for PA it is the sample variance of the mod-180 wrapped residuals about the circular weighted mean, which is the correct wrapped analogue). Then `sigma_int = sqrt(max(0, var_sample - mean(err**2)))`, `upper_limit = (var_sample - mean(err**2)) <= 0`, unchanged otherwise. Keep the `N < 2 -> NaN` edge case.\n\nUpdate the docstring to state explicitly: `sigma_obs^2` is the **ddof=1 sample variance** (centred on the residuals' own arithmetic mean), that this is what makes `E[s^2] = sigma_int^2 + mean(sigma_i^2)` hold, and that centring on the inverse-variance weighted mean would add a positive `N/(N-1)*(xbar_arith - xbar_w)^2` bias. Mirror one senten"
+    },
+    "review_rejection": {
+      "source": "trial-06",
+      "seq": 673,
+      "issues": [
+        "`pa_pd_stability` accepts incomplete `pcube_timeseg` products as successful analyses. `red_ixpe.pcube_timeseg` catches a failed segment reduction, skips that segment, still writes the integrated row, \u2026 [+502 chars]",
+        "`PA_ptp` is computed by the linear `_ptp(pa)`. For physically adjacent mod-180 angles such as -89 and +89 degrees, it reports 178 degrees rather than 2 degrees. This silently misstates PA variability \u2026 [+174 chars]",
+        "`_intrinsic_scatter` documents and promises a sample-variance moment estimator but computes `sum((x-weighted_mean)**2)/(N-1)`, which is not sample variance when measurement errors differ. For example,\u2026 [+445 chars]"
+      ],
+      "rationale": "The marked synth ObsID fixtures are legitimate validation data and no fabrication was found. However, the tool can silently analyze an incomplete upstream reduction, and two reported PA/PD statistics are mathematically wrong for plausible production inputs. The current tests do not guard these cases."
+    }
+  }
+}

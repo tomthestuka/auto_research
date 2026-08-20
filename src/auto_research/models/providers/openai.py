@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from auto_research.env import tool_search_config
+from auto_research.models.keys import OPENAI, active_key
 from auto_research.models.providers._json import loads_first_json_object
 from auto_research.models.providers._media import (
     MediaLimits,
@@ -281,7 +282,9 @@ class OpenAIProvider:
         if attachment_content:
             input_items.append({"role": "user", "content": attachment_content})
 
-        client = AsyncOpenAI()
+        # Explicit key, not the SDK's own env lookup: the SDK reads OPENAI_API_KEY once per
+        # client construction, so a rotation would never reach a client built this way.
+        client = AsyncOpenAI(api_key=active_key(OPENAI))
 
         # ONE request, built from whatever the caller gave us. `schema` and `tools` are
         # independent: declaring both is what lets the terminal compose keep its tool

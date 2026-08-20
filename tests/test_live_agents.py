@@ -143,18 +143,6 @@ def test_live_role_wrappers_on_research_jobs(tmp_path, monkeypatch):
                 latest_memory = output
                 await storage.replace_memory_for_paper(output)
 
-        searcher = LibrarianSearcherAgent(
-            retrieval=SqliteRetrievalBackend(storage),
-            model=registry.resolve("librarian_searcher").handles[0],
-        )
-        await _record(
-            log_path,
-            "librarian_searcher",
-            searcher,
-            searcher.search(SearchRequest(query="spectural fit", sources=["local"], max_results=5)),
-            failures,
-        )
-
         obs_payload = {
             name: str(config.obs_db_path)
             for name, config in observations.missions.items()
@@ -222,7 +210,8 @@ def test_live_role_wrappers_on_research_jobs(tmp_path, monkeypatch):
             )
             stream.write("\n")
         if not hits:
-            failures.append(("librarian_searcher", "no local hit for 'spectural fit'"))
+            # Local retrieval is pure Python — there is no LLM searcher role to attribute this to.
+            failures.append(("local_retrieval", "no local hit for 'spectural fit'"))
         return failures
 
     failures = asyncio.run(run_all())

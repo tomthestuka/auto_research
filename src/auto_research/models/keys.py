@@ -20,8 +20,12 @@ the client at all — the SDK reads the variable once per client construction, a
 value we want may not be the one in the environment.
 
 Env vars: ``<PROVIDER>_API_KEY`` and the optional ``<PROVIDER>_API_KEY_FALLBACK``.
-Only ``anthropic`` is wired today (:data:`ANTHROPIC`); the pool is keyed by provider so a
-second provider is a call to :func:`key_pool` plus the one line in its adapter.
+``anthropic`` and ``openai`` are wired (:data:`ROTATING_PROVIDERS`). Wiring a provider takes
+three things, not one: a cited per-provider error taxonomy in
+:mod:`auto_research.models.retry` (the same condition arrives as a different status and a
+different word from each provider), an adapter that sends ``api_key=`` explicitly, and
+membership of that tuple. Google is absent because its documented vocabulary cannot be cited;
+the reason is recorded beside the taxonomies.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ import os
 import threading
 
 ANTHROPIC = "anthropic"
+OPENAI = "openai"
 
 _ENV_PRIMARY = "{provider}_API_KEY"
 _ENV_FALLBACK = "{provider}_API_KEY_FALLBACK"
@@ -159,7 +164,7 @@ def active_key(provider: str) -> str | None:
 #: recourse — a failover that looks like it works and silently does not. Wiring a provider
 #: means one line in its adapter *and* its name here; the preflight check reads the same
 #: tuple, so a configured fallback is validated exactly when it can be honoured.
-ROTATING_PROVIDERS: tuple[str, ...] = (ANTHROPIC,)
+ROTATING_PROVIDERS: tuple[str, ...] = (ANTHROPIC, OPENAI)
 
 
 def make_rotator(provider: str):

@@ -15,9 +15,9 @@ and the active Phase 2 build order in
 
 | Submodule | Step | Role |
 |---|---|---|
-| `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`); small `orchestration.yaml` accessors (`runtime_data_dir`, `papers_dir`, `sandbox_call_timeout_default`, `provider_retry_policy`). |
+| `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`, whose model-key requirements are **derived from `config/models.yaml`**: one group per provider a role is configured with, or the exact variable a member names with `key_env`); small `orchestration.yaml` accessors (`runtime_data_dir`, `papers_dir`, `sandbox_call_timeout_default`, `provider_retry_policy`). |
 | `setup.py` | — | The install-script Python stage (`python -m auto_research.setup`, run by `install.sh`): discovers defaults, prompts (interactive `questionary`) or reads `--answers` (headless), then writes the gitignored `config/orchestration.yaml` + `observations.yaml` from their `*.example` templates (deriving `agent_fs_allow` from the answered paths) and runs the preflight smoke test. |
-| `preflight.py` | — | Launch-time deterministic **checklist** (`Preflight` / async `run_preflight()`): runs every no-LLM precondition (`.env` shape, API-key fallback usability, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, `analyze_probe` stack smoke-test, human-channel ping) before any model client is built. |
+| `preflight.py` | — | Launch-time deterministic **checklist** (`Preflight` / async `run_preflight()`): runs every no-LLM precondition, and carries a warning tier (`PreflightWarning`) for a precondition that is satisfiable but never proven live — the launch continues and the caution is recorded (`.env` shape, API-key fallback usability, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, `analyze_probe` stack smoke-test, human-channel ping) before any model client is built. |
 | `hitl` | 5 | Raise-to-human clarification channel: the injectable `HumanHandler`, the CLI/Slack/WhatsApp connectors, the CLI-vs-library resolver, and the launch-time channel ping. |
 | `schemas` | 1 | Pydantic v2 message protocol between agents. |
 | `models` | 2 | Provider abstraction + role→model registry from `config/models.yaml`. |
@@ -44,8 +44,13 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - Each submodule documents its own interface in its `DOCS.md`. Cross-module
   contracts go through `auto_research.schemas`.
 - `auto_research.env.check_required_env()` loads the repo-root `.env` with
-  `override=False` and validates required provider/source keys before SDK clients
-  are constructed.
+  `override=False` and validates required keys before SDK clients are constructed. The source keys
+  (ADS, Tavily) are fixed; the **model keys are derived from `config/models.yaml`** — a provider a
+  role names implies its SDK's variable (`_PROVIDER_KEY_ALIASES`), and a member naming `key_env`
+  requires exactly that variable, which is how the coder harnesses' vendor keys become a launch
+  requirement. A run therefore requires the vendors it actually calls and no others, and the
+  failure names the member that wanted each missing key. An unreadable config falls back to the
+  historical three rather than relaxing to nothing.
 - `auto_research.preflight.run_preflight(*, human_handler=None, monitor=None)` (async) is the
   launch-time entry that runs the whole deterministic checklist (registered via
   `build_default_preflight(human_handler)`): `check_required_env`,
@@ -215,3 +220,15 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   All three are silently deduplicated away by the key pool, which would leave a human believing a
   run is protected against throttling when rotation has nowhere to go. Full design in
   `models/DOCS.md`.
+
+- 2026-08-19 — **`check_required_env` derives its model keys from `config/models.yaml`.** The list
+  was written once and had drifted in both directions: it demanded `GOOGLE_API_KEY` from a config
+  with no Google member, and it could not know about the vendor variables the coder harnesses reach
+  DeepSeek, Z.AI and Alibaba Model Studio through (`key_env`), so a missing one surfaced inside an
+  author subprocess instead of at launch. Requirements now come from the configuration: a provider
+  a role names implies its SDK's variable, a member's `key_env` requires that variable exactly and
+  wins over the provider default (a plan-specific endpoint may use a different name), and the error
+  names which role/member wanted it. The alias table carries the three coder vendors' own
+  documented variables (`DEEPSEEK_API_KEY`, `ZAI_API_KEY`, `DASHSCOPE_API_KEY`) as well as the
+  three chat providers', so configuring one of them as a chat member later needs no `key_env`.
+  Tests: `tests/test_env.py` 1 → 8.

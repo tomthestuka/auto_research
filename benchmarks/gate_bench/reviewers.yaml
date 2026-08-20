@@ -1,0 +1,59 @@
+# Reviewer roster for the model-swap leg (paper item 2, second panel).
+#
+# The benchmark plants its defects by hand: there is NO author, so nothing is decorrelated from
+# anything and an Anthropic reviewer is admissible here in a way it is not in production
+# (CLAUDE.md §9.3 binds the author↔reviewer pair, which does not exist in this corpus). What this
+# leg measures is therefore reviewer-model SENSITIVITY, not provider decorrelation.
+#
+# Parameters are harmonised on purpose: each member gets a comparable reasoning effort and enough
+# output budget to write a full verdict, expressed in each provider's own vocabulary. Running the
+# models at their production role settings would compare configurations (`gpt-5.6-luna` ships as a
+# 2048-token status monitor) rather than models.
+roles:
+  bench_reviewer:
+    members:
+      - name: gpt_5_6_sol
+        provider: openai
+        model: gpt-5.6-sol
+        vision: true
+        documents: true
+        priceMTk: {input: 5.0, output: 30.0}
+        parameters:
+          max_output_tokens: 16384
+          reasoning: {effort: high}
+      - name: gpt_5_6_terra
+        provider: openai
+        model: gpt-5.6-terra
+        vision: true
+        documents: true
+        priceMTk: {input: 5.0, output: 30.0}
+        parameters:
+          max_output_tokens: 16384
+          reasoning: {effort: high}
+      - name: gpt_5_6_luna
+        provider: openai
+        model: gpt-5.6-luna
+        vision: false
+        documents: false
+        priceMTk: {input: 0.5, output: 4.0}
+        parameters:
+          max_output_tokens: 16384
+          reasoning: {effort: high}
+      - name: claude_opus_5
+        provider: anthropic
+        model: claude-opus-5
+        vision: true
+        documents: true
+        priceMTk: {input: 5.0, output: 25.0}
+        parameters:
+          max_tokens: 21000  # shares budget with adaptive thinking; 21333 non-streaming ceiling
+          thinking: {type: adaptive}
+      - name: claude_sonnet_5
+        provider: anthropic
+        model: claude-sonnet-5
+        vision: true
+        documents: true
+        priceMTk: {input: 3.0, output: 15.0}
+        parameters:
+          max_tokens: 21000
+          thinking: {type: adaptive}

@@ -188,7 +188,12 @@ author and review tools. The tool **author and reviewer must be different provid
 (e.g. author Claude / reviewer GPT) so a merge candidate gets two *independent* checks,
 not one model checking itself ([§9.3](#93-actors-and-the-propose--author--review-flow)).
 Gemini may back cheaper, non-gating roles but stays off the critical author/review path.
-The **coding/author agent is Sonnet-tier** (medium), spawned by the Opus analyst lead.
+The **coding/author agent is Sonnet-tier** (medium), spawned by the Opus analyst lead. The
+`coder` member names **both a model and the author harness that drives it** (`harness:
+claude_sdk | codex`), because a harness speaks one wire dialect and only some vendors publish an
+endpoint in it; the legal pairings and their documented endpoints are a table checked at launch
+(`sandbox/coder/harness.py`). The **decorrelation rule reads the author's actual vendor**, so a
+non-Anthropic author simply requires a co-lead that is not that vendor.
 Because the coder is the weaker model, *architectural* decisions — extend an existing
 toolkit vs. author a new one ([§9.3](#93-actors-and-the-propose--author--review-flow)) —
 stay with the more-capable proposer/lead; the Sonnet author executes them.
@@ -394,7 +399,10 @@ toolkit.**
    `research_toolkit`, using `xspec_utils` as the template, and — reading the **full `lib/`
    source**, not just the minimal `skills/` stubs — either **edits existing files to build on
    current capability or scaffolds a new package**, per the `ToolSpec` disposition. The author
-   is the **Claude Agent SDK** harness seeded with the `ToolSpec`. The
+   is the **harness named on the `coder` role** — the Claude Agent SDK, or the Codex app-server —
+   seeded with the `ToolSpec`. What the flow asks of either is only *bring the author up, send it
+   one instruction, take it down*, so the gate, the review and the commit are defined over the
+   working tree rather than over the process that edited it. The
    harness injects **local structure context** (the `xspec_utils` template, conventions,
    obs-db paths, existing primitives) from **runtime-safe sources only** — real toolkit
    source, `prompts/coder.md`, and config — **never `DOCS.md`/`CLAUDE.md`**
@@ -566,11 +574,13 @@ rule that *you, the coding agent, perform zero git*:
   LLM never issues git; `approve_edit()` (code) does, and it is unreachable unless the gate
   passed **and** the provider-decorrelated GPT co-lead's review passed. **Commit ⇔ gate-pass
   ∧ co-lead review-pass.** A reject → no commit, feedback to the author.
-- The **coder never issues git** — it is the runtime's job, so the author's Bash carries a deny-rule
-  (`disallowed_tools=["Bash(git:*)", "Bash(git)"]` on the coder's own options) and `prompts/coder.md`
-  tells it to leave git to the runtime and `ask_lead` instead of working around it. Deny-rules are
-  best-effort (prefix-matched; pipes/subshells can slip), so the gate-entry check and reset below are
-  the robust backstops.
+- The **coder never issues git** — it is the runtime's job, so `prompts/coder.md` tells it to leave
+  git to the runtime and `ask_lead` instead of working around it, and each harness adds what it can:
+  the Claude SDK author carries a Bash deny-rule (`disallowed_tools=["Bash(git:*)", "Bash(git)"]` on
+  its own options), while the Codex author runs under a sandbox in which `.git` is read-only even
+  inside a writable root, so committing is refused by the OS rather than by a rule. A deny-rule is
+  best-effort (prefix-matched; pipes/subshells can slip), so the gate-entry check and reset below
+  remain the robust backstops on either harness.
 - As the **first action at the gate**, `_gated` compares HEAD to the per-attempt base ref; if the
   coder committed (slipped the deny-rule), the runtime does `git reset --mixed <base_ref>` — undoing
   the commit but **keeping the work in the working tree** — and emits a `coder.committed` event, so the
@@ -681,7 +691,14 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   `sandbox.fs_guard.PathGuard` — a `PreToolUse` hook for the coder, provider checks for the
   reviewer/lead/workers — so `auto_research` and governance files are denied. The OS jail of that
   same allow-list is what remains: it would also gate a shell subprocess's **implicit** reads,
-  which the command-string `Bash` check cannot see. See §13.)*
+  which the command-string `Bash` check cannot see. See §13.)* **Half of it arrived with the Codex
+  harness (2026-08-19):** that harness enforces the same allow-list as its sandbox's writable
+  roots, i.e. by the OS, so **writes** are jailed there — while **reads** get worse, since Codex
+  grants full-disk read access by design and only records a crossing. Feasibility of the full jail
+  was measured the same day on this host: Landlock is active, unprivileged user namespaces are
+  enabled, `bwrap` is present, and PyXspec plus the toolkit import inside a jail that binds only
+  the allow-list while denying `auto_research` and `~/.claude` — which also names the one conflict,
+  since the Claude author authenticates from `~/.claude/.credentials.json`.
 - **Multimodal guards are per-provider and enforce only what is documented.**
   `models/providers/_media.py` gates every request carrying figures/documents — mime, image count,
   PDF pages, per-item bytes, dimensions, whole-request payload — with each adapter's `_LIMITS`
@@ -736,7 +753,17 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   workers' `read_file`/`list_dir`), but for `Bash`/`bash_exec` it only checks the absolute paths
   **named in the command** — a subprocess's implicit reads are invisible. Complete confinement is
   the OS-level jail (§12). Also: the workers' **toolkit-tool path *arguments*** are not yet
-  allow-listed (toolkit tools take obs/data paths and run in the sandbox).
+  allow-listed (toolkit tools take obs/data paths and run in the sandbox). **Per-harness, for the
+  coder:** the Claude author is gated by that hook; the **Codex author's reads are not gated at
+  all** (full-disk read access is that sandbox's documented design, and a command the sandbox
+  permits is not even offered to the client's approval handler — measured 2026-08-19), so a
+  crossing is only *recorded*, as `coder.read_outside_allowlist`. Its **writes**, conversely, are
+  jailed by the OS against the same allow-list. **Measured, not hypothetical** (2026-08-19): a
+  DeepSeek coder on that harness read `sandbox/coder/codex_sdk.py` (the backend driving it),
+  `sandbox/DOCS.md`, `tests/test_live_coder_matrix.py` (the test harnessing it), its fixture, the
+  installed Codex SDK sources and `~/.codex/config.toml` — 36 recorded crossings in one session,
+  none of them asked for. The §12 `bwrap` jail measured feasible the same day denies exactly these
+  while the science stack still imports.
 - **`sandbox.merge_flow._reset_direct_tree`** — best-effort: a git failure during the post-failed-
   authoring reset is logged (`coder.tree_reset.error`) and swallowed so it never masks the result;
   a residual dirty tree is then caught at the next launch's preflight (the in-flow
@@ -751,9 +778,21 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   `git reset --hard <base>` out of band. The reset is also bounded (30 s) on the interrupt path, so a
   wedged git yields rather than hanging the stop; a dirty tree then falls to the next launch's
   preflight and the resume-time heal.
-- **Coder git-ban is best-effort (deny-rule).** The coder's Bash deny-rule
+- **The Qwen coder pairing is NOT LIVE TESTED.** `dashscope` + `codex` is configured against the
+  endpoint Alibaba Model Studio documents for Codex, and nothing has ever run through it: on
+  2026-08-19 every attempt returned HTTP 400 `AccessDenied.Unpurchased` across three models and all
+  three documented hosts (the pay-as-you-go host recognised the key; the CN and token-plan hosts
+  answered `InvalidApiKey`), i.e. right wiring, unentitled account — QwenCloud gates pay-as-you-go
+  on a complete billing profile, not on buying credits. Recorded in
+  `sandbox/coder/harness.py: UNVERIFIED_PAIRINGS`, warned at launch by
+  `check_coder_harness_supported` (a `PreflightWarning`, which never blocks a launch), and skipped
+  with the vendor's refusal by `tests/test_live_coder_matrix.py`. The other four pairings are live
+  probed. Two traps when finishing it: the Coding Plan's `sk-sp-…` keys speak Chat Completions,
+  which current Codex refuses, and the Token Plan changes both key and host.
+- **Coder git-ban is best-effort (deny-rule) on the Claude harness.** Its Bash deny-rule
   (`disallowed_tools=["Bash(git:*)", "Bash(git)"]`, §9.9) blocks the obvious `git …`, but prefix
-  matching can be slipped (pipes, `$(…)`, env prefixes, `python -c subprocess`). The robust catches are
+  matching can be slipped (pipes, `$(…)`, env prefixes, `python -c subprocess`). The Codex harness
+  does not have this gap: `.git` is read-only inside a writable root under its sandbox. The robust catches are
   the **gate-entry auto-revert** (`_gated` does `reset --mixed <base_ref>` on a moved HEAD before
   scanning, so a slipped commit is normalized to uncommitted work, not a confusing reject) and the
   **base-ref failure reset** above (drops any commit on a failed attempt) — both regardless of how the
@@ -844,18 +883,25 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   exact name would have pulled one — the resident-token win is real either way, but a query-shape
   regression costs tokens silently.
 - **API-key failover is per-key, and two of its edges stay best-effort.** `ANTHROPIC_API_KEY_FALLBACK`
-  rotates on a rate limit or a spent balance (`models/keys.py`), but (a) **Anthropic rate limits are
-  per-organization**, so a fallback issued by the *same* org rotates onto the same exhausted bucket —
+  and `OPENAI_API_KEY_FALLBACK` rotate on a rate limit or a spent balance (`models/keys.py`), but
+  (a) **rate limits are per-organization**, so a fallback issued by the *same* org rotates onto the same exhausted bucket —
   the preflight check cannot see the org and rejects only what it can prove useless (blank, duplicate,
   or primary-less); (b) **a coder session already in flight keeps the key it launched with** — the
   Agent SDK owns that subprocess's environment for its lifetime, so only the *next* session picks up a
   rotation; and (c) 401 `authentication_error` is deliberately **not** rotated, so a revoked primary
   key still fails the run rather than silently running on the fallback; (d) key **retirement** is
   process-scoped, so a key retired for a spent balance is eligible again on the next run — right
-  for a topped-up key, but it means a still-dead key costs one wasted call at each run's start. Only Anthropic is wired, and
-  `keys.ROTATING_PROVIDERS` is what makes that safe rather than incidental: a provider whose adapter
-  does not send `active_key` must never rotate, or the client would keep the SDK-resolved key while
-  the caller skipped its cooldown. Adding OpenAI/Google is one adapter line each **plus** that tuple.
+  for a topped-up key, but it means a still-dead key costs one wasted call at each run's start.
+  `keys.ROTATING_PROVIDERS` is what makes wiring safe rather than incidental: a provider whose
+  adapter does not send `active_key` must never rotate, or the client would keep the SDK-resolved
+  key while the caller skipped its cooldown. Wiring a provider takes **three** things — a cited
+  per-provider error taxonomy, the adapter line, and the tuple entry — because the vocabulary is
+  not shared: Anthropic reports a spent balance as a 400/403 `billing_error` while **OpenAI reports
+  every key quota as a 429**, so a global "a 429 refills" rule leaves an OpenAI dead key in
+  rotation. (e) **Google is deliberately unwired**: its troubleshooting guide and error reference
+  disagree on the vocabulary, neither publishes the response body, and its SDK's `APIError.code` is
+  the HTTP status integer where OpenAI's is a string code — so no rule is cited for it and it never
+  rotates.
 
 ---
 
@@ -1185,3 +1231,138 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   before any tokens is never billed. Preflight went 10/10 → **11/11** with `api_key_fallbacks`. What the
   resume does *not* yet exercise is a 429 on both keys and a rotation preceding a coder session
   (`tmp_remaining_livetest.md` K1).
+
+- 2026-08-18 — **Authoring-reliability instrument (paper item 4), and key failover generalized to
+  OpenAI.** `benchmarks/author_bench` runs one fixed brief K times through the **production**
+  lead-driven loop (`AnalystLeadAgent.drive_authoring`), deliberately not the legacy
+  `propose_and_pr` auto-loop whose rework caps §9.10 already records as unused on that path. The
+  brief is not written for the benchmark: it is the Opus lead's own `ToolSpec` from run `46ed6671`
+  (analysis #2), recovered verbatim from that run's ledger and frozen, so §3's walkthrough becomes
+  trial 0 of the same distribution and the brief keeps its real ambiguities — its proposed checks
+  name two synthetic fixture ObsIDs that the original authoring resolved by writing controlled CSVs
+  into the test's own `tmp_path` instead. Trials clone the toolkit at `fa99ef8`, the parent of the
+  commit that landed the tool, each on its own branch, so the live checkout is untouched and trials
+  cannot see each other. Concurrency rests on the cost meter being a `ContextVar`: each trial
+  installs its own **inside its own task**, or K trials would each report the batch total. No human
+  handler is wired, so a raise records as the `needs_human` terminal (§9.6) rather than being
+  answered for. The report separates **terminal states** (which partition K) from **rounds**
+  (events inside a trial), a correction the paper's Table 6 needs too, and reports fabrication as a
+  signal for hand-reading rather than a count.
+  **The first batch (K=15) died at 48 minutes and $122.26 with 0 trials finished**, on
+  `429 insufficient_quota` / `credit_balance_exhausted` from the GPT co-lead, and that exposed the
+  second item. The key pool was already provider-generic; the **error vocabulary** was not.
+  Anthropic reports a spent balance as a 400/403 `billing_error`, so `is_exhausted_key_error`
+  short-circuited "any 429 refills" — true there, false at OpenAI, where every key quota is a 429
+  and only `code` separates the refilling one from the four that do not. Adding OpenAI to
+  `ROTATING_PROVIDERS` alone would have rotated, never retired the dead primary, and bounced back
+  onto it at the fallback's next rate limit: the failure retirement exists to prevent. Both
+  predicates now take a **required** `provider` and read a per-provider table whose every entry
+  cites that provider's own documentation, with shapes taken version-exact from the SDKs
+  (openai 2.38.0 parses `.type`/`.code` from `body["error"]`) and confirmed against the live error.
+  An unrefillable quota now **raises once rotation is exhausted** instead of taking the transient
+  path — the 48 minutes were spent backing off against a balance no wait could restore. `AsyncOpenAI`
+  sends `api_key=` explicitly. **Google stays unwired and the reason is recorded**: its own two
+  documentation pages disagree on the vocabulary, neither publishes the response body, and
+  google-genai's `APIError.code` is the HTTP status integer where OpenAI's is a string code, so a
+  shared field read would misclassify silently. Measured on the way: a full authoring trial costs
+  **$27–45** through the whole loop against the $13–30 projected from the Q21 windows, which had
+  priced tools authored onto a branch already carrying their chain-mates; `papers/FANGZ/DOCS.md`
+  §8/§8.4 corrected, K set to 10. Suite 821 → 957 (`tests/test_author_bench.py` 14,
+  `test_provider_key_failover.py` 40 → 49).
+
+- 2026-08-19 — **The author became swappable: a second harness, and the `coder` role now names
+  which one.** Paper item 7 (the model-tier sweep) needs authors other than Claude Sonnet, and the
+  research answered the shape of that work: **alt models are not a harness problem** — DeepSeek,
+  Z.AI GLM and Alibaba Model Studio each publish an Anthropic-dialect endpoint documented for Claude
+  Code *and* a Responses endpoint documented for Codex — while **a second harness is real work**.
+  Codex-first was chosen because all three vendors are natively Codex-capable, so one backend opens
+  every leg with no gateway. New `sandbox/coder/`: `CoderBackend` is three methods
+  (`connect`/`drive`/`disconnect`), which is all the authoring flow ever needed from an author, so
+  the gate, the co-lead review, `approve_edit`, the per-attempt base ref and the failure reset are
+  untouched; `claude_sdk.py` holds today's wires verbatim and re-exports them from `merge_flow` so
+  callers and tests are unchanged; `codex_sdk.py` is the new one. `RoleModelConfig` gained
+  `harness`/`base_url`/`key_env`, `ProviderName` gained the three harness-only vendors (whose
+  members resolve to a `HarnessOnlyProvider` that raises if anything tries to chat with them), and
+  two preflight checks refuse an impossible pairing or an unlaunchable harness before any model is
+  built. **Decorrelation needed no new rule** — it reads the author's vendor, so a DeepSeek author
+  and the GPT co-lead separate on their own.
+  **The harness swap is not neutral, and the differences were measured rather than assumed** (live
+  probe, cents): Codex's `workspace-write` + `writableRoots` turns `agent_fs_allow` into an
+  **OS-enforced write jail** (half of §12, finally), `.git` is read-only inside it so the coder's
+  git ban stops being a prefix rule, and its per-call token counts let coder spend be priced by the
+  same code as every chat role instead of the Claude SDK's opaque session dollars. Against that:
+  **Codex reads are ungated** (full-disk read access is documented design; a command the sandbox
+  permits is never offered to the client's approval handler), so a crossing is recorded as
+  `coder.read_outside_allowlist` and nothing more — a §4 boundary the Claude legs enforce and the
+  Codex legs do not, to be stated wherever a Codex leg is reported. Escalation moved to an
+  in-process Streamable-HTTP MCP endpoint on loopback with a per-session bearer token, because
+  `ask_lead` and `ask_human` must keep reaching the live lead object and the run's HITL connector.
+  The role prompt rides as `developerInstructions` (layering over Codex's own tool instructions)
+  rather than replacing them.
+  **The full OS jail was priced the same day and is light, not heavy:** Landlock active,
+  unprivileged user namespaces enabled, `bwrap` present, and PyXspec + the toolkit importing inside
+  a jail that binds only the allow-list while denying `auto_research` and `~/.claude` — the last of
+  which is also the one conflict, since the Claude author authenticates from the credentials there.
+  New deps: `openai-codex==0.147.0` (pip; it pulls its own version-matched CLI binary, which is why
+  no conda `codex` is pinned — SDK and app-server share a protocol). Suite 967 → 995
+  (`tests/test_coder_backends.py`). **NOT LIVE TESTED:** a real authoring attempt on the Codex
+  harness (the probe exercised the harness, not the flow), and no alt-vendor credential exists yet.
+
+- 2026-08-19 (same day, follow-up) — **The coder's live coverage became a matrix, and the harness
+  table was narrowed to what the code can do.** The three `claude_sdk` alt-vendor rows are gone:
+  those vendors do publish an Anthropic-dialect endpoint, but the Claude backend sets no
+  `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` and no model-name mapping, so a member naming one
+  would have silently authored on Claude — a table that promises more than the backend delivers is
+  worse than a short table. Five pairs remain, and `sandbox/coder/harness.py` records why the other
+  three are absent. **`tests/test_live_coder_matrix.py`** is the coder analogue of the schema
+  matrix: one warm session per leg, walked through nine stimuli in the order a real attempt produces
+  them (seed brief, gate rejection, co-lead rejection, lead instruction, governance-file read, git
+  attempt, `ask_lead`, lengthening trajectory), with every stimulus **frozen out of real ledgers**
+  rather than written for the test (`tests/fixtures/coder_history.json`;
+  `tmp_scripts/extract_coder_history.py` mines it). Assertions stay on our side of the boundary and
+  a leg skips on a missing credential, so two legs run today and three wait on vendor keys.
+  **It caught two defects before it caught anything about a harness.** Its own first invocation died
+  on a missing import, which is the `NameError` class the 2026-08-06 static guard exists to prevent
+  — in a file that guard did not scan. `tests/test_no_undefined_names.py` now scans `tests/` and
+  `benchmarks/` too, and that widening immediately found a real latent one: `test_live_agents.py`
+  still constructed a `LibrarianSearcherAgent` for a role deleted from config, so that live test
+  would have died the moment anyone ran it. **Lesson, matching the original:** a test that only runs
+  behind an env flag has fewer chances to be caught than a rare source branch, so the guard belongs
+  over the tests as much as over the package.
+  **Then the matrix found the two Codex defects it was built to find, neither visible to any
+  deterministic test.** The escalation tools never reached their handler: MCP servers are read when
+  the app-server **process** starts, not per thread, so a server passed at thread start never
+  connected — and once registered correctly, an MCP tool call is offered to the client as an
+  **elicitation** whose reply vocabulary is the MCP spec's `{"action": "accept"}`, so answering with
+  the `{"decision": …}` used for patch approvals reads as a rejection and the author is told *"user
+  rejected MCP tool call"* while our handler is never called. This is the
+  read-the-contract-don't-infer-it lesson again, at a new boundary: two shapes arrive on one
+  callback and they do not share a vocabulary. Second defect: the read audit resolved Codex's
+  **relative** command paths against this process's cwd, recording 47 crossings for ordinary
+  in-worktree reads — and a second path bug behind it, since `cwd` is a `RootModel` whose `str()`
+  is `root='/tmp/…'`, cost 40 more. An audit that cries wolf hides the crossing it exists to show.
+  All fixed and pinned; the escalation round-trip is now live-verified end to end on Codex (model →
+  localhost MCP → in-process handler → answer). **One finding was about the test:** demanding an
+  *edit* in response to a recorded rejection asks a throwaway toolkit to contain the files that
+  rejection names, so the cells assert **delivery** and record the rest. Suite 995 → 1101.
+
+- 2026-08-19 (third, same day) — **Launch checks learned two things: what the config actually
+  needs, and how to say "unproven".** `check_required_env` had a hand-written key list that drifted
+  in both directions — it demanded `GOOGLE_API_KEY` from a config with no Google member, and knew
+  nothing of the vendor variables the coder harnesses authenticate with, so a missing one surfaced
+  inside an author subprocess instead of at launch. Requirements are now **derived from
+  `config/models.yaml`**: a provider a role names implies its own SDK's variable, a member's
+  `key_env` requires exactly that variable and beats the provider default (a plan-specific endpoint
+  may use another name), and the failure names the role/member that wanted each missing key. The
+  alias table carries all six vendors, so configuring DeepSeek, Z.AI or Qwen as *chat* members in
+  the model sweep needs no `key_env` at all.
+  **New warning tier.** Preflight was pass-or-raise, which cannot express a precondition that is
+  satisfiable and unproven at once. `PreflightWarning` fills that: the launch continues, the line
+  reads `WARNING`, the caution records at level 2, and the summary counts warnings apart from
+  failures. Its first user is the Qwen coder pairing (§13): configured against the endpoint the
+  vendor documents, never run, because the account is not entitled. Blocking that launch would be
+  wrong and passing silently would make a first-time failure look like a defect in the flow.
+  The live matrix classifies it the same way — a leg whose vendor refuses the account on the seed
+  turn **skips carrying that refusal** rather than failing, since nine downstream cells reporting
+  nine consequences of one cause would bury the cause. Four of five legs are live-probed.
+  Suite 1101 → 1112.

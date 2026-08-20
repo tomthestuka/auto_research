@@ -19,31 +19,103 @@ from dotenv import load_dotenv
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENV_FILE = _REPO_ROOT / ".env"
 _ORCH_CONFIG = _REPO_ROOT / "config" / "orchestration.yaml"
+_MODELS_CONFIG = _REPO_ROOT / "config" / "models.yaml"
 
-# Each tuple is a group of aliases; at least one must be set.
-# Derived from .env.example; optional vars (LangSmith, runtime dir) are excluded.
+# Each tuple is a group of aliases; at least one must be set. These are the keys every run needs
+# whatever models it is configured with; the model keys are derived from `models.yaml` instead
+# (``_model_key_groups``), so a run requires exactly the vendors it actually calls.
 _REQUIRED: tuple[tuple[str, ...], ...] = (
-    ("ANTHROPIC_API_KEY",),
-    ("OPENAI_API_KEY",),
-    ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     ("ADS_DEV_KEY", "ADS_API_TOKEN"),
     ("TAVILY_API_KEY",),
 )
+
+# The variable each provider's own SDK reads, used when a member does not name one explicitly.
+# A member's `key_env` always wins, which is how a harness can point at a plan-specific endpoint
+# with a differently-named variable. The vendor entries carry each vendor's documented name, so a
+# future chat member for one of them needs no `key_env` at all.
+_PROVIDER_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+    "google": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "zai": ("ZAI_API_KEY",),
+    "dashscope": ("DASHSCOPE_API_KEY",),
+}
+
+# Kept so a config that cannot be read still demands the historical set rather than nothing.
+_FALLBACK_MODEL_KEYS: tuple[tuple[str, ...], ...] = (
+    ("ANTHROPIC_API_KEY",),
+    ("OPENAI_API_KEY",),
+    ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+)
+
+
+def _model_key_groups() -> tuple[tuple[tuple[str, ...], ...], dict[tuple[str, ...], str]]:
+    """The key variables ``config/models.yaml`` implies, with who needs each.
+
+    A run calls exactly the members its roles name, so requiring a key for a provider nobody is
+    configured with fails a perfectly good launch, and *not* requiring one a member does name
+    (the vendor keys the coder harnesses use, `key_env`) lets the run die later inside a
+    subprocess instead of at launch. Both directions are wrong in the same way: the requirement
+    belongs to the configuration, not to a list written once.
+
+    Returns the alias groups to require and, for each, a human-readable note naming the roles
+    and members that need it — a missing key is much easier to fix when the message says which
+    member wanted it.
+    """
+    import yaml  # local import — yaml is not needed at module load time
+
+    try:
+        with _MODELS_CONFIG.open("r", encoding="utf-8") as stream:
+            config = yaml.safe_load(stream) or {}
+    except (FileNotFoundError, OSError, yaml.YAMLError):
+        return _FALLBACK_MODEL_KEYS, {}
+
+    roles = config.get("roles")
+    if not isinstance(roles, dict):
+        return _FALLBACK_MODEL_KEYS, {}
+
+    wanted: dict[tuple[str, ...], list[str]] = {}
+    for role, group in roles.items():
+        members = (group or {}).get("members") if isinstance(group, dict) else None
+        for member in members or []:
+            if not isinstance(member, dict):
+                continue
+            explicit = member.get("key_env")
+            aliases = (
+                (str(explicit),)
+                if explicit
+                else _PROVIDER_KEY_ALIASES.get(str(member.get("provider") or ""), ())
+            )
+            if not aliases:
+                continue
+            label = f"{role}/{member.get('name') or member.get('model') or '?'}"
+            wanted.setdefault(aliases, []).append(label)
+
+    if not wanted:
+        return _FALLBACK_MODEL_KEYS, {}
+    notes = {aliases: ", ".join(sorted(set(users))) for aliases, users in wanted.items()}
+    return tuple(wanted), notes
 
 
 def check_required_env() -> None:
     """Raise RuntimeError listing every missing required env var.
 
-    Each group is satisfied when any alias in that group is set and non-empty.
-    Raises on the first call if anything is missing so the process dies before
-    constructing any SDK client.
+    Two sources: the keys every run needs (literature sources), and the key variables
+    ``config/models.yaml`` implies — one per provider a role is configured with, or the exact
+    variable a member names with ``key_env``. Each group is satisfied when any alias in it is set
+    and non-empty. Raises before any SDK client is constructed, and names the member that wanted
+    each missing key.
     """
     load_dotenv(_ENV_FILE, override=False)
+    model_groups, notes = _model_key_groups()
     missing: list[str] = []
-    for group in _REQUIRED:
-        if not any(os.environ.get(k) for k in group):
-            label = group[0] if len(group) == 1 else f"{group[0]} (or {group[1]})"
-            missing.append(label)
+    for group in (*_REQUIRED, *model_groups):
+        if any(os.environ.get(key) for key in group):
+            continue
+        label = group[0] if len(group) == 1 else f"{group[0]} (or {group[1]})"
+        used_by = notes.get(group)
+        missing.append(f"{label} [{used_by}]" if used_by else label)
     if missing:
         raise RuntimeError(
             "Required environment variables are not set. "

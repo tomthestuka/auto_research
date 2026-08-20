@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+
+import pytest
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -286,3 +288,43 @@ def test_meter_seeds_from_an_existing_ledger_so_a_resume_keeps_counting(tmp_path
     fresh = install_cost_meter(run_id="r2", monitor=RunMonitor(chatter=10,
                                                               jsonl_path=tmp_path / "new.jsonl"))
     assert fresh.total_usd == 0.0 and fresh.calls == 0
+
+def test_a_litellm_entry_with_no_rates_falls_back_to_the_member_price(monkeypatch):
+    """A known id carrying no rates is worse than an unknown one: it prices every token at zero
+    while reporting `source="litellm"`, which reads as authoritative, and it shadows the member's
+    own `priceMTk`. Live case (2026-08-19): litellm knows `qwen3.7-plus` and carries no rates, so a
+    Qwen coder leg booked real usage at $0.00 and could not be fixed by configuring a price.
+    """
+    from auto_research.observability import costs
+
+    monkeypatch.setattr(
+        costs,
+        "_litellm_model_cost",
+        lambda: {"rate-less-model": {"input_cost_per_token": 0.0, "output_cost_per_token": 0.0}},
+    )
+    member = RoleModelConfig(
+        name="m", provider="openai", model="rate-less-model",
+        priceMTk={"input": 0.32, "output": 1.28},
+    )
+    rates = costs.token_rates_for(member)
+    assert rates.source == "config"
+    assert rates.input == pytest.approx(0.32 / 1_000_000)
+    assert rates.output == pytest.approx(1.28 / 1_000_000)
+
+
+def test_a_litellm_entry_with_real_rates_still_wins_over_the_member_price(monkeypatch):
+    """The order is litellm-first for a reason: its map is maintained and ours is hand-copied."""
+    from auto_research.observability import costs
+
+    monkeypatch.setattr(
+        costs,
+        "_litellm_model_cost",
+        lambda: {"priced-model": {"input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6}},
+    )
+    member = RoleModelConfig(
+        name="m", provider="openai", model="priced-model",
+        priceMTk={"input": 999.0, "output": 999.0},
+    )
+    rates = costs.token_rates_for(member)
+    assert rates.source == "litellm"
+    assert rates.input == pytest.approx(1e-6)

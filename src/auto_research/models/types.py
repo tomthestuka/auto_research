@@ -9,7 +9,16 @@ from pydantic import BaseModel, ConfigDict, Field
 from auto_research.schemas import DocumentRef, FigureRef
 
 
-ProviderName = Literal["anthropic", "google", "openai"]
+# Who serves the model. The first three back the chat adapters in ``providers/``; the rest are
+# vendors reached only through a coder harness (CLAUDE.md §6/§9.3), so they have no chat adapter
+# and ``provider_for`` hands them a raising placeholder instead of one.
+ProviderName = Literal["anthropic", "google", "openai", "deepseek", "zai", "dashscope"]
+CHAT_PROVIDERS: frozenset[str] = frozenset({"anthropic", "google", "openai"})
+
+# Which author harness drives a ``coder`` member: the Claude Agent SDK, or the Codex app-server.
+# A harness speaks exactly one wire dialect, so the legal (provider, harness) pairs are a table
+# checked at launch (``sandbox.coder.harness``), never inferred at the call site.
+HarnessName = Literal["claude_sdk", "codex"]
 MessageRole = Literal["system", "user", "assistant"]
 
 
@@ -178,6 +187,15 @@ class RoleModelConfig(BaseModel):
     documents: bool = False
     priceMTk: dict[str, float] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
+    # --- coder-role fields (ignored by chat roles) ---
+    harness: HarnessName | None = None
+    """Author harness driving this member; required for the ``coder`` role."""
+    base_url: str | None = None
+    """Endpoint the harness is pointed at; required when the provider is not the harness's
+    native one (e.g. a DeepSeek model driven by the Codex app-server)."""
+    key_env: str | None = None
+    """Environment variable holding this vendor's API key. Absent means the harness
+    authenticates the way it does by default (the Claude SDK's stored credentials)."""
 
 
 class RoleModelGroup(BaseModel):
@@ -296,6 +314,7 @@ class ModelHandle:
                 ),
             ),
             describe=f"{self.role}/{self.config.name}",
+            provider=self.config.provider,
             rotate_key=rotate_key,
             on_key_rotation=self._record_key_rotation if rotate_key is not None else None,
         )

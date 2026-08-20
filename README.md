@@ -121,14 +121,17 @@ optional raise-to-human connectors (only when selected) — **Telegram** (recomm
 (`TWILIO_ACCOUNT_SID`/`TWILIO_API_KEY_SID`/`TWILIO_API_KEY_SECRET`/`TWILIO_WHATSAPP_FROM`/`WHATSAPP_TO`);
 the terminal (`cli`) channel needs none.
 
-Optionally set **`ANTHROPIC_API_KEY_FALLBACK`**. A rate limit (429) and a spent credit balance
-are quotas of the *key*, not of Anthropic, so waiting cannot clear them — the first stalls a call
-through minutes of cooldown, the second used to kill the run outright. With a fallback set, either
-one switches keys and retries immediately, at no cooldown; provider-capacity failures (529/5xx)
-still wait, since every key sees the same outage. Use a key from a **different Anthropic
-organization** — rate limits are per-organization. Launch preflight (`api_key_fallbacks`) rejects a
-fallback that is blank or identical to the primary, and each switch is recorded on the run ledger
-as `provider.key_rotation` (naming the slot, never the key).
+Optionally set **`ANTHROPIC_API_KEY_FALLBACK`** and **`OPENAI_API_KEY_FALLBACK`**. A rate limit
+and a spent balance are quotas of the *key*, not of the provider, so waiting cannot clear them —
+the first stalls a call through minutes of cooldown, the second used to kill the run outright.
+With a fallback set, either one switches keys and retries immediately, at no cooldown;
+provider-capacity failures (529/5xx) still wait, since every key sees the same outage. A quota
+that does not refill now **raises as soon as every key has been tried** rather than backing off
+against it. Use a key from a **different organization** — rate limits are per-organization. Launch
+preflight (`api_key_fallbacks`) rejects a fallback that is blank or identical to the primary, and
+each switch is recorded on the run ledger as `provider.key_rotation` (naming the slot, never the
+key). Google does not rotate: its published error vocabulary is inconsistent between its own two
+documentation pages, so no rule is guessed for it.
 
 Over **Telegram or Slack** a human can drive a live run with slash-commands (intercepted, never
 treated as answers to an agent): `/help` (commands + the live roster, numbered), `/status
@@ -380,8 +383,12 @@ and Google. No model identifier is hardcoded. Defaults: reviewer group = Fable 5
 GPT-5.5 high effort, and Gemini 3.5 Flash high thinking; analyst lead = Opus 4.8;
 analyst worker group = Sonnet 4.6 and GPT-5.5 medium effort; librarian I/O group =
 Sonnet 4.6, GPT-5.5 medium effort, and Gemini 3.5 Flash thinking. Phase 2 adds `coder`
-(Claude Sonnet via Claude Agent SDK) and `analyst_colead` (GPT-5.5 xhigh) so tool authoring
-and review are provider-decorrelated. There is no LLM librarian-searcher role; local
+(the tool author) and `analyst_colead` (GPT-5.5 xhigh) so tool authoring and review are
+provider-decorrelated. The `coder` member names **both a model and the author harness that drives
+it** (`harness: claude_sdk | codex`): the default is Claude Sonnet through the Claude Agent SDK,
+and the Codex app-server is the second harness, which also reaches DeepSeek, Z.AI GLM and Alibaba
+Model Studio models through the endpoints those vendors document. Legal harness/provider pairings
+are checked at launch. There is no LLM librarian-searcher role; local
 retrieval is pure Python.
 
 Current role/tool surfaces:

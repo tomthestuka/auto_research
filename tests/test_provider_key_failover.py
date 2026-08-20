@@ -16,6 +16,7 @@ import pytest
 from auto_research.models import keys as keys_mod
 from auto_research.models.keys import (
     ANTHROPIC,
+    OPENAI,
     KeyPool,
     active_key,
     check_api_key_fallbacks,
@@ -25,6 +26,7 @@ from auto_research.models.keys import (
 )
 from auto_research.models.retry import (
     call_with_transient_retry,
+    is_exhausted_key_error,
     is_key_scoped_provider_error,
     is_transient_provider_error,
 )
@@ -43,8 +45,9 @@ def _isolate_pools(monkeypatch):
     this a rotation in one test would leak into the next.
     """
 
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY_FALLBACK", raising=False)
+    for provider in ("ANTHROPIC", "OPENAI", "GOOGLE"):
+        monkeypatch.delenv(f"{provider}_API_KEY", raising=False)
+        monkeypatch.delenv(f"{provider}_API_KEY_FALLBACK", raising=False)
     reset_pools()
     yield
     reset_pools()
@@ -61,12 +64,15 @@ def _set_keys(monkeypatch, primary: str | None, fallback: str | None) -> None:
 class _ProviderError(Exception):
     """Stand-in for an SDK error: the two attributes our classifiers actually read."""
 
-    def __init__(self, message: str, *, status_code: int | None = None, type_: str | None = None):
+    def __init__(self, message: str, *, status_code: int | None = None, type_: str | None = None,
+                 code: str | None = None):
         super().__init__(message)
         if status_code is not None:
             self.status_code = status_code
         if type_ is not None:
             self.type = type_
+        if code is not None:
+            self.code = code
 
 
 def _rate_limit() -> _ProviderError:
@@ -87,6 +93,27 @@ def _credit_balance() -> _ProviderError:
 
 def _overloaded() -> _ProviderError:
     return _ProviderError("overloaded", status_code=529, type_="overloaded_error")
+
+
+# OpenAI reports every one of these as a 429 (developers.openai.com/api/docs/guides/error-codes).
+# The field values are the ones the SDK actually sets — openai 2.38.0 parses `.type`/`.code` out
+# of `body["error"]` — and were confirmed against a live failure on 2026-08-18.
+def _openai_spent_balance() -> _ProviderError:
+    return _ProviderError(
+        "You have no credits remaining. Add credits to continue using the API.",
+        status_code=429, type_="insufficient_quota", code="credit_balance_exhausted",
+    )
+
+
+def _openai_rate_limit() -> _ProviderError:
+    return _ProviderError("Rate limit reached for requests", status_code=429,
+                          type_="requests", code="rate_limit_exceeded")
+
+
+def _openai_spend_limit() -> _ProviderError:
+    return _ProviderError("Your organization reached its enforced spend limit",
+                          status_code=429, type_="insufficient_quota",
+                          code="organization_spend_limit_exceeded")
 
 
 # ── the pool ────────────────────────────────────────────────────────────────────────
@@ -152,6 +179,7 @@ def test_a_dead_primary_does_not_turn_a_fallback_rate_limit_into_a_fatal_error(m
             call_with_transient_retry(
                 _runner([_credit_balance()]),
                 describe="role/member",
+                provider=ANTHROPIC,
                 policy=_NO_WAIT_POLICY,
                 sleep=sleep,
                 rotate_key=make_rotator(ANTHROPIC),
@@ -169,6 +197,7 @@ def test_a_dead_primary_does_not_turn_a_fallback_rate_limit_into_a_fatal_error(m
             call_with_transient_retry(
                 _runner([_rate_limit()]),
                 describe="role/member",
+                provider=ANTHROPIC,
                 policy=_NO_WAIT_POLICY,
                 sleep=sleep,
                 rotate_key=make_rotator(ANTHROPIC),
@@ -189,6 +218,7 @@ def test_every_key_retired_raises_honestly(monkeypatch):
             call_with_transient_retry(
                 _runner([_credit_balance(), _credit_balance()]),
                 describe="role/member",
+                provider=ANTHROPIC,
                 policy=_NO_WAIT_POLICY,
                 rotate_key=make_rotator(ANTHROPIC),
             )
@@ -205,7 +235,7 @@ def test_every_key_retired_raises_honestly(monkeypatch):
 def test_only_non_refilling_quotas_retire_a_key(exc_factory, retires):
     from auto_research.models.retry import is_exhausted_key_error
 
-    assert is_exhausted_key_error(exc_factory()) is retires
+    assert is_exhausted_key_error(exc_factory(), ANTHROPIC) is retires
 
 
 def test_one_call_offers_each_key_at_most_once(monkeypatch):
@@ -238,7 +268,7 @@ def test_rotation_is_bidirectional_across_calls(monkeypatch):
     "exc_factory", [_rate_limit, _billing, _credit_balance], ids=["429", "billing", "credit"]
 )
 def test_key_scoped_errors_are_recognized(exc_factory):
-    assert is_key_scoped_provider_error(exc_factory())
+    assert is_key_scoped_provider_error(exc_factory(), ANTHROPIC)
 
 
 @pytest.mark.parametrize(
@@ -251,7 +281,7 @@ def test_key_independent_errors_do_not_rotate(exc_factory, transient):
     """Provider capacity and ordinary bad requests are not the key's fault."""
 
     exc = exc_factory()
-    assert not is_key_scoped_provider_error(exc)
+    assert not is_key_scoped_provider_error(exc, ANTHROPIC)
     assert is_transient_provider_error(exc) is transient
 
 
@@ -259,7 +289,8 @@ def test_auth_errors_are_deliberately_excluded():
     """A revoked key is a configuration fault a human must see, not one to route around."""
 
     assert not is_key_scoped_provider_error(
-        _ProviderError("invalid x-api-key", status_code=401, type_="authentication_error")
+        _ProviderError("invalid x-api-key", status_code=401, type_="authentication_error"),
+        ANTHROPIC,
     )
 
 
@@ -301,6 +332,7 @@ def test_key_scoped_error_retries_immediately_on_the_other_key(monkeypatch, exc_
         call_with_transient_retry(
             _runner([exc_factory()]),
             describe="analyst_lead/claude",
+            provider=ANTHROPIC,
             policy=_NO_WAIT_POLICY,
             sleep=sleep,
             rotate_key=make_rotator(ANTHROPIC),
@@ -323,6 +355,7 @@ def test_a_spent_balance_no_longer_kills_the_run(monkeypatch):
             call_with_transient_retry(
                 _runner([_billing()]),
                 describe="role/member",
+                provider=ANTHROPIC,
                 policy=_NO_WAIT_POLICY,
                 rotate_key=None,  # no fallback configured — the pre-existing behaviour
             )
@@ -333,6 +366,7 @@ def test_a_spent_balance_no_longer_kills_the_run(monkeypatch):
             call_with_transient_retry(
                 _runner([_billing()]),
                 describe="role/member",
+                provider=ANTHROPIC,
                 policy=_NO_WAIT_POLICY,
                 rotate_key=make_rotator(ANTHROPIC),
             )
@@ -356,6 +390,7 @@ def test_rotation_exhausted_falls_through_to_the_cooldown_path(monkeypatch):
         call_with_transient_retry(
             _runner([_rate_limit(), _rate_limit(), _rate_limit()]),
             describe="role/member",
+            provider=ANTHROPIC,
             policy=_NO_WAIT_POLICY,
             sleep=sleep,
             rotate_key=make_rotator(ANTHROPIC),
@@ -375,6 +410,7 @@ def test_rotation_exhausted_on_a_non_transient_error_still_raises(monkeypatch):
             call_with_transient_retry(
                 _runner([_billing(), _billing(), _billing()]),
                 describe="role/member",
+                provider=ANTHROPIC,
                 policy=_NO_WAIT_POLICY,
                 rotate_key=make_rotator(ANTHROPIC),
             )
@@ -394,6 +430,7 @@ def test_overload_waits_instead_of_rotating(monkeypatch):
         call_with_transient_retry(
             _runner([_overloaded()]),
             describe="role/member",
+            provider=ANTHROPIC,
             policy=_NO_WAIT_POLICY,
             sleep=sleep,
             rotate_key=make_rotator(ANTHROPIC),
@@ -417,6 +454,7 @@ def test_a_failing_rotation_hook_never_breaks_the_call(monkeypatch):
         call_with_transient_retry(
             _runner([_rate_limit()]),
             describe="role/member",
+            provider=ANTHROPIC,
             policy=_NO_WAIT_POLICY,
             rotate_key=make_rotator(ANTHROPIC),
             on_key_rotation=broken,
@@ -515,22 +553,155 @@ def test_an_unwired_provider_never_rotates(monkeypatch):
     """Rotating a provider whose adapter ignores the pool is worse than doing nothing.
 
     The client would keep the key the SDK resolved from the environment while the caller
-    skipped its cooldown — a failover that looks like it works and silently does not. Only
-    Anthropic sends ``active_key`` today, so only Anthropic may rotate.
+    skipped its cooldown — a failover that looks like it works and silently does not. Google
+    is the standing example: its documented error vocabulary cannot be cited, so it has no
+    taxonomy and never rotates however its environment is configured.
     """
 
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-a")
-    monkeypatch.setenv("OPENAI_API_KEY_FALLBACK", "sk-b")
+    monkeypatch.setenv("GOOGLE_API_KEY", "g-a")
+    monkeypatch.setenv("GOOGLE_API_KEY_FALLBACK", "g-b")
     reset_pools()
-    assert KeyPool("openai").has_fallback()  # configured…
-    assert make_rotator("openai") is None  # …but not honoured, so not offered
-    assert keys_mod.ROTATING_PROVIDERS == (ANTHROPIC,)
+    assert KeyPool("google").has_fallback()  # configured…
+    assert make_rotator("google") is None  # …but not honoured, so not offered
+    assert "google" not in keys_mod.ROTATING_PROVIDERS
 
 
 def test_preflight_only_validates_providers_that_can_rotate(monkeypatch):
     """A fallback is checked exactly where it can be honoured — the same tuple drives both."""
 
     _set_keys(monkeypatch, PRIMARY, FALLBACK)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-a")
-    monkeypatch.setenv("OPENAI_API_KEY_FALLBACK", "sk-a")  # a duplicate, but unwired
+    monkeypatch.setenv("GOOGLE_API_KEY", "g-a")
+    monkeypatch.setenv("GOOGLE_API_KEY_FALLBACK", "g-a")  # a duplicate, but unwired
     check_api_key_fallbacks()
+
+
+# ── the taxonomy is per provider, not global ────────────────────────────────────────
+
+@pytest.mark.parametrize(
+    "exc_factory, exhausted",
+    [(_openai_spent_balance, True), (_openai_spend_limit, True), (_openai_rate_limit, False)],
+    ids=["spent-balance", "spend-limit", "rate-limit"],
+)
+def test_openai_reports_every_key_quota_as_a_429_and_the_code_separates_them(exc_factory, exhausted):
+    """All three are 429s, so only the error code can say which one refills."""
+
+    exc = exc_factory()
+    assert is_key_scoped_provider_error(exc, OPENAI)
+    assert is_exhausted_key_error(exc, OPENAI) is exhausted
+
+
+def test_the_same_429_is_read_differently_under_each_provider():
+    """The trap this split exists to close.
+
+    Anthropic never reports a spent balance as a 429, so under its taxonomy a 429 always
+    refills and must not retire a key. OpenAI's spent balance *is* a 429. Classifying an
+    OpenAI failure under Anthropic's rule would leave a permanently dead key in rotation, and
+    because rotation is bidirectional the run would return to it on the fallback's next
+    routine rate limit.
+    """
+
+    exc = _openai_spent_balance()
+    assert is_exhausted_key_error(exc, OPENAI) is True
+    assert is_exhausted_key_error(exc, ANTHROPIC) is False
+
+
+def test_a_provider_without_cited_rules_never_classifies():
+    """No taxonomy, no rotation — an uncitable vocabulary is not guessed at."""
+
+    assert not is_key_scoped_provider_error(_openai_spent_balance(), "google")
+    assert not is_exhausted_key_error(_openai_spent_balance(), "google")
+    assert not is_key_scoped_provider_error(_rate_limit(), "")
+
+
+def test_openai_rotates_onto_its_fallback_and_retires_the_spent_key(monkeypatch):
+    """The batch-killing failure of 2026-08-18, now survivable."""
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-a")
+    monkeypatch.setenv("OPENAI_API_KEY_FALLBACK", "sk-b")
+    reset_pools()
+    rotations: list[str] = []
+
+    async def on_rotation(label: str, exc: BaseException) -> None:
+        rotations.append(label)
+
+    result = asyncio.run(
+        call_with_transient_retry(
+            _runner([_openai_spent_balance()]),
+            describe="analyst_colead/gpt",
+            provider=OPENAI,
+            policy=_NO_WAIT_POLICY,
+            rotate_key=make_rotator(OPENAI),
+            on_key_rotation=on_rotation,
+        )
+    )
+
+    assert result == "ok"
+    assert rotations == ["fallback1"]
+    assert active_key(OPENAI) == "sk-b"
+    assert make_rotator(OPENAI)() is None  # the spent primary is retired, not re-offered
+
+
+def test_an_unrefillable_quota_raises_instead_of_cooling_down(monkeypatch):
+    """A spent balance cannot be waited out, and OpenAI delivers it as a retryable-looking 429.
+
+    Before this, the transient path owned it: a benchmark batch spent 48 minutes in backoff
+    (42 s, 64 s, 225 s, 341 s) against a balance no wait could restore.
+    """
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-a")
+    monkeypatch.delenv("OPENAI_API_KEY_FALLBACK", raising=False)
+    reset_pools()
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    with pytest.raises(_ProviderError):
+        asyncio.run(
+            call_with_transient_retry(
+                _runner([_openai_spent_balance()] * 4),
+                describe="analyst_colead/gpt",
+                provider=OPENAI,
+                policy=_NO_WAIT_POLICY,
+                sleep=sleep,
+                rotate_key=make_rotator(OPENAI),
+            )
+        )
+    assert waits == []
+
+
+def test_an_openai_rate_limit_still_waits_when_no_key_is_left(monkeypatch):
+    """The refilling half keeps the cooldown path: waiting is the right answer for it."""
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-a")
+    monkeypatch.delenv("OPENAI_API_KEY_FALLBACK", raising=False)
+    reset_pools()
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    result = asyncio.run(
+        call_with_transient_retry(
+            _runner([_openai_rate_limit()]),
+            describe="analyst_colead/gpt",
+            provider=OPENAI,
+            policy=_NO_WAIT_POLICY,
+            sleep=sleep,
+            rotate_key=make_rotator(OPENAI),
+        )
+    )
+    assert result == "ok"
+    assert len(waits) == 1
+
+
+def test_both_wired_providers_send_their_key_explicitly():
+    """Rotation is invisible to a client that lets the SDK resolve the environment itself."""
+
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src/auto_research/models/providers"
+    assert "AsyncAnthropic(api_key=active_key(ANTHROPIC))" in (root / "anthropic.py").read_text()
+    assert "AsyncOpenAI(api_key=active_key(OPENAI))" in (root / "openai.py").read_text()
+    for provider in keys_mod.ROTATING_PROVIDERS:
+        assert provider in ("anthropic", "openai")

@@ -24,7 +24,14 @@ from pathlib import Path
 
 import pytest
 
-PACKAGE = Path(__file__).resolve().parents[1] / "src" / "auto_research"
+REPO = Path(__file__).resolve().parents[1]
+PACKAGE = REPO / "src" / "auto_research"
+# The tests are scanned too. A live test's slip is the same defect wearing a cheaper hat: on
+# 2026-08-19 a missing import in the coder matrix wasted a live invocation, and a test that only
+# runs behind an env flag has even fewer chances to be caught than a rare source branch.
+SCANNED = sorted(PACKAGE.rglob("*.py")) + sorted((REPO / "tests").glob("*.py")) + sorted(
+    (REPO / "benchmarks").rglob("*.py")
+)
 _MODULE_DUNDERS = {"__file__", "__name__", "__doc__", "__package__", "__spec__", "__loader__"}
 
 
@@ -102,9 +109,7 @@ def _undefined_names(path: Path) -> list[str]:
     return found
 
 
-@pytest.mark.parametrize(
-    "path", sorted(PACKAGE.rglob("*.py")), ids=lambda p: str(p.relative_to(PACKAGE))
-)
+@pytest.mark.parametrize("path", SCANNED, ids=lambda p: str(p.relative_to(REPO)))
 def test_module_has_no_undefined_names(path: Path) -> None:
     problems = _undefined_names(path)
     assert not problems, "\n".join(problems)

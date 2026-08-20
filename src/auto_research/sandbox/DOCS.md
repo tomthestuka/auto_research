@@ -388,6 +388,81 @@ failure is logged via `coder.tree_reset.error` and swallowed, never masking the 
 launch preflight (`check_toolkit_branch_clean`) still guards a dirty tree at startup — e.g. a
 run killed before `finally` ran.
 
+### `coder/` — the author harnesses (which process writes the code)
+
+The `coder` role in `config/models.yaml` names both a model and the **harness** that drives it, so
+a run can be authored by the Claude Agent SDK or by the Codex app-server without any change to the
+authoring flow. What the flow needs from an author is three methods; everything else about a
+harness is the backend's business.
+
+```python
+class CoderBackend(Protocol):        # coder/backend.py
+    async def connect(self) -> None            # bring the author process up
+    async def drive(self, message: str) -> str # one turn; streams to the ledger, books its spend
+    async def disconnect(self) -> None         # take it down (finally + interrupt cleanup)
+```
+
+`merge_flow._build_backend` picks the implementation from `coder_member().harness`. Both receive
+the same brief, working tree, escalation handlers and filesystem allow-list; the harnesses differ
+in what mechanism they offer for each.
+
+| wire | `claude_sdk.ClaudeSdkBackend` | `codex_sdk.CodexBackend` |
+|---|---|---|
+| process | the `claude` CLI via `ClaudeSDKClient` | `codex app-server` via `openai_codex.CodexClient` |
+| auth | the env rebuild drops `ANTHROPIC_API_KEY`, so it uses stored subscription credentials; `_with_live_anthropic_key` stamps a rotated key | the vendor key named by the member's `key_env`, in the child's environment |
+| role prompt | `prompts/coder.md` as `system_prompt` (replaces) | the same text as `developerInstructions` (layers over Codex's own tool instructions) |
+| tool surface | an explicit `allowed_tools` list | Codex's fixed built-ins plus `tools.web_search` |
+| write jail | a `PreToolUse` hook consulting `PathGuard` | `sandbox="workspace-write"` + `writableRoots` = the same allow-list, enforced by the OS (Landlock) |
+| read jail | the same hook, for tools whose path it sees | **none**: Codex grants full-disk read access by design, so a crossing is recorded as `coder.read_outside_allowlist` |
+| git ban | a `Bash` deny-rule (best-effort) | `.git` is read-only inside a writable root under that sandbox |
+| escalation | an in-process SDK MCP server | an in-process Streamable-HTTP MCP endpoint (`escalation_server.py`), registered as a **process-level** `--config` override and gated by an *elicitation* the client answers with `{"action": "accept"}` |
+| cost | a session-cumulative dollar figure, differenced per turn | real token counts per model call (`thread/tokenUsage/updated`), priced by `CostMeter.record_call` like any chat role |
+| turn status | inferred | `turn/completed` carries a status and an error |
+
+Both stream the same `coder.*` events (`coder.session_start`, `coder.text`, `coder.tool_use`,
+`coder.tool_result`, `coder.turn_end`), which is what makes two harnesses comparable inside one
+campaign; `coder.read_outside_allowlist` is Codex-only by construction.
+
+**Not every pairing is proven.** `UNVERIFIED_PAIRINGS` marks the ones configured correctly and
+never run against the real service, and `check_coder_harness_supported` raises a
+`PreflightWarning` at launch when the configured coder is one of them — the run proceeds and the
+caution lands on the ledger, so a first-time failure reads against a known gap. Today that is
+**`dashscope` + `codex` (Qwen): NOT LIVE TESTED.** Every attempt on 2026-08-19 returned HTTP 400
+`AccessDenied.Unpurchased` across three models and all three documented hosts; the pay-as-you-go
+host recognised the key (the CN and token-plan hosts answered `InvalidApiKey`), so the wiring is
+right and the account was not entitled. QwenCloud gates pay-as-you-go on a complete billing
+profile (payment method plus name, address and phone verification) rather than on buying credits.
+Two traps for whoever finishes it: the Coding Plan issues `sk-sp-…` keys on a Chat-Completions
+endpoint current Codex refuses, and the Token Plan uses a different key **and** host.
+
+**Which pairings exist** (`coder/harness.py`): a harness speaks one wire dialect, so
+`HARNESS_ENDPOINTS` is the table of legal `(provider, harness)` pairs, each non-native row
+carrying the endpoint that vendor documents for that harness (DeepSeek, Z.AI GLM and Alibaba Model
+Studio publish both an Anthropic-dialect and a Responses endpoint; Anthropic publishes no Responses
+endpoint and OpenAI no Anthropic-dialect one, so those two pairs are absent). Two launch checks run
+before any model is constructed: `check_coder_harness_supported` (the pair exists, a non-native pair
+names its endpoint, the key variable is set) and `check_coder_harness_available` (the harness's CLI
+resolves — asked of each SDK rather than probed on `PATH`).
+
+**Live coverage is a matrix over the legs** (`tests/test_live_coder_matrix.py`, env-gated). One warm
+session per `(vendor, harness)` pair is walked through every stimulus the flow can send — the seed
+brief, a gate rejection, a co-lead rejection, a free-text lead instruction, a governance-file read,
+a git attempt, an `ask_lead` escalation, and a lengthening trajectory — in the order a real attempt
+produces them, because the history is part of the state under test. The stimuli are **recorded, not
+invented**: `tests/fixtures/coder_history.json` is frozen out of real run ledgers by
+`tmp_scripts/extract_coder_history.py`. Assertions sit on our side of the boundary (ledger event
+names, the working files surviving across turns, HEAD not moving, the escalation handler being
+reached in-process, spend booked, the governance marker never entering the transcript) and never
+judge model quality. A leg skips when its credential is absent, and the read-boundary expectation
+is declared per leg rather than branched inside the test, so the Claude-enforces / Codex-audits
+asymmetry is visible in the roster.
+
+**Measured, not assumed** (2026-08-19, live probe): under `approvalPolicy="untrusted"` with
+`approvalsReviewer="user"` a *patch* is offered to the client's approval handler and a denial is
+honoured, but a shell command the sandbox already permits arrives with **no** approval request. The
+Codex handler is therefore a second line over patches and sandbox escalations, not a gate on every
+command; commands are confined by the writable-roots sandbox and audited by the read event.
+
 ### `gate.run_gate` (Phase 2 step 3 — the deterministic mergeability gate)
 
 ```python
@@ -654,6 +729,41 @@ the hook mapping a fake-model verdict — no live LLM).
   touched (`_touched_packages`), so one pytest run over an authored chain honours the slowest
   package's ceiling. No clamp (trusted infra), coder-settable; values are read (never imported)
   from the worktree. Derived from the diff, not the brief's advisory `target_domain` ([A12]).
+- `coder.backend.CoderBackend` — the author-harness protocol: `connect()`, `drive(message) -> str`,
+  `disconnect()`. A backend also streams `coder.*` events and books its own spend.
+- `coder.harness.HARNESS_ENDPOINTS` → `dict[(provider, harness), str | None]` — the legal
+  pairings; the value is the endpoint that vendor documents for that harness, or `None` when the
+  harness is native to it. A pair absent from the table does not exist.
+  - `coder.harness.coder_member()` → `RoleModelConfig` — the single configured `coder` member;
+    raises when the role carries more than one (one harness drives one model).
+  - `coder.harness.check_coder_harness_supported()` — launch preflight: the pair exists, a
+    non-native pair names its endpoint, and the member's `key_env` is set. Registered in
+    `auto_research.preflight`.
+  - `coder.harness.check_coder_harness_available()` — launch preflight: the configured harness's
+    CLI resolves (asked of the SDK, not probed on `PATH`). Registered in `auto_research.preflight`.
+- `coder.codex_bin.resolve_codex_bin()` → `str` — the Codex CLI a run would launch: `$CODEX_BIN`,
+  else the SDK's own resolver (the version-matched binary it ships), else `PATH`.
+  `configured_codex_bin()` returns only the explicit override, so the backend can pass `None` and
+  let the SDK resolve its own.
+- `coder.claude_sdk.ClaudeSdkBackend(client, *, monitor, coder_model)` — the Claude Agent SDK
+  harness. The client is injected, which keeps `sdk_client_factory` usable as a test seam. The
+  SDK-specific helpers (`_build_options`, `_make_fs_guard_hook`, `_make_escalation_server`,
+  `_drive_author`, `_record_coder_cost`, `_with_live_anthropic_key`, and the deprecated
+  `_make_path_confiner`) live here and are re-exported from `merge_flow` for callers and tests.
+- `coder.codex_sdk.CodexBackend(*, member, worktree, system_prompt, guard, escalation=None, …)` —
+  the Codex app-server harness. `approve(method, params)` is its in-process approval handler;
+  `_config_payload()` builds the thread config (writable roots, the vendor provider block, the
+  escalation MCP entry); usage from each `thread/tokenUsage/updated` is booked through
+  `CostMeter.record_call`.
+- `coder.escalation_server.EscalationServer(ask_lead, ask_human)` — a Streamable-HTTP MCP endpoint
+  serving the two escalation tools from **this** process (the handlers must reach the live lead
+  object and the run's HITL connector). Loopback, ephemeral port, per-session bearer token;
+  `url`, `env()` and `token_env` are what a harness needs, `start()`/`aclose()` its lifecycle.
+- `coder.events.emit` / `cap_text` / `CODER_TEXT_CAP` — the shared ledger emission, so a backend
+  records without importing the flow that drives it. `merge_flow._emit`/`_cap_text` alias them.
+- `merge_flow._build_backend(...)` → a `CoderBackend` — the harness dispatch, on
+  `coder_member().harness`. For Codex it turns the `agent_fs_allow` list into `writableRoots` and
+  builds the escalation endpoint; for Claude it builds the SDK options and wraps the client.
 - `review.make_review_hook(colead=None, *, author_provider, web_source=None, monitor=None)` →
   the default `run_review` hook (§9.3 step 4); the provider-decorrelated co-lead review.
   - `review.select_decorrelated_member(group, author_provider)` → `ModelHandle` — picks the
@@ -749,3 +859,130 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   so with no rotation the options are unchanged and the SDK keeps inheriting the parent env
   exactly as before. Sessions already connected are unaffected. Tests:
   `tests/test_provider_key_failover.py::test_coder_env_{is_untouched_while_the_primary_key_is_live,carries_the_rotated_key}`.
+
+- 2026-08-19 — **A second author harness: the `coder` role now names a harness, and Codex is one.**
+  New `coder/` package. `CoderBackend` (`connect`/`drive`/`disconnect`) is everything the authoring
+  flow needs from an author, so the gate, the review, the commit, the per-attempt base ref and the
+  failure reset are untouched by which process wrote the code. `claude_sdk.py` holds today's SDK
+  wires verbatim (they still re-export from `merge_flow`, so existing callers and tests are
+  unchanged) and `codex_sdk.py` adds the Codex app-server. `merge_flow._build_backend` dispatches on
+  `coder_member().harness`; `AuthoringSession` holds a backend instead of an SDK client.
+  **Which pairings exist is a table, not an inference** (`coder/harness.py`): a harness speaks one
+  wire dialect, and each non-native row carries the endpoint its vendor documents for that harness
+  (verified 2026-08-19 against DeepSeek's, Z.AI's and Alibaba Model Studio's own pages). Anthropic
+  publishes no Responses endpoint and OpenAI no Anthropic-dialect one, so those pairs are absent
+  rather than rejected. Two preflight checks (`coder_harness_supported`, `coder_harness_available`)
+  run before any model is built.
+  **Three seams differ and one is a real regression.** Codex has no per-tool allow-list, so the
+  allow-list becomes `writableRoots` under `workspace-write` — the OS-enforced write jail this
+  project has deferred since Phase 2 began, and `.git` is read-only inside it, which makes the
+  coder's git ban structural rather than a deny-rule. Escalation moves to an in-process
+  Streamable-HTTP MCP endpoint (`escalation_server.py`, loopback + per-session bearer token) because
+  `ask_lead` and `ask_human` must keep reaching the live lead object and the run's HITL connector.
+  **Reads are the regression:** Codex grants full-disk read access by design and asks no approval to
+  read, so a crossing is recorded as `coder.read_outside_allowlist` rather than prevented; the
+  preventive form is the §12 OS jail.
+  **Measured rather than assumed** (live probe, ~$0.02): under `approvalPolicy="untrusted"` with
+  `approvalsReviewer="user"` a patch approval reaches the client handler and a denial is honoured,
+  but a shell command the sandbox already permits arrives with **no** approval request — so the
+  handler is a second line, not the command gate. `developerInstructions` and `baseInstructions`
+  were both honoured; the role prompt goes in as the former, layering over Codex's own account of
+  its tools rather than replacing it. Also observed: the Python SDK *merges* `CodexConfig.env` into
+  the inherited environment (the TypeScript SDK documents replacement), and it reports real token
+  classes per model call, so Codex-leg coder spend is priced by the same code as every chat role
+  instead of arriving as an opaque session dollar figure.
+  Tests: `tests/test_coder_backends.py` (25, incl. the live-shaped approval payloads and a real
+  loopback MCP round-trip) plus the env-gated `tests/test_live_coder_matrix.py` over every leg.
+  Suite 967 → 995.
+
+- 2026-08-19 — **The coder's live coverage became a matrix, and the legality table was narrowed to
+  what the code can do.** The three `claude_sdk` alt-vendor rows are gone: those vendors do document
+  an Anthropic-dialect endpoint, but the Claude backend sets no base URL or auth token, so a member
+  naming one would have silently authored on Claude. The table now lists five pairs, and the module
+  records why the other three are absent so nobody re-derives it.
+  **`tests/test_live_coder_matrix.py`** walks one warm session per leg through nine stimuli in the
+  order a real attempt produces them, with the stimuli frozen out of real ledgers
+  (`tests/fixtures/coder_history.json`, built by `tmp_scripts/extract_coder_history.py`: an actual
+  2 kB lead instruction, an actual `no_fabrication.vocabulary` rejection, an actual three-issue
+  co-lead rejection, an actual coder question). Legs skip on a missing credential, so two run today
+  and three wait on vendor keys.
+  **Writing it immediately paid for itself twice.** Its own first invocation died on a missing
+  import — the `NameError` class the 2026-08-06 guard exists to prevent, in a file that guard did
+  not scan — so `tests/test_no_undefined_names.py` now scans `tests/` and `benchmarks/` as well as
+  the package, and that extension found a real latent defect: `tests/test_live_agents.py` still
+  constructed a `LibrarianSearcherAgent` for a role deleted from config, so that live test would
+  have `NameError`ed the moment anyone ran it. Both fixed. Suite 995 → 1093 (the guard is
+  parametrized per file, so scanning the tests and benchmarks added ~98 cases).
+  **Then it found what it was built for: four Codex defects, none visible to a deterministic
+  test.** (1) *MCP servers are read when the app-server **process** starts, not per thread*, so an
+  escalation server passed in `thread_start(config=…)` never connected and its tools were absent
+  from the author's surface; the whole config now goes in as flattened `--config` overrides
+  (`_flatten_overrides`, TOML literals). (2) *An MCP tool call is offered as an **elicitation***
+  (`mcpServer/elicitation/request`, `_meta.codex_approval_kind = "mcp_tool_call"`) whose reply
+  vocabulary is the MCP spec's `{"action": "accept"}` — answering with the `{"decision": …}` used
+  for patch approvals reads as a rejection, and the author is told *"user rejected MCP tool call"*
+  while our handler is never reached. Two shapes arrive on one callback and they do not share a
+  vocabulary; a server the runtime did not configure is now declined. (3) *Codex's command parse
+  yields paths **relative** to the command's cwd*, so resolving them against this process's cwd
+  recorded 47 crossings for ordinary in-worktree reads. (4) *`cwd` is a `RootModel`*, so `str()` on
+  it yields `root='/tmp/…'` and the base path was garbage — 40 further false crossings after fix
+  (3). An audit that cries wolf hides the one real crossing it exists to show.
+  **One finding was about the test, not the harness:** requiring an *edit* in response to a
+  recorded rejection asks a throwaway toolkit to contain files the rejection names, so the cells
+  now assert **delivery** (the turn produced a reply and activity) and record `tree_changed` as
+  data. All pinned deterministically (`test_coder_backends.py` 25 → 33).
+  **Both credentialled legs then passed** (6m46s, `logs/dev/coder-matrix/`): the escalation
+  round-trip works end to end on each harness (`ask_lead` 3 / `ask_human` 2 on Claude, 3 / 1 on
+  Codex — model → localhost MCP → in-process handler → answer), neither harness let the coder
+  commit, every stimulus produced a reply, and spend was booked on both ($1.84 notional on the
+  subscription, $1.29 real). **The read asymmetry is now measured rather than argued:** the Claude
+  leg refused the governance file (marker absent, zero crossings recorded) while the Codex leg read
+  it and the audit recorded exactly **2** crossings — the real one and nothing else, against 47 and
+  40 false ones before the two path fixes. An audit is only worth having at that precision.
+
+- 2026-08-19 — **Vendor keys seeded; four of five coder legs live-probed, and Qwen recorded as
+  untested rather than quietly skipped.** DeepSeek and Z.AI answered on the first trivial turn;
+  Qwen refused every attempt with HTTP 400 `AccessDenied.Unpurchased` across three models and all
+  three documented hosts, which the host-by-model probe attributed to entitlement rather than
+  wiring (the pay-as-you-go host recognised the key; the CN and token-plan hosts answered
+  `InvalidApiKey`). Three records now carry that: `UNVERIFIED_PAIRINGS` in `coder/harness.py`, a
+  new **`PreflightWarning`** tier so `check_coder_harness_supported` cautions at launch without
+  blocking it (the caution lands on the ledger at level 2, and the summary counts warnings
+  separately from failures), and a skip in the live matrix carrying the vendor's own refusal.
+  **The skip is a classification, not a convenience:** an unentitled account is an environment
+  fact, and letting nine downstream cells report nine consequences of one cause would bury it.
+  A leg that refuses on the seed turn stops there and reports the refusal, so it starts passing
+  for real the moment the account is entitled. Also fixed on the way: a failed Codex turn returned
+  an empty string, which the lead would read as a silent no-op — it now returns
+  `[harness error] …` carrying the vendor's message, which is what made the Qwen diagnosis legible
+  at all. Suite 1108 → 1112.
+
+- 2026-08-19 — **The coder matrix is green on every credentialled leg, and it paid for itself
+  four more times on the way.** Final sheet (`logs/dev/coder-matrix/`, ten cells per leg):
+
+  | leg | model | usage | cost | reads outside the allow-list |
+  |---|---|---|---|---|
+  | `claude_sdk`+anthropic | `claude-sonnet-5` | 11 calls | $1.69 | **0 — refused** |
+  | `codex`+openai | `gpt-5.6-terra` | 30 calls | $0.354 | 2 |
+  | `codex`+deepseek | `deepseek-v4-flash` | 100 calls | $0.041 | **36** |
+  | `codex`+zai | `glm-5.3` | 69 calls | $0.527 | 2 |
+  | `codex`+dashscope | `qwen3.7-plus` | — | — | skipped: account not entitled |
+
+  Every leg keeps its working tree across turns, refuses to commit, is offered both escalation
+  tools and reaches their in-process handlers when it calls them, and books usage for every model
+  call. **The DeepSeek row is the finding:** unprompted, that coder read `coder/codex_sdk.py` (the
+  backend driving it), `sandbox/DOCS.md`, `tests/test_live_coder_matrix.py` (the test harnessing
+  it), that test's fixture, the installed Codex SDK sources and `~/.codex/config.toml`. The §2/§4
+  boundary as a measurement: denied on the Claude harness, recorded-and-allowed on Codex, and
+  exactly what the §12 `bwrap` jail blocks.
+  **Four defects found by running it.** (1) `glm-5.3` refuses every turn unless a reasoning effort
+  is named ("This model always engages in thinking and cannot be disabled; please use low, high, or
+  max"), so a member's `parameters` now flow into the Codex config and a vendor requirement travels
+  as configuration rather than a special case. (2) litellm knows `qwen3.7-plus` and carries no rates,
+  which priced a leg at $0.00 under an authoritative-looking `source="litellm"` and shadowed
+  `priceMTk`; a rate-less entry is now treated as absent. (3) `_touched_paths` sliced git porcelain
+  at a fixed offset and clipped the first character of a path. (4) Three assertions measured model
+  compliance rather than the harness contract — a reply's wording, a tool being *called* rather than
+  *offered*, a priced cost rather than a booked one — and two legs failed on the first of those
+  while behaving correctly. The contract is what the matrix asserts now; behaviour is recorded.
+  Suite 1112 → 1115.

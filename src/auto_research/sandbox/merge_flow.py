@@ -37,6 +37,18 @@ import yaml
 
 from auto_research.agents.prompts import load_prompt
 from auto_research.hitl import HumanHandler, HumanInputRequired, resolve_human
+from auto_research.sandbox.coder.claude_sdk import (  # noqa: F401 — re-exported: the Claude
+    ClaudeSdkBackend,                                # harness's own wires live in that module,
+    _build_options,                                  # and callers/tests still import them here
+    _default_sdk_client_factory,
+    _drive_author,
+    _make_escalation_server,
+    _make_fs_guard_hook,
+    _make_path_confiner,
+    _record_coder_cost,
+    _with_live_anthropic_key,
+)
+from auto_research.sandbox.coder.events import CODER_TEXT_CAP, cap_text, emit
 from auto_research.schemas import GateReport, HumanQuery, MergeFlowResult, ToolReviewVerdict, ToolSpec
 
 # Type aliases for the injectable hooks (stubs in step 2; real impls in steps 3/4).
@@ -273,36 +285,13 @@ def _observation_paths() -> dict[str, str]:
 
 # ----------------------------------------------------------------------------
 # Monitor emit helpers — make the authoring flow (coder stream, escalations, gate/
-# review/commit) legible in the run's JSONL. team="tooling"; no-op when monitor is None.
+# review/commit) legible in the run's JSONL. Defined in ``coder.events`` so an author
+# harness records under the same names without importing the flow that drives it.
 # ----------------------------------------------------------------------------
 
-_CODER_TEXT_CAP = 2_000
-
-
-def _cap_text(text: str, limit: int = _CODER_TEXT_CAP) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"… [+{len(text) - limit:,} chars]"
-
-
-async def _emit(
-    monitor: Any | None,
-    event: str,
-    *,
-    level: int,
-    summary: str,
-    data: dict[str, Any] | None = None,
-    actor: str = "coder",
-) -> None:
-    """Record one authoring event; logging must never break the authoring flow."""
-    if monitor is None:
-        return
-    try:
-        await monitor.record(
-            "tooling", event, level=level, summary=summary, actor=actor, data=data or {}
-        )
-    except Exception:  # noqa: BLE001
-        pass
+_CODER_TEXT_CAP = CODER_TEXT_CAP
+_cap_text = cap_text
+_emit = emit
 
 
 # ----------------------------------------------------------------------------
@@ -352,42 +341,6 @@ def _make_ask_human_handler(
     return handler
 
 
-def _make_escalation_server(
-    ask_lead: Callable[..., Awaitable[str]], ask_human: Callable[..., Awaitable[str]]
-):
-    """Build the in-process MCP server exposing ``ask_lead`` and ``ask_human`` (§9.7)."""
-    from claude_agent_sdk import create_sdk_mcp_server, tool
-
-    _msg_schema = {
-        "type": "object",
-        "properties": {
-            "message": {
-                "type": "string",
-                "description": "Your question, in Markdown — the ask first, then any needed facts.",
-            }
-        },
-        "required": ["message"],
-    }
-
-    @tool(
-        "ask_lead",
-        "Ask the analyst lead a code/convention/which-lib-function question (Markdown).",
-        _msg_schema,
-    )
-    async def _ask_lead(args: dict[str, Any]) -> dict[str, Any]:
-        answer = await ask_lead(args["message"])
-        return {"content": [{"type": "text", "text": answer}]}
-
-    @tool(
-        "ask_human",
-        "Escalate a genuine expert-science unknown to the real human (Markdown).",
-        _msg_schema,
-    )
-    async def _ask_human(args: dict[str, Any]) -> dict[str, Any]:
-        answer = await ask_human(args["message"])
-        return {"content": [{"type": "text", "text": answer}]}
-
-    return create_sdk_mcp_server("escalation", tools=[_ask_lead, _ask_human])
 
 
 # ----------------------------------------------------------------------------
@@ -599,77 +552,8 @@ def heal_toolkit_branch_if_dirty(
 _DEFAULT_APPROVE_EDIT = approve_edit
 
 
-def _make_path_confiner(worktree: Path):
-    """DEPRECATED — do not use for confinement (see CLAUDE.md "Loose ends").
-
-    A ``can_use_tool`` callback that denied file writes outside the worktree. The official
-    Claude Agent SDK permission flow runs ``can_use_tool`` **last** and **skips it** under
-    ``permission_mode="acceptEdits"`` / when an ``allowed_tools`` rule matches — so it never
-    fired here (it could not gate reads or Bash at all). Superseded by the ``PreToolUse`` hook
-    :func:`_make_fs_guard_hook` (runs first, fires for every tool call) enforcing the shared
-    :class:`~auto_research.sandbox.fs_guard.PathGuard` allow-list. Kept for reference; unwired.
-    """
-    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
-
-    write_tools = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
-    root = worktree.resolve()
-
-    async def can_use_tool(name: str, args: dict[str, Any], ctx: Any) -> Any:
-        if name in write_tools:
-            target = args.get("file_path") or args.get("path") or args.get("notebook_path")
-            if target is not None:
-                resolved = Path(str(target)).resolve()
-                if resolved != root and root not in resolved.parents:
-                    return PermissionResultDeny(message=f"path outside worktree: {target}")
-        return PermissionResultAllow()
-
-    return can_use_tool
 
 
-_FILE_TOOLS = {"Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Glob", "Grep"}
-
-
-def _make_fs_guard_hook(guard):
-    """A Claude Agent SDK ``PreToolUse`` hook enforcing the shared filesystem allow-list
-    (:class:`~auto_research.sandbox.fs_guard.PathGuard`) on the coder.
-
-    The correct gate: ``PreToolUse`` runs **first** in the permission flow and fires for **every**
-    tool call (unlike ``can_use_tool`` — see the deprecated :func:`_make_path_confiner`). File
-    tools are checked by their path argument (exact); ``Bash`` by the absolute paths *named* in its
-    command (best-effort — a subprocess's implicit reads are invisible to the hook; the complete
-    fix is the OS-level jail, §12 / Loose ends). The system's ``auto_research`` repo and governance
-    files are not on the allow-list, so they are denied (§2/§4). Fail-open on an unexpected internal
-    error so a guard bug never bricks authoring.
-    """
-
-    async def hook(input_data, tool_use_id, context):  # noqa: ANN001 — SDK callback signature
-        try:
-            tool = input_data.get("tool_name", "")
-            ti = input_data.get("tool_input") or {}
-            denied: str | None = None
-            if tool in _FILE_TOOLS:
-                target = ti.get("file_path") or ti.get("path") or ti.get("notebook_path")
-                if target is not None and not guard.is_allowed(target):
-                    denied = str(target)
-            elif tool == "Bash":
-                denied = guard.forbidden_in_command(ti.get("command", ""))
-            if denied is not None:
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": input_data.get("hook_event_name", "PreToolUse"),
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": (
-                            f"{denied} is outside the coder's filesystem allow-list "
-                            f"(research_toolkit / obsdb / analyst-env / HEASoft); the auto_research "
-                            f"orchestration repo and governance files are off-limits (§2/§4)."
-                        ),
-                    }
-                }
-        except Exception:  # noqa: BLE001 — a guard bug must never brick authoring (fail-open)
-            return {}
-        return {}
-
-    return hook
 
 
 def _author_env(toolkit_root: Path) -> dict[str, str] | None:
@@ -705,173 +589,14 @@ def _author_env(toolkit_root: Path) -> dict[str, str] | None:
     return env
 
 
-def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, escalation_server, max_turns: int, env: dict[str, str] | None = None):
-    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
-
-    from auto_research.sandbox.fs_guard import PathGuard
-
-    # Filesystem jail: a PreToolUse hook (runs first, fires for every tool call) enforcing the
-    # shared config allow-list. Replaces the deprecated can_use_tool confiner, which the SDK
-    # skips under acceptEdits/allow-rules. Inactive when agent_fs_allow is unset (allow-all).
-    fs_guard_hook = _make_fs_guard_hook(PathGuard.from_config())
-    kwargs: dict[str, Any] = dict(
-        cwd=str(worktree),
-        model=coder_model,
-        system_prompt=system_prompt,
-        setting_sources=[],  # SDK-only: ignore any filesystem .claude/settings
-        permission_mode="acceptEdits",
-        hooks={
-            "PreToolUse": [
-                HookMatcher(
-                    matcher="Read|Write|Edit|MultiEdit|NotebookEdit|Glob|Grep|Bash",
-                    hooks=[fs_guard_hook],
-                )
-            ]
-        },
-        mcp_servers={"escalation": escalation_server},
-        allowed_tools=[
-            "Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep",
-            "WebSearch", "WebFetch",
-            "mcp__escalation__ask_lead", "mcp__escalation__ask_human",
-        ],
-        # The coder never issues git (§9.9): staging/commit is the runtime's job
-        # (``approve_edit`` only, after gate-pass ∧ review-pass). Deny-rules are evaluated
-        # first and apply under acceptEdits; prefix-matching is best-effort (pipes/subshells
-        # can slip), so the per-attempt base-ref reset (``_reset_direct_tree``) is the robust
-        # backstop that drops any commit a coder still lands. Scoped to the coder by being on
-        # the coder's own options, not global settings.
-        disallowed_tools=["Bash(git:*)", "Bash(git)"],
-        max_turns=max_turns,
-    )
-    env = _with_live_anthropic_key(env)
-    if env:  # full sourced env (analyst conda + HEASoft); omit when unset so the SDK inherits.
-        kwargs["env"] = env
-    return ClaudeAgentOptions(**kwargs)
 
 
-def _with_live_anthropic_key(env: dict[str, str] | None) -> dict[str, str] | None:
-    """Stamp the currently-live Anthropic key onto the coder's env, when it has rotated.
-
-    The coder is the Claude Agent SDK — a **separate process** that authenticates from its
-    own environment, so a key rotation inside this process (see
-    ``auto_research.models.keys``) does not reach it. A session started after a rotation
-    would otherwise launch on the throttled or exhausted key.
-
-    Untouched in the common case: while the live key still equals ``ANTHROPIC_API_KEY``
-    there is nothing to override, so ``None`` stays ``None`` and the SDK keeps inheriting
-    the parent environment exactly as before. Only a rotated key materializes a dict.
-    A session already in flight keeps the key it launched with — the SDK owns that
-    subprocess's environment for its lifetime.
-    """
-
-    import os
-
-    from auto_research.models.keys import ANTHROPIC, active_key
-
-    live = active_key(ANTHROPIC)
-    if not live or live == os.environ.get("ANTHROPIC_API_KEY"):
-        return env
-    merged = dict(env) if env else dict(os.environ)
-    merged["ANTHROPIC_API_KEY"] = live
-    return merged
 
 
-def _default_sdk_client_factory(options):
-    from claude_agent_sdk import ClaudeSDKClient
-
-    return ClaudeSDKClient(options=options)
 
 
-async def _record_coder_cost(result_message: Any, coder_model: str) -> float | None:
-    """Feed one coder turn's spend to the run's cost meter; return the turn's delta in USD.
-
-    ``ResultMessage.total_cost_usd`` is **session-cumulative** (verified against real runs: it grows
-    monotonically across a session's turns), so the meter converts it to a per-turn delta keyed by
-    ``session_id``. Returns ``None`` when the SDK reported no cost or no meter is installed.
-    """
-
-    from auto_research.observability import current_cost_meter
-
-    cumulative = getattr(result_message, "total_cost_usd", None)
-    meter = current_cost_meter()
-    if cumulative is None or meter is None:
-        return None
-    try:
-        return await meter.record_session_total(
-            role="coder",
-            member="claude_sdk",
-            provider="anthropic",
-            model=coder_model or "claude_sdk",
-            session_id=str(getattr(result_message, "session_id", "") or "coder"),
-            cumulative_usd=float(cumulative),
-        )
-    except Exception:  # noqa: BLE001 — cost accounting never breaks an authoring turn
-        return None
 
 
-async def _drive_author(
-    client: Any, message: str, *, monitor: Any | None = None, coder_model: str = ""
-) -> str:
-    """Send one turn to the warm author session and drain its response (L0 runs inside).
-
-    When a ``monitor`` is wired, each streamed block is mirrored to the run's JSONL so the
-    otherwise-opaque SDK author session is legible: tool calls (file edits, bash, ask_*),
-    tool results, narration, and the per-turn end summary. Logging never breaks the drain.
-
-    The turn-end result also carries the SDK session's **cumulative** dollar cost, which is fed to
-    the run's cost meter as a delta — the coder is a separate process making its own API calls, so
-    this is the only path by which its spend (historically the largest unaccounted line) reaches
-    the run's cost record.
-    """
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ResultMessage,
-        TextBlock,
-        ToolResultBlock,
-        ToolUseBlock,
-        UserMessage,
-    )
-
-    await client.query(message)
-    chunks: list[str] = []
-    async for msg in client.receive_response():
-        if isinstance(msg, AssistantMessage):
-            for block in getattr(msg, "content", []) or []:
-                if isinstance(block, TextBlock):
-                    chunks.append(block.text)
-                    if block.text.strip():
-                        await _emit(monitor, "coder.text", level=8,
-                                    summary=_cap_text(block.text.strip(), 80),
-                                    data={"text": _cap_text(block.text)})
-                elif isinstance(block, ToolUseBlock):
-                    await _emit(
-                        monitor, "coder.tool_use", level=7,
-                        summary=f"coder → {block.name}",
-                        data={"tool": block.name,
-                              "input": _cap_text(json.dumps(block.input, default=str, sort_keys=True))},
-                    )
-        elif isinstance(msg, UserMessage):
-            for block in getattr(msg, "content", []) or []:
-                if isinstance(block, ToolResultBlock):
-                    text = block.content if isinstance(block.content, str) else json.dumps(
-                        block.content, default=str
-                    )
-                    await _emit(
-                        monitor, "coder.tool_result", level=7,
-                        summary=f"coder tool result{' (error)' if block.is_error else ''}",
-                        data={"is_error": bool(block.is_error), "text": _cap_text(text)},
-                    )
-        elif isinstance(msg, ResultMessage):
-            turn_usd = await _record_coder_cost(msg, coder_model)
-            await _emit(
-                monitor, "coder.turn_end", level=5,
-                summary=f"coder turn ended ({msg.num_turns} turns)",
-                data={"num_turns": msg.num_turns, "stop_reason": getattr(msg, "stop_reason", None),
-                      "cost_usd": getattr(msg, "total_cost_usd", None),
-                      "cost_usd_turn": turn_usd,
-                      "is_error": bool(getattr(msg, "is_error", False))},
-            )
-    return "\n".join(chunks)
 
 
 # ----------------------------------------------------------------------------
@@ -937,7 +662,7 @@ class AuthoringSession:
         self,
         *,
         tool_spec: ToolSpec,
-        client: Any,
+        backend: Any,
         worktree: Path,
         branch: str,
         base_ref: str | None,
@@ -968,7 +693,7 @@ class AuthoringSession:
         self.last_gate: GateReport | None = None
         self.last_review: ToolReviewVerdict | None = None
         self.last_commit_sha: str | None = None
-        self._client = client
+        self._backend = backend
         self._base_ref = base_ref
         self._structure_context = structure_context
         self._run_gate = run_gate
@@ -986,7 +711,7 @@ class AuthoringSession:
         return _initial_message(self.tool_spec, self._structure_context)
 
     async def connect(self) -> None:
-        await self._client.connect()
+        await self._backend.connect()
         await _emit(
             self._monitor, "coder.session_start", level=4,
             summary=f"authoring {self.tool_spec.proposed_tool_name} on branch {self.branch}",
@@ -995,10 +720,12 @@ class AuthoringSession:
         )
 
     async def drive(self, message: str) -> str:
-        """Send one instruction to the warm coder session and drain its response (L0 inside)."""
-        return await _drive_author(
-            self._client, message, monitor=self._monitor, coder_model=self._coder_model
-        )
+        """Send one instruction to the warm coder session and drain its response (L0 inside).
+
+        Which author harness answers is the backend's business (``coder.backend``); this flow is
+        defined over the working tree, so the gate, the review and the commit are identical
+        whichever one it is."""
+        return await self._backend.drive(message)
 
     async def run_gate_step(self) -> GateReport:
         """Run the deterministic gate over the current tree (§9.4). First applies the §9.9
@@ -1085,12 +812,64 @@ class AuthoringSession:
         if self._closed:
             return
         self._closed = True
-        await self._client.disconnect()
+        await self._backend.disconnect()
         if self._direct_branch is not None and not self.committed:
             await _reset_direct_tree(
                 self._toolkit_root, base_ref=self._base_ref, artifact_dir=self._worktree_base,
                 monitor=self._monitor, tool_spec=self.tool_spec,
             )
+
+
+def _build_backend(
+    *,
+    worktree: Path,
+    toolkit_root: Path,
+    coder_model: str,
+    system_prompt: str,
+    ask_lead: Callable[..., Awaitable[str]],
+    ask_human: Callable[..., Awaitable[str]],
+    max_turns: int,
+    monitor: Any | None,
+    sdk_client_factory: Callable[[Any], Any],
+) -> Any:
+    """Build the author harness the ``coder`` role names (§6, ``coder.harness``).
+
+    Both backends receive the same brief, the same working tree, the same escalation handlers and
+    the same filesystem allow-list; what differs is the mechanism each harness offers for them.
+    The Claude SDK hosts the escalation tools in-process and gates the filesystem with a hook; the
+    Codex app-server takes an MCP endpoint by URL and enforces the allow-list as writable roots at
+    the OS level (see :mod:`auto_research.sandbox.coder.codex_sdk`).
+    """
+    from auto_research.sandbox.coder.harness import coder_member
+
+    member = coder_member()
+    if member.harness == "codex":
+        from auto_research.sandbox.coder.codex_sdk import CodexBackend
+        from auto_research.sandbox.coder.escalation_server import EscalationServer
+        from auto_research.sandbox.fs_guard import PathGuard, load_fs_allowlist
+
+        # The allow-list becomes this harness's writable roots, with the working tree always in
+        # it: one configured list, enforced by the OS rather than by a hook.
+        roots = [str(Path(root)) for root in load_fs_allowlist()]
+        if str(worktree) not in roots:
+            roots.append(str(worktree))
+        return CodexBackend(
+            member=member,
+            worktree=worktree,
+            system_prompt=system_prompt,
+            guard=PathGuard.from_config(),
+            escalation=EscalationServer(ask_lead, ask_human),
+            env=_author_env(toolkit_root),  # author's shell == analyst/gate execution env
+            writable_roots=roots,
+            monitor=monitor,
+        )
+
+    options = _build_options(
+        worktree=worktree, coder_model=coder_model, system_prompt=system_prompt,
+        escalation_server=_make_escalation_server(ask_lead, ask_human), max_turns=max_turns,
+        env=_author_env(toolkit_root),  # author's Bash == analyst/gate code-execution env
+    )
+    return ClaudeSdkBackend(sdk_client_factory(options), monitor=monitor, coder_model=coder_model)
 
 
 def build_authoring_session(
@@ -1169,18 +948,21 @@ def build_authoring_session(
 
     structure_context = _build_structure_context(worktree)
     system_prompt = load_prompt("coder")
-    escalation_server = _make_escalation_server(
-        _make_ask_lead_handler(lead, monitor=monitor),
-        _make_ask_human_handler(human_handler, model=coder_model, monitor=monitor),
+    ask_lead = _make_ask_lead_handler(lead, monitor=monitor)
+    ask_human = _make_ask_human_handler(human_handler, model=coder_model, monitor=monitor)
+    backend = _build_backend(
+        worktree=worktree,
+        toolkit_root=toolkit_root,
+        coder_model=coder_model,
+        system_prompt=system_prompt,
+        ask_lead=ask_lead,
+        ask_human=ask_human,
+        max_turns=max_turns,
+        monitor=monitor,
+        sdk_client_factory=sdk_client_factory,
     )
-    options = _build_options(
-        worktree=worktree, coder_model=coder_model, system_prompt=system_prompt,
-        escalation_server=escalation_server, max_turns=max_turns,
-        env=_author_env(toolkit_root),  # author's Bash == analyst/gate code-execution env
-    )
-    client = sdk_client_factory(options)
     return AuthoringSession(
-        tool_spec=tool_spec, client=client, worktree=worktree, branch=branch, base_ref=base_ref,
+        tool_spec=tool_spec, backend=backend, worktree=worktree, branch=branch, base_ref=base_ref,
         structure_context=structure_context, run_gate=run_gate, run_review=run_review,
         approve_edit=approve_edit, direct_branch=direct_branch, toolkit_root=toolkit_root,
         worktree_base=worktree_base, submit_cap=submit_cap, debate_cap=debate_cap, monitor=monitor,

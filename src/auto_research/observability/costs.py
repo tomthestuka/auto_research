@@ -113,9 +113,17 @@ def _rates_from_litellm(provider: ProviderName, model: str) -> TokenRates | None
         if not entry:
             continue
         in_rate = float(entry.get("input_cost_per_token", 0.0) or 0.0)
+        out_rate = float(entry.get("output_cost_per_token", 0.0) or 0.0)
+        if in_rate <= 0 and out_rate <= 0:
+            # A known id carrying no rates is worse than an unknown one: it prices every token at
+            # zero while reporting ``source="litellm"``, which reads as authoritative, and it
+            # shadows the member's own ``priceMTk``. Treat it as absent so the fallback engages.
+            # (`qwen3.7-plus` was exactly this on 2026-08-19.) A model that is genuinely free says
+            # so explicitly with ``priceMTk: {input: 0, output: 0}``, which at least labels itself.
+            continue
         return TokenRates(
             input=in_rate,
-            output=float(entry.get("output_cost_per_token", 0.0) or 0.0),
+            output=out_rate,
             # litellm omits cache costs on models without caching → derive from input.
             cache_read=float(entry.get("cache_read_input_token_cost") or in_rate * 0.1),
             cache_write=float(entry.get("cache_creation_input_token_cost") or in_rate * 1.25),

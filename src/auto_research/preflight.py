@@ -6,7 +6,8 @@ of after burning tokens (the ``.env`` shape, the author↔reviewer provider deco
 …). This is the single place the run's preconditions are asserted.
 
 Design: a check is a zero-arg function that **raises on failure** and lives in its *own*
-module (next to the thing it validates) — ``env.check_required_env``,
+module (next to the thing it validates). A check may also raise :class:`PreflightWarning` for a
+precondition that is satisfiable but unproven — the launch continues and the caution is recorded — ``env.check_required_env``,
 ``sandbox.review.check_author_reviewer_decorrelation``, etc. ``build_default_preflight``
 registers them into a :class:`Preflight`; ``run_checklist`` runs them all and aggregates
 every failure into one error (so a single launch reports *all* misconfigurations, not just
@@ -29,6 +30,18 @@ class PreflightError(RuntimeError):
 
     The message aggregates every failed check so a single launch surfaces all
     misconfigurations at once.
+    """
+
+
+class PreflightWarning(RuntimeError):
+    """Raised *by a check* to report a caution that must not block the launch.
+
+    Some preconditions are satisfiable but unproven — a configuration this project has never
+    exercised live, for instance. Blocking such a run would be wrong (it may well work) and
+    passing silently would be worse (a first-time failure then looks like a defect in the flow).
+    So a check raises this instead: the launch continues, the line reads ``WARNING``, and the
+    caution lands on the run ledger where a later reader of the record can see it was known in
+    advance.
     """
 
 
@@ -66,6 +79,7 @@ class Preflight:
         launch), and one level-3 tally closes the checklist out either way.
         """
         failures: list[str] = []
+        warnings: list[str] = []
         for name, check in self._checks:
             print(f"  [preflight] {name} …", end="", flush=True)
             try:
@@ -75,6 +89,14 @@ class Preflight:
                 print(" ok", flush=True)
                 await _record(monitor, f"preflight.{name}", level=5,
                               summary=f"Preflight {name}: ok", data={"check": name, "ok": True})
+            except PreflightWarning as warning:
+                # Satisfiable but unproven: the run proceeds and the caution is recorded, so a
+                # later failure is read against something that was flagged, not as a surprise.
+                print(f" WARNING: {warning}", flush=True)
+                warnings.append(f"[{name}] {warning}")
+                await _record(monitor, f"preflight.{name}", level=2,
+                              summary=f"Preflight {name}: WARNING — {warning}",
+                              data={"check": name, "ok": True, "warning": str(warning)})
             except Exception as exc:  # noqa: BLE001 — any failure is a launch-blocking fault
                 print(" FAILED", flush=True)
                 failures.append(f"[{name}] {exc}")
@@ -82,11 +104,14 @@ class Preflight:
                               summary=f"Preflight {name}: FAILED",
                               data={"check": name, "ok": False, "error": str(exc)})
         passed = len(self._checks) - len(failures)
+        tally = f"Preflight: {passed}/{len(self._checks)} checks passed"
+        if warnings:
+            tally += f", {len(warnings)} warning(s)"
         await _record(
-            monitor, "preflight.summary", level=3,
-            summary=f"Preflight: {passed}/{len(self._checks)} checks passed",
+            monitor, "preflight.summary", level=3, summary=tally,
             data={"passed": passed, "total": len(self._checks),
-                  "failed": [f.split("]")[0].lstrip("[") for f in failures]},
+                  "failed": [f.split("]")[0].lstrip("[") for f in failures],
+                  "warnings": warnings},
         )
         if failures:
             raise PreflightError(
@@ -112,6 +137,10 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
         check_toolkit_git_identity,
         check_toolkit_root_configured,
     )
+    from auto_research.sandbox.coder import (
+        check_coder_harness_available,
+        check_coder_harness_supported,
+    )
     from auto_research.sandbox.review import check_author_reviewer_decorrelation
     from auto_research.sandbox.runner import check_analyze_probe
     from auto_research.storage import check_database_health
@@ -122,6 +151,8 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     preflight.register("checkpointer_available", check_checkpointer_available)
     preflight.register("database_health", check_database_health)
     preflight.register("author_reviewer_decorrelation", check_author_reviewer_decorrelation)
+    preflight.register("coder_harness_supported", check_coder_harness_supported)
+    preflight.register("coder_harness_available", check_coder_harness_available)
     preflight.register("toolkit_root_configured", check_toolkit_root_configured)
     preflight.register("toolkit_git_identity", check_toolkit_git_identity)
     preflight.register("toolkit_branch_clean", check_toolkit_branch_clean)

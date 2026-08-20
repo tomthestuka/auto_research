@@ -35,9 +35,13 @@ dependencies:
   - questionary>=2.0   # interactive install.sh prompts (arrow-menus/path entry); lazy-imported
   # tests
   - pytest>=8
-  # langgraph-cli, claude-agent-sdk, and langgraph-checkpoint-sqlite are not on conda-forge.
+  # langgraph-cli, claude-agent-sdk, openai-codex, and langgraph-checkpoint-sqlite are not on
+  # conda-forge.
   - pip:
       - -e .
       - langgraph-cli[inmem]
       - claude-agent-sdk==0.2.99
+      # Codex author harness (sandbox/coder/codex_sdk.py). Pulls its own version-matched
+      # `openai-codex-cli-bin`, which is the binary the SDK's app-server protocol is built against.
+      - openai-codex==0.147.0
       - langgraph-checkpoint-sqlite>=3.1   # AsyncSqliteSaver for durable mid-run resume (§12); pulls aiosqlite + sqlite-vec

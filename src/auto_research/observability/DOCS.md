@@ -126,3 +126,11 @@ Compacted 2026-08-05: the 2026-07-29 entries folded into one (detail in git hist
   claiming a total. `CostMeter.seed_from_ledger` reads the run's own `cost.call` rows back at install
   time, since a resumed run builds a fresh meter in a new process and its accumulated figure had
   restarted at $0.00 mid-run. Tests: `tests/test_observability.py`, `tests/test_monitor.py`.
+
+- 2026-08-19 — **A litellm entry with no rates is now treated as absent.** `_rates_from_litellm`
+  returned on the first entry it found, so a model litellm *knows* but does not price booked every
+  token at zero while reporting `source="litellm"` — and because the resolver is litellm-first, the
+  member's own `priceMTk` could never override it. Found live: a Qwen coder leg on `qwen3.7-plus`
+  recorded 40 model calls at `$0.00` and no configured price could fix it. An entry whose input and
+  output rates are both non-positive now falls through to `priceMTk`; a genuinely free model states
+  that explicitly, which at least labels the zero as ours. Tests: `test_observability.py` 13 → 15.

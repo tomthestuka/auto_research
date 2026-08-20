@@ -1,0 +1,82 @@
+{
+ "_provenance": {
+  "event": "analyst_lead.decide_authoring.output",
+  "lead_model": "claude-opus-4-8",
+  "note": "Verbatim ToolSpec as the Opus lead wrote it in run 46ed6671 (analysis #2). Frozen so a trial depends on no log file. Never edited: the brief is the fixed instrument, and how the authoring flow resolves it is the measurement.",
+  "record_sequence": 548,
+  "recovered_from": "logs/dev/P2/step-7/p1_pa_pd_stability_20260702T015350_monitor.jsonl",
+  "run_id": "eb0d2e6116d049c08aa5f4a384644462"
+ },
+ "tool_spec": {
+  "created_at": "2026-07-02T07:46:11.357895Z",
+  "disposition": "extend_existing",
+  "expected_behavior": "Extend xspec_utils with a new pure-numpy/scipy human-half module lib/pa_pd_stability.py (must NOT import xspec or ixpeobssim), one skills/session.py wrapper ixpe_pa_pd_stability, and one TOOL_MANIFEST entry (key research_toolkit.xspec_utils.ixpe_pa_pd_stability). Signature: pa_pd_stability(obs_db_path, obsids, output_dir, sources=None, variability_p_threshold=0.01, sf_lags_ks=None (default [5,10,20] ks), min_seg_for_sf=10). Per obsid it reads {obs_db_path}/{obsid}/pcube_timeseg_{obsid}.csv (reuse red_ixpe._read_existing_timeseg_csv to obtain provenance + rows_by_segid + integrated; columns segment_id,t_start_mjd,t_stop_mjd,exposure_s,PD_pct,PD_err,PA_deg,PA_err,QI,QI_err,UI,UI_err,MDP99,SIGNIF; segment_id>=0 per-segment, -1 integrated). Compute: (1) weighted mean x_bar=sum(w_i x_i)/sum(w_i) with w_i=1/sigma_i^2 and chi2=sum(w_i(x_i-x_bar)^2), dof=N-1, for PD, QI, UI, and PA; PA uses mod-180 handling (doubled-angle circular weighted mean, residuals wrapped to (-90,+90] via ((d+90)%180)-90); (2) AUTHORITATIVE 2D Stokes chi2_2D=chi2_QI+chi2_UI, dof_2D=2(N-1), p_2D=scipy.stats.chi2.sf; variable flag = p_2D<variability_p_threshold; also per-quantity p-values; (3) moment-estimator intrinsic scatter sigma_int=sqrt(max(0,sigma_obs^2-mean_var)) with upper_limit flag when the term <=0, for PA (wrapped residuals) and PD; (4) peak-to-peak PD and PA ranges; (5) first-order structure functions SF_PD(tau) and SF_PA(tau) (PA differences wrapped) at lags in sf_lags_ks, only when N>=min_seg_for_sf, tolerance half-width=0.5*segment_duration_s from provenance (fallback median inter-segment spacing), NaN for empty lag bins; (6) cross-source Spearman rank (scipy.stats.spearmanr) of mean_MDP99 vs reduced chi2_PD and vs reduced chi2_PA across obsids (>=3 finite, else NaN with note). Edge cases handled without raising: missing CSV -> record error entry and skip; N<2 -> chi2 NaN, variable=False; non-finite or non-positive errors excluded per quantity. Writes pa_pd_stability_catalog.csv (one row/obsid with obsid,source,N_seg,integrated PD/PA/MDP99/SIGNIF, chi2/dof/p for PD/PA/QI/UI, chi2_2D/dof_2D/p_2D, variable, sigma_PA_int/PA_int_upper_limit, sigma_PD_int/PD_int_upper_limit, PD_ptp, PA_ptp, rchi2_PD, rchi2_PA, mean_MDP99) and pa_pd_variability_summary.txt (per-obs 2D verdict + secondary stats, two Spearman results, cited source CSV paths). Does NOT write redundant per-obs copies of the input CSVs. Returns dict with per_obs (including sf_pd/sf_pa), spearman, catalog_csv, summary_txt, exit_code. All configurable axes (variability_p_threshold, sf_lags_ks, min_seg_for_sf) are overridable defaults so the tool serves the whole class of IXPE stability questions, not this run's instance.",
+  "id": "ixpe_pa_pd_stability",
+  "notes": "Non-trivial science tool; design settled with the human via plan_and_debate and signed off ('go'): human confirmed the QI/UI 2D chi-squared as the authoritative constancy statistic (PA/PD chi-squared secondary/descriptive), moment-estimator intrinsic scatter (not ML), and that a companion plotter is needed. Data and plots kept separate per policy: this cycle authors the data/analysis tool only; plot_pa_pd_stability (one PNG, mirrors plot_fit/plot_iqu, consumes this tool's product) is the natural next tool once this lands and a worker reruns on it. No data acquisition needed (all six ObsIDs local with pcube_timeseg products per data_catalog). Derived summaries are not observation data, so no obsdb_catalog write. NOTE: the drive_coder call returned 'authoring is not enabled for this role', so the coder was not actually driven and no tool was implemented, gated, or reviewed in this session; this ToolSpec is the finalised brief to hand off, not a merged tool.",
+  "observed_issue": null,
+  "proposed_checks": [
+   {
+    "description": "test_repro: call ixpe_pa_pd_stability twice on the same real ObsID (e.g. 01250401) and assert every catalog number is equal within tolerance. The tool is pure arithmetic (no fitting), so equality must be near-exact.",
+    "kind": "reproducibility",
+    "tolerance": 1e-10
+   },
+   {
+    "description": "Capability test that fails if the tool only emits well-shaped metadata: run against a marked synth CSV with a deliberately variable PA (synth_pa_pd_variable) and a constant one (synth_pa_pd_constant), pre-generated as data under the mission path in worker scratch. Assert the variable case yields p_2D<variability_p_threshold and variable=True while the constant case yields variable=False. Proves the constancy statistic actually discriminates variability, not just returns a plausible number.",
+    "kind": "capability",
+    "tolerance": null
+   },
+   {
+    "description": "Independent differential: for one real ObsID recompute chi2_PD with a standalone numpy expression written directly in the test (weighted mean and sum of squared weighted residuals) and assert agreement with the tool's chi2_PD. Must be an independent computation, not a call to the tool's own helper.",
+    "kind": "differential",
+    "tolerance": 1e-08
+   }
+  ],
+  "proposed_tool_name": "ixpe_pa_pd_stability",
+  "replication_tolerance": 1e-10,
+  "request_kind": "new_capability",
+  "science_context": "IXPE intra-observation PA/PD stability analysis. The time-resolved PCUBE CSVs (pcube_timeseg_{obsid}.csv) already exist on disk for all six BH-XRB ObsIDs (confirmed local via data_catalog: 01002901, 01250401, 02001901, 03002599, 03005801, 03006001 all carry a pcube_timeseg product). The toolkit's xspec_utils/lib/red_ixpe.py provides PCUBE reduction and the time-seg helpers (_segment_edges, _gti_overlap, _TIMESEG_FIELDS, _read_existing_timeseg_csv) but has NO capability to compute constancy/variability statistics on the resulting per-segment tables. Both analyst workers hit this same wall (one blocked by a sandbox path-scanner false positive on inline arithmetic, the other correctly reporting no tool exists). This is the natural dependency-order next step: reduce -> analyse.",
+  "target_domain": "xspec_utils",
+  "validation_data": [
+   {
+    "mission": "ixpe",
+    "obsid": "01002901",
+    "synthetic": false
+   },
+   {
+    "mission": "ixpe",
+    "obsid": "03002599",
+    "synthetic": false
+   },
+   {
+    "mission": "ixpe",
+    "obsid": "03005801",
+    "synthetic": false
+   },
+   {
+    "mission": "ixpe",
+    "obsid": "03006001",
+    "synthetic": false
+   },
+   {
+    "mission": "ixpe",
+    "obsid": "01250401",
+    "synthetic": false
+   },
+   {
+    "mission": "ixpe",
+    "obsid": "02001901",
+    "synthetic": false
+   },
+   {
+    "mission": "ixpe",
+    "obsid": "synth_pa_pd_variable",
+    "synthetic": true
+   },
+   {
+    "mission": "ixpe",
+    "obsid": "synth_pa_pd_constant",
+    "synthetic": true
+   }
+  ]
+ }
+}
