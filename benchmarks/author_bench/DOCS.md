@@ -83,6 +83,20 @@ Each trial also writes its own ledger, so per-round counts are read from the str
 the production flow emitted (`gate.result.passed`, `review.result.approved`) rather than by
 wrapping the hooks or parsing a summary string.
 
+### What survives a trial
+
+The clone is deleted when a trial ends, so a committed changeset would otherwise exist only as a
+commit SHA in a repository that no longer exists. Two facts make the ledger an inadequate fallback:
+coder tool inputs are capped at 4,000 characters before they are recorded, so a file written in one
+call is stored truncated, and the review payload records only a message count and a model name. A
+committed trial therefore writes `committed.patch` beside its ledger, a one-commit `format-patch`
+against the pinned base, which applies onto a fresh clone at that base with `git am`. That is what
+lets a committed changeset be re-gated or re-reviewed later without re-authoring it, which a
+reviewer-arrangement control needs and a rubber-stamp test is.
+
+`--keep-clones` stores the same information as a whole toolkit copy per trial, so it stays an
+inspection aid rather than the record.
+
 ### Terminal states against rounds
 
 A **terminal state** is what a trial ended as, so those rows partition K exactly: committed,
@@ -205,6 +219,10 @@ observation database. Nothing depends on this package.
 - **`run_trial`** — never raises: a broken trial is recorded with status `error` so one failure
   cannot end a batch. Records status, commit SHA and committed files, reason, cost, duration, and
   the ledger-derived round counts.
+- **`save_committed_patch`** — writes a committed trial's `committed.patch` (one-commit
+  `format-patch` against the pinned base) into the trial directory and returns its path; a failure
+  to produce it is written into the file rather than raised, so it can never fail a measured trial.
+  The record carries the path as `patch`.
 - **`summarise_ledger`** — tolerant of a truncated final line, so a batch that is still running
   can be read live.
 - **`stress` (in `tmp_scripts/author_bench_heartbeat.py`)** — cap proximity plus rejection
@@ -258,3 +276,15 @@ observation database. Nothing depends on this package.
   its fallback answered**, which exposed a real defect in the Codex author's key resolution (fixed in
   `sandbox/DOCS.md`, same date) and is why the probe now fails over rather than reporting the first
   refusal. Tests 20 → 34.
+
+- 2026-08-22 — **A committed trial now keeps its changeset.** `save_committed_patch` writes
+  `committed.patch` into each committed trial's directory and the record names it. Found by asking
+  whether the correlated arm's five committed trees could be re-reviewed: they could not. The clones
+  were deleted (`keep_clones` off by default), the toolkit repository never received the commits, all
+  five SHAs were absent from every surviving `/tmp` clone (each of those sits at the pinned base), and
+  the ledger carries no diff — the gate records failing checks and a report hash, the review input
+  records a message count and a model. Reconstruction from the coder's own edits fails too, because
+  its tool inputs are capped at 4,000 characters and 8 of one trial's 41 write/edit payloads are
+  stored truncated; one trial committed a file the ledger records no write to, and another wrote
+  through six shell redirects. Tests 39 → 41 (both new ones cover this: the patch reapplies onto
+  a fresh clone at the base, and a committed trial's record names a patch that outlives its clone).

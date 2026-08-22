@@ -141,6 +141,25 @@ def prepare_clone(dest: Path, toolkit_root: Path, base_sha: str, branch: str) ->
     return dest
 
 
+def save_committed_patch(clone: Path, commit_sha: str, trial_dir: Path) -> Path:
+    """Persist the committed tool as a patch beside the trial's ledger.
+
+    The clone is deleted when the trial ends, so without this the only surviving record of what
+    was committed is the ledger, whose coder tool inputs are capped mid-file. A one-commit
+    ``format-patch`` against the pinned base is complete and applies with ``git am`` onto a fresh
+    clone at that base, which is what lets a committed changeset be re-gated or re-reviewed later
+    without re-authoring it. Failing to write it leaves the trial's own outcome untouched.
+    """
+    out = trial_dir / "committed.patch"
+    try:
+        out.write_text(
+            _git(clone, "format-patch", "-1", "--stdout", commit_sha), encoding="utf-8"
+        )
+    except Exception as exc:  # noqa: BLE001 — a missing patch never fails a measured trial
+        out.write_text(f"<patch unavailable: {type(exc).__name__}: {exc}>\n", encoding="utf-8")
+    return out
+
+
 # ----------------------------------------------------------------------------
 # What the ledger says happened
 # ----------------------------------------------------------------------------
@@ -316,6 +335,7 @@ async def run_trial(index: int, cfg: TrialConfig) -> dict:
             record["committed_files"] = _git(
                 clone, "show", "--name-only", "--pretty=format:", result.commit_sha
             ).split()
+            record["patch"] = str(save_committed_patch(clone, result.commit_sha, trial_dir))
     except HumanInputRequired as exc:
         # §9.8 fail-safe: the flow needed a human and none was wired. An honest terminal, and the
         # one the paper's table names, so it is recorded rather than answered around.

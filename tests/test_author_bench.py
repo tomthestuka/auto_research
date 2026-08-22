@@ -158,6 +158,89 @@ def test_trial_clones_at_the_pinned_base_and_records_a_commit(tmp_path, monkeypa
     assert lead.seen["spec"].proposed_tool_name == "ixpe_pa_pd_stability"
 
 
+def test_save_committed_patch_writes_a_patch_that_reapplies_onto_the_base(tmp_path):
+    """The patch is the surviving record of a committed tool, so it has to re-create the tree.
+
+    The clone a trial authors in is deleted when the trial ends and the ledger caps coder tool
+    inputs mid-file, so a patch that does not apply leaves a committed changeset unrecoverable.
+    """
+    def git(cwd, *args):
+        subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True)
+
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git(origin, "init", "--quiet")
+    git(origin, "config", "user.email", "t@t")
+    git(origin, "config", "user.name", "t")
+    (origin / "keep.txt").write_text("base\n", encoding="utf-8")
+    git(origin, "add", "keep.txt")
+    git(origin, "commit", "--quiet", "-m", "base")
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(origin),
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+    clone = tmp_path / "clone"
+    trial.prepare_clone(clone, origin, base, "author-bench-t01")
+    (clone / "tool.py").write_text("def tool():\n    return 1\n", encoding="utf-8")
+    git(clone, "add", "tool.py")
+    git(clone, "commit", "--quiet", "-m", "add the tool")
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(clone),
+                         capture_output=True, text=True, check=True).stdout.strip()
+
+    trial_dir = tmp_path / "trial-01"
+    trial_dir.mkdir()
+    patch = trial.save_committed_patch(clone, sha, trial_dir)
+
+    assert patch == trial_dir / "committed.patch"
+    assert "add the tool" in patch.read_text(encoding="utf-8")
+
+    # The point of keeping it: a fresh clone at the pinned base plus the patch is the tree again.
+    fresh = tmp_path / "fresh"
+    trial.prepare_clone(fresh, origin, base, "replay")
+    git(fresh, "config", "user.email", "t@t")
+    git(fresh, "config", "user.name", "t")
+    git(fresh, "am", str(patch))
+    assert (fresh / "tool.py").read_text(encoding="utf-8") == "def tool():\n    return 1\n"
+
+
+def test_a_committed_trial_records_the_patch_beside_its_ledger(tmp_path, monkeypatch):
+    """A committed record names a patch on disk, so the changeset outlives the deleted clone."""
+    root = _skip_without_toolkit()
+
+    class _CommittingLead(_FakeLead):
+        """Commits into the clone it was handed, the way the authoring flow does."""
+
+        async def drive_authoring(self, spec, **kwargs):
+            clone = kwargs["toolkit_root"]
+            (clone / "xspec_utils" / "lib" / "bench_probe.py").write_text(
+                "VALUE = 1\n", encoding="utf-8"
+            )
+            for args in (
+                ("add", "xspec_utils/lib/bench_probe.py"),
+                ("-c", "user.email=t@t", "-c", "user.name=t", "commit", "--quiet", "-m", "probe"),
+            ):
+                subprocess.run(["git", *args], cwd=str(clone), check=True,
+                               capture_output=True, text=True)
+            sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(clone),
+                                 capture_output=True, text=True, check=True).stdout.strip()
+            self.seen = {"spec": spec, **kwargs}
+            return MergeFlowResult(
+                tool_spec_id="ixpe_pa_pd_stability", status="committed",
+                branch="author-bench-t01", commit_sha=sha, reason="gate-pass and review-pass",
+            )
+
+    lead = _CommittingLead()
+    _install_fake_lead(monkeypatch, lead)
+
+    record = asyncio.run(trial.run_trial(1, _config(tmp_path, root)))
+
+    assert record["status"] == "committed"
+    assert record["committed_files"] == ["xspec_utils/lib/bench_probe.py"]
+    patch = Path(record["patch"])
+    assert patch.exists() and "bench_probe" in patch.read_text(encoding="utf-8")
+    # The clone is gone; the patch is what is left.
+    assert not (tmp_path / "out" / "trial-01" / "repo").exists()
+
+
 def test_trial_records_a_human_raise_as_its_own_terminal_state(tmp_path, monkeypatch):
     """An unattended raise is an honest terminal, never an error and never answered for."""
     from auto_research.hitl import HumanInputRequired
