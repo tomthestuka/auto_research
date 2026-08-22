@@ -20,6 +20,15 @@ from auto_research.sandbox.merge_flow import (
 from auto_research.schemas import GateReport, ToolReviewVerdict, ToolSpec
 
 
+def _coder_member(model: str):
+    """A stand-in author member, so the flow needs no configured ``coder`` role to be exercised."""
+    from auto_research.models.types import RoleModelConfig
+
+    return RoleModelConfig(
+        name="test_coder", provider="anthropic", harness="claude_sdk", model=model
+    )
+
+
 def _spec():
     return ToolSpec(
         science_context="need retBB",
@@ -91,7 +100,7 @@ class _RecordingApproveEdit:
 def _run(spec, **kwargs):
     client = _FakeClient()
     kwargs.setdefault("lead", _FakeLead())
-    kwargs.setdefault("coder_model", "fake-model")
+    kwargs.setdefault("coder", _coder_member("fake-model"))
     kwargs.setdefault("run_gate", _pass_gate)
     kwargs.setdefault("run_review", _pass_review)
     kwargs.setdefault("worktree_factory", lambda root, base, branch: base / branch.replace("/", "_"))
@@ -630,9 +639,18 @@ def test_reset_direct_tree_swallows_errors(tmp_path):
 # ── coder filesystem jail — the PreToolUse hook (todo #3 Stage B) ─────────────────
 
 
-def test_fs_guard_hook_allows_inside_denies_outside_and_governance(tmp_path):
+@pytest.mark.parametrize("jailed", [False, True])
+def test_fs_guard_hook_allows_inside_denies_outside_and_governance(tmp_path, monkeypatch, jailed):
+    """The hook denies when it is the only layer, and stands down when the kernel jail is on.
+
+    Swept over both settings because the jail flag is gitignored machine-local config, and because
+    the standing-down half is what stopped the hook from vetoing an author's own files.
+    """
+    from auto_research.sandbox import jail
     from auto_research.sandbox.fs_guard import PathGuard
     from auto_research.sandbox.merge_flow import _make_fs_guard_hook
+
+    monkeypatch.setattr(jail, "jail_enabled", lambda: jailed, raising=True)
 
     tk = tmp_path / "research_toolkit"
     tk.mkdir()
@@ -647,12 +665,15 @@ def test_fs_guard_hook_allows_inside_denies_outside_and_governance(tmp_path):
         return out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
 
     assert call("Read", {"file_path": str(tk / "xspec_utils" / "lib" / "x.py")}) == {}  # inside → allow
-    assert denied(call("Read", {"file_path": str(tmp_path / "auto_research" / "gate.py")}))  # outside
-    assert denied(call("Read", {"file_path": str(tk / "CLAUDE.md")}))  # governance, even inside
+    # Under the jail these paths are simply absent from the author's mount namespace, so the hook
+    # allows and the kernel refuses; unjailed, the hook is the only layer and must deny.
+    expect = (lambda out: out == {}) if jailed else denied
+    assert expect(call("Read", {"file_path": str(tmp_path / "auto_research" / "gate.py")}))
+    assert expect(call("Read", {"file_path": str(tk / "CLAUDE.md")}))  # governance, even inside
     assert call("Glob", {"pattern": "**/*.py"}) == {}  # no path arg → defaults to cwd → allow
     # Bash: named-path enforcement (best-effort)
     assert call("Bash", {"command": 'python -c "import xspec_utils"'}) == {}  # no abs path named
-    assert denied(call("Bash", {"command": f"cat {tmp_path}/auto_research/gate.py"}))
+    assert expect(call("Bash", {"command": f"cat {tmp_path}/auto_research/gate.py"}))
 
 
 def test_fs_guard_hook_inactive_when_allowlist_empty():
@@ -743,7 +764,7 @@ def test_build_authoring_session_forwards_monitor_to_the_review_hook(monkeypatch
         lead=object(),
         toolkit_root=toolkit,
         worktree_base=tmp_path / "wt",
-        coder_model="test-model",
+        coder=_coder_member("test-model"),
         sdk_client_factory=lambda _o: object(),
         worktree_factory=_fake_worktree,
         run_gate=lambda *_a, **_k: None,
@@ -751,3 +772,55 @@ def test_build_authoring_session_forwards_monitor_to_the_review_hook(monkeypatch
     )
 
     assert seen["monitor"] is mon, "the review hook was built without the run monitor"
+
+
+def test_one_coder_member_carries_model_provider_and_harness_together(monkeypatch, tmp_path):
+    """The three author facts come from one object, so they cannot disagree.
+
+    They used to be resolved by three independent reads of the ``coder`` role: the model id for
+    the record and the cost meter, the provider the review is routed away from, and the harness
+    that spawns the author process. Passing one member is what lets a sweep author with a vendor
+    the config does not name, and it makes a mismatch between the three unrepresentable.
+    """
+    from auto_research.sandbox.coder.codex_sdk import CodexBackend
+    from auto_research.models.types import RoleModelConfig
+
+    seen = {}
+
+    def _fake_make_review_hook(*, colead=None, author_provider=None, monitor=None, **_kw):
+        seen["author_provider"] = author_provider
+
+        async def _hook(*_a, **_k):  # pragma: no cover — never invoked here
+            raise AssertionError
+
+        return _hook
+
+    monkeypatch.setattr(
+        "auto_research.sandbox.review.make_review_hook", _fake_make_review_hook, raising=True
+    )
+
+    toolkit = tmp_path / "research_toolkit"
+    (toolkit / ".git").mkdir(parents=True)
+
+    member = RoleModelConfig(
+        name="sweep_leg", provider="openai", harness="codex", model="gpt-5.6-terra"
+    )
+    session = build_authoring_session(
+        _spec(),
+        lead=object(),
+        toolkit_root=toolkit,
+        worktree_base=tmp_path / "wt",
+        coder=member,
+        sdk_client_factory=lambda _o: object(),
+        worktree_factory=lambda _r, base, slug: _mkdir(pathlib.Path(base) / slug.replace("/", "_")),
+        run_gate=lambda *_a, **_k: None,
+    )
+
+    assert seen["author_provider"] == "openai", "review routing must read the passed member"
+    assert session._coder_model == "gpt-5.6-terra", "the record must name the passed member"
+    assert isinstance(session._backend, CodexBackend), "the harness must be the member's"
+
+
+def _mkdir(path):
+    path.mkdir(parents=True, exist_ok=True)
+    return path

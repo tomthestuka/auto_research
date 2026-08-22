@@ -493,13 +493,14 @@ def test_thread_params_layer_the_role_prompt_rather_than_replacing_codex_instruc
     assert backend._start_thread() == "t-1"
     assert params["developerInstructions"] == "prompt"
     assert "baseInstructions" not in params
-    assert params["approvalPolicy"] == "untrusted"
+    # approvalPolicy depends on the jail (machine-local config); its own test sweeps both.
     assert params["approvalsReviewer"] == "user"
-    assert params["sandbox"] == "workspace-write"
+    # Not asserted here: the sandbox mode depends on whether the kernel jail is on, which is
+    # machine-local config. Its own test sweeps both values.
     assert params["modelProvider"] == "deepseek"
 
 
-def test_build_backend_dispatches_on_the_configured_harness(monkeypatch, tmp_path):
+def test_build_backend_dispatches_on_the_members_harness(tmp_path):
     """One config field decides which author process a run spawns; everything downstream of
     ``drive`` is identical."""
     from auto_research.sandbox import merge_flow
@@ -514,7 +515,6 @@ def test_build_backend_dispatches_on_the_configured_harness(monkeypatch, tmp_pat
     kwargs = dict(
         worktree=tmp_path,
         toolkit_root=tmp_path,
-        coder_model="claude-sonnet-5",
         system_prompt="p",
         ask_lead=ask_lead,
         ask_human=ask_human,
@@ -523,20 +523,23 @@ def test_build_backend_dispatches_on_the_configured_harness(monkeypatch, tmp_pat
         sdk_client_factory=lambda options: _FakeSdkClient(),
     )
 
-    claude = merge_flow._build_backend(**kwargs)
+    claude = merge_flow._build_backend(
+        member=_member(provider="anthropic", harness="claude_sdk", model="claude-sonnet-5"),
+        **kwargs,
+    )
     assert isinstance(claude, ClaudeSdkBackend)
 
-    monkeypatch.setattr(
-        "auto_research.sandbox.coder.harness.coder_member",
-        lambda: _member(
+    # The member is an argument, not ambient config, so one process can build both backends —
+    # which is what lets a benchmark sweep the author across vendors in one batch.
+    codex = merge_flow._build_backend(
+        member=_member(
             provider="deepseek",
             harness="codex",
             model="deepseek-v4-pro",
             base_url="https://api.deepseek.com/",
         ),
-        raising=True,
+        **kwargs,
     )
-    codex = merge_flow._build_backend(**kwargs)
     assert isinstance(codex, CodexBackend)
     # The configured allow-list becomes the harness's writable roots, with the working tree in it.
     assert str(tmp_path) in codex._writable_roots
@@ -765,3 +768,213 @@ def test_member_parameters_reach_the_codex_config_and_win():
     assert config["model_reasoning_effort"] == "high"
     # Applied last, so a member can override a default this module sets.
     assert config["tools"] == {"web_search": False}
+
+
+# --------------------------------------------------------------------------- vendor key pool
+
+
+def _codex_backend(member, env=None, monkeypatch=None, tmp_path=None):
+    from auto_research.sandbox.coder.codex_sdk import CodexBackend
+
+    return CodexBackend(
+        member=member, worktree=tmp_path, system_prompt="p", guard=None,
+        escalation=None, env=env, writable_roots=[str(tmp_path)], monitor=None,
+    )
+
+
+def test_a_rotating_provider_author_launches_on_the_live_key_not_the_primary(monkeypatch, tmp_path):
+    """The failure this exists to prevent: a spent primary retires for the whole process, every
+    chat role rotates to the fallback, and the author — reading the raw variable — launches on the
+    dead key and cannot run at all."""
+    from auto_research.models import keys as keymod
+
+    monkeypatch.setenv("OPENAI_API_KEY", "dead-primary")
+    monkeypatch.setenv("OPENAI_API_KEY_FALLBACK", "live-fallback")
+    keymod.reset_pools()
+    pool = keymod.key_pool("openai")
+    assert pool.rotate() == "fallback1", "precondition: the pool can rotate"
+
+    member = _member(provider="openai", harness="codex", model="gpt-5.6-terra",
+                     key_env="OPENAI_API_KEY")
+    backend = _codex_backend(member, tmp_path=tmp_path)
+    key, slot = backend._live_vendor_key()
+
+    assert key == "live-fallback"
+    assert slot == "fallback1", "the slot is named for the log, never the key itself"
+    keymod.reset_pools()
+
+
+def test_a_harness_only_vendor_reads_its_own_variable(monkeypatch, tmp_path):
+    """DeepSeek, Z.AI and Alibaba are deliberately outside the rotating set — no cited error
+    taxonomy, so nothing may rotate them — and their key must come from their own variable."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    member = _member(provider="deepseek", harness="codex", model="deepseek-v4-flash",
+                     base_url="https://api.deepseek.com/", key_env="DEEPSEEK_API_KEY")
+    backend = _codex_backend(member, tmp_path=tmp_path)
+
+    assert backend._live_vendor_key() == ("ds-key", "env")
+
+
+def test_a_plan_specific_variable_is_not_shadowed_by_the_pool(monkeypatch, tmp_path):
+    """A member may name a variable other than the provider's standard primary (a plan-specific
+    endpoint does). The pool describes only the standard pair, so it must not answer for one."""
+    from auto_research.models import keys as keymod
+
+    monkeypatch.setenv("OPENAI_API_KEY", "standard")
+    monkeypatch.setenv("OPENAI_PLAN_KEY", "plan-specific")
+    keymod.reset_pools()
+
+    member = _member(provider="openai", harness="codex", model="gpt-5.6-terra",
+                     key_env="OPENAI_PLAN_KEY")
+    backend = _codex_backend(member, tmp_path=tmp_path)
+
+    assert backend._live_vendor_key() == ("plan-specific", "env")
+    keymod.reset_pools()
+
+
+def test_a_pooled_key_overrides_an_inherited_one_but_an_env_key_does_not(monkeypatch, tmp_path):
+    """The author's environment is an overlay on the analyst init script's. A pooled key must win
+    over a stale inherited value, since the whole point is not to launch on a rotated-away key; a
+    vendor with no pool has nothing more authoritative than the environment, so it leaves an
+    inherited value alone."""
+    from auto_research.models import keys as keymod
+
+    monkeypatch.setenv("OPENAI_API_KEY", "dead-primary")
+    monkeypatch.setenv("OPENAI_API_KEY_FALLBACK", "live-fallback")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ours")
+    keymod.reset_pools()
+    keymod.key_pool("openai").rotate()
+
+    rotating = _codex_backend(
+        _member(provider="openai", harness="codex", model="gpt-5.6-terra",
+                key_env="OPENAI_API_KEY"),
+        env={"OPENAI_API_KEY": "stale-inherited"}, tmp_path=tmp_path,
+    )
+    value, slot = rotating._live_vendor_key()
+    assert (value, slot) == ("live-fallback", "fallback1")
+
+    harness_only = _codex_backend(
+        _member(provider="deepseek", harness="codex", model="deepseek-v4-flash",
+                base_url="https://api.deepseek.com/", key_env="DEEPSEEK_API_KEY"),
+        env={"DEEPSEEK_API_KEY": "inherited"}, tmp_path=tmp_path,
+    )
+    assert harness_only._live_vendor_key() == ("ours", "env")
+    keymod.reset_pools()
+
+
+def test_the_child_environment_carries_the_live_key_not_the_stale_one(monkeypatch, tmp_path):
+    """The production path, not just the resolver: what the author subprocess actually inherits.
+
+    ``setdefault`` was the bug's shape — an inherited value would have kept a key the run had
+    already rotated away from, and the author would have failed inside the subprocess.
+    """
+    from auto_research.models import keys as keymod
+    from auto_research.sandbox.coder.codex_sdk import CodexBackend
+
+    monkeypatch.setenv("OPENAI_API_KEY", "dead-primary")
+    monkeypatch.setenv("OPENAI_API_KEY_FALLBACK", "live-fallback")
+    keymod.reset_pools()
+    keymod.key_pool("openai").rotate()
+
+    captured: dict = {}
+
+    class _Client:
+        def start(self): pass
+        def initialize(self): pass
+        def account_login_start(self, params): captured["login"] = params
+
+    def _factory(config, _approve):
+        captured["env"] = dict(config.env)
+        return _Client()
+
+    backend = CodexBackend(
+        member=_member(provider="openai", harness="codex", model="gpt-5.6-terra",
+                       key_env="OPENAI_API_KEY"),
+        worktree=tmp_path,
+        system_prompt="p",
+        guard=None,
+        env={"OPENAI_API_KEY": "stale-inherited"},
+        client_factory=_factory,
+    )
+    backend._build_client()
+
+    assert captured["env"]["OPENAI_API_KEY"] == "live-fallback"
+    assert captured["login"].root.api_key == "live-fallback"
+    keymod.reset_pools()
+
+
+@pytest.mark.parametrize("jailed, expected", [(True, "danger-full-access"), (False, "workspace-write")])
+def test_the_harness_sandbox_stands_down_exactly_when_the_kernel_jail_is_on(
+    monkeypatch, tmp_path, jailed, expected
+):
+    """One enforcement layer, not two — and the invariant is asserted at both settings.
+
+    This harness's own sandbox *is* bubblewrap, so running it inside our bubblewrap jail nests the
+    same mechanism: it cannot spawn its sandbox helper, every shell command is rejected, and the
+    author reaches the gate having read and written nothing, which looks like a weak model rather
+    than broken plumbing. When the jail is on it therefore stands down and the kernel is the wall;
+    when the jail is off it is the only wall and stays on.
+
+    Swept rather than pinned to one value, because the flag is gitignored machine-local config: a
+    test that reads it is a test of one machine (the 2026-07-28 lesson, and this test hit it).
+    """
+    from auto_research.sandbox import jail
+    from auto_research.sandbox.coder.codex_sdk import CodexBackend
+
+    monkeypatch.setattr(jail, "jail_enabled", lambda: jailed, raising=True)
+    params = {}
+
+    class _Started:
+        thread = type("T", (), {"id": "t-1"})()
+
+    class _Client:
+        def thread_start(self, sent, **kw):
+            params.update(sent if isinstance(sent, dict) else kw)
+            return _Started()
+
+    backend = CodexBackend(
+        member=_member(harness="codex", provider="deepseek", base_url="https://api.deepseek.com/"),
+        worktree=tmp_path, system_prompt="prompt", guard=None,
+    )
+    backend._client = _Client()
+    backend._start_thread()
+
+    assert params["sandbox"] == expected
+    # Jailed, approvals are off too: that path had never run (the harness sandbox used to permit
+    # those commands without asking), and when it finally did it rejected `python` and `pytest`, so
+    # the author could not run the tests it wrote. The kernel makes out-of-jail paths absent, which
+    # is stronger than a command-string check.
+    assert params["approvalPolicy"] == ("never" if jailed else "untrusted")
+
+
+def test_an_author_may_write_only_its_worktree_and_its_own_settings_home(tmp_path):
+    """What makes standing the harness sandbox down safe rather than a loosening.
+
+    The surrendered ``workspace-write`` mode confined writes to the working tree; so does this, but
+    the kernel enforces it and reads are confined too. The observation database is read-only, so no
+    author can write a data file where a fabricated result would have to live.
+    """
+    from auto_research.sandbox.jail import coder_policy
+
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    policy = coder_policy(label="probe-write", extra_rw=(str(worktree),))
+
+    assert str(worktree) in policy.rw
+    assert policy.home in policy.rw
+    assert len(policy.rw) == 2, f"an author writes to two places only, got {policy.rw}"
+    assert all(entry not in policy.rw for entry in policy.ro)
+
+
+def test_the_temp_root_is_not_readable_by_an_author():
+    """Trial working trees live under it, so leaving it readable would let one author read
+    another's solution — which invalidates a repeated-trial measurement instead of breaking
+    anything visibly."""
+    import tempfile
+
+    from auto_research.sandbox.jail import coder_policy
+
+    policy = coder_policy(label="probe-temp")
+    temp_root = str(Path(tempfile.gettempdir()).resolve())
+    assert temp_root not in policy.ro
+    assert temp_root not in policy.rw

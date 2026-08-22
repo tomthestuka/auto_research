@@ -27,6 +27,15 @@ from auto_research.graph.runtime import load_orchestration_config
 from auto_research.sandbox.merge_flow import propose_and_pr
 from auto_research.schemas import ToolSpec
 
+
+def _coder_member(model: str):
+    """A stand-in author member, so the flow needs no configured ``coder`` role to be exercised."""
+    from auto_research.models.types import RoleModelConfig
+
+    return RoleModelConfig(
+        name="test_coder", provider="anthropic", harness="claude_sdk", model=model
+    )
+
 pytestmark = pytest.mark.skipif(
     os.getenv("AUTO_RESEARCH_LIVE_MERGE_FLOW_TESTS") != "1",
     reason="set AUTO_RESEARCH_LIVE_MERGE_FLOW_TESTS=1 to run the live authoring-reset test",
@@ -137,7 +146,7 @@ def test_live_authoring_reset_after_bad_diffs(tmp_path):
             lead=_FakeLead(),
             toolkit_root=clone,
             worktree_base=artifacts,
-            coder_model="x",
+            coder=_coder_member("x"),
             direct_branch="ai",
             gate_rework_cap=1,  # initial diff + one rework diff, then fail → reset
             run_review=_review_must_not_run,

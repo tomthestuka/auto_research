@@ -332,7 +332,8 @@ async def propose_and_pr(
     worktree_base: Path,        # isolated worktree location (under the runtime data dir)
     colead=None,                # AnalystColeadAgent — the GPT co-lead reviewer (step 4); built from config if None
     human_handler=None,         # §9.8 injected (HumanQuery)->HumanResponse (auto_research.hitl); None+headless → HumanInputRequired
-    coder_model: str | None = None,   # resolved from the `coder` role in models.yaml
+    coder: RoleModelConfig | None = None,   # the author member; None = the `coder` role in models.yaml
+    allow_correlated_review: bool = False, # MEASUREMENT ONLY: permit a same-provider co-lead
     run_gate=None,              # injectable hook; defaults to the REAL gate (gate.run_gate, step 3)
     run_review=None,            # injectable hook; defaults to the REAL review (review.make_review_hook, step 4)
     gate_rework_cap=None, review_rework_cap=None, max_turns=None,  # from orchestration.yaml
@@ -594,8 +595,8 @@ with an injected Layer-B runner — no live science stack).
 ### `review.make_review_hook` (Phase 2 step 4 — provider-decorrelated co-lead review)
 
 ```python
-def make_review_hook(colead=None, *, author_provider: str,
-                     web_source=None, monitor=None) -> ReviewHook
+def make_review_hook(colead=None, *, author_provider: str, web_source=None,
+                     monitor=None, allow_correlated: bool = False) -> ReviewHook
 def select_decorrelated_member(group, author_provider: str) -> ModelHandle
 def build_diff_bundle(worktree: Path) -> str
 ```
@@ -609,6 +610,15 @@ review-pass`). `make_review_hook` returns the default `run_review` hook (signatu
   `provider != author_provider` (the author is the Claude SDK, so the reviewer is GPT). Raises
   `ValueError` when no eligible member exists — a co-lead sharing the author's provider is a
   broken trust boundary and fails loudly. An injected `colead` is asserted decorrelated too.
+- **`allow_correlated`** is the one way past that boundary and it is opt-in, off by default, and
+  set by no production caller. It exists to *measure* what decorrelation is worth: the sweep runs
+  the same brief with a same-provider reviewer and compares. With it set, a `None` colead takes the
+  role's first member instead of a decorrelated one, and an injected same-provider colead is
+  permitted. Every review under it records a **`review.correlated`** event (level 3, actor
+  `analyst_colead`, naming the author provider and the reviewer model) rather than passing silently,
+  because a verdict reached that way does not carry the guarantee the same verdict carries in
+  production. The launch preflight still asserts the configured roles are decorrelated, so enabling
+  it cannot change how a research run behaves.
 - **`monitor` is forwarded by `build_authoring_session`**, so the co-lead built from config
   records its ReAct actions (tool calls, `web_search`, reasoning steps) onto the run ledger.
   Until 2026-07-29 that kwarg was dropped at the call site: the co-lead got `monitor=None` and
@@ -696,7 +706,8 @@ the hook mapping a fake-model verdict — no live LLM).
 - `ToolkitRegistry.load_mcp(client)` — index MCP tools from a started client.
 - `ToolkitRegistry.is_mcp(kind)` → `bool` — True if kind is an MCP tool.
 - `propose_and_pr(tool_spec, *, lead, toolkit_root, worktree_base, colead=None,
-  human_handler=None, coder_model=None, run_gate=None, run_review=None, approve_edit=None, …)`
+  human_handler=None, coder=None, allow_correlated_review=False, run_gate=None, run_review=None,
+  approve_edit=None, …)`
   → `MergeFlowResult` — the author harness: spawns the Sonnet Claude-SDK author in an
   isolated worktree and drives the L0–L4 bounded rework loop. `run_gate` defaults to the real
   `gate.run_gate`; `run_review` to the real `review.make_review_hook`; `approve_edit` to the
@@ -718,12 +729,22 @@ the hook mapping a fake-model verdict — no live LLM).
   these in the auto-loop; the analyst lead's authoring ReAct tools drive the *same* primitives
   directly (so the lead diagnoses each verdict rather than the run terminating).
 - `build_authoring_session(tool_spec, *, lead, toolkit_root, worktree_base, colead=None,
-  human_handler=None, coder_model=None, run_gate=None, run_review=None, max_turns=None,
-  direct_branch=None, worktree_factory=None, sdk_client_factory=None, approve_edit=None,
-  monitor=None)` → `AuthoringSession` — resolves config/hooks, picks worktree vs direct-branch
-  mode (§9.9), builds the seeded SDK client, returns a **not-yet-connected** session (`await
-  connect()` before use). Setup only — the sole git touches are the direct-branch clean-tree
-  precondition and the per-attempt base-ref record.
+  human_handler=None, coder=None, allow_correlated_review=False, run_gate=None, run_review=None,
+  max_turns=None, direct_branch=None, worktree_factory=None, sdk_client_factory=None,
+  approve_edit=None, monitor=None)` → `AuthoringSession` — resolves config/hooks, picks worktree vs
+  direct-branch mode (§9.9), builds the seeded author harness, returns a **not-yet-connected**
+  session (`await connect()` before use). Setup only — the sole git touches are the direct-branch
+  clean-tree precondition and the per-attempt base-ref record.
+  `coder` is the author **member** (`RoleModelConfig`), `None` meaning the one `models.yaml` names,
+  which is every production caller. It carries all three author facts at once — the model id
+  recorded and priced, the provider the review is routed away from, and the harness that spawns the
+  author process — so they cannot be resolved separately and disagree; `_resolve_coder_provider` is
+  gone and `_resolve_coder_model()` is now a thin accessor over `coder_member()`. A benchmark passes
+  a member directly to sweep the author across vendors with the rest of the flow byte-identical.
+  `allow_correlated_review` is a **measurement** switch, off in production and set by no production
+  caller: it permits a co-lead sharing the author's provider, which the trust boundary otherwise
+  refuses (§9.3), and the launch preflight still guards the configured roles. See
+  `review.make_review_hook`.
 - `approve_edit(worktree, *, message)` → `str` — Phase 2 step 6, the **only** place the
   runtime commits (§9.9). Stages **exactly** `gate.collect_targets(worktree)`'s paths
   (explicit-path `git add -- …`, never `git add -A`, so scratch outside a `*_utils` package
@@ -783,19 +804,49 @@ the hook mapping a fake-model verdict — no live LLM).
   jail is off or unavailable. The one call every insertion point makes.
   - `jail.policy_from_config(*, network, label)` → `JailPolicy` — `agent_fs_allow` split by
     `agent_fs_readonly` into writable and read-only roots.
-  - `jail.coder_policy(*, label, extra_rw)` → `JailPolicy` — the author-harness policy: the
-    allow-list, its own `$HOME`, and `~/.claude/.credentials.json` bound read-only as a single file
-    so the subscription path survives a hidden home.
+  - `jail.coder_policy(*, label, extra_rw)` → `JailPolicy` — the author-harness policy. An author
+    writes to **two places only**: its working tree (`extra_rw`) and its own settings home;
+    everything else on the allow-list is read-only, and the temp root is **absent** entirely. That
+    tightening is what makes it safe for the Codex harness to stand its own sandbox down inside the
+    jail: the surrendered `workspace-write` confined writes to the working tree, and so does this,
+    while the observation database becomes read-only so no author can write a data file where a
+    fabricated result would live. The temp root is dropped rather than demoted because trial working
+    trees live under it, and a readable one would let one author read another's solution — which
+    invalidates a repeated-trial measurement instead of breaking anything visibly.
+    `~/.claude/.credentials.json` is bound read-only **at the address the CLI will read**, not at its
+    own path: the jail replaces `$HOME`, so a same-path bind leaves it somewhere the process never
+    looks (every Claude author died that way, 2026-08-20).
+  - `jail.coder_home(label)` → `Path` — a writable `$HOME` for one author, on **local disk** rather
+    than under the runtime dir like `jail_home`: both harness CLIs keep state in SQLite and the
+    runtime dir is an NFS mount, where it cannot take locks. Bound writable by the policy itself, so
+    it does not depend on the allow-list naming the temp root.
+  - `jail.codex_settings_home(label)` → `Path` — the fresh `CODEX_HOME` a jailed Codex author gets,
+    under its `coder_home`. The default is the operator's own directory, which is not in the jail.
+  - `jail.binary_reachable_in_jail(binary, *, label)` → `(bool, str)` — whether a path is executable
+    *inside* the jail, tested by `test -x` in the namespace rather than by running the vendor CLI
+    (a `--version` may authenticate or reach the network).
+  - `jail.harness_binary(harness)` → `str | None` — the CLI a harness execs, asked of each SDK
+    rather than probed on `PATH`, since both ship a bundled binary `which` cannot see.
   - `jail.jail_argv(policy)` → `list[str]` — the bwrap prefix; `[]` when bwrap is absent.
   - `jail.write_launcher(path, target, policy)` → `Path` — a `#!/bin/sh` wrapper that execs
     `target` inside the jail, passing `"$@"` through; what the harnesses' binary-path options get.
+    **Binds the binary's own directory read-only and execs the resolved path**: both harnesses ship
+    their CLI inside the orchestration environment, a tree the allow-list deliberately does not name,
+    so nothing else would bind it — and bind and exec must agree on one spelling, since a resolved
+    bind with an unresolved exec fails `execvp` on a host reached through a symlink.
   - `jail.jail_home(label)` → `Path` — a writable `$HOME` per process kind under the runtime dir.
+    Authors use `coder_home` instead (SQLite on NFS).
   - `jail.jail_available()` → `(bool, str)` — runs a trivial jailed command, because user
     namespaces can be present and administratively denied.
   - `jail.check_os_jail_available()` — launch **warning** when the jail is configured on a host
     that cannot run it. Registered in `auto_research.preflight`.
   - `jail.check_os_jail_probe()` — launch **failure** when the configured `analyze_probe` does not
     run inside the jail. Registered in `auto_research.preflight`.
+  - `jail.check_os_jail_harness()` — launch **failure** when the configured author harness's CLI is
+    not reachable inside the jail. The probe above execs the *analysis interpreter*, which is why it
+    passed while every author died; this one execs the author's own binary. Registered in
+    `auto_research.preflight`; the authoring benchmark runs it per leg, since a sweep uses harnesses
+    `models.yaml` does not name.
 - `coder.backend.CoderBackend` — the author-harness protocol: `connect()`, `drive(message) -> str`,
   `disconnect()`. A backend also streams `coder.*` events and books its own spend.
 - `coder.harness.HARNESS_ENDPOINTS` → `dict[(provider, harness), str | None]` — the legal
@@ -822,6 +873,16 @@ the hook mapping a fake-model verdict — no live LLM).
   `_config_payload()` builds the thread config (writable roots, the vendor provider block, the
   escalation MCP entry); usage from each `thread/tokenUsage/updated` is booked through
   `CostMeter.record_call`.
+  - `coder.codex_sdk.resolve_vendor_key(provider, key_env)` → `(key, slot)` — the key an author
+    launches with plus a **log-safe** slot name (`primary`/`fallback1`/`env`/`unset`), never the
+    value. For a provider in `keys.ROTATING_PROVIDERS` whose member names that provider's standard
+    primary variable, this reads the **live** key from the process key pool rather than the raw
+    environment variable, because by the time an author is spawned a chat role may already have
+    rotated off a spent primary. A member naming a plan-specific variable, and every harness-only
+    vendor, reads its own variable. Used by both `_build_client` (the child-environment overlay,
+    where a pooled key overrides an inherited one while an environment-sourced key leaves an
+    inherited value alone) and `_login`, and shared with the launch checks so a probe cannot report
+    on a credential the run does not use.
 - `coder.escalation_server.EscalationServer(ask_lead, ask_human)` — a Streamable-HTTP MCP endpoint
   serving the two escalation tools from **this** process (the handlers must reach the live lead
   object and the run's HITL connector). Loopback, ephemeral port, per-session bearer token;
@@ -831,8 +892,9 @@ the hook mapping a fake-model verdict — no live LLM).
 - `merge_flow._build_backend(...)` → a `CoderBackend` — the harness dispatch, on
   `coder_member().harness`. For Codex it turns the `agent_fs_allow` list into `writableRoots` and
   builds the escalation endpoint; for Claude it builds the SDK options and wraps the client.
-- `review.make_review_hook(colead=None, *, author_provider, web_source=None, monitor=None)` →
-  the default `run_review` hook (§9.3 step 4); the provider-decorrelated co-lead review.
+- `review.make_review_hook(colead=None, *, author_provider, web_source=None, monitor=None,
+  allow_correlated=False)` → the default `run_review` hook (§9.3 step 4); the
+  provider-decorrelated co-lead review. `allow_correlated` is measurement-only (above).
   - `review.select_decorrelated_member(group, author_provider)` → `ModelHandle` — picks the
     `analyst_colead` member with `provider != author_provider`; raises if none exists.
   - `review.build_diff_bundle(worktree)` → `str` — new files in full + modified files as
@@ -1053,3 +1115,60 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   *offered*, a priced cost rather than a booked one — and two legs failed on the first of those
   while behaving correctly. The contract is what the matrix asserts now; behaviour is recorded.
   Suite 1112 → 1115.
+
+- 2026-08-20 — **The author became a parameter, the correlated reviewer became measurable, and the
+  Codex author stopped launching on a key the run had abandoned.** Three changes, all needed by the
+  paper's coder model sweep, all defaulting to the previous behaviour.
+  (1) **One coder member replaces three config reads.** `build_authoring_session`, `propose_and_pr`
+  and `AnalystLeadAgent.drive_authoring` take `coder: RoleModelConfig | None`; `_build_backend` takes
+  `member=` instead of `coder_model=` and no longer calls `coder_member()` itself. The model id, the
+  provider that routes the review, and the harness that spawns the author now come from one object,
+  so they cannot disagree; `_resolve_coder_provider` is deleted and `_resolve_coder_model` is a thin
+  accessor. `test_coder_backends.py` proves harness dispatch by *passing* members rather than by
+  monkeypatching ambient config, which is what production does now.
+  (2) **`make_review_hook(..., allow_correlated=False)`** — the only way past the decorrelation
+  boundary, opt-in, and set by no production caller. It exists so the sweep can measure what
+  decorrelation is worth by running the same brief with a same-provider reviewer. Every review under
+  it emits a `review.correlated` event, because a verdict reached that way does not carry the
+  guarantee the same verdict carries in production.
+  (3) **`coder.codex_sdk.resolve_vendor_key`** — the Codex author resolved its vendor key from the
+  raw environment variable at two places, so it always launched on the **primary** even after a chat
+  role had rotated off a spent one. Found while probing the sweep's legs: the OpenAI primary was out
+  of credits (`429 credit_balance_exhausted`) while the configured fallback answered, so an OpenAI
+  author was unrunnable at the same moment its own co-lead was answering normally. This is worse than
+  the §13 note that a session in flight keeps its key: it never *started* from the live key. Now one
+  shared resolver reads the pool for a rotating provider whose member names that provider's standard
+  primary variable, and the raw variable otherwise (a plan-specific variable must not be shadowed,
+  and harness-only vendors have no cited taxonomy so they never rotate). A pooled key overrides an
+  inherited environment value; an environment-sourced one does not. Suite 1136 → 1160.
+
+- 2026-08-20 (jail, first live authoring attempt) — **The OS jail had never run an author, and it
+  showed.** Turning it on for the coder sweep failed four distinct ways, each hidden behind the last,
+  every one at startup for $0. (1) **The launcher never bound the binary it execs** — both harnesses
+  ship their CLI inside the orchestration environment, which the allow-list deliberately does not
+  name, so `bwrap` failed `execvp` on all 40 trials. It now binds the binary's parent directory
+  read-only. (2) **Bind and exec disagreed on the path spelling**: the bind resolved symlinks, the
+  exec did not, so on this host the Claude author still failed after its directory was bound. Codex
+  survived only because for it the two coincide. The launch check resolved too, so it reported
+  "reachable" while the launcher failed — *a check that normalises differently from the thing it
+  checks is not a check*. (3) **Codex was pointed at the operator's own settings directory**, absent
+  from the jail; it now gets a fresh one, which our own code comment had claimed for months.
+  (4) **Both CLIs keep state in SQLite and the runtime dir is NFS**, where it cannot lock, so author
+  homes moved to local disk. Plus one defect of the fix itself: the re-addressed credential was built
+  from the unresolved runtime path while the home is bound resolved, and a label derived from the
+  clone's *directory name* collided across every concurrent author, since every trial clones into a
+  directory called `repo`.
+  **Then the real one: this harness's own sandbox IS bubblewrap**, so jailing it nests the same
+  mechanism — Codex cannot spawn `codex-linux-sandbox`, every shell command is rejected, and the
+  author reaches the gate having read and written nothing, which reads as a weak model rather than as
+  broken plumbing. The coder diagnosed it itself and escalated, which is the honest-failure path
+  working. Resolved as **one enforcement layer**: the harness sandbox stands down when the kernel jail
+  is on, and `coder_policy` tightens the author to two writable places (working tree, own settings
+  home) so the result is *stricter* than the `workspace-write` it replaces — the observation database
+  is read-only, and the temp root is absent so one author cannot read another's solution.
+  **Live-verified end to end**: two concurrent authors per harness starting jailed, the Claude pair
+  authenticating from the subscription and answering, and a full production trial authoring both
+  toolkit halves plus tests and passing the deterministic gate on its second submission. Tests
+  `tests/test_jail.py` 19 → 28, suite 1136 → 1176. **Lesson recorded:** a hand-built probe is not the
+  production path — mine failed with the jail *off* too, which is the only reason I did not read its
+  failure as a code defect.

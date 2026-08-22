@@ -8,9 +8,13 @@ brief K times through the **production** authoring loop and reports the distribu
 fraction commits, how many gate and review rounds it takes, what it costs, and how the attempts
 that do not commit end.
 
-It fills `papers/FANGZ` §5.3 Table 6 (paper item 4), and it is the driver the pressure ablation
-(item 8) and the cross-model-tier sweep (item 7) reuse, since coder tier and reviewer provider are
-already configuration rather than code.
+It fills `papers/FANGZ` §5.3 Table 6 (paper item 4). Since 2026-08-20 it also **is** the
+cross-model-tier sweep (item 7): a **leg** is one (author member, reviewer arrangement) pair, and a
+batch runs the roster. The earlier note here that tier and provider were "already configuration
+rather than code" was wrong — the author harness resolved its member by reading the `coder` role
+directly, with no injection point, which is the seam that had to be built
+(`merge_flow.build_authoring_session(coder=...)`). The pressure ablation (item 8) still reuses this
+driver.
 
 Development code, not runtime code: it lives outside `src/auto_research/`, nothing in the
 pipeline imports it, and it never runs during a research run.
@@ -92,6 +96,47 @@ rejection naming invented data is evidence to be read, not a count to be publish
 the gate benchmark's attribution roster: crediting a layer, or charging a coder, without reading
 what was actually said inflates the number.
 
+### The sweep: what a leg varies, and what it may not
+
+Two comparisons live in one roster and they cannot share rows.
+
+**Tier rows** vary the author and hold the reviewer fixed. The reviewer must therefore be the same
+member in every tier row, which is why **no tier row may be an OpenAI author**: the configured
+co-lead is OpenAI, so such a row would force the reviewer to change and vary two things at once.
+
+**Decorrelation rows** hold the author fixed and vary only the reviewer, which is the comparison
+`papers/FANGZ` §6.2 asks for. The cross-provider arm is the production shape and is already measured
+by the `claude_sonnet_5` row, so that row is declared `reuse` and reported without being re-run; the
+new arm gives the same author a same-provider reviewer. `claude-opus-5` is the pinned reviewer
+because the reviewer swap found it the strongest, so a cost to sharing the author's provider even
+there is a strong result and no cost is an honest negative one. A pinned reviewer's reasoning effort
+and output budget are **harmonised** with the configured co-lead's, since a member left at its own
+default would compare configurations rather than models.
+
+A leg changes exactly two things about the call: the author member, and (for a correlated row) the
+switch that lets a same-provider reviewer run. The loop, the brief, the base, the caps, the gate and
+the prompts are identical across legs, which is the only reason the rows are comparable.
+
+**Legs run sequentially, trials inside a leg concurrently.** Sequential legs keep two vendors' rate
+limits and two accounts' balances from interacting inside one measurement, and they make a mid-batch
+stop leave whole legs finished rather than all of them partial. The **concurrency ceiling lives on the
+roster row**, not in whoever types the command: the Claude legs cap at 2 because that author
+authenticates from a subscription whose session cap is shared across concurrent coders, and four at
+once exhausted it after about two hours and contaminated six of ten trials in the first batch.
+
+**Every leg's vendor is probed live before any lead spend**, and the probe participates in key
+failover. The pool only advances when a call fails, so at launch it still holds a spent primary; the
+probe is the run's first real call, so a spent balance retires that key for the process and a rate
+limit rotates past it, leaving the pool on the key that answered. Without this a dead key is
+discovered inside an author subprocess, one trial at a time, after each trial's lead spend is gone —
+and a harness-only vendor's key never passes through chat-provider rotation at all. The gate
+benchmark learned the general lesson the expensive way, losing 26 runs to a missing key found one
+failed call at a time.
+
+**The Qwen row is absent, not substituted.** `legs.QWEN_ABSENT` records why (the account was never
+entitled: `AccessDenied.Unpurchased` on every model and host, a vendor billing-profile gate rather
+than our wiring), because a reader has to be able to tell a skipped vendor from an unconsidered one.
+
 ## 3. Interfaces
 
 | Symbol | Meaning |
@@ -100,21 +145,29 @@ what was actually said inflates the number.
 | `brief.brief_provenance() -> dict` | The run, ledger record and lead model it was recovered from. |
 | `brief.BASE_SHA` | Toolkit state each trial authors from (`fa99ef8`). |
 | `brief.VALIDATION_OBSIDS` | The brief's six real validation observations, checked in preflight. |
-| `trial.TrialConfig` | Toolkit root, output directory, stamps, clone retention, chatter. |
+| `trial.TrialConfig` | Toolkit root, output directory, stamps, clone retention, chatter, and the `leg` being run (`None` = the configured author). |
+| `trial.build_pinned_colead(leg, monitor)` | The co-lead a decorrelation leg pins, built outside the configured role and harmonised with it. |
+| `legs.Leg` | One roster row: author (provider, harness, model, key var, endpoint), reviewer arrangement, purpose, brand colour, per-leg K and concurrency ceiling. |
+| `legs.ROSTER` / `legs.BY_SLUG` | The sweep roster and its index. |
+| `legs.resolve(slugs) -> list[Leg]` | Every runnable leg, or exactly the ones named; `reuse` rows are skipped unless named. |
+| `legs.BRAND_COLOURS` / `legs.QWEN_ABSENT` | Figure colours by vendor; the recorded reason the Qwen row is absent rather than substituted. |
+| `score.leg_of(record)` / `score.by_leg(records)` | Which row a record came from, and the grouping the multi-leg report renders. |
 | `trial.collect_stamps(root, ref) -> dict` | Orchestration SHA and dirtiness, toolkit base, `code_gate.yaml` hash, brief provenance. |
 | `trial.prepare_clone(dest, root, sha, branch) -> Path` | A throwaway clone at the pinned base on the trial's own branch. |
 | `trial.summarise_ledger(path) -> dict` | Per-round counts and per-role cost, read from one trial's ledger. |
 | `trial.run_trial(index, cfg) -> dict` | One authoring lifecycle; returns its JSONL record. Never raises. |
 | `score.summarise(records) -> dict` | Terminal-state partition, totals. |
 | `score.build_report(records, stamps) -> str` | The Markdown report and the source of Table 6. |
-| `__main__.preflight(root, ref) -> list[str]` | Every check decidable without a model call. |
+| `__main__.preflight(root, ref, legs) -> list[str]` | Every check decidable without a model call, plus one live vendor probe per leg. |
+| `__main__.probe_leg_vendor(leg) -> str \| None` | One trivial call to a leg's vendor; participates in key failover. |
 
 ### CLI
 
 ```
-python -m benchmarks.author_bench --k 15 --concurrency 4   # a batch
-python -m benchmarks.author_bench --check                  # preflight only, no spend
-python -m benchmarks.author_bench --rescore DIR            # re-render a finished batch
+python -m benchmarks.author_bench                                  # every runnable leg, each at its own K
+python -m benchmarks.author_bench --legs deepseek_v4_flash --k 3   # one leg, three trials
+python -m benchmarks.author_bench --check                          # preflight + vendor probes, no lead spend
+python -m benchmarks.author_bench --rescore DIR...                 # re-render/merge finished batches
 ```
 
 Outputs land in `logs/dev/author-bench/<UTC>/`: `records.jsonl` (one line per trial),
@@ -188,3 +241,20 @@ observation database. Nothing depends on this package.
   `plan_and_debate` — the likely cause of trials grinding to the submit cap in a way attended runs
   do not. Prompts verified unmodified (lead `prompts/analyst_lead.md`, coder `prompts/coder.md`).
   Tests 14 → 20.
+
+- 2026-08-20 — **The benchmark became the model sweep (paper item 7).** New `legs.py` roster: a leg is
+  one (author member, reviewer arrangement) pair with its own K, concurrency ceiling and brand colour.
+  `--legs` selects them, legs run sequentially with trials concurrent inside, each leg's records land
+  under its own directory, and every record names its own author and reviewer so a merged report can
+  group them. The report grows a per-leg table only when more than one leg is present, and `--rescore`
+  keys on `(leg, trial)` — every leg numbers from one, so keying on the number alone would let one
+  leg's trial silently overwrite another's. **The single-leg report is byte-identical**, verified
+  against the batch already in the paper, so its published numbers are untouched.
+  Three findings from building it. **The DOCS was wrong** that tier and provider were already
+  configuration: the author harness read the `coder` role directly with no injection point, so
+  `build_authoring_session(coder=...)` had to be built. **A tier row cannot be an OpenAI author** with
+  the reviewer held fixed at the OpenAI co-lead, which is why that author appears only as a
+  correlated decorrelation row. And the live vendor probe **found the OpenAI primary key spent while
+  its fallback answered**, which exposed a real defect in the Codex author's key resolution (fixed in
+  `sandbox/DOCS.md`, same date) and is why the probe now fails over rather than reporting the first
+  refusal. Tests 20 → 34.

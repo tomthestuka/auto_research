@@ -40,6 +40,19 @@ def _stats(values: list[float]) -> str:
     return f"{statistics.median(values):.2f} [{min(values):.2f}--{max(values):.2f}]"
 
 
+def leg_of(record: dict) -> str:
+    """Which sweep row a record came from; the single-leg batches predate the field."""
+    return record.get("leg") or "(configured author)"
+
+
+def by_leg(records: list[dict]) -> dict[str, list[dict]]:
+    """Records grouped by sweep row, in first-seen order so the roster's order survives."""
+    groups: dict[str, list[dict]] = {}
+    for record in records:
+        groups.setdefault(leg_of(record), []).append(record)
+    return groups
+
+
 def summarise(records: list[dict]) -> dict:
     """The distribution over trials, and the round counts inside them."""
     by_state = {state: [r for r in records if r.get("status") == state] for state in TERMINAL_ORDER}
@@ -79,6 +92,32 @@ def build_report(records: list[dict], stamps: dict) -> str:
     if summary["other"]:
         lines.append(f"| (unclassified) | {len(summary['other'])} | --- | --- | --- |")
 
+    groups = by_leg(records)
+    multi = len(groups) > 1
+    if multi:
+        lines += ["", "## By leg", "",
+                  "One row per author/reviewer arrangement. Rows partition the trials, so this is",
+                  "the per-model distribution; the pooled table above is not meaningful across legs.",
+                  "",
+                  "| Leg | Author | Reviewer | N | Committed | Honest failure | Needs human | "
+                  "Cost $ | Minutes | Submits |",
+                  "|---|---|---|---|---|---|---|---|---|---|"]
+        for slug, rows in groups.items():
+            counts = {state: sum(1 for r in rows if r.get("status") == state)
+                      for state in TERMINAL_ORDER}
+            author = rows[0].get("coder") or rows[0].get("coder_model") or "?"
+            reviewer = rows[0].get("colead") or "(configured)"
+            if rows[0].get("correlated_review"):
+                reviewer += " [correlated]"
+            costs = [r.get("cost_usd", 0.0) for r in rows]
+            mins = [r.get("duration_s", 0.0) / 60 for r in rows]
+            submits = [float(r.get("review_runs", 0)) for r in rows]
+            lines.append(
+                f"| {slug} | {author} | {reviewer} | {len(rows)} | {counts['committed']} "
+                f"| {counts['failed']} | {counts['needs_human']} | {_stats(costs)} "
+                f"| {_stats(mins)} | {_stats(submits)} |"
+            )
+
     lines += ["", "## Rounds inside a trial", "",
               "A round is an event, not an outcome: one trial can carry several, so these counts",
               "describe the work inside the trials rather than partitioning them.", "",
@@ -90,6 +129,8 @@ def build_report(records: list[dict], stamps: dict) -> str:
         ("review_rejections", "Co-lead rejections"),
         ("coder_sessions", "Coder sessions"),
         ("coder_asks_lead", "Coder questions to the lead"),
+        ("coder_commands_ok", "Coder commands that succeeded"),
+        ("coder_commands_failed", "Coder commands that failed"),
     ):
         values = [float(r.get(key, 0)) for r in records]
         any_count = sum(1 for v in values if v > 0)
@@ -107,31 +148,61 @@ def build_report(records: list[dict], stamps: dict) -> str:
               "spend another rework round, so the honest-failure rate here is an **unattended** figure",
               "and an upper bound on what an attended run would produce.", ""]
 
+    starved = [
+        (leg_of(r), r["trial"], r.get("coder_commands_ok", 0), r.get("coder_commands_failed", 0))
+        for r in records
+        if (r.get("coder_commands_ok", 0) + r.get("coder_commands_failed", 0)) > 0
+        and r.get("coder_commands_ok", 0) == 0
+    ]
+    throttled = [
+        (leg_of(r), r["trial"], r.get("coder_turns_rate_limited", 0), r.get("coder_turns_failed", 0))
+        for r in records if r.get("coder_turns_rate_limited", 0) > 0
+    ]
+    if throttled:
+        lines += ["", "## WARNING: trials whose author turns were rate-limited", "",
+                  "A failed author turn carries no tool calls and no text, so it reaches the lead",
+                  "indistinguishable from an author that did nothing. These rows describe the",
+                  "vendor's throttling, not the model.", ""]
+        for slug, trial, rl, tf in throttled:
+            lines.append(f"- {slug} trial {trial:02d}: {rl} rate-limited of {tf} failed turns")
+
+    if starved:
+        lines += ["", "## WARNING: trials whose coder could not execute anything", "",
+                  "Every other number in these rows describes the harness rather than the model:",
+                  "an author that cannot run a command still writes text, still calls tools, and can",
+                  "still reach the gate, because the gate runs the tests in its own process.", ""]
+        for slug, trial, ok, bad in starved:
+            lines.append(f"- {slug} trial {trial:02d}: {ok} succeeded, {bad} failed")
+
     lines += ["", "## Fabrication signals (to be hand-read before they count)", ""]
-    signals = [(r["trial"], r.get("no_fabrication_hits") or []) for r in records]
-    flagged = [(t, hits) for t, hits in signals if hits]
+    flagged = [(leg_of(r), r["trial"], r.get("no_fabrication_hits") or []) for r in records
+               if r.get("no_fabrication_hits")]
     if not flagged:
         lines.append("No no-fabrication scan hit in any trial.")
     else:
-        for trial, hits in flagged:
-            lines.append(f"- trial {trial:02d}: {', '.join(sorted(set(hits)))}")
+        for slug, trial, hits in flagged:
+            label = f"{slug} trial {trial:02d}" if multi else f"trial {trial:02d}"
+            lines.append(f"- {label}: {', '.join(sorted(set(hits)))}")
 
+    head = "| Leg | Trial |" if multi else "| Trial |"
     lines += ["", "## Per-trial detail", "",
-              "| Trial | Status | Gate p/r | Review a/r | Asks | Cost $ | Min | Commit |",
-              "|---|---|---|---|---|---|---|---|"]
-    for r in sorted(records, key=lambda x: x["trial"]):
+              head + " Status | Gate p/r | Review a/r | Asks | Cost $ | Min | Commit |",
+              ("|---" * (9 if multi else 8)) + "|"]
+    for r in sorted(records, key=lambda x: (leg_of(x), x["trial"])):
         sha = (r.get("commit_sha") or "")[:9] or "---"
+        prefix = f"| {leg_of(r)} " if multi else ""
         lines.append(
-            f"| {r['trial']:02d} | {r.get('status', '?')} "
+            f"{prefix}| {r['trial']:02d} | {r.get('status', '?')} "
             f"| {r.get('gate_passes', 0)}/{r.get('gate_rejections', 0)} "
             f"| {r.get('review_approvals', 0)}/{r.get('review_rejections', 0)} "
             f"| {r.get('coder_asks_lead', 0)} "
             f"| {r.get('cost_usd', 0.0):.2f} | {r.get('duration_s', 0.0) / 60:.0f} | {sha} |"
         )
-    reasons = [(r["trial"], r.get("reason") or r.get("error") or "") for r in records
-               if r.get("status") != "committed"]
+    reasons = [(leg_of(r), r["trial"], r.get("reason") or r.get("error") or "")
+               for r in records if r.get("status") != "committed"]
     if reasons:
         lines += ["", "## Why the non-committing trials ended", ""]
-        for trial, reason in reasons:
-            lines.append(f"- **trial {trial:02d}**: {reason.strip()[:600]}")
+        for slug, trial, reason in reasons:
+            label = f"{slug} trial {trial:02d}" if multi else f"trial {trial:02d}"
+            lines.append(f"- **{label}**: {reason.strip()[:600]}")
     return "\n".join(lines) + "\n"

@@ -103,6 +103,37 @@ def _thread_config(*, writable_roots: list[str]) -> dict[str, Any]:
     }
 
 
+def resolve_vendor_key(provider: str, key_env: str | None) -> tuple[str, str]:
+    """The key a Codex author should launch with, and a log-safe name for its slot.
+
+    For a provider whose failover is wired, this reads the **live** key from the process key pool
+    rather than the raw environment variable. The variable holds the primary, and by the time an
+    author is spawned a chat role may already have rotated off it: a spent balance retires the
+    primary for the whole process. Reading the variable would launch the author on the dead key
+    while every other role in the same run used the fallback, which is how an OpenAI author became
+    unrunnable while its own co-lead answered normally.
+
+    The member's own variable still wins when it is not that provider's standard primary. A member
+    may name a plan-specific variable (see the harness table), and the pool describes only the
+    standard pair, so it must not answer for a deliberately different one. Harness-only vendors are
+    outside the rotating set entirely and always read their own variable.
+
+    Returned as a pair so a caller can log *which* slot was used without touching the value. Shared
+    with the launch checks on purpose: a probe that resolves a different key than the run would
+    report on a credential nothing uses.
+    """
+    if not key_env:
+        return "", "unset"
+    from auto_research.models.keys import ROTATING_PROVIDERS, env_var_names, key_pool
+
+    if provider in ROTATING_PROVIDERS and key_env == env_var_names(provider)[0]:
+        pool = key_pool(provider)
+        live = pool.active()
+        if live:
+            return live, pool.active_label()
+    return os.environ.get(key_env, ""), "env"
+
+
 class CodexBackend:
     """:class:`~auto_research.sandbox.coder.backend.CoderBackend` over one Codex thread."""
 
@@ -146,6 +177,11 @@ class CodexBackend:
         self._client_factory = client_factory
         self._client: Any | None = None
         self._thread_id: str | None = None
+
+    # ---------------------------------------------------------------- vendor key
+    def _live_vendor_key(self) -> tuple[str, str]:
+        """This author's launch key and its slot; see :func:`resolve_vendor_key`."""
+        return resolve_vendor_key(self._provider, self._key_env)
 
     # ---------------------------------------------------------------- permission gate
 
@@ -242,9 +278,25 @@ class CodexBackend:
         # The harness authenticates from the vendor key named on the coder member; the SDK
         # resolves it inside the child, so it has to be present in the child's environment.
         if self._key_env:
-            value = os.environ.get(self._key_env, "")
+            value, slot = self._live_vendor_key()
             if value:
-                env.setdefault(self._key_env, value)
+                if slot == "env":
+                    # Nothing more authoritative than the environment for this vendor, so an
+                    # inherited value is left alone.
+                    env.setdefault(self._key_env, value)
+                else:
+                    # A pooled key is what the rest of the run is using, so it wins over whatever
+                    # the inherited environment carries: the point is not to launch on a key the
+                    # run has already rotated away from.
+                    env[self._key_env] = value
+        # Jailed, the CLI's settings directory has to be one that exists *inside* the jail. It
+        # defaults to the operator's own, which is not bound there, and the CLI refuses to start
+        # rather than degrade — every Codex author died this way on the first jailed sweep. Set only
+        # when jailed, so the unjailed path keeps whatever the operator has configured.
+        from auto_research.sandbox.jail import codex_settings_home, jail_enabled
+
+        if jail_enabled():
+            env["CODEX_HOME"] = str(codex_settings_home(self._jail_label()))
         overrides = [
             "preferred_auth_method=apikey",
             "forced_login_method=api",
@@ -276,7 +328,7 @@ class CodexBackend:
         """Authenticate with the vendor key, when one is configured."""
         if not self._key_env:
             return
-        key = env.get(self._key_env) or os.environ.get(self._key_env, "")
+        key = env.get(self._key_env) or self._live_vendor_key()[0]
         if not key:
             return
         from openai_codex.generated.v2_all import (
@@ -289,12 +341,40 @@ class CodexBackend:
         )
 
     def _start_thread(self) -> str:
+        from auto_research.sandbox.jail import jail_enabled
+
+        # One enforcement layer, not two. This harness's own sandbox **is** bubblewrap, so running
+        # it inside our bubblewrap jail nests the same mechanism: Codex cannot spawn its
+        # ``codex-linux-sandbox`` helper, every shell command it issues is rejected, and the author
+        # reads nothing and writes nothing — which reaches the gate as an empty changeset and reads
+        # like a weak model rather than like broken plumbing (measured 2026-08-20, the coder
+        # diagnosed it itself and escalated).
+        #
+        # So when the kernel jail is on, this harness's own sandbox stands down and the jail is the
+        # wall. That is only safe because ``jail.coder_policy`` tightens the author's writable roots
+        # to the working tree and its own settings home, which is **stricter** than the
+        # ``workspace-write`` mode being given up: the observation database, the runtime directory
+        # and the environments are all read-only, so an author cannot write data files anywhere.
+        # The approval policy stays ``untrusted`` either way, so the path guard still sees the
+        # commands it can see — belt, with the kernel as the wall.
         params: dict[str, Any] = {
             "cwd": str(self._worktree),
             "model": self._model,
-            "approvalPolicy": "untrusted",
+            # ``never`` under the jail, and this is not a relaxation of anything that worked.
+            # With the harness sandbox on, a command it already permitted was never offered to the
+            # client (so this was never the command gate); standing that sandbox down routed
+            # command approvals to a handler for the first time, and that path has never worked —
+            # `python`, `pytest` and every compound shell command came back rejected, so the author
+            # could not run the tests it had just written. Measured 2026-08-20 across three trials,
+            # with the lead telling the coder those binaries were "blocked by design". The kernel
+            # jail already makes anything outside the allow-list *absent*, which is stronger than a
+            # command-string check, so the approval round-trip buys nothing here and costs the
+            # author its own test run. What is genuinely given up is the ``PathGuard`` command
+            # audit for this harness while jailed; it was documented best-effort (§13) and the
+            # jail supersedes it.
+            "approvalPolicy": "never" if jail_enabled() else "untrusted",
             "approvalsReviewer": "user",
-            "sandbox": "workspace-write",
+            "sandbox": "danger-full-access" if jail_enabled() else "workspace-write",
             # Layered on top of Codex's own instructions rather than replacing them
             # (``baseInstructions``): the harness's account of its tools is harness-specific and
             # worth keeping, while `prompts/coder.md` is policy. Both were live-checked to be
@@ -363,10 +443,23 @@ class CodexBackend:
                 real = resolve_codex_bin()
             except Exception:  # noqa: BLE001 — let the SDK report a missing binary as it always did
                 return None
-        # CODEX_HOME lives under the worktree's authoring dir, so the wrapper goes beside it.
         target = self._worktree if self._worktree.is_dir() else Path(".")
-        policy = coder_policy(label="codex", extra_rw=(str(target),))
+        # A label of this author's own, so concurrent authors do not share one settings directory:
+        # a sweep runs several at once, and the CLI writes login state and history into it.
+        policy = coder_policy(label=self._jail_label(), extra_rw=(str(target),))
         return str(write_launcher(target / ".codex-jailed", real, policy))
+
+    def _jail_label(self) -> str:
+        """A settings-home label unique to this author.
+
+        Derived from the working tree's **full** path, not its name: every trial clones its toolkit
+        into a directory called ``repo``, so a name-derived label collided across every concurrent
+        author and they raced to initialise one state database (2026-08-20).
+        """
+        import hashlib
+
+        digest = hashlib.sha1(str(self._worktree.resolve()).encode()).hexdigest()[:10]
+        return f"codex-{digest}"
 
     async def disconnect(self) -> None:
         import asyncio

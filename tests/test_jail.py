@@ -237,3 +237,245 @@ def test_availability_probe_actually_runs_a_jailed_command():
     the mounts and reported a working host as broken."""
     ok, reason = jail.jail_available()
     assert ok, reason
+
+
+# --------------------------------------------------------------------------- harness binaries
+
+
+def test_the_launcher_binds_the_binary_it_execs(tmp_path):
+    """A wrapper that execs a path the mount namespace does not contain fails with
+    ``execvp: No such file or directory`` — which is how the first jailed sweep lost all 40 of its
+    trials. Both harnesses ship their CLI inside the orchestration environment's site-packages, a
+    tree the allow-list deliberately does not name, so nothing else would ever bind it.
+    """
+    from auto_research.sandbox.jail import JailPolicy, write_launcher
+
+    vendor = tmp_path / "vendor" / "bin"
+    vendor.mkdir(parents=True)
+    binary = vendor / "codex"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+
+    script = write_launcher(
+        tmp_path / "launcher", str(binary),
+        JailPolicy(ro=(), rw=(str(tmp_path),), network=True, home=None, label="t"),
+    )
+    body = script.read_text()
+
+    assert str(vendor.resolve()) in body, "the binary's own directory must be bound read-only"
+    assert f"--ro-bind {vendor.resolve()}" in body or "--ro-bind" in body
+
+
+def test_the_launcher_binds_the_directory_not_only_the_file(tmp_path):
+    """A bundled CLI normally needs its siblings (a runtime, a wasm blob, a licence file), so the
+    parent directory is bound rather than the single file."""
+    from auto_research.sandbox.jail import JailPolicy, write_launcher
+
+    vendor = tmp_path / "pkg" / "bin"
+    vendor.mkdir(parents=True)
+    binary = vendor / "cli"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    (vendor / "runtime.so").write_text("x")
+
+    body = write_launcher(
+        tmp_path / "l", str(binary),
+        JailPolicy(ro=(), rw=(str(tmp_path),), network=True, home=None, label="t"),
+    ).read_text()
+
+    assert str(vendor.resolve()) in body
+    assert f"{binary.resolve()} " not in body.replace(str(vendor.resolve()), "")
+
+
+def test_every_harness_this_project_can_run_resolves_a_binary():
+    """A harness whose CLI cannot be resolved cannot be jailed or checked, so the roster and the
+    resolver must agree about what exists."""
+    from auto_research.sandbox.coder.harness import HARNESS_ENDPOINTS
+    from auto_research.sandbox.jail import harness_binary
+
+    for harness in sorted({h for _, h in HARNESS_ENDPOINTS}):
+        assert harness_binary(harness) is not None, harness
+
+
+def test_binary_reachability_is_vacuously_true_with_the_jail_off(monkeypatch):
+    """The check must never block a host that does not run the jail at all."""
+    from auto_research.sandbox import jail
+
+    monkeypatch.setattr(jail, "jail_enabled", lambda: False, raising=True)
+    assert jail.binary_reachable_in_jail("/definitely/not/here", label="t") == (True, "")
+
+
+def test_a_missing_binary_is_reported_rather_than_probed(monkeypatch):
+    from auto_research.sandbox import jail
+
+    monkeypatch.setattr(jail, "jail_enabled", lambda: True, raising=True)
+    monkeypatch.setattr(jail, "jail_available", lambda: (True, ""), raising=True)
+    ok, why = jail.binary_reachable_in_jail("/definitely/not/here", label="t")
+    assert ok is False and "does not exist outside the jail" in why
+
+
+def test_the_launcher_execs_the_same_path_it_binds(tmp_path):
+    """Bind and exec must agree on one spelling of the path.
+
+    They did not: the bind resolved symlinks and the exec did not, so on a host that reaches its
+    environment through a symlink the Claude author still failed ``execvp`` after its own directory
+    had been bound. The launch check resolved too, so it passed while the launcher failed.
+    """
+    from auto_research.sandbox.jail import JailPolicy, write_launcher
+
+    real_dir = tmp_path / "real" / "bin"
+    real_dir.mkdir(parents=True)
+    binary = real_dir / "cli"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    link = tmp_path / "via-symlink"
+    link.symlink_to(tmp_path / "real")
+
+    body = write_launcher(
+        tmp_path / "l", str(link / "bin" / "cli"),
+        JailPolicy(ro=(), rw=(str(tmp_path),), network=True, home=None, label="t"),
+    ).read_text()
+
+    assert str(binary.resolve()) in body, "the exec target must be the resolved path"
+    assert str(link) not in body, "the unresolved path is not bound, so it must not be exec'd"
+
+
+def test_a_re_addressed_credential_lands_inside_the_jail_home(tmp_path, monkeypatch):
+    """The jail replaces HOME, so a credential bound at its own path is somewhere the process will
+    never look. It is carried to the address the process actually reads, and that address has to be
+    built from the *resolved* home, since the home itself is bound resolved."""
+    from auto_research.sandbox import jail
+
+    fake_home = tmp_path / "home"
+    (fake_home / ".claude").mkdir(parents=True)
+    (fake_home / ".claude" / ".credentials.json").write_text("{}")
+    monkeypatch.setattr(jail.Path, "home", staticmethod(lambda: fake_home), raising=True)
+    monkeypatch.setattr(jail, "coder_home", lambda label: tmp_path / "jail" / label, raising=True)
+    (tmp_path / "jail" / "claude_sdk").mkdir(parents=True)
+
+    policy = jail.coder_policy(label="claude_sdk")
+
+    assert len(policy.ro_files_at) == 1
+    source, destination = policy.ro_files_at[0]
+    assert source == str(fake_home / ".claude" / ".credentials.json")
+    assert destination.startswith(str((tmp_path / "jail" / "claude_sdk").resolve()))
+    assert destination.endswith("/.claude/.credentials.json")
+    # Its parent exists on disk, so the CLI's own writes to that directory have a writable place.
+    assert Path(destination).parent.is_dir()
+
+
+def test_a_re_addressed_file_is_bound_after_the_home(tmp_path):
+    """A later bind lands on top of an earlier one, and the destination is inside the home, so
+    emitting the file first would let the home bind hide it."""
+    from auto_research.sandbox.jail import JailPolicy, jail_argv
+
+    home = tmp_path / "home"
+    home.mkdir()
+    secret = tmp_path / "secret.json"
+    secret.write_text("{}")
+    argv = jail_argv(JailPolicy(
+        ro=(), rw=(str(tmp_path),), network=True, home=str(home), label="t",
+        ro_files_at=((str(secret), str(home / ".claude" / ".credentials.json")),),
+    ))
+
+    assert "--setenv" in argv
+    assert argv.index("--setenv") < argv.index(str(home / ".claude" / ".credentials.json"))
+
+
+def test_each_author_gets_its_own_settings_home(tmp_path):
+    """Concurrent authors must not share a settings directory: the CLI writes login state and
+    history into it, and a sweep runs several at once."""
+    from auto_research.sandbox.jail import codex_settings_home
+
+    a = codex_settings_home("codex-trial-a")
+    b = codex_settings_home("codex-trial-b")
+    assert a != b and a.is_dir() and b.is_dir()
+
+
+def test_the_author_settings_home_is_on_local_disk():
+    """Both harness CLIs keep their state in SQLite, which cannot take locks on an NFS mount.
+
+    The runtime data directory is NFS on this cluster, so every Codex author failed with "failed to
+    initialize sqlite state runtime" while its settings home lived there. The author home therefore
+    does *not* follow ``jail_home`` under the runtime dir.
+    """
+    import tempfile
+
+    from auto_research.sandbox.jail import coder_home, jail_home
+
+    home = coder_home("probe-label")
+    assert str(home).startswith(tempfile.gettempdir())
+    assert not str(home).startswith(str(jail_home("probe-label").parent.parent))
+
+
+def test_the_author_home_is_bound_writable_by_the_policy_itself():
+    """It must not depend on the allow-list happening to name the temp root."""
+    from auto_research.sandbox.jail import coder_policy
+
+    policy = coder_policy(label="probe-label")
+    assert policy.home in policy.rw
+
+
+def test_two_authors_on_identically_named_trees_get_different_homes(tmp_path):
+    """Every trial clones its toolkit into a directory called ``repo``, so a label derived from the
+    directory *name* collided across all concurrent authors and they raced on one state database."""
+    from auto_research.models.types import RoleModelConfig
+    from auto_research.sandbox.coder.codex_sdk import CodexBackend
+
+    member = RoleModelConfig(name="m", provider="deepseek", harness="codex",
+                             model="deepseek-v4-flash", base_url="https://api.deepseek.com/")
+    labels = set()
+    for parent in ("trial-01", "trial-02"):
+        worktree = tmp_path / parent / "repo"
+        worktree.mkdir(parents=True)
+        labels.add(
+            CodexBackend(member=member, worktree=worktree, system_prompt="p", guard=None)
+            ._jail_label()
+        )
+    assert len(labels) == 2, f"both authors got the same settings home: {labels}"
+
+
+def test_the_claude_launcher_binds_the_worktree_the_author_edits(tmp_path):
+    """The author's own working tree must be inside its jail.
+
+    Binding only the artifacts directory left the clone outside, so the author silently read the
+    *live* toolkit checkout instead of its own and could write nowhere: 10 and 16 "File does not
+    exist" tool results in the first two trials of 2026-08-21, with the CLI reporting its cwd as the
+    settings home. Latent while the allow-list made the temp root writable for authors; tightening
+    the policy to two writable places removed that accidental coverage and exposed it.
+    """
+    from auto_research.sandbox.coder.claude_sdk import _jail_launcher
+
+    base = tmp_path / "authoring"
+    base.mkdir()
+    worktree = tmp_path / "clone" / "repo"
+    worktree.mkdir(parents=True)
+
+    body = Path(_jail_launcher(base, worktree)).read_text()
+
+    assert f"--bind {worktree}" in body, "the author cannot edit a tree outside its jail"
+    assert f"--bind {base}" in body, "artifacts still need a writable home"
+
+
+def test_both_harness_launchers_bind_their_worktree(tmp_path):
+    """The property is per-harness, and only one of them had it. Asserted for both so a future
+    harness cannot be added without it."""
+    from auto_research.models.types import RoleModelConfig
+    from auto_research.sandbox.coder.claude_sdk import _jail_launcher
+    from auto_research.sandbox.coder.codex_sdk import CodexBackend
+
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+
+    claude = Path(_jail_launcher(tmp_path / "authoring", worktree)).read_text()
+    codex_backend = CodexBackend(
+        member=RoleModelConfig(name="m", provider="deepseek", harness="codex",
+                               model="deepseek-v4-flash", base_url="https://api.deepseek.com/"),
+        worktree=worktree, system_prompt="p", guard=None,
+    )
+    codex = Path(codex_backend._jail_launcher(None) or "/dev/null")
+    codex_body = codex.read_text() if codex.exists() and codex.name != "null" else ""
+
+    assert f"--bind {worktree}" in claude
+    if codex_body:
+        assert f"--bind {worktree}" in codex_body

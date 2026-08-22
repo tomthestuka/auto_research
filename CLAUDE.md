@@ -892,8 +892,10 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   (a) **rate limits are per-organization**, so a fallback issued by the *same* org rotates onto the same exhausted bucket —
   the preflight check cannot see the org and rejects only what it can prove useless (blank, duplicate,
   or primary-less); (b) **a coder session already in flight keeps the key it launched with** — the
-  Agent SDK owns that subprocess's environment for its lifetime, so only the *next* session picks up a
-  rotation; and (c) 401 `authentication_error` is deliberately **not** rotated, so a revoked primary
+  author harness owns that subprocess's environment for its lifetime, so only the *next* session picks
+  up a rotation (**it does now start from the live key**: `coder/codex_sdk.resolve_vendor_key` reads
+  the pool rather than the raw variable, fixed 2026-08-20 after an OpenAI author was unrunnable on a
+  spent primary while its own co-lead answered on the fallback); and (c) 401 `authentication_error` is deliberately **not** rotated, so a revoked primary
   key still fails the run rather than silently running on the fallback; (d) key **retirement** is
   process-scoped, so a key retired for a spent balance is eligible again on the next run — right
   for a topped-up key, but it means a still-dead key costs one wasted call at each run's start.
@@ -1399,6 +1401,89 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   this was written — Landlock active, unprivileged user namespaces enabled, `bwrap` present, PyXspec
   importing inside a jail that denies `auto_research` and `~/.claude` — and the Claude author's
   credential file is bound as a single read-only file so the subscription path and every measured
-  cost figure survive a hidden home. Shipped **off** (`agent_os_jail: false`); what remains is a
+  cost figure survive a hidden home. Shipped **off** (`agent_os_jail: false`); what remained was a
   live authoring attempt under it and egress control for the three processes that keep the network.
-  Tests: `tests/test_jail.py` (19). Suite 1115 → 1136.
+  **The authoring attempt happened the same day and the jail did not survive it intact** — see the
+  third 2026-08-20 entry: four startup defects, then the structural one (this harness's own sandbox
+  is bubblewrap, so jailing it nests the same mechanism). Now fixed and live-verified, with the
+  harness sandbox standing down when the jail is on. **Egress control remains the open item.**
+  Tests: `tests/test_jail.py` (19 → 28). Suite 1115 → 1136.
+
+- 2026-08-20 (second, same day) — **The author became a parameter, so the model sweep is a benchmark
+  rather than a config edit — and building it found a key the coder could never reach.** Paper item 7
+  (the coder model sweep, §6.2 Table 8) needs one fixed brief authored by several vendors, and the
+  authoring flow could not express that: `build_authoring_session` resolved the model id one way, the
+  author provider a second way for review routing, and `_build_backend` resolved the harness member a
+  third way, each reading the `coder` role independently. One `coder: RoleModelConfig` parameter now
+  carries all three facts (`_resolve_coder_provider` deleted, `_resolve_coder_model` reduced to an
+  accessor), which is a simplification rather than an addition: the three could previously disagree.
+  Harness dispatch is now proven by *passing* members instead of monkeypatching ambient config, which
+  is what production does. Second seam: `make_review_hook(..., allow_correlated=False)`, the only way
+  past the decorrelation boundary, opt-in and set by no production caller, because the same-provider
+  arm is otherwise inexpressible — an injected co-lead is asserted decorrelated too. Every review
+  under it emits `review.correlated`, since a verdict reached that way does not carry production's
+  guarantee, and the launch preflight still guards the configured roles.
+  **The sweep lives in `benchmarks/author_bench`** (the human's call): a *leg* is one (author member,
+  reviewer arrangement) pair with its own K, concurrency ceiling and vendor brand colour; legs run
+  sequentially with trials concurrent inside; the report grows a per-leg table only when a batch has
+  more than one leg, and the single-leg report is **byte-identical** to the one already in the paper.
+  Two structural rulings came out of the roster. **A tier row cannot be an OpenAI author**: the tier
+  axis needs the reviewer held fixed, and the configured co-lead is OpenAI, so such a row would vary
+  two things at once — it appears instead as a deliberately correlated row, with decorrelation
+  elaborated in the text. **The decorrelation panel holds the author at the campaign default** and
+  moves only the reviewer, which makes the existing K=10 batch its cross-provider arm for free;
+  `claude-opus-5` is the pinned same-provider reviewer because the reviewer swap found it the
+  strongest, so a cost there is a strong result and no cost an honest negative one. The **Qwen row is
+  absent, not substituted**, with the reason recorded in code. The subscription session cap that
+  contaminated six of ten trials in the first batch is now a **concurrency ceiling on the roster row**
+  rather than something the operator must remember.
+  **The finding: the Codex author never consulted the key pool.** It resolved its vendor key from the
+  raw environment variable at two places, so it always launched on the *primary* even after a chat
+  role had rotated off a spent one — worse than the §13 note that a session in flight keeps its key,
+  because it never *started* from the live key. Surfaced by the new per-leg vendor probe: the OpenAI
+  primary was out of credits (`429 credit_balance_exhausted`) while the configured fallback answered,
+  so an OpenAI author was unrunnable at the same moment its own co-lead was answering normally. One
+  shared `resolve_vendor_key` now reads the pool for a rotating provider whose member names that
+  provider's standard primary variable, and the raw variable otherwise — a plan-specific variable must
+  not be shadowed, and a harness-only vendor has no cited error taxonomy so it never rotates. It
+  returns a **log-safe slot name**, never the value. The probe uses the same resolver *and fails over*,
+  because the pool only advances reactively: at launch it still holds the spent primary, so the probe
+  is the run's first real call and retires a spent key for the process, leaving the batch to launch
+  its authors on the key that answered instead of discovering the dead one inside an author
+  subprocess after each trial's lead spend is gone. **Human ruling on cost reporting:** the paper
+  states one list-price USD figure with no billed-versus-notional split ("the science won't care
+  whether those were billed from a subscription or an API key"), and the Claude coder is *not* moved
+  onto an API key to make its spend real, because it is too expensive to bill that way. Suite
+  1136 → 1160.
+
+- 2026-08-20 (third, same day) — **The OS jail met its first author, and needed five fixes to
+  survive it.** §12 recorded "a live authoring attempt under it" as the jail's remaining work; the
+  coder sweep supplied one, and every layer failed in turn — all at startup, all for $0, which is
+  the only reason this was cheap. (1) The launcher **never bound the binary it execs**: both
+  harnesses ship their CLI inside the orchestration environment, a tree `agent_fs_allow` deliberately
+  does not name, so `bwrap` failed `execvp` on all 40 trials. (2) **Bind and exec disagreed on the
+  path spelling** — the bind resolved symlinks, the exec did not, so the Claude author still failed
+  after its own directory was bound, while Codex survived because for it the two coincide. The launch
+  check I had just written resolved as well, so it reported "reachable" while the launcher failed:
+  *a check that normalises differently from the thing it checks is not a check.* (3) Codex was
+  pointed at the **operator's own settings directory**, absent from the jail. (4) Both CLIs keep
+  state in **SQLite** and the runtime dir is an **NFS** mount, where it cannot take locks, so author
+  homes moved to local disk. (5) A label derived from the clone's *directory name* collided across
+  every concurrent author, because every trial clones into a directory called `repo`.
+  **The structural one was last: this harness's own sandbox IS bubblewrap.** Jailing it nests the
+  same mechanism — Codex cannot spawn `codex-linux-sandbox`, every shell command is rejected, and the
+  author reaches the gate having read and written nothing, which reads as a weak model rather than as
+  broken plumbing. The coder diagnosed it itself and escalated to the lead, the §9.6 path behaving as
+  designed. **Human ruling: one enforcement layer.** The harness sandbox stands down when the kernel
+  jail is on, and `coder_policy` tightens the author to two writable places (its working tree and its
+  own settings home), which is *stricter* than the `workspace-write` surrendered: the observation
+  database is read-only, so no author can write a data file where a fabricated result would have to
+  live, and the temp root is absent entirely so one author cannot read another's solution — a
+  contamination that would have invalidated a repeated-trial measurement rather than broken anything
+  visibly. **Live-verified end to end**: two concurrent authors per harness starting jailed, the
+  Claude pair authenticating from the subscription and replying, and a full production trial
+  authoring both toolkit halves plus tests and passing the deterministic gate on its second
+  submission. Suite 1136 → 1176. **Two process lessons.** A hand-built probe is not the production
+  path: mine failed with the jail *off* too, which is the only reason I did not read its failure as a
+  code defect. And the config-flip lesson recurred twice in one session — two tests asserted against
+  whatever `agent_os_jail` happened to be on this host, and both now sweep it.

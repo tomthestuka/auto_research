@@ -25,6 +25,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from auto_research.sandbox.coder.events import emit
 from auto_research.sandbox.gate import collect_targets
 from auto_research.schemas import GateReport, ToolReviewVerdict, ToolSpec
 
@@ -134,6 +135,7 @@ def make_review_hook(
     author_provider: str,
     web_source: Any | None = None,
     monitor: Any | None = None,
+    allow_correlated: bool = False,
 ) -> ReviewHook:
     """Build the default ``run_review`` hook for ``merge_flow.propose_and_pr`` (§9.3 step 4).
 
@@ -143,6 +145,14 @@ def make_review_hook(
     way). ``web_source`` backs the co-lead's ``web_search`` tool; when ``None`` a default
     :class:`~auto_research.sources.WebSource` is used (its Tavily client is built lazily —
     ``TAVILY_API_KEY`` is a launch preflight requirement, so no missing-key fallback is needed).
+
+    ``allow_correlated`` permits a co-lead that shares ``author_provider``, which the trust
+    boundary otherwise refuses. It exists for one purpose: measuring what provider decorrelation
+    is worth, by running the same brief with a same-provider reviewer and comparing. It is off by
+    default, no production caller sets it, and the launch preflight still asserts the configured
+    roles are decorrelated, so enabling it cannot change how a research run behaves. A correlated
+    review records a ``review.correlated`` event rather than passing silently, because a verdict
+    reached under it does not carry the guarantee the same verdict carries in production.
     """
 
     async def run_review(
@@ -161,15 +171,37 @@ def make_review_hook(
         if agent is None:
             from auto_research.models import resolve
 
-            handle = select_decorrelated_member(resolve("analyst_colead"), author_provider)
+            group = resolve("analyst_colead")
+            handle = (
+                group.handles[0] if allow_correlated
+                else select_decorrelated_member(group, author_provider)
+            )
             agent = AnalystColeadAgent(model=handle, monitor=monitor)
         else:
             prov = getattr(getattr(agent, "model", None), "config", None)
             prov = getattr(prov, "provider", None)
-            if prov is not None and prov == author_provider:
+            if prov is not None and prov == author_provider and not allow_correlated:
                 raise ValueError(
                     "injected co-lead shares the author's provider "
-                    f"{author_provider!r}; the review must be provider-decorrelated (§9.3)."
+                    f"{author_provider!r}; the review must be provider-decorrelated (§9.3). "
+                    "A measurement that deliberately correlates them passes allow_correlated=True."
+                )
+
+        if allow_correlated:
+            reviewer = getattr(getattr(agent, "model", None), "config", None)
+            if getattr(reviewer, "provider", None) == author_provider:
+                # Recorded on every review, not once at build time: the ledger is the record, so a
+                # verdict that authorised a commit under a correlated reviewer stays readable as
+                # such afterwards.
+                await emit(
+                    None if monitor is None else monitor, "review.correlated", level=3,
+                    actor="analyst_colead",
+                    summary=(
+                        f"co-lead {getattr(reviewer, 'model', '?')} shares the author's provider "
+                        f"{author_provider!r}: decorrelation deliberately defeated (measurement)"
+                    ),
+                    data={"author_provider": author_provider,
+                          "reviewer_model": getattr(reviewer, "model", None)},
                 )
 
         tools = ReadOnlyToolProvider(

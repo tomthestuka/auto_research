@@ -191,6 +191,20 @@ def make_rotator(provider: str):
     tried = {pool.active_label()}
 
     def rotate(retire_current: bool = False) -> str | None:
+        # Another in-flight call may have rotated the pool since this one started. Two things
+        # follow, and both were wrong until 2026-08-21, when one spent primary took out a healthy
+        # fallback across a 14-trial batch:
+        #
+        # 1. The live key may be one this call has not tried, in which case there is nothing to
+        #    rotate: take it and retry. Rotating instead would step *past* it and, with two keys,
+        #    land back on the retired one and report "nothing left" while the pool was healthy.
+        # 2. ``retire_active`` retires whatever is live **now**, not the key this call used. A call
+        #    that failed on the old key would retire the *replacement* a racing call had just
+        #    switched to, and with both keys then retired every later call raised.
+        live = pool.active_label()
+        if live not in tried:
+            tried.add(live)
+            return live
         if retire_current:
             tried.add(pool.retire_active())
         label = pool.rotate(exclude=frozenset(tried))

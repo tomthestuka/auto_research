@@ -166,3 +166,67 @@ def test_review_hook_rejects_injected_colead_sharing_author_provider(tmp_path):
 
     with pytest.raises(ValueError, match="provider-decorrelated"):
         asyncio.run(hook(repo, _spec(), GateReport(passed=True)))
+
+
+def test_review_hook_allows_a_correlated_colead_only_when_measurement_asks(tmp_path):
+    """``allow_correlated`` is the one way past the trust boundary, and it is opt-in.
+
+    The default refusal is tested above. This is the measurement path: the sweep that asks what
+    provider decorrelation is worth has to be able to run the same brief with a same-provider
+    reviewer, and no other caller may.
+    """
+    repo = _make_repo(tmp_path)
+    fake = _FakeModel({"approved": True, "rationale": "ok"})
+    fake.config = SimpleNamespace(provider="anthropic", model="claude-opus-5")
+    colead = AnalystColeadAgent(model=fake)
+
+    hook = make_review_hook(
+        colead=colead, author_provider="anthropic", allow_correlated=True
+    )
+    verdict = asyncio.run(hook(repo, _spec(), GateReport(passed=True)))
+    assert verdict.approved is True
+
+
+def test_a_correlated_review_is_recorded_so_the_verdict_stays_readable_as_such(tmp_path):
+    """A verdict reached under a correlated reviewer does not carry production's guarantee, so
+    the ledger has to say so — otherwise a later reader cannot tell the two apart."""
+    repo = _make_repo(tmp_path)
+    events: list[tuple[str, dict]] = []
+
+    class _Monitor:
+        async def record(self, team, event, *, level, summary, actor=None, data=None):
+            events.append((event, dict(data or {})))
+
+    fake = _FakeModel({"approved": True, "rationale": "ok"})
+    fake.config = SimpleNamespace(provider="openai", model="gpt-5.6-sol")
+    colead = AnalystColeadAgent(model=fake)
+
+    hook = make_review_hook(
+        colead=colead, author_provider="openai", monitor=_Monitor(), allow_correlated=True
+    )
+    asyncio.run(hook(repo, _spec(), GateReport(passed=True)))
+
+    correlated = [d for name, d in events if name == "review.correlated"]
+    assert correlated, f"expected a review.correlated event, saw {[n for n, _ in events]}"
+    assert correlated[0]["author_provider"] == "openai"
+    assert correlated[0]["reviewer_model"] == "gpt-5.6-sol"
+
+
+def test_a_decorrelated_review_records_nothing_about_correlation(tmp_path):
+    """The flag being on does not make the event fire; sharing a provider does."""
+    repo = _make_repo(tmp_path)
+    events: list[str] = []
+
+    class _Monitor:
+        async def record(self, team, event, *, level, summary, actor=None, data=None):
+            events.append(event)
+
+    fake = _FakeModel({"approved": True, "rationale": "ok"})
+    fake.config = SimpleNamespace(provider="openai", model="gpt-5.6-sol")
+    colead = AnalystColeadAgent(model=fake)
+
+    hook = make_review_hook(
+        colead=colead, author_provider="anthropic", monitor=_Monitor(), allow_correlated=True
+    )
+    asyncio.run(hook(repo, _spec(), GateReport(passed=True)))
+    assert "review.correlated" not in events

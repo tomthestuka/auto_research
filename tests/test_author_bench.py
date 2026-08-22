@@ -351,3 +351,392 @@ def test_records_state_that_trials_ran_without_a_human_channel():
     if not (root / ".git").exists():
         pytest.skip(f"toolkit checkout absent at {root}")
     assert collect_stamps(root, brief.BASE_SHA)["human_channel"] == "none (unattended)"
+
+
+# ── the sweep roster ────────────────────────────────────────────────────────
+
+
+def test_no_tier_row_shares_the_configured_coleads_provider():
+    """The tier axis is only interpretable if the reviewer is the same in every tier row.
+
+    The configured co-lead is OpenAI, so an OpenAI author would force the reviewer to change and
+    the row would vary two things at once. Such an author belongs in a decorrelation row, labelled
+    as correlated, which is exactly where the roster puts it.
+    """
+    from auto_research.models import resolve
+
+    from benchmarks.author_bench.legs import ROSTER
+
+    colead_provider = resolve("analyst_colead").handles[0].config.provider
+    tier = [leg for leg in ROSTER if leg.purpose == "tier"]
+    assert tier, "the roster has no tier rows"
+    for leg in tier:
+        assert leg.provider != colead_provider, (
+            f"tier row {leg.slug} shares the co-lead's provider {colead_provider!r}, so its "
+            "reviewer cannot be held fixed"
+        )
+        assert leg.colead_provider is None, f"tier row {leg.slug} pins a reviewer"
+        assert not leg.correlated
+
+
+def test_every_decorrelation_row_is_correlated_and_says_so():
+    """A decorrelation row exists to measure the same-provider arrangement, so it must actually
+    be one; the flag that permits it is what the run passes to the review hook."""
+    from benchmarks.author_bench.legs import ROSTER
+
+    rows = [leg for leg in ROSTER if leg.purpose == "decorrelation"]
+    assert rows, "the roster has no decorrelation rows"
+    for leg in rows:
+        assert leg.correlated, f"{leg.slug} is a decorrelation row but is not correlated"
+
+
+def test_every_leg_is_a_pairing_the_harness_table_supports():
+    """A leg naming an impossible author pairing would fail inside the author subprocess."""
+    from auto_research.sandbox.coder.harness import HARNESS_ENDPOINTS
+
+    from benchmarks.author_bench.legs import ROSTER
+
+    for leg in ROSTER:
+        key = (leg.provider, leg.harness)
+        assert key in HARNESS_ENDPOINTS, f"{leg.slug}: {leg.provider}+{leg.harness} does not exist"
+        documented = HARNESS_ENDPOINTS[key]
+        if documented is None:
+            continue
+        assert leg.base_url == documented, (
+            f"{leg.slug} points at {leg.base_url!r}; the vendor documents {documented!r}"
+        )
+
+
+def test_the_claude_legs_cap_their_own_concurrency():
+    """The subscription session cap is a measured hazard, not a remembered one: it contaminated
+    six of ten trials in the first batch. It belongs in the roster, where a batch cannot forget
+    it, rather than in whoever types the command."""
+    from benchmarks.author_bench.legs import ROSTER
+
+    for leg in ROSTER:
+        if leg.harness == "claude_sdk":
+            assert leg.max_concurrency is not None and leg.max_concurrency <= 2, leg.slug
+        else:
+            assert leg.max_concurrency is None, leg.slug
+
+
+def test_a_leg_supplies_the_author_member_and_its_correlation_setting(tmp_path, monkeypatch):
+    """What a leg actually changes about the call: the author member and, for a correlated row,
+    the switch that lets a same-provider reviewer run. Everything else stays identical."""
+    from benchmarks.author_bench.legs import BY_SLUG
+
+    root = _skip_without_toolkit()
+    lead = _FakeLead(result=MergeFlowResult(
+        tool_spec_id="ixpe_pa_pd_stability", status="committed", branch="b", commit_sha="",
+        reason="ok",
+    ))
+    _install_fake_lead(monkeypatch, lead)
+
+    leg = BY_SLUG["deepseek_v4_flash"]
+    cfg = _config(tmp_path, root)
+    cfg = trial.TrialConfig(
+        toolkit_root=cfg.toolkit_root, out_dir=cfg.out_dir, base_sha=cfg.base_sha,
+        stamps=cfg.stamps, keep_clones=False, chatter=1, leg=leg,
+    )
+    record = asyncio.run(trial.run_trial(1, cfg))
+
+    member = lead.seen["coder"]
+    assert member.model == "deepseek-v4-flash"
+    assert member.provider == "deepseek"
+    assert member.harness == "codex"
+    assert lead.seen["allow_correlated_review"] is False
+    assert lead.seen["colead"] is None, "a tier row takes the configured decorrelated routing"
+    # The record names its own author, or a merged multi-leg report cannot group it.
+    assert record["leg"] == "deepseek_v4_flash"
+    assert record["coder"] == "deepseek-v4-flash"
+    assert record["correlated_review"] is False
+
+
+def test_a_correlated_leg_pins_its_reviewer_and_opens_the_switch(tmp_path, monkeypatch):
+    root = _skip_without_toolkit()
+    lead = _FakeLead(result=MergeFlowResult(
+        tool_spec_id="ixpe_pa_pd_stability", status="committed", branch="b", commit_sha="",
+        reason="ok",
+    ))
+    _install_fake_lead(monkeypatch, lead)
+
+    from benchmarks.author_bench.legs import BY_SLUG
+
+    leg = BY_SLUG["claude_sonnet_5_correlated"]
+    base = _config(tmp_path, root)
+    cfg = trial.TrialConfig(
+        toolkit_root=base.toolkit_root, out_dir=base.out_dir, base_sha=base.base_sha,
+        stamps=base.stamps, keep_clones=False, chatter=1, leg=leg,
+    )
+    record = asyncio.run(trial.run_trial(1, cfg))
+
+    assert lead.seen["allow_correlated_review"] is True
+    colead = lead.seen["colead"]
+    assert colead is not None, "the same-provider arm has no configured member to route to"
+    assert colead.model.config.model == "claude-opus-5"
+    assert colead.model.config.provider == "anthropic"
+    assert record["correlated_review"] is True
+
+
+def test_a_pinned_reviewer_is_harmonised_with_the_configured_one():
+    """A member left at its own default would compare configurations rather than models, which is
+    the correction the reviewer swap already had to make."""
+    from benchmarks.author_bench.legs import BY_SLUG
+    from benchmarks.author_bench.trial import build_pinned_colead
+
+    colead = build_pinned_colead(BY_SLUG["claude_sonnet_5_correlated"], None)
+    assert colead.model.config.parameters["max_tokens"] == 16384
+
+
+# ── the multi-leg report ────────────────────────────────────────────────────
+
+
+def _leg_record(leg, trial_no, status, cost, colead="(configured)", correlated=False):
+    return {
+        "trial": trial_no, "status": status, "cost_usd": cost, "duration_s": 60.0,
+        "leg": leg, "coder": f"{leg}-model", "colead": colead,
+        "correlated_review": correlated, "review_runs": 2,
+    }
+
+
+def test_a_multi_leg_report_partitions_by_leg_not_by_pooling():
+    """Pooling terminal states across legs would average away the very axis being measured, so a
+    multi-leg report grows a per-leg table and the per-trial rows name their leg."""
+    records = [
+        _leg_record("alpha", 1, "committed", 10.0),
+        _leg_record("alpha", 2, "failed", 20.0),
+        _leg_record("beta", 1, "committed", 30.0, colead="pinned", correlated=True),
+    ]
+    report = build_report(records, {})
+
+    assert "## By leg" in report
+    assert "| alpha |" in report and "| beta |" in report
+    assert "pinned [correlated]" in report
+    # Trial numbers repeat across legs, so a row without its leg is ambiguous.
+    assert "| Leg | Trial |" in report
+
+
+def test_a_single_leg_report_gains_no_leg_column():
+    """The reliability batch's own report must not change shape because the sweep exists: its
+    numbers are already in the paper."""
+    records = [_leg_record("alpha", 1, "committed", 10.0)]
+    report = build_report(records, {})
+    assert "## By leg" not in report
+    assert "| Leg | Trial |" not in report
+
+
+def test_records_from_different_legs_never_replace_each_other_on_rescore(tmp_path):
+    """Every leg numbers its trials from one, so keying a merge on the trial number alone would
+    let one leg's trial silently overwrite another's."""
+    from benchmarks.author_bench.__main__ import rescore
+
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    for path, leg in ((first, "alpha"), (second, "beta")):
+        path.mkdir()
+        (path / "records.jsonl").write_text(
+            json.dumps(_leg_record(leg, 1, "committed", 5.0)) + "\n", encoding="utf-8"
+        )
+
+    rescore([first, second])
+    report = (second / "report.md").read_text(encoding="utf-8")
+    assert "| alpha |" in report and "| beta |" in report
+
+
+# ── the per-leg vendor probe ────────────────────────────────────────────────
+
+
+class _ProbeError(Exception):
+    """A stand-in SDK error carrying the two fields the key classifiers read."""
+
+    def __init__(self, message, *, status_code=None, type_=None, code=None):
+        super().__init__(message)
+        if status_code is not None:
+            self.status_code = status_code
+        if type_ is not None:
+            self.type = type_
+        if code is not None:
+            self.code = code
+
+
+def _spent_balance():
+    # OpenAI reports a spent balance as a 429; only `code` separates it from a refilling one.
+    return _ProbeError("You have no credits remaining.", status_code=429,
+                       type_="insufficient_quota", code="credit_balance_exhausted")
+
+
+def _install_fake_openai(monkeypatch, outcomes: dict[str, object]):
+    """A client whose behaviour depends on the key it was handed."""
+    import openai
+
+    seen: list[str] = []
+
+    class _Responses:
+        def __init__(self, key):
+            self._key = key
+
+        def create(self, **_kw):
+            seen.append(self._key)
+            outcome = outcomes.get(self._key)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return object()
+
+    class _Client:
+        def __init__(self, api_key=None, base_url=None):
+            self.responses = _Responses(api_key)
+
+    monkeypatch.setattr(openai, "OpenAI", _Client, raising=True)
+    return seen
+
+
+def test_the_probe_fails_over_and_leaves_the_pool_on_the_key_that_answered(monkeypatch):
+    """The pool advances only when a call fails, so at launch it still holds a spent primary.
+
+    The probe is the run's first real call to that vendor, so it fails over: the spent key is
+    retired for the process and the batch then launches its authors on the key that answered,
+    instead of discovering the dead one inside an author subprocess one trial at a time.
+    """
+    from auto_research.models import keys as keymod
+
+    from benchmarks.author_bench.__main__ import probe_leg_vendor
+    from benchmarks.author_bench.legs import BY_SLUG
+
+    monkeypatch.setenv("OPENAI_API_KEY", "dead")
+    monkeypatch.setenv("OPENAI_API_KEY_FALLBACK", "live")
+    keymod.reset_pools()
+    seen = _install_fake_openai(monkeypatch, {"dead": _spent_balance(), "live": None})
+
+    problem = probe_leg_vendor(BY_SLUG["gpt_5_6_terra_correlated"])
+
+    assert problem is None
+    assert seen == ["dead", "live"], "the probe must try the live key, not just report the dead one"
+    assert keymod.key_pool("openai").active() == "live", (
+        "the pool must be left on the key that answered, or the author still launches on the dead one"
+    )
+    keymod.reset_pools()
+
+
+def test_the_probe_reports_honestly_when_every_key_is_dead(monkeypatch):
+    """Rotation offers each key once and then stops. A batch must not launch on the belief that
+    some key works when none does."""
+    from auto_research.models import keys as keymod
+
+    from benchmarks.author_bench.__main__ import probe_leg_vendor
+    from benchmarks.author_bench.legs import BY_SLUG
+
+    monkeypatch.setenv("OPENAI_API_KEY", "dead1")
+    monkeypatch.setenv("OPENAI_API_KEY_FALLBACK", "dead2")
+    keymod.reset_pools()
+    _install_fake_openai(
+        monkeypatch, {"dead1": _spent_balance(), "dead2": _spent_balance()}
+    )
+
+    problem = probe_leg_vendor(BY_SLUG["gpt_5_6_terra_correlated"])
+
+    assert problem is not None
+    assert "every configured key" in problem
+    keymod.reset_pools()
+
+
+def test_the_probe_does_not_rotate_a_vendor_with_no_cited_taxonomy(monkeypatch):
+    """A harness-only vendor is deliberately outside the rotating set: no cited error taxonomy, so
+    nothing may be inferred from its refusal. Its failure is reported, not routed around."""
+    from benchmarks.author_bench.__main__ import probe_leg_vendor
+    from benchmarks.author_bench.legs import BY_SLUG
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "k")
+    seen = _install_fake_openai(monkeypatch, {"k": _spent_balance()})
+
+    problem = probe_leg_vendor(BY_SLUG["deepseek_v4_flash"])
+
+    assert problem is not None and "refused" in problem
+    assert seen == ["k"], "one attempt only: there is nothing to rotate to"
+
+
+def test_a_claude_leg_has_nothing_to_probe():
+    """It authenticates from stored subscription credentials, not a key."""
+    from benchmarks.author_bench.__main__ import probe_leg_vendor
+    from benchmarks.author_bench.legs import BY_SLUG
+
+    assert probe_leg_vendor(BY_SLUG["claude_sonnet_5_correlated"]) is None
+
+
+def test_a_leg_cannot_hold_a_global_slot_while_queued_behind_its_own_cap():
+    """Lock order decides whether legs interleave or starve each other.
+
+    Taking the batch-wide slot before the per-leg one lets a trial occupy the batch-wide budget
+    while it is still waiting for its own leg's cap, so the legs created first hold every slot and
+    the later legs never start. Asserted on the source order, because the failure is an ordering
+    property that a passing run hides: the batch still completes, just one pair of legs at a time.
+    """
+    import inspect
+
+    from benchmarks.author_bench import __main__ as cli
+
+    source = inspect.getsource(cli._run)
+    assert "async with own, everything:" in source, (
+        "the per-leg semaphore must be acquired before the batch-wide one"
+    )
+    assert "async with everything, own:" not in source
+
+
+def test_the_record_counts_whether_the_coder_could_execute_anything(tmp_path):
+    """Exit codes, not call counts: the one number that separates a weak model from a dead harness.
+
+    An author that cannot run a command still emits text, still calls tools, and can still reach a
+    gate pass, because the gate runs the tests in its own process. So every other field in the
+    record looks normal while the author is disabled.
+    """
+    ledger = tmp_path / "monitor.jsonl"
+    rows = [
+        {"event": "coder.tool_use", "data": {"exit_code": None, "input": "pytest"}},
+        {"event": "coder.tool_use", "data": {"exit_code": 0, "input": "pytest"}},
+        {"event": "coder.tool_use", "data": {"exit_code": 1, "input": "pytest -x"}},
+        {"event": "coder.tool_use", "data": {"exit_code": 2, "input": "python -c ..."}},
+    ]
+    ledger.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    got = trial.summarise_ledger(ledger)
+
+    assert got["coder_commands_ok"] == 1
+    assert got["coder_commands_failed"] == 2, "a pending call (exit_code None) counts as neither"
+
+
+def test_a_report_shouts_when_a_coder_could_not_execute_anything():
+    """It has to be visible where the numbers are read. Buried in a ledger it was missed for an
+    entire batch, at a cost of US$155 and no measurement."""
+    dead = _leg_record("alpha", 1, "failed", 3.0)
+    dead.update({"coder_commands_ok": 0, "coder_commands_failed": 58})
+    fine = _leg_record("beta", 1, "committed", 9.0)
+    fine.update({"coder_commands_ok": 81, "coder_commands_failed": 4})
+
+    report = build_report([dead, fine], {})
+
+    assert "could not execute anything" in report
+    assert "alpha trial 01: 0 succeeded, 58 failed" in report
+    assert "beta trial 01" not in report.split("## Fabrication")[0].split("WARNING")[-1]
+
+
+def test_no_warning_when_every_coder_could_execute():
+    fine = _leg_record("beta", 1, "committed", 9.0)
+    fine.update({"coder_commands_ok": 81, "coder_commands_failed": 4})
+    assert "could not execute anything" not in build_report([fine], {})
+
+
+def test_the_command_counter_reads_both_harness_shapes(tmp_path):
+    """Codex reports `exit_code` on the tool_use; the Claude SDK reports `is_error` on a separate
+    tool_result. Counting one shape only made a Claude author's blocked calls read as no calls."""
+    ledger = tmp_path / "monitor.jsonl"
+    rows = [
+        {"event": "coder.tool_use", "data": {"exit_code": 0}},
+        {"event": "coder.tool_use", "data": {"exit_code": 1}},
+        {"event": "coder.tool_result", "data": {"is_error": True, "text": "denied"}},
+        {"event": "coder.tool_result", "data": {"is_error": False, "text": "ok"}},
+    ]
+    ledger.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    got = trial.summarise_ledger(ledger)
+
+    assert got["coder_commands_ok"] == 2
+    assert got["coder_commands_failed"] == 2

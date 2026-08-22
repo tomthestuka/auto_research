@@ -37,6 +37,7 @@ that cannot run it.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -67,6 +68,12 @@ class JailPolicy:
     label: str = ""
     ro_files: tuple[str, ...] = field(default=())
     """Individual files bound read-only, for a secret that must not bring its directory with it."""
+    ro_files_at: tuple[tuple[str, str], ...] = field(default=())
+    """``(source, destination)`` read-only file binds, for a file the jailed process must find at a
+    *different* path than it occupies outside. The case that needs it: the Claude CLI's credential
+    lives in the real home, and the jail hands the process a fresh home, so binding the file at its
+    own path puts it somewhere the process will never look. Carrying one file to the address the
+    process actually reads keeps the narrow exposure and makes the subscription path work."""
 
 
 def _config() -> dict:
@@ -212,6 +219,14 @@ def jail_argv(policy: JailPolicy) -> list[str]:
         home = str(Path(policy.home).resolve())
         argv += ["--bind", home, home, "--setenv", "HOME", home]
 
+    # After the home bind on purpose: a later bind lands on top of an earlier one, and every
+    # re-addressed file is destined *inside* the home, so emitting these first would let the home
+    # bind hide them.
+    for source, destination in policy.ro_files_at:
+        resolved = str(Path(source).resolve())
+        if Path(resolved).is_file():
+            argv += ["--ro-bind", resolved, str(destination)]
+
     argv += ["--proc", "/proc", "--dev", "/dev"]
     return argv
 
@@ -251,9 +266,29 @@ def write_launcher(path: Path, target: str, policy: JailPolicy) -> Path:
     ``CodexConfig.codex_bin``) rather than a command line, and each SDK builds its own arguments
     after that. Wrapping the *binary* instead of the argv keeps us out of that: whatever a vendor
     decides to pass next release still lands inside the jail.
+
+    **The binary is bound read-only into the jail here**, because a wrapper that execs a path the
+    mount namespace does not contain fails with ``execvp: No such file or directory`` — which is
+    what happened to all 40 trials of the first jailed sweep (2026-08-20). Both harnesses ship
+    their CLI *inside the orchestration environment's* ``site-packages``, a tree the allow-list
+    deliberately does not name, so nothing else would ever bind it. The **parent directory** is
+    bound rather than the single file, since a bundled CLI normally needs its siblings (a runtime,
+    a wasm blob, a licence file); it is one vendor package directory, and the working tree that
+    holds the governance files and the gate's own source stays denied, so §4 is unaffected.
     """
+    # Resolved on both sides, and they must match: the bind is of the resolved directory, so a
+    # launcher that execs the *unresolved* path asks for something the namespace does not contain.
+    # On this host the environment is reached through a symlink, so the two differed and the Claude
+    # author still failed `execvp` after its directory was bound (2026-08-20).
+    resolved_target = str(Path(target).resolve())
+    target_dir = str(Path(resolved_target).parent)
+    policy = JailPolicy(
+        ro=(*policy.ro, target_dir) if target_dir not in policy.ro else policy.ro,
+        rw=policy.rw, network=policy.network, home=policy.home, label=policy.label,
+        ro_files=policy.ro_files, ro_files_at=policy.ro_files_at,
+    )
     prefix = jail_argv(policy)
-    command = [*prefix, "--", target] if prefix else [target]
+    command = [*prefix, "--", resolved_target] if prefix else [resolved_target]
     body = "#!/bin/sh\nexec " + " ".join(_quote(part) for part in command)
     path.write_text(body + ' "$@"\n', encoding="utf-8")
     path.chmod(0o755)
@@ -326,6 +361,97 @@ def check_os_jail_probe() -> None:
             "root (read-only in `agent_fs_readonly`), or set `agent_os_jail: false`."
         )
 
+def binary_reachable_in_jail(binary: str, *, label: str) -> tuple[bool, str]:
+    """Whether ``binary`` is executable **inside** the jail, and why not when it is not.
+
+    Proven by testing the path inside the namespace rather than by running the vendor CLI: a
+    ``--version`` may authenticate, reach the network, or write a config directory, none of which
+    this needs to know. What failed on 2026-08-20 was the mount, so the mount is what is checked.
+    """
+    if not jail_enabled():
+        return True, ""
+    ok, _ = jail_available()
+    if not ok:
+        return True, ""  # check_os_jail_available already warns
+    resolved = Path(binary).resolve()
+    if not resolved.is_file():
+        return False, f"{binary} does not exist outside the jail either"
+    policy = coder_policy(label=label)
+    policy = JailPolicy(
+        ro=(*policy.ro, str(resolved.parent)), rw=policy.rw, network=policy.network,
+        home=policy.home, label=policy.label, ro_files=policy.ro_files,
+    )
+    try:
+        probe = subprocess.run(
+            [*jail_argv(policy), "--", "/bin/sh", "-c", f"test -x {shlex.quote(str(resolved))}"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"the jail could not start to check it: {exc}"
+    if probe.returncode != 0:
+        detail = (probe.stderr or "").strip().splitlines()
+        return False, detail[-1] if detail else f"not executable inside the jail (exit {probe.returncode})"
+    return True, ""
+
+
+def harness_binary(harness: str) -> str | None:
+    """The CLI an author harness execs, or ``None`` when it cannot be resolved.
+
+    Each SDK is asked for its own binary rather than probed on ``PATH``: both ship a bundled one
+    that ``which`` cannot see.
+    """
+    if harness == "codex":
+        from auto_research.sandbox.coder.codex_bin import resolve_codex_bin
+
+        try:
+            return resolve_codex_bin()
+        except Exception:  # noqa: BLE001 — a missing binary is the harness check's to report
+            return None
+    if harness == "claude_sdk":
+        try:
+            from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+            return SubprocessCLITransport._find_cli(
+                SubprocessCLITransport.__new__(SubprocessCLITransport)
+            )
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def check_os_jail_harness() -> None:
+    """Launch check: the configured author harness's CLI is reachable inside the jail.
+
+    The sibling probe runs the analysis stack inside the jail, which is why it passed while every
+    author died: it never execs a *harness* binary. Both harnesses ship their CLI inside the
+    orchestration environment, a tree the allow-list does not name, so this is the one check that
+    would have caught the first jailed sweep's failure at launch rather than in forty trials.
+    """
+    if not jail_enabled():
+        return
+    from auto_research.sandbox.coder.harness import coder_member
+
+    try:
+        member = coder_member()
+    except Exception:  # noqa: BLE001 — the harness preflight owns a malformed coder role
+        return
+    harness = member.harness
+    if not harness:
+        return
+    binary = harness_binary(harness)
+    if binary is None:
+        return  # the harness support check owns an unresolvable binary
+    ok, why = binary_reachable_in_jail(binary, label=harness)
+    if not ok:
+        raise ValueError(
+            f"the {harness} author's CLI ({binary}) is not usable inside the OS jail: {why}. "
+            "Its wrapper execs that path inside the mount namespace, so an unbound one fails as "
+            "`execvp: No such file or directory` in every authoring attempt. `write_launcher` "
+            "binds the binary's own directory; if that is not enough, add what it needs to "
+            "`agent_fs_readonly`, or set `agent_os_jail: false`."
+        )
+
+
 def jail_home(label: str) -> Path:
     """A writable HOME for one jailed process, under the runtime data dir.
 
@@ -340,21 +466,86 @@ def jail_home(label: str) -> Path:
     return home
 
 
+def coder_home(label: str) -> Path:
+    """A writable HOME for one author harness, on **local** disk.
+
+    Deliberately not under the runtime data dir like :func:`jail_home`: both harness CLIs keep
+    their state in a SQLite database, and this cluster's runtime directory is an NFS mount, where
+    SQLite cannot take the locks it needs. Every Codex author failed with "failed to initialize
+    sqlite state runtime" until this moved to local disk (2026-08-20). The directory is bound
+    writable by the policy itself, so it does not depend on the allow-list naming the temp root.
+    """
+    import tempfile
+
+    home = Path(tempfile.gettempdir()) / "auto_research-coder-home" / (label or "default")
+    home.mkdir(parents=True, exist_ok=True)
+    return home
+
+
+def codex_settings_home(label: str) -> Path:
+    """A fresh, writable settings directory for a jailed Codex author.
+
+    The CLI keeps its login state and history in the directory ``CODEX_HOME`` names, which outside
+    the jail is the operator's own. Inside the jail that path is not bound, so the CLI refuses to
+    start — and binding the real one would be both writable-when-it-must-not-be and an exposure of
+    exactly the config file a coder on this harness once read unprompted. A fresh directory of its
+    own avoids all three: it is inside the jail, writable, and carries nothing of the operator's.
+    """
+    home = coder_home(label).resolve() / ".codex"
+    home.mkdir(parents=True, exist_ok=True)
+    return home
+
+
 def coder_policy(*, label: str, extra_rw: tuple[str, ...] = ()) -> JailPolicy:
     """The jail for an author harness: the allow-list, its own home, and its credential file.
 
     The Claude harness authenticates from ``~/.claude/.credentials.json``, which a jailed home
     hides. Binding that one file read-only keeps the subscription path working without exposing the
     home directory it lives in — every other harness secret arrives through the environment.
+
+    **The file is carried to the address the CLI will actually read**, not to its own path. The jail
+    replaces ``HOME``, so a bind at the real path leaves the credential somewhere the process never
+    looks: that is why every Claude author died on the first jailed sweep (2026-08-20). Its parent
+    is created inside the real settings home first, so the CLI's own writes to that directory land
+    in a writable place rather than on a mount point's synthesised parent.
+
+    **An author writes to two places only: its working tree and its own settings home.** Everything
+    else on the allow-list is read-only for this policy, which is what makes it safe for the Codex
+    harness to stand its own sandbox down inside the jail (see ``codex_sdk._start_thread``): the
+    surrendered ``workspace-write`` mode confined writes to the working tree, and so does this, but
+    the kernel enforces it and the reads are confined too. The observation database in particular is
+    read-only here, so no author can write a data file into the place a fabricated result would have
+    to live.
+
+    The temp root is dropped from the read set rather than demoted, because trial working trees live
+    under it: leaving it readable would let one author read another's solution, which would quietly
+    invalidate a repeated-trial measurement rather than break anything visibly.
     """
+    import tempfile
+
     base = policy_from_config(network=True, label=label)
-    home = jail_home(label)
+    # Resolved, because the home is *bound* at its resolved path: on a host that reaches the
+    # runtime directory through a symlink, a destination built from the unresolved path lands
+    # outside the bound home and the file is invisible again.
+    home = coder_home(label).resolve()
     credential = Path.home() / ".claude" / ".credentials.json"
+    mapped: tuple[tuple[str, str], ...] = ()
+    if credential.is_file():
+        destination = home / ".claude" / ".credentials.json"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        mapped = ((str(credential), str(destination)),)
+
+    writable = tuple(dict.fromkeys((*extra_rw, str(home))))
+    temp_root = str(Path(tempfile.gettempdir()).resolve())
+    readonly = tuple(
+        entry for entry in dict.fromkeys((*base.ro, *base.rw))
+        if entry not in writable and str(Path(entry).resolve()) != temp_root
+    )
     return JailPolicy(
-        ro=base.ro,
-        rw=(*base.rw, *extra_rw, str(home)),
+        ro=readonly,
+        rw=writable,
         network=True,
         home=str(home),
         label=label,
-        ro_files=(str(credential),) if credential.is_file() else (),
+        ro_files_at=mapped,
     )

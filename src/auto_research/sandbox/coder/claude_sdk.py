@@ -111,6 +111,18 @@ def _make_fs_guard_hook(guard):
     """
 
     async def hook(input_data, tool_use_id, context):  # noqa: ANN001 — SDK callback signature
+        # One enforcement layer. With the kernel jail on, anything outside the allow-list is not in
+        # the mount namespace at all, so a read fails as *absent* — strictly stronger than this
+        # check. What the check still contributes there is false denials: its command extractor
+        # fails closed on path-ish tokens (§13 [F3]), and on 2026-08-21 it denied
+        # `/lib/red_ixpe.py`, `/pcube_timeseg_` and `/dev/null` to authors working on exactly those
+        # files, which then wrote nothing and were rejected by the gate for an absent manifest
+        # entry. The same ruling was already applied to the Codex harness's approval gate, for the
+        # same reason: turning off one layer must not leave a second one vetoing legitimate work.
+        from auto_research.sandbox.jail import jail_enabled
+
+        if jail_enabled():
+            return {}
         try:
             tool = input_data.get("tool_name", "")
             ti = input_data.get("tool_input") or {}
@@ -140,7 +152,7 @@ def _make_fs_guard_hook(guard):
     return hook
 
 
-def _jail_launcher(worktree_base: Path | None) -> str | None:
+def _jail_launcher(worktree_base: Path | None, worktree: Path | None = None) -> str | None:
     """A wrapper that runs the SDK's own CLI inside the OS jail, or ``None`` when the jail is off.
 
     The SDK accepts a path to the binary (``cli_path``) and builds its own arguments after that, so
@@ -163,7 +175,23 @@ def _jail_launcher(worktree_base: Path | None) -> str | None:
         )
     except Exception:  # noqa: BLE001 — no CLI to wrap; the SDK will report it as it always did
         return None
-    policy = coder_policy(label="claude_sdk", extra_rw=(str(worktree_base),))
+    # A label of this author's own: concurrent authors must not share a settings directory, since
+    # the CLI writes session state into it and the credential is carried in per home. Derived from
+    # the **full** path, because several concurrent trials use the same directory *name* — a
+    # name-derived label collided across all of them and they raced on one state database.
+    import hashlib
+
+    digest = hashlib.sha1(str(Path(worktree_base).resolve()).encode()).hexdigest()[:10]
+    # BOTH the artifacts directory and the **working tree**. The worktree is where the author
+    # reads and writes; binding only ``worktree_base`` left the author's own clone outside its
+    # jail, so it silently read the *live* toolkit checkout instead and could write nowhere
+    # (measured 2026-08-21: 10 and 16 "File does not exist" tool results in the first two trials,
+    # with the CLI reporting its cwd as the settings home). This was latent while the allow-list
+    # made the temp root writable for the author; tightening the policy to two writable places
+    # removed that accidental coverage and exposed it. The Codex launcher always passed its
+    # worktree, which is why only this harness was affected.
+    writable = [str(worktree_base)] + ([str(worktree)] if worktree is not None else [])
+    policy = coder_policy(label=f"claude_sdk-{digest}", extra_rw=tuple(writable))
     launcher = Path(worktree_base)
     launcher.mkdir(parents=True, exist_ok=True)
     return str(write_launcher(launcher / "claude-jailed", str(real), policy))
@@ -210,7 +238,7 @@ def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, esca
     env = _with_live_anthropic_key(env)
     if env:  # full sourced env (analyst conda + HEASoft); omit when unset so the SDK inherits.
         kwargs["env"] = env
-    launcher = _jail_launcher(worktree_base)
+    launcher = _jail_launcher(worktree_base, worktree)
     if launcher:
         # The OS jail (§12): the guard hook above stays, since it is what tells the model *why* a
         # path was refused, but the kernel is now what enforces it — including the reads a hook

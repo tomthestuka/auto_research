@@ -34,8 +34,43 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.author_bench.brief import load_brief
+from benchmarks.author_bench.legs import Leg
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# The co-lead settings a pinned reviewer is given, harmonised with the configured OpenAI co-lead's
+# (``reasoning.effort: high``, ``max_output_tokens: 16384``) rather than left at each vendor's
+# default. The reviewer swap established why: a member left at its own role setting compares
+# configurations instead of models.
+_PINNED_COLEAD_PARAMETERS: dict[str, dict[str, object]] = {
+    "anthropic": {"thinking": {"type": "adaptive"}, "max_tokens": 16384},
+    "openai": {"max_output_tokens": 16384, "reasoning": {"effort": "high"}},
+}
+
+
+def build_pinned_colead(leg: Leg, monitor: Any | None) -> Any:
+    """The co-lead a decorrelation leg pins, built outside the configured role.
+
+    Needed because ``analyst_colead`` carries only the production OpenAI member, so the
+    same-provider arm of an Anthropic author has no member to route to. Building it here keeps the
+    measurement out of machine-local config, which is what makes the batch reproducible.
+    """
+    from auto_research.agents import AnalystColeadAgent
+    from auto_research.models.providers import provider_for
+    from auto_research.models.types import ModelHandle, RoleModelConfig
+
+    member = RoleModelConfig(
+        name=f"sweep_colead_{leg.slug}",
+        provider=leg.colead_provider,
+        model=leg.colead_model,
+        vision=True,
+        documents=True,
+        parameters=dict(_PINNED_COLEAD_PARAMETERS.get(leg.colead_provider, {})),
+    )
+    handle = ModelHandle(
+        role="analyst_colead", config=member, provider=provider_for(member.provider)
+    )
+    return AnalystColeadAgent(model=handle, monitor=monitor)
 
 
 @dataclass
@@ -48,6 +83,9 @@ class TrialConfig:
     stamps: dict[str, str] = field(default_factory=dict)
     keep_clones: bool = False
     chatter: int = 4
+    leg: Leg | None = None
+    """The sweep row this batch is running; ``None`` means the configured author, i.e. the
+    single-leg reliability batch the benchmark started as."""
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -118,6 +156,8 @@ def summarise_ledger(path: Path) -> dict:
         return {}
     events: Counter[str] = Counter()
     gate_pass = gate_fail = review_pass = review_fail = 0
+    cmd_ok = cmd_failed = 0
+    turns_failed = turns_rate_limited = 0
     cost_by_role: Counter[str] = Counter()
     gate_failing_checks: list[str] = []
     review_issues: list[str] = []
@@ -147,6 +187,35 @@ def summarise_ledger(path: Path) -> dict:
             else:
                 review_fail += 1
                 review_issues.extend(data.get("issues") or [])
+        elif event == "coder.tool_use" and data.get("exit_code") is not None:
+            # Whether the harness actually served the model. A coder that cannot execute anything
+            # still produces text, still produces tool calls, and still reaches the gate, because
+            # the gate runs the tests in its own process — so every other number in this record
+            # looks normal while the author is disabled. That is not hypothetical: on 2026-08-20 a
+            # probe ran 58 commands with 0 successes, nothing in the summary showed it, and the
+            # batch that followed cost US$155 and measured nothing.
+            if data.get("exit_code") == 0:
+                cmd_ok += 1
+            else:
+                cmd_failed += 1
+        elif event == "coder.turn_end":
+            # A *failed* author turn produces no tool calls and no text, so it reaches the lead
+            # indistinguishable from an author that chose to do nothing — which is how 670
+            # rate-limited GLM turns read as a lazy model for an hour (2026-08-21). Counted here so
+            # the record says which it was.
+            if "failed" in str(data.get("status") or "").lower():
+                turns_failed += 1
+            if "ate limit" in str(data.get("error") or ""):
+                turns_rate_limited += 1
+        elif event == "coder.tool_result":
+            # The other harness shape. The Claude SDK reports `is_error` on a separate tool_result
+            # rather than an exit code on the tool_use, so counting only the Codex shape recorded a
+            # Claude author's 12 blocked calls as "0 ok / 0 failed" — the exact blindness this
+            # counter exists to remove, in the harness it was not written for (2026-08-21).
+            if data.get("is_error"):
+                cmd_failed += 1
+            else:
+                cmd_ok += 1
         elif event == "cost.call":
             cost_by_role[data.get("role") or "?"] += float(data.get("total_cost_usd") or 0.0)
     return {
@@ -159,6 +228,10 @@ def summarise_ledger(path: Path) -> dict:
         "coder_sessions": events.get("coder.session_start", 0),
         "coder_asks_lead": events.get("coder.ask_lead", 0),
         "coder_asks_human": events.get("coder.ask_human", 0),
+        "coder_turns_failed": turns_failed,
+        "coder_turns_rate_limited": turns_rate_limited,
+        "coder_commands_ok": cmd_ok,
+        "coder_commands_failed": cmd_failed,
         "coder_committed_itself": events.get("coder.committed", 0),
         "gate_failing_checks": gate_failing_checks,
         "no_fabrication_hits": scan_findings,
@@ -182,7 +255,9 @@ async def run_trial(index: int, cfg: TrialConfig) -> dict:
     from auto_research.sources.downloads import papers_dir
 
     started = time.time()
-    label = f"t{index:02d}"
+    # The label names the leg once there is one: with legs running concurrently, two of them both
+    # have a trial 1, and a bare "t01" would give two live ledgers the same run id.
+    label = f"t{index:02d}" if cfg.leg is None else f"{cfg.leg.slug}-t{index:02d}"
     trial_dir = cfg.out_dir / f"trial-{index:02d}"
     trial_dir.mkdir(parents=True, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix=f"author_bench_{label}_"))
@@ -217,12 +292,20 @@ async def run_trial(index: int, cfg: TrialConfig) -> dict:
             model=getattr(getattr(lead, "model", None), "name", "") or "",
         )
 
+        leg = cfg.leg
+        # A leg supplies the author member, and for a pinned-reviewer leg the co-lead too.
+        # Everything else about the call is identical across legs, which is the whole point: what
+        # varies between rows is the author or the reviewer, never the loop.
+        colead = build_pinned_colead(leg, monitor) if leg is not None and leg.colead_model else None
         result = await lead.drive_authoring(
             spec,
             toolkit_root=clone,
             worktree_base=trial_dir / "authoring",
             direct_branch=f"author-bench-{label}",
-            colead=None,        # built from config: provider-decorrelated from the Claude author
+            # colead None => built from config, provider-decorrelated from the author
+            colead=colead,
+            coder=None if leg is None else leg.member(),
+            allow_correlated_review=bool(leg is not None and leg.correlated),
             human_handler=None,  # a raise becomes the needs_human terminal, never an answer
         )
         record["status"] = result.status
@@ -247,6 +330,15 @@ async def run_trial(index: int, cfg: TrialConfig) -> dict:
         else:
             shutil.rmtree(workdir, ignore_errors=True)
 
+    # The row names its own author and reviewer. Without this a merged multi-leg report cannot
+    # group its records, and a rescored batch cannot be told apart from another leg's.
+    if cfg.leg is not None:
+        record["leg"] = cfg.leg.slug
+        record["coder"] = cfg.leg.model
+        record["coder_provider"] = cfg.leg.provider
+        record["coder_harness"] = cfg.leg.harness
+        record["colead"] = cfg.leg.colead_model or "(configured)"
+        record["correlated_review"] = cfg.leg.correlated
     record["duration_s"] = round(time.time() - started, 2)
     record["cost_usd"] = round(getattr(meter, "total_usd", 0.0), 4)
     record.update(summarise_ledger(trial_dir / "monitor.jsonl"))

@@ -1398,6 +1398,8 @@ class AnalystLeadAgent(AgentRole):
         direct_branch: str | None = None,
         colead: Any | None = None,
         human_handler: Any | None = None,
+        coder: Any | None = None,
+        allow_correlated_review: bool = False,
     ) -> MergeFlowResult:
         """Drive one tool through authoring as the plan owner (§9.3 B-topology, A1).
 
@@ -1409,6 +1411,11 @@ class AnalystLeadAgent(AgentRole):
         resumes; failed → it finalizes) read off the session. Owns the session lifecycle
         (``aclose`` in ``finally``); the LLM never issues git — ``build_authoring_session`` /
         ``approve_edit`` do (§9.9).
+
+        ``coder`` overrides the author member (``None`` = the configured one, every production
+        caller) and ``allow_correlated_review`` permits a same-provider co-lead; both exist so a
+        benchmark can sweep the author and the reviewer with the rest of the loop byte-identical,
+        and both are documented on ``merge_flow.build_authoring_session``.
         """
         from auto_research.sandbox.merge_flow import build_authoring_session
 
@@ -1419,6 +1426,8 @@ class AnalystLeadAgent(AgentRole):
             worktree_base=worktree_base,
             colead=colead,
             human_handler=human_handler,
+            coder=coder,
+            allow_correlated_review=allow_correlated_review,
             direct_branch=direct_branch,
             monitor=self.monitor,
         )

@@ -59,7 +59,7 @@ agent_fs_allow:
   - /tmp
 
 # ── OS-level filesystem jail (§12) ──
-agent_os_jail: false          # wrap runtime subprocesses in bwrap, confined to the lists below
+agent_os_jail: true           # wrap runtime subprocesses in bwrap, confined to the lists below
 agent_fs_readonly:            # subset of agent_fs_allow the jail mounts read-only
   - /grad/fzhou/.conda/envs/astropy                          # analyze_env
   - /opt/heasoft/heasoft-6.34/x86_64-pc-linux-gnu-libc2.34   # HEADAS

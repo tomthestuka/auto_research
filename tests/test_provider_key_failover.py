@@ -705,3 +705,38 @@ def test_both_wired_providers_send_their_key_explicitly():
     assert "AsyncOpenAI(api_key=active_key(OPENAI))" in (root / "openai.py").read_text()
     for provider in keys_mod.ROTATING_PROVIDERS:
         assert provider in ("anthropic", "openai")
+
+
+def test_a_racing_call_takes_the_key_another_already_rotated_to(monkeypatch):
+    """Concurrency: the pool is process-wide, the tried-set is per call.
+
+    A call that fails on the old key just after another call rotated must take the live key, not
+    rotate past it. With two keys, rotating past the live one lands on the retired one and reports
+    "nothing left to try" while the pool is perfectly healthy.
+    """
+    _set_keys(monkeypatch, "dead", "live")
+    rotator = make_rotator(ANTHROPIC)          # constructed while the primary was live
+    other = make_rotator(ANTHROPIC)            # a second in-flight call
+    assert other(retire_current=True) == "fallback1"   # it rotates first, retiring the primary
+
+    # Ours failed on the primary, which is no longer live. It must be handed the live key.
+    assert rotator(retire_current=True) == "fallback1"
+    assert key_pool(ANTHROPIC).active() == "live"
+
+
+def test_a_racing_call_never_retires_the_key_it_did_not_use(monkeypatch):
+    """The failure that cost a batch: ``retire_active`` retires whatever is live *now*.
+
+    A call failing on the old key would retire the replacement a racing call had just switched to.
+    With two keys that leaves everything retired, and every later call raises even though one key
+    still had credit.
+    """
+    _set_keys(monkeypatch, "dead", "live")
+    rotator = make_rotator(ANTHROPIC)
+    other = make_rotator(ANTHROPIC)
+    other(retire_current=True)                 # primary retired, pool now on the fallback
+
+    rotator(retire_current=True)               # must not retire the fallback
+
+    pool = key_pool(ANTHROPIC)
+    assert pool.active() == "live", "the healthy key was retired by a call that never used it"

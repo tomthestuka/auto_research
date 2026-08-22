@@ -18,6 +18,25 @@ from auto_research.sandbox.persistent import PersistentSandbox
 from auto_research.sandbox.runner import check_analyze_probe
 
 
+@pytest.fixture(autouse=True)
+def _no_host_jail_state(monkeypatch):
+    """Decide the OS jail here rather than reading gitignored machine-local config.
+
+    These tests boot a real REPL with ``analyze_env=None``, so the subprocess runs the
+    *orchestration* interpreter — a path the jail's allow-list deliberately does not bind, since
+    only the analyst science env belongs inside the jail. Production always passes the configured
+    ``analyze_env`` and ``check_os_jail_probe`` exercises exactly that interpreter inside the jail
+    at launch, so nothing here is what covers the jailed REPL (``tests/test_jail.py`` is).
+
+    Pinned rather than left to the host because `config/orchestration.yaml` is machine-local: a
+    test that reads it is a test of one machine, and it passes or fails on a collaborator's fresh
+    install with no code change between them.
+    """
+    monkeypatch.setattr(
+        "auto_research.sandbox.jail.jail_enabled", lambda: False, raising=True
+    )
+
+
 def test_bash_exec_description_injects_probe(monkeypatch):
     import auto_research.sandbox.builtin_server as bs
 

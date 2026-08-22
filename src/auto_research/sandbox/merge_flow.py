@@ -37,6 +37,7 @@ import yaml
 
 from auto_research.agents.prompts import load_prompt
 from auto_research.hitl import HumanHandler, HumanInputRequired, resolve_human
+from auto_research.models.types import RoleModelConfig
 from auto_research.sandbox.coder.claude_sdk import (  # noqa: F401 — re-exported: the Claude
     ClaudeSdkBackend,                                # harness's own wires live in that module,
     _build_options,                                  # and callers/tests still import them here
@@ -206,21 +207,16 @@ def check_toolkit_branch_clean(root: Path | None = None, branch: str | None = No
 
 
 def _resolve_coder_model() -> str:
-    """Resolve the model id for the ``coder`` role from config (no hardcoded id, §6)."""
-    from auto_research.models import resolve
+    """The model id of the configured ``coder`` member (no hardcoded id, §6).
 
-    return resolve("coder").handles[0].config.model
-
-
-def _resolve_coder_provider() -> str:
-    """Resolve the ``coder`` (author) provider from config — the decorrelation key (§9.3).
-
-    The co-lead reviewer is routed to a member whose provider differs from this, so the
-    author's own model family never approves the merge candidate. No hardcoded string (§6).
+    A convenience over :func:`~auto_research.sandbox.coder.harness.coder_member` for callers that
+    want only the id. The authoring flow itself carries the whole member, so the model, the
+    provider that decides review routing, and the harness that spawns the author can never come
+    from three separate config reads that disagree.
     """
-    from auto_research.models import resolve
+    from auto_research.sandbox.coder.harness import coder_member
 
-    return resolve("coder").handles[0].config.provider
+    return coder_member().model
 
 
 # ----------------------------------------------------------------------------
@@ -822,10 +818,10 @@ class AuthoringSession:
 
 def _build_backend(
     *,
+    member: RoleModelConfig,
     worktree: Path,
     toolkit_root: Path,
     worktree_base: Path | None = None,
-    coder_model: str,
     system_prompt: str,
     ask_lead: Callable[..., Awaitable[str]],
     ask_human: Callable[..., Awaitable[str]],
@@ -833,17 +829,19 @@ def _build_backend(
     monitor: Any | None,
     sdk_client_factory: Callable[[Any], Any],
 ) -> Any:
-    """Build the author harness the ``coder`` role names (§6, ``coder.harness``).
+    """Build the author harness ``member`` names (§6, ``coder.harness``).
 
     Both backends receive the same brief, the same working tree, the same escalation handlers and
     the same filesystem allow-list; what differs is the mechanism each harness offers for them.
     The Claude SDK hosts the escalation tools in-process and gates the filesystem with a hook; the
     Codex app-server takes an MCP endpoint by URL and enforces the allow-list as writable roots at
     the OS level (see :mod:`auto_research.sandbox.coder.codex_sdk`).
-    """
-    from auto_research.sandbox.coder.harness import coder_member
 
-    member = coder_member()
+    ``member`` is passed in rather than read from config here so one caller can author with a
+    member the config does not name, which is what lets a benchmark sweep the author across vendors
+    while every other part of the flow stays byte-identical.
+    """
+    coder_model = member.model
     if member.harness == "codex":
         from auto_research.sandbox.coder.codex_sdk import CodexBackend
         from auto_research.sandbox.coder.escalation_server import EscalationServer
@@ -882,7 +880,8 @@ def build_authoring_session(
     worktree_base: Path,
     colead: Any | None = None,
     human_handler: HumanHandler | None = None,
-    coder_model: str | None = None,
+    coder: RoleModelConfig | None = None,
+    allow_correlated_review: bool = False,
     run_gate: GateHook | None = None,
     run_review: ReviewHook | None = None,
     max_turns: int | None = None,
@@ -894,14 +893,29 @@ def build_authoring_session(
     approve_edit: Callable[..., str] | None = None,
     monitor: Any | None = None,
 ) -> AuthoringSession:
-    """Resolve config + hooks, choose worktree/direct-branch mode (§9.9), build the Claude-SDK
-    coder client (seeded via ``coder`` prompt + escalation MCP tools), and return a **not yet
-    connected** :class:`AuthoringSession`. Setup only — the sole git touches are the
-    direct-branch clean-tree precondition and the per-attempt base-ref record. ``await connect()``
-    on the returned session before driving it."""
+    """Resolve config + hooks, choose worktree/direct-branch mode (§9.9), build the author harness
+    (seeded via ``coder`` prompt + escalation tools), and return a **not yet connected**
+    :class:`AuthoringSession`. Setup only — the sole git touches are the direct-branch clean-tree
+    precondition and the per-attempt base-ref record. ``await connect()`` on the returned session
+    before driving it.
+
+    ``coder`` is the author member; ``None`` means the one ``config/models.yaml`` names, which is
+    every production caller. It carries **all three** author facts at once — the model id recorded
+    and priced, the provider the review is routed away from, and the harness that spawns the author
+    process — so they cannot be resolved separately and disagree. A benchmark passes a member
+    directly to sweep the author across vendors with the rest of the flow byte-identical.
+
+    ``allow_correlated_review`` is a **measurement** switch, off in production: it permits a co-lead
+    sharing the author's provider, which the trust boundary otherwise refuses (§9.3). Set it only to
+    measure what decorrelation is worth; the launch preflight still guards the configured roles.
+    """
     toolkit_root = Path(toolkit_root)
     worktree_base = Path(worktree_base)
-    coder_model = coder_model or _resolve_coder_model()
+    if coder is None:
+        from auto_research.sandbox.coder.harness import coder_member
+
+        coder = coder_member()
+    coder_model = coder.model
     if run_gate is None:
         from auto_research.sandbox.gate import run_gate as _real_gate
 
@@ -915,7 +929,8 @@ def build_authoring_session(
         # the one provider-decorrelated check in `commit ⇔ gate ∧ review` the only actor whose
         # work was invisible.
         run_review = make_review_hook(
-            colead=colead, author_provider=_resolve_coder_provider(), monitor=monitor
+            colead=colead, author_provider=coder.provider, monitor=monitor,
+            allow_correlated=allow_correlated_review,
         )
     max_turns = max_turns if max_turns is not None else _cap("tool_author_max_turns", 50)
     submit_cap = submit_cap if submit_cap is not None else _cap("tool_author_submit_cap", 5)
@@ -953,10 +968,10 @@ def build_authoring_session(
     ask_lead = _make_ask_lead_handler(lead, monitor=monitor)
     ask_human = _make_ask_human_handler(human_handler, model=coder_model, monitor=monitor)
     backend = _build_backend(
+        member=coder,
         worktree=worktree,
         toolkit_root=toolkit_root,
         worktree_base=worktree_base,
-        coder_model=coder_model,
         system_prompt=system_prompt,
         ask_lead=ask_lead,
         ask_human=ask_human,
@@ -981,7 +996,8 @@ async def propose_and_pr(
     worktree_base: Path,
     colead: Any | None = None,
     human_handler: HumanHandler | None = None,
-    coder_model: str | None = None,
+    coder: RoleModelConfig | None = None,
+    allow_correlated_review: bool = False,
     run_gate: GateHook | None = None,
     run_review: ReviewHook | None = None,
     gate_rework_cap: int | None = None,
@@ -1007,9 +1023,13 @@ async def propose_and_pr(
     patch artifact of the discarded work is saved under ``worktree_base`` first). ``None``
     keeps the isolated-worktree behaviour (tests/future use).
 
+    ``coder`` is the author member (``None`` = the configured one, every production caller) and
+    ``allow_correlated_review`` is the measurement-only switch that permits a same-provider
+    co-lead; both are documented on :func:`build_authoring_session`.
+
     ``colead`` is the GPT co-lead reviewer (an ``AnalystColeadAgent``); when ``None`` the
     default ``run_review`` builds one from config, routed to a member whose provider differs
-    from the Claude author's (``review.make_review_hook``). Injectable seams
+    from the author's (``review.make_review_hook``). Injectable seams
     (``run_gate``/``run_review``/``worktree_factory``/``sdk_client_factory``/``approve_edit``)
     let the loop and the commit be exercised deterministically without a live LLM or git.
     """
@@ -1017,8 +1037,9 @@ async def propose_and_pr(
     review_rework_cap = review_rework_cap if review_rework_cap is not None else _cap("tool_author_review_rework_cap", 2)
     session = build_authoring_session(
         tool_spec, lead=lead, toolkit_root=toolkit_root, worktree_base=worktree_base,
-        colead=colead, human_handler=human_handler, coder_model=coder_model,
-        run_gate=run_gate, run_review=run_review, max_turns=max_turns, direct_branch=direct_branch,
+        colead=colead, human_handler=human_handler, coder=coder,
+        allow_correlated_review=allow_correlated_review, run_gate=run_gate,
+        run_review=run_review, max_turns=max_turns, direct_branch=direct_branch,
         worktree_factory=worktree_factory, sdk_client_factory=sdk_client_factory,
         approve_edit=approve_edit, monitor=monitor,
     )
