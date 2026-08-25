@@ -21,10 +21,14 @@ import os
 
 import pytest
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 from auto_research.agents.roles import _ClarifyReply
 from auto_research.models.providers.anthropic import AnthropicProvider
+from auto_research.models.providers.dashscope import DashscopeProvider
+from auto_research.models.providers.deepseek import DeepSeekProvider
 from auto_research.models.providers.openai import OpenAIProvider
+from auto_research.models.providers.zai import ZaiProvider
 from auto_research.models.types import (
     ModelMessage,
     RoleModelConfig,
@@ -65,7 +69,47 @@ SCHEMAS = [
 PROVIDERS = [
     ("openai", OpenAIProvider(), "gpt-5.6-terra"),
     ("anthropic", AnthropicProvider(), "claude-sonnet-5"),
+    # DeepSeek joined the chat set 2026-08-24. It belongs in this matrix and not merely in a
+    # smoke test because its Responses endpoint documents `format` as supported without saying
+    # whether `strict` constrains anything, and because a compatibility layer is exactly where a
+    # large real schema diverges from a two-field toy.
+    ("deepseek", DeepSeekProvider(), "deepseek-v4-flash"),
+    # Z.AI reaches the same guarantee by the forced-tool route rather than `text.format`
+    # (`ResponsesVendor.schema_via_tool`), so it belongs in this matrix on equal terms: what
+    # matters to a caller is that a valid instance comes back, not which mechanism produced it.
+    ("zai", ZaiProvider(), "glm-5.3"),
+    # Qwen joined on 2026-08-24, once Model Studio was activated on the account. It reaches a
+    # schema by the same forced-tool route as Z.AI, except that it refuses a *named* tool_choice
+    # while thinking (Anthropic's documented rule, enforced here too), so the emit tool is
+    # offered under `auto` instead.
+    ("dashscope", DashscopeProvider(), "qwen3.8-max"),
 ]
+
+#: Vendors that cannot be handed a schema by any route this adapter supports, or whose account
+#: cannot be exercised. They still have to reach, authenticate and call tools, which is what the
+#: check below covers. Z.AI left this list on 2026-08-24 when the forced-tool route was verified;
+#: Qwen stays because its account is entitled for nothing at all.
+SCHEMALESS_PROVIDERS: list[tuple[str, object, str]] = [
+    # Empty since 2026-08-24: every configured vendor reaches a schema by one route or the
+    # other. Kept because the next vendor added may not, and the checks below are what say so.
+]
+
+
+#: A literal for hash-shaped fields. An instruction to "use 64 hex characters" loses to the
+#: model's own sense of what a digest looks like — measured twice on Anthropic, which returned
+#: differently-invented stylised values of the wrong length — because no provider enforces
+#: JSON-Schema `pattern`. A value to copy verbatim competes with nothing.
+_HASH_LITERAL = "0" * 64
+
+
+def _skip_without_key(provider) -> None:
+    """Skip a leg whose credential is absent, naming the variable rather than failing the run."""
+    vendor = getattr(provider, "vendor", None)
+    if vendor is None or not vendor.key_env:
+        return
+    if not os.getenv(vendor.key_env):
+        pytest.skip(f"{vendor.name}: ${vendor.key_env} is unset")
+
 
 _TOOLS = [
     {
@@ -87,9 +131,31 @@ def _config(provider_name: str, model: str) -> RoleModelConfig:
         model=model,
         vision=True,
         documents=True,
+        # Anthropic budgets output with `max_tokens`; every Responses-dialect vendor uses
+        # `max_output_tokens`, which DeepSeek and Z.AI both document as supported.
         parameters={"max_tokens": 8192}
         if provider_name == "anthropic"
         else {"max_output_tokens": 8192},
+    )
+
+
+def _handle(provider_name: str, provider, model):
+    """A real ``ModelHandle``, so a live leg runs the path production runs.
+
+    These tests used to call ``provider.call`` directly. That skipped everything
+    ``ModelHandle.call`` adds -- and the omission that bit was **key failover**: a key-scoped
+    failure (a rate limit, a spent balance) rotates to the configured fallback inside
+    ``call_with_transient_retry``, so a direct call fails on an exhausted primary while the run
+    it is meant to model would have continued on the other key. Observed 2026-08-24, when both
+    frontier primaries were out of credit and 22 legs failed against working fallbacks.
+
+    It also closes the altitude gap recorded on 2026-08-06: a live test that never executes the
+    layer above the adapter cannot see a defect introduced there.
+    """
+    from auto_research.models.types import ModelHandle
+
+    return ModelHandle(
+        role="live_probe", config=_config(provider_name, model), provider=provider
     )
 
 
@@ -98,8 +164,20 @@ def _config(provider_name: str, model: str) -> RoleModelConfig:
 def test_live_schema_is_accepted_with_tools_declared(
     provider_name, provider, model, schema_name, schema
 ):
-    """The request is accepted and a valid instance comes back, with tools on the request."""
+    """The request is accepted and a valid instance comes back, with tools on the request.
+
+    The prompt spells out the hash format because **no provider enforces JSON-Schema
+    ``pattern``** (measured on Anthropic 2026-08-24: it returned a plausible but wrong-length
+    value for ``FigureRef.sha256``, and DeepSeek's docs list ``pattern`` among the unsupported
+    keywords). Type, required and ``additionalProperties`` are enforced; a regex is advisory.
+
+    That gap is harmless in production, where a ``FigureRef`` is built by a tool from a real file
+    and the model only *cites* figures by index — it is reachable only here, because this test
+    asks a model to invent a whole record from nothing. The assertion stays strict: what is
+    relaxed is the unnatural demand, not the validation.
+    """
     load_dotenv()
+    _skip_without_key(provider)
     messages = [
         ModelMessage(
             role="system",
@@ -110,19 +188,17 @@ def test_live_schema_is_accepted_with_tools_declared(
             content=(
                 f"Emit a MINIMAL but schema-valid {schema_name}. Use short placeholder-free "
                 "strings drawn from this situation: an IXPE polarization analysis of Cyg X-1 "
-                "that produced a null result. Keep every list to at most one element. Do not "
-                "call any tool."
+                "that produced a null result. Keep every list to at most one element. Leave "
+                "the analysis tools alone. For any hash field use this exact value: "
+                + _HASH_LITERAL
+                + "."
             ),
         ),
     ]
 
     async def run():
-        return await provider.call(
-            messages,
-            _config(provider_name, model),
-            schema=schema,
-            tools=_TOOLS,
-            tool_choice="none",
+        return await _handle(provider_name, provider, model).call(
+            messages, schema=schema, tools=_TOOLS, tool_choice="none"
         )
 
     response = asyncio.run(run())
@@ -174,7 +250,8 @@ def test_live_compose_with_real_schema_after_a_real_trajectory(
     REAL schema and `tool_choice="none"` over the accumulated history.
     """
     load_dotenv()
-    cfg = _config(provider_name, model)
+    _skip_without_key(provider)
+    load_dotenv()
     seed = [
         ModelMessage(
             role="system",
@@ -190,11 +267,12 @@ def test_live_compose_with_real_schema_after_a_real_trajectory(
     ]
 
     async def run():
+        handle = _handle(provider_name, provider, model)
         history = list(seed)
         turns = []
         for reply in ("q=0.012+/-0.009, u=-0.004+/-0.009, n_slices=40",
                       "exposure=524389 s, source=Cyg X-1, obsid=01002901"):
-            turn = await provider.call(history, cfg, tools=_TOOLS, tool_choice="auto")
+            turn = await handle.call(history, tools=_TOOLS, tool_choice="auto")
             turns.append(turn)
             if not turn.tool_calls:
                 break
@@ -211,8 +289,8 @@ def test_live_compose_with_real_schema_after_a_real_trajectory(
             content=f"Emit the final {schema_name} now, grounded only in the tool results above. "
                     "Keep every list to at most one element.",
         ))
-        composed = await provider.call(
-            history, cfg, schema=schema, tools=_TOOLS, tool_choice="none"
+        composed = await handle.call(
+            history, schema=schema, tools=_TOOLS, tool_choice="none"
         )
         return turns, composed
 
@@ -240,3 +318,100 @@ def test_live_compose_with_real_schema_after_a_real_trajectory(
     assert not composed.tool_calls, "tool_choice='none' forbids a call"
     assert composed.parsed is not None, "the compose produced its structured answer"
     schema.model_validate(composed.parsed)
+
+
+@pytest.mark.skipif(not SCHEMALESS_PROVIDERS, reason="every configured vendor reaches a schema")
+@pytest.mark.parametrize(
+    "provider_name,provider,model", SCHEMALESS_PROVIDERS or [(None, None, None)],
+    ids=[n for n, _, _ in SCHEMALESS_PROVIDERS] or ["none"],
+)
+def test_live_schemaless_vendor_reaches_and_calls_a_tool(provider_name, provider, model):
+    """A vendor that cannot be trusted with a schema must still reach, answer and call a tool.
+
+    Those are the capabilities a role actually needs from it, so they are what is asserted: the
+    call authenticates at the vendor's own endpoint, prose comes back, and a declared tool is
+    invoked with correctly-typed arguments. Schema behaviour is deliberately not exercised here,
+    because the adapter refuses to send one (see the deterministic sweep in
+    ``tests/test_responses_vendors.py``); it is refused on our side, so there is nothing live to
+    learn.
+
+    A vendor whose account is not entitled skips carrying its own refusal rather than failing.
+    Nine consequences of one billing gate would bury the cause, which is the same rule the coder
+    matrix follows.
+    """
+    load_dotenv()
+    _skip_without_key(provider)
+
+    messages = [
+        ModelMessage(role="system", content="You assist an X-ray astronomy research pipeline."),
+        ModelMessage(
+            role="user",
+            content="Call read_file on the path /etc/hostname. Use the tool, do not answer directly.",
+        ),
+    ]
+
+    async def run():
+        return await _handle(provider_name, provider, model).call(
+            messages, tools=_TOOLS, tool_choice="auto"
+        )
+
+    try:
+        response = asyncio.run(run())
+    except Exception as exc:  # noqa: BLE001 — a vendor refusal is a skip, not a failure
+        text = str(exc)
+        # Entitlement and credential refusals are both "this account cannot call the vendor",
+        # which is not a defect in our adapter. Alibaba answers `AccessDenied.Unpurchased` when
+        # Model Studio is unactivated and `InvalidApiKey` when the key belongs to another plan's
+        # host, and a run may meet either depending on which key is configured.
+        if any(
+            marker in text
+            for marker in ("Unpurchased", "AccessDenied", "InvalidApiKey", "invalid api-key")
+        ):
+            pytest.skip(f"{provider_name}: vendor refuses this credential -- {text[:160]}")
+        raise
+
+    log = dev_log_path("schema-matrix", f"{provider_name}_schemaless", ".json")
+    log.write_text(
+        json.dumps(
+            {
+                "provider": provider_name,
+                "model": model,
+                "content": response.content[:400],
+                "tool_calls": [
+                    {"name": c.name, "arguments": c.arguments} for c in response.tool_calls
+                ],
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+            },
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+
+    assert response.tool_calls, f"{provider_name} declared a tool and never called it"
+    call = response.tool_calls[0]
+    assert call.name == "read_file"
+    assert isinstance(call.arguments.get("path"), str) and call.arguments["path"]
+    assert response.usage.output_tokens > 0, "usage did not map into the neutral buckets"
+
+
+@pytest.mark.skipif(not SCHEMALESS_PROVIDERS, reason="every configured vendor reaches a schema")
+@pytest.mark.parametrize(
+    "provider_name,provider,model", SCHEMALESS_PROVIDERS or [(None, None, None)],
+    ids=[n for n, _, _ in SCHEMALESS_PROVIDERS] or ["none"],
+)
+def test_live_schemaless_vendor_sends_its_schema_by_the_route_it_supports(
+    provider_name, provider, model
+):
+    """These vendors ignore `text.format`, so the schema must ride as a forced tool call.
+
+    Checked against the real adapter, and without spending a call: what could regress is the
+    *request*, and a vendor whose account cannot answer still lets us assert how we would ask.
+    """
+    load_dotenv()
+    vendor = provider.vendor
+    assert not vendor.supports_strict_schema
+    assert vendor.schema_via_tool, (
+        f"{provider_name} can be handed no schema by any route, so no role may emit one"
+    )

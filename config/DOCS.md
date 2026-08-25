@@ -74,7 +74,14 @@ raise a "copy the `.example` / run install.sh" message when a live file is absen
 - `models.yaml.roles.<role>.members` — non-empty model group.
 - `models.yaml.roles.<role>.members[].name` — stable member name within the
   group.
-- `models.yaml.roles.<role>.members[].provider` — provider adapter label.
+- `models.yaml.roles.<role>.members[].provider` — provider adapter label: `anthropic`,
+  `google`, `openai`, `deepseek`, `zai`, or `dashscope`. The last three are served over the
+  OpenAI Responses dialect and are refused any role that emits a structured schema, because
+  two of them accept the parameter and ignore it (see `models/DOCS.md`).
+- `models.yaml.roles.<role>.members[].base_url` — optional endpoint override, for a member on
+  a plan-specific host. Defaults to the vendor's documented endpoint.
+- `models.yaml.roles.<role>.members[].key_env` — optional API-key variable, when the member
+  does not authenticate from that provider's standard `<PROVIDER>_API_KEY`.
 - `models.yaml.roles.<role>.members[].model` — provider model identifier.
 - `models.yaml.roles.<role>.members[].vision` — whether the member may receive
   figures.

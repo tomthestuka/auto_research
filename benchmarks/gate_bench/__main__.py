@@ -49,6 +49,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ablate", default="none", choices=sorted(ABLATIONS),
                         help="disable one defence over the identical corpus (paper item 2). "
                              "'review' is not a value here: omit --review for that configuration")
+    parser.add_argument("--concurrency", type=int, default=1,
+                        help="mutants in flight at once (default 1). Each gets its own worktree "
+                             "and its own cost meter, so records stay attributable")
     parser.add_argument("--keep-worktrees", action="store_true", help="leave temp worktrees on disk")
     parser.add_argument("--list", action="store_true", help="list the corpus and exit")
     parser.add_argument("--reviewer", default="gpt_5_6_sol",
@@ -178,20 +181,58 @@ async def _run(args: argparse.Namespace) -> int:
     # survives every later run of the corpus.
     roster = load_roster(OUT_ROOT / ROSTER_NAME)
 
-    records = []
-    for index, mutant in enumerate(mutants, 1):
-        print(f"[{index:>2}/{len(mutants)}] {mutant.id} ({mutant.family})", flush=True)
-        record = score_record(await run_mutant(mutant, cfg, meter=meter), roster)
-        records.append(record)
-        with jsonl_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record) + "\n")
-        print(
-            f"          -> {record['outcome']}"
-            f" [{', '.join(record['caught_by']) or 'no layer'}]"
-            f" ({record['duration_s']:.0f}s)"
-            + (f"  ERROR {record['error']}" if record.get("error") else ""),
-            flush=True,
-        )
+    # Concurrency is bounded by a semaphore rather than by batching, so a slow mutant does not
+    # hold a barrier. Two things have to be per-task for a concurrent run to mean anything:
+    #
+    #   cost meter   -- ``install_cost_meter`` sets a ContextVar, and ``run_mutant`` records a
+    #                   mutant's cost as the meter's delta across its own execution. One shared
+    #                   meter would charge each record with whatever ran beside it, so each task
+    #                   installs its own inside itself and the batch total is the sum of records.
+    #   review hook  -- built lazily on first use, which two tasks would race. It is built once
+    #                   here instead; the co-lead holds no conversation between calls, so one hook
+    #                   serving concurrent reviews is the same measurement as one serving serial
+    #                   ones.
+    if args.review and args.concurrency > 1 and cfg.review_hook is None:
+        from benchmarks.gate_bench.harness import review_hook_for
+
+        cfg.review_hook = review_hook_for(cfg.reviewer)
+
+    lock = asyncio.Lock()
+    gate = asyncio.Semaphore(max(1, args.concurrency))
+    done = 0
+
+    async def one(index: int, mutant) -> dict:
+        nonlocal done
+        async with gate:
+            print(f"[{index:>2}/{len(mutants)}] {mutant.id} ({mutant.family})", flush=True)
+            if args.review and args.concurrency > 1:
+                from auto_research.observability.costs import install_cost_meter
+
+                own = install_cost_meter(run_id=f"gate-bench-{mutant.id}")
+            else:
+                own = meter
+            record = score_record(await run_mutant(mutant, cfg, meter=own), roster)
+            async with lock:
+                done += 1
+                with jsonl_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record) + "\n")
+                print(
+                    f"          -> {record['outcome']}"
+                    f" [{', '.join(record['caught_by']) or 'no layer'}]"
+                    f" ({record['duration_s']:.0f}s) [{done}/{len(mutants)} done]"
+                    + (f"  ERROR {record['error']}" if record.get("error") else ""),
+                    flush=True,
+                )
+            return record
+
+    if args.concurrency > 1:
+        # Gathered in corpus order, so the matrix reads the same as a serial run even though the
+        # records file is written in completion order.
+        records = list(await asyncio.gather(
+            *(one(i, m) for i, m in enumerate(mutants, 1))
+        ))
+    else:
+        records = [await one(i, m) for i, m in enumerate(mutants, 1)]
 
     matrix = build_matrix(records, stamps)
     (out_dir / "matrix.md").write_text(matrix, encoding="utf-8")

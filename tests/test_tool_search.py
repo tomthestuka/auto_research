@@ -306,7 +306,7 @@ def test_openai_declares_search_tool_and_defers(monkeypatch):
 
     _FakeOpenAI.store = {}
     monkeypatch.setattr(openai, "AsyncOpenAI", _FakeOpenAI)
-    monkeypatch.setattr("auto_research.models.providers.openai.tool_search_config", _enabled)
+    monkeypatch.setattr("auto_research.models.providers._responses.tool_search_config", _enabled)
     cfg = RoleModelConfig(name="m", provider="openai", model="gpt-5.5")
     response = asyncio.run(OpenAIProvider().call(_messages(), cfg, tools=_tools()))
     sent = _FakeOpenAI.store["request"]["tools"]
@@ -323,7 +323,7 @@ def test_openai_replays_discovery_items(monkeypatch):
 
     _FakeOpenAI.store = {}
     monkeypatch.setattr(openai, "AsyncOpenAI", _FakeOpenAI)
-    monkeypatch.setattr("auto_research.models.providers.openai.tool_search_config", _enabled)
+    monkeypatch.setattr("auto_research.models.providers._responses.tool_search_config", _enabled)
     cfg = RoleModelConfig(name="m", provider="openai", model="gpt-5.5")
     turn = ModelResponse(
         content="",
@@ -342,7 +342,7 @@ def test_openai_disabled_sends_no_search_tool(monkeypatch):
 
     _FakeOpenAI.store = {}
     monkeypatch.setattr(openai, "AsyncOpenAI", _FakeOpenAI)
-    monkeypatch.setattr("auto_research.models.providers.openai.tool_search_config", _disabled)
+    monkeypatch.setattr("auto_research.models.providers._responses.tool_search_config", _disabled)
     cfg = RoleModelConfig(name="m", provider="openai", model="gpt-5.5")
     asyncio.run(OpenAIProvider().call(_messages(), cfg, tools=_tools()))
     sent = _FakeOpenAI.store["request"]["tools"]
@@ -436,7 +436,7 @@ def test_openai_capture_translates_discovery_items_to_their_input_shape(monkeypa
 
     _FakeOpenAI.store = {}
     monkeypatch.setattr(openai, "AsyncOpenAI", _FakeOpenAI)
-    monkeypatch.setattr("auto_research.models.providers.openai.tool_search_config", _enabled)
+    monkeypatch.setattr("auto_research.models.providers._responses.tool_search_config", _enabled)
     cfg = RoleModelConfig(name="m", provider="openai", model="gpt-5.5")
 
     response = asyncio.run(OpenAIProvider().call(_messages(), cfg, tools=_tools()))

@@ -454,13 +454,30 @@ _BESPOKE = {
 }
 
 
+# Every ledger-derived entry is the same honest changeset with one anchor edited, so its
+# matched control is that changeset with no edit: a pair differs only at the defect, which is
+# the property that makes a rejection evidence of discrimination rather than of suspicion.
+def _ledger_bespoke() -> dict:
+    from benchmarks.gate_bench.mutants_ledger import honest_scaffold, ledger_corpus
+    from benchmarks.gate_bench.mutants_ledger_codex import (
+        honest_edit as codex_honest_edit,
+        ledger_codex_corpus,
+    )
+
+    return {
+        **{m.id: honest_scaffold for m in ledger_corpus()},
+        **{m.id: codex_honest_edit for m in ledger_codex_corpus()},
+    }
+
+
 def paired_controls(mutants) -> list[Mutant]:
     """One clean changeset per planted defect, in corpus order."""
     out: list[Mutant] = []
+    bespoke_all = {**_BESPOKE, **_ledger_bespoke()}
     for mutant in mutants:
         if mutant.family == FAM_CONTROL:
             continue
-        bespoke = _BESPOKE.get(mutant.id)
+        bespoke = bespoke_all.get(mutant.id)
         if bespoke is not None:
             build = _synthetic(bespoke) if mutant.base == "synthetic" else bespoke
             matched = True
@@ -484,6 +501,8 @@ def paired_controls(mutants) -> list[Mutant]:
             target_domain=mutant.target_domain,
             spec_behavior=mutant.spec_behavior,  # a pair must differ only in the defect
             pairs_with=mutant.id,
+            author=mutant.author,
+            attested=mutant.attested,
             notes="matched" if matched else "clean-base repeat",
         ))
     return out

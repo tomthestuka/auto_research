@@ -1,9 +1,9 @@
 # Reviewer roster for the model-swap leg (paper item 2, second panel).
 #
-# The benchmark plants its defects by hand: there is NO author, so nothing is decorrelated from
-# anything and an Anthropic reviewer is admissible here in a way it is not in production
-# (CLAUDE.md §9.3 binds the author↔reviewer pair, which does not exist in this corpus). What this
-# leg measures is therefore reviewer-model SENSITIVITY, not provider decorrelation.
+# The defects are planted by hand rather than produced by an authoring session, so §9.3's
+# author↔reviewer pairing does not exist here and an Anthropic reviewer is admissible in a way it
+# is not in production. What this leg measures is therefore reviewer-model SENSITIVITY, not
+# provider decorrelation.
 #
 # Parameters are harmonised on purpose: each member gets a comparable reasoning effort and enough
 # output budget to write a full verdict, expressed in each provider's own vocabulary. Running the

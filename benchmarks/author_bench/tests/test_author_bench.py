@@ -6,7 +6,7 @@ ledger-derived round counts, and the terminal-state classification — is proven
 trials are launched. The toolkit-dependent test skips when the checkout is absent, so this suite
 passes on a fresh clone.
 
-Run from the repository root: ``conda run -n auto_research python -m pytest tests/test_author_bench.py``.
+Run from the repository root: ``conda run -n auto_research python -m pytest benchmarks/author_bench/tests`.
 """
 
 import asyncio
@@ -22,7 +22,8 @@ from auto_research.schemas import MergeFlowResult
 from benchmarks.author_bench import brief, trial
 from benchmarks.author_bench.score import build_report, summarise
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+# benchmarks/author_bench/tests/<this file> -> three levels up is the repository root.
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 # ── the frozen brief ────────────────────────────────────────────────────────
@@ -490,17 +491,23 @@ def test_every_leg_is_a_pairing_the_harness_table_supports():
         )
 
 
-def test_the_claude_legs_cap_their_own_concurrency():
-    """The subscription session cap is a measured hazard, not a remembered one: it contaminated
-    six of ten trials in the first batch. It belongs in the roster, where a batch cannot forget
-    it, rather than in whoever types the command."""
+def test_every_vendor_ceiling_lives_on_the_roster_row():
+    """A vendor limit is a measured hazard, not a remembered one.
+
+    The Claude subscription session cap contaminated six of ten trials in the first batch, and
+    Z.AI throttled 87 to 97 per cent of author turns above two in flight, which reaches the lead
+    as an author that did nothing. Both belong where a batch cannot forget them rather than in
+    whoever types the command.
+    """
     from benchmarks.author_bench.legs import ROSTER
 
     for leg in ROSTER:
         if leg.harness == "claude_sdk":
             assert leg.max_concurrency is not None and leg.max_concurrency <= 2, leg.slug
-        else:
-            assert leg.max_concurrency is None, leg.slug
+        elif leg.provider == "zai":
+            assert leg.max_concurrency == 2, leg.slug
+        elif leg.max_concurrency is not None:
+            assert leg.max_concurrency >= 2, leg.slug
 
 
 def test_a_leg_supplies_the_author_member_and_its_correlation_setting(tmp_path, monkeypatch):
@@ -823,3 +830,69 @@ def test_the_command_counter_reads_both_harness_shapes(tmp_path):
 
     assert got["coder_commands_ok"] == 2
     assert got["coder_commands_failed"] == 2
+
+
+# ── The lead as a correlation axis ───────────────────────────────────────────
+#
+# Section 9.3 binds the reviewer's provider against the AUTHOR's and says nothing about the lead,
+# yet the lead writes the instructions the coder executes, decides when work is submitted, and
+# argues the verdict. Panel (a) held the lead at the Anthropic default, so its reviewer provider
+# and its lead provider moved together; these pin the wiring that separates them.
+
+def test_panel_a_legs_take_the_configured_lead_and_panel_b_pins_one():
+    """The lead is varied only where a leg says so, so panel (a) stays the campaign default."""
+    from benchmarks.author_bench.legs import ROSTER
+
+    for leg in ROSTER:
+        if leg.purpose == "lead":
+            assert leg.lead_model, f"{leg.slug} is a lead leg but pins no lead"
+            assert leg.lead_provider, f"{leg.slug} pins a lead model with no provider"
+        else:
+            assert leg.lead_model is None, f"{leg.slug} silently varies the lead"
+
+
+def test_the_roster_covers_all_four_correlation_cells_at_one_coder():
+    """Both axes, crossed, at a fixed coder: without this the two cannot be told apart.
+
+    Panel (a) alone cannot reach the cell where the coder shares the reviewer's vendor and the
+    lead does not, which is why a same-provider result there was attributable to either.
+    """
+    from benchmarks.author_bench.legs import ROSTER
+
+    cells = {
+        (leg.correlated, leg.lead_correlated)
+        for leg in ROSTER
+        if leg.model == "claude-sonnet-5"
+    }
+    assert cells == {(False, False), (True, True), (False, True), (True, False)}
+
+
+def test_lead_correlation_reads_the_configured_defaults():
+    """An unpinned leg inherits the Anthropic lead and the OpenAI co-lead, and is decorrelated."""
+    from benchmarks.author_bench.legs import BY_SLUG
+
+    assert BY_SLUG["claude_sonnet_5"].lead_correlated is False
+    assert BY_SLUG["claude_sonnet_5_correlated"].lead_correlated is True
+    # A GPT coder reviewed by the GPT co-lead is author-correlated but not lead-correlated, and
+    # it drew the joint-highest rejection count in panel (a), which is why the axes matter.
+    assert BY_SLUG["gpt_5_6_terra_correlated"].correlated is True
+    assert BY_SLUG["gpt_5_6_terra_correlated"].lead_correlated is False
+
+
+def test_a_pinned_lead_is_built_from_the_leg_not_from_config():
+    """The lead a leg names is the lead the trial drives, so a batch is reproducible."""
+    from benchmarks.author_bench.legs import BY_SLUG
+
+    leg = BY_SLUG["claude_sonnet_5_gptlead"]
+    lead = trial.build_pinned_lead(leg, monitor=None)
+    assert lead.model.config.model == "gpt-5.6-sol"
+    assert lead.model.config.provider == "openai"
+    assert lead.model.role == "analyst_lead"
+
+
+def test_the_glm_legs_hold_their_vendor_ceiling_in_both_panels():
+    """Z.AI throttles above two in flight, which reaches the lead as an author that did nothing."""
+    from benchmarks.author_bench.legs import BY_SLUG
+
+    for slug in ("glm_5_3", "glm_5_3_gptlead"):
+        assert BY_SLUG[slug].max_concurrency == 2

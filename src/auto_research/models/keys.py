@@ -158,6 +158,36 @@ def active_key(provider: str) -> str | None:
     return key_pool(provider).active()
 
 
+def resolve_key(provider: str, key_env: str | None) -> tuple[str, str]:
+    """The key an actor should authenticate with, and a log-safe name for its slot.
+
+    For a provider whose failover is wired, this reads the **live** key from the process key pool
+    rather than the raw environment variable. The variable holds the primary, and by the time a
+    later actor starts a chat role may already have rotated off it: a spent balance retires the
+    primary for the whole process. Reading the variable would authenticate on the dead key while
+    every other role in the same run used the fallback, which is how an OpenAI author became
+    unrunnable while its own co-lead answered normally.
+
+    The member's own variable still wins when it is not that provider's standard primary. A member
+    may name a plan-specific variable (see ``sandbox/coder/harness.py``), and the pool describes
+    only the standard pair, so it must not answer for a deliberately different one. Providers
+    outside :data:`ROTATING_PROVIDERS` always read their own variable.
+
+    Returned as a pair so a caller can log *which* slot was used without touching the value.
+    Shared between the chat adapters and the coder harness on purpose: a run must not
+    authenticate two of its own actors from different keys, and a probe that resolves
+    differently from the run would report on a credential nothing uses.
+    """
+    if not key_env:
+        return "", "unset"
+    if provider in ROTATING_PROVIDERS and key_env == env_var_names(provider)[0]:
+        pool = key_pool(provider)
+        live = pool.active()
+        if live:
+            return live, pool.active_label()
+    return os.environ.get(key_env, ""), "env"
+
+
 #: Providers whose adapter actually sends :func:`active_key`. Rotating any other provider
 #: would be worse than doing nothing: the client would keep using the key the SDK resolved
 #: from the environment, while the caller skipped the cooldown that was its only real

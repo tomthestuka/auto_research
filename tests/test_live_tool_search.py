@@ -82,6 +82,34 @@ def _messages():
     ]
 
 
+def _tool_search_target(provider_name: str) -> str:
+    """Where `tool_search_config` is read for this provider.
+
+    Anthropic has its own adapter; every vendor speaking the OpenAI Responses dialect shares
+    ``_responses``, so patching the vendor module would silently do nothing there. Derived rather
+    than hardcoded per leg, because that is how the OpenAI legs went stale when the wire logic was
+    factored out on 2026-08-24: the f-string still resolved for Anthropic and raised for OpenAI.
+    """
+    from auto_research.models.providers import responses_vendors
+
+    shared = {vendor.name for vendor in responses_vendors()}
+    module = "_responses" if provider_name in shared else provider_name
+    return f"auto_research.models.providers.{module}.tool_search_config"
+
+
+def _handle(provider, cfg):
+    """A real ``ModelHandle`` around one leg's provider and config.
+
+    Calling ``provider.call`` directly skips ``ModelHandle.call``, and with it **key failover**:
+    on 2026-08-24 both frontier primaries were out of credit and every direct-call live leg
+    failed against working fallback keys. Routing through the handle also means these tests
+    exercise the layer production uses rather than one below it.
+    """
+    from auto_research.models.types import ModelHandle
+
+    return ModelHandle(role="live_probe", config=cfg, provider=provider)
+
+
 @pytest.mark.parametrize(
     "provider_name,provider,model",
     [
@@ -92,7 +120,7 @@ def _messages():
 def test_live_tool_search_defers_and_discovers(monkeypatch, provider_name, provider, model):
     load_dotenv()
     monkeypatch.setattr(
-        f"auto_research.models.providers.{provider_name}.tool_search_config", lambda: _ENABLED
+        _tool_search_target(provider_name), lambda: _ENABLED
     )
     cfg = RoleModelConfig(
         name="worker", provider=provider_name, model=model, parameters={"max_tokens": 2048}
@@ -100,13 +128,13 @@ def test_live_tool_search_defers_and_discovers(monkeypatch, provider_name, provi
     )
 
     async def run():
-        deferred = await provider.call(_messages(), cfg, tools=_real_tools(defer=True))
+        deferred = await _handle(provider, cfg).call(_messages(), tools=_real_tools(defer=True))
         # Baseline: the same request with every definition resident.
         monkeypatch.setattr(
-            f"auto_research.models.providers.{provider_name}.tool_search_config",
+            _tool_search_target(provider_name),
             lambda: ToolSearchConfig(enabled=False, anthropic_tool="", openai_tool=""),
         )
-        loaded = await provider.call(_messages(), cfg, tools=_real_tools(defer=False))
+        loaded = await _handle(provider, cfg).call(_messages(), tools=_real_tools(defer=False))
         return deferred, loaded
 
     deferred, loaded = asyncio.run(run())
@@ -166,7 +194,7 @@ def test_live_second_turn_after_discovery(monkeypatch, provider_name, provider, 
     """
     load_dotenv()
     monkeypatch.setattr(
-        f"auto_research.models.providers.{provider_name}.tool_search_config", lambda: _ENABLED
+        _tool_search_target(provider_name), lambda: _ENABLED
     )
     cfg = RoleModelConfig(
         name="worker", provider=provider_name, model=model,
@@ -179,7 +207,7 @@ def test_live_second_turn_after_discovery(monkeypatch, provider_name, provider, 
     tools = _real_tools(defer=True)
 
     async def run():
-        first = await provider.call(_messages(), cfg, tools=tools)
+        first = await _handle(provider, cfg).call(_messages(), tools=tools)
         assert first.tool_calls, "the model must call a discovered tool for this to test anything"
         history = [
             *_messages(),
@@ -197,7 +225,7 @@ def test_live_second_turn_after_discovery(monkeypatch, provider_name, provider, 
             ),
         ]
         # The turn that 400'd twice in production.
-        return first, await provider.call(history, cfg, tools=tools)
+        return first, await _handle(provider, cfg).call(history, tools=tools)
 
     first, second = asyncio.run(run())
 
@@ -249,7 +277,7 @@ def test_live_compose_over_a_discovery_trajectory_declares_its_tools(monkeypatch
 
     load_dotenv()
     monkeypatch.setattr(
-        "auto_research.models.providers.anthropic.tool_search_config", lambda: _ENABLED
+        _tool_search_target("anthropic"), lambda: _ENABLED
     )
     provider = AnthropicProvider()
     cfg = RoleModelConfig(
@@ -259,7 +287,7 @@ def test_live_compose_over_a_discovery_trajectory_declares_its_tools(monkeypatch
     tools = _real_tools(defer=True)
 
     async def run():
-        first = await provider.call(_messages(), cfg, tools=tools)
+        first = await _handle(provider, cfg).call(_messages(), tools=tools)
         assert first.tool_calls, "need a tool-calling turn to replay"
         history = [
             *_messages(),
@@ -271,8 +299,8 @@ def test_live_compose_over_a_discovery_trajectory_declares_its_tools(monkeypatch
             ]),
         ]
         # Schema AND tools: the terminal compose, on the documented echo path.
-        return first, await provider.call(
-            history, cfg, schema=_Answer, tools=tools, tool_choice="none"
+        return first, await _handle(provider, cfg).call(
+            history, schema=_Answer, tools=tools, tool_choice="none"
         )
 
     first, composed = asyncio.run(run())
@@ -333,7 +361,7 @@ def test_live_compose_declares_its_tools(provider_name, provider, model):
     ]
 
     async def run():
-        first = await provider.call(seed, cfg, tools=tools)
+        first = await _handle(provider, cfg).call(seed, tools=tools)
         assert first.tool_calls, "need a real tool-calling turn to replay"
         history = [
             *seed,
@@ -348,8 +376,8 @@ def test_live_compose_declares_its_tools(provider_name, provider, model):
             ModelMessage(role="user", content="Now emit the verdict. Do not call tools."),
         ]
         # Declared AND forbidden — the fix. Omitting `tools=` here is the 400 above.
-        return first, await provider.call(
-            history, cfg, schema=_Verdict, tools=tools, tool_choice="none"
+        return first, await _handle(provider, cfg).call(
+            history, schema=_Verdict, tools=tools, tool_choice="none"
         )
 
     first, composed = asyncio.run(run())

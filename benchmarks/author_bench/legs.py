@@ -86,7 +86,9 @@ class Leg:
     harness: str
     model: str
     purpose: str
-    """``tier`` (vary the author, reviewer fixed) or ``decorrelation`` (vary the reviewer)."""
+    """``tier`` (vary the author, reviewer fixed), ``decorrelation`` (vary the reviewer), or
+    ``lead`` (vary the analyst lead, which panel (b) does to separate the lead's correlation with
+    the reviewer from the author's)."""
 
     key_env: str | None = None
     base_url: str | None = None
@@ -95,6 +97,18 @@ class Leg:
 
     colead_model: str | None = None
     """Exact co-lead model, when the leg pins one rather than taking the role's first member."""
+
+    lead_provider: str | None = None
+    lead_model: str | None = None
+    """The analyst lead this leg runs under. ``None`` takes the configured role, which is the
+    campaign default and every panel-(a) row.
+
+    The lead is a separate correlation axis from the author, and until it is varied the two cannot
+    be told apart. The lead writes the instructions the coder executes, decides when the work is
+    submitted, and argues the co-lead's verdict, so it has more influence over what reaches a
+    review than the coder does. It is Anthropic in every panel-(a) leg, which means the arm whose
+    co-lead is also Anthropic correlates the reviewer with the coder **and** the lead at once, and
+    a change in its rejection count cannot be attributed to either alone."""
 
     reuse: str | None = None
     """Set when this row is already measured by another leg or an earlier batch, with the reason.
@@ -119,6 +133,18 @@ class Leg:
     def correlated(self) -> bool:
         """Whether this leg deliberately shares a provider between author and reviewer."""
         return self.colead_provider is not None and self.colead_provider == self.provider
+
+    @property
+    def lead_correlated(self) -> bool:
+        """Whether the reviewer shares a provider with the lead that submits the work.
+
+        Reported separately from :attr:`correlated` because §9.3's rule binds the author and says
+        nothing about the lead, so a leg can pass the decorrelation preflight while the reviewer
+        and the actor deciding submission come from one vendor.
+        """
+        lead = self.lead_provider or "anthropic"      # the configured lead is Anthropic
+        colead = self.colead_provider or "openai"      # the configured co-lead is OpenAI
+        return lead == colead
 
     @property
     def colour(self) -> str:
@@ -169,6 +195,7 @@ ROSTER: tuple[Leg, ...] = (
         harness="codex",
         model="glm-5.3",
         purpose="tier",
+        max_concurrency=2,
         key_env="ZAI_API_KEY",
         base_url="https://api.z.ai/api/v1",
         note="open-weight family, served by its own vendor rather than self-hosted",
@@ -179,6 +206,7 @@ ROSTER: tuple[Leg, ...] = (
         harness="codex",
         model="glm-5.2",
         purpose="tier",
+        max_concurrency=2,
         key_env="ZAI_API_KEY",
         base_url="https://api.z.ai/api/v1",
         in_default=False,
@@ -202,6 +230,82 @@ ROSTER: tuple[Leg, ...] = (
             "reviewer swap found it the strongest reviewer, so a cost to sharing the author's "
             "provider even there is a strong result and no cost is an honest negative one"
         ),
+    ),
+    # ── Panel (b): the same five arms under a GPT analyst lead ──────────────
+    # Panel (a) holds the lead at the Anthropic default, so the reviewer's provider and the
+    # lead's move together and neither can be credited. In panel (a)'s own data the coder's
+    # provider tracks nothing (a GPT coder under a GPT reviewer drew the joint-highest rejection
+    # count) while the single zero-rejection arm is the single arm whose reviewer shares the
+    # LEAD's vendor. Swapping the lead is what tests that: under a GPT lead the prediction is the
+    # mirror image, GPT-reviewed arms falling toward zero and the Anthropic-reviewed arm rising.
+    Leg(
+        slug="claude_sonnet_5_gptlead",
+        provider="anthropic",
+        harness="claude_sdk",
+        model="claude-sonnet-5",
+        purpose="lead",
+        lead_provider="openai",
+        lead_model="gpt-5.6-sol",
+        max_concurrency=2,
+        note="panel (b) twin of the campaign default: lead and reviewer share a vendor here",
+    ),
+    Leg(
+        slug="claude_sonnet_5_gptlead_anthropic_review",
+        provider="anthropic",
+        harness="claude_sdk",
+        model="claude-sonnet-5",
+        purpose="lead",
+        lead_provider="openai",
+        lead_model="gpt-5.6-sol",
+        colead_provider="anthropic",
+        colead_model="claude-opus-5",
+        max_concurrency=2,
+        note=(
+            "the cell panel (a) cannot reach: the coder shares the reviewer's vendor while the "
+            "lead does not, which is the arm that separates the two axes"
+        ),
+    ),
+    Leg(
+        slug="deepseek_v4_flash_gptlead",
+        provider="deepseek",
+        harness="codex",
+        model="deepseek-v4-flash",
+        purpose="lead",
+        key_env="DEEPSEEK_API_KEY",
+        base_url="https://api.deepseek.com/",
+        lead_provider="openai",
+        lead_model="gpt-5.6-sol",
+        max_concurrency=4,
+        note="panel (b) twin; its own vendor imposes no ceiling that matters at this size",
+    ),
+    Leg(
+        slug="glm_5_3_gptlead",
+        provider="zai",
+        harness="codex",
+        model="glm-5.3",
+        purpose="lead",
+        key_env="ZAI_API_KEY",
+        base_url="https://api.z.ai/api/v1",
+        lead_provider="openai",
+        lead_model="gpt-5.6-sol",
+        max_concurrency=2,
+        note=(
+            "panel (b) twin. Held at two in flight: Z.AI throttled 87 to 97 per cent of author "
+            "turns at three and four, which reaches the lead as an author that did nothing"
+        ),
+    ),
+    Leg(
+        slug="gpt_5_6_terra_gptlead",
+        provider="openai",
+        harness="codex",
+        model="gpt-5.6-terra",
+        purpose="lead",
+        key_env="OPENAI_API_KEY",
+        lead_provider="openai",
+        lead_model="gpt-5.6-sol",
+        colead_provider="openai",
+        max_concurrency=4,
+        note="panel (b) twin; coder, lead and reviewer all one vendor, the fully correlated cell",
     ),
     Leg(
         slug="gpt_5_6_terra_correlated",

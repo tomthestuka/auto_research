@@ -42,12 +42,29 @@ def test_a_chat_member_needs_no_harness_fields():
 
 
 def test_harness_only_provider_resolves_but_refuses_a_chat_call():
-    for name in ("deepseek", "zai", "dashscope"):
-        assert name not in CHAT_PROVIDERS
-        provider = provider_for(name)
-        assert isinstance(provider, HarnessOnlyProvider)
-        with pytest.raises(RuntimeError, match="only through a coder harness"):
-            asyncio.run(provider.call())
+    """The placeholder is still the answer for a vendor with no chat adapter.
+
+    It used to be reached by naming DeepSeek, Z.AI or Alibaba, which all gained adapters on
+    2026-08-24. Pinning it to those names measured the roster rather than the mechanism, so the
+    check now uses a vendor that is deliberately not in the chat set: what must hold is that an
+    unwired name resolves to something that raises with the reason, whichever name that is.
+    """
+    provider = provider_for("a-vendor-with-no-adapter")
+    assert isinstance(provider, HarnessOnlyProvider)
+    with pytest.raises(RuntimeError, match="only through a coder harness"):
+        asyncio.run(provider.call())
+
+
+def test_every_harness_vendor_can_also_be_reached_as_a_chat_member():
+    """Each vendor a coder harness may drive now also backs a chat role.
+
+    This is what makes the lead and co-lead axes configurable across vendors rather than only
+    the author's. It is a roster fact, so it is asserted from the harness table rather than from
+    a hand-written list that would drift from it.
+    """
+    for provider, _harness in HARNESS_ENDPOINTS:
+        assert provider in CHAT_PROVIDERS
+        assert not isinstance(provider_for(provider), HarnessOnlyProvider)
 
 
 def test_chat_providers_still_get_their_real_adapters():

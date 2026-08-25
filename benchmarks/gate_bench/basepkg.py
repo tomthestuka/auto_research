@@ -396,3 +396,68 @@ def write(path: Path, text: str) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+def keep_only_passing_tests(repo: Path, package: str, *, timeout: int = 300) -> list[str]:
+    """Restrict a changeset's committed tests to the ones it passes, and say which were dropped.
+
+    The corpus's rule for a behavioural defect: it ships the honest suite **minus the checks that
+    would have caught it**. That is the shape the campaign ledgers record, where a defect reached
+    the independent reviewer precisely because the author's own verification did not cover it, and
+    it is what the "inadequate test" family means.
+
+    Applying the rule mechanically rather than by hand-editing each test matters for two reasons.
+    A hand-relaxed suite has to be re-relaxed whenever an honest check is added, and forgetting
+    silently converts a reviewer-caught defect into a free Layer-B catch. And a rule stated once
+    and applied uniformly is auditable, where a pile of individual deletions is not.
+
+    Returns the node ids removed, so a builder can record what its plant is not pinned by.
+    """
+    import json as _json
+    import re as _re
+    import sys as _sys
+
+    tests_dir = Path(repo) / package / "tests"
+    if not tests_dir.is_dir():
+        return []
+    dropped: list[str] = []
+    # Iterate: removing one failing test can expose another (pytest -x stops at the first).
+    for _ in range(60):
+        result = subprocess.run(
+            [_sys.executable, "-m", "pytest", "-q", "--no-header", "-x", f"{package}/tests"],
+            cwd=str(repo), capture_output=True, text=True, timeout=timeout,
+        )
+        if result.returncode == 0:
+            return dropped
+        failing = _re.findall(r"^(?:FAILED|ERROR) ([^\s:]+)::([A-Za-z0-9_]+)",
+                              result.stdout, flags=_re.M)
+        if not failing:
+            failing = _re.findall(r"^_+ ([A-Za-z0-9_]+) _+$", result.stdout, flags=_re.M)
+            failing = [(None, name) for name in failing]
+        if not failing:
+            raise AssertionError(
+                f"the suite fails but no test name could be read from it:\n{result.stdout[-800:]}"
+            )
+        for path_hint, name in failing[:1]:
+            target = (Path(repo) / path_hint) if path_hint else None
+            candidates = [target] if target and target.is_file() else sorted(tests_dir.glob("*.py"))
+            for candidate in candidates:
+                if _drop_test_function(candidate, name):
+                    dropped.append(f"{candidate.name}::{name}")
+                    break
+            else:
+                raise AssertionError(f"cannot find {name} in {package}/tests to drop")
+    raise AssertionError("the suite still fails after dropping sixty checks")
+
+
+def _drop_test_function(path: Path, name: str) -> bool:
+    """Remove one top-level ``def <name>`` block from a test module. True when it was there."""
+    text = path.read_text(encoding="utf-8")
+    marker = f"\ndef {name}("
+    start = text.find(marker)
+    if start < 0:
+        return False
+    body = start + 1
+    nxt = text.find("\ndef ", body + 1)
+    end = len(text) if nxt < 0 else nxt + 1
+    path.write_text(text[:body] + text[end:], encoding="utf-8")
+    return True

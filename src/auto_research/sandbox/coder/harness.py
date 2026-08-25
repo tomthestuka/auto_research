@@ -15,8 +15,12 @@ Verified against vendor documentation on 2026-08-19:
 * Z.AI GLM, Responses — ``https://api.z.ai/api/v1`` (docs.z.ai/devpack/tool/codex, which states
   Codex requires a dedicated Responses endpoint).
 * Alibaba Model Studio (Qwen), Responses — ``https://dashscope-intl.aliyuncs.com/compatible-mode/v1``
-  (docs.qwencloud.com, Codex page. Its Coding-Plan host speaks Chat Completions only, which newer
-  Codex versions no longer accept, so the pay-as-you-go or token-plan host is the one to name.)
+  (the Singapore pay-as-you-go host of ``.../model-studio/base-url``). **Confirmed correct
+  2026-08-24** after being doubted: the key class is what decides the host, and only a
+  pay-as-you-go key belongs here. The Coding Plan lives at
+  ``coding-intl.dashscope.aliyuncs.com/v1``, where ``/responses`` **404s** — that plan serves Chat
+  Completions only, so it can drive neither this harness nor the chat adapter, which generalises
+  the ``sk-sp-`` trap below to its ``sk-mr-`` keys.
 
 Two absences are structural: Anthropic publishes no Responses endpoint, and OpenAI no
 Anthropic-dialect one.

@@ -50,6 +50,11 @@ class MediaLimits:
 
     image_mimes: frozenset[str]
     doc_mimes: frozenset[str] = frozenset()
+    images_accepted: bool = True
+    """Whether *this model* accepts image input at all. Unlike the fields below, this is not a
+    volume limit but a per-model capability: a vendor may serve vision on only part of its
+    lineup, and an image sent to the wrong model is refused outright rather than ignored. An
+    adapter narrows its vendor limits per call (``ResponsesVendor.limits_for``)."""
     max_images: int = 0
     """Image blocks per request (0 = undocumented)."""
     strict_block_threshold: int = 0
@@ -173,6 +178,16 @@ def _resolve_one(
     """Per-item checks: mime, count, pages, bytes, dimensions."""
     name = item.path.name
     if item.is_image:
+        if not limits.images_accepted:
+            # Some vendors serve vision on only part of their lineup, and sending an image to
+            # the wrong model is a 400 rather than a degraded answer (DeepSeek: "Only vision
+            # models accept images; other models return a 400 error"). Withholding here keeps
+            # that a model-visible note instead of a dead request.
+            return Resolved(
+                None,
+                item.mime,
+                f"[withheld] {name}: this model does not accept image input.",
+            )
         if limits.image_mimes and item.mime not in limits.image_mimes:
             # Closes [V-3]: an unsupported mime must never enter the image channel, where every
             # provider 400s on it.

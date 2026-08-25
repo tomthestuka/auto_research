@@ -48,6 +48,31 @@ _PINNED_COLEAD_PARAMETERS: dict[str, dict[str, object]] = {
 }
 
 
+def build_pinned_lead(leg: Leg, monitor: Any | None) -> Any:
+    """The analyst lead a leg pins, built outside the configured role.
+
+    Same construction as the co-lead below and for the same reason: the measurement lives in the
+    roster rather than in machine-local config, so a batch is reproducible. Parameters are the
+    per-provider pinned set, so a lead swap compares models and not configurations.
+    """
+    from auto_research.agents import AnalystLeadAgent
+    from auto_research.models.providers import provider_for
+    from auto_research.models.types import ModelHandle, RoleModelConfig
+
+    member = RoleModelConfig(
+        name=f"sweep_lead_{leg.slug}",
+        provider=leg.lead_provider,
+        model=leg.lead_model,
+        vision=True,
+        documents=True,
+        parameters=dict(_PINNED_COLEAD_PARAMETERS.get(leg.lead_provider, {})),
+    )
+    handle = ModelHandle(
+        role="analyst_lead", config=member, provider=provider_for(member.provider)
+    )
+    return AnalystLeadAgent(model=handle, monitor=monitor)
+
+
 def build_pinned_colead(leg: Leg, monitor: Any | None) -> Any:
     """The co-lead a decorrelation leg pins, built outside the configured role.
 
@@ -297,7 +322,11 @@ async def run_trial(index: int, cfg: TrialConfig) -> dict:
         )
         spec = load_brief()
 
-        lead = AnalystLeadAgent(monitor=monitor)
+        leg_for_lead = cfg.leg
+        if leg_for_lead is not None and leg_for_lead.lead_model:
+            lead = build_pinned_lead(leg_for_lead, monitor)
+        else:
+            lead = AnalystLeadAgent(monitor=monitor)
         # The lead's investigation surface, wired as runtime.py wires it: the toolkit it is
         # authoring into, the papers dir, and its own trial directory. plan_and_debate needs a
         # human and is off here, which is the unattended production shape.
@@ -357,6 +386,8 @@ async def run_trial(index: int, cfg: TrialConfig) -> dict:
         record["coder"] = cfg.leg.model
         record["coder_provider"] = cfg.leg.provider
         record["coder_harness"] = cfg.leg.harness
+        record["lead"] = cfg.leg.lead_model or "(configured)"
+        record["lead_correlated_with_colead"] = cfg.leg.lead_correlated
         record["colead"] = cfg.leg.colead_model or "(configured)"
         record["correlated_review"] = cfg.leg.correlated
     record["duration_s"] = round(time.time() - started, 2)

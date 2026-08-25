@@ -37,6 +37,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from auto_research.models.keys import resolve_key
 from auto_research.sandbox.coder.events import cap_text, emit
 
 
@@ -103,35 +104,13 @@ def _thread_config(*, writable_roots: list[str]) -> dict[str, Any]:
     }
 
 
-def resolve_vendor_key(provider: str, key_env: str | None) -> tuple[str, str]:
-    """The key a Codex author should launch with, and a log-safe name for its slot.
-
-    For a provider whose failover is wired, this reads the **live** key from the process key pool
-    rather than the raw environment variable. The variable holds the primary, and by the time an
-    author is spawned a chat role may already have rotated off it: a spent balance retires the
-    primary for the whole process. Reading the variable would launch the author on the dead key
-    while every other role in the same run used the fallback, which is how an OpenAI author became
-    unrunnable while its own co-lead answered normally.
-
-    The member's own variable still wins when it is not that provider's standard primary. A member
-    may name a plan-specific variable (see the harness table), and the pool describes only the
-    standard pair, so it must not answer for a deliberately different one. Harness-only vendors are
-    outside the rotating set entirely and always read their own variable.
-
-    Returned as a pair so a caller can log *which* slot was used without touching the value. Shared
-    with the launch checks on purpose: a probe that resolves a different key than the run would
-    report on a credential nothing uses.
-    """
-    if not key_env:
-        return "", "unset"
-    from auto_research.models.keys import ROTATING_PROVIDERS, env_var_names, key_pool
-
-    if provider in ROTATING_PROVIDERS and key_env == env_var_names(provider)[0]:
-        pool = key_pool(provider)
-        live = pool.active()
-        if live:
-            return live, pool.active_label()
-    return os.environ.get(key_env, ""), "env"
+#: The key a Codex author launches with, and a log-safe name for its slot.
+#:
+#: Re-exported rather than defined here: the chat adapters need the identical resolution, and a
+#: run must not authenticate two of its own actors from different keys. The rule and its history
+#: live with the key pool (``models.keys.resolve_key``); this name is kept because the harness,
+#: its launch probe and their tests all address it.
+resolve_vendor_key = resolve_key
 
 
 class CodexBackend:

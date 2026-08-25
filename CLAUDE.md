@@ -180,8 +180,13 @@ LLM teams must be upgradable without code changes. All model selection lives in 
 provider, model id, vision flag, and provider-specific parameters. No model identifier
 appears in source code.
 
-Providers: **OpenAI, Anthropic, Google.** Reviewer-tier and analyst models **must be
-vision-capable** (figures, [§7](#7-schemas--protocols)).
+Providers: **OpenAI, Anthropic, Google, DeepSeek, Z.AI, Alibaba Model Studio.** Reviewer-tier
+and analyst models **must be vision-capable** (figures, [§7](#7-schemas--protocols)). The last
+three joined the chat set on 2026-08-24 over the OpenAI **Responses** dialect they already
+publish, so a role may now be bound to any of the six. Reaching a vendor is not the same as
+being eligible for a role: a member's adapter declares what that vendor's documentation states
+and a live probe confirms, and **Z.AI and Alibaba accept a strict output schema and ignore it**,
+so they are refused any role that emits one (`_responses.ResponsesVendor`).
 
 **Phase 2 — authoring/review providers.** Only **Claude and GPT** are reliable enough to
 author and review tools. The tool **author and reviewer must be different providers**
@@ -794,6 +799,37 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   with the vendor's refusal by `tests/test_live_coder_matrix.py`. The other four pairings are live
   probed. Two traps when finishing it: the Coding Plan's `sk-sp-…` keys speak Chat Completions,
   which current Codex refuses, and the Token Plan changes both key and host.
+  **Re-probed 2026-08-24 and the diagnosis holds, with two facts added.** The key authenticates:
+  `GET /models` on the international host returns 200 with a 162-model list. Every inference call is
+  still refused — HTTP 400 `AccessDenied.Unpurchased` ("Access to app denied") on the Responses path,
+  HTTP 403 with the same code on Chat Completions — and that held for a **current** model id
+  (`qwen3.8-max`) as well as the stale `qwen3-max`/`qwen-plus` tried before, so it is not a
+  model-name error. **Second, the endpoint in `HARNESS_ENDPOINTS` is probably wrong:**
+  `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` appears nowhere in the vendor's own
+  Responses host list, which is workspace-scoped (`{WorkspaceId}.<region>.maas.aliyuncs.com`) plus a
+  bare `dashscope-us` host that answered `InvalidApiKey` for this `sk-ws-` key. No host can be
+  confirmed while the account is unentitled, so the row is left naming the host that at least
+  authenticates and the discrepancy is recorded in `models/providers/dashscope.py`. The same gate
+  makes the **chat** adapter added 2026-08-24 unverified, so `qwen` is unusable as a lead or co-lead
+  until the account is activated.
+  **The diagnosis was corrected the same day, twice, and both corrections matter.** First,
+  `AccessDenied.Unpurchased` is not a billing gate: Alibaba's error reference gives it exactly one
+  meaning, *"Alibaba Cloud Model Studio service has not been activated on your account"*, with a
+  four-step remedy ending in agreeing to the service terms in the console. New accounts then get 1M
+  free tokens per eligible model on the International endpoint for 90 days, so the row may cost
+  nothing. Second, **there is more than one key class and each has its own host**, which is why no
+  amount of probing one host settled it. Measured against every host `.../model-studio/base-url`
+  documents: an `sk-ws-` pay-as-you-go key is valid on `dashscope-intl` alone (and there reports the
+  unactivated service), while an `sk-mr-` **Coding Plan** key is valid on
+  `coding-intl.dashscope.aliyuncs.com/v1` alone, where it lists ten models across four vendors and
+  then refuses inference with *"invalid access token or token expired"*.
+  **The architectural finding outranks the credential one:** `/responses` **404s** on the Coding
+  Plan host, so that plan speaks Chat Completions only and can drive **neither** the Codex coder
+  harness **nor** the chat adapter, both of which are Responses. A Coding Plan key is therefore a
+  dead end for this system regardless of whether its token is renewed, which generalises the
+  already-recorded `sk-sp-` trap to `sk-mr-`. The usable path is pay-as-you-go plus activation.
+  `tmp_scripts/check_qwen_entitlement.py` sweeps every documented host and names both the accepting
+  host and the remedy, so this is a seconds-long re-check rather than a re-investigation.
 - **Coder git-ban is best-effort (deny-rule) on the Claude harness.** Its Bash deny-rule
   (`disallowed_tools=["Bash(git:*)", "Bash(git)"]`, §9.9) blocks the obvious `git …`, but prefix
   matching can be slipped (pipes, `$(…)`, env prefixes, `python -c subprocess`). The Codex harness
@@ -1487,3 +1523,158 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   path: mine failed with the jail *off* too, which is the only reason I did not read its failure as a
   code defect. And the config-flip lesson recurred twice in one session — two tests asserted against
   whatever `agent_os_jail` happened to be on this host, and both now sweep it.
+
+- 2026-08-24 — **The three harness-only vendors became chat members, so the lead and co-lead are a
+  provider axis rather than a constant.** §8.5 of the paper DOCS found that the coder sweep varied
+  the reviewer's provider and the lead's together, because the lead was Anthropic in all five arms;
+  separating them needs leads and co-leads from more than two vendors. DeepSeek, Z.AI and Alibaba
+  Model Studio each already publish an OpenAI **Responses** endpoint — the dialect our OpenAI
+  adapter speaks — so this was a factoring, not three new adapters: `providers/_responses.py` holds
+  the wire logic (input projection, capture-time field filtering, replay ordering, one
+  request/one extraction) and each vendor module holds a `ResponsesVendor` of documented facts
+  beside its citations, mirroring how `_media.py` already splits mechanics from per-provider policy.
+  Copying 540 lines written against three run-killers in one week would have forked those fixes
+  four ways. `CHAT_PROVIDERS` is now all six; `HarnessOnlyProvider` remains for any future unwired
+  vendor.
+  **Every flag was read from the vendor's docs and then probed, because a compatibility table says
+  what is *accepted*, not what is *honoured*** — and that distinction decided who may hold a role.
+  **DeepSeek** honours a strict schema exactly (bare JSON, declared keys, both its models), calls
+  functions, and accepts the `tools`+`schema`+`tool_choice="none"` compose shape, so it is a full
+  member: **11/11 live** on all nine real schemas plus both trajectory composes. **Z.AI accepts
+  `text.format` and ignores it**, answering once with prose carrying no JSON and once with a fenced
+  object whose keys the schema never declared. A 200 with invented keys cannot be caught downstream,
+  so `supports_strict_schema=False` refuses the request with a reason instead; its documented
+  workaround (schema in the prompt) did return exact keys on a nested schema, but once, so nothing
+  is wired on one draw. DeepSeek also rejects `prompt_cache_key`, which the lead role sends on every
+  cached call.
+  **Two defects only a live probe could find, both now per-vendor flags.** Its strict mode accepts a
+  **narrower `format` set** and enumerates it in the refusal ("expected one of `email`, `hostname`,
+  `ipv4`, `ipv6`, `uuid`"), which refused three of the nine schemas for carrying a date field. And
+  its validator **does not follow a `$ref` inside an `anyOf` branch**, so every `X | None` field
+  broke: the cheap fix was probed first and merely moved the error to "An object with no properties
+  is not allowed", which is what proves the reference is never followed, while inlining the
+  definition is accepted and validates. The inliner is deliberately narrow (only a branch whose sole
+  key is `$ref`, never through a definition already open on the path) and its **first version
+  recursed without bound** — caught by its own guard test, not by any schema we send.
+  **Live tests now route through `ModelHandle` rather than `provider.call`.** Both frontier primaries
+  were out of credit that day (Anthropic 400 credit balance, OpenAI 429 `credit_balance_exhausted`)
+  and 22 legs failed against working fallback keys, because key rotation lives in the layer the live
+  tests skipped. Routing through the handle fixes that and also closes the altitude gap recorded on
+  2026-08-06, where a live test could not see a defect introduced above the adapter. The same move
+  exposed a stale monkeypatch target that resolved for Anthropic and raised for OpenAI, now derived
+  from the vendor registry instead of spelled per leg.
+  **Qwen ships unverified**: its key authenticates and lists 162 models, but every inference call is
+  refused `AccessDenied.Unpurchased` on both dialects and with a current model id, so it is a
+  billing gate rather than our wiring; its documented Responses hosts are workspace-scoped and do
+  not include the one `HARNESS_ENDPOINTS` names, recorded rather than silently changed. New deps:
+  none. Suite 1008 -> 1058; live 36/1-skipped on the schema matrix and 7/7 on tool search.
+  **Open, awaiting a ruling:** whether GLM gets a row in the lead x co-lead matrix given that its
+  structured path is unmeasured (handoff [I14]).
+
+- 2026-08-24 (second, same day) — **A structured answer now has two routes, because a vendor can
+  accept the parameter that requests one and ignore it.** Z.AI answers `text.format` with
+  `strict: true` at HTTP 200 and then writes prose, or an object whose keys the schema never
+  declared. A 200 with invented keys cannot be caught downstream, which is worse than a rejection.
+  The human's insight found the way through: **a coding harness never uses structured output** —
+  Claude Code's and Codex's own editing tools are JSON-Schema functions, so any vendor that works
+  inside those harnesses must handle schema-shaped tool arguments. `ResponsesVendor.schema_via_tool`
+  therefore declares one synthetic tool whose parameters *are* the schema and pins `tool_choice` to
+  it. Live-verified with the real `ToolReviewVerdict` on **both** dialects Z.AI publishes, and then
+  across the whole nine-schema matrix. The loop's own tools stay declared beside the emit tool, so a
+  replayed trajectory still resolves every item that names one — forcing the emit tool is what
+  replaces `tool_choice="none"` there — and the emit call is consumed into `parsed`, never surfaced
+  as a `tool_call` the ReAct loop would try to execute. A vendor that declines the forced call
+  raises rather than returning a quiet `parsed=None`.
+  **Two of my own defensive choices were wrong and were corrected by measurement.** DeepSeek's
+  narrow `format` allowlist had been applied to Z.AI and Qwen as well; that narrowing is imposed by
+  *DeepSeek's strict-mode validator*, which these vendors never reach, and Z.AI demonstrably accepts
+  `format: date` in tool parameters — so it is now DeepSeek-only, per the standing rule to enforce
+  what a vendor refuses rather than what another one does.
+  **And the forced-tool route has one measured quirk, which the fix must not overstate.** GLM
+  intermittently fills an optional field with the *string* `"null"`: schema-valid against a
+  `string` branch and a type error for anything else (live, `SearchRequest.since`). The same call
+  emitted correct JSON `null` for an optional model field and real floats for both tolerances, so it
+  is intermittent, which is the worse shape for a batch — and it reaches the authoring path, whose
+  `AuthoringDecision` carries two optional floats. `_normalise_null_strings` coerces a literal
+  `"null"` to `None` **only** where the schema permits null and no branch accepts a plain string, so
+  `float | None` and `date | None` are unambiguous while `str | None` is left exactly as written. It
+  normalises spelling, never content. Writing its tests caught two bugs in the first implementation:
+  a date field is `{"type": "string", "format": "date"}`, so an "any string branch" exclusion skipped
+  the very case it was written for, and `tool_specs.items` is a `$ref` the walk could not follow.
+  **Live tests were also moved onto `ModelHandle`** rather than calling `provider.call` directly:
+  both frontier primaries were out of credit and 22 legs failed against working fallback keys,
+  because key rotation lives in the layer those tests skipped. That also closes the altitude gap
+  recorded on 2026-08-06. The move exposed a monkeypatch target that resolved for Anthropic and
+  raised for OpenAI once the wire logic was shared, now derived from the vendor registry.
+  Suite 1058 -> 1073; Z.AI 12/12 live on the real schemas (one transient vendor auth blip, passing on
+  retry), Qwen skipping with the vendor's own refusal quoted.
+
+- 2026-08-24 (third, same day) — **Qwen came alive, and the last defect turned out to be ours: a
+  compatibility layer does not resolve `$ref`.** Activating Model Studio cleared the entitlement
+  gate, and with all five vendors reachable the remaining failures were schema-shaped rather than
+  vendor-shaped. `ResearchReport` and `AuthoringDecision` failed on Qwen at *every* reasoning
+  effort (10/11/8 errors, always at `figures.0`, `references.0`, `sections.0` — the `list[Model]`
+  fields), which is what showed the cause was structural: our inliner rewrote `$ref` only inside
+  `anyOf`, so list-item schemas stayed unresolved and the model **invented** a shape for them (a
+  made-up `figure_id`, none of the required fields). Dereferencing the whole schema and dropping
+  `$defs` fixes it; the narrow version is gone.
+  **The two compat vendors fail the same way in opposite shapes, and that is the durable lesson.**
+  DeepSeek *rejects* an unresolved reference (HTTP 400, found in minutes); Qwen *accepts* and
+  fabricates a plausible object (HTTP 200, found only because Pydantic rejected it downstream). A
+  rejection announces itself; an invention looks like an answer. It is the argument for keeping
+  strict validation at the role layer rather than trusting a 200, and for treating "the vendor
+  answered" as no evidence at all.
+  **Two corrections the human's questions forced, both of which had been wrong in my picture.**
+  `structured_retry_cap: 2` already retries off-schema output at the role layer, so no retry
+  needed building — and the live tests sit *below* that loop, calling `ModelHandle.call` directly,
+  so they measure raw single-shot behaviour and made Qwen look worse than a real run will.
+  Thinking was never disabled: it runs at each vendor's default, and `reasoning.effort: none` is
+  strictly worse (it breaks `AuthoringDecision` while default and high both validate), so the
+  right trade is keeping thinking and *offering* the emit tool rather than disabling thinking to
+  force it. Qwen refuses a named `tool_choice` while thinking — **the same rule Anthropic
+  documents** for its own thinking models — so the emit tool is declared under `auto` with a final
+  instruction that the call IS the answer. That instruction exists because a prompt written for
+  native structured output may end "do not call any tool", which on this route forbids the answer
+  itself; measured, it produced no emit call at all.
+  **Qwen's credentials also had to be understood before any of this could run:** the key class
+  decides the host, an `sk-mr-` Coding Plan key is valid only on `coding-intl` where `/responses`
+  404s (so that plan can drive neither harness nor adapter), and only a pay-as-you-go key on
+  `dashscope-intl` serves us. `tmp_scripts/check_qwen_entitlement.py` sweeps every documented host
+  and names the remedy. `harness.py`'s endpoint was correct all along and its doubt is retracted.
+  **Live: 55 passed / 2 skipped / 0 failed** across all five vendors on the nine real schemas plus
+  the trajectory compose. Suite 1075 -> 1078. The lead x co-lead grid is now genuinely 5x5.
+
+- 2026-08-24 (fourth, same day) — **"Cannot resolve a `$ref`" was never one property, and the
+  boolean that encoded it is deleted.** Prompted by the human asking whether we had actually
+  *tried* sending references to each vendor: we had not. Z.AI had inlining enabled purely by
+  analogy with DeepSeek and was never tested; the general claim rested on two data points from
+  different vendors. Measured properly at 5 draws per cell, every cell 0/5 or 5/5, no variance:
+
+  | vendor | `anyOf: [{$ref}, null]` | `items: {$ref}` |
+  |---|---|---|
+  | DeepSeek | refused 0/5 | fine 5/5 |
+  | Z.AI | fine 5/5 | fine 5/5 |
+  | Qwen | fine 5/5 | refused 0/5 |
+
+  **Qwen is what forced the redesign:** it needs opposite treatment in the two positions, so a
+  per-vendor boolean is wrong whichever way it is set — and blanket dereferencing was *causing*
+  its `anyOf` failures (a working 5/5 shape driven to 0/5, answering with a JSON-encoded string in
+  an object field). `inline_anyof_refs` and the blanket inliner are gone; `resolve_refs_in` names
+  the positions a vendor is measured to need, defaulting to none. Z.AI's shim was deleted rather
+  than switched off, per the human's instruction.
+  **DeepSeek's rule, probed six ways** (default endpoint, `/beta`, `/beta` strict function-calling,
+  and the `$defs`/`$def`/`definitions` spellings): every `anyOf` branch must carry a literal
+  `type`, checked *before* any reference is followed — adding the type moves the error to "An
+  object with no properties is not allowed", which is what proves the pointer is never resolved.
+  Its docs list `anyOf` and `$ref` as supported and are silent on the combination, so this is
+  measured rather than read. The community search that opened the question also **independently
+  corroborated the narrow `format` allowlist**, which had been derived only from an error message.
+  **No dependency was added.** `jsonref` does blanket dereferencing, which the data says is wrong
+  for Qwen, so the library solves a problem we no longer have; the ~60 lines kept do something no
+  library does, resolve selectively by position.
+  **Two process notes.** A closed third-party issue ("not planned") was cited as support when a
+  live measurement of our own request already existed — the probe was always the authority, and
+  the human was right to force the re-check. And writing the position-aware resolver
+  **reintroduced the same unbounded-recursion bug fixed an hour earlier** (expand with the path
+  recorded, then re-walk the expansion with the path forgotten); the guard test caught it, not
+  review. Suite 1081.

@@ -702,9 +702,29 @@ def test_both_wired_providers_send_their_key_explicitly():
 
     root = Path(__file__).resolve().parents[1] / "src/auto_research/models/providers"
     assert "AsyncAnthropic(api_key=active_key(ANTHROPIC))" in (root / "anthropic.py").read_text()
-    assert "AsyncOpenAI(api_key=active_key(OPENAI))" in (root / "openai.py").read_text()
+    # Every Responses-dialect vendor shares one client construction, so the check is on the
+    # shared layer. `resolve_key` reads the live pool for a rotating provider, which is what
+    # `active_key` did here before the vendors were factored out.
+    assert "AsyncOpenAI(api_key=key or None" in (root / "_responses.py").read_text()
     for provider in keys_mod.ROTATING_PROVIDERS:
         assert provider in ("anthropic", "openai")
+
+
+def test_every_responses_vendor_names_its_key_variable():
+    """A vendor with no ``key_env`` would silently fall back to the SDK's own env lookup.
+
+    That is the failure this whole module exists to prevent, and factoring the adapter into
+    per-vendor descriptors makes it expressible by omission: a new vendor module that forgets the
+    field gets a client the pool cannot reach. Asserting it over the registry rather than over one
+    adapter's source is what keeps the guarantee as vendors are added.
+    """
+
+    from auto_research.models.providers import responses_vendors
+
+    vendors = responses_vendors()
+    assert vendors, "no Responses-dialect vendors registered"
+    for vendor in vendors:
+        assert vendor.key_env, f"vendor {vendor.name!r} names no API-key variable"
 
 
 def test_a_racing_call_takes_the_key_another_already_rotated_to(monkeypatch):

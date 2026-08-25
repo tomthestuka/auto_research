@@ -229,6 +229,63 @@ observation database. Nothing depends on this package.
   density, reported at every heartbeat while a batch runs, because pressure is the leading
   indicator of fabrication.
 
+## 5b. Provider coupling has two axes, and the rule binds the one that shows no effect
+
+The sweep was built to vary the author against a fixed reviewer, on the understanding that §9.3's
+`reviewer.provider != author.provider` names the coupling that matters. Panel (a)'s own data says
+otherwise, and the reason is that the **analyst lead was never varied**: it is `claude-opus-4-8`
+in all five arms, so a change in the reviewer's provider moved the reviewer's relation to the
+author and to the lead at the same time.
+
+```
+coder              co-lead         coder~rev   lead~rev   co-lead rejections
+deepseek-v4-flash  gpt-5.6-sol        no          no             8
+glm-5.3            gpt-5.6-sol        no          no            14
+claude-sonnet-5    gpt-5.6-sol        no          no            11
+gpt-5.6-terra      gpt-5.6-sol       YES          no            14
+claude-sonnet-5    claude-opus-5     YES         YES             0
+```
+
+Read down the two correlation columns. Sharing the **author's** provider with the reviewer tracks
+nothing: a GPT author under the GPT co-lead is author-correlated and drew the joint-highest count.
+Every arm with an Anthropic lead and an OpenAI reviewer drew 8 to 14 whoever wrote the code. The
+single zero-rejection arm is the single arm whose reviewer shares the **lead's** vendor.
+
+**Why the lead is the more plausible locus.** The coder writes text; the lead writes the
+instructions the coder executes, reads the result, decides when to submit, and argues the verdict.
+Submission is the lead's act, so the lead determines what a reviewer is asked to judge and when.
+In the zero-rejection arm a `claude-opus-5` reviewer is passing on a submission decision made by
+`claude-opus-4-8`.
+
+**What this does not establish.** The arms confound the two axes perfectly, so the table above is
+suggestive and not decisive: no arm exists in which the author shares the reviewer's provider while
+the lead does not. Two other readings survive it. The arms' code may genuinely have differed, which
+is partly circular because an approved first submission ends a trial cheap and fast, and that arm's
+median cost and wall clock are a third of its twin's. And the seeded-defect corpus rules out the
+simplest explanations for either reviewer: over the 54 authored-style changesets of
+`benchmarks/gate_bench`, `claude-opus-5` caught 26 of 26 planted defects with 0 of 28 false
+rejections while raising **3.15 blocking issues per rejecting review** against `gpt-5.6-sol`'s
+1.27. On that evidence the same-provider reviewer is the stricter of the two per call, not the more
+permissive, so "Opus rubber-stamps" and "sol is too harsh" both fail as intrinsic accounts.
+
+**The decision (2026-08-24): panel (b) varies the lead.** Every panel-(a) arm is repeated with the
+lead pinned to `gpt-5.6-sol` and nothing else changed, which crosses the two axes at a fixed
+author and makes them separable. The prediction is a mirror image: under a GPT lead the
+GPT-reviewed arms fall toward zero and the `claude-opus-5`-reviewed arm rises into the 8 to 14
+band. The arm that makes this work is `claude_sonnet_5_gptlead_anthropic_review`, the cell panel
+(a) cannot reach, where the author shares the reviewer's vendor and the lead does not.
+
+Rejected alternative: holding the author at a non-Anthropic vendor and varying only the reviewer.
+It isolates the lead axis but tests it indirectly, and it does not produce a panel that reads as a
+sibling of the one already published.
+
+**Consequence for §9.3, recorded because it outlives this measurement.** The rule binds the author
+and is silent on the lead. A configuration with an Anthropic co-lead correlates the reviewer with
+the author *and* with the lead while the decorrelation preflight passes, because the check reads
+the author's vendor alone. `Leg.lead_correlated` now reports the second axis alongside
+`Leg.correlated` so a row cannot hide it. Whether the rule should bind the lead is a question for
+the measurement, not for this DOCS.
+
 ## 6. Changelog
 
 - 2026-08-18 — Package created for paper item 4. `drive_authoring` chosen as the trial unit over
@@ -288,3 +345,28 @@ observation database. Nothing depends on this package.
   stored truncated; one trial committed a file the ledger records no write to, and another wrote
   through six shell redirects. Tests 39 → 41 (both new ones cover this: the patch reapplies onto
   a fresh clone at the base, and a committed trial's record names a patch that outlives its clone).
+
+- 2026-08-23 — **Tests moved beside the instrument.** `tests/test_author_bench.py` is now
+  `benchmarks/author_bench/tests/`, because the repository's `tests/` tree is the pipeline's own
+  suite and a benchmark is a separate instrument with its own invariants. The move exposed a
+  repo-root of `parents[1]`, which had been resolving to the benchmark package itself and looking
+  for `config/orchestration.yaml` inside it; it is now `parents[3]` with the depth named.
+
+- 2026-08-24 — **The lead became a roster axis, because provider coupling has two of them (§5b).**
+  `Leg` gains `lead_provider`/`lead_model` and a `lead_correlated` property; `trial.py` gains
+  `build_pinned_lead`, mirroring the co-lead builder so the measurement lives in the roster rather
+  than machine-local config; each record now carries `lead` and
+  `lead_correlated_with_colead` so a merged report can group by either axis. Five panel-(b) legs
+  added, repeating every panel-(a) arm under a `gpt-5.6-sol` lead, plus the cell panel (a) cannot
+  reach (author correlated with the reviewer, lead not). Tests 41 → 46.
+  **Why:** panel (a) held the lead at `claude-opus-4-8` throughout, so its single zero-rejection
+  arm is equally explained by the author sharing the reviewer's provider or by the lead doing so,
+  and the author axis tracks nothing in that data while the lead axis tracks the whole effect.
+  **Two roster gaps closed by the new tests rather than by reading.** The panel-(a) GLM rows
+  carried the throttling finding in prose and set no ceiling, leaving it to whoever typed the
+  command, though the batch had voided every GLM trial above two in flight; both rows now cap at
+  two. And the concurrency test asserted that only the Claude legs cap themselves, which the
+  vendor ceilings make false; it now states the rule that holds, that a ceiling is a vendor's
+  limit wherever one exists.
+  **Not yet run.** 25 trials, roughly $700-900 at list prices with about $150 of that billed,
+  since the Claude author legs draw on the subscription.

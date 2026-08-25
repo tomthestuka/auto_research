@@ -12,10 +12,14 @@ Google by editing YAML alone
   `ModelGroupHandle`.
 - `registry.py` — loads and validates `config/models.yaml`; exposes
   `load_registry()` and `resolve(role)`.
-- `providers/` — thin adapters for OpenAI, Anthropic, and Google. SDK clients
-  are imported only inside `call()` so importing the package does not require
-  credentials or make network calls.
-- `keys.py` — the per-provider API-key pool and its rotation rule. Anthropic only today.
+- `providers/` — one adapter per vendor. SDK clients are imported only inside `call()` so
+  importing the package does not require credentials or make network calls. Anthropic and
+  Google each have their own wire logic; the four vendors that speak the **OpenAI Responses
+  dialect** (OpenAI, DeepSeek, Z.AI, Alibaba Model Studio) share `_responses.py` and differ
+  only by a `ResponsesVendor` descriptor in their own module, beside that vendor's citations.
+  The split mirrors `_media.py`: mechanics shared, policy per vendor.
+- `keys.py` — the per-provider API-key pool, its rotation rule (Anthropic and OpenAI), and
+  `resolve_key`, the single resolution every actor uses to pick the key it authenticates with.
 - `retry.py` — one chokepoint for provider failures, with **two** answers because there are
   two kinds: *wait* for provider capacity (529/5xx/connection), *switch keys* for a quota of
   the key itself (429 rate limit, spent credit balance).
@@ -209,11 +213,61 @@ turns on one distinction:
   (the coder's environment).
 
 ## Dictionary-level reference
-- `ProviderName` — literal provider label accepted in `config/models.yaml`. The three chat
-  providers (`anthropic`, `google`, `openai`) plus the vendors reachable only through a coder
-  harness (`deepseek`, `zai`, `dashscope`), which have no chat adapter.
-- `CHAT_PROVIDERS` — the subset with a real adapter; anything outside it resolves to a
-  `HarnessOnlyProvider`.
+- `ProviderName` — literal provider label accepted in `config/models.yaml`: `anthropic`,
+  `google`, `openai`, `deepseek`, `zai`, `dashscope`. All six back a chat adapter as of
+  2026-08-24.
+- `CHAT_PROVIDERS` — the providers with a real adapter; anything outside it resolves to a
+  `HarnessOnlyProvider`. Membership means a chat call *reaches* the vendor and says nothing
+  about what it honours: `zai` and `dashscope` accept `text.format` and ignore it, so their
+  descriptors set `supports_strict_schema=False` and their adapter refuses a schema rather
+  than returning invented keys into a validator.
+- `ResponsesVendor` — one vendor's Responses-API policy: `name`, `limits` (its own documented
+  `MediaLimits`), `base_url`, `key_env`, `supports_prompt_cache_key`, `supports_strict_schema`,
+  `schema_via_tool`, `forces_tool_choice`, `strict_schema_formats`, `resolve_refs_in`,
+  `supports_tool_search`, and `vision_models`.
+  **Reference resolution is per vendor AND per position** (`resolve_refs_in`), which is why it is
+  a set of position names rather than a boolean. Measured 2026-08-24 at 5 draws per cell, every
+  cell 0/5 or 5/5 with no variance:
+
+  | vendor | `anyOf: [{$ref}, null]` | `items: {$ref}` |
+  |---|---|---|
+  | DeepSeek | **refused 0/5** | fine 5/5 |
+  | Z.AI | fine 5/5 | fine 5/5 |
+  | Qwen | fine 5/5 | **refused 0/5** |
+
+  Qwen is what forced the shape: resolving its `anyOf` refs makes a *working* call fail 0/5, while
+  its `items` refs must be resolved, so one vendor needs opposite treatment in two positions.
+  Z.AI needs nothing at all. Resolving is therefore never a safe default and is applied only where
+  a vendor is measured to need it.
+
+  DeepSeek's rule is precise and was probed six ways: every `anyOf` branch must carry a literal
+  `type`, checked *before* any reference is followed. The same refusal comes from the default
+  endpoint, `/beta`, `/beta` strict function-calling, and all three `$defs`/`$def`/`definitions`
+  spellings. Its docs list `anyOf` and `$ref` as supported and say nothing about the combination.
+
+  "A compatibility layer cannot resolve a reference" is **not** a property any of them has; treat
+  this as a measured table, never as a general rule.
+
+  **No provider enforces JSON-Schema `pattern`.** Type, `required` and `additionalProperties` are
+  enforced; a regex is advisory. Measured on Anthropic 2026-08-24 (it returned a plausible but
+  wrong-length value for `FigureRef.sha256`), and DeepSeek's docs list `pattern` among the
+  unsupported keywords. Harmless in production, where a `FigureRef` is built by a tool from a real
+  file and a model only *cites* figures by index; it matters only where a model is asked to invent
+  a whole record. A constrained field that a model must author is therefore validated by us, never
+  by the provider.
+
+  **Two routes to a structured answer.** Native decoding via `text.format` where
+  `supports_strict_schema` holds (OpenAI, DeepSeek); otherwise `schema_via_tool` declares one
+  synthetic tool whose parameters *are* the schema and pins `tool_choice` to it (Z.AI, Qwen). The
+  forced-tool route is the mechanism a coding harness already depends on, since Claude Code's and
+  Codex's own editing tools are JSON-Schema functions, so it reaches a vendor whose `text.format`
+  is a no-op. The emit call is consumed into `parsed` and never appears in `tool_calls`; the
+  loop's own tools stay declared beside it so a replayed trajectory still resolves. A vendor with
+  neither route raises rather than returning invented keys. Every flag defaults to the OpenAI behaviour and
+  is turned off only with a citation. `limits_for(model)` narrows the limits to what one model
+  accepts, so a text-only model on a vision-capable vendor withholds images with a note.
+- `responses_vendors() -> tuple[ResponsesVendor, ...]` — every Responses-dialect descriptor, so
+  a check can hold a property across all of them instead of per adapter.
 - `HarnessName` — which author harness drives a `coder` member: `claude_sdk` or `codex`. Legal
   `(provider, harness)` pairs live in `sandbox/coder/harness.py`, checked at launch.
 - `MessageRole` — one of `"system"`, `"user"`, or `"assistant"`.
@@ -386,7 +440,12 @@ turns on one distinction:
   `HarnessOnlyProvider`: the role still resolves (for stamps, decorrelation and the launch
   checks) and a chat call against it raises stating that its model is driven by an author
   harness.
-- `OpenAIProvider.call(...)`, `AnthropicProvider.call(...)`,
+- `ResponsesProvider.call(...)` — the shared Responses-dialect implementation, subclassed by
+  `OpenAIProvider`, `DeepSeekProvider`, `ZaiProvider` and `DashscopeProvider`, each supplying
+  only a `vendor` descriptor. It resolves the key through `keys.resolve_key` (the same
+  resolution the coder harness uses, so a run never authenticates two of its own actors from
+  different keys) and builds the client at the member's `base_url` or the vendor's.
+- `AnthropicProvider.call(...)`,
   `GoogleProvider.call(...)` — provider-specific SDK calls returning
   `ModelResponse`. The Anthropic `schema=` path uses `messages.parse(output_format=)`
   (the SDK's `transform_schema` strict-ifies the Pydantic model and the API constrains
@@ -604,3 +663,39 @@ Compacted 2026-08-05: entries through 2026-08-03 folded into themed ranges (deta
   DeepSeek-served coder reads as provider `deepseek`, which the existing
   `select_decorrelated_member` already separates from the GPT co-lead. The legality table and its
   two launch checks live in `sandbox/coder/harness.py` (see `sandbox/DOCS.md`).
+
+- 2026-08-24 — **The three harness-only vendors became chat members, and the Responses wire logic
+  became shared.** The lead and co-lead were only ever configurable across Anthropic and OpenAI,
+  which is what confined the paper's provider-coupling measurement to one lead vendor. DeepSeek,
+  Z.AI and Alibaba Model Studio each already publish an OpenAI **Responses** endpoint (the dialect
+  our OpenAI adapter speaks, as the coder harness table records), so the work was a factoring
+  rather than three new adapters: `providers/_responses.py` now holds the wire logic — input
+  projection, capture-time field filtering, replay ordering, one-request/one-extraction — and each
+  vendor module holds a `ResponsesVendor` of documented facts beside its citations. `openai.py` is
+  that descriptor plus its `MediaLimits`; `deepseek.py`, `zai.py` and `dashscope.py` are new.
+  Copying 540 lines written against three run-killers in one week would have forked those fixes
+  four ways.
+  **Every capability flag is read from the vendor's own docs and then probed, because a
+  compatibility table states what is *accepted*, not what is *honoured*.** That distinction was
+  not academic: DeepSeek honours `text.format` with `strict: true` exactly (bare JSON, declared
+  keys, on both its models) and calls functions and accepts the `tools`+`schema`+
+  `tool_choice="none"` compose shape, so it is a full member; **Z.AI accepts the same parameter
+  and ignores it**, answering once with prose containing no JSON and once with a fenced object
+  whose keys the schema never declared. A 200 with invented keys cannot be caught downstream, so
+  `supports_strict_schema=False` makes the adapter refuse a schema with a specific reason instead.
+  DeepSeek also rejects `prompt_cache_key` outright, which our lead role sends on every cached
+  call, so the flag is load-bearing rather than cosmetic.
+  **Two smaller consequences.** `MediaLimits` gained `images_accepted`, because DeepSeek serves
+  vision on `deepseek-v4-flash-vision-exp` alone and answers 400 elsewhere; a text-only model now
+  withholds a figure with a model-visible note rather than sending it into a refusal. And
+  `resolve_vendor_key` moved from the Codex backend into `keys.resolve_key`, since the chat
+  adapters need the identical resolution and a run must not authenticate two of its own actors
+  from different keys; the old name is re-exported.
+  **Qwen ships unverified**: its key authenticates and lists 162 models, but every inference call
+  is refused `AccessDenied.Unpurchased` on both dialects and with a current model id, so it is a
+  billing gate rather than our wiring. Its documented Responses hosts are workspace-scoped and do
+  not include the one the coder harness table names, which is recorded in `dashscope.py` rather
+  than silently changed. Tests: new `tests/test_responses_vendors.py` (44) sweeps every vendor for
+  endpoint, explicit key, per-flag gating and shared wire behaviour, asserting on the **request**
+  rather than the result; `tests/test_live_schema_matrix.py` gained DeepSeek across all nine real
+  schemas and a schema-less leg for Z.AI and Qwen. Suite 1008 -> 1053.

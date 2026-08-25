@@ -63,6 +63,17 @@ FAMILY_ORDER = [
     FAM_CONTROL,
 ]
 
+# ── Who wrote the entry, and on what evidence ────────────────────────────────
+# The corpus has two evidence provenances and three author labels. The original entries were
+# written by an Anthropic model before any benchmark had run: no authoring batch, no reviewer
+# swap, no ledger to read, so they are that model's expectation of what an author would get
+# wrong. That matters because one reviewer in the swap shares its family, a correlation the
+# swap cannot otherwise see. Later entries are derived from campaign ledger defects; independent
+# Anthropic and OpenAI halves separate evidence provenance from vendor effects.
+AUTHOR_BLIND = "claude-opus-5/blind"
+AUTHOR_LEDGER = "claude-opus-5/ledger"
+AUTHOR_CODEX = "gpt-5.6-sol/ledger"
+
 # ── Attribution layers (also the matrix columns) ─────────────────────────────
 DETERMINISTIC_LAYERS = ("scan", "structural", "determinism", "layer_b")
 LAYERS = (*DETERMINISTIC_LAYERS, "review", "commit_sweep")
@@ -85,6 +96,8 @@ class Mutant:
     spec_behavior: str = ""  # overrides the brief when the changeset is not a new capability
     pairs_with: str | None = None  # for a control: the mutant whose honest counterpart it is
     cleanup_markers: bool = False  # the test leaves a temp marker the harness removes
+    author: str = AUTHOR_BLIND  # who wrote this entry (see AUTHOR_* above)
+    attested: str = ""  # the ledger record this defect was observed in, when it was observed
 
     @property
     def expects_deterministic_catch(self) -> bool:
@@ -1066,6 +1079,17 @@ def corpus() -> list[Mutant]:
         description="A real tool's committed test gains two further assertions.",
         build=_real_control_strengthened_test,
     ))
+
+    # ── The ledger-derived half ─────────────────────────────────────────────
+    # Imported here rather than at module scope: that module imports this one for the family
+    # names and the Mutant type, so a top-level import would be a cycle. Every entry it adds
+    # is a defect a co-lead actually raised in the campaign's own ledgers, carrying its
+    # citation in ``attested``; the entries above predate any benchmark run and carry none.
+    from benchmarks.gate_bench.mutants_ledger import ledger_corpus
+    from benchmarks.gate_bench.mutants_ledger_codex import ledger_codex_corpus
+
+    out.extend(ledger_corpus())
+    out.extend(ledger_codex_corpus())
 
     # One matched control per planted defect (imported here rather than at module scope: the
     # controls are built from these mutants, so a top-level import would be a cycle).

@@ -9,11 +9,19 @@ from pydantic import BaseModel, ConfigDict, Field
 from auto_research.schemas import DocumentRef, FigureRef
 
 
-# Who serves the model. The first three back the chat adapters in ``providers/``; the rest are
-# vendors reached only through a coder harness (CLAUDE.md §6/§9.3), so they have no chat adapter
-# and ``provider_for`` hands them a raising placeholder instead of one.
+# Who serves the model. Every name here backs a chat adapter in ``providers/``; a name absent
+# from CHAT_PROVIDERS would be reachable only through a coder harness (CLAUDE.md §6/§9.3), and
+# ``provider_for`` hands such a vendor a raising placeholder instead of an adapter.
+#
+# The last three joined the chat set on 2026-08-24, when each was given an adapter over the
+# OpenAI Responses dialect it already publishes. Membership here says a chat call *reaches* the
+# vendor; it says nothing about what the vendor honours. Two of the three accept a strict schema
+# and ignore it, so a role that emits one is refused by its adapter rather than by this set
+# (``_responses.ResponsesVendor.supports_strict_schema``).
 ProviderName = Literal["anthropic", "google", "openai", "deepseek", "zai", "dashscope"]
-CHAT_PROVIDERS: frozenset[str] = frozenset({"anthropic", "google", "openai"})
+CHAT_PROVIDERS: frozenset[str] = frozenset(
+    {"anthropic", "google", "openai", "deepseek", "zai", "dashscope"}
+)
 
 # Which author harness drives a ``coder`` member: the Claude Agent SDK, or the Codex app-server.
 # A harness speaks exactly one wire dialect, so the legal (provider, harness) pairs are a table

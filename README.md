@@ -107,7 +107,7 @@ smoke test.
 | File | Purpose |
 |---|---|
 | `.env` | API keys and optional tracing flags. Loaded automatically. Never committed (`cp .env.example .env`). |
-| `config/models.yaml` | Role → model-group mapping (OpenAI/Anthropic/Google). No model IDs in code. |
+| `config/models.yaml` | Role → model-group mapping (OpenAI/Anthropic/Google/DeepSeek/Z.AI/Qwen). No model IDs in code. |
 | `config/orchestration.yaml` | `runtime_dir`, iteration/ReAct caps, `toolkit_root`, `analyze_env`, `analyze_ini_sh`, `disabled_tools`, `agent_fs_allow` (the per-agent filesystem allow-list), the internet-stability retry policy (`provider_retry_*` — transient provider failures waited out with growing cooldowns instead of killing the run), report formats, report retry cap, and Phase-2 authoring caps. |
 | `config/observations.yaml` | `obs_db_root` — the single obs-db folder; missions are its `<MISSION>` subdirs (those holding a `catalog.json`), discovered from disk and treated as data. |
 | `config/code_gate.yaml` | The Phase-2 gate's no-fabrication scan lists (banned vocabulary, hard-fail vs finding-tier code patterns — which list a pattern sits in decides its severity; RNG is finding-tier since Monte-Carlo tools need randomness — literal-array findings, ObsID allowlist). Human-tunable; no scan constant in code. |

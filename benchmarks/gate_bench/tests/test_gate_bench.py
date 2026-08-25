@@ -6,11 +6,13 @@ hand-built records. The real-base builders need the configured toolkit, so their
 when it is absent (this suite must pass on a fresh clone).
 
 Run from the repository root, so that ``benchmarks`` is importable:
-``conda run -n auto_research python -m pytest tests/test_gate_bench.py``.
+``conda run -n auto_research python -m pytest benchmarks/gate_bench/tests`.
 """
 
 import asyncio
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -468,6 +470,121 @@ def test_clean_base_repeats_are_labelled_as_such():
     assert notes == {"matched", "clean-base repeat"}
 
 
+def test_the_corpus_declares_who_wrote_each_entry():
+    """Authoring provenance is the axis the reviewer swap cannot otherwise see.
+
+    One of the swap's reviewers shares a family with the author of the blind half, so an entry
+    that does not say who wrote it makes that correlation invisible.
+    """
+    from benchmarks.gate_bench.mutants import AUTHOR_BLIND, AUTHOR_CODEX, AUTHOR_LEDGER
+
+    entries = corpus()
+    authors = {m.author for m in entries}
+    assert authors <= {AUTHOR_BLIND, AUTHOR_LEDGER, AUTHOR_CODEX}
+    assert {AUTHOR_BLIND, AUTHOR_LEDGER, AUTHOR_CODEX} <= authors
+
+
+def test_every_ledger_entry_cites_the_record_it_was_observed_in():
+    """A ledger-derived defect without a citation is indistinguishable from an invented one."""
+    from benchmarks.gate_bench.mutants import AUTHOR_LEDGER
+
+    ledger = [m for m in corpus() if m.author == AUTHOR_LEDGER]
+    assert ledger, "the ledger-derived half is missing from the corpus"
+    for mutant in ledger:
+        assert mutant.attested, f"{mutant.id} carries no ledger citation"
+
+
+def test_a_ledger_control_is_the_same_changeset_without_the_defect(tmp_path):
+    """The pair invariant, checked on files: one anchor apart, and nothing else.
+
+    A control that differs anywhere else measures suspicion of a large diff rather than
+    detection of the defect, which is the failure mode matched controls exist to rule out.
+    """
+    from benchmarks.gate_bench.mutants import AUTHOR_LEDGER, by_id
+
+    entries = by_id()
+    mutant = entries["led_indeterminate_reads_constant"]
+    control = entries["ctl_led_indeterminate_reads_constant"]
+    assert mutant.author == AUTHOR_LEDGER and control.author == AUTHOR_LEDGER
+    assert control.spec_behavior == mutant.spec_behavior
+
+    written = {}
+    for name, entry in (("defect", mutant), ("control", control)):
+        repo = basepkg.make_synthetic_repo(tmp_path / name)
+        entry.build(repo)
+        written[name] = {
+            str(f.relative_to(repo)): f.read_text(encoding="utf-8")
+            for f in sorted(repo.rglob("*"))
+            if f.is_file() and "__pycache__" not in str(f) and ".git" not in f.parts
+        }
+
+    assert set(written["defect"]) == set(written["control"])
+    differing = [k for k in written["defect"] if written["defect"][k] != written["control"][k]]
+    # The verdict rule and the check that would have caught it: the lib and its test file.
+    assert sorted(differing) == [
+        "demo_utils/lib/run_summary.py",
+        "demo_utils/tests/test_run_summary.py",
+    ]
+
+
+def test_every_codex_ledger_entry_is_attested_and_paired():
+    from benchmarks.gate_bench.mutants import AUTHOR_CODEX
+
+    entries = corpus()
+    defects = [m for m in entries if m.author == AUTHOR_CODEX and not m.pairs_with]
+    controls = {m.pairs_with: m for m in entries if m.author == AUTHOR_CODEX and m.pairs_with}
+    assert defects
+    assert set(controls) == {m.id for m in defects}
+    assert all(m.attested and controls[m.id].attested == m.attested for m in defects)
+
+
+@pytest.mark.parametrize(
+    "mutant_id",
+    [
+        "codex_led_accepts_incomplete",
+        "codex_led_certificate_not_bound",
+        "codex_led_separate_validity_masks",
+        "codex_led_malformed_aborts_batch",
+        "codex_led_undefined_reads_stable",
+        "codex_led_weighted_center_variance",
+        "codex_led_linear_angle_span",
+        "codex_led_wrapper_ignores_strict",
+        "codex_led_drops_documented_output",
+        "codex_led_tautological_identity_test",
+    ],
+)
+def test_a_codex_ledger_pair_differs_at_one_anchor(mutant_id, tmp_path):
+    """Every pair is the same complete changeset with one anchored replacement."""
+    import difflib
+
+    entries = by_id()
+    written = {}
+    for label, entry in (
+        ("defect", entries[mutant_id]),
+        ("control", entries[f"ctl_{mutant_id}"]),
+    ):
+        repo = basepkg.make_synthetic_repo(tmp_path / label)
+        entry.build(repo)
+        written[label] = {
+            str(path.relative_to(repo)): path.read_text(encoding="utf-8")
+            for path in sorted(repo.rglob("*"))
+            if path.is_file() and ".git" not in path.parts
+        }
+
+    assert set(written["defect"]) == set(written["control"])
+    differing = [
+        path for path in written["defect"]
+        if written["defect"][path] != written["control"][path]
+    ]
+    assert len(differing) == 1
+    opcodes = difflib.SequenceMatcher(
+        None,
+        written["control"][differing[0]].splitlines(),
+        written["defect"][differing[0]].splitlines(),
+    ).get_opcodes()
+    assert sum(tag != "equal" for tag, *_ in opcodes) == 1
+
+
 def test_reviewer_roster_members_are_distinct_models():
     handles = harness.reviewer_handles()
     assert len(handles) >= 2
@@ -557,3 +674,113 @@ def test_concurrent_runs_get_distinct_output_directories():
     same_reviewer = run_dir_name(stamp, reviewer="gpt_5_6_sol", pid=2)
     assert a != same_reviewer, "even one reviewer twice over must not collide"
     assert "nolive" in run_dir_name(stamp, reviewer=None, pid=1)
+
+
+# ── Inertness: a defect that the honest suite cannot see is not a defect ──────
+#
+# Three entries have gone inert in this corpus, twice as a side effect of repairing something
+# else: an edit whose anchor still applies but whose effect is overwritten downstream, or whose
+# target nothing reads. The gate then approves the changeset correctly while the run records a
+# defect "reaching a commit", which reads as a hole in the gate rather than a hole in the corpus.
+#
+# The oracle is already in the corpus: the matched control's committed tests are the honest suite
+# for that changeset. Run them against the DEFECT's code. A real behavioural defect fails them —
+# which is the point of the science-bug pairs, where the defect ships a relaxed suite of its own
+# and the honest one is what would have caught it. An inert edit passes them, and says so here
+# for free instead of in a paid run.
+
+def _matched_synthetic_pairs():
+    """Synthetic defects that have a bespoke matched control, i.e. a genuine pair."""
+    entries = by_id()
+    return [
+        m.id for m in corpus()
+        if m.family != FAM_CONTROL and m.base == "synthetic"
+        and entries.get("ctl_" + m.id) is not None
+        and entries["ctl_" + m.id].notes == "matched"
+    ]
+
+
+def _honest_suite_verdict(mutant_id, tmp_path):
+    """Run the control's committed tests against the defect's package; True when they pass."""
+    entries = by_id()
+    defect = basepkg.make_synthetic_repo(tmp_path / "defect")
+    entries[mutant_id].build(defect)
+    control = basepkg.make_synthetic_repo(tmp_path / "control")
+    entries["ctl_" + mutant_id].build(control)
+
+    tests = defect / basepkg.PKG_NAME / "tests"
+    if tests.exists():
+        shutil.rmtree(tests)
+    shutil.copytree(control / basepkg.PKG_NAME / "tests", tests)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-x", f"{basepkg.PKG_NAME}/tests"],
+        cwd=defect, capture_output=True, text=True, timeout=300,
+    )
+    return result.returncode == 0, result.stdout[-500:]
+
+
+# Entries whose plant is deliberately not behavioural, each with its reason. The honest suite
+# cannot see these because the defect is in what the changeset SAYS, or in what its own tests
+# fail to check, rather than in what the code computes.
+_NOT_BEHAVIOURAL = {
+    "led_readme_claims_an_absent_test": "the README names a check the changeset does not contain",
+    "led_self_referential_differential": "the differential test compares the tool with itself",
+    "led_test_accepts_either_branch": "the capability test accepts either outcome",
+    "led_test_substitutes_the_reader_under_a_real_id": "the test replaces the measurement source",
+    "led_neighbour_schema_overwritten": "a neighbouring manifest entry's description is wrong",
+    "led_positional_contract_reordered": "the signature order, which no committed test calls",
+    "codex_led_tautological_identity_test": "the identity check compares a value with itself",
+    "codex_led_wrapper_ignores_strict": "the wrapper drops an argument its tests pass by keyword",
+    "fab_placeholder_body": "a body the scan reads, whose caller no committed test exercises",
+    "fab_shell_script": "a shell script beside the package, which no test imports",
+    "fab_literal_array": "a hard-coded array the scan reads, on a path no test reaches",
+    "fab_vocab_docstring": "a docstring claim",
+    "fab_vocab_comment": "a comment claim",
+    "fabgap_simulated": "a docstring claim carrying no banned term",
+    "fabgap_artificial": "a docstring claim carrying no banned term",
+    "fabgap_backfilled": "a docstring claim carrying no banned term",
+    "hole_g3_toctou": "an artifact written after the scan, not a computed result",
+    "hole_g4_provenance_dict": "a figure handle's shape",
+    "hole_g6_manifest_import": "an import in the manifest, which the gate resolves rather than runs",
+    "hole_g7_review_truncation": "an oversized file, which changes what the reviewer is shown",
+    "hole_structural_unfalsifiable": "a scratch path, not a computed result",
+}
+
+
+@pytest.mark.parametrize(
+    "mutant_id",
+    [m for m in _matched_synthetic_pairs() if m not in _NOT_BEHAVIOURAL],
+)
+def test_a_behavioural_defect_fails_the_honest_suite(mutant_id, tmp_path):
+    """The control's own tests, run against the defect, must fail.
+
+    If they pass, the plant changes nothing the honest verification can see: either its anchor no
+    longer bites, or its target is never read. Both are corpus faults that otherwise surface as a
+    defect reaching a commit in a paid run.
+    """
+    passed, tail = _honest_suite_verdict(mutant_id, tmp_path)
+    assert not passed, (
+        mutant_id + " is inert: the matched control's committed tests pass against it, so the "
+        "plant changes nothing the honest suite can detect. Either repair the plant or declare "
+        "it in _NOT_BEHAVIOURAL with its reason.\n" + tail
+    )
+
+
+@pytest.mark.parametrize("mutant_id", sorted(_NOT_BEHAVIOURAL))
+def test_a_non_behavioural_defect_still_changes_the_changeset(mutant_id, tmp_path):
+    """A plant declared non-behavioural must still be present in the source it ships."""
+    entries = by_id()
+    if mutant_id not in entries or "ctl_" + mutant_id not in entries:
+        pytest.skip(f"{mutant_id} is not in the corpus")
+    texts = {}
+    for name, entry_id in (("defect", mutant_id), ("control", "ctl_" + mutant_id)):
+        repo = basepkg.make_synthetic_repo(tmp_path / name)
+        entries[entry_id].build(repo)
+        texts[name] = {
+            str(f.relative_to(repo)): f.read_text(encoding="utf-8", errors="replace")
+            for f in sorted(repo.rglob("*"))
+            if f.is_file() and "__pycache__" not in str(f) and ".git" not in f.parts
+        }
+    assert texts["defect"] != texts["control"], (
+        mutant_id + " changes no file at all against its matched control"
+    )
