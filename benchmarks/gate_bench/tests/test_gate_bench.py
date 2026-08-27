@@ -538,6 +538,17 @@ def test_every_codex_ledger_entry_is_attested_and_paired():
     assert all(m.attested and controls[m.id].attested == m.attested for m in defects)
 
 
+#: Directories a build or test run drops into a tree that are not part of the changeset. This
+#: comparison walks the built repo and reads every file, so an artifact landing in one leg and not
+#: the other makes the two file SETS differ before any content is compared -- and a `.pyc` makes
+#: the read itself raise `UnicodeDecodeError`. Nine parametrised cases failed on this at once,
+#: which reads like a broken defect corpus and is really a walk that never excluded build output.
+#: The synthetic base builder already mirrors the toolkit's ignore rules for the same reason.
+_TOOLING_ARTIFACT = frozenset(
+    {".git", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".hypothesis"}
+)
+
+
 @pytest.mark.parametrize(
     "mutant_id",
     [
@@ -568,7 +579,7 @@ def test_a_codex_ledger_pair_differs_at_one_anchor(mutant_id, tmp_path):
         written[label] = {
             str(path.relative_to(repo)): path.read_text(encoding="utf-8")
             for path in sorted(repo.rglob("*"))
-            if path.is_file() and ".git" not in path.parts
+            if path.is_file() and not _TOOLING_ARTIFACT.intersection(path.parts)
         }
 
     assert set(written["defect"]) == set(written["control"])

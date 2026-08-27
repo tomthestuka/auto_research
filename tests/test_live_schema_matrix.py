@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 
 import pytest
 from dotenv import load_dotenv
@@ -83,12 +84,20 @@ PROVIDERS = [
     # while thinking (Anthropic's documented rule, enforced here too), so the emit tool is
     # offered under `auto` instead.
     ("dashscope", DashscopeProvider(), "qwen3.8-max"),
+    # Keep the balanced tier in the identical fixture shape: same adapter, schema matrix and
+    # trajectory tests, with only the model id changing. This catches model-specific behaviour
+    # hidden by a vendor-wide descriptor (notably tool/schema compatibility and ref handling).
+    ("dashscope", DashscopeProvider(), "qwen3.7-plus"),
 ]
+
+QWEN_MODELS = ["qwen3.8-max", "qwen3.7-plus"]
+QWEN_REASONING_EFFORTS = ["none", "minimal", "medium"]
+QWEN_MATRIX_REASONING_EFFORT = "minimal"
 
 #: Vendors that cannot be handed a schema by any route this adapter supports, or whose account
 #: cannot be exercised. They still have to reach, authenticate and call tools, which is what the
-#: check below covers. Z.AI left this list on 2026-08-24 when the forced-tool route was verified;
-#: Qwen stays because its account is entitled for nothing at all.
+#: check below covers. Z.AI and Qwen left this list on 2026-08-24 when their forced-tool route
+#: was live-verified.
 SCHEMALESS_PROVIDERS: list[tuple[str, object, str]] = [
     # Empty since 2026-08-24: every configured vendor reaches a schema by one route or the
     # other. Kept because the next vendor added may not, and the checks below are what say so.
@@ -124,7 +133,21 @@ _TOOLS = [
 ]
 
 
-def _config(provider_name: str, model: str) -> RoleModelConfig:
+def _config(
+    provider_name: str, model: str, *, reasoning_effort: str | None = None
+) -> RoleModelConfig:
+    parameters = (
+        {"max_tokens": 8192}
+        if provider_name == "anthropic"
+        else {"max_output_tokens": 8192}
+    )
+    if provider_name == "dashscope":
+        # Alibaba defaults Responses calls to medium reasoning. The full capability matrix uses
+        # the lowest reasoning mode that preserves deliberation; the focused sweep below measures
+        # direct mode separately because it previously failed the complex AuthoringDecision shape.
+        parameters["reasoning"] = {
+            "effort": reasoning_effort or QWEN_MATRIX_REASONING_EFFORT
+        }
     return RoleModelConfig(
         name="probe",
         provider=provider_name,
@@ -133,13 +156,11 @@ def _config(provider_name: str, model: str) -> RoleModelConfig:
         documents=True,
         # Anthropic budgets output with `max_tokens`; every Responses-dialect vendor uses
         # `max_output_tokens`, which DeepSeek and Z.AI both document as supported.
-        parameters={"max_tokens": 8192}
-        if provider_name == "anthropic"
-        else {"max_output_tokens": 8192},
+        parameters=parameters,
     )
 
 
-def _handle(provider_name: str, provider, model):
+def _handle(provider_name: str, provider, model, *, reasoning_effort: str | None = None):
     """A real ``ModelHandle``, so a live leg runs the path production runs.
 
     These tests used to call ``provider.call`` directly. That skipped everything
@@ -155,8 +176,15 @@ def _handle(provider_name: str, provider, model):
     from auto_research.models.types import ModelHandle
 
     return ModelHandle(
-        role="live_probe", config=_config(provider_name, model), provider=provider
+        role="live_probe",
+        config=_config(provider_name, model, reasoning_effort=reasoning_effort),
+        provider=provider,
     )
+
+
+def _log_stem(provider_name: str, model: str, case: str) -> str:
+    """Keep live artifacts distinct when one provider contributes multiple model fixtures."""
+    return f"{provider_name}_{model.replace('/', '_')}_{case}"
 
 
 @pytest.mark.parametrize("provider_name,provider,model", PROVIDERS)
@@ -198,12 +226,20 @@ def test_live_schema_is_accepted_with_tools_declared(
 
     async def run():
         return await _handle(provider_name, provider, model).call(
-            messages, schema=schema, tools=_TOOLS, tool_choice="none"
+            messages,
+            schema=schema,
+            tools=_TOOLS,
+            tool_choice="none",
+            cache_prefix=True,
         )
 
+    started = time.perf_counter()
     response = asyncio.run(run())
+    elapsed_s = time.perf_counter() - started
 
-    log = dev_log_path("schema-matrix", f"{provider_name}_{schema_name}", ".json")
+    log = dev_log_path(
+        "schema-matrix", _log_stem(provider_name, model, schema_name), ".json"
+    )
     log.write_text(
         json.dumps(
             {
@@ -213,7 +249,10 @@ def test_live_schema_is_accepted_with_tools_declared(
                 "parsed": response.parsed,
                 "tool_calls": [c.name for c in response.tool_calls],
                 "input_tokens": response.usage.input_tokens,
+                "cache_read_tokens": response.usage.cache_read_tokens,
                 "output_tokens": response.usage.output_tokens,
+                "reasoning_tokens": response.usage.reasoning_tokens,
+                "elapsed_s": elapsed_s,
             },
             indent=2,
             default=str,
@@ -270,9 +309,14 @@ def test_live_compose_with_real_schema_after_a_real_trajectory(
         handle = _handle(provider_name, provider, model)
         history = list(seed)
         turns = []
+        turn_elapsed_s = []
         for reply in ("q=0.012+/-0.009, u=-0.004+/-0.009, n_slices=40",
                       "exposure=524389 s, source=Cyg X-1, obsid=01002901"):
-            turn = await handle.call(history, tools=_TOOLS, tool_choice="auto")
+            started = time.perf_counter()
+            turn = await handle.call(
+                history, tools=_TOOLS, tool_choice="auto", cache_prefix=True
+            )
+            turn_elapsed_s.append(time.perf_counter() - started)
             turns.append(turn)
             if not turn.tool_calls:
                 break
@@ -289,24 +333,53 @@ def test_live_compose_with_real_schema_after_a_real_trajectory(
             content=f"Emit the final {schema_name} now, grounded only in the tool results above. "
                     "Keep every list to at most one element.",
         ))
+        started = time.perf_counter()
         composed = await handle.call(
-            history, schema=schema, tools=_TOOLS, tool_choice="none"
+            history,
+            schema=schema,
+            tools=_TOOLS,
+            tool_choice="none",
+            cache_prefix=True,
         )
-        return turns, composed
+        compose_elapsed_s = time.perf_counter() - started
+        return turns, turn_elapsed_s, composed, compose_elapsed_s
 
-    turns, composed = asyncio.run(run())
+    started = time.perf_counter()
+    turns, turn_elapsed_s, composed, compose_elapsed_s = asyncio.run(run())
+    total_elapsed_s = time.perf_counter() - started
 
-    log = dev_log_path("schema-matrix", f"{provider_name}_{schema_name}_trajectory", ".json")
+    log = dev_log_path(
+        "schema-matrix",
+        _log_stem(provider_name, model, f"{schema_name}_trajectory"),
+        ".json",
+    )
     log.write_text(
         json.dumps(
             {
+                "provider": provider_name,
+                "model": model,
                 "turns": [
-                    {"tool_calls": [c.name for c in t.tool_calls],
-                     "part_types": [p.get("type") for p in t.provider_parts]}
-                    for t in turns
+                    {
+                        "tool_calls": [c.name for c in turn.tool_calls],
+                        "part_types": [p.get("type") for p in turn.provider_parts],
+                        "input_tokens": turn.usage.input_tokens,
+                        "cache_read_tokens": turn.usage.cache_read_tokens,
+                        "output_tokens": turn.usage.output_tokens,
+                        "reasoning_tokens": turn.usage.reasoning_tokens,
+                        "elapsed_s": elapsed,
+                    }
+                    for turn, elapsed in zip(turns, turn_elapsed_s, strict=True)
                 ],
                 "composed_parsed": composed.parsed,
                 "composed_tool_calls": [c.name for c in composed.tool_calls],
+                "composed_usage": {
+                    "input_tokens": composed.usage.input_tokens,
+                    "cache_read_tokens": composed.usage.cache_read_tokens,
+                    "output_tokens": composed.usage.output_tokens,
+                    "reasoning_tokens": composed.usage.reasoning_tokens,
+                },
+                "compose_elapsed_s": compose_elapsed_s,
+                "total_elapsed_s": total_elapsed_s,
             },
             indent=2,
             default=str,
@@ -318,6 +391,79 @@ def test_live_compose_with_real_schema_after_a_real_trajectory(
     assert not composed.tool_calls, "tool_choice='none' forbids a call"
     assert composed.parsed is not None, "the compose produced its structured answer"
     schema.model_validate(composed.parsed)
+
+
+@pytest.mark.parametrize("model", QWEN_MODELS)
+@pytest.mark.parametrize("reasoning_effort", QWEN_REASONING_EFFORTS)
+def test_live_qwen_reasoning_effort_latency(model, reasoning_effort):
+    """Measure Qwen's reasoning cost without changing the task between effort levels.
+
+    The full matrix establishes capability at ``minimal``. This smaller, identical request isolates
+    the latency policy: ``none`` tests direct mechanical schema emission, ``minimal`` the proposed
+    default for ordinary agent work, and ``medium`` Alibaba's server default. The test asserts only
+    schema validity; elapsed time and token classes are evidence written to the development log.
+    """
+    load_dotenv()
+    provider = DashscopeProvider()
+    _skip_without_key(provider)
+    messages = [
+        ModelMessage(
+            role="system",
+            content="You emit structured results for an X-ray astronomy research pipeline.",
+        ),
+        ModelMessage(
+            role="user",
+            content=(
+                "Emit a minimal schema-valid MemoryRecord for an IXPE Cyg X-1 null result. "
+                "Use this exact value for every hash field: " + _HASH_LITERAL + "."
+            ),
+        ),
+    ]
+
+    async def run():
+        return await _handle(
+            "dashscope",
+            provider,
+            model,
+            reasoning_effort=reasoning_effort,
+        ).call(
+            messages,
+            schema=MemoryRecord,
+            tools=_TOOLS,
+            tool_choice="none",
+            cache_prefix=True,
+        )
+
+    started = time.perf_counter()
+    response = asyncio.run(run())
+    elapsed_s = time.perf_counter() - started
+
+    log = dev_log_path(
+        "schema-matrix",
+        _log_stem("dashscope", model, f"reasoning_{reasoning_effort}"),
+        ".json",
+    )
+    log.write_text(
+        json.dumps(
+            {
+                "provider": "dashscope",
+                "model": model,
+                "reasoning_effort": reasoning_effort,
+                "elapsed_s": elapsed_s,
+                "input_tokens": response.usage.input_tokens,
+                "cache_read_tokens": response.usage.cache_read_tokens,
+                "output_tokens": response.usage.output_tokens,
+                "reasoning_tokens": response.usage.reasoning_tokens,
+                "parsed": response.parsed,
+            },
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+
+    assert response.parsed is not None
+    MemoryRecord.model_validate(response.parsed)
 
 
 @pytest.mark.skipif(not SCHEMALESS_PROVIDERS, reason="every configured vendor reaches a schema")

@@ -147,9 +147,84 @@ and a harness-only vendor's key never passes through chat-provider rotation at a
 benchmark learned the general lesson the expensive way, losing 26 runs to a missing key found one
 failed call at a time.
 
-**The Qwen row is absent, not substituted.** `legs.QWEN_ABSENT` records why (the account was never
-entitled: `AccessDenied.Unpurchased` on every model and host, a vendor billing-profile gate rather
-than our wiring), because a reader has to be able to tell a skipped vendor from an unconsidered one.
+**Qwen has no *author* row, and the reason changed.** `legs.QWEN_ABSENT` records it: through
+2026-08-19 the account was not entitled (`AccessDenied.Unpurchased` on every model and host, a
+service-activation gate rather than our wiring), which was cleared on 2026-08-24. Qwen is live and
+carries a lead and a co-lead axis in the grid below; what still keeps it off the author axis is
+that `dashscope`+`codex` sits in `UNVERIFIED_PAIRINGS`, never having run. A reader has to be able
+to tell a skipped vendor from an unconsidered one.
+
+### 2.1 The lead x co-lead grid
+
+A second experiment beside the curated roster, and **generated rather than written out**. The
+curated rows are chosen one at a time and each carries prose saying why. The grid is a *product* --
+every eligible lead crossed with every eligible co-lead at one pinned author -- so a cell's
+identity is its coordinates and there is no per-cell rationale to write. Twenty hand-authored
+literals would hide the design in repetition and make a missing cell invisible, which is what
+`legs._grid_legs()` and `test_the_grid_is_the_full_product_of_its_two_axes` exist to prevent.
+
+**What it measures.** CLAUDE.md §9.3 binds `reviewer.provider != author.provider` and says nothing
+about the lead. `papers/FANGZ/DOCS.md` §8.5 found the coder sweep cannot separate those, because
+the lead was Anthropic in all five arms, so the reviewer's relation to the author and to the lead
+moved together. Holding the author fixed and crossing the other two separates them, and the result
+decides whether §9.3 binds the right actor.
+
+**Axes.** Leads are `claude-opus-5`, `gpt-5.6-sol`, `glm-5.3`, `qwen3.8-max`; co-leads are those
+four plus `deepseek-v4-pro`. Author pinned at `deepseek-v4-flash` on the Codex harness, K=5, twenty
+cells, 100 trials. The axes are unequal because vision binds the roles that are sent figures: the
+lead is handed the accumulated per-worker catalog and the co-lead is handed none, so a text-only
+vendor may review but not lead. Google is out of both, its second tool call in any loop being a
+hard 400 ([I8]).
+
+**Why Pro reviews rather than Flash.** It is the stronger reviewer on the axis a reviewer uses
+(independent testing 77 against 60, with Flash's win confined to agentic tool use), and it keeps
+the author-correlated column same-provider-different-model, matching the one author-correlated arm
+already measured. A Flash co-lead would make that column same-*model* and incomparable to it.
+Live-probed 2026-08-25: nine of nine real schemas with tools declared, so Pro honours every
+DeepSeek descriptor flag previously measured on Flash alone.
+
+**The shape's virtue and its cost.** Because the author is DeepSeek and DeepSeek cannot lead, the
+two correlations are fully crossed and never coincide -- four lead-correlated cells, four
+author-correlated, twelve clean, none both -- so each is estimable free of the other. The cost is
+that the doubly-correlated cell is unreachable, so no interaction term is estimable, which the
+manuscript states rather than leaves to a reader.
+
+**Selection.** The grid stays out of a bare batch (`in_default=False`) and is named as a group:
+`--legs grid`. Groups exist so a factorial is selected by what it is rather than by pasting twenty
+slugs, which is the other way a cell goes missing.
+
+### 2.2 Running unattended for two days
+
+The grid is 100 trials at roughly 82 trial-hours, so it outlives any shell it is launched from and
+the operator is not watching when it breaks. Three properties make that survivable, and only the
+first predates the grid.
+
+**Durability was already there.** `records.jsonl` is appended per trial, under a lock, the moment
+that trial finishes. A kill at hour 40 loses only the trials actually in flight; everything
+measured is on disk. Each trial also keeps its own `monitor.jsonl`, which is where an agent's own
+words are read when a leg goes wrong.
+
+**`--detach` launches it orphaned.** A double fork through `graph.detached._spawn_orphaned`, not a
+local `nohup`, because `start_new_session` alone leaves the parent-to-child `/proc` link that a
+graceful VSCode or Jupyter teardown walks when it kills process trees -- which killed a live
+detached run once already (2026-07-16). Detaching happens *after* preflight, so a batch that would
+have failed its checks says so on the terminal that launched it instead of burying the reason in a
+log nobody reads for two days.
+
+**`--status DIR` is the visibility, `--resume DIR` the recovery.** Both read `batch.json`, which
+the batch writes about itself at launch, so neither needs the original flags retyped -- a resume
+handed the wrong `--legs` at 3am is how a grid loses a day. Status reads the *records* rather than
+the report, because the report is written once at the end and would be absent for the entire run;
+it reports per-leg progress, terminal-state counts, spend, and whether the recorded pid is still
+alive, which is the failure that otherwise hides (a batch dead for hours whose directory still
+looks busy). Resume recomputes the gaps **per leg**: a twenty-leg batch dies with different gaps in
+each, and the pre-existing global `--only` cannot express that, since it would re-run trial 3 of
+every leg named including those whose trial 3 succeeded. A trial recorded `error` is re-run,
+because an error is an infrastructure failure and `score.py` partitions trials by terminal state,
+where `error` is not one; a committed or honestly-failed trial is a measurement and is never
+re-run, which is what stops a resume quietly changing the batch it repairs. The final report is
+rendered from every record on disk rather than from the resuming process's own list, so a resumed
+batch reports both sittings instead of losing the first.
 
 ## 3. Interfaces
 
@@ -160,10 +235,15 @@ than our wiring), because a reader has to be able to tell a skipped vendor from 
 | `brief.BASE_SHA` | Toolkit state each trial authors from (`fa99ef8`). |
 | `brief.VALIDATION_OBSIDS` | The brief's six real validation observations, checked in preflight. |
 | `trial.TrialConfig` | Toolkit root, output directory, stamps, clone retention, chatter, and the `leg` being run (`None` = the configured author). |
-| `trial.build_pinned_colead(leg, monitor)` | The co-lead a decorrelation leg pins, built outside the configured role and harmonised with it. |
+| `trial.build_pinned_lead(leg, monitor)` | The analyst lead a leg pins, built outside the configured role and harmonised with it. |
+| `trial.build_pinned_colead(leg, monitor)` | The co-lead a leg pins, likewise. Vision is declared by the roster, so a text-only reviewer is expressible. |
 | `legs.Leg` | One roster row: author (provider, harness, model, key var, endpoint), reviewer arrangement, purpose, brand colour, per-leg K and concurrency ceiling. |
-| `legs.ROSTER` / `legs.BY_SLUG` | The sweep roster and its index. |
-| `legs.resolve(slugs) -> list[Leg]` | Every runnable leg, or exactly the ones named; `reuse` rows are skipped unless named. |
+| `legs.ROSTER` / `legs.BY_SLUG` | The full roster (`CURATED + GRID`) and its index. |
+| `legs.CURATED` / `legs.GRID` | The hand-chosen author sweep, and the generated lead x co-lead product. |
+| `legs.GridMember` | One coordinate on a grid axis: vendor, model, declared vision, vendor concurrency ceiling. |
+| `legs.GRID_LEADS` / `legs.GRID_COLEADS` / `legs.GRID_AUTHOR` | The two axes and the author held fixed across all twenty cells. |
+| `legs.GROUPS` | Named selections `--legs` accepts beside individual slugs (`grid`, `curated`). |
+| `legs.resolve(slugs) -> list[Leg]` | Every runnable leg, or exactly the ones named; a name may be a leg slug or a group; `reuse` rows are skipped unless named. |
 | `legs.BRAND_COLOURS` / `legs.QWEN_ABSENT` | Figure colours by vendor; the recorded reason the Qwen row is absent rather than substituted. |
 | `score.leg_of(record)` / `score.by_leg(records)` | Which row a record came from, and the grouping the multi-leg report renders. |
 | `trial.collect_stamps(root, ref) -> dict` | Orchestration SHA and dirtiness, toolkit base, `code_gate.yaml` hash, brief provenance. |
@@ -172,7 +252,12 @@ than our wiring), because a reader has to be able to tell a skipped vendor from 
 | `trial.run_trial(index, cfg) -> dict` | One authoring lifecycle; returns its JSONL record. Never raises. |
 | `score.summarise(records) -> dict` | Terminal-state partition, totals. |
 | `score.build_report(records, stamps) -> str` | The Markdown report and the source of Table 6. |
-| `__main__.preflight(root, ref, legs) -> list[str]` | Every check decidable without a model call, plus one live vendor probe per leg. |
+| `__main__.preflight(root, ref, legs) -> list[str]` | Every check decidable without a model call, plus one live vendor probe per leg and one per distinct pinned chat member. |
+| `__main__.probe_chat_member(provider, model)` | Liveness of a vendor a leg pins as lead or co-lead, through `ModelHandle` so key rotation applies. |
+| `__main__.batch_status(dir) -> str` | A batch's progress and liveness, read from its records. Costs nothing, never touches the run. |
+| `__main__.missing_indices(dir, plan) -> dict` | The (leg, trial) pairs a resume must run: never recorded, or recorded as an error. |
+| `__main__._detach(args, out_dir)` | Relaunch the batch orphaned via `graph.detached._spawn_orphaned`, recording `batch.pid`. |
+| `BATCH_PLAN` / `BATCH_PID` / `BATCH_LOG` | `batch.json`, `batch.pid`, `batch.log` — what a batch writes about itself so `--status`/`--resume` need only the directory. |
 | `__main__.probe_leg_vendor(leg) -> str \| None` | One trivial call to a leg's vendor; participates in key failover. |
 
 ### CLI
@@ -370,3 +455,44 @@ the measurement, not for this DOCS.
   limit wherever one exists.
   **Not yet run.** 25 trials, roughly $700-900 at list prices with about $150 of that billed,
   since the Claude author legs draw on the subscription.
+
+- 2026-08-25 — **The lead x co-lead grid, generated rather than written out.** Twenty cells
+  (`legs.GRID`), one per (lead, co-lead) pair, at a pinned `deepseek-v4-flash` author, K=5. The
+  roster splits into `CURATED` (the hand-chosen author sweep, unchanged) and `GRID` (a product of
+  two axis tables), because a factorial's cells have coordinates rather than rationales and twenty
+  literals would have hidden a missing cell. `--legs grid` selects it through the new `GROUPS`.
+  **Three things the grid needed that were genuinely missing, none of them generatable.** The
+  pinned-parameter table carried Anthropic and OpenAI only, so a Z.AI or Qwen lead would have run
+  at its vendor default against harmonised peers -- the exact "compares configurations rather than
+  models" error that table exists to prevent; all five vendors now have entries, Qwen at high
+  effort despite the measured latency, because parity is the property the measurement rests on and
+  latency is a cost rather than a confound. `build_pinned_lead`/`build_pinned_colead` hardcoded
+  `vision=True`, which cannot express the text-only reviewer the grid depends on, so vision is now
+  declared per axis member and carried onto the built member. And preflight probed the *author's*
+  vendor alone, which sufficed while every lead and reviewer came from the configured roles; a
+  cell can pin two vendors the author never touches, so `probe_chat_member` now probes each
+  distinct pinned member through `ModelHandle`, once per (provider, model) rather than per leg.
+  **Two test corrections, both widening rather than weakening.** The vendor-ceiling test read
+  `leg.provider`, which names the author seat only, so a cell pinning Z.AI as *lead* escaped its
+  measured ceiling entirely; it now checks the chat seats too. And the lead-pinning invariant keyed
+  on `purpose == "lead"`, which a grid leg is not; it now names the set of purposes allowed to move
+  the lead, so a new purpose has to join deliberately. Suite: 54 in this package, 1400 green
+  overall. Unrelated and pre-existing, recorded so it is not read as fallout: 11 `gate_bench`
+  failures from planted mutants gone inert against a `research_toolkit` checkout that has advanced
+  past the corpus's pinned base.
+  **Not yet run.** 100 trials, order $600 at list prices from the measured $6.50 median, with
+  wall-clock the binding constraint at about 82 trial-hours.
+
+- 2026-08-25 (second, same day) — **The grid made the batch a two-day unattended job, so detach,
+  status and resume were built before it launched.** Durability already held: `records.jsonl` is
+  appended per trial under a lock, so a kill loses only what was in flight. Three things did not.
+  `--detach` spawns the batch orphaned through `graph.detached._spawn_orphaned` (reused, not
+  reinvented: the double fork is there because `start_new_session` leaves the `/proc` link a VSCode
+  logout walks), after preflight rather than before it. `--status DIR` reports per-leg progress,
+  terminal-state counts, spend and pid liveness, reading the records rather than the report, since
+  the report does not exist until the end. `--resume DIR` recomputes gaps **per leg** — the
+  pre-existing `--only` is global across legs and would have re-run succeeded trials in a
+  twenty-leg batch — and re-runs an `error` record while never re-running a measurement. Both read
+  a new `batch.json` the batch writes about itself, so a resume cannot be handed the wrong flags.
+  The end-of-run report now renders from every record on disk, or a resumed batch would have
+  reported only its second sitting. Ten tests; package suite 54 → 63.

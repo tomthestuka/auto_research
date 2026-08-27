@@ -113,7 +113,8 @@ smoke test.
 | `config/code_gate.yaml` | The Phase-2 gate's no-fabrication scan lists (banned vocabulary, hard-fail vs finding-tier code patterns — which list a pattern sits in decides its severity; RNG is finding-tier since Monte-Carlo tools need randomness — literal-array findings, ObsID allowlist). Human-tunable; no scan constant in code. |
 
 **Keys** (the provider SDKs read these directly; see `.env.example` for the full template):
-`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `ADS_DEV_KEY` (NASA ADS),
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`, `ZAI_API_KEY`,
+`DASHSCOPE_API_KEY`, `ADS_DEV_KEY` (NASA ADS),
 `TAVILY_API_KEY`; optional LangSmith tracing (`LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`);
 optional raise-to-human connectors (only when selected) — **Telegram** (recommended:
 `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`), Slack
@@ -132,6 +133,13 @@ preflight (`api_key_fallbacks`) rejects a fallback that is blank or identical to
 each switch is recorded on the run ledger as `provider.key_rotation` (naming the slot, never the
 key). Google does not rotate: its published error vocabulary is inconsistent between its own two
 documentation pages, so no rule is guessed for it.
+
+Responses-dialect HTTP attempts are capped at 300 seconds with SDK retries disabled. The shared
+provider retry layer owns later attempts and logs every cooldown, so DeepSeek/Qwen latency cannot
+turn into the SDK's default ten-minute wait repeated three times without an observable event.
+Qwen's documented session-cache header rides every adapter call; Alibaba leaves that cache
+disabled unless the request sends the header. Stable-prefix paths still pass the common
+`cache_prefix` flag so their intent stays explicit across providers.
 
 Over **Telegram or Slack** a human can drive a live run with slash-commands (intercepted, never
 treated as answers to an agent): `/help` (commands + the live roster, numbered), `/status
@@ -378,8 +386,10 @@ Pydantic-validated and fail loudly, with bounded `structured_retry_cap` retries.
 prompts carry role and scope only; tool names, arguments, and descriptions reach the model
 through tool loading, not prompt text.
 
-Model groups are **config-driven** (`config/models.yaml`), spanning OpenAI, Anthropic,
-and Google. No model identifier is hardcoded. Defaults: reviewer group = Fable 5,
+Model groups are **config-driven** (`config/models.yaml`) across OpenAI, Anthropic, Google,
+DeepSeek, Z.AI, and Alibaba Model Studio. Role eligibility follows capabilities: DeepSeek's
+Responses endpoint is text-only, while Alibaba currently documents Qwen Max with image/text/video
+input. No model identifier is hardcoded. Defaults: reviewer group = Fable 5,
 GPT-5.5 high effort, and Gemini 3.5 Flash high thinking; analyst lead = Opus 4.8;
 analyst worker group = Sonnet 4.6 and GPT-5.5 medium effort; librarian I/O group =
 Sonnet 4.6, GPT-5.5 medium effort, and Gemini 3.5 Flash thinking. Phase 2 adds `coder`

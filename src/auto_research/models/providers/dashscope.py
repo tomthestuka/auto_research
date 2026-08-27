@@ -1,38 +1,20 @@
-"""Alibaba Model Studio (Qwen) provider adapter (OpenAI Responses dialect).
+"""Alibaba Model Studio Qwen adapter over the OpenAI Responses dialect.
 
-**NOT LIVE VERIFIED, and the reason is the account rather than the wiring.** Probed 2026-08-24:
-the configured key authenticates against the international host and ``GET /models`` returns 200
-with a 162-model list, but every inference call is refused with HTTP 400
-``AccessDenied.Unpurchased`` ("Access to app denied") on the Responses path and HTTP 403 with the
-same code on Chat Completions. That held for a current model id (``qwen3.8-max``) as well as an
-old one, so it is not a stale-name error: Model Studio gates pay-as-you-go on a complete billing
-profile. This adapter is therefore configured from documentation alone and warns at launch, the
-same treatment the Qwen coder pairing already carries (``sandbox/coder/harness.py``).
+Live probes on 2026-08-24 established structured answers through a function-tool call. Alibaba's
+Responses documentation includes custom function tools and ``allowed_tools`` tool choice. It
+recommends workspace-specific regional endpoints while retaining the legacy DashScope endpoints.
 
-Documented parameters (alibabacloud.com/help/en/model-studio/compatibility-with-openai-responses-api):
-``reasoning`` with effort ``none`` through ``high`` is supported. Structured output is documented
-only as ``response_format`` with ``{"type": "json_object"}`` plus the word "JSON" in a message
-(.../qwen-structured-output), with no ``json_schema`` member, so strict schema is off here for the
-same reason it is off for Z.AI. Function tools are not documented for this endpoint either; only
-the built-in web search, code interpreter and web extractor are.
-
-**The endpoint recorded in the coder harness table disagrees with this documentation and is
-likely wrong.** That table names ``https://dashscope-intl.aliyuncs.com/compatible-mode/v1``, which
-appears nowhere in the Responses page's host list. The documented hosts are workspace-scoped,
-``https://{WorkspaceId}.<region>.maas.aliyuncs.com/compatible-mode/v1``, plus one bare
-``https://dashscope-us.aliyuncs.com/compatible-mode/v1``. The configured key's ``sk-ws-`` prefix
-is consistent with a workspace credential, and the bare US host answered ``InvalidApiKey`` for it
-while the international host recognised it. Since no host can be confirmed while the account is
-unentitled, the host that at least authenticates is the one named here, and the discrepancy is
-recorded rather than silently resolved.
+Alibaba's current model page lists ``qwen3.8-max`` with image, text, and video input and native
+visual understanding, so figures remain enabled. Media-volume limits stay unset until the vendor
+publishes limits for this exact model/API combination.
 """
 
 from auto_research.models.providers._media import MediaLimits
 from auto_research.models.providers._responses import ResponsesProvider, ResponsesVendor
 
 
-# No media limits are documented for this endpoint, and none can be measured while the account is
-# unentitled, so nothing is enforced beyond keeping non-image mimes out of the image channel.
+# The current qwen3.8-max model page lists image input. This descriptor enforces only published
+# Responses limits; none specific to this model/API combination are currently listed.
 _LIMITS = MediaLimits(
     image_mimes=frozenset({"image/jpeg", "image/png", "image/webp"}),
 )
@@ -40,22 +22,19 @@ _LIMITS = MediaLimits(
 DASHSCOPE_VENDOR = ResponsesVendor(
     name="dashscope",
     limits=_LIMITS,
-    # The host that recognises the configured key. See the module docstring for why this
-    # disagrees with the vendor's own Responses host list.
+    # Legacy international endpoint. Alibaba recommends workspace-specific regional URLs for
+    # new deployments and documents the legacy endpoints as functional.
     base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
     key_env="DASHSCOPE_API_KEY",
     supports_prompt_cache_key=False,
+    # Enable Responses session caching on every request; repeated prefixes then receive the
+    # vendor's latency and cost benefit without relying on every caller to opt in separately.
+    cache_headers=(("x-dashscope-session-cache", "enable"),),
     # Documented as json_object mode only, with no json_schema member.
     supports_strict_schema=False,
-    # A structured answer is reachable, just not through `text.format`: the schema rides as a
-    # forced tool call instead. Documented as supporting the `tools` parameter, and the same forced-call route Z.AI is
-    # verified on. UNVERIFIED here: the account cannot make any inference call (see the module
-    # docstring), so this is configuration, not measurement.
+    # A structured answer is reachable through a function-tool call rather than `text.format`.
     schema_via_tool=True,
-    # It enforces the same rule Anthropic documents for thinking models: a named or `required`
-    # tool_choice is refused ("does not support being set to required or object in thinking
-    # mode", measured 2026-08-24). We want the thinking, so the emit tool is offered rather than
-    # forced, and a declined call raises.
+    # Thinking mode accepts automatic tool choice. A declined emit call raises loudly.
     forces_tool_choice=False,
     # The full set: the narrow one is DeepSeek's, imposed by *its* strict-mode validator,
     # and this vendor never goes through that path. Measured 2026-08-24: `format: date`

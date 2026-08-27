@@ -38,13 +38,26 @@ from benchmarks.author_bench.legs import Leg
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# The co-lead settings a pinned reviewer is given, harmonised with the configured OpenAI co-lead's
+# The settings a pinned lead or reviewer is given, harmonised with the configured OpenAI co-lead's
 # (``reasoning.effort: high``, ``max_output_tokens: 16384``) rather than left at each vendor's
 # default. The reviewer swap established why: a member left at its own role setting compares
 # configurations instead of models.
+#
+# Every vendor on a grid axis needs an entry, or that axis silently compares a harmonised member
+# against a defaulted one -- the exact error this table exists to prevent. Anthropic's analogue of
+# a high reasoning effort is adaptive thinking; the three Responses-dialect vendors take
+# ``reasoning.effort`` and ``max_output_tokens`` under the names their own adapters send.
+#
+# Qwen is the one to watch rather than to tune away: Alibaba defaults a Responses call to medium
+# effort and high is slower still (measured 2026-08-25, 517 s for an eleven-call schema probe
+# against Sonnet's 78 s). It is set to high anyway, because parity across the axis is the property
+# the measurement depends on and latency is a cost rather than a confound.
 _PINNED_COLEAD_PARAMETERS: dict[str, dict[str, object]] = {
     "anthropic": {"thinking": {"type": "adaptive"}, "max_tokens": 16384},
     "openai": {"max_output_tokens": 16384, "reasoning": {"effort": "high"}},
+    "zai": {"max_output_tokens": 16384, "reasoning": {"effort": "high"}},
+    "dashscope": {"max_output_tokens": 16384, "reasoning": {"effort": "high"}},
+    "deepseek": {"max_output_tokens": 16384, "reasoning": {"effort": "high"}},
 }
 
 
@@ -63,7 +76,9 @@ def build_pinned_lead(leg: Leg, monitor: Any | None) -> Any:
         name=f"sweep_lead_{leg.slug}",
         provider=leg.lead_provider,
         model=leg.lead_model,
-        vision=True,
+        # Declared by the roster, not assumed here. The lead IS sent figures, so a vision-less
+        # lead is a configuration error the roster tests catch rather than a mid-trial failure.
+        vision=leg.lead_vision,
         documents=True,
         parameters=dict(_PINNED_COLEAD_PARAMETERS.get(leg.lead_provider, {})),
     )
@@ -88,8 +103,11 @@ def build_pinned_colead(leg: Leg, monitor: Any | None) -> Any:
         name=f"sweep_colead_{leg.slug}",
         provider=leg.colead_provider,
         model=leg.colead_model,
-        vision=True,
-        documents=True,
+        # A text-only reviewer is legitimate -- the co-lead is never sent an image -- so this is
+        # declared by the roster rather than assumed true. Declaring vision on a member whose
+        # vendor will not serve it would be a false statement of capability.
+        vision=leg.colead_vision,
+        documents=leg.colead_vision,
         parameters=dict(_PINNED_COLEAD_PARAMETERS.get(leg.colead_provider, {})),
     )
     handle = ModelHandle(

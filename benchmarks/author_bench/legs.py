@@ -46,7 +46,7 @@ BRAND_COLOURS: dict[str, str] = {
     "openai": "#0b0b0b",      # near-black
     "deepseek": "#4d6bfe",    # indigo
     "zai": "#12a594",         # teal
-    "dashscope": "#7c5cd6",   # purple (absent from the roster; see QWEN_ABSENT)
+    "dashscope": "#7c5cd6",   # purple
 }
 
 # Published per-million-token rates for the models litellm does not price. Read from each vendor's
@@ -65,13 +65,15 @@ _PARAMETERS: dict[str, dict[str, object]] = {
     "glm-5.2": {"model_reasoning_effort": "high"},
 }
 
-# Why the Qwen row is absent rather than substituted. Stated here because the paper reports the
-# absence, and a reader has to be able to tell a skipped vendor from an unconsidered one.
+# Qwen's entitlement was the reason it had no row, and it was resolved on 2026-08-24 by
+# activating Model Studio on a pay-as-you-go key. Kept as a record because the paper reports the
+# earlier absence, and because the key class still decides the host for whoever rotates it.
 QWEN_ABSENT = (
-    "Alibaba Model Studio (qwen) is configured and wired but was never entitled: as of 2026-08-19 "
-    "every attempt returned HTTP 400 AccessDenied.Unpurchased across three models and all three "
-    "documented hosts, the pay-as-you-go host recognising the key while the others rejected it. "
-    "That is a vendor billing-profile gate, not our wiring. No model is substituted for it."
+    "Alibaba Model Studio (qwen) had no coder row through 2026-08-19: every attempt returned "
+    "HTTP 400 AccessDenied.Unpurchased across three models and all three documented hosts. That "
+    "was a service-activation gate, not our wiring, and it was cleared on 2026-08-24 -- Qwen is "
+    "live and carries a lead and co-lead axis in the grid below. It still has no *author* row: "
+    "the dashscope+codex pairing remains in UNVERIFIED_PAIRINGS, never having run."
 )
 
 
@@ -98,8 +100,20 @@ class Leg:
     colead_model: str | None = None
     """Exact co-lead model, when the leg pins one rather than taking the role's first member."""
 
+    colead_vision: bool = True
+    """Whether the pinned co-lead's member is declared vision-capable.
+
+    A declaration, and it has to be able to be false: the co-lead is never sent an image (its
+    review passes none and its tool set excludes the knowledge-base tools), so a text-only vendor
+    is eligible to review, and declaring vision on a member its vendor will not serve would be a
+    false statement of capability. `deepseek-v4-pro` is the case that needs it."""
+
     lead_provider: str | None = None
     lead_model: str | None = None
+    lead_vision: bool = True
+    """Whether the pinned lead's member is declared vision-capable. The lead IS sent figures (the
+    accumulated per-worker catalog), so this is true for every lead the grid can legally use, and
+    exists so a vision-less lead fails a test rather than a trial."""
     """The analyst lead this leg runs under. ``None`` takes the configured role, which is the
     campaign default and every panel-(a) row.
 
@@ -165,7 +179,7 @@ class Leg:
         )
 
 
-ROSTER: tuple[Leg, ...] = (
+CURATED: tuple[Leg, ...] = (
     Leg(
         slug="claude_sonnet_5",
         provider="anthropic",
@@ -323,22 +337,169 @@ ROSTER: tuple[Leg, ...] = (
     ),
 )
 
+# ── The lead x co-lead grid ─────────────────────────────────────────────────
+#
+# A different experiment from CURATED above, and it is generated rather than written out. The
+# rows above are a curated set: each was chosen for a reason and carries the prose that says
+# which. The grid is a *product* -- every eligible lead crossed with every eligible co-lead at
+# one pinned author -- so a cell's identity is its coordinates and there is no per-cell rationale
+# to write. Twenty hand-authored literals would hide the design in repetition and make a missing
+# cell invisible, which is exactly what generating from the axes prevents.
+#
+# **What it measures.** CLAUDE.md §9.3 binds `reviewer.provider != author.provider` and says
+# nothing about the lead. `papers/FANGZ/DOCS.md` §8.5 found that the coder sweep cannot tell those
+# apart, because the lead was Anthropic in all five of its arms, so the reviewer's relation to the
+# author and to the lead moved together. Holding the author fixed and crossing the other two is
+# what separates them. If the lead-correlated diagonal moves and the author-correlated column does
+# not, §9.3 binds the wrong actor.
+#
+# **Why the axes are unequal.** The lead is sent figures (the accumulated per-worker catalog) and
+# the co-lead is not, by construction -- its review passes no images and its tool set excludes the
+# knowledge-base tools -- so vision binds the lead axis alone (audited 2026-08-25, CLAUDE.md §6).
+# DeepSeek is text-only under the policy of the same date, so it reviews without leading. Google
+# is out of both axes: its second tool call in any loop is a hard 400 (handoff [I8]), so it cannot
+# run a ReAct role at all.
+#
+# **The shape's one virtue and one cost.** Because the author is DeepSeek and DeepSeek cannot
+# lead, author-correlation and lead-correlation never coincide, so each is estimable free of the
+# other -- these are the four arms §8.5 records as not existing. The cost is that the
+# doubly-correlated cell is unreachable, so no interaction term is estimable, which the manuscript
+# has to state rather than leave to a reader.
+
+#: The pinned author, identical in all twenty cells. `deepseek-v4-flash` because it is the
+#: cheapest capable author measured (five of five committed at a $6.50 median, of which the coder
+#: is under a dollar), which is what makes a 100-trial factorial affordable at all.
+GRID_AUTHOR = {
+    "provider": "deepseek",
+    "harness": "codex",
+    "model": "deepseek-v4-flash",
+    "key_env": "DEEPSEEK_API_KEY",
+    "base_url": "https://api.deepseek.com/",
+}
+
+
+@dataclass(frozen=True)
+class GridMember:
+    """One coordinate on a grid axis: the vendor and model a role is pinned to."""
+
+    slug: str
+    """Short vendor tag; one half of a generated leg's slug."""
+
+    provider: str
+    model: str
+
+    vision: bool = True
+    """Whether this member is declared vision-capable, per that vendor's own documentation.
+
+    False only for DeepSeek, and by policy rather than by absent capability: the vendor documents
+    `deepseek-v4-flash-vision-exp`, and this project declines a multimodal path its vendor labels
+    experimental (ruling 2026-08-25). It is why DeepSeek can review but cannot lead.
+    """
+
+    max_concurrency: int | None = None
+    """A ceiling this vendor imposes on *any* role, not only on an author. Z.AI throttled 87 to 97
+    per cent of turns above two in flight, and a throttled lead or reviewer stalls a trial exactly
+    as a throttled author does."""
+
+
+#: The lead axis. Every entry must be vision-capable, since the lead is sent figures.
+GRID_LEADS: tuple[GridMember, ...] = (
+    GridMember("anthropic", "anthropic", "claude-opus-5"),
+    GridMember("openai", "openai", "gpt-5.6-sol"),
+    GridMember("zai", "zai", "glm-5.3", max_concurrency=2),
+    GridMember("qwen", "dashscope", "qwen3.8-max"),
+)
+
+#: The co-lead axis: the lead axis plus DeepSeek, which reviews without vision.
+#: `deepseek-v4-pro` rather than the author's Flash, for two reasons. It is the stronger reviewer
+#: on the axis that matters here -- independent testing puts it at 77 against Flash's 60, with
+#: Flash's win confined to agentic tool use, which a reviewer barely exercises -- and it keeps the
+#: author-correlated column same-provider-different-model, which is the shape of the one
+#: author-correlated arm already measured (`claude-sonnet-5` authored, `claude-opus-5` reviewed).
+#: A Flash co-lead would make that column same-*model* and not comparable to it.
+#: Live-probed 2026-08-25: nine of nine real schemas, tools declared, `tool_choice="none"`, so Pro
+#: honours every DeepSeek descriptor flag that had been measured on Flash alone.
+GRID_COLEADS: tuple[GridMember, ...] = GRID_LEADS + (
+    GridMember("deepseek", "deepseek", "deepseek-v4-pro", vision=False),
+)
+
+
+def _grid_legs() -> tuple[Leg, ...]:
+    """Cross the two axes into one leg per cell.
+
+    A generated leg names its coordinates in its slug and its note; the correlation flags are
+    derived by :attr:`Leg.correlated` and :attr:`Leg.lead_correlated` from the providers, never
+    restated here, so a cell cannot claim a correlation it does not have.
+    """
+    legs: list[Leg] = []
+    for lead in GRID_LEADS:
+        for colead in GRID_COLEADS:
+            ceilings = [c for c in (lead.max_concurrency, colead.max_concurrency) if c]
+            legs.append(
+                Leg(
+                    slug=f"grid_lead_{lead.slug}_colead_{colead.slug}",
+                    purpose="grid",
+                    provider=GRID_AUTHOR["provider"],
+                    harness=GRID_AUTHOR["harness"],
+                    model=GRID_AUTHOR["model"],
+                    key_env=GRID_AUTHOR["key_env"],
+                    base_url=GRID_AUTHOR["base_url"],
+                    lead_provider=lead.provider,
+                    lead_model=lead.model,
+                    lead_vision=lead.vision,
+                    colead_provider=colead.provider,
+                    colead_model=colead.model,
+                    colead_vision=colead.vision,
+                    trials=5,
+                    max_concurrency=min(ceilings) if ceilings else 4,
+                    # Kept out of a bare batch: naming `grid` runs the twenty together, so the
+                    # curated author sweep above stays re-runnable without paying for the grid.
+                    in_default=False,
+                    note=(
+                        f"grid cell: lead {lead.model}, co-lead {colead.model}, "
+                        f"author {GRID_AUTHOR['model']}"
+                    ),
+                )
+            )
+    return tuple(legs)
+
+
+GRID: tuple[Leg, ...] = _grid_legs()
+
+ROSTER: tuple[Leg, ...] = CURATED + GRID
+
 BY_SLUG: dict[str, Leg] = {leg.slug: leg for leg in ROSTER}
+
+
+#: Named groups `--legs` accepts beside individual slugs, so a factorial is selected by what it
+#: is rather than by pasting twenty slugs at a shell prompt (which is also how a cell goes missing
+#: unnoticed). A group expands in roster order and de-duplicates against anything named beside it.
+GROUPS: dict[str, tuple[Leg, ...]] = {
+    "grid": GRID,
+    "curated": CURATED,
+}
 
 
 def resolve(slugs: str | None) -> list[Leg]:
     """The legs a batch runs: every runnable leg by default, or exactly the ones named.
 
     Reuse rows are excluded from a default run because they are already measured; naming one
-    explicitly still runs it, which is what a re-measurement needs.
+    explicitly still runs it, which is what a re-measurement needs. A name may be a single leg
+    slug or a group from :data:`GROUPS`.
     """
     if not slugs:
         return [leg for leg in ROSTER if leg.reuse is None and leg.in_default]
     wanted = [s.strip() for s in slugs.split(",") if s.strip()]
-    unknown = [s for s in wanted if s not in BY_SLUG]
+    unknown = [s for s in wanted if s not in BY_SLUG and s not in GROUPS]
     if unknown:
         raise SystemExit(
             f"unknown leg(s): {', '.join(unknown)}. "
+            f"Known groups: {', '.join(GROUPS)}. "
             f"Known legs: {', '.join(BY_SLUG)}."
         )
-    return [BY_SLUG[s] for s in wanted]
+    chosen: list[Leg] = []
+    for name in wanted:
+        for leg in GROUPS[name] if name in GROUPS else (BY_SLUG[name],):
+            if leg not in chosen:
+                chosen.append(leg)
+    return chosen

@@ -508,6 +508,14 @@ def test_every_vendor_ceiling_lives_on_the_roster_row():
             assert leg.max_concurrency == 2, leg.slug
         elif leg.max_concurrency is not None:
             assert leg.max_concurrency >= 2, leg.slug
+        # A ceiling belongs to the VENDOR, not to the author seat. Z.AI throttles any role, so a
+        # cell that pins it as lead or reviewer is throttled exactly as an author row is -- and
+        # that case was invisible while this test read `leg.provider` alone, which names the
+        # author only. A throttled lead reaches the trial as a lead that did nothing.
+        if "zai" in (leg.lead_provider, leg.colead_provider):
+            assert leg.max_concurrency == 2, (
+                f"{leg.slug} pins Z.AI as a chat role without its ceiling"
+            )
 
 
 def test_a_leg_supplies_the_author_member_and_its_correlation_setting(tmp_path, monkeypatch):
@@ -839,13 +847,20 @@ def test_the_command_counter_reads_both_harness_shapes(tmp_path):
 # argues the verdict. Panel (a) held the lead at the Anthropic default, so its reviewer provider
 # and its lead provider moved together; these pin the wiring that separates them.
 
-def test_panel_a_legs_take_the_configured_lead_and_panel_b_pins_one():
-    """The lead is varied only where a leg says so, so panel (a) stays the campaign default."""
+#: The purposes that are allowed to move the lead off the configured campaign default. Naming
+#: them is what keeps "the lead varies only where a leg says so" checkable: a new purpose that
+#: pins a lead has to be added here deliberately, and any other purpose doing it is a defect.
+LEAD_VARYING_PURPOSES = {"lead", "grid"}
+
+
+def test_the_lead_is_varied_only_by_a_purpose_that_says_it_varies_it():
+    """The lead is varied only where a leg says so, so the tier and decorrelation rows stay on the
+    campaign default and a lead swap can never be an accident of a copied row."""
     from benchmarks.author_bench.legs import ROSTER
 
     for leg in ROSTER:
-        if leg.purpose == "lead":
-            assert leg.lead_model, f"{leg.slug} is a lead leg but pins no lead"
+        if leg.purpose in LEAD_VARYING_PURPOSES:
+            assert leg.lead_model, f"{leg.slug} is a lead-varying leg but pins no lead"
             assert leg.lead_provider, f"{leg.slug} pins a lead model with no provider"
         else:
             assert leg.lead_model is None, f"{leg.slug} silently varies the lead"
@@ -896,3 +911,300 @@ def test_the_glm_legs_hold_their_vendor_ceiling_in_both_panels():
 
     for slug in ("glm_5_3", "glm_5_3_gptlead"):
         assert BY_SLUG[slug].max_concurrency == 2
+
+
+# ── the lead x co-lead grid ─────────────────────────────────────────────────
+
+
+def test_the_grid_is_the_full_product_of_its_two_axes():
+    """A generated factorial's whole advantage over hand-written rows is that a missing cell is
+    impossible rather than merely unlikely, so the count and the coordinates are both asserted."""
+    from benchmarks.author_bench.legs import GRID, GRID_COLEADS, GRID_LEADS
+
+    assert len(GRID) == len(GRID_LEADS) * len(GRID_COLEADS) == 20
+    cells = {(leg.lead_model, leg.colead_model) for leg in GRID}
+    assert cells == {
+        (lead.model, colead.model) for lead in GRID_LEADS for colead in GRID_COLEADS
+    }
+    assert len({leg.slug for leg in GRID}) == len(GRID), "a generated slug collides"
+
+
+def test_the_grid_holds_one_author_across_every_cell():
+    """The author is the quantity held fixed; if it varied the grid would measure three things."""
+    from benchmarks.author_bench.legs import GRID, GRID_AUTHOR
+
+    assert {(leg.provider, leg.model, leg.harness) for leg in GRID} == {
+        (GRID_AUTHOR["provider"], GRID_AUTHOR["model"], GRID_AUTHOR["harness"])
+    }
+
+
+def test_the_two_correlations_are_crossed_and_never_coincide():
+    """The property that makes this grid worth running.
+
+    §8.5 of `papers/FANGZ/DOCS.md` records that no measured arm has the author sharing the
+    reviewer's vendor while the lead does not, so the two correlations cannot be told apart. Here
+    they are fully crossed: four cells correlate the lead with the reviewer, four correlate the
+    author with it, and none does both -- because the author is DeepSeek and DeepSeek cannot lead.
+    The cost of that, asserted so it stays visible, is that no interaction term is estimable.
+    """
+    from benchmarks.author_bench.legs import GRID
+
+    lead_only = [leg for leg in GRID if leg.lead_correlated and not leg.correlated]
+    author_only = [leg for leg in GRID if leg.correlated and not leg.lead_correlated]
+    both = [leg for leg in GRID if leg.correlated and leg.lead_correlated]
+    neither = [leg for leg in GRID if not leg.correlated and not leg.lead_correlated]
+
+    assert len(lead_only) == 4
+    assert len(author_only) == 4
+    assert len(neither) == 12
+    assert both == [], "a doubly-correlated cell would confound the two axes it separates"
+
+
+def test_every_grid_lead_is_vision_capable_and_the_deepseek_reviewer_is_not():
+    """Vision binds the roles that are sent figures, which is the lead and not the reviewer.
+
+    The lead is handed the accumulated per-worker figure catalog, so a vision-less lead would fail
+    on its first figure deep inside a paid trial. The co-lead is handed none, so a text-only
+    vendor is eligible to review -- which is what puts DeepSeek on one axis and not the other.
+    """
+    from benchmarks.author_bench.legs import GRID, GRID_LEADS
+
+    assert all(member.vision for member in GRID_LEADS)
+    assert all(leg.lead_vision for leg in GRID)
+
+    deepseek = [leg for leg in GRID if leg.colead_provider == "deepseek"]
+    assert len(deepseek) == 4
+    assert not any(leg.colead_vision for leg in deepseek), (
+        "declaring vision on a DeepSeek reviewer would state a capability its vendor will not serve"
+    )
+
+
+def test_a_deepseek_reviewer_is_built_without_vision():
+    """The declaration has to survive into the member the trial actually builds, not stop at the
+    roster: `build_pinned_colead` hardcoded `vision=True` until the grid needed otherwise."""
+    from benchmarks.author_bench.legs import BY_SLUG
+    from benchmarks.author_bench.trial import build_pinned_colead
+
+    colead = build_pinned_colead(BY_SLUG["grid_lead_anthropic_colead_deepseek"], None)
+    assert colead.model.config.vision is False
+    assert colead.model.config.provider == "deepseek"
+    assert colead.model.config.model == "deepseek-v4-pro"
+
+
+def test_every_pinned_grid_vendor_is_harmonised():
+    """A vendor left at its own default compares configurations rather than models, and the grid
+    puts two vendors on its axes that the pinned-parameter table did not previously carry."""
+    from benchmarks.author_bench.legs import GRID_COLEADS, GRID_LEADS
+    from benchmarks.author_bench.trial import _PINNED_COLEAD_PARAMETERS
+
+    for member in set(GRID_LEADS) | set(GRID_COLEADS):
+        assert member.provider in _PINNED_COLEAD_PARAMETERS, (
+            f"{member.provider} sits on a grid axis with no harmonised parameters"
+        )
+
+
+def test_the_grid_stays_out_of_a_default_batch_but_is_selectable_as_a_group():
+    """Twenty cells joining every bare invocation would make the curated author sweep unrunnable
+    without paying for the grid; pasting twenty slugs instead is how a cell goes missing."""
+    from benchmarks.author_bench.legs import GRID, resolve
+
+    default = resolve(None)
+    assert not any(leg.purpose == "grid" for leg in default)
+    assert resolve("grid") == list(GRID)
+    assert len(resolve("grid,deepseek_v4_flash")) == len(GRID) + 1
+
+
+def test_an_unknown_group_names_the_groups_it_could_have_meant():
+    from benchmarks.author_bench.legs import resolve
+
+    with pytest.raises(SystemExit) as exc:
+        resolve("gird")
+    assert "grid" in str(exc.value)
+
+
+# ── surviving two days unattended: detach, status, resume ───────────────────
+
+
+def _plan_dir(tmp_path, legs, k=5, records=()):
+    from benchmarks.author_bench.__main__ import BATCH_PLAN
+
+    (tmp_path / BATCH_PLAN).write_text(json.dumps({
+        "legs": list(legs),
+        "trials_per_leg": {slug: k for slug in legs},
+        "base_ref": "fa99ef8",
+        "started": "2026-08-25T00:00:00+00:00",
+    }), encoding="utf-8")
+    (tmp_path / "records.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8"
+    )
+    return tmp_path
+
+
+def test_resume_runs_only_the_gaps_and_per_leg(tmp_path):
+    """A twenty-leg batch dies with different gaps in each leg, which one global --only list
+    cannot express: it would re-run trial 3 of every leg named, including the legs whose trial 3
+    already succeeded. The gaps are therefore computed per leg."""
+    from benchmarks.author_bench.__main__ import BATCH_PLAN, missing_indices
+
+    out = _plan_dir(tmp_path, ["alpha", "beta"], k=3, records=[
+        {"leg": "alpha", "trial": 1, "status": "committed"},
+        {"leg": "alpha", "trial": 3, "status": "failed"},
+        {"leg": "beta", "trial": 2, "status": "committed"},
+    ])
+    plan = json.loads((out / BATCH_PLAN).read_text())
+    assert missing_indices(out, plan) == {"alpha": [2], "beta": [1, 3]}
+
+
+def test_resume_re_runs_an_infrastructure_error_but_never_a_measurement(tmp_path):
+    """An `error` record is a crash, not a terminal state -- `score.py` partitions the trials by
+    terminal state and `error` is not one of them. An honest failure IS a measurement, and re-running
+    it would quietly change the batch a resume is supposed to repair."""
+    from benchmarks.author_bench.__main__ import BATCH_PLAN, missing_indices
+
+    out = _plan_dir(tmp_path, ["alpha"], k=4, records=[
+        {"leg": "alpha", "trial": 1, "status": "committed"},
+        {"leg": "alpha", "trial": 2, "status": "error", "error": "ConnectionError"},
+        {"leg": "alpha", "trial": 3, "status": "needs_human"},
+        {"leg": "alpha", "trial": 4, "status": "failed"},
+    ])
+    plan = json.loads((out / BATCH_PLAN).read_text())
+    assert missing_indices(out, plan) == {"alpha": [2]}
+
+
+def test_a_fully_recorded_batch_has_nothing_to_resume(tmp_path):
+    from benchmarks.author_bench.__main__ import BATCH_PLAN, missing_indices
+
+    out = _plan_dir(tmp_path, ["alpha"], k=2, records=[
+        {"leg": "alpha", "trial": 1, "status": "committed"},
+        {"leg": "alpha", "trial": 2, "status": "failed"},
+    ])
+    assert missing_indices(out, json.loads((out / BATCH_PLAN).read_text())) == {}
+
+
+def test_status_reads_the_records_not_the_report(tmp_path):
+    """The report is written once at the very end, so for the whole two days of a long batch the
+    per-trial records are the only truth on disk. Status must therefore never need a report."""
+    from benchmarks.author_bench.__main__ import batch_status
+
+    out = _plan_dir(tmp_path, ["alpha", "beta"], k=2, records=[
+        {"leg": "alpha", "trial": 1, "status": "committed", "cost_usd": 6.5},
+        {"leg": "beta", "trial": 1, "status": "failed", "cost_usd": 3.5},
+    ])
+    assert not (out / "report.md").exists()
+    text = batch_status(out)
+    assert "trials 2/4" in text
+    assert "$10.00" in text
+    assert "committed 1" in text and "failed 1" in text
+    assert "--resume" in text, "an incomplete batch must print how to continue itself"
+
+
+def test_status_of_a_finished_batch_offers_no_resume(tmp_path):
+    from benchmarks.author_bench.__main__ import batch_status
+
+    out = _plan_dir(tmp_path, ["alpha"], k=1, records=[
+        {"leg": "alpha", "trial": 1, "status": "committed", "cost_usd": 1.0},
+    ])
+    text = batch_status(out)
+    assert "every planned trial has a record" in text
+    assert "--resume" not in text
+
+
+def test_status_reports_a_dead_batch_as_not_running(tmp_path):
+    """The failure this exists to make visible: a detached batch that died hours ago while its
+    directory still looks like a run in progress."""
+    from benchmarks.author_bench.__main__ import BATCH_PID, batch_status
+
+    out = _plan_dir(tmp_path, ["alpha"], k=2, records=[
+        {"leg": "alpha", "trial": 1, "status": "committed", "cost_usd": 1.0},
+    ])
+    (out / BATCH_PID).write_text("999999999\n", encoding="utf-8")
+    assert "NOT RUNNING" in batch_status(out)
+
+
+def test_status_of_a_directory_that_is_not_a_batch_says_so(tmp_path):
+    from benchmarks.author_bench.__main__ import batch_status
+
+    assert "not an author_bench batch directory" in batch_status(tmp_path)
+
+
+def test_detach_reuses_the_orphaning_spawner_rather_than_a_local_nohup(monkeypatch, tmp_path):
+    """`start_new_session` alone leaves the parent->child /proc link a graceful VSCode or Jupyter
+    teardown walks when it kills process trees, which killed a live detached run once already.
+    Reinventing the launch here would reintroduce exactly that bug, so it must delegate."""
+    import argparse
+
+    from benchmarks.author_bench import __main__ as mainmod
+
+    seen = {}
+
+    def fake_spawn(argv, log_path):
+        seen["argv"] = argv
+        seen["log"] = log_path
+        return 4242
+
+    monkeypatch.setattr("auto_research.graph.detached._spawn_orphaned", fake_spawn)
+    args = argparse.Namespace(
+        resume=None, out=tmp_path, base_ref="fa99ef8", legs="grid", k=None,
+        concurrency=4, chatter=4, keep_clones=False,
+    )
+    assert mainmod._detach(args, tmp_path) == 0
+    assert (tmp_path / mainmod.BATCH_PID).read_text().strip() == "4242"
+    assert "--legs" in seen["argv"] and "grid" in seen["argv"]
+    assert "--detach" not in seen["argv"], "the child must not detach again"
+    assert seen["log"] == tmp_path / mainmod.BATCH_LOG
+
+
+def test_a_detached_resume_relaunches_as_a_resume(monkeypatch, tmp_path):
+    import argparse
+
+    from benchmarks.author_bench import __main__ as mainmod
+
+    seen = {}
+    monkeypatch.setattr(
+        "auto_research.graph.detached._spawn_orphaned",
+        lambda argv, log: (seen.update(argv=argv), 7)[1],
+    )
+    args = argparse.Namespace(
+        resume=tmp_path, out=None, base_ref="fa99ef8", legs=None, k=None,
+        concurrency=4, chatter=4, keep_clones=False,
+    )
+    mainmod._detach(args, tmp_path)
+    assert "--resume" in seen["argv"]
+    assert "--out" not in seen["argv"], "a resume names its directory once, as the resume target"
+
+
+def test_the_chat_probe_works_from_inside_a_running_event_loop(monkeypatch):
+    """`preflight` is a blocking call made from inside the batch's event loop, so a probe reaching
+    for a bare `asyncio.run` raises "cannot be called from a running event loop" -- which the
+    probe's own except clause then reports as a vendor refusal, five of them, hiding whatever the
+    vendors actually said. That is the trap `probe_leg_vendor` documents and dodges with the
+    synchronous SDK client; this probe cannot dodge it that way, because going through
+    `ModelHandle` is what makes key rotation apply. Driven from inside a running loop, which is
+    the only place the defect exists.
+    """
+    import asyncio
+
+    import auto_research.models.types as types_mod
+
+    from benchmarks.author_bench import __main__ as mainmod
+
+    calls: list[str] = []
+
+    class _Handle:
+        def __init__(self, **kwargs):
+            pass
+
+        async def call(self, messages, **kwargs):
+            calls.append("called")
+            return object()
+
+    monkeypatch.setattr(types_mod, "ModelHandle", _Handle)
+    monkeypatch.setattr(
+        "auto_research.models.providers.provider_for", lambda name: object()
+    )
+
+    async def drive():
+        return mainmod.probe_chat_member("openai", "gpt-5.6-sol")
+
+    assert asyncio.run(drive()) is None
+    assert calls == ["called"], "the probe never reached the model handle"

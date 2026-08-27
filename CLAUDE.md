@@ -180,13 +180,30 @@ LLM teams must be upgradable without code changes. All model selection lives in 
 provider, model id, vision flag, and provider-specific parameters. No model identifier
 appears in source code.
 
-Providers: **OpenAI, Anthropic, Google, DeepSeek, Z.AI, Alibaba Model Studio.** Reviewer-tier
-and analyst models **must be vision-capable** (figures, [§7](#7-schemas--protocols)). The last
+Providers: **OpenAI, Anthropic, Google, DeepSeek, Z.AI, Alibaba Model Studio.** The last
 three joined the chat set on 2026-08-24 over the OpenAI **Responses** dialect they already
-publish, so a role may now be bound to any of the six. Reaching a vendor is not the same as
-being eligible for a role: a member's adapter declares what that vendor's documentation states
-and a live probe confirms, and **Z.AI and Alibaba accept a strict output schema and ignore it**,
-so they are refused any role that emits one (`_responses.ResponsesVendor`).
+publish, so a capability-compatible role may be bound to any of the six. Reaching a vendor is not
+the same as being eligible for a role: a member's adapter declares what that vendor's
+documentation states and a live probe confirms. Z.AI and Alibaba reach schemas through
+function-tool arguments because their native strict-output path is unsuitable here.
+
+**Vision binds the roles that are actually sent figures** (figures, [§7](#7-schemas--protocols)) —
+the **reviewer**, the **analyst lead** and the **analyst worker**, and those only. Audited
+2026-08-25 against the call sites rather than the config: the reviewer is passed the report's
+figures, the lead the accumulated per-worker figure catalog, the worker its peers' figures and its
+own tools'. The **analyst co-lead is not**, and by construction — `review_tool` passes no images
+and its tool set is read-file/list-dir/web-search with the knowledge-base tools switched off, so a
+code reviewer never receives a plot. The librarian needs documents, not vision; the status monitor
+neither; the `coder`'s `vision` flag is dead config, since an author is a harness subprocess and
+never a `ModelHandle`. The flag is a **declaration, not a guard**: it gates the call-time `images=`
+channel only, so figures arriving on a tool result are unchecked ([V-2], §13).
+
+**DeepSeek is treated as text-only by policy, not by vendor limitation** (ruling 2026-08-25). The
+vendor documents `deepseek-v4-flash-vision-exp` with a full limit set and names the Responses API
+among the endpoints accepting it; the project declines to depend on a multimodal path its vendor
+labels experimental, and revisits when a non-experimental one ships. `deepseek-v4-pro` **is**
+accepted by the Responses endpoint and needs no new wiring. Alibaba's current Qwen Max page lists
+image/text/video input, so its vision eligibility follows that documented model capability.
 
 **Phase 2 — authoring/review providers.** Only **Claude and GPT** are reliable enough to
 author and review tools. The tool **author and reviewer must be different providers**
@@ -253,7 +270,7 @@ Phase 1 is complete and documented. This is the orientation tour; each module's 
 is the authoritative interface. Phase 2 builds **on top of** this — do not rebuild it.
 
 **Foundation.** Pydantic v2 `schemas` (the protocol, incl. `FigureRef`); a config-driven
-`models` provider abstraction (OpenAI/Anthropic/Google) resolving role→model groups from
+`models` provider abstraction (OpenAI/Anthropic/Google/DeepSeek/Z.AI/Alibaba) resolving role→model groups from
 `config/models.yaml`; `observability` (LangSmith tracing + per-call cost logging) wired
 into the provider layer; `storage` (SQLite: papers / memory / query_log, with an embedding
 column reserved); `observations.py` (generic mission archive paths from
@@ -1643,6 +1660,9 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   and names the remedy. `harness.py`'s endpoint was correct all along and its doubt is retracted.
   **Live: 55 passed / 2 skipped / 0 failed** across all five vendors on the nine real schemas plus
   the trajectory compose. Suite 1075 -> 1078. The lead x co-lead grid is now genuinely 5x5.
+  **Corrected 2026-08-25: it is 4x5.** The lead is sent figures and DeepSeek is text-only under the
+  ruling recorded that day, so DeepSeek reviews but does not lead; Google is excluded from both by
+  [I8], its second tool call in any loop being a hard 400.
 
 - 2026-08-24 (fourth, same day) — **"Cannot resolve a `$ref`" was never one property, and the
   boolean that encoded it is deleted.** Prompted by the human asking whether we had actually
@@ -1678,3 +1698,80 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   **reintroduced the same unbounded-recursion bug fixed an hour earlier** (expand with the path
   recorded, then re-walk the expansion with the path forgotten); the guard test caught it, not
   review. Suite 1081.
+
+- 2026-08-25 — **DeepSeek and Qwen live-probe trouble was separated into documented capability
+  limits, endpoint behavior, and local transformations.** DeepSeek's Responses API
+  accepts only `deepseek-v4-flash` and substitutes placeholder text for image/file inputs; the
+  prior vision-experimental model claim had no official source, so its descriptor now withholds
+  figures with a visible note. Alibaba's newer `qwen3.8-max` page lists image/text/video input and
+  native visual understanding, so Qwen figures remain enabled. Alibaba's current Responses docs
+  confirm custom functions, `allowed_tools`, and workspace-specific regional endpoints; three fresh Qwen
+  terminal-tool variants stalled past 130 seconds (`allowed_tools` past six minutes). Its legacy
+  endpoint remains functional, while Alibaba recommends workspace-specific domains for higher
+  stability; member `base_url` is the deployment-time path once the workspace ID is known. The
+  last live-verified automatic choice remains in production pending a stable response.
+
+  Two local schema bugs were fixed: exact constrained strings such as enum/const/pattern `"null"`
+  retain their data value, while an invalid optional spelling still normalizes to JSON null; and a
+  root `$ref` expands only in Pydantic's bare `$ref` + `$defs` form, preserving JSON Schema 2020-12
+  sibling constraints. A Qwen terminal response that both emits structured data and requests a
+  working tool is now rejected as premature for bounded retry. Responses clients also disable the
+  SDK's two hidden retries and cap one HTTP attempt at 300 seconds; `retry.py` remains the sole,
+  visible retry owner. Qwen now sends Alibaba's documented session-cache header whenever the
+  caller marks a stable prefix; the vendor defaults that cache off. Focused provider/media suite:
+  100.
+
+- 2026-08-25 — **Qwen caching is now the adapter default and explicit in both schema probes.**
+  Alibaba's `x-dashscope-session-cache: enable` header rides every Qwen Responses request, while
+  both the direct nine-schema live matrix and the two real-trajectory compose paths pass
+  `cache_prefix=True`. This removes caller omission as a source of Qwen latency while preserving
+  the common provider interface; the live matrix remains the measurement of endpoint tail latency.
+
+- 2026-08-25 — **Qwen latency became a controlled live-test axis instead of an inherited
+  default.** The successful 11-leg `qwen3.8-max` probe took 517.12 s against Sonnet's 78.14 s;
+  across the nine direct calls, output-token count explained 98.6% of Qwen latency and Alibaba's
+  Responses reference identified the omitted setting: `reasoning.effort` defaults to `medium`.
+  `tests/test_live_schema_matrix.py` now runs the full nine-schema + two-trajectory matrix at
+  explicit `minimal` reasoning for both `qwen3.8-max` and the balanced `qwen3.7-plus`, preserving
+  the existing `(provider_name, provider, model)` fixture. A focused, identical `MemoryRecord`
+  request sweeps `none`/`minimal`/`medium` on both models; logs are model-specific and retain
+  elapsed time, cache reads, output tokens, and reasoning tokens per call. `none` stays a measured
+  mechanical-call option rather than the full-matrix default because it previously broke the
+  complex `AuthoringDecision` shape.
+
+- 2026-08-25 (second, same day) — **Role eligibility was decided per role instead of per tier, and
+  the lead x co-lead grid was sized from it.** §6 had one blanket clause, "reviewer-tier and analyst
+  models must be vision-capable", which is a tier statement about a per-role fact. Audited against
+  the call sites: three roles are sent figures (reviewer, analyst lead, analyst worker) and the
+  **analyst co-lead is not**, by construction rather than by accident — `review_tool` passes no
+  images and its tool set is read-file/list-dir/web-search with the knowledge-base tools off, so a
+  code reviewer never receives a plot. The clause now names those three. Two smaller findings from
+  the same audit: the `coder`'s `vision: true` is dead config, an author being a harness subprocess
+  and never a `ModelHandle`, and the flag is a declaration rather than a guard, since it gates the
+  call-time `images=` channel only and not figures arriving on a tool result ([V-2]).
+  **The DeepSeek exclusion was right and its stated reason was wrong.** The previous day's entry
+  recorded that DeepSeek's Responses API accepts only `deepseek-v4-flash` and that the removed
+  `deepseek-v4-flash-vision-exp` descriptor "had no vendor source". The vendor's Responses guide
+  lists three models including `deepseek-v4-pro`, and its vision guide documents the vision model
+  with exactly the limits that had been deleted. Human ruling: the code stands
+  (`images_accepted=False`), because the project declines a multimodal path its vendor labels
+  experimental and will revisit on a non-experimental one — but the *justification* is replaced,
+  since "the vendor has no vision model" is a fact a later reader would act on and would be wrong,
+  where "we decline the experimental one" is a decision they can reopen. The recurring rule
+  (2026-08-05) applies at a new address: read **every** page the vendor publishes for the
+  capability, not the one page already open. The Responses reference was read; the vision guide,
+  which is where that vendor documents image support, was not.
+  **The grid.** §8.5 of `papers/FANGZ/DOCS.md` records a confound: the analyst lead was Anthropic in
+  all five arms of the coder sweep, so the reviewer's provider moved with the lead's and neither
+  could be credited. The measurement agreed this session is a **4 x 5 lead x co-lead grid at a
+  pinned author**, `deepseek-v4-flash` on the Codex harness, K=5, 100 trials. Leads are Anthropic,
+  OpenAI, Z.AI and Alibaba; co-leads are those four plus DeepSeek, which reviews without vision on
+  `deepseek-v4-pro`. Google is out of both axes on [I8]. Because DeepSeek authors but cannot lead,
+  the author-correlated and lead-correlated cells are fully crossed and never coincide — the four
+  arms §8.5 says do not exist — at the cost of the doubly-correlated cell being structurally
+  unreachable, so no interaction is estimable. The four author-correlated cells run only through
+  `make_review_hook(allow_correlated=True)` and each records `review.correlated`.
+  **What the grid decides is §9.3 itself:** that rule binds the *author's* vendor and says nothing
+  about the lead's, and the coder sweep's own data does not support the author as the operative
+  axis. If the lead-correlated diagonal moves and the author-correlated column does not, the rule
+  binds the wrong actor. Docs-only this session; no code changed.

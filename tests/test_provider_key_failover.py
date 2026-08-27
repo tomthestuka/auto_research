@@ -705,7 +705,14 @@ def test_both_wired_providers_send_their_key_explicitly():
     # Every Responses-dialect vendor shares one client construction, so the check is on the
     # shared layer. `resolve_key` reads the live pool for a rotating provider, which is what
     # `active_key` did here before the vendors were factored out.
-    assert "AsyncOpenAI(api_key=key or None" in (root / "_responses.py").read_text()
+    # Matched without the constructor name glued on: this assertion is about a *property* (the key
+    # is passed explicitly rather than resolved from the environment by the SDK), and gluing it to
+    # a one-line call spelling made it fail the moment the constructor gained a `timeout` and wrapped
+    # across lines, with the property itself untouched. A guard that breaks on reformatting trains
+    # people to edit the guard.
+    responses_src = (root / "_responses.py").read_text()
+    assert "AsyncOpenAI(" in responses_src
+    assert "api_key=key or None" in responses_src
     for provider in keys_mod.ROTATING_PROVIDERS:
         assert provider in ("anthropic", "openai")
 

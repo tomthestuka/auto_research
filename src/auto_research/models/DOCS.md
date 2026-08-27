@@ -3,8 +3,8 @@
 ## Purpose
 Resolves an agent role (e.g. `reviewer`) to a configured group of LLM calls,
 using `config/models.yaml`. Hides the per-provider SDK differences behind a
-thin common interface so any role group can be backed by OpenAI, Anthropic, or
-Google by editing YAML alone
+thin common interface so a capability-compatible role group can use any of the six configured
+providers by editing YAML alone
 ([CLAUDE.md §6](../../../CLAUDE.md#6-config-driven-model-registry)).
 
 ## Architecture
@@ -17,7 +17,11 @@ Google by editing YAML alone
   Google each have their own wire logic; the four vendors that speak the **OpenAI Responses
   dialect** (OpenAI, DeepSeek, Z.AI, Alibaba Model Studio) share `_responses.py` and differ
   only by a `ResponsesVendor` descriptor in their own module, beside that vendor's citations.
-  The split mirrors `_media.py`: mechanics shared, policy per vendor.
+  The split mirrors `_media.py`: mechanics shared, policy per vendor. The shared client gives
+  each HTTP attempt a 300-second ceiling and disables the SDK's two hidden retries; the outer
+  `retry.py` policy owns subsequent attempts and records their cooldowns.
+  Alibaba's Responses session cache is enabled on every Qwen request through its documented
+  `x-dashscope-session-cache: enable` header; live schema tests also mark their stable prefixes.
 - `keys.py` — the per-provider API-key pool, its rotation rule (Anthropic and OpenAI), and
   `resolve_key`, the single resolution every actor uses to pick the key it authenticates with.
 - `retry.py` — one chokepoint for provider failures, with **two** answers because there are
@@ -217,14 +221,18 @@ turns on one distinction:
   `google`, `openai`, `deepseek`, `zai`, `dashscope`. All six back a chat adapter as of
   2026-08-24.
 - `CHAT_PROVIDERS` — the providers with a real adapter; anything outside it resolves to a
-  `HarnessOnlyProvider`. Membership means a chat call *reaches* the vendor and says nothing
-  about what it honours: `zai` and `dashscope` accept `text.format` and ignore it, so their
-  descriptors set `supports_strict_schema=False` and their adapter refuses a schema rather
-  than returning invented keys into a validator.
+  `HarnessOnlyProvider`. Membership means a chat call *reaches* the vendor; role eligibility also
+  requires the member's media and structured-output capabilities. Z.AI and Qwen reach schemas
+  through function-tool arguments because their native strict-output path is unsuitable here.
+  DeepSeek is treated as text-only **by policy, not by vendor limitation** — its only multimodal
+  model is experimental (see `limits_for` below). Alibaba's current `qwen3.8-max` model page lists
+  image, text, and video input.
 - `ResponsesVendor` — one vendor's Responses-API policy: `name`, `limits` (its own documented
-  `MediaLimits`), `base_url`, `key_env`, `supports_prompt_cache_key`, `supports_strict_schema`,
+  `MediaLimits`), `base_url`, `key_env`, `supports_prompt_cache_key`, `cache_headers`, `supports_strict_schema`,
   `schema_via_tool`, `forces_tool_choice`, `strict_schema_formats`, `resolve_refs_in`,
   `supports_tool_search`, and `vision_models`.
+  `cache_headers` are sent on every request; Qwen uses this to opt into Alibaba's session cache
+  globally rather than depending on individual role call sites.
   **Reference resolution is per vendor AND per position** (`resolve_refs_in`), which is why it is
   a set of position names rather than a boolean. Measured 2026-08-24 at 5 draws per cell, every
   cell 0/5 or 5/5 with no variance:
@@ -258,14 +266,28 @@ turns on one distinction:
 
   **Two routes to a structured answer.** Native decoding via `text.format` where
   `supports_strict_schema` holds (OpenAI, DeepSeek); otherwise `schema_via_tool` declares one
-  synthetic tool whose parameters *are* the schema and pins `tool_choice` to it (Z.AI, Qwen). The
-  forced-tool route is the mechanism a coding harness already depends on, since Claude Code's and
+  synthetic tool whose parameters *are* the schema (Z.AI, Qwen). Z.AI pins the choice; Qwen keeps
+  automatic choice while thinking and appends a terminal emit instruction. A response containing
+  both the emitter and a working-tool request is rejected as premature, allowing the role's
+  bounded structured retry to make a clean attempt. The tool route is the mechanism Claude Code's and
   Codex's own editing tools are JSON-Schema functions, so it reaches a vendor whose `text.format`
   is a no-op. The emit call is consumed into `parsed` and never appears in `tool_calls`; the
   loop's own tools stay declared beside it so a replayed trajectory still resolves. A vendor with
   neither route raises rather than returning invented keys. Every flag defaults to the OpenAI behaviour and
   is turned off only with a citation. `limits_for(model)` narrows the limits to what one model
-  accepts, so a text-only model on a vision-capable vendor withholds images with a note.
+  accepts, so a text-only model withholds images with a note. DeepSeek's Responses endpoint accepts
+  `deepseek-v4-flash`, `deepseek-v4-pro` and `deepseek-v4-flash-vision-exp`, replacing image input
+  with placeholder text on every model but the last
+  (api-docs.deepseek.com/guides/responses_api). That vision model **is** documented, with its own
+  limits — 600 images, 8192 px per side dropping to 4096 at 15 or more, 32 MiB per image, 48 MiB
+  body (api-docs.deepseek.com/guides/vision) — so `images_accepted=False` for this vendor is a
+  **standing policy decision taken 2026-08-25**, not an absent capability: the project declines to
+  depend on a multimodal path the vendor labels experimental, and revisits when DeepSeek ships a
+  non-experimental one. Alibaba's current `qwen3.8-max` page lists native visual understanding and
+  image/text/video input.
+  Qwen's `cache_headers` enables the vendor's session cache on every request; Alibaba documents
+  that cache as disabled by default. Callers still mark stable-prefix paths with `cache_prefix`
+  through the common interface so the intent remains explicit across providers.
 - `responses_vendors() -> tuple[ResponsesVendor, ...]` — every Responses-dialect descriptor, so
   a check can hold a property across all of them instead of per adapter.
 - `HarnessName` — which author harness drives a `coder` member: `claude_sdk` or `codex`. Legal
@@ -699,3 +721,74 @@ Compacted 2026-08-05: entries through 2026-08-03 folded into themed ranges (deta
   endpoint, explicit key, per-flag gating and shared wire behaviour, asserting on the **request**
   rather than the result; `tests/test_live_schema_matrix.py` gained DeepSeek across all nine real
   schemas and a schema-less leg for Z.AI and Qwen. Suite 1008 -> 1053.
+
+- 2026-08-25 — **Live-probe failures were traced to capability mismatch plus two local schema
+  transformations.** DeepSeek's official Responses reference supports only
+  `deepseek-v4-flash` and substitutes placeholder text for image/file input; the prior
+  `deepseek-v4-flash-vision-exp` entry had no vendor source, so DeepSeek now sets
+  `images_accepted=False` and makes figure omission explicit and model-visible. Alibaba's newer
+  `qwen3.8-max` page lists image/text/video input and native visual understanding, so Qwen figures
+  remain enabled; the broader catalog's text-generation heading alone is not a modality limit.
+  Qwen's current Responses documentation does document custom function tools, recommends
+  workspace-specific endpoints while retaining legacy endpoints, and includes `allowed_tools`.
+  Three fresh Qwen calls using automatic, `allowed_tools`, and named terminal choice all stalled
+  past 130 seconds (`allowed_tools` past six minutes). The legacy endpoint is still functional,
+  while Alibaba recommends workspace-specific regional domains for higher stability. The
+  production choice policy remains the last live-verified shape instead of encoding an
+  unverified workaround; deployments can select the recommended domain through member
+  `base_url` once its workspace ID is known.
+
+  The schema audit found two independent data-integrity bugs. Null normalization used the
+  *presence* of `enum` to classify every constrained string as non-string, so a legitimate enum,
+  const, or pattern value `"null"` became JSON null. It now tests whether the exact spelling is
+  accepted. Root dereferencing also replaced any schema carrying `$ref`, discarding its 2020-12
+  sibling constraints; only the bare `$ref` + `$defs` root form is expanded now. Qwen's automatic
+  terminal route also rejects a mixed emit-plus-working-tool response as premature instead of
+  accepting an unfinished result. The OpenAI SDK otherwise gives each request ten minutes and
+  retries it twice; this also explains why a nominal per-attempt probe timeout looked ineffective.
+  Responses clients now use one 300-second attempt so the repository's visible
+  retry layer is the sole retry owner. Qwen's documented session-cache header is also sent for
+  `cache_prefix=True`; the vendor disables that cache by default, so the prior adapter silently
+  forfeited it on the long ReAct trajectories where it matters. Focused provider/media tests: 100
+  passed.
+
+- 2026-08-25 — **Qwen session caching became adapter-wide and explicit in both live schema paths.**
+  Alibaba disables Responses session caching by default, so the Qwen descriptor's documented
+  `x-dashscope-session-cache: enable` header now rides every adapter request. Both the direct
+  nine-schema matrix and the two trajectory-compose probes pass `cache_prefix=True`, keeping their
+  intent visible and allowing stable prefixes to receive the vendor's latency and cost benefit.
+
+- 2026-08-25 — **The live schema matrix now measures both Qwen tiers and explicit reasoning
+  effort.** `qwen3.7-plus` joins `qwen3.8-max` through the existing
+  `(provider_name, provider, model)` fixture, so both models traverse all nine real schemas and
+  both real-trajectory composes through the same DashScope adapter. Qwen matrix legs set
+  `reasoning.effort=minimal` explicitly instead of inheriting Alibaba's slower `medium` default;
+  a separate identical `MemoryRecord` request sweeps `none`/`minimal`/`medium` on both models.
+  Development logs are model-specific and now retain elapsed time plus input, cache-read, output,
+  and reasoning token counts, including per-call trajectory measurements.
+
+- 2026-08-25 — **DeepSeek's text-only treatment is a policy decision, and the reason recorded for
+  it was wrong.** The 2026-08-25 entry above states that DeepSeek's Responses API accepts only
+  `deepseek-v4-flash` and that the removed `deepseek-v4-flash-vision-exp` entry "had no vendor
+  source". Both claims are false against the vendor's own documentation, read this session. The
+  Responses guide lists `deepseek-v4-flash / deepseek-v4-pro / deepseek-v4-flash-vision-exp` as
+  supported and says image input is replaced with placeholder text on models other than the vision
+  one; the vision guide documents that model with a full limit set — 600 images, 8192 px per side
+  dropping to 4096 at 15 or more, 32 MiB per image, 48 MiB body, JPEG/PNG/GIF/WebP — and names the
+  Responses API among the endpoints that accept it. The deleted `_LIMITS` values were that source,
+  transcribed correctly.
+  **The code is unchanged and stays unchanged** (`images_accepted=False`), on a human ruling taken
+  the same day: this project declines to depend on a multimodal path its vendor labels
+  experimental, and revisits when DeepSeek ships a non-experimental one. What changes is only the
+  justification, because the two are not interchangeable — "the vendor has no vision model" is a
+  fact a later reader would act on and would be wrong, while "we decline the experimental one" is a
+  decision they can reopen. The standing rule that produced the error is the one already in
+  `feedback_read_provider_docs_before_encoding_rules`: read every relevant page for the vendor, not
+  the one page that happens to be open. The Responses reference alone was read; the vision guide,
+  which is where that vendor documents its image support, was not.
+  **Second correction from the same reading:** `deepseek-v4-pro` is accepted by the Responses
+  endpoint, so it is reachable through this adapter with no new wiring. Every DeepSeek
+  structured-output flag here — `supports_strict_schema`, `strict_schema_formats`,
+  `resolve_refs_in` — was measured on `deepseek-v4-flash` only and is **unprobed on Pro**, which
+  matters because the lead x co-lead grid adopts Pro as a co-lead emitting `ToolReviewVerdict`.
+  Probe before that grid runs.

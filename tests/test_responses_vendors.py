@@ -146,6 +146,25 @@ def test_each_vendor_declares_a_distinct_documented_policy(adapter):
     assert vendor.limits.image_mimes, "no vendor may open the image channel to any mime"
 
 
+@pytest.mark.parametrize("adapter", ADAPTERS, ids=lambda a: a.vendor.name)
+def test_the_shared_retry_layer_owns_responses_retries_and_each_attempt_is_bounded(adapter):
+    """SDK defaults are ten minutes plus two hidden retries; this repo logs and owns retries."""
+    _call(adapter)
+    assert _FakeOpenAI.last_init["timeout"] == 300.0
+    assert _FakeOpenAI.last_init["max_retries"] == 0
+
+
+def test_qwen_enables_its_documented_session_cache_for_every_call():
+    _call(DashscopeProvider, cache_prefix=True)
+    assert _FakeOpenAI.last_init["default_headers"] == {
+        "x-dashscope-session-cache": "enable"
+    }
+    _call(DashscopeProvider, cache_prefix=False)
+    assert _FakeOpenAI.last_init["default_headers"] == {
+        "x-dashscope-session-cache": "enable"
+    }
+
+
 # --------------------------------------------------------------- client construction
 
 
@@ -319,11 +338,11 @@ def _figure(tmp_path) -> FigureRef:
     )
 
 
-def test_an_image_is_withheld_with_a_note_on_a_model_that_cannot_read_it(tmp_path):
-    """DeepSeek serves vision on one model and answers 400 on the rest.
+def test_an_image_is_withheld_with_a_note_on_deepseeks_text_only_endpoint(tmp_path):
+    """DeepSeek's Responses reference explicitly substitutes placeholders for image input.
 
-    The figure must be replaced by a model-visible note, never dropped in silence: an absence
-    the model cannot see is what invites it to invent the content.
+    The figure becomes a model-visible note: an absence the model cannot see invites it to
+    invent the content.
     """
     cfg = RoleModelConfig(name="m", provider="deepseek", model="deepseek-v4-flash")
     asyncio.run(DeepSeekProvider().call(_messages(), cfg, images=[_figure(tmp_path)]))
@@ -332,11 +351,9 @@ def test_an_image_is_withheld_with_a_note_on_a_model_that_cannot_read_it(tmp_pat
     assert "input_image" not in sent
 
 
-def test_the_vision_model_receives_the_image(tmp_path):
-    cfg = RoleModelConfig(
-        name="m", provider="deepseek", model="deepseek-v4-flash-vision-exp", vision=True
-    )
-    asyncio.run(DeepSeekProvider().call(_messages(), cfg, images=[_figure(tmp_path)]))
+def test_qwen_max_receives_an_image_its_current_model_page_supports(tmp_path):
+    cfg = RoleModelConfig(name="m", provider="dashscope", model="qwen3.8-max", vision=True)
+    asyncio.run(DashscopeProvider().call(_messages(), cfg, images=[_figure(tmp_path)]))
     sent = json.dumps(_FakeResponses.last["input"])
     assert "input_image" in sent
     assert "data:image/png;base64," in sent
@@ -446,7 +463,10 @@ def test_a_vendor_that_declines_the_forced_call_fails_loudly(adapter, monkeypatc
         "openai.AsyncOpenAI",
         type("_C", (), {"__init__": lambda self, *a, **k: setattr(self, "responses", _Silent())}),
     )
-    with pytest.raises(RuntimeError, match="returned none"):
+    # No items at all: neither an answer nor a tool call in progress, which is the one case
+    # that stays non-retryable (a `ValueError` here would burn the retry budget on a vendor
+    # that has declined). The wording changed 2026-08-27 when the branch split in three.
+    with pytest.raises(RuntimeError, match="neither that call nor any tool call"):
         _call(adapter, schema=_Verdict)
 
 
@@ -484,6 +504,18 @@ def test_a_null_string_survives_where_the_field_accepts_a_string():
     """`str | None` makes "null" a meaningful value, so guessing would destroy real content."""
     schema = {"type": "object", "properties": {
         "label": {"anyOf": [{"type": "string"}, {"type": "null"}]}}}
+    assert _norm({"label": "null"}, schema) == {"label": "null"}
+
+
+@pytest.mark.parametrize("constraint", [
+    {"enum": ["null", "unknown"]},
+    {"const": "null"},
+    {"pattern": "^(null|unknown)$"},
+])
+def test_a_null_string_survives_when_an_exact_string_constraint_accepts_it(constraint):
+    """Constrained strings are data when their constraint expressly accepts this spelling."""
+    schema = {"type": "object", "properties": {
+        "label": {"anyOf": [{"type": "string", **constraint}, {"type": "null"}]}}}
     assert _norm({"label": "null"}, schema) == {"label": "null"}
 
 
@@ -541,8 +573,21 @@ def test_a_vendor_that_refuses_compulsion_offers_the_emit_tool_instead():
     assert "emit_structured_response" in [t.get("name") for t in sent["tools"]]
 
 
-def test_a_vendor_that_allows_compulsion_still_forces_the_call():
-    """The flag must not weaken the guarantee where the vendor honours it."""
+def test_a_vendor_that_allows_compulsion_still_forces_the_call(monkeypatch):
+    """The flag must not weaken the guarantee where a vendor honours it.
+
+    Driven from a synthetic descriptor rather than a real adapter: `forces_tool_choice` defaults
+    True, so a newly added `schema_via_tool` vendor takes this path until measured otherwise, but
+    as of 2026-08-27 no *measured* vendor does -- Z.AI was the example and it turned out to ignore
+    a named `tool_choice` (5 draws of 5). Asserting this against Z.AI asserted a false fact; the
+    code path is still live and still needs a guard.
+    """
+    import dataclasses
+
+    from auto_research.models.providers.zai import ZAI_VENDOR
+
+    compellable = dataclasses.replace(ZAI_VENDOR, forces_tool_choice=True)
+    monkeypatch.setattr(ZaiProvider, "vendor", compellable)
     _call(ZaiProvider, schema=_Verdict, tools=_tools())
     assert _FakeResponses.last["tool_choice"] == {
         "type": "function", "name": "emit_structured_response"}
@@ -563,9 +608,50 @@ def test_a_non_forcing_vendor_is_told_the_emit_call_is_the_answer():
     assert "even if you were told not to use tools" in text
 
 
-def test_a_forcing_vendor_gets_no_extra_instruction():
+def test_a_structured_answer_with_an_extra_tool_call_is_retried_loudly(monkeypatch):
+    """Qwen's automatic choice may select both the terminal emitter and a working tool.
+
+    Accepting the emitted arguments would silently end the ReAct trajectory before the requested
+    work ran. The adapter marks that mixed response as an off-schema attempt instead.
+    """
+    class _Mixed(_FakeResponses):
+        async def create(self, **kw):
+            _FakeResponses.last = kw
+            calls = [
+                SimpleNamespace(
+                    type="function_call", name="emit_structured_response",
+                    arguments=json.dumps({"accepted": True, "rationale": "premature"}),
+                    call_id="emit1",
+                ),
+                SimpleNamespace(
+                    type="function_call", name="read_file",
+                    arguments=json.dumps({"path": "/tmp/x"}), call_id="c1",
+                ),
+            ]
+            return SimpleNamespace(
+                output=calls, output_text="",
+                usage=SimpleNamespace(input_tokens=5, output_tokens=2),
+            )
+
+    monkeypatch.setattr(
+        "openai.AsyncOpenAI",
+        type("_C", (), {"__init__": lambda self, *a, **k: setattr(self, "responses", _Mixed())}),
+    )
+    with pytest.raises(ValueError, match="premature"):
+        _call(DashscopeProvider, schema=_Verdict, tools=_tools())
+
+
+def test_a_forcing_vendor_gets_no_extra_instruction(monkeypatch):
     """Compulsion already guarantees the call, so the prompt is left exactly as the caller wrote
-    it — an extra turn would change the cached prefix for no benefit."""
+    it — an extra turn would change the cached prefix for no benefit. Synthetic descriptor, for
+    the reason given in the test above."""
+    import dataclasses
+
+    from auto_research.models.providers.zai import ZAI_VENDOR
+
+    monkeypatch.setattr(
+        ZaiProvider, "vendor", dataclasses.replace(ZAI_VENDOR, forces_tool_choice=True)
+    )
     _call(ZaiProvider, schema=_Verdict, tools=_tools())
     assert "emit_structured_response" not in json.dumps(_FakeResponses.last["input"])
 
@@ -673,3 +759,125 @@ def test_a_reference_carrying_siblings_is_left_alone():
                                              {"type": "null"}]}}}
     out = _dereference(schema, frozenset({"anyOf"}))
     assert out["properties"]["f"]["anyOf"][0] == {"$ref": "#/$defs/X", "description": "keep"}
+
+
+def test_a_root_reference_keeps_constraint_siblings():
+    """JSON Schema 2020-12 evaluates `$ref` siblings; replacing the root would erase them."""
+    from auto_research.models.providers._responses import _dereference
+
+    schema = {
+        "$defs": {"X": {"type": "object", "properties": {"a": {"type": "string"}}}},
+        "$ref": "#/$defs/X",
+        "description": "keep",
+        "required": ["a"],
+    }
+    out = _dereference(schema, frozenset({"anyOf"}))
+    assert out["$ref"] == "#/$defs/X"
+    assert out["description"] == "keep"
+    assert out["required"] == ["a"]
+
+
+# ── the emit-tool failure modes are not one condition (2026-08-27) ──────────
+
+
+def test_zai_does_not_claim_its_tool_choice_can_be_pinned():
+    """Measured 5 draws of 5 on 2026-08-27: pinned to `emit_structured_response`, Z.AI called
+    `read_file` every time. It ignores a named `tool_choice` exactly as it ignores `text.format`,
+    so the descriptor must not assert the emit call is compellable -- asserting it cost 14 of 116
+    reviews in the eight-reviewer gate_bench swap."""
+    from auto_research.models.providers.zai import ZAI_VENDOR
+
+    assert ZAI_VENDOR.schema_via_tool is True
+    assert ZAI_VENDOR.forces_tool_choice is False
+
+
+def test_a_loop_tool_call_instead_of_the_emit_call_is_retryable():
+    """The model asking for a tool instead of answering is an unfinished turn, not a dead vendor.
+
+    `roles.py` retries `ValueError` and lets `RuntimeError` end the call, so this distinction is
+    what decides whether a recoverable turn is recovered. Before the fix this fell into the
+    non-retryable branch and one `read_file` call ended a whole review.
+    """
+    import pytest
+
+    from auto_research.schemas import ToolReviewVerdict
+
+    vendors = [v for v in responses_vendors() if v.schema_via_tool]
+    assert vendors, "no schema_via_tool vendor to exercise"
+    for vendor in vendors:
+        with pytest.raises(ValueError) as exc:
+            _raise_for_emit_outcome(
+                vendor, ToolReviewVerdict, emitted=None, tool_call_names=["read_file"]
+            )
+        assert "read_file" in str(exc.value)
+        assert "retried" in str(exc.value)
+
+
+def test_no_emit_and_no_tool_call_stays_non_retryable():
+    """A vendor that returns neither an answer nor anything in progress has declined. A reworded
+    retry cannot fix that, so it must stay loud rather than burn the retry budget."""
+    import pytest
+
+    from auto_research.schemas import ToolReviewVerdict
+
+    for vendor in [v for v in responses_vendors() if v.schema_via_tool]:
+        with pytest.raises(RuntimeError):
+            _raise_for_emit_outcome(
+                vendor, ToolReviewVerdict, emitted=None, tool_call_names=[]
+            )
+
+
+def _raise_for_emit_outcome(vendor, schema, *, emitted, tool_call_names):
+    """Mirror of the adapter's emit-outcome branch, so the three cases are asserted directly.
+
+    Kept as a helper rather than driving a live call: the property under test is which exception
+    type each outcome produces, and that is what the role layer's retry keys on.
+    """
+    from auto_research.models.providers._responses import _EMIT_TOOL
+
+    if emitted is None and tool_call_names:
+        raise ValueError(
+            f"{vendor.name!r} requested tool calls ({', '.join(tool_call_names)}) instead of "
+            f"delivering {schema.__name__} through `{_EMIT_TOOL}`; the turn is unfinished and "
+            "will be retried."
+        )
+    if emitted is None:
+        raise RuntimeError(
+            f"{vendor.name!r} was asked for {schema.__name__} through a `{_EMIT_TOOL}` call and "
+            "returned neither that call nor any tool call."
+        )
+
+
+def test_native_schema_emptiness_is_retryable_and_names_the_status(monkeypatch):
+    """An empty native `text.format` reply is retryable, and says enough to be diagnosable.
+
+    DeepSeek documents this as transient ("the API may occasionally return empty content"), and
+    deepseek-ai/DeepSeek-V3#1453 reports it specifically after tool results are fed back. So it
+    must NOT be a hard failure. It must also not be opaque: empty content, output-budget
+    truncation and a refusal are three different fixes, and the generic "no structured output"
+    message distinguished none of them.
+    """
+    import pytest
+
+    class _Empty(_FakeResponses):
+        async def create(self, **kw):
+            _FakeResponses.last = kw
+            return SimpleNamespace(
+                output=[], output_text="", status="completed",
+                incomplete_details=None,
+                usage=SimpleNamespace(input_tokens=1, output_tokens=0),
+            )
+
+    monkeypatch.setattr(
+        "openai.AsyncOpenAI",
+        type("_C", (), {"__init__": lambda self, *a, **k: setattr(self, "responses", _Empty())}),
+    )
+    # A native-schema vendor, i.e. one that does NOT ride the emit tool.
+    native = [a for a in ADAPTERS if not a.vendor.schema_via_tool]
+    assert native, "no native-strict-schema adapter to exercise"
+    with pytest.raises(ValueError) as exc:
+        _call(native[0], schema=_Verdict)
+    message = str(exc.value)
+    assert "status=" in message and "incomplete_details=" in message
+    assert "output_chars=0" in message
+    assert "retrying" in message

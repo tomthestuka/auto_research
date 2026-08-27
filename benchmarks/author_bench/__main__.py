@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -75,6 +76,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--keep-clones", action="store_true", help="leave trial clones on disk")
     parser.add_argument("--check", action="store_true",
                         help="run the preflight (env, base ref, validation data, brief) and exit")
+    parser.add_argument("--detach", action="store_true",
+                        help="spawn the batch orphaned (double-fork) and return immediately, so it "
+                             "survives this shell, an SSH drop and a VSCode logout. Prints the "
+                             "output directory and the --status/--resume commands for it")
+    parser.add_argument("--resume", metavar="DIR", type=Path, default=None,
+                        help="continue an interrupted batch in DIR: re-runs exactly the (leg, "
+                             "trial) pairs with no record yet, or whose record is an "
+                             "infrastructure error, and leaves every completed measurement alone")
+    parser.add_argument("--status", metavar="DIR", type=Path, default=None,
+                        help="print a batch's progress and whether it is still alive; costs "
+                             "nothing and never touches the run")
     parser.add_argument("--rescore", type=Path, nargs="+", metavar="DIR",
                         help="re-render finished batches from their records; costs nothing. Several "
                              "directories merge into one report, a later directory's trial "
@@ -143,6 +155,64 @@ def probe_leg_vendor(leg: Leg) -> str | None:
                     f"{leg.model} at {where} refused on every configured key "
                     f"({', '.join(tried)}): {exc}"
                 )
+
+
+def probe_chat_member(provider_name: str, model: str) -> str | None:
+    """One trivial call to a vendor a leg pins as its lead or co-lead.
+
+    The chat analogue of :func:`probe_leg_vendor`, and it goes through ``ModelHandle`` rather than
+    a raw SDK client, so it exercises the layer the run exercises -- key resolution, rotation and
+    the retry policy included. A vendor that answers here is one whose account, entitlement and
+    balance are good for the roles the grid pins it to.
+
+    Returns a problem string, or ``None`` when the member is good to run.
+    """
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    from auto_research.models.providers import provider_for
+    from auto_research.models.types import ModelHandle, ModelMessage, RoleModelConfig
+
+    member = RoleModelConfig(
+        name=f"preflight_{provider_name}",
+        provider=provider_name,
+        model=model,
+        vision=False,
+        parameters=(
+            {"max_tokens": 16}
+            if provider_name == "anthropic"
+            else {"max_output_tokens": 16}
+        ),
+    )
+    handle = ModelHandle(
+        role="preflight", config=member, provider=provider_for(provider_name)
+    )
+    # On its own thread with its own loop, because `preflight` is a blocking function called from
+    # inside the batch's event loop: a bare `asyncio.run` here raises "cannot be called from a
+    # running event loop", which the except below would then report as five vendor refusals,
+    # hiding whatever the vendors actually said. `probe_leg_vendor` dodges this by using the
+    # synchronous SDK client; this probe cannot, because going through `ModelHandle` is the whole
+    # point (it is what makes key rotation apply), and `ModelHandle.call` is async.
+    def _call() -> None:
+        # Not `asyncio.run`: it closes the loop the instant the coroutine returns, while the
+        # adapter's per-call SDK client is still holding an httpx transport whose finalizer then
+        # fires against a dead loop and prints an "Event loop is closed" traceback. Harmless, but
+        # it lands in a log a human reads days later looking for the reason a batch died. Draining
+        # async generators and yielding once before closing lets those transports shut down first.
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(handle.call([ModelMessage(role="user", content="ok")]))
+            loop.run_until_complete(asyncio.sleep(0))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            loop.close()
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(_call).result()
+    except Exception as exc:  # noqa: BLE001 — the vendor's own message names the fix
+        return f"refused: {exc}"
+    return None
 
 
 def preflight(toolkit_root: Path, base_ref: str, legs: list[Leg]) -> list[str]:
@@ -225,6 +295,25 @@ def preflight(toolkit_root: Path, base_ref: str, legs: list[Leg]) -> list[str]:
         if problem:
             problems.append(f"leg {leg.slug}: {problem}")
 
+    # The same argument for the *chat* vendors a leg pins. `probe_leg_vendor` covers the author
+    # alone, which was sufficient while every lead and reviewer came from the configured roles and
+    # so from an account the run was already using. The lead x co-lead grid breaks that assumption:
+    # a cell can pin a lead and a reviewer from two vendors the author never touches, and a dead
+    # key there surfaces mid-trial, after the author has already been paid for. Probed once per
+    # distinct (provider, model) rather than once per leg, since twenty cells share four vendors.
+    for provider_name, model in sorted({
+        pair
+        for leg in legs
+        for pair in (
+            (leg.lead_provider, leg.lead_model),
+            (leg.colead_provider, leg.colead_model),
+        )
+        if pair[0] and pair[1]
+    }):
+        problem = probe_chat_member(provider_name, model)
+        if problem:
+            problems.append(f"pinned {provider_name}/{model}: {problem}")
+
     # A coder session is a Claude Agent SDK subprocess, so the CLI it drives has to resolve before
     # K trials discover its absence one dead session at a time. The SDK is asked where its own CLI
     # is rather than probing PATH: recent versions ship a bundled binary that ``which`` cannot see,
@@ -238,15 +327,189 @@ def preflight(toolkit_root: Path, base_ref: str, legs: list[Leg]) -> list[str]:
     return problems
 
 
+#: What a batch writes about itself at launch, so `--resume` and `--status` need nothing beyond
+#: the directory. A resume that has to be handed the original `--legs` and `--k` again is a resume
+#: that gets them wrong at 3am, and a twenty-leg grid is exactly where that costs a day.
+BATCH_PLAN = "batch.json"
+BATCH_PID = "batch.pid"
+BATCH_LOG = "batch.log"
+
+
+def _alive(pid: int) -> bool:
+    """Whether a recorded batch pid is still running. A pid we may not signal is still alive."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def missing_indices(out_dir: Path, plan: dict) -> dict[str, list[int]]:
+    """The (leg, trial) pairs a resume must run: never recorded, or recorded as an error.
+
+    An ``error`` record is an infrastructure failure rather than a terminal state -- ``score.py``
+    partitions trials by terminal state and ``error`` is not one of them -- so a resume re-runs it.
+    A committed or honestly-failed trial IS a measurement and is never re-run, which is what keeps
+    a resume from quietly changing the batch it repairs.
+
+    Per leg, because a twenty-leg batch dies with different gaps in each and a single global
+    ``--only`` list cannot express that: it would re-run trial 3 of every leg named, including the
+    legs whose trial 3 already succeeded.
+    """
+    from benchmarks.author_bench.score import load_records
+
+    try:
+        records = load_records(Path(out_dir))
+    except FileNotFoundError:
+        records = []
+    usable: dict[str, set[int]] = {}
+    for record in records:
+        if record.get("status") != "error":
+            usable.setdefault(record.get("leg") or "", set()).add(record["trial"])
+    out: dict[str, list[int]] = {}
+    for slug, k in (plan.get("trials_per_leg") or {}).items():
+        gaps = [i for i in range(1, int(k) + 1) if i not in usable.get(slug, set())]
+        if gaps:
+            out[slug] = gaps
+    return out
+
+
+def batch_status(out_dir: Path) -> str:
+    """A batch's progress, read from what it has already written. Never touches the run.
+
+    Reads the per-trial records rather than the report: the report is written once at the very
+    end, so for the whole two days of a long batch the records are the only truth on disk.
+    """
+    from benchmarks.author_bench.score import load_records
+
+    out_dir = Path(out_dir)
+    plan_path = out_dir / BATCH_PLAN
+    if not plan_path.exists():
+        return f"{out_dir}: no {BATCH_PLAN}; not an author_bench batch directory"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    try:
+        records = load_records(out_dir)
+    except FileNotFoundError:
+        records = []
+
+    done: dict[str, list[dict]] = {}
+    for record in records:
+        done.setdefault(record.get("leg") or "", []).append(record)
+
+    lines = [
+        f"batch {out_dir.name}   base {plan.get('base_ref')}   started {plan.get('started')}"
+    ]
+    pid_path = out_dir / BATCH_PID
+    pid = int(pid_path.read_text(encoding="utf-8").strip() or 0) if pid_path.exists() else 0
+    if pid:
+        state = "ALIVE" if _alive(pid) else "NOT RUNNING"
+        lines.append(f"pid {pid}: {state}   log {out_dir / BATCH_LOG}")
+    else:
+        lines.append("no pid recorded (foreground run, or launched before --detach existed)")
+
+    expected = plan.get("trials_per_leg") or {}
+    total_expected = sum(int(v) for v in expected.values())
+    total_done = sum(len(v) for v in done.values())
+    cost = sum(r.get("cost_usd", 0.0) for r in records)
+    lines += [
+        f"trials {total_done}/{total_expected}   spend ${cost:.2f}",
+        "",
+        f"{'leg':42} {'done':>7}  {'terminal states':<32} {'US$':>8}",
+    ]
+    for slug in plan.get("legs", []):
+        rows = done.get(slug, [])
+        states: dict[str, int] = {}
+        for record in rows:
+            key = record.get("status") or "?"
+            states[key] = states.get(key, 0) + 1
+        summary = ", ".join(f"{k} {v}" for k, v in sorted(states.items())) or "-"
+        leg_cost = sum(r.get("cost_usd", 0.0) for r in rows)
+        lines.append(
+            f"{slug:42} {len(rows):>3}/{int(expected.get(slug, 0)):<3}  {summary:<32} {leg_cost:>8.2f}"
+        )
+
+    gaps = missing_indices(out_dir, plan)
+    if gaps:
+        outstanding = sum(len(v) for v in gaps.values())
+        lines += [
+            "",
+            f"{outstanding} trial(s) outstanding; continue with:",
+            f"  python -m benchmarks.author_bench --resume {out_dir}",
+        ]
+    else:
+        lines += ["", "every planned trial has a record"]
+    return "\n".join(lines)
+
+
+def _detach(args: argparse.Namespace, out_dir: Path) -> int:
+    """Relaunch this same command orphaned, so a two-day batch outlives every session above it.
+
+    Reuses ``graph.detached._spawn_orphaned`` rather than a local ``nohup``: that double fork
+    exists because ``start_new_session`` alone leaves the parent->child ``/proc`` link a graceful
+    VSCode or Jupyter teardown walks when it kills process trees, which killed a live detached run
+    once already (2026-07-16). Reinventing it here would reintroduce exactly that bug.
+    """
+    from auto_research.graph.detached import _spawn_orphaned
+
+    argv = [sys.executable, "-m", "benchmarks.author_bench"]
+    if args.resume:
+        argv += ["--resume", str(out_dir)]
+    else:
+        argv += ["--out", str(out_dir), "--base-ref", args.base_ref]
+        if args.legs:
+            argv += ["--legs", args.legs]
+        if args.k is not None:
+            argv += ["--k", str(args.k)]
+    argv += ["--concurrency", str(args.concurrency), "--chatter", str(args.chatter)]
+    if args.keep_clones:
+        argv.append("--keep-clones")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pid = _spawn_orphaned(argv, out_dir / BATCH_LOG)
+    (out_dir / BATCH_PID).write_text(f"{pid}\n", encoding="utf-8")
+    print(f"detached: pid {pid}")
+    print(f"  out    {out_dir}")
+    print(f"  log    {out_dir / BATCH_LOG}")
+    print(f"  status python -m benchmarks.author_bench --status {out_dir}")
+    print(f"  resume python -m benchmarks.author_bench --resume {out_dir}")
+    return 0
+
+
 async def _run(args: argparse.Namespace) -> int:
     toolkit_root = _toolkit_root()
-    legs = resolve_legs(args.legs)
+
+    # A resume reads the batch's own recorded plan, so it continues exactly what was launched
+    # rather than whatever flags happen to be typed the second time.
+    resumed_plan: dict | None = None
+    if args.resume:
+        plan_path = Path(args.resume) / BATCH_PLAN
+        if not plan_path.exists():
+            print(f"PREFLIGHT: {args.resume} has no {BATCH_PLAN}; nothing to resume")
+            return 2
+        resumed_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        args.base_ref = resumed_plan.get("base_ref", args.base_ref)
+        from benchmarks.author_bench.legs import BY_SLUG
+
+        legs = [BY_SLUG[slug] for slug in resumed_plan["legs"] if slug in BY_SLUG]
+    else:
+        legs = resolve_legs(args.legs)
+
     problems = preflight(toolkit_root, args.base_ref, legs)
     if problems:
         for problem in problems:
             print(f"PREFLIGHT: {problem}")
         return 2
-    plan = [(leg, trial_indices(args, leg)) for leg in legs]
+
+    if resumed_plan is not None:
+        gaps = missing_indices(Path(args.resume), resumed_plan)
+        plan = [(leg, gaps[leg.slug]) for leg in legs if gaps.get(leg.slug)]
+        if not plan:
+            print("every planned trial already has a record; nothing to resume")
+            return 0
+    else:
+        plan = [(leg, trial_indices(args, leg)) for leg in legs]
     total = sum(len(idx) for _, idx in plan)
     print(f"preflight clean: {len(plan)} leg(s), {total} trials, base {args.base_ref}")
     share_preview = max(1, -(-args.concurrency // max(1, len(plan))))
@@ -259,9 +522,35 @@ async def _run(args: argparse.Namespace) -> int:
     if args.check:
         return 0
 
+    out_dir = (
+        Path(args.resume) if args.resume
+        else (args.out or OUT_ROOT / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"))
+    )
+    # Detaching AFTER preflight on purpose: a batch that would have failed its checks should say so
+    # on the terminal that launched it, not bury the reason in a log nobody reads for two days.
+    if args.detach:
+        return _detach(args, out_dir)
+
     stamps = collect_stamps(toolkit_root, args.base_ref)
-    out_dir = args.out or OUT_ROOT / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     out_dir.mkdir(parents=True, exist_ok=True)
+    # The batch records its own plan first, so --status and --resume work from the moment it
+    # starts rather than only once something has finished.
+    if resumed_plan is None:
+        (out_dir / BATCH_PLAN).write_text(
+            json.dumps(
+                {
+                    "legs": [leg.slug for leg, _ in plan],
+                    "trials_per_leg": {leg.slug: len(idx) for leg, idx in plan},
+                    "base_ref": args.base_ref,
+                    "concurrency": args.concurrency,
+                    "started": datetime.now(UTC).isoformat(timespec="seconds"),
+                },
+                indent=1,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    (out_dir / BATCH_PID).write_text(f"{os.getpid()}\n", encoding="utf-8")
     jsonl_path = out_dir / "records.jsonl"
     (out_dir / "brief.json").write_text(
         json.dumps(load_brief().model_dump(mode="json"), indent=1, sort_keys=True) + "\n",
@@ -326,7 +615,11 @@ async def _run(args: argparse.Namespace) -> int:
 
     await asyncio.gather(*(asyncio.create_task(run_leg(leg, idx)) for leg, idx in plan))
 
-    report = build_report(records, stamps)
+    # Rendered from every record on disk, not from this process's own list: a resumed batch would
+    # otherwise report only the trials it happened to re-run and silently lose the first sitting.
+    from benchmarks.author_bench.score import load_records
+
+    report = build_report(load_records(out_dir), stamps)
     (out_dir / "report.md").write_text(report, encoding="utf-8")
     print("\n" + report)
     print(f"wrote {jsonl_path} and {out_dir / 'report.md'}")
@@ -356,6 +649,9 @@ def rescore(run_dirs: list[Path]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.status:
+        print(batch_status(args.status))
+        return 0
     if args.rescore:
         return rescore(args.rescore)
     return asyncio.run(_run(args))

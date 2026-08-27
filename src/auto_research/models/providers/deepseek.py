@@ -7,14 +7,15 @@ below, which the vendor marks "Not supported" outright.
 
 **Live-probed 2026-08-24**, because a documentation table states what is *accepted* and not what
 is *honoured* (the Z.AI adapter beside this one is exactly that failure). All four request shapes
-returned HTTP 200 on both models: a plain call, ``text.format`` with ``strict: true``, a function
-tool with ``tool_choice="auto"``, and the terminal-compose shape of tools plus schema plus
+returned HTTP 200 in the completed probe: a plain call, ``text.format`` with ``strict: true``, a
+function tool with ``tool_choice="auto"``, and the terminal-compose shape of tools plus schema plus
 ``tool_choice="none"``. The strict-schema reply carried exactly the declared keys, bare, with no
 fence, so the constraint is real rather than advisory.
 
-Vision is served on ``deepseek-v4-flash-vision-exp`` only; other models answer 400. The vendor
-states that model is "on par with the official DeepSeek-V4-Flash" on pure-text capability and it
-is priced identically, so it is the member to configure for any role that may see a figure.
+The Responses endpoint is text-only. Its API reference lists ``deepseek-v4-flash`` as the only
+accepted model and states that image/file inputs are replaced with placeholder text. The adapter
+therefore withholds images with a model-visible note; this provider is eligible for text-only chat
+roles and the coder harness, rather than figure-reviewing analyst/reviewer roles.
 """
 
 from auto_research.models.providers._media import MediaLimits
@@ -25,23 +26,12 @@ from auto_research.models.providers._responses import (
 )
 
 
-# DeepSeek's documented media limits (api-docs.deepseek.com/guides/vision). It is the only vendor
-# besides Anthropic to publish a "many images ⇒ stricter dimension" rule, so unlike OpenAI and
-# Google it gets a real `strict_block_threshold`. Document input is not documented at all, so the
-# document channel stays closed rather than being guessed at.
+# DeepSeek's Responses reference explicitly says image and file inputs are unsupported and image
+# parts are replaced with placeholder text. Withhold them here so the model sees an honest note
+# instead of silently reasoning over pixels it never received.
 _LIMITS = MediaLimits(
-    # "Supported image formats: JPEG, PNG, GIF, and WebP".
     image_mimes=frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"}),
-    # "Images per request: 600 maximum".
-    max_images=600,
-    # "Dimensions: 8192 px per side (4096 px when >= 15 images)".
-    max_edge=8192,
-    strict_block_threshold=15,
-    strict_max_edge=4096,
-    # "Single image (base64/URL): Max 32 MiB".
-    max_image_bytes=32 * 1024 * 1024,
-    # "Request body: 48 MiB total".
-    max_request_bytes=48 * 1024 * 1024,
+    images_accepted=False,
 )
 
 DEEPSEEK_VENDOR = ResponsesVendor(
@@ -81,8 +71,6 @@ DEEPSEEK_VENDOR = ResponsesVendor(
     # server-side tool-search tool is one of the ignored types, so deferred loading would leave
     # the model unable to resolve a deferred reference. Every tool is therefore declared resident.
     supports_tool_search=False,
-    # "Only vision models (deepseek-v4-flash-vision-exp) accept images; other models return a 400".
-    vision_models=frozenset({"deepseek-v4-flash-vision-exp"}),
 )
 
 

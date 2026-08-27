@@ -251,6 +251,14 @@ _NO_TOOL_SEARCH = ToolSearchConfig(enabled=False, anthropic_tool="", openai_tool
 """Stand-in for a vendor that runs no server-side tool-search tool. Every tool is then declared
 resident, which is what ``defer_loading`` costs when nobody can resolve a deferred reference."""
 
+_REQUEST_TIMEOUT_S = 300.0
+"""Wall-clock ceiling for one Responses HTTP attempt.
+
+The official SDK default is ten minutes and it retries timeouts twice. This project owns retries
+above the provider layer, with visible cooldown logging, so the client gets one bounded attempt
+and the shared retry policy decides what happens next.
+"""
+
 
 @dataclass(frozen=True)
 class ResponsesVendor:
@@ -280,6 +288,9 @@ class ResponsesVendor:
     """Whether ``prompt_cache_key`` is accepted. Prefix caching is automatic on this API either
     way, so a vendor that rejects the parameter loses only the cache-routing hint."""
 
+    cache_headers: tuple[tuple[str, str], ...] = ()
+    """Vendor headers sent on every request, such as an opt-in session-cache header."""
+
     supports_strict_schema: bool = True
     """Whether ``text.format`` with ``strict: true`` actually constrains the output. A vendor may
     accept the parameter and ignore it, which is worse than rejecting it: the call succeeds and
@@ -294,14 +305,14 @@ class ResponsesVendor:
     vendor ignores, so it is stripped before sending."""
 
     schema_via_tool: bool = False
-    """Whether a structured answer is obtained as **forced tool-call arguments** rather than
+    """Whether a structured answer is obtained as terminal tool-call arguments rather than
     through ``text.format``.
 
     This is the mechanism a coding harness already relies on: Claude Code's and Codex's own
     file-editing tools are JSON-Schema-parameterised functions, so a vendor that works inside
     those harnesses handles schema-shaped tool arguments even when its structured-output path is
-    a no-op. Declaring one tool whose parameters *are* the schema and forcing ``tool_choice``
-    onto it therefore reaches the same guarantee by the route the vendor actually supports.
+    a no-op. Declaring one tool whose parameters *are* the schema therefore uses the route the
+    vendor actually supports; :attr:`forces_tool_choice` records whether that call can be pinned.
     Live-verified on Z.AI 2026-08-24, on both dialects it publishes, with the real
     ``ToolReviewVerdict``.
 
@@ -450,7 +461,13 @@ class ResponsesProvider:
         # otherwise, which is the same resolution the coder harness uses — a run must not
         # authenticate two of its own actors differently.
         key, _slot = resolve_key(vendor.name, config.key_env or vendor.key_env)
-        client = AsyncOpenAI(api_key=key or None, base_url=vendor.endpoint_for(config))
+        client = AsyncOpenAI(
+            api_key=key or None,
+            base_url=vendor.endpoint_for(config),
+            timeout=_REQUEST_TIMEOUT_S,
+            max_retries=0,
+            default_headers=dict(vendor.cache_headers) or None,
+        )
 
         # ONE request, built from whatever the caller gave us. `schema` and `tools` are
         # independent: declaring both is what lets the terminal compose keep its tool
@@ -591,17 +608,63 @@ class ResponsesProvider:
         if schema is None:
             parsed = None
         elif emit_tool is not None:
-            # A forced call is structurally guaranteed, but a vendor that declined to make one
-            # must not read as "no structured answer" indistinguishable from a text reply.
+            # Three outcomes, and they are NOT one condition. The distinction is which exception
+            # type: the role layer retries `ValueError` and lets `RuntimeError` end the call
+            # (`roles.py`, "shape problems are retryable; everything else propagates"), so
+            # choosing the wrong one either kills a recoverable turn or loops on a dead one.
+            if emitted is None and tool_calls:
+                # The model is still working: it asked for a loop tool instead of answering. That
+                # is a turn to continue, not a broken vendor — the same "premature" condition as
+                # emitting alongside a tool call, and retryable for the same reason.
+                #
+                # This branch exists because Z.AI ignores a named `tool_choice` (measured 5/5,
+                # 2026-08-27; see `zai.py`). It previously fell into the RuntimeError below, whose
+                # non-retryability then ended 14 of 116 reviews in the gate_bench swap.
+                names = ", ".join(call.name for call in tool_calls)
+                raise ValueError(
+                    f"{vendor.name!r} requested tool calls ({names}) instead of delivering "
+                    f"{schema.__name__} through `{_EMIT_TOOL}`; the turn is unfinished and will "
+                    "be retried."
+                )
             if emitted is None:
+                # No answer and nothing pending: the vendor declined outright. Not a shape problem
+                # a reworded retry can fix, so it stays non-retryable and loud.
                 raise RuntimeError(
-                    f"{vendor.name!r} was asked for {schema.__name__} through a forced "
-                    f"`{_EMIT_TOOL}` call and returned none, so there is no structured answer "
-                    "to parse."
+                    f"{vendor.name!r} was asked for {schema.__name__} through a "
+                    f"`{_EMIT_TOOL}` call and returned neither that call nor any tool call, so "
+                    "there is no structured answer to parse and nothing in progress."
+                )
+            if tool_calls:
+                names = ", ".join(call.name for call in tool_calls)
+                raise ValueError(
+                    f"{vendor.name!r} returned a structured answer while also requesting "
+                    f"tool calls ({names}); the answer is premature and will be retried."
                 )
             parsed = emitted
         else:
             parsed = loads_first_json_object(text)
+            if parsed is None:
+                # Native `text.format` came back with nothing parseable. Retryable (ValueError, so
+                # the role layer's bounded structured retry gets it), because for at least one
+                # vendor this is a documented TRANSIENT defect rather than a wiring fault:
+                # DeepSeek's JSON-output guide states "the API may occasionally return empty
+                # content. We are actively working on optimizing this issue"
+                # (api-docs.deepseek.com/guides/json_mode), and deepseek-ai/DeepSeek-V3#1453
+                # reports `deepseek-v4-pro` returning an empty response specifically after tool
+                # results are fed back — the long-trajectory shape, which is why this hit 25 per
+                # cent of authoring reviews and 2 per cent of the much shorter gate reviews.
+                #
+                # The status is included because without it the failure is indistinguishable
+                # between empty content, output-budget truncation, and a refusal, which are three
+                # different fixes. Community guidance for this vendor is explicitly to log
+                # `finish_reason` alongside a bounded retry rather than to retry blind.
+                status = getattr(response, "status", None)
+                incomplete = getattr(response, "incomplete_details", None)
+                raise ValueError(
+                    f"{vendor.name!r} returned no parseable {schema.__name__} from native "
+                    f"`text.format` (status={status!r}, incomplete_details={incomplete!r}, "
+                    f"output_chars={len(text)}); retrying."
+                )
         return _response(
             content=text,
             parsed=parsed,
@@ -734,20 +797,34 @@ _NULL_STRINGS = frozenset({"null", "none"})
 """Literal strings a model may write where it means JSON ``null``."""
 
 
-def _accepts_a_plain_string(branch: Any) -> bool:
-    """Whether a schema branch would accept an arbitrary string as a meaningful value.
+def _accepts_null_spelling(branch: Any, value: str) -> bool:
+    """Whether a string branch accepts this exact literal as meaningful content.
 
-    A ``format``ed or enumerated string branch does not: ``{"type": "string", "format": "date"}``
-    describes a date, and the literal ``"null"`` is no more a date than it is a number. Treating
-    every ``string`` branch as plain was the first version's bug, and it skipped exactly the live
-    case this function exists for.
+    Exact-value constraints matter here: an enum containing ``"null"`` expressly preserves that
+    string, while a date-format branch rejects it. Unknown formats and malformed regular
+    expressions preserve content because their validation semantics are application-defined.
     """
-    return (
-        isinstance(branch, Mapping)
-        and branch.get("type") == "string"
-        and "format" not in branch
-        and "enum" not in branch
-    )
+    if not isinstance(branch, Mapping) or branch.get("type") != "string":
+        return False
+    if "const" in branch and branch["const"] != value:
+        return False
+    enum = branch.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        return False
+    if isinstance(branch.get("minLength"), int) and len(value) < branch["minLength"]:
+        return False
+    if isinstance(branch.get("maxLength"), int) and len(value) > branch["maxLength"]:
+        return False
+    pattern = branch.get("pattern")
+    if isinstance(pattern, str):
+        try:
+            if re.search(pattern, value) is None:
+                return False
+        except re.error:
+            return True
+    if branch.get("format") in _STRICT_SCHEMA_FORMATS:
+        return False
+    return True
 
 
 def _resolve(schema: Any, defs: Mapping[str, Any]) -> Any:
@@ -771,7 +848,7 @@ def _normalise_null_strings(
     rather than an obvious break.
 
     **Why it is safe.** The coercion applies only where the field's schema accepts null *and* no
-    branch of it accepts a plain string. For ``date | None`` or ``float | None`` the string
+    branch accepts that exact spelling. For ``date | None`` or ``float | None`` the string
     ``"null"`` cannot be a legitimate value, so reading it as null is the only interpretation
     available. For ``str | None`` it is left exactly as written, because there the string is
     meaningful and guessing would destroy real content.
@@ -791,7 +868,7 @@ def _normalise_null_strings(
         )
         if (
             accepts_null
-            and not any(_accepts_a_plain_string(b) for b in resolved)
+            and not any(_accepts_null_spelling(b, value) for b in resolved)
             and value.strip().lower() in _NULL_STRINGS
         ):
             return None
@@ -841,10 +918,10 @@ def _dereference(schema: dict[str, Any], positions: frozenset[str]) -> dict[str,
         return schema
     defs = schema.get("$defs", {})
     root = schema
-    if "$ref" in schema:
+    if set(schema) - {"$defs"} == {"$ref"}:
         # Pydantic puts `$defs` and `$ref` together at the root of a self-referencing model, so a
-        # "only key is $ref" test never fires there and the schema would collapse to a bare
-        # pointer carrying no content at all.
+        # `$ref` plus `$defs` is the bare-root form. Other siblings are constraints in JSON
+        # Schema 2020-12 and stay attached to the reference.
         name = str(schema["$ref"]).rsplit("/", 1)[-1]
         if name in defs:
             root = deepcopy(defs[name])

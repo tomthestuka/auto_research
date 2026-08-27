@@ -57,3 +57,49 @@ roles:
         parameters:
           max_tokens: 21000
           thinking: {type: adaptive}
+      # ── Added 2026-08-26: the three Responses-dialect vendors ──────────────
+      # The lead x co-lead grid (papers/FANGZ DOCS §8.5) found reviewer identity to be the only
+      # axis that moves review outcomes, with GPT rejecting 20/20 first submissions against 0-7%
+      # for these three. That grid cannot say whether GPT catches more or over-rejects, because
+      # every cell reviews its own authoring session and no two reviewers ever see the same code.
+      # This roster is where that is settled: one fixed corpus, planted defects, matched controls.
+      #
+      # Prices are omitted where litellm carries the model (checked 2026-08-26: it prices
+      # `qwen3.8-max` and `deepseek-v4-pro`, and returns a zero-rate config stub for `glm-5.3`),
+      # since a hand-copied rate that shadows a maintained one is a liability.
+      #
+      # `reasoning: {effort: high}` and `max_output_tokens: 16384` mirror the OpenAI members, so a
+      # swap compares models rather than configurations. This review is text-only (the harness
+      # sends no images or documents), so the media flags are capability declarations rather than
+      # functional requirements.
+      - name: glm_5_3
+        provider: zai
+        model: glm-5.3
+        vision: true
+        documents: false
+        priceMTk: {input: 1.4, output: 4.4, cache_read: 0.26}   # Z.AI's own page; litellm has no entry
+        parameters:
+          max_output_tokens: 16384
+          reasoning: {effort: high}
+      - name: qwen3_8_max
+        provider: dashscope
+        model: qwen3.8-max
+        vision: true
+        documents: false
+        parameters:
+          max_output_tokens: 16384
+          reasoning: {effort: high}
+      # DeepSeek is declared text-only by the standing policy of 2026-08-25 (its only multimodal
+      # model is experimental and this project declines it), not by absent vendor capability.
+      # NOTE: in the grid this member failed 5 of 20 reviews with "provider returned no structured
+      # output for ToolReviewVerdict" -- a 25 per cent hard failure on long ReAct trajectories that
+      # a nine-schema probe on short conversations did not reveal. A gate_bench review is a shorter
+      # exchange, so it may not recur here; if it does, its n is what suffers and the run must say so.
+      - name: deepseek_v4_pro
+        provider: deepseek
+        model: deepseek-v4-pro
+        vision: false
+        documents: false
+        parameters:
+          max_output_tokens: 16384
+          reasoning: {effort: high}

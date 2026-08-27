@@ -53,6 +53,29 @@ ZAI_VENDOR = ResponsesVendor(
     # real `ToolReviewVerdict`, which validated on both dialects it publishes. That is the path its
     # Claude Code and Codex integrations already depend on.
     schema_via_tool=True,
+    # **Z.AI ignores a NAMED `tool_choice`.** Its own function-calling guide documents
+    # `tool_choice` as accepting `auto`, `required`, or a named tool
+    # (docs.z.ai/guides/capabilities/function-calling), so this is the same accept-and-ignore
+    # pattern already recorded above for `text.format` — now confirmed at a second parameter.
+    # Measured 2026-08-27, 5 draws of 5 against api.z.ai: pinned to `emit_structured_response` it
+    # called `read_file` every time and never the pinned tool.
+    #
+    # The community reports the same class with a mechanism: GLM is natively an XML tool-caller,
+    # and compelling a named JSON tool breaks the parse (vllm-project/vllm#48095, a GLM-5.2 forced
+    # tool call left unparsed in `content`; huggingface zai-org/GLM-5.1-FP8 discussion #1). Those
+    # are self-hosted runtimes rather than this endpoint, but the model behaviour is the vendor's
+    # own and the live probe above confirms it reaches the hosted API too.
+    #
+    # **`required` is not a safer middle ground:** sgl-project/sglang#13514 reports
+    # `tool_choice: "required"` causing unbounded generation on GLM-4.x. So the emit call cannot be
+    # compelled here at all, and this vendor takes the same `auto` + terminal-instruction route as
+    # Qwen.
+    #
+    # Cost of having asserted otherwise: in the eight-reviewer gate_bench swap, 14 of 116 reviews
+    # (12 per cent) died because the adapter treated "no emit call" as a guarantee violation and
+    # raised a deliberately non-retryable error, when the model was simply asking to read a file
+    # first. Those 14 changesets are missing from that leg's denominators.
+    forces_tool_choice=False,
     # The full set: the narrow one is DeepSeek's, imposed by *its* strict-mode validator,
     # and this vendor never goes through that path. Measured 2026-08-24: `format: date`
     # is accepted in tool parameters here, so narrowing it would strip a hint for no

@@ -1,4 +1,4 @@
-"""Multimodal request guards — mechanical half, shared by the three adapters.
+"""Multimodal request guards — mechanical half, shared by the provider adapters.
 
 **Why this exists.** Live run `8c75990e` died at $116.10, after all five of its tools had
 committed, on ``400 … image dimensions exceed max allowed size for many-image requests: 2000
