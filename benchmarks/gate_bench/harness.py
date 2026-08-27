@@ -25,6 +25,7 @@ from typing import Any
 from auto_research.sandbox.gate import collect_targets, run_gate
 from auto_research.schemas import ToolSpec, ValidationDataset
 
+from benchmarks.gate_bench.briefs import brief_for
 from benchmarks.gate_bench.mutants import Mutant
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -223,12 +224,17 @@ REAL_VALIDATION = ValidationDataset(mission="IXPE", obsid="01002901")
 
 def tool_spec_for(mutant: Mutant) -> ToolSpec:
     """The brief the gate is handed — the same shape the lead writes for a real authoring."""
+    # The id is opaque on purpose. It used to be `gate-bench-{mutant.id}`, which put the defect's
+    # own slug into the reviewer's prompt (`gate-bench-led_self_referential_differential`) and
+    # marked every control with a `ctl_` prefix. `ToolSpec.id` is field 1 of the dump the co-lead
+    # reads (`roles.py`), so that was a second answer leak beside the science_context one. A hash
+    # keeps entries distinct — as two real changesets would be — while carrying no class.
+    opaque = hashlib.sha256(mutant.id.encode("utf-8")).hexdigest()[:10]
     return ToolSpec(
-        id=f"gate-bench-{mutant.id}",
-        science_context=(
-            "Seeded-defect benchmark for the mergeability gate: "
-            f"{mutant.description}"
-        ),
+        id=f"{mutant.tool_name}-{opaque}",
+        # Keyed on the TOOL, so a defect and its matched control are reviewed against byte-identical
+        # briefs. See `briefs.py` for why this is structural rather than a wording fix.
+        science_context=brief_for(mutant).science_context,
         expected_behavior=mutant.spec_behavior or (
             "The tool computes its stated quantity from the named validation input and "
             "commits a test file beside it."

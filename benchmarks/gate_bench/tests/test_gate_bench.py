@@ -10,6 +10,8 @@ Run from the repository root, so that ``benchmarks`` is importable:
 """
 
 import asyncio
+import json
+import re
 import shutil
 import subprocess
 import sys
@@ -795,3 +797,78 @@ def test_a_non_behavioural_defect_still_changes_the_changeset(mutant_id, tmp_pat
     assert texts["defect"] != texts["control"], (
         mutant_id + " changes no file at all against its matched control"
     )
+
+
+# ── the brief must not carry the answer (2026-08-27) ────────────────────────
+
+#: Vocabulary that would tell a reviewer it is looking at an exercise, which defect it holds, or
+#: that a changeset is a control. Until 2026-08-27 the brief was
+#: `"Seeded-defect benchmark for the mergeability gate: " + mutant.description`, so every defect
+#: arrived with its own description and every control was labelled "the same edit made honestly".
+_ANSWER_LEAK = re.compile(
+    r"seeded|benchmark|matched control|planted|honestly|mutant|ctl_|gate-bench", re.I
+)
+
+
+def test_no_toolspec_field_tells_the_reviewer_it_is_an_exercise():
+    """Every field of the ToolSpec is dumped into the co-lead's prompt (`roles.py`), so a leak
+    anywhere in it is a leak. Two fields carried one: `science_context` held the defect
+    description, and `id` held the mutant slug plus the `ctl_` control marker."""
+    from benchmarks.gate_bench.harness import tool_spec_for
+    from benchmarks.gate_bench.mutants import by_id
+
+    offences = []
+    for mutant_id, mutant in by_id().items():
+        for field, value in tool_spec_for(mutant).model_dump(mode="json").items():
+            found = _ANSWER_LEAK.search(json.dumps(value))
+            if found:
+                offences.append(f"{mutant_id}.{field} contains {found.group(0)!r}")
+    assert not offences, "the brief leaks the answer:\n  " + "\n  ".join(offences[:15])
+
+
+def test_a_pair_is_reviewed_against_an_identical_brief():
+    """The property that makes the matched-control design mean anything.
+
+    If a defect and its control differ in the brief, the reviewer can tell them apart without
+    reading the diff, and 'detection' becomes label-following. Asserted rather than trusted
+    because it is exactly what regressed: the brief was keyed on the mutant, so control briefs
+    read "Matched control for X: the same edit made honestly".
+    """
+    from benchmarks.gate_bench.harness import tool_spec_for
+    from benchmarks.gate_bench.mutants import by_id
+
+    entries = by_id()
+    pairs = [(i, f"ctl_{i}") for i in entries if not i.startswith(("ctl_", "control_"))]
+    checked = 0
+    for defect_id, control_id in pairs:
+        if control_id not in entries:
+            continue
+        defect = tool_spec_for(entries[defect_id])
+        control = tool_spec_for(entries[control_id])
+        assert defect.science_context == control.science_context, defect_id
+        assert defect.expected_behavior == control.expected_behavior, defect_id
+        # The id may differ — two real changesets would — but must not encode the class.
+        assert "ctl" not in control.id, control_id
+        checked += 1
+    assert checked >= 20, f"only {checked} pairs checked; the corpus should have far more"
+
+
+def test_every_corpus_tool_has_a_brief_and_names_where_it_came_from():
+    """A missing brief must fail loudly rather than fall back to a generic string, and a salvaged
+    brief has to say which run it was quoted from — that provenance is what makes 'these are real
+    briefs' a checkable claim rather than an assertion."""
+    from benchmarks.gate_bench.briefs import BRIEFS, brief_for
+    from benchmarks.gate_bench.mutants import by_id
+
+    for mutant in by_id().values():
+        brief = brief_for(mutant)          # raises if absent
+        assert brief.science_context.strip()
+        assert brief.provenance.strip()
+    salvaged = [b for b in BRIEFS.values() if "verbatim" in b.provenance]
+    assert salvaged, "no brief is quoted from a real run"
+    for brief in salvaged:
+        assert re.search(r"run [0-9a-z\-]+", brief.provenance), brief.provenance
+    # Provenance stays out of the text the model reads.
+    for brief in BRIEFS.values():
+        assert "verbatim" not in brief.science_context
+        assert "corpus" not in brief.science_context
