@@ -11,6 +11,7 @@ Run from the repository root: ``conda run -n auto_research python -m pytest benc
 
 import asyncio
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -154,7 +155,11 @@ def test_trial_clones_at_the_pinned_base_and_records_a_commit(tmp_path, monkeypa
     assert record["trial"] == 1
     # The lead was handed a clone, never the live checkout, and the production authoring shape.
     assert lead.seen["toolkit_root"] != root
-    assert lead.seen["direct_branch"] == "author-bench-t01"
+    # Its own branch, and an OPAQUE one. The name was `author-bench-{label}`, which put the
+    # campaign and the leg in front of every actor that can see a checkout (2026-08-27).
+    assert lead.seen["direct_branch"].startswith("authoring-")
+    assert "author-bench" not in lead.seen["direct_branch"]
+    assert "t01" not in lead.seen["direct_branch"]
     assert lead.seen["human_handler"] is None
     assert lead.seen["spec"].proposed_tool_name == "ixpe_pa_pd_stability"
 
@@ -1208,3 +1213,69 @@ def test_the_chat_probe_works_from_inside_a_running_event_loop(monkeypatch):
 
     assert asyncio.run(drive()) is None
     assert calls == ["called"], "the probe never reached the model handle"
+
+
+# ── the actors must not be able to read which experiment they are in (2026-08-27) ──────────
+
+#: Anything that would tell an actor it is in a benchmark, or which arm it is in. A leg slug names
+#: the lead AND the co-lead vendor, so a co-lead reading it in the correlated arm learns the very
+#: assignment it exists to be blind to.
+_ARM_LEAK = re.compile(r"author.bench|grid_lead|colead_|_lead_", re.I)
+
+
+def _run_one_grid_trial(tmp_path, monkeypatch):
+    from benchmarks.author_bench.legs import BY_SLUG
+
+    root = _skip_without_toolkit()
+    lead = _FakeLead(result=MergeFlowResult(
+        tool_spec_id="ixpe_pa_pd_stability", status="committed", branch="b", commit_sha="",
+        reason="gate-pass and co-lead review-pass",
+    ))
+    _install_fake_lead(monkeypatch, lead)
+    leg = BY_SLUG["grid_lead_qwen_colead_deepseek"]
+    cfg = _config(tmp_path, root)
+    cfg.leg = leg
+    asyncio.run(trial.run_trial(1, cfg))
+    return lead, leg, cfg
+
+
+def test_no_path_an_actor_can_see_names_the_experiment(tmp_path, monkeypatch):
+    """Every path handed to an actor must be blind to the experiment.
+
+    Measured on the 2026-08-26 grid before the fix: the lead typed a leg-naming path in 2,641 tool
+    calls and the co-lead in 1,923, because `ReadOnlyToolProvider` renders its `roots` into the
+    `read_file`/`list_dir` descriptions the model reads. Production is blind here by accident of
+    design -- its lead roots are `run_dir(run_id)` and a run id is a hex string -- so this asserts
+    the bench matches production rather than diverging from it.
+    """
+    lead, _leg, _cfg = _run_one_grid_trial(tmp_path, monkeypatch)
+
+    # the worktree base the coder edits in, and from which the co-lead's own roots are derived
+    base = str(lead.seen["worktree_base"])
+    assert not _ARM_LEAK.search(base), f"worktree base names the experiment: {base}"
+    # the clone the coder's cwd sits in
+    clone = str(lead.seen["toolkit_root"])
+    assert not _ARM_LEAK.search(clone), f"clone path names the experiment: {clone}"
+    # the branch, visible in any checkout-state output
+    assert not _ARM_LEAK.search(str(lead.seen["direct_branch"]))
+    # the lead's own investigation roots, which become tool-description text
+    for rootpath in getattr(getattr(lead, "tools", None), "roots", []):
+        assert not _ARM_LEAK.search(str(rootpath)), f"lead root names the experiment: {rootpath}"
+
+
+def test_the_leg_named_record_tree_is_never_handed_to_an_actor(tmp_path, monkeypatch):
+    """Records stay organised by leg for the human; that tree must not reach a prompt.
+
+    This is the half that looked like a tradeoff and is not one: the lead needs a run directory,
+    not the leg-named results directory, so it gets the opaque one while the records keep their
+    readable layout.
+    """
+    lead, leg, cfg = _run_one_grid_trial(tmp_path, monkeypatch)
+
+    roots = [str(r) for r in getattr(getattr(lead, "tools", None), "roots", [])]
+    assert roots, "the lead was given no investigation roots"
+    assert not any(leg.slug in r for r in roots), roots
+    # and the record tree really is still there, under its readable path. (Asserting the
+    # monitor FILE would test the fake lead rather than the layout: it emits no events, so
+    # nothing is ever written to the ledger.)
+    assert (cfg.out_dir / "trial-01").is_dir()

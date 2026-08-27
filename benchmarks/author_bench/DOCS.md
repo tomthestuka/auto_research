@@ -496,3 +496,27 @@ the measurement, not for this DOCS.
   a new `batch.json` the batch writes about itself, so a resume cannot be handed the wrong flags.
   The end-of-run report now renders from every record on disk, or a resumed batch would have
   reported only its second sitting. Ten tests; package suite 54 → 63.
+
+- 2026-08-27 — **The trial's paths told every actor which experiment it was in; they are opaque
+  now.** `mkdtemp(prefix=f"author_bench_{label}_")` and `direct_branch=f"author-bench-{label}"` put
+  the campaign name and the leg slug into paths all three actors handle, and the leg slug names the
+  lead's vendor *and* the co-lead's. Measured on the 2026-08-26 grid: the lead typed such a path in
+  2,641 tool calls and the co-lead in 1,923, because `ReadOnlyToolProvider` renders its `roots` into
+  the `read_file`/`list_dir` descriptions the model reads. A co-lead in the correlated arm could
+  therefore read `lead_anthropic_colead_anthropic` — the assignment it exists to be blind to.
+  Unlike the sibling leak found the same day in `gate_bench`, nothing here reveals an *answer*
+  (nothing is planted), so authoring outcomes stand; what it contaminates is the arm comparison,
+  which is the grid's whole purpose. The 100-trial grid is therefore re-run rather than reported.
+  **The fix is to match production, not to compromise with it.** Production's lead roots are
+  `[run_dir(run_id), papers_dir(), toolkit_root]`, and a run id is a hex string, so no production
+  actor has ever been able to learn anything about its run from a path. The trial now mints an
+  opaque per-trial token, holds the clone *and the authoring worktrees* under it, names the branch
+  `authoring-<token>`, and hands the lead that directory instead of the leg-named results tree.
+  Because `make_review_hook` derives the co-lead's roots from the authoring worktree, one change
+  blinds all three actors. What looked like a tradeoff between blindness and a human-readable
+  layout was not one: records stay organised by leg, and no actor ever sees them.
+  **One artifact needed rescuing.** §9.9 writes a discarded attempt's diff as
+  `tool_author_failed_*.patch` under the authoring dir, which moved into the swept temp tree; those
+  are now copied into the trial's record directory before cleanup, guarded so a diagnostic can
+  never fail a trial. Three tests: the branch is opaque, no path an actor sees names the
+  experiment, and the leg-named tree never reaches a prompt. Package suite 63 → 65.

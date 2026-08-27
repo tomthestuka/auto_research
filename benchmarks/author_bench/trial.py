@@ -23,6 +23,7 @@ row of the paper's own table, so answering on the flow's behalf would erase the 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -322,8 +323,22 @@ async def run_trial(index: int, cfg: TrialConfig) -> dict:
     label = f"t{index:02d}" if cfg.leg is None else f"{cfg.leg.slug}-t{index:02d}"
     trial_dir = cfg.out_dir / f"trial-{index:02d}"
     trial_dir.mkdir(parents=True, exist_ok=True)
-    workdir = Path(tempfile.mkdtemp(prefix=f"author_bench_{label}_"))
-    record: dict = {"trial": index, **cfg.stamps}
+
+    # ── The actors must not be able to read which experiment they are in ──────────────────
+    # `label` names the campaign and the leg (`grid_lead_qwen_colead_deepseek-t01`), so it may
+    # reach a RECORD or the monitor but never a path an actor can see. It used to be the tempdir
+    # prefix and the branch name, which put it in front of all three: the lead typed such a path in
+    # 2,641 tool calls and the co-lead in 1,923 (measured on the 2026-08-26 grid), because
+    # `ReadOnlyToolProvider` renders its roots into the `read_file`/`list_dir` descriptions the
+    # model reads. A co-lead in the correlated arm could therefore read
+    # `lead_anthropic_colead_anthropic` — exactly the assignment it must be blind to.
+    #
+    # `opaque` is what production has always had by accident: the lead's roots there are
+    # `run_dir(run_id)`, and a run id is a hex string, so no production actor can learn anything
+    # about its run from a path. This makes the bench match that rather than diverge from it.
+    opaque = hashlib.sha256(f"{cfg.stamps.get('toolkit_base_sha','')}/{label}".encode()).hexdigest()[:16]
+    workdir = Path(tempfile.mkdtemp(prefix=f"ar_run_{opaque}_"))
+    record: dict = {"trial": index, "workdir_token": opaque, **cfg.stamps}
 
     monitor = RunMonitor(
         chatter=cfg.chatter, run_id=f"author-bench-{label}",
@@ -335,8 +350,10 @@ async def run_trial(index: int, cfg: TrialConfig) -> dict:
     monitor.cost_meter = meter
 
     try:
+        # Branch name is opaque for the same reason: it is visible to `git`-adjacent output and
+        # to anything that prints the checkout state.
         clone = prepare_clone(
-            workdir / "repo", cfg.toolkit_root, cfg.stamps["toolkit_base_sha"], f"author-bench-{label}"
+            workdir / "repo", cfg.toolkit_root, cfg.stamps["toolkit_base_sha"], f"authoring-{opaque}"
         )
         spec = load_brief()
 
@@ -346,10 +363,15 @@ async def run_trial(index: int, cfg: TrialConfig) -> dict:
         else:
             lead = AnalystLeadAgent(monitor=monitor)
         # The lead's investigation surface, wired as runtime.py wires it: the toolkit it is
-        # authoring into, the papers dir, and its own trial directory. plan_and_debate needs a
+        # authoring into, the papers dir, and its own run directory. plan_and_debate needs a
         # human and is off here, which is the unattended production shape.
+        #
+        # `workdir` rather than `trial_dir`: the latter is `…/<leg.slug>/trial-NN`, organised by
+        # experimental arm for the human reading results, and putting it here published the arm to
+        # the lead. The authoring worktrees live under `workdir` now, so the lead still reads
+        # everything it needs to and the leg-named tree holds only records no actor sees.
         lead.tools = ReadOnlyToolProvider(
-            roots=[clone, papers_dir(), trial_dir],
+            roots=[clone, papers_dir(), workdir],
             web_source=WebSource(),
             include_data_catalog=True,
             include_plan_and_debate=False,
@@ -366,8 +388,11 @@ async def run_trial(index: int, cfg: TrialConfig) -> dict:
         result = await lead.drive_authoring(
             spec,
             toolkit_root=clone,
-            worktree_base=trial_dir / "authoring",
-            direct_branch=f"author-bench-{label}",
+            # Under `workdir` (opaque), not `trial_dir` (leg-named): the co-lead's own roots are
+            # derived from this worktree by `make_review_hook`, so a leg-named base leaked the arm
+            # to the reviewer as well as to the lead.
+            worktree_base=workdir / "authoring",
+            direct_branch=f"authoring-{opaque}",
             # colead None => built from config, provider-decorrelated from the author
             colead=colead,
             coder=None if leg is None else leg.member(),
@@ -392,6 +417,21 @@ async def run_trial(index: int, cfg: TrialConfig) -> dict:
         record["status"] = "error"
         record["error"] = f"{type(exc).__name__}: {exc}"
     finally:
+        # The authoring worktrees moved under `workdir` so no actor could read the leg from their
+        # path — which also put them in line to be swept. §9.9 writes a discarded attempt's diff
+        # there as `tool_author_failed_*.patch`, and that is the only record of what a
+        # non-committing attempt actually wrote, so rescue it into the record tree first. Records
+        # are organised by leg on purpose; the human reads them and no actor ever sees them.
+        try:
+            saved = []
+            for patch in sorted((workdir / "authoring").rglob("tool_author_failed*.patch")):
+                dest = trial_dir / patch.name
+                shutil.copy2(patch, dest)
+                saved.append(str(dest))
+            if saved:
+                record["failed_attempt_patches"] = saved
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must never fail a trial
+            record["failed_attempt_patches_error"] = f"{type(exc).__name__}: {exc}"
         if cfg.keep_clones:
             record["clone"] = str(workdir)
         else:
