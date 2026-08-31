@@ -441,7 +441,17 @@ _BESPOKE = {
     "sci_pa_sign_adequate": _ctl_pa_sign,
     "sci_deg_rad_adequate": _ctl_deg_rad,
     "sci_epoch_inversion_adequate": _ctl_real_epoch,
+    # The inadequate variant shares the adequate one's honest counterpart: the epoch-side
+    # rewrite. Left unmapped it fell through to `_real_control_docstring`, which edits
+    # `qu_lag_dcf.py` — a control whose diff and brief describe two different tools, rejected
+    # 7/8 on exactly that mismatch in the 2026-08-27 clean run (defect C2 of the control audit).
+    "sci_epoch_inversion_inadequate": _ctl_real_epoch,
     "sci_bin_edge_adequate": _ctl_real_bin_edge,
+    # Same rule as the epoch pair above: the inadequate variant's honest counterpart is the
+    # adequate one's (the semantics-preserving edge rewrite), so its diff exercises the
+    # restructuring its shared `_SPEC_QU_BIN` brief scopes, rather than a docstring edit that
+    # restructures nothing (reviewer finding, 2026-08-28).
+    "sci_bin_edge_inadequate": _ctl_real_bin_edge,
     "bound_row_clamp": _ctl_bound_row_clamp,
     "bound_error_floor": _ctl_bound_error_floor,
     "bound_lag_cap_real": _ctl_real_lag_range,

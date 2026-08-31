@@ -115,7 +115,7 @@ def _chi2_sf(statistic, dof):
             log_total = hi + math.log(math.exp(log_total - hi) + math.exp(log_term - hi))
         return min(1.0, math.exp(log_total))
     total = math.erfc(math.sqrt(half))
-    term = math.sqrt(2.0 * half / math.pi) * math.exp(-half)
+    term = math.sqrt(2.0 * statistic / math.pi) * math.exp(-half)
     for k in range(1, (dof + 1) // 2):
         total += term
         term *= half / (k + 0.5)

@@ -446,6 +446,15 @@ turns on one distinction:
   optional); raises when one is set but blank, identical to the primary, or set without a
   primary — each a fallback that `KeyPool` silently drops, which would leave a human
   believing a run is protected against throttling when rotation has nowhere to go.
+- `PROMPT_DUMP_ENV` (`"AUTO_RESEARCH_PROMPT_DUMP"`) / `_dump_prompt(...)` — verbatim prompt
+  dump for leak audits: when the variable names a file, every `ModelHandle.call` appends one
+  JSON record (role, member, provider/model, the whole normalized conversation, tool
+  definitions, `tool_choice`, schema name, attachment counts) after the request is assembled
+  and before dispatch — one record per logical call, not per retry. Unset, the cost is one
+  `os.environ.get` and the request is byte-identical; dump failures are swallowed. Known
+  narrowness (recorded 2026-08-28): the schema is dumped by name only and attachments by
+  count, so field descriptions and figure captions are not in the record; the coder author is
+  a harness subprocess and is not covered by this chokepoint.
 - `ModelGroupHandle(role: str, handles: tuple[ModelHandle, ...])` — resolved
   model group. Method: `member(name: str) -> ModelHandle`.
 - `REQUIRED_ROLES` — required role names that must appear in config: `reviewer`,
@@ -792,3 +801,15 @@ Compacted 2026-08-05: entries through 2026-08-03 folded into themed ranges (deta
   `resolve_refs_in` — was measured on `deepseek-v4-flash` only and is **unprobed on Pro**, which
   matters because the lead x co-lead grid adopts Pro as a co-lead emitting `ToolReviewVerdict`.
   Probe before that grid runs.
+
+- 2026-08-28 — **`_dump_prompt` documented (built 2026-08-27 for the gate-bench leak audit, sync
+  was missed).** `types.py` gains `PROMPT_DUMP_ENV = "AUTO_RESEARCH_PROMPT_DUMP"`: when that
+  variable names a file, `ModelHandle.call` appends one JSON record per call — role, member,
+  provider/model, the whole normalized conversation, the tool definitions and `tool_choice`,
+  schema and attachments — after the request is assembled and before dispatch, so a leak audit
+  reads the actual prompt every actor received rather than a hand-built reconstruction (the
+  2026-08-27 hand-rebuilt scan missed the worktree-path leak for exactly that reason; the
+  rationale lives in `_dump_prompt`'s docstring). With the flag unset the cost is one
+  `os.environ.get` and the request is byte-identical; serialization is best-effort
+  (`default=str`) and dump failures are swallowed so the hook can never fail a run. Evidence
+  use: `logs/dev/leak-scan/20260827T093104Z/prompts_readable.txt`.

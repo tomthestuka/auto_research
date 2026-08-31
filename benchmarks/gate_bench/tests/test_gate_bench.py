@@ -104,8 +104,8 @@ def test_patch_refuses_a_missed_anchor(tmp_path):
         basepkg.patch(path, "b = 2\n", "b = 3\n")
 
 
-def test_real_builders_apply_against_the_pinned_toolkit(tmp_path):
-    """Every real-base builder's anchors still match the pinned ref (skipped off-host)."""
+def _pinned_toolkit_config():
+    """The RunConfig for the pinned toolkit ref, or a skip where this host lacks it."""
     config = harness.REPO_ROOT / "config" / "orchestration.yaml"
     if not config.is_file():
         pytest.skip("no machine-local orchestration config")
@@ -119,14 +119,89 @@ def test_real_builders_apply_against_the_pinned_toolkit(tmp_path):
     )
     if probe.returncode != 0:
         pytest.skip(f"toolkit ref {ref!r} is not present in this checkout")
-    cfg = harness.RunConfig(
+    return harness.RunConfig(
         toolkit_root=harness.Path(toolkit_root), toolkit_ref=ref,
         stamps={"toolkit_sha": probe.stdout.strip()},
     )
+
+
+def test_real_builders_apply_against_the_pinned_toolkit(tmp_path):
+    """Every real-base builder's anchors still match the pinned ref (skipped off-host)."""
+    cfg = _pinned_toolkit_config()
     for mutant in [m for m in corpus() if m.base == "real"]:
         worktree = harness.prepare_worktree(mutant, tmp_path / mutant.id, cfg)
         mutant.build(worktree)  # raises if an anchor drifted
         assert collect_targets(worktree), mutant.id
+
+
+# ── real-base entries: the brief↔changeset contract (control-audit C1/C2) ───
+#
+# The tool-keyed brief describes a capability, so a real-base entry must carry its own
+# changeset-scoped ``spec_behavior`` (C1) and its changeset must touch only files that belong
+# to the tool the brief names (C2). The 2026-08-27 clean run measured what their absence does:
+# every real-base changeset reaching review was rejected 8/8, defects and controls alike.
+
+# The files each real tool's changesets may touch. ``ixpe_qu_lag_dcf`` includes the shared
+# argument-coercion helper because ``hole_regression_blindness`` maintains it by design, with a
+# spec that says so.
+_REAL_TOOL_FILES = {
+    "ixpe_qu_lag_dcf": {
+        "xspec_utils/lib/qu_lag_dcf.py",
+        "xspec_utils/tests/test_qu_lag_dcf.py",
+        "xspec_utils/lib/toolargs.py",
+        "xspec_utils/tests/test_toolargs.py",
+    },
+    "load_data": {
+        "xspec_utils/lib/irf_epoch.py",
+        "xspec_utils/tests/test_irf_epoch.py",
+    },
+}
+
+
+def _real_entries():
+    # ``corpus()`` already appends the paired controls, so this is defects and controls both.
+    return [m for m in corpus() if m.base == "real"]
+
+
+def test_every_real_base_entry_carries_a_changeset_scoped_spec():
+    """A real-base entry reviewed against the capability brief alone loses on its face."""
+    missing = [m.id for m in _real_entries() if not m.spec_behavior.strip()]
+    assert not missing, f"real-base entries with no changeset-scoped spec_behavior: {missing}"
+
+
+def test_a_real_changeset_touches_only_its_named_tools_files(tmp_path):
+    """The diff and the brief must describe the same tool (skipped off-host)."""
+    cfg = _pinned_toolkit_config()
+    for entry in _real_entries():
+        worktree = harness.prepare_worktree(entry, tmp_path / entry.id, cfg)
+        entry.build(worktree)
+        touched = {str(p.relative_to(worktree)) for p in collect_targets(worktree)}
+        assert entry.tool_name in _REAL_TOOL_FILES, (
+            f"{entry.id}: real tool {entry.tool_name!r} has no _REAL_TOOL_FILES allow-list"
+        )
+        allowed = _REAL_TOOL_FILES[entry.tool_name]
+        assert touched, entry.id
+        assert touched <= allowed, (
+            f"{entry.id} (tool {entry.tool_name}) touches {sorted(touched - allowed)}"
+        )
+
+
+def test_a_real_worktrees_git_metadata_does_not_name_the_benchmark(tmp_path):
+    """The reviewer can read `.git`, and on a real-base clone three files named the benchmark
+    until 2026-08-28: `.git/HEAD` (branch `gate-bench`), `.git/logs/HEAD` (the checkout line),
+    and `.git/packed-refs` (the cloned remote-tracking ref `origin/gate-bench-base`). The scan
+    vocabulary is narrower than `_ANSWER_LEAK` because a real toolkit's history legitimately
+    says "benchmark" (`benchmark_compare` is a science tool); the strings checked here are the
+    ones the harness itself mints. Skipped off-host with the other pinned-toolkit tests."""
+    from benchmarks.gate_bench.mutants import by_id
+
+    cfg = _pinned_toolkit_config()
+    pattern = re.compile(r"gate[-_ ]bench|ctl_", re.I)
+    worktree = harness.prepare_worktree(
+        by_id()["control_real_docstring"], tmp_path / "repo", cfg
+    )
+    leaks = _git_metadata_leaks(worktree, pattern)
+    assert not leaks, "\n".join(leaks)
 
 
 # ── the gate integration (fake Layer-B runner: no science stack) ────────────
@@ -872,3 +947,83 @@ def test_every_corpus_tool_has_a_brief_and_names_where_it_came_from():
     for brief in BRIEFS.values():
         assert "verbatim" not in brief.science_context
         assert "corpus" not in brief.science_context
+
+
+def test_no_path_the_reviewer_can_see_names_the_benchmark_or_the_defect(tmp_path):
+    """The SECOND channel, and the one that survived the first fix.
+
+    `ReadOnlyToolProvider` renders its `roots` into the `read_file`/`list_dir` descriptions the
+    model reads, so a filesystem path is prompt content. The worktree prefix was
+    `gate_bench_{mutant.id}_`, which put "permitted roots:
+    /tmp/gate_bench_led_self_referential_differential_XXXX/repo" in front of the reviewer -- naming
+    the benchmark and the planted defect, with `ctl_` marking controls. The brief fix
+    (`briefs.py`) closed the ToolSpec channel and left this one open, which is exactly why a leak
+    scan has to enumerate every channel rather than the one it just repaired.
+    """
+    import hashlib
+
+    from auto_research.agents.react import ReadOnlyToolProvider
+
+    from benchmarks.gate_bench.harness import RunConfig, collect_stamps, prepare_worktree
+    from benchmarks.gate_bench.mutants import by_id
+
+    cfg = RunConfig(
+        toolkit_root=Path("/data/fzhou/research_toolkit"),
+        stamps=collect_stamps(
+            Path("/data/fzhou/research_toolkit"), "gate-bench-base", resolve_toolkit=False
+        ),
+    )
+    # A control and its defect: the control is the one whose old path announced itself with `ctl_`.
+    for mutant_id in ("led_self_referential_differential", "ctl_led_self_referential_differential"):
+        mutant = by_id()[mutant_id]
+        opaque = hashlib.sha256(
+            f"{cfg.stamps.get('code_gate_sha256','')}/{mutant.id}".encode()
+        ).hexdigest()[:16]
+        worktree = prepare_worktree(mutant, tmp_path / f"ar_gate_{opaque}" / "repo", cfg)
+        definitions = json.dumps(
+            ReadOnlyToolProvider(roots=[worktree], include_text_search=False).tool_definitions()
+        )
+        found = _ANSWER_LEAK.search(definitions)
+        assert not found, f"{mutant_id}: tool descriptions leak {found.group(0)!r}"
+        # and the harness must not reintroduce a naming prefix
+        assert mutant.id not in definitions, f"{mutant_id}: its own id is in the tool descriptions"
+        # THE FIFTH CHANNEL (2026-08-28): the worktree's own `.git`. `read_file`/`list_dir`
+        # filter only governance basenames, so `.git/config` (committer identity), both reflog
+        # files and `.git/HEAD` are reviewer-readable — and all of them said "gate-bench" until
+        # the committer became a plausible operator. The synthetic base's `.git` is entirely
+        # ours, so the full leak vocabulary applies (objects/ skipped: zlib noise, not text).
+        for leak in _git_metadata_leaks(worktree, _ANSWER_LEAK):
+            raise AssertionError(f"{mutant_id}: {leak}")
+
+
+def _git_metadata_leaks(worktree, pattern) -> list[str]:
+    """`.git` files whose text matches the leak vocabulary, as 'path: match' strings."""
+    offences = []
+    git_dir = Path(worktree) / ".git"
+    for path in sorted(git_dir.rglob("*")):
+        if not path.is_file() or "objects" in path.parts:
+            continue
+        found = pattern.search(path.read_text(encoding="utf-8", errors="ignore"))
+        if found:
+            offences.append(f"{path.relative_to(worktree)} leaks {found.group(0)!r}")
+    return offences
+
+
+def test_the_harness_mints_an_opaque_worktree_prefix():
+    """Asserted on the source, because the property is about the NAME the harness chooses and a
+    passing path check on one mutant would not stop someone reinstating the old prefix."""
+    source = (Path(__file__).resolve().parents[1] / "harness.py").read_text(encoding="utf-8")
+    assert 'prefix=f"gate_bench_{mutant.id}_"' not in source
+    assert 'prefix=f"ar_gate_{opaque}_"' in source
+
+
+def test_the_nondeterminism_marker_is_named_in_fiction():
+    """The marker literal rides inside the plant's own diff, which reaches the reviewer under
+    `--ablate layer_b --review` (the determinism check that normally stops it is off), so its
+    name must read as package code, not as the benchmark. The sweeper's glob must follow the
+    producer's literal, or markers accumulate in tmp across runs."""
+    mutants_src = (Path(__file__).resolve().parents[1] / "mutants.py").read_text(encoding="utf-8")
+    harness_src = (Path(__file__).resolve().parents[1] / "harness.py").read_text(encoding="utf-8")
+    assert '"gate_bench_seen_"' not in mutants_src
+    assert '"demo_summary_cache_"' in mutants_src
+    assert 'glob("demo_summary_cache_*")' in harness_src

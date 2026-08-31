@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import csv
 import glob
+import hashlib
 import math
 import os
 
@@ -111,12 +112,27 @@ def read_product(csv_path):
     return header, rows
 
 
+def rows_digest(rows):
+    """Content digest of the parsed data rows, the value a completion certificate binds to.
+
+    Computed from the parsed values rather than the file bytes, so the certificate the
+    producer embeds in the header can cover the body it sits above.
+    """
+    canon = "\\n".join(
+        f'{r["obsid"]},{r["low_counts"]!r},{r["high_counts"]!r},'
+        f'{r["pa_deg"]!r},{r["pa_err_deg"]!r}'
+        for r in rows
+    )
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
 def product_is_complete(csv_path, header, rows):
     """Whether the producer certified this product, at this path, as finished.
 
-    Three conditions, each necessary: an explicit positive record, a path that names the file
-    being read rather than another product of the same kind, and a row count matching the
-    number the producer declared it would write.
+    Four conditions, each necessary: an explicit positive record, a path that names the file
+    being read rather than another product of the same kind, a row count matching the number
+    the producer declared it would write, and a content digest matching the rows actually
+    read -- so a certificate cannot vouch for data other than the data beneath it.
     """
     if header.get("complete") != "true":
         return False
@@ -125,7 +141,9 @@ def product_is_complete(csv_path, header, rows):
     declared = header.get("n_rows")
     if declared is None:
         return False
-    return len(rows) == int(declared)
+    if len(rows) != int(declared):
+        return False
+    return header.get("rows_sha256") == rows_digest(rows)
 
 
 def counts_are_usable(row):
@@ -418,6 +436,7 @@ from demo_utils.lib.run_summary import (
     peak_to_peak,
     product_is_complete,
     read_product,
+    rows_digest,
     summarize_product,
     summarize_run,
     usable_rows,
@@ -433,10 +452,16 @@ ROWS = [
 def write_product(path, rows=ROWS, complete=True, n_rows=None, name=None):
     """A reduced product CSV with the producer's provenance header."""
     declared = len(rows) if n_rows is None else n_rows
+    parsed = [
+        {"obsid": o, "low_counts": float(lo), "high_counts": float(hi),
+         "pa_deg": float(pa), "pa_err_deg": float(err)}
+        for o, lo, hi, pa, err in rows
+    ]
     header = [
         "# produced_by=test_run_summary",
         f"# path={name or path.name}",
         f"# n_rows={declared}",
+        f"# rows_sha256={rows_digest(parsed)}",
         f"# complete={'true' if complete else 'false'}",
     ]
     body = ["obsid,low_counts,high_counts,pa_deg,pa_err_deg"]
@@ -473,6 +498,16 @@ def test_a_truncated_product_is_not_complete(tmp_path):
 
 def test_a_certificate_naming_another_product_is_not_accepted(tmp_path):
     path = write_product(tmp_path / "product_a.csv", name="product_b.csv")
+    header, rows = read_product(path)
+    assert product_is_complete(path, header, rows) is False
+
+
+def test_a_product_modified_after_certification_is_not_complete(tmp_path):
+    """The certificate binds the rows' content, so a value edited afterwards is refused."""
+    path = write_product(tmp_path / "product_a.csv")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("400.0", "401.0"), encoding="utf-8"
+    )
     header, rows = read_product(path)
     assert product_is_complete(path, header, rows) is False
 
@@ -697,8 +732,9 @@ _README_SOURCE = '''\
 error-weighted mean position angle, a chi-square against that mean, and a per-product verdict.
 
 A product is summarized only when its provenance header certifies it complete, names the file
-being read, and declares a row count matching the rows present. An uncertified product is
-reported as `incomplete` and is not summarized.
+being read, declares a row count matching the rows present, and carries a `rows_sha256` content
+digest matching the rows as parsed (`rows_digest`), so a certificate vouches for exactly the
+data beneath it. An uncertified product is reported as `incomplete` and is not summarized.
 
 The entry point is `summarize_run(csv_dir, min_total_counts, require_complete)`, in that order.
 
@@ -708,7 +744,8 @@ consistent with zero is reported as unresolved rather than as a numerical bound.
 Verified by `demo_utils/tests/test_run_summary.py`, which recomputes each statistic
 independently, checks that the reported total chi-square is the sum of its reported parts,
 checks that the reported angle spread rests on the same rows as the angle mean, and checks that
-a truncated product and a certificate naming another product are both refused.
+a truncated product, a certificate naming another product, and a product modified after
+certification are all refused.
 '''
 
 
@@ -742,7 +779,9 @@ _A_COMPLETE = """\
     declared = header.get("n_rows")
     if declared is None:
         return False
-    return len(rows) == int(declared)
+    if len(rows) != int(declared):
+        return False
+    return header.get("rows_sha256") == rows_digest(rows)
 """
 
 _A_COMPLETE_TESTS = '''\
@@ -761,6 +800,16 @@ def test_a_truncated_product_is_not_complete(tmp_path):
 
 def test_a_certificate_naming_another_product_is_not_accepted(tmp_path):
     path = write_product(tmp_path / "product_a.csv", name="product_b.csv")
+    header, rows = read_product(path)
+    assert product_is_complete(path, header, rows) is False
+
+
+def test_a_product_modified_after_certification_is_not_complete(tmp_path):
+    """The certificate binds the rows' content, so a value edited afterwards is refused."""
+    path = write_product(tmp_path / "product_a.csv")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("400.0", "401.0"), encoding="utf-8"
+    )
     header, rows = read_product(path)
     assert product_is_complete(path, header, rows) is False
 
@@ -1172,7 +1221,12 @@ def test_summary_reproduces_the_validation_observation(monkeypatch):
         {"obsid": REAL_OBSID, "low_counts": 305.0, "high_counts": 299.0,
          "pa_deg": 14.2, "pa_err_deg": 3.7},
     ]
-    header = {"complete": "true", "n_rows": "3", "path": f"product_{REAL_OBSID}.csv"}
+    header = {
+        "complete": "true",
+        "n_rows": "3",
+        "path": f"product_{REAL_OBSID}.csv",
+        "rows_sha256": run_summary.rows_digest(rows),
+    }
     monkeypatch.setattr(run_summary, "read_product", lambda path: (header, rows))
     out = run_summary.summarize_product(f"product_{REAL_OBSID}.csv")
     assert out["status"] == "ok"
@@ -1195,7 +1249,8 @@ _SPEC = (
     "mean whose reported total is the sum of its reported parts over their own samples, "
     "each part centred on a weighted mean the summary reports, and a per-product verdict. "
     "Summarize a product only where the producer certified it complete, at the path being "
-    "read, with the row count it declared. Report a product with no degrees of freedom as "
+    "read, with the row count it declared and a content digest matching the rows as parsed. "
+    "Report a product with no degrees of freedom as "
     "indeterminate, and report excess scatter consistent with zero as unresolved rather than "
     "as a numerical bound. Apply one validity rule per quantity, so a row excluded from a "
     "statistic is excluded from everything derived from it. One unreadable product costs that "

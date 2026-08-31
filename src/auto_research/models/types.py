@@ -298,6 +298,13 @@ class ModelHandle:
             raise ValueError(
                 f"role {self.role!r} member {self.config.name!r} is not configured for document inputs"
             )
+        # Additive, and only when asked: with the flag unset this is one `os.environ.get` and the
+        # request below is byte-identical. See `_dump_prompt` for why the dump lives HERE.
+        _dump_prompt(
+            role=self.role, config=self.config, messages=normalized, schema=schema,
+            tools=tools, tool_choice=tool_choice, images=images, documents=documents,
+        )
+
         from auto_research.models.keys import make_rotator
         from auto_research.models.retry import call_with_transient_retry
         from auto_research.observability import traced_model_call
@@ -375,3 +382,81 @@ class ModelGroupHandle:
             if handle.config.name == name:
                 return handle
         raise KeyError(f"unknown model member {name!r} for role {self.role!r}")
+
+
+# ---------------------------------------------------------------------------
+# Verbatim prompt dump — the leak scan a benchmark must pass before it spends
+# ---------------------------------------------------------------------------
+
+#: Set to a file path to append one JSON object per model call, carrying the COMPLETE input that
+#: call sends. Unset (the default) it costs one dict lookup and changes nothing.
+PROMPT_DUMP_ENV = "AUTO_RESEARCH_PROMPT_DUMP"
+
+
+def _dump_prompt(
+    *,
+    role: str,
+    config: "RoleModelConfig",
+    messages: list,
+    schema: Any | None,
+    tools: Any | None,
+    tool_choice: Any | None,
+    images: Any,
+    documents: Any,
+) -> None:
+    """Append the verbatim input of one model call, when ``AUTO_RESEARCH_PROMPT_DUMP`` is set.
+
+    **Why here.** This is the single chokepoint every actor's prompt passes through, so a dump
+    taken at this line is the real thing rather than a reconstruction — system prompt, user
+    payload, tool definitions and schema together, for every role, with no per-caller wiring to
+    keep in sync. That distinction is not academic: on 2026-08-27 a leak scan built by
+    hand-reassembling the co-lead's payload proved the brief was clean and missed that the
+    worktree path named the planted defect, because a hand-built approximation contains only the
+    channels its author remembered. Both benchmarks had shipped a leak through a channel nobody
+    reconstructed (`benchmarks/gate_bench/briefs.py`, `benchmarks/author_bench/trial.py`).
+
+    **Why additive rather than a separate debug path.** The scan is only evidence if it reads what
+    the production pipeline actually sends, so the flag must not change the request, the control
+    flow, or the harness in use. Everything here happens after the request is assembled and before
+    it is dispatched, writes to its own file, and swallows its own failures: a diagnostic that can
+    fail a run is worse than no diagnostic.
+
+    Serialisation is best-effort and lossy on purpose — ``default=str`` rather than a schema — since
+    the reader is a human or a regex hunting for a leaked string, not a replayer.
+    """
+    import os
+
+    path = os.environ.get(PROMPT_DUMP_ENV)
+    if not path:
+        return
+    try:
+        import json
+        from pathlib import Path
+
+        def _render(message: Any) -> Any:
+            if hasattr(message, "model_dump"):
+                return message.model_dump(mode="json")
+            return message
+
+        record = {
+            "role": role,
+            "member": config.name,
+            "provider": config.provider,
+            "model": config.model,
+            # The whole conversation, in order, exactly as handed to the adapter.
+            "messages": [_render(m) for m in messages],
+            # Tool definitions matter as much as the payload: a provider renders their
+            # descriptions into what the model reads, which is how a filesystem path becomes
+            # prompt content.
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "schema": getattr(schema, "__name__", None) if schema is not None else None,
+            "n_images": len(images or ()),
+            "n_documents": len(documents or ()),
+        }
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, default=str) + "\n")
+    except Exception:  # noqa: BLE001 — a diagnostic must never break a run
+        pass

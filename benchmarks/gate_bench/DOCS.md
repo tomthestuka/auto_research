@@ -97,21 +97,25 @@ identical clean input, run repeatedly, which measures whether the review layer a
 
 ### What the corpus contains
 
-One hundred thirty-six changesets: sixty-six planted defects across the paper's eight fixed
-families, sixty-six matched controls, and the four original standalone controls. The families
+One hundred thirty-four changesets: sixty-five planted defects across the paper's eight fixed
+families and sixty-nine controls (matched plus the original standalone ones; `--list` is the
+authoritative count after the 2026-08-22 retirement). The families
 and the layer each entry is expected to be caught by:
 
 | Family | n | Expected |
 |---|---|---|
 | Fabrication, in-vocabulary | 8 | scan (6), layer_b (1), review (1 — the finding tier) |
 | Fabrication, vocabulary gap | 6 | review (5), layer_b (1) |
-| Science bug, adequate test | 11 | layer_b (5), review (6) |
-| Science bug, inadequate test | 13 | review |
+| Science bug, adequate test | 4 | layer_b |
+| Science bug, inadequate test | 15 | review |
 | Vacuous or nondeterministic tests | 9 | layer_b (1), determinism (1), review (7) |
-| Silent capability bound | 8 | review (7), layer_b (1) |
-| Structural or manifest | 5 | structural (2), review (3) |
+| Silent capability bound | 10 | review |
+| Structural or manifest | 7 | structural (2), layer_b (2), review (3) |
 | Known-hole probes | 6 | commit_sweep (1), review (5) |
-| Control (clean changeset) | 70 | pass (66 paired + 4 standalone) |
+| Control (clean changeset) | 69 | pass (65 paired + 4 standalone) |
+
+(The counts are re-derived from `corpus()` 2026-08-31 — the table had drifted from the code
+through the 2026-08 corpus merges; `--list` remains the authority.)
 
 The four science-bug archetypes named in the manuscript are a position-angle sign flip and a
 degree/radian confusion (synthetic base, where the angle arithmetic is load-bearing), a
@@ -257,10 +261,13 @@ Depended on by: nothing in `src/`. `tests/test_gate_bench.py` covers it determin
 - `AUTHOR_BLIND` / `AUTHOR_LEDGER` / `AUTHOR_CODEX` — entry provenance labels for the original
   blind half and the two independently mined ledger halves.
 - `Mutant` — frozen dataclass: `id`, `family`, `base`, `description`, `expected`, `build`,
-  `tool_name`, `target_domain`, `known_hole`, `notes`, `cleanup_markers`, `author`, and
-  `attested`. `expected` is a layer name, `miss`, or `pass`; `attested` identifies the ledger
-  record behind an observed defect. `expects_deterministic_catch` is true when the expected
-  layer is one the free legs exercise.
+  `tool_name`, `target_domain`, `known_hole`, `notes`, `spec_behavior`, `pairs_with`,
+  `cleanup_markers`, `author`, and `attested`. `expected` is a layer name, `miss`, or `pass`;
+  `spec_behavior` rides `ToolSpec.expected_behavior` beside the tool-keyed brief (every
+  real-base entry carries one — a maintenance-scope statement, shared verbatim by its matched
+  control); `pairs_with` names, on a control, the defect whose honest counterpart it is;
+  `attested` identifies the ledger record behind an observed defect.
+  `expects_deterministic_catch` is true when the expected layer is one the free legs exercise.
 - `corpus() -> list[Mutant]` — the full corpus in report order. `by_id() -> dict[str, Mutant]`.
 
 ### `mutants_ledger_codex.py` — independent second-vendor ledger half
@@ -726,3 +733,115 @@ seconds; that run cost $25.
   **The process lesson, recorded because it cost the most:** the controls were the only thing in
   question, and one control reviewed in isolation costs $0.25 and thirty seconds. Three full
   passes at $26 each were spent discovering what that loop would have shown each time.
+
+- 2026-08-28 — **Two honest-scaffold defects repaired (C4, C5 of the 2026-08-27 control audit),
+  verified against the clean swap run's own rationales.** C5: `mutants_ledger` `product_is_complete`
+  bound its certificate by basename only, weaker than its docstring — the convergent, near-verbatim
+  ground on which all three GPT variants rejected 14–17 of the 18 byte-identical `ctl_led_*`
+  controls that every other vendor approved 18/18. The certificate now also binds content: the
+  producer records `rows_sha256` (`rows_digest` over the parsed rows, so the in-file header can
+  cover the body beneath it) and the checker recomputes it; new honest test
+  `test_a_product_modified_after_certification_is_not_complete`; `_A_COMPLETE` anchor updated, both
+  anchor-replacing plants (`led_rows_imply_complete`, `led_certificate_not_bound`) re-verified to
+  fail the honest suite (5 and 3 failures). C4: `mutants_ledger_codex._chi2_sf`'s odd-dof series
+  seed used `half` where the statistic belongs (√2 low, ratio → 0.707; verified against scipy at
+  0.71–0.82 over dof 3–9) — dead code in-tool since `dof = 2·(n_joint−1)` is always even, but the
+  ground on which reviewers split on the `ctl_codex_led_*` controls. One-token fix; max relative
+  error vs scipy now 9e-15 on the dof ≤ 15 / x ≤ 60 grid measured here (3e-14 on the independent
+  reviewer's wider x ≤ 200 grid); the honest suite pins only the even-dof value,
+  so nothing else moved. Deterministic suite unchanged: the same 9 pre-existing failures
+  (anchor-count parametrization, the inert plant, the ledger-control equality test), zero new.
+  **Left open, recorded:** the codex scaffold's `_weighted_stat` overflows silently
+  (`q_err=1e-154` → weights 1e308 → sum inf → weighted mean 0.0, reproduced) — terra's one
+  uncorroborated-but-true rejection ground; and the Class-1 brief/changeset mismatch on the
+  real-base entries, which is a harness pairing repair, not a scaffold repair.
+
+- 2026-08-28 (second, same day) — **Class 1 of the control audit repaired: every real-base entry
+  now carries a changeset-scoped `spec_behavior`, and the corpus asserts the brief↔changeset
+  contract.** The tool-keyed brief (briefs.py) describes a capability none of the real-base edits
+  implements, so the 2026-08-27 clean run rejected every real-base changeset reaching review 8/8 —
+  defects and controls alike, zero pair discrimination, C1/C2 of the audit. Four maintenance-brief
+  texts (`_SPEC_QU_DOCS/_SPEC_QU_BIN/_SPEC_QU_RANGE/_SPEC_EPOCH`) now ride the nine previously
+  spec-less real entries; a pair shares the text by construction (`paired_controls` copies it), so
+  it names the invariants the edit must preserve while carrying no class — the register
+  `hole_regression_blindness` already used, whose scoped spec split reviewers 4/4 on honoring it.
+  C2's mechanism closed: `sci_epoch_inversion_inadequate` now maps to `_ctl_real_epoch` in
+  `_BESPOKE` instead of falling through to `_real_control_docstring`, whose diff (qu_lag_dcf.py)
+  and brief (load_data) described two different tools. Two guard tests added — the corpus half
+  that never existed: `test_every_real_base_entry_carries_a_changeset_scoped_spec` (pure) and
+  `test_a_real_changeset_touches_only_its_named_tools_files` (builds each real entry against the
+  pinned ref and asserts its diff stays inside a per-tool file allow-list; skipped off-host). The
+  second guard's first run found my own harness bug before any corpus bug: `corpus()` already
+  appends the paired controls, so `corpus() + paired_controls(...)` built every control twice and
+  died on the second clone. Suite 232 → 234; the same 9 pre-existing failures, none new. Synthetic
+  entries stay spec-less on purpose: their changesets ship the whole briefed capability, so brief
+  and diff already describe the same thing.
+
+- 2026-08-28 (third, same day) — **Independent adversarial review of the two repairs, one finding
+  applied.** The reviewer regenerated both scaffolds (41/41, 37/37), re-verified the anchors, the
+  digest round-trip on adversarial row shapes, the C4 fix vs scipy (2.6e-14 over dof 1-11), the
+  leak copy (`paired_controls` shares `spec_behavior`; texts positive-form, no answer vocabulary),
+  and the suite (225 + the same 9). Its one confirmed gap: `sci_bin_edge_inadequate`'s control
+  still fell through to `_real_control_docstring`, the C1 shape in miniature under the new
+  `_SPEC_QU_BIN`; now mapped to `_ctl_real_bin_edge`, the same rule as the epoch pair. Recorded
+  for later, out of today's scope: the reviewed worktree's `.git` still carries "gate-bench"
+  (branch name, synthetic committer identity) — a class-free residual of the answer-leak family
+  the README/prefix fixes closed; the `_nondeterministic_test` plant writes a `gate_bench_seen_`
+  literal into its diff (unreachable at review today: determinism catches it before review runs);
+  `_A_COMPLETE_TESTS`/`_WEAK` are consumer-less constants and `_A_MASK_TEST` no longer matches
+  `_TEST_SOURCE`, so its first use as an anchor will raise.
+
+- 2026-08-28 (fourth, same day) — **Second independent review, on a different model per the
+  working contract, and it caught what the same-model review had blessed.** Its confirmed finding:
+  the C5 repair added a fourth certificate condition while the two documents the reviewer reads —
+  the ledger entries' shared `_SPEC` and the changeset's own `_README_SOURCE` — still described
+  three, and that README ships inside the reviewed diff; on the changeset's own terms the digest
+  was an undocumented condition no specified producer emits, handing the co-lead a new convergent
+  rejection ground on the same 18 `ctl_led_*` controls C5 was written to clean. Both texts now
+  name the digest condition (and the README's test list gains the modified-after-certification
+  check); honest scaffold regenerates 41/41, full suite 225 + the same 9. Also applied from the
+  same review: `sci_bin_edge_inadequate`'s control mapped to `_ctl_real_bin_edge` (the C1 shape
+  in miniature, from the first review round); a named assertion where the file-scope guard would
+  have raised a bare `KeyError` on an unregistered tool; the C4 error figure now states its grid
+  (the reviewer's wider grid reads 3e-14); and the previously-unsynced `_dump_prompt` hook got its
+  `models/DOCS.md` entry plus a docstring-reference fix. Recorded, not fixed (need rulings or are
+  follow-ups): the adequate/inadequate control pairs are now byte-identical twins (two changesets
+  in four control slots — a weighting question for the false-rejection table); `_REAL_TOOL_FILES`
+  is per-tool, so a docs-scoped control editing `toolargs.py` would still pass the guard; the
+  real-base specs enumerate the invariant each defect breaks, so real-base detection measures
+  check-the-named-property rather than unprompted science judgment — state beside Table 3 when
+  comparing arms; worktree `.git` metadata (branch `gate-bench`, synthetic committer) remains the
+  open in-repo channel the path test cannot see.
+
+- 2026-08-31 — **Pre-launch session review closed the `.git` channel and the ablation-leg marker
+  leak; the repaired tree is verified launch-ready.** A three-way review (docs/ledger
+  reconciliation, diff code review, fresh all-channel leak audit building all 134 worktrees)
+  confirmed every 2026-08-28 repair: C1 `spec_behavior` reaches the co-lead on
+  `ToolSpec.expected_behavior` beside the tool-keyed brief (`harness.tool_spec_for`), pairs share
+  it; C4's fixed seed checks against an independent tail integral at 1.9e-12 over dof 1–15; C5's
+  digest is producer/checker-consistent and the honest scaffold runs 26/26 with both
+  anchor-replacing plants still failing it (5, 3); suite exactly 225 + the same 9. The leak audit
+  then found the recorded-open `.git` residual concrete: `read_file`/`list_dir` filter only
+  governance basenames, so `.git/config` (committer `gate-bench`), `.git/HEAD` (branch
+  `gate-bench`), `.git/logs/HEAD` (the checkout line) and `.git/packed-refs`
+  (`origin/gate-bench-base`) were reviewer-readable on every worktree — class-invariant (defect
+  and control carry identical `.git`), so no pair verdict could flip, but naming the setting
+  through a channel the tool surface advertises. Closed structurally: the synthetic committer is
+  `analyst`, the real-base branch is `ai` (`checkout -B`, the branch a production authoring runs
+  on) and the clone drops its remote (removing every remote-tracking ref); the
+  `_nondeterministic_test` marker became `demo_summary_cache_*` (its old `gate_bench_seen_`
+  literal rides the plant's own diff, which reaches the reviewer under `--ablate layer_b
+  --review`), with the harness sweeper's glob renamed in step. Guard tests extended per the
+  no-leaks rule: the tool-description test now also scans the built synthetic worktree's `.git`
+  text against the full leak vocabulary; a new on-host test scans a real-base worktree's `.git`
+  against the harness-minted strings (narrower on purpose — real toolkit history legitimately
+  says "benchmark"); a source-level test pins the marker rename and the producer↔sweeper glob
+  agreement. Also synced: the corpus-count header (136 → the actual 134, verified by `--list`)
+  and the §2 family table, re-derived from `corpus()` (four rows had drifted through the 2026-08
+  corpus merges),
+  `Mutant`'s dictionary entry gains `spec_behavior`/`pairs_with`, the `spec_behavior` field
+  comment no longer claims to "override the brief", `models/DOCS.md` gains the
+  `PROMPT_DUMP_ENV` dictionary entry (with its recorded narrowness: schema by name, attachments
+  by count, coder not covered), and `table_catchrate.py` now fails loudly on a family missing
+  from `FAMILY_ORDER` (the defaultdict would have dropped it from the table silently). Suite
+  234 → 236 + the same 9.

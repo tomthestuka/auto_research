@@ -207,7 +207,14 @@ def prepare_worktree(mutant: Mutant, dest: Path, cfg: RunConfig) -> Path:
         ["git", "clone", "--quiet", "--no-hardlinks", str(cfg.toolkit_root), str(dest)],
         check=True, capture_output=True, text=True,
     )
-    _git(dest, "checkout", "--quiet", "-b", "gate-bench", cfg.stamps["toolkit_sha"])
+    # The reviewer can read `.git` (only governance basenames are filtered), and three of its
+    # files named the benchmark on a real-base worktree (2026-08-28 audit): `.git/HEAD` carried
+    # the old branch name `gate-bench`, `.git/logs/HEAD` the checkout line that names it, and
+    # `.git/packed-refs` the cloned remote-tracking ref `origin/gate-bench-base`. The branch is
+    # now `ai` — the branch a production authoring actually runs on (`-B`: the clone may already
+    # have a local `ai`) — and dropping the remote removes every remote-tracking ref.
+    _git(dest, "remote", "remove", "origin")
+    _git(dest, "checkout", "--quiet", "-B", "ai", cfg.stamps["toolkit_sha"])
     return dest
 
 
@@ -285,8 +292,14 @@ def _check_dicts(checks) -> list[dict]:
 
 
 def _cleanup_markers() -> None:
-    """Remove the temp markers a deliberately nondeterministic test leaves behind."""
-    for path in Path(tempfile.gettempdir()).glob("gate_bench_seen_*"):
+    """Remove the temp markers a deliberately nondeterministic test leaves behind.
+
+    The marker literal rides inside the plant's own diff, so it is named in-fiction
+    (`demo_summary_cache_*`): under `--ablate layer_b --review` the determinism check that
+    normally stops this plant is switched off and the diff reaches the reviewer, where a
+    `gate_bench_*` name would have handed it the benchmark (2026-08-28 audit).
+    """
+    for path in Path(tempfile.gettempdir()).glob("demo_summary_cache_*"):
         try:
             path.unlink()
         except OSError:
@@ -296,7 +309,18 @@ def _cleanup_markers() -> None:
 async def run_mutant(mutant: Mutant, cfg: RunConfig, *, meter: Any | None = None) -> dict:
     """Build, gate, optionally review and sweep one mutant; return its JSONL record."""
     started = time.time()
-    workdir = Path(tempfile.mkdtemp(prefix=f"gate_bench_{mutant.id}_"))
+    # OPAQUE, and this is load-bearing. The prefix was `gate_bench_{mutant.id}_`, so the co-lead's
+    # own `read_file`/`list_dir` descriptions read "permitted roots:
+    # /tmp/gate_bench_led_self_referential_differential_XXXX/repo" — naming the benchmark AND the
+    # planted defect, with `ctl_` marking every control. That is the same answer leak the brief
+    # carried (see `briefs.py`), through a second channel: `ReadOnlyToolProvider` renders its roots
+    # into the tool descriptions the model reads, so a filesystem path IS prompt content.
+    #
+    # Found 2026-08-27 by dumping all three input channels for one mutant before launching a batch,
+    # after the brief fix had already been made and verified. The lesson is that closing one channel
+    # proves nothing about the others.
+    opaque = hashlib.sha256(f"{cfg.stamps.get('code_gate_sha256','')}/{mutant.id}".encode()).hexdigest()[:16]
+    workdir = Path(tempfile.mkdtemp(prefix=f"ar_gate_{opaque}_"))
     spend_before = getattr(meter, "total_usd", 0.0)
     record: dict = {
         "id": mutant.id,
