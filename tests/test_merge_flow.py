@@ -824,3 +824,107 @@ def test_one_coder_member_carries_model_provider_and_harness_together(monkeypatc
 def _mkdir(path):
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+# ── submission snapshots: the checkpoint just before the gate scans (§9.9) ────
+
+
+def _direct_session(tmp_path, repo, **kwargs):
+    kwargs.setdefault("lead", _FakeLead())
+    kwargs.setdefault("coder", _coder_member("fake-model"))
+    kwargs.setdefault("run_gate", _pass_gate)
+    kwargs.setdefault("run_review", _pass_review)
+    kwargs.setdefault("sdk_client_factory", lambda options: _FakeClient())
+    kwargs.setdefault("approve_edit", _RecordingApproveEdit())
+    return build_authoring_session(
+        _spec(), toolkit_root=repo, worktree_base=tmp_path / "wt",
+        direct_branch="ai", **kwargs,
+    )
+
+
+def _coder_edits(repo):
+    (repo / "demo_utils" / "lib" / "retbb.py").write_text("def add_retbb(i):\n    return i\n")
+    (repo / "demo_utils" / "tests" / "test_retbb.py").write_text("def test_r():\n    pass\n")
+
+
+def test_a_submission_is_checkpointed_before_the_gate_and_restorable_after_a_reset(tmp_path):
+    """The working tree at submit time survives the failure reset as a restorable snapshot,
+    and a fresh session for the same tool on the same base ref restores it and says so."""
+    from auto_research.sandbox.merge_flow import _reset_direct_tree
+
+    repo = _toolkit_repo(tmp_path)
+    (repo / "demo_utils" / "tests").mkdir(parents=True, exist_ok=True)
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "tests dir", "--allow-empty")
+    _git(repo, "checkout", "-q", "-b", "ai")
+
+    session = _direct_session(tmp_path, repo)
+    _coder_edits(repo)                                   # the "coder" worked
+    gate = asyncio.run(session.run_gate_step())          # submit: snapshot, then scan
+    assert gate.passed
+    review = asyncio.run(session.run_review_step(gate))
+    assert review.approved
+
+    snap = tmp_path / "wt" / "submissions" / "fit_retbb_hss"
+    assert (snap / "submit_01.patch").is_file()
+    import json as _json
+    state = _json.loads((snap / "state.json").read_text())
+    assert state["submits"][-1]["gate_passed"] is True
+    assert state["submits"][-1]["review_approved"] is True
+
+    # crash before commit: the failure reset cleans the tree; the snapshot survives it
+    asyncio.run(_reset_direct_tree(repo, base_ref=session._base_ref,
+                                   artifact_dir=tmp_path / "wt"))
+    assert not (repo / "demo_utils" / "lib" / "retbb.py").exists()
+
+    resumed = _direct_session(tmp_path, repo)
+    assert resumed.restored_submission is not None
+    assert resumed.restored_submission["index"] == 1
+    assert (repo / "demo_utils" / "lib" / "retbb.py").is_file()  # work is back in the tree
+    assert "Restored prior work" in resumed.initial_message
+
+
+def test_a_snapshot_never_restores_onto_a_moved_base_ref(tmp_path):
+    """A chain-mate's commit moves HEAD; the old snapshot silently stays unrestored."""
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+
+    session = _direct_session(tmp_path, repo)
+    (repo / "demo_utils" / "lib" / "retbb.py").write_text("x = 1\n")
+    asyncio.run(session.run_gate_step())
+    _git(repo, "reset", "--hard", "HEAD"); _git(repo, "clean", "-fdq")
+    _git(repo, "commit", "-qm", "chain-mate landed", "--allow-empty")  # HEAD moves
+
+    resumed = _direct_session(tmp_path, repo)
+    assert resumed.restored_submission is None
+    assert not (repo / "demo_utils" / "lib" / "retbb.py").exists()
+
+
+def test_commit_discards_the_tools_snapshots(tmp_path):
+    """Committed work lives in git; the snapshot record has nothing left to restore."""
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+
+    session = _direct_session(tmp_path, repo)
+    (repo / "demo_utils" / "lib" / "retbb.py").write_text("x = 1\n")
+    asyncio.run(session.run_gate_step())
+    assert (tmp_path / "wt" / "submissions" / "fit_retbb_hss").exists()
+    asyncio.run(session.commit("Add retbb"))
+    assert not (tmp_path / "wt" / "submissions" / "fit_retbb_hss").exists()
+
+
+def test_an_unappliable_snapshot_is_discarded_and_authoring_starts_clean(tmp_path):
+    """The snapshot is an economy, never a dependency: a corrupt patch is dropped."""
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+
+    session = _direct_session(tmp_path, repo)
+    (repo / "demo_utils" / "lib" / "retbb.py").write_text("x = 1\n")
+    asyncio.run(session.run_gate_step())
+    _git(repo, "reset", "--hard", "HEAD"); _git(repo, "clean", "-fdq")
+    snap = tmp_path / "wt" / "submissions" / "fit_retbb_hss"
+    (snap / "submit_01.patch").write_text("this is not a patch\n")
+
+    resumed = _direct_session(tmp_path, repo)
+    assert resumed.restored_submission is None
+    assert not snap.exists()
+    assert "Restored prior work" not in resumed.initial_message

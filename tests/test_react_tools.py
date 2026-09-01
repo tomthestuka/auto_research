@@ -64,6 +64,18 @@ def test_kb_tools_scoped_together(tmp_path):
     assert not ({"text_search", "open_paper"} & _names(lead))
 
 
+def test_read_file_malformed_offset_is_a_tool_error_not_a_crash(tmp_path):
+    """Live 2026-08-31 (gate-bench swapfix, claude_opus_5 x2): the reviewer sent
+    offset='150, ' and the bare int() ValueError escaped the provider, killing the whole
+    review instead of letting the model correct its own slip."""
+    f = tmp_path / "a.txt"
+    f.write_text("line\n" * 5)
+    provider = ReadOnlyToolProvider(roots=[tmp_path])
+    out = asyncio.run(provider.execute("read_file", {"path": str(f), "offset": "150, "}))
+    assert out.is_error
+    assert "invalid argument" in out.text
+
+
 def test_open_paper_attaches_pdf_and_records_path(tmp_path):
     pdf = tmp_path / "paper.pdf"
     pdf.write_bytes(b"%PDF-1.5\nbody")

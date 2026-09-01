@@ -409,3 +409,12 @@ Compacted 2026-08-05: entries through 2026-07-28 folded into themed ranges (deta
   total payload). Those now live per adapter in `models/providers/_media.py`. The distinct-paper cap
   (`_OPEN_PAPER_CAP`=6) stays — that one is about attention, not provider limits. Test:
   `tests/test_react_tools.py::test_open_paper_no_longer_caps_size_itself`.
+
+- 2026-08-31 — **A malformed `read_file` argument no longer kills the caller.**
+  `ReadOnlyToolProvider.execute` coerced `offset`/`limit` with bare `int()` inside a `try` that
+  caught only `OSError`, so a model-sent `offset='150, '` raised `ValueError` out of the provider
+  — live, twice, in the gate-bench swapfix batch (claude_opus_5 on two real-base changesets,
+  $0.05 each, whole review lost). The [F11] rule applies on this path too: a malformed argument
+  is the model's slip to correct, surfaced as an `is_error` tool result naming the expectation,
+  never a crash. `ValueError`/`TypeError` now return that error outcome.
+  Test: `tests/test_react_tools.py::test_read_file_malformed_offset_is_a_tool_error_not_a_crash`.

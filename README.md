@@ -216,8 +216,10 @@ run = await run_research_nohup("your research question", human_channel="telegram
 
 # resume=True recovers a backend that DIED mid-run (host reboot / OOM / kill): it re-launches
 # and continues from the latest on-disk checkpoint — from the last completed node (the in-flight
-# node re-runs). Needs langgraph-checkpoint-sqlite (pip; in environment.yml). Mutually exclusive
-# with overwrite. NOT LIVE TESTED end-to-end yet.
+# node re-runs). An interrupted tool-authoring attempt additionally restores its last SUBMITTED
+# working tree (the pre-gate submission snapshot under run_dir/authoring/submissions/), so the
+# re-run re-enters at the gate instead of re-authoring. Needs langgraph-checkpoint-sqlite (pip;
+# in environment.yml). Mutually exclusive with overwrite. NOT LIVE TESTED end-to-end yet.
 run = await run_research_nohup("your research question", human_channel="telegram", resume=True)
 ```
 

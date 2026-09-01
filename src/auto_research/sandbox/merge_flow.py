@@ -492,6 +492,125 @@ def _read_persisted_base_ref(run_directory: Path) -> str | None:
         return None
 
 
+# ----------------------------------------------------------------------------
+# Submission snapshots — the checkpoint just before the gate scans (§9.9)
+# ----------------------------------------------------------------------------
+#
+# Coding is the run's most expensive chunk, and everything between "coder starts" and
+# "approve_edit commits" was volatile: a crash anywhere in an attempt — including a review-time
+# provider failure on an already gate-passed tree — reset the tree to the base ref and forced a
+# full re-authoring. A *submission* is the natural durability boundary: the tree state the lead
+# judged worth gating. So every submit persists the working tree as a patch (plus the verdicts
+# it earned) under the run's authoring dir, and a resumed attempt for the same tool on the same
+# base ref restores the latest submission and continues, re-running the gate on the restored
+# tree — no stored verdict is ever trusted (the checkpoint sits BEFORE the scan by design, so
+# ``commit ⇔ gate ∧ review`` stays defined over the live tree).
+
+_SUBMISSIONS_DIR = "submissions"
+
+
+def _submissions_dir(worktree_base: Path, tool_name: str) -> Path:
+    return Path(worktree_base) / _SUBMISSIONS_DIR / tool_name
+
+
+def _load_snapshot_state(snap_dir: Path) -> dict | None:
+    try:
+        state = json.loads((snap_dir / "state.json").read_text(encoding="utf-8"))
+        return state if isinstance(state, dict) and state.get("submits") else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_snapshot_state(snap_dir: Path, state: dict) -> None:
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    (snap_dir / "state.json").write_text(json.dumps(state, indent=1), encoding="utf-8")
+
+
+def _working_tree_patch(worktree: Path, base_ref: str) -> str:
+    """The full diff of the working tree vs ``base_ref`` — tracked edits AND untracked files —
+    leaving the tree byte-identical: stage everything, diff the index, unstage."""
+    _git_in(worktree, "add", "-A")
+    try:
+        return _git_in(worktree, "diff", "--cached", base_ref)
+    finally:
+        _git_in(worktree, "reset", "--quiet", base_ref)
+
+
+def save_submission_snapshot(
+    worktree: Path, worktree_base: Path, tool_spec: ToolSpec, *, base_ref: str, branch: str,
+) -> dict | None:
+    """Persist the current working tree as this tool's latest submission. Returns the new
+    submit entry (its verdict fields filled in later), or None when there is nothing to save.
+    Best-effort by the caller's choice — a snapshot failure must never block a submit."""
+    snap_dir = _submissions_dir(worktree_base, tool_spec.proposed_tool_name)
+    diff = _working_tree_patch(worktree, base_ref)
+    if not diff.strip():
+        return None
+    state = _load_snapshot_state(snap_dir) or {
+        "tool_name": tool_spec.proposed_tool_name,
+        "target_domain": tool_spec.target_domain,
+        "tool_spec_id": tool_spec.id,
+        "branch": branch,
+        "base_ref": base_ref,
+        "submits": [],
+    }
+    if state.get("base_ref") != base_ref:
+        # A chain-mate committed since these snapshots were taken: they can never be restored,
+        # so start this tool's record fresh at the current base.
+        state = {**state, "base_ref": base_ref, "submits": []}
+    index = len(state["submits"]) + 1
+    patch_name = f"submit_{index:02d}.patch"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    (snap_dir / patch_name).write_text(diff, encoding="utf-8")
+    entry = {"index": index, "patch": patch_name, "gate_passed": None, "review_approved": None,
+             "review_issues": []}
+    state["submits"].append(entry)
+    _write_snapshot_state(snap_dir, state)
+    return entry
+
+
+def _update_last_submission(worktree_base: Path, tool_name: str, **fields: Any) -> None:
+    """Record a gate/review outcome onto the latest submission's state (best-effort)."""
+    snap_dir = _submissions_dir(Path(worktree_base), tool_name)
+    state = _load_snapshot_state(snap_dir)
+    if state is None:
+        return
+    state["submits"][-1].update(fields)
+    try:
+        _write_snapshot_state(snap_dir, state)
+    except OSError:
+        pass
+
+
+def find_submission_snapshot(
+    worktree_base: Path, tool_name: str, *, base_ref: str
+) -> tuple[Path, dict] | None:
+    """The latest restorable submission for ``tool_name``: its state must record exactly the
+    current ``base_ref`` — the condition that makes a restore safe (the patch re-applies onto
+    the very tree state it was taken from, chains included)."""
+    snap_dir = _submissions_dir(Path(worktree_base), tool_name)
+    state = _load_snapshot_state(snap_dir)
+    if state is None or state.get("base_ref") != base_ref:
+        return None
+    patch = snap_dir / state["submits"][-1]["patch"]
+    return (patch, state) if patch.is_file() else None
+
+
+def restore_submission_snapshot(worktree: Path, patch: Path) -> None:
+    """Apply the persisted submission onto the clean tree at its base ref (working-tree write
+    only — never a commit; ``approve_edit`` stays the sole commit path). Raises on failure so
+    the caller can discard the snapshot and start clean."""
+    _git_in(worktree, "apply", "--whitespace=nowarn", str(patch))
+
+
+def discard_submission_snapshots(worktree_base: Path, tool_name: str) -> None:
+    """Remove a tool's snapshot record (on commit — the work now lives in git — or on a failed
+    restore). Best-effort."""
+    import shutil
+
+    shutil.rmtree(_submissions_dir(Path(worktree_base), tool_name), ignore_errors=True)
+
+
 class BranchHealResult(NamedTuple):
     """Outcome of a resume-time authoring-branch heal (for a monitor event)."""
 
@@ -609,6 +728,27 @@ def _initial_message(tool_spec: ToolSpec, structure_context: str) -> str:
     )
 
 
+def _restored_note(entry: dict) -> str:
+    """The seed-message section for a restored submission: what the tree already holds and the
+    feedback it last earned, so the coder continues rather than restarts."""
+    lines = [
+        "## Restored prior work",
+        f"A previous session for this tool was interrupted after submission {entry.get('index')}. "
+        "The working tree ALREADY CONTAINS that submission's files — inspect them first and "
+        "build on them.",
+    ]
+    if entry.get("gate_passed") is True:
+        lines.append("That submission passed the deterministic gate.")
+    elif entry.get("gate_passed") is False:
+        lines.append("That submission was rejected by the deterministic gate.")
+    issues = entry.get("review_issues") or []
+    if issues:
+        lines.append("The independent reviewer's outstanding feedback on it:")
+        lines += [f"- {i}" for i in issues]
+    lines.append("Address the outstanding feedback, re-run pytest until green, then stop.")
+    return "\n".join(lines)
+
+
 def _gate_feedback_message(gate: GateReport) -> str:
     failed = [c for c in (*gate.layer_a, *gate.layer_b) if not c.passed]
     detail = "\n".join(f"- {c.name}: {c.detail}" for c in failed) or gate.reason
@@ -673,6 +813,7 @@ class AuthoringSession:
         debate_cap: int = 3,
         monitor: Any | None = None,
         coder_model: str = "",
+        restored_submission: dict | None = None,
     ) -> None:
         self.tool_spec = tool_spec
         self.worktree = worktree
@@ -700,11 +841,19 @@ class AuthoringSession:
         self._worktree_base = worktree_base
         self._monitor = monitor
         self._coder_model = coder_model  # attributes the SDK session's own spend on the cost meter
+        # A prior interrupted attempt's latest submission, already applied to the working tree
+        # by build_authoring_session; carried so the seed message and the ledger say so.
+        self.restored_submission = restored_submission
 
     @property
     def initial_message(self) -> str:
-        """The seed turn: the ToolSpec brief + runtime-safe local structure context."""
-        return _initial_message(self.tool_spec, self._structure_context)
+        """The seed turn: the ToolSpec brief + runtime-safe local structure context; when a
+        prior attempt's submission was restored, a section saying what is already in the tree
+        and what feedback it last earned."""
+        message = _initial_message(self.tool_spec, self._structure_context)
+        if self.restored_submission:
+            message += "\n\n" + _restored_note(self.restored_submission)
+        return message
 
     async def connect(self) -> None:
         await self._backend.connect()
@@ -714,6 +863,16 @@ class AuthoringSession:
             data={"tool_spec_id": self.tool_spec.id, "tool": self.tool_spec.proposed_tool_name,
                   "branch": self.branch, "disposition": self.tool_spec.disposition},
         )
+        if self.restored_submission:
+            await _emit(
+                self._monitor, "authoring.snapshot.restored", level=3,
+                summary=(
+                    f"restored submission {self.restored_submission.get('index')} of "
+                    f"{self.tool_spec.proposed_tool_name} into the working tree"
+                ),
+                data={"tool": self.tool_spec.proposed_tool_name,
+                      "restored_from": self.restored_submission},
+            )
 
     async def drive(self, message: str) -> str:
         """Send one instruction to the warm coder session and drain its response (L0 inside).
@@ -742,6 +901,28 @@ class AuthoringSession:
                     summary="coder ran git itself — auto-reverted the commit to uncommitted changes",
                     data={"head_was": head, "base_ref": self._base_ref},
                 )
+        # THE CHECKPOINT: persist this submission before anything scans it, so a crash anywhere
+        # downstream (the gate, a review-provider failure, a kill) costs a resume the review at
+        # most, never the authoring. Best-effort — a snapshot failure must never block a submit.
+        if self._base_ref is not None:
+            try:
+                entry = save_submission_snapshot(
+                    self.worktree, self._worktree_base, self.tool_spec,
+                    base_ref=self._base_ref, branch=self.branch,
+                )
+                if entry is not None:
+                    await _emit(
+                        self._monitor, "authoring.snapshot.saved", level=5,
+                        summary=f"submission {entry['index']} of "
+                                f"{self.tool_spec.proposed_tool_name} checkpointed",
+                        data={"tool": self.tool_spec.proposed_tool_name, "index": entry["index"]},
+                    )
+            except Exception as exc:  # noqa: BLE001 — the submit matters more than its snapshot
+                await _emit(
+                    self._monitor, "authoring.snapshot.error", level=4,
+                    summary=f"submission snapshot failed: {type(exc).__name__}: {exc}",
+                    data={"error": repr(exc)},
+                )
         g = await self._run_gate(self.worktree, self.tool_spec)
         failed = [f"[{c.layer}] {c.name}" for c in (*g.layer_a, *g.layer_b) if not c.passed]
         await _emit(
@@ -751,6 +932,12 @@ class AuthoringSession:
                   "reason": _cap_text(g.reason)},
         )
         self.last_gate = g
+        if self._base_ref is not None:
+            failed = [f"[{c.layer}] {c.name}" for c in (*g.layer_a, *g.layer_b) if not c.passed]
+            _update_last_submission(
+                self._worktree_base, self.tool_spec.proposed_tool_name,
+                gate_passed=g.passed, gate_failing_checks=failed,
+            )
         return g
 
     async def run_review_step(
@@ -778,6 +965,12 @@ class AuthoringSession:
                   "checks_adequate": review.checks_adequate, "rationale": _cap_text(review.rationale)},
         )
         self.last_review = review
+        if self._base_ref is not None:
+            _update_last_submission(
+                self._worktree_base, self.tool_spec.proposed_tool_name,
+                review_approved=review.approved,
+                review_issues=[_cap_text(i, 300) for i in review.issues],
+            )
         return review
 
     async def commit(self, message: str) -> str:
@@ -787,6 +980,8 @@ class AuthoringSession:
         commit_sha = self._approve_edit(self.worktree, message=message)
         self.committed = True
         self.last_commit_sha = commit_sha
+        # The committed work now lives in git; the snapshot record has nothing left to restore.
+        discard_submission_snapshots(self._worktree_base, self.tool_spec.proposed_tool_name)
         await _emit(
             self._monitor, "commit", level=3,
             summary=f"committed {self.tool_spec.proposed_tool_name} → {commit_sha[:10]}",
@@ -959,9 +1154,25 @@ def build_authoring_session(
             _base_ref_path(worktree_base).write_text(base_ref, encoding="utf-8")
         except OSError:
             pass  # best-effort; heal falls back to HEAD if the file is unreadable
+        # Restore an interrupted attempt's latest submission (the pre-gate checkpoint): only
+        # onto the exact base ref it was taken from, so chains and healed trees stay safe. A
+        # restore failure discards the record and starts clean — the snapshot is an economy,
+        # never a dependency.
+        restored_submission = None
+        found = find_submission_snapshot(
+            worktree_base, tool_spec.proposed_tool_name, base_ref=base_ref
+        )
+        if found is not None:
+            patch, state = found
+            try:
+                restore_submission_snapshot(toolkit_root, patch)
+                restored_submission = state["submits"][-1]
+            except Exception:  # noqa: BLE001 — an unappliable snapshot must not block authoring
+                discard_submission_snapshots(worktree_base, tool_spec.proposed_tool_name)
     else:
         branch = f"tool/{tool_spec.proposed_tool_name}-{uuid.uuid4().hex[:8]}"
         worktree = worktree_factory(toolkit_root, worktree_base, branch)
+        restored_submission = None
 
     structure_context = _build_structure_context(worktree)
     system_prompt = load_prompt("coder")
@@ -984,7 +1195,7 @@ def build_authoring_session(
         structure_context=structure_context, run_gate=run_gate, run_review=run_review,
         approve_edit=approve_edit, direct_branch=direct_branch, toolkit_root=toolkit_root,
         worktree_base=worktree_base, submit_cap=submit_cap, debate_cap=debate_cap, monitor=monitor,
-        coder_model=coder_model,
+        coder_model=coder_model, restored_submission=restored_submission,
     )
 
 

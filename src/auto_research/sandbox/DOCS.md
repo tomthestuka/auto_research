@@ -1172,3 +1172,31 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   `tests/test_jail.py` 19 → 28, suite 1136 → 1176. **Lesson recorded:** a hand-built probe is not the
   production path — mine failed with the jail *off* too, which is the only reason I did not read its
   failure as a code defect.
+
+- 2026-08-31 — **Submission snapshots: the authoring checkpoint just before the gate scans.**
+  Coding is a run's most expensive chunk, and everything between "coder starts" and
+  `approve_edit` was volatile: a crash anywhere in an attempt — including a review-provider
+  failure on an already gate-passed tree — reset the branch to the base ref and forced a full
+  re-authoring (~$27–45 lost to save a ~$1–3 review). The submission is the natural durability
+  boundary. `AuthoringSession.run_gate_step` now persists the working tree at every submit,
+  after the §9.9 coder-commit backstop and before the scan, as
+  `run_dir/authoring/submissions/<tool>/submit_NN.patch` + `state.json` (base ref, branch,
+  spec id, and — appended as they land — the gate outcome and the co-lead's issues); every
+  submission is kept, failed ones included. `build_authoring_session` (direct-branch mode)
+  restores the latest snapshot **only when its recorded base ref equals current HEAD** — the
+  condition that makes a restore safe across chains and heals — via `git apply` (a working-tree
+  write; `approve_edit` stays the sole commit path), marks the session `restored_submission`,
+  and the seed message gains a "Restored prior work" section carrying the last feedback, so the
+  stateless-restartable coder continues over the durable substance (tree + feedback) rather
+  than restarting. The gate re-runs on the restored tree: no stored verdict is ever trusted,
+  and `commit ⇔ gate ∧ review` stays defined over the live tree. `commit()` discards the
+  tool's snapshots (the work now lives in git); an unappliable snapshot is discarded and
+  authoring starts clean (the snapshot is an economy, never a dependency); worktree
+  (non-direct) mode is unchanged. Snapshots live under the run's authoring dir, outside both
+  repos, so the failure reset, `heal_toolkit_branch_if_dirty`, and the clean-tree preflight
+  neither see nor destroy them. Events: `authoring.snapshot.saved` (L5) / `.restored` (L3) /
+  `.error` (L4). New module functions: `save_submission_snapshot`,
+  `find_submission_snapshot`, `restore_submission_snapshot`, `discard_submission_snapshots`,
+  `_working_tree_patch`, `_update_last_submission`. Tests: `tests/test_merge_flow.py`
+  (checkpoint→reset→restore round-trip incl. the seed section; moved-base-ref refusal;
+  commit cleanup; corrupt-patch discard). Suite 41/41 + adjacent 278 green.

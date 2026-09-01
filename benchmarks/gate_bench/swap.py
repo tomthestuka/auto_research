@@ -59,19 +59,45 @@ def _reviewed(record: dict) -> bool:
     return bool((record.get("review") or {}).get("ran"))
 
 
+def _review_errored(record: dict) -> bool:
+    """The gate passed, the review was attempted, and the vendor never delivered a verdict.
+
+    Ruling 2026-08-31: a vendor failure is a property of that reviewer and counts as FAILING
+    the item — it stays in the reviewed denominator (a defect earns no detection credit, a
+    control is not cleanly approved, a pair is not discriminated) instead of silently
+    shrinking the denominator.
+    """
+    return (
+        bool(record.get("error"))
+        and (record.get("gate") or {}).get("passed") is True
+        and not _reviewed(record)
+    )
+
+
 def summarise(reviewer: str, records: list[dict]) -> dict:
     """One row of the comparison: what this model did to defects, controls and pairs."""
     by_id = {r["id"]: r for r in records}
     defects = [r for r in records if r["family"] != FAM_CONTROL]
     controls = [r for r in records if r["family"] == FAM_CONTROL]
 
-    reviewed_defects = [r for r in defects if _reviewed(r)]
-    reviewed_controls = [r for r in controls if _reviewed(r)]
+    # An errored review counts as failing the item (see _review_errored), so the reviewed
+    # denominators include it; only a delivered verdict can score.
+    reviewed_defects = [r for r in defects if _reviewed(r) or _review_errored(r)]
+    reviewed_controls = [r for r in controls if _reviewed(r) or _review_errored(r)]
 
-    # A pair is discriminated when the defect is rejected and its honest twin is accepted.
+    # A pair is discriminated when the defect is rejected and its honest twin is accepted —
+    # both verdicts actually delivered; an errored member fails its pair.
     pairs = [(by_id.get(c["pairs_with"]), c) for c in controls if c.get("pairs_with")]
-    judged = [(m, c) for m, c in pairs if m is not None and _reviewed(m) and _reviewed(c)]
-    discriminated = [(m, c) for m, c in judged if _rejected(m) and not _rejected(c)]
+    judged = [
+        (m, c) for m, c in pairs
+        if m is not None
+        and (_reviewed(m) or _review_errored(m))
+        and (_reviewed(c) or _review_errored(c))
+    ]
+    discriminated = [
+        (m, c) for m, c in judged
+        if _reviewed(m) and _reviewed(c) and _rejected(m) and not _rejected(c)
+    ]
 
     attributions = [r.get("review_attribution") for r in defects if _rejected(r)]
     landed = [r for r in defects
@@ -85,6 +111,8 @@ def summarise(reviewer: str, records: list[dict]) -> dict:
         "controls_rejected": sum(1 for r in reviewed_controls if _rejected(r)),
         "pairs_judged": len(judged),
         "pairs_discriminated": len(discriminated),
+        "defect_errors": sum(1 for r in defects if _review_errored(r)),
+        "control_errors": sum(1 for r in controls if _review_errored(r)),
         "on_target": sum(1 for a in attributions if a == "on_target"),
         "off_target": sum(1 for a in attributions if a == "off_target"),
         "unread": sum(1 for a in attributions if a in ("undecided", "stale")),
@@ -130,15 +158,16 @@ def build_swap_report(runs: list[tuple[str, list[dict]]]) -> str:
         "",
         "## Summary",
         "",
-        "| Reviewer | Defects rejected | Controls rejected | Pairs discriminated | On-target | Unread | Reaching a commit | Spend | Minutes |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| Reviewer | Defects rejected | Controls rejected | Pairs discriminated | On-target | Unread | Errors | Reaching a commit | Spend | Minutes |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in rows:
+        errors = row.get("defect_errors", 0) + row.get("control_errors", 0)
         lines.append(
             f"| `{row['reviewer']}` | {row['defects_rejected']}/{row['defects_reviewed']} "
             f"| {row['controls_rejected']}/{row['controls_reviewed']} "
             f"| {row['pairs_discriminated']}/{row['pairs_judged']} "
-            f"| {row['on_target']} | {row['unread']} | {row['reaching_commit']} "
+            f"| {row['on_target']} | {row['unread']} | {errors} | {row['reaching_commit']} "
             f"| ${row['cost_usd']:.2f} | {row['seconds'] / 60:.0f} |"
         )
     lines += [
@@ -147,6 +176,10 @@ def build_swap_report(runs: list[tuple[str, list[dict]]]) -> str:
         "model separated the defect from the same edit made honestly. Rejecting both is suspicion,",
         "not discrimination. `On-target` counts rejections a human read as naming the planted",
         "defect; `unread` are those not yet judged, and they are not credited anywhere.",
+        "`Errors` counts gate-passed items on which the vendor never delivered a verdict; a",
+        "reviewer property, so those items stay in the denominators and score as failures — a",
+        "defect earns no detection credit, a control is not cleanly approved, the pair is not",
+        "discriminated.",
         "",
     ]
 

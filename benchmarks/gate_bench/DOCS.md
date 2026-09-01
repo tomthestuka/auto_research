@@ -845,3 +845,74 @@ seconds; that run cost $25.
   by count, coder not covered), and `table_catchrate.py` now fails loudly on a family missing
   from `FAMILY_ORDER` (the defaultdict would have dropped it from the table silently). Suite
   234 → 236 + the same 9.
+
+- 2026-08-31 (second, same day) — **Methodology ruling: the repair loop ends here — the corpus
+  is frozen in place, and "clean" means honest, not unobjectionable.** Prompted by the operator
+  observing that four repair→run cycles (08-17 control repairs, 08-22 retirement, 08-27 leak +
+  C1–C5 audit, 08-28 repairs, 08-31 roster read) each surfaced new flaws — the adaptive-revision
+  hazard (Gelman & Loken's forking paths; Dwork's holdout reuse). A literature sweep
+  (`logs/dev/gate-bench/METHODOLOGY_20260831.md`: SWE-bench Verified/+, EvalPlus, MMLU-Redux,
+  mutation testing's equivalent-mutant discipline, Redwood's AI-control line, SWR-Bench) sets the
+  line the field draws: post-hoc repair is legitimate only per score-blind validity criterion,
+  invalid items are excluded from denominators with the exclusion counted, pre/post numbers stay
+  visible, and the instrument freezes before the headline run. Decisions recorded:
+  1. **The control label is "honest"** — no fabrication, no planted defect, behavior matching its
+     docs within the brief's scope — **not "no reviewer can object"**. The unbounded
+     scaffold-quality class (certificate basename binding, the spread self-oracle, the missing
+     `strict=True` test, `peak_to_peak` circular wrap, err-row counting, `require_complete`
+     strictness) is declared out of repair scope: a strict reviewer rejecting honest-but-imperfect
+     code is the false-rejection measurement, itemized by ground beside the table, never repaired
+     away. Chasing unobjectionable controls tunes the corpus to the strictest reviewer, which is
+     the result-engineering this ruling forbids.
+  2. **The corpus version the 20260831T172738Z-swapfix batch ran on is the frozen v1**; that
+     batch is the headline measurement. The label violations the roster read found in it are
+     handled by documented exclusion/reclassification, mutation-testing style, not a re-run:
+     `led_total_on_a_different_sample` (the plant is an accidental swallowed NameError —
+     `usable_rows(above)`, this file's builder — not its described defect; excluded or footnoted),
+     `ctl_hole_g7_review_truncation` (the shared filler ships invented "reference response"
+     provenance, violating the honesty label — its rejections reclassify as justified, out of the
+     false-rejection denominator), and the real-base control verdicts resting on
+     `_SPEC_QU_BIN`'s overpromise ("half-range spanned", which the pinned `dcf_bins` floor()
+     semantics do not honour — our brief misstating ground truth; footnoted count).
+  3. **The four-round repair history is disclosed in the manuscript as a funnel** (round, what
+     was found, class, count, pre/post effect — the C1 spec repair's 8/8 → 0–4/10 real-base
+     control rejection is itself a measured result), with earlier batches reported as pilots.
+  4. **v2 repairs land in the tree without a paid re-run**: the label violations above, plus the
+     mechanical scaffold fixes, so any future batch runs clean; a confirmatory run happens only
+     if a referee requires one, once, on the tagged v2.
+  5. **Attribution roster**: the 306-entry LLM read
+     (`logs/dev/gate-bench/review_roster_20260831_proposed.json`, rubric in
+     `…-swapfix-ROSTERREAD.md`) merges only after a human spot-sample (~30 verdicts) with the
+     agreement figure reported; readers disagreed on ground-level justification (sol/terra vs
+     luna readers), so justification is ruled per ground by the human, not per record.
+
+- 2026-08-31 (third, same day) — **The swapfix batch's 8 errored records investigated: none is
+  internet or throttling; one was ours and is fixed.** claude_opus_5 ×2 (`fabgap_surrogate_real`,
+  `bound_lag_cap_real`): the reviewer sent `read_file` `offset='150, '` and
+  `ReadOnlyToolProvider`'s bare `int()` raised out of a `try` that caught only `OSError`, killing
+  the review — fixed in `agents/react.py` (malformed argument → `is_error` tool result, the
+  [F11] rule on this path; test
+  `tests/test_react_tools.py::test_read_file_malformed_offset_is_a_tool_error_not_a_crash`), so
+  those two records are retryable in any future batch. deepseek_v4_pro ×3: the vendor's known
+  structured-output failure shape on long trajectories (one `max_output_tokens` with 0 output
+  chars, two "completed" at ~233/253 chars that parse to nothing) — vendor behavior, already a
+  §13-class caveat, reported beside its leg. qwen3_8_max ×2: the vendor's known thinking-mode
+  emit-tool races (one turn with no emit call at all, one emitting a structured answer beside a
+  hallucinated `emit_structified_response` tool call — the misspelling is the model's, not ours)
+  — anticipated by the adapter's premature-answer guard, retried, exhausted. glm_5_3 ×1
+  (`hole_regression_blindness`): the forced emit call arrived with empty arguments `{}` and
+  failed `ToolReviewVerdict` validation after retries — the GLM forced-tool route's known
+  degraded shape ([I14] family), reported beside its leg. Error records carry no verdict and drop
+  out of that leg's reviewed denominator (the 47/46/45 variance in the leg table).
+
+- 2026-08-31 (fourth, same day) — **Vendor review failures now score as failures, not gaps.**
+  Ruling: a gate-passed item on which the vendor never delivered a verdict is a property of
+  that reviewer and counts as failing the item. `swap._review_errored` (error set, gate passed,
+  no verdict) keeps such records in the reviewed denominators — a defect earns no detection
+  credit, a control is not cleanly approved, and an errored member fails its pair — and the
+  summary table gains an `Errors` column; a pre-gate error still drops out. This replaces the
+  silent denominator shrink behind the swapfix table's 47/46/45 variance. The two
+  claude_opus_5 records lost to the (now fixed) `read_file` coercion crash are re-run on the
+  same frozen corpus and patched into that leg with a note, since their failure was the
+  harness's, not the vendor's. Test:
+  `tests/test_gate_bench.py::test_a_vendor_error_counts_as_failing_the_item`.

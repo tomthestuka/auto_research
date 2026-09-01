@@ -1775,3 +1775,25 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   about the lead's, and the coder sweep's own data does not support the author as the operative
   axis. If the lead-correlated diagonal moves and the author-correlated column does not, the rule
   binds the wrong actor. Docs-only this session; no code changed.
+
+- 2026-08-31 — **Submission snapshots: an authoring attempt is durable from the moment it meets
+  the gate.** Real-run ledgers show coding is the chunk that eats most time and money, and the
+  checkpoint map had a hole exactly there: LangGraph resumes at node granularity, `approve_edit`
+  commits are durable, the per-attempt base ref heals the branch — but everything between "coder
+  starts" and "commit" was volatile, so a review-provider failure on a gate-passed tree cost a
+  full re-authoring. `AuthoringSession.run_gate_step` now persists every submission (after the
+  §9.9 coder-commit backstop, before the scan) as a patch + verdict record under
+  `run_dir/authoring/submissions/<tool>/`, failed submissions included; on resume,
+  `build_authoring_session` restores the latest snapshot only onto its exact recorded base ref,
+  seeds the coder with the restored tree and its outstanding feedback, and the gate re-runs on
+  the restored tree — no stored verdict is trusted, `commit ⇔ gate ∧ review` stays defined over
+  the live tree, `approve_edit` stays the sole commit path, and the placement follows the
+  existing discipline (durable state under the run dir; tree, never process; resume re-enters at
+  a boundary by re-running the step). `commit()` discards the tool's record; a snapshot that
+  fails to apply is discarded — an economy, never a dependency. Same session: the swapfix
+  batch's 8 review-stage errors were investigated (none internet/throttle: 2 were our
+  `ReadOnlyToolProvider` bare-`int()` crash on a model-sent `offset='150, '`, fixed to an
+  `is_error` tool result per the [F11] rule and re-run clean; 6 are known vendor
+  structured-output shapes, now ruled to count as failing the item — `swap._review_errored`
+  keeps them in the denominators). NOT LIVE TESTED: a real killed-mid-authoring run resumed
+  through a snapshot restore (joins the §13 durable-resume live-test list).

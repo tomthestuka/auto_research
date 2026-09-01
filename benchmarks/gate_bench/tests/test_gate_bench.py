@@ -716,6 +716,42 @@ def test_pair_discrimination_needs_the_control_accepted():
     assert suspicious["controls_rejected"] == 1
 
 
+def test_a_vendor_error_counts_as_failing_the_item():
+    """Ruling 2026-08-31: a gate-passed item whose review never delivered a verdict is a
+    reviewer property — it stays in the denominators and scores as a failure (no detection
+    credit, no clean approval, no pair discrimination), instead of silently shrinking the
+    denominator as it did in the swapfix batch's 47/46/45 variance."""
+    from benchmarks.gate_bench import swap
+
+    def errored(mutant_id, family, pairs_with=None):
+        return {"id": mutant_id, "family": family, "pairs_with": pairs_with,
+                "caught_by": [], "gate": {"passed": True}, "review": None,
+                "error": "ValueError: vendor returned no parseable verdict",
+                "cost_usd": 0.0, "duration_s": 0.0}
+
+    def verdict(mutant_id, family, approved, pairs_with=None):
+        return {"id": mutant_id, "family": family, "pairs_with": pairs_with,
+                "caught_by": ["review"] if approved is False else [],
+                "gate": {"passed": True},
+                "review": {"ran": True, "approved": approved}, "cost_usd": 0.0,
+                "duration_s": 0.0}
+
+    row = swap.summarise("m", [
+        errored("d1", "Silent capability bound"),                      # defect, review errored
+        errored("ctl_d2", FAM_CONTROL, pairs_with="d2"),               # control, review errored
+        verdict("d2", "Silent capability bound", False, None),         # its defect was rejected
+    ])
+    assert row["defects_reviewed"] == 2 and row["defects_rejected"] == 1
+    assert row["controls_reviewed"] == 1 and row["controls_rejected"] == 0
+    assert row["defect_errors"] == 1 and row["control_errors"] == 1
+    # the errored control fails its pair: judged, never discriminated
+    assert row["pairs_judged"] == 1 and row["pairs_discriminated"] == 0
+    # a pre-gate error (gate never passed) is not a review failure
+    pre_gate = dict(errored("d3", "Silent capability bound"), gate={"passed": False})
+    row2 = swap.summarise("m", [pre_gate])
+    assert row2["defects_reviewed"] == 0 and row2["defect_errors"] == 0
+
+
 def test_swap_report_carries_every_models_verbatim_verdict():
     """The audit trail is the point: a claim of a catch must be checkable against the words."""
     from benchmarks.gate_bench import swap

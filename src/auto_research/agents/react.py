@@ -1971,6 +1971,16 @@ class ReadOnlyToolProvider:
                     text = json.dumps(sorted(p.name for p in target.iterdir()))
             except OSError as exc:
                 return ToolOutcome(text=f"{type(exc).__name__}: {exc}", is_error=True)
+            except (ValueError, TypeError) as exc:
+                # A malformed argument (live: offset='150, ') is the model's slip to correct,
+                # never a crash: surface it on the tool result like every other tool error.
+                return ToolOutcome(
+                    text=(
+                        f"invalid argument: {type(exc).__name__}: {exc}. "
+                        "offset and limit must be plain integers."
+                    ),
+                    is_error=True,
+                )
             return ToolOutcome(text=text or "(empty)")
 
         if name == "text_search":
