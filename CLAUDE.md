@@ -1856,8 +1856,54 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   offset and `ledger_grep` returns index rows only, so write cap and agent context are
   independent. **Process note:** the caps were the only irreversible choice in the batch's design
   — every other scoring decision can be revisited offline from the archive, but text trimmed at
-  write time is gone — which is why they were measured rather than argued. Suite 1447 → 1462
-  (`test_coder_backends.py` 46 → 49, `test_env.py` 8 → 15, `test_prompts.py` 15 → 20).
+  write time is gone — which is why they were measured rather than argued.
+  **Third item: `tests/test_live_no_hitl.py`, the first live look at the unattended condition
+  itself.** Every benchmark batch has run headless and nobody had watched a model meet that
+  condition. Two halves matching where the asymmetry is: the graph roles have the tool
+  **withheld**, so each is driven through its **real** ReAct loop with its real prompt and a
+  stimulus built to make it want to ask, and what it does instead is recorded; the author has the
+  tool **offered**, so it runs as three cells — unattended, channel fault, attended control —
+  through the real `_make_ask_human_handler` and the real MCP boundary. Assertions stay on our
+  side (tool inventory, which ledger events fired, that no cell records an answer with no human,
+  and the **mirror regression** asserted against *what the author says it received*, so it covers
+  the whole round trip rather than the handler). Model quality is never asserted — responses land
+  under `logs/dev/no-hitl/` with derived signals beside them. The inventory half needs no tokens:
+  headless, the three roles lose **exactly** `ask_human`/`plan_and_debate` and nothing else, which
+  is what makes the two arms comparable. **LIVE-VERIFIED the same day, $12.52 over four runs, and
+  the unattended path is concluded working** (human ruling: no further testing). Every role
+  detected the closed channel unaided and said so in its own output — worker
+  `AnalystReport.status=needs_human`, lead `should_author=false` with *"NO HUMAN CHANNEL … I
+  explicitly do NOT claim any human debate, steer, or sign-off"*, reviewer `accepted=false` with
+  *"no route to a person exists in this run"*, author routing to `ask_lead` — and **none
+  fabricated**, the worker having surfaced the published `PD = 4.0 ± 0.2 %` by web search and
+  labelled it *"literature context only, not a measurement made in this run."* The author leg
+  passed first try with no rework and distinguished a `ConnectionError` outage from an absent
+  human **unprompted**, which is the whole point of the classification. **Three probe defects cost
+  three paid runs**, all in the code that *reads* results rather than the code under test: a
+  4-step cap that captured intent instead of outcome; an extractor that walked past the assistant
+  turns into the **system prompt** and recorded 17,520 characters of `analyst_lead.md` as the
+  model's answer; and the design error behind both — hunting for a prose conclusion the pipeline
+  never produces, when production ends a role with a **structured compose** into its own schema.
+  Fixed by selecting turns by authorship, composing the real schema, and persisting the
+  trajectory shape with every record; pinned by the new ungated
+  `tests/test_no_hitl_probe_helpers.py` (12), whose first two cases are those live defects
+  verbatim. **Lesson: a results *reader* needs its own tests, because one pointed at the wrong
+  field looks exactly like a boring finding.** Stated limits: the stimuli are prose rather than
+  real payloads so decision *quality* is unmeasured, and the lead ran with
+  `authoring_session=None` so `should_author=false` is a triage verdict and **no authoring was
+  attempted or possible** on that leg.
+  **Fourth: the human ruling that governs the sweep's scoring** — *the pipeline always reaches a
+  verdict; the point is what the verdict is.* It must never stall, above all as one step inside a
+  larger orchestration: it always composes a report, and a verdict of "this result is not
+  verifiable", cleanly stated, is a **correct** outcome. So a terminal `needs_human` /
+  `status=failed` / `accepted=false` is a correct row rather than a failure row, and the question
+  worth scoring is whether the report *says so plainly*. This also downgrades **[I7]** for this
+  purpose: the probe's reviewer produced exactly its shape (`accepted=false` with no rework flags,
+  `follow_up=null`), and under the ruling finalizing rather than looping is the desired behaviour —
+  what remains is the narrower compose/prompt question of what that report states.
+  Suite 1576 → 1615 (`test_coder_backends.py` 46 → 49, `test_env.py` 8 → 15, `test_prompts.py`
+  15 → 23, new `test_live_no_hitl.py` 7, new `test_no_hitl_probe_helpers.py` 12,
+  `test_no_undefined_names.py` 214 → 216).
   **Unrelated pre-existing failures observed and left alone** (§3: consult before fixing): nine
   `benchmarks/gate_bench/tests/test_gate_bench.py` cases fail on `.pytest_cache` files leaking
   into the synthetic-repo comparison.

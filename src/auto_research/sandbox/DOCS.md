@@ -1240,7 +1240,22 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   in the code and its test — and is **domain-neutral by construction**, naming channels rather
   than kinds of document, because `prompts/coder.md` and the toolkit are not tied to one field.
   Also: `CODER_TEXT_CAP` became `coder_text_cap()`, read from config at call time (see the root
-  `DOCS.md` entry of the same date). Tests: `tests/test_coder_backends.py` 46 → 49.
+  `DOCS.md` entry of the same date). Tests: `tests/test_coder_backends.py` 46 → 49, plus the
+  new live probe `tests/test_live_no_hitl.py` (`AUTO_RESEARCH_LIVE_NO_HITL=1`), which drives
+  the real author backend through three cells — unattended, channel fault, attended control —
+  and asserts the mirror regression against **what the author says it received**, so the whole
+  MCP round trip is covered rather than the handler alone. **LIVE-VERIFIED 2026-09-01, first
+  run, no rework:** the three arms produced `.unattended` / `.error` / `.answer` with no
+  `.answer` in either failure arm, and the author **distinguished the two failures unprompted**
+  — naming one a `ConnectionError` outage and the other nobody being there — which is what the
+  classification exists to make possible and what one flattened string could not support. It
+  reported receiving the guidance rather than its own question (the mirror is dead), recited
+  the three steps back, and then **acted on their ordering**, choosing `ask_lead` over the web
+  with a stated reason. In the fault arm it said outright *"I will not guess silently or
+  hardcode a calibration epoch choice without grounding it."* All three arms refused to invent
+  a `ToolSpec` to work from. Note what this does **not** cover: the leg drives the backend
+  directly, so no lead, no gate and no commit are exercised — end-to-end authoring is
+  `test_live_loader_authoring.py`'s job, not this file's.
 
 - 2026-09-01 (same day) — **What the audit found in the surrounding wiring, recorded because it
   overturned a plan premise.** Withholding the tool (the "option (b)" a benchmark plan was about
