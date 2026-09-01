@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from auto_research.config_paths import orchestration_yaml
 from auto_research.preflight import run_preflight
 from auto_research.hitl import HumanHandler, resolve_handler
 from auto_research.agents import (
@@ -40,7 +41,6 @@ from auto_research.storage import Storage
 
 
 DEFAULT_WORKER_COUNT = 2
-DEFAULT_ORCHESTRATION_CONFIG = Path(__file__).resolve().parents[3] / "config" / "orchestration.yaml"
 
 
 @dataclass(frozen=True)
@@ -79,9 +79,15 @@ class ResearchRun:
         return render_run_summary(stored if stored is not None else build_run_summary(events))
 
 
-def load_orchestration_config(path: str | Path = DEFAULT_ORCHESTRATION_CONFIG) -> dict:
-    """Load iteration caps from orchestration.yaml."""
-    path = Path(path)
+def load_orchestration_config(path: str | Path | None = None) -> dict:
+    """Load iteration caps from the configured ``orchestration.yaml``.
+
+    ``path=None`` asks :mod:`auto_research.config_paths`, which answers with the repository's own
+    configuration unless this process was launched against another one. Resolved per call rather
+    than captured as a default argument, since a default argument is evaluated at import and would
+    pin the answer before a caller could set it.
+    """
+    path = Path(path) if path is not None else orchestration_yaml()
     if not path.exists():
         raise RuntimeError(
             f"Config not found: {path}. Run `bash install.sh` from the repo root, or copy "

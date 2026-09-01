@@ -43,6 +43,7 @@ from pathlib import Path
 
 import yaml
 
+from auto_research.config_paths import code_gate_yaml, orchestration_yaml
 from auto_research.schemas import CheckResult, GateReport, ToolSpec
 
 
@@ -51,14 +52,19 @@ from auto_research.schemas import CheckResult, GateReport, ToolSpec
 # ----------------------------------------------------------------------------
 
 
-@lru_cache(maxsize=1)
-def _code_gate_config() -> dict:
-    path = Path(__file__).resolve().parents[3] / "config" / "code_gate.yaml"
+@lru_cache(maxsize=4)
+def _load_yaml(path: Path) -> dict:
+    """Read one config file, cached on its path (best-effort: absent reads as empty)."""
     try:
         with path.open("r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     except OSError:
         return {}
+
+
+def _code_gate_config() -> dict:
+    """The scan lists this process is configured with."""
+    return _load_yaml(code_gate_yaml())
 
 
 # ----------------------------------------------------------------------------
@@ -728,14 +734,14 @@ def _gate_test_timeout(worktree: Path, targets: dict[Path, set[int] | None]) -> 
     return best
 
 
-@lru_cache(maxsize=1)
 def _orchestration_config() -> dict:
-    path = Path(__file__).resolve().parents[3] / "config" / "orchestration.yaml"
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    except OSError:
-        return {}
+    """Load and cache the configured ``orchestration.yaml`` (best-effort).
+
+    Cached **on the resolved path** rather than on nothing: an override is a per-process decision
+    set before the process starts, so in a real run the key never changes, but keying on it means a
+    test that points the process elsewhere is not served the previous directory's answer.
+    """
+    return _load_yaml(orchestration_yaml())
 
 
 # ----------------------------------------------------------------------------

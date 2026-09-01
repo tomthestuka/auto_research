@@ -5,6 +5,7 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
+from auto_research.config_paths import models_yaml
 from auto_research.models.providers import provider_for
 from auto_research.models.types import ModelGroupHandle, ModelHandle, ModelsConfig
 
@@ -25,7 +26,6 @@ REQUIRED_ROLES = frozenset(
         "status_monitor",
     }
 )
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "models.yaml"
 
 
 class ModelRegistry:
@@ -35,9 +35,15 @@ class ModelRegistry:
         self.config = config
 
     @classmethod
-    def from_file(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> "ModelRegistry":
-        """Load and validate a model registry from YAML."""
+    def from_file(cls, path: str | Path | None = None) -> "ModelRegistry":
+        """Load and validate a model registry from YAML.
 
+        ``path=None`` reads the configured ``models.yaml``, resolved per call: a default argument
+        would be evaluated at import and pin the answer before a process could be pointed at
+        another configuration.
+        """
+
+        path = Path(path) if path is not None else models_yaml()
         with Path(path).open("r", encoding="utf-8") as stream:
             data = yaml.safe_load(stream)
         config = ModelsConfig.model_validate(data)
@@ -61,14 +67,14 @@ class ModelRegistry:
         return ModelGroupHandle(role=role, handles=handles)
 
 
-def load_registry(path: str | Path = DEFAULT_CONFIG_PATH) -> ModelRegistry:
-    """Load the default model registry."""
+def load_registry(path: str | Path | None = None) -> ModelRegistry:
+    """Load the configured model registry (``None`` = whatever this process is configured with)."""
 
     return ModelRegistry.from_file(path)
 
 
-def resolve(role: str, path: str | Path = DEFAULT_CONFIG_PATH) -> ModelGroupHandle:
-    """Resolve `role` from a model config file."""
+def resolve(role: str, path: str | Path | None = None) -> ModelGroupHandle:
+    """Resolve `role` from a model config file (``None`` = the configured one)."""
 
     try:
         return load_registry(path).resolve(role)

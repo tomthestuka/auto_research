@@ -1,6 +1,7 @@
 """Provider abstraction + role-to-model registry."""
 
-from auto_research.models.registry import DEFAULT_CONFIG_PATH, REQUIRED_ROLES, ModelRegistry, load_registry, resolve
+from auto_research.config_paths import models_yaml
+from auto_research.models.registry import REQUIRED_ROLES, ModelRegistry, load_registry, resolve
 from auto_research.models.types import (
     ConversationMessage,
     ModelGroupHandle,
@@ -19,7 +20,7 @@ from auto_research.models.types import (
 )
 
 __all__ = [
-    "DEFAULT_CONFIG_PATH",
+    "models_yaml",
     "REQUIRED_ROLES",
     "ConversationMessage",
     "ModelHandle",

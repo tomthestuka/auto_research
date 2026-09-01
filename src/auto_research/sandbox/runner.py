@@ -11,6 +11,7 @@ import textwrap
 import time
 from pathlib import Path
 
+from auto_research.config_paths import orchestration_yaml
 from auto_research.schemas.tools import ToolResult
 
 # Cache: ini_sh path → env dict sourced from that script.
@@ -54,10 +55,7 @@ def _source_ini_env(ini_sh: str) -> dict[str, str]:
     return env
 
 
-_DEFAULT_ORCH_CONFIG = Path(__file__).resolve().parents[2] / "config" / "orchestration.yaml"
-
-
-def check_analyze_probe(*, config_path: str | Path = _DEFAULT_ORCH_CONFIG) -> None:
+def check_analyze_probe(*, config_path: str | Path | None = None) -> None:
     """Preflight: run the configured stack smoke-test under ``analyze_env`` (skip if unset).
 
     Reads ``analyze_probe``/``analyze_env``/``analyze_ini_sh``/``toolkit_root`` from
@@ -69,6 +67,7 @@ def check_analyze_probe(*, config_path: str | Path = _DEFAULT_ORCH_CONFIG) -> No
     """
     import yaml  # local — keep the preflight import-light
 
+    config_path = Path(config_path) if config_path is not None else orchestration_yaml()
     try:
         with Path(config_path).open("r", encoding="utf-8") as stream:
             orch = yaml.safe_load(stream) or {}

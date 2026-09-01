@@ -35,6 +35,7 @@ from typing import Any, NamedTuple
 
 import yaml
 
+from auto_research.config_paths import orchestration_yaml
 from auto_research.agents.prompts import load_prompt
 from auto_research.hitl import HumanHandler, HumanInputRequired, resolve_human
 from auto_research.models.types import RoleModelConfig
@@ -66,14 +67,23 @@ ReviewHook = Callable[[Path, ToolSpec, GateReport], Awaitable[ToolReviewVerdict]
 # ----------------------------------------------------------------------------
 
 
-@lru_cache(maxsize=1)
-def _orchestration_config() -> dict:
-    path = Path(__file__).resolve().parents[3] / "config" / "orchestration.yaml"
+@lru_cache(maxsize=4)
+def _load_orchestration(path: Path) -> dict:
     try:
         with path.open("r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     except OSError:
         return {}
+
+
+def _orchestration_config() -> dict:
+    """Load and cache the configured ``orchestration.yaml`` (best-effort).
+
+    Cached **on the resolved path** rather than on nothing: an override is a per-process decision
+    set before the process starts, so in a real run the key never changes, but keying on it means a
+    test that points the process elsewhere is not served the previous directory's answer.
+    """
+    return _load_orchestration(orchestration_yaml())
 
 
 def _cap(key: str, default: int) -> int:

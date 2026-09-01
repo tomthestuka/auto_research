@@ -16,10 +16,13 @@ from typing import NamedTuple
 
 from dotenv import load_dotenv
 
+from auto_research.config_paths import models_yaml, orchestration_yaml
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+# The secrets file stays with the repository whatever a run is configured with: an API key is a
+# property of the machine, not of the experiment, and copying one into a per-run directory would
+# multiply the number of places a key can be left behind.
 _ENV_FILE = _REPO_ROOT / ".env"
-_ORCH_CONFIG = _REPO_ROOT / "config" / "orchestration.yaml"
-_MODELS_CONFIG = _REPO_ROOT / "config" / "models.yaml"
 
 # Each tuple is a group of aliases; at least one must be set. These are the keys every run needs
 # whatever models it is configured with; the model keys are derived from `models.yaml` instead
@@ -66,7 +69,7 @@ def _model_key_groups() -> tuple[tuple[tuple[str, ...], ...], dict[tuple[str, ..
     import yaml  # local import — yaml is not needed at module load time
 
     try:
-        with _MODELS_CONFIG.open("r", encoding="utf-8") as stream:
+        with models_yaml().open("r", encoding="utf-8") as stream:
             config = yaml.safe_load(stream) or {}
     except (FileNotFoundError, OSError, yaml.YAMLError):
         return _FALLBACK_MODEL_KEYS, {}
@@ -128,7 +131,7 @@ def _orch_config() -> dict:
     import yaml  # local import — yaml not needed at module load time
 
     try:
-        with _ORCH_CONFIG.open("r", encoding="utf-8") as f:
+        with orchestration_yaml().open("r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     except FileNotFoundError:
         return {}

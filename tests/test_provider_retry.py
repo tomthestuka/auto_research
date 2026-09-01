@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 import auto_research.env as env
+from auto_research import config_paths
 from auto_research.env import ProviderRetryPolicy
 from auto_research.models.retry import call_with_transient_retry, is_transient_provider_error
 
@@ -153,7 +154,7 @@ def test_budget_exhaustion_reraises_original_error():
 
 
 def test_policy_defaults_when_config_absent(monkeypatch, tmp_path):
-    monkeypatch.setattr(env, "_ORCH_CONFIG", tmp_path / "missing.yaml")
+    monkeypatch.setenv(config_paths.CONFIG_DIR_ENV, str(tmp_path))  # holds no orchestration.yaml
     assert env.provider_retry_policy() == ProviderRetryPolicy(8, 60.0, 600.0)
 
 
@@ -165,7 +166,7 @@ def test_policy_reads_config_keys(monkeypatch, tmp_path):
         "provider_retry_max_cooldown_s: 20\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(env, "_ORCH_CONFIG", cfg)
+    monkeypatch.setenv(config_paths.CONFIG_DIR_ENV, str(cfg.parent))
     assert env.provider_retry_policy() == ProviderRetryPolicy(2, 5.0, 20.0)
 
 
@@ -176,5 +177,5 @@ def test_policy_falls_back_per_field_on_malformed_values(monkeypatch, tmp_path):
         "provider_retry_base_cooldown_s: 5\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(env, "_ORCH_CONFIG", cfg)
+    monkeypatch.setenv(config_paths.CONFIG_DIR_ENV, str(cfg.parent))
     assert env.provider_retry_policy() == ProviderRetryPolicy(8, 5.0, 600.0)

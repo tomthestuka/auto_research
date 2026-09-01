@@ -32,7 +32,8 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import yaml
 
-_MODELS_CONFIG = Path(__file__).resolve().parents[3] / "config" / "models.yaml"
+from auto_research.config_paths import models_yaml
+
 
 _TEAM_FOR_ROLE = {
     "reviewer": "reviewer",
@@ -81,7 +82,8 @@ _ROLE_ORDER = [
 ]
 
 
-def _load_models_yaml(path: Path = _MODELS_CONFIG) -> dict:
+def _load_models_yaml(path: Path | None = None) -> dict:
+    path = Path(path) if path is not None else models_yaml()
     with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 

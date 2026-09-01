@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from auto_research import env
+from auto_research import config_paths, env
 
 
 def test_check_required_env_loads_project_dotenv(tmp_path, monkeypatch) -> None:
@@ -49,7 +49,9 @@ def _isolate(monkeypatch, tmp_path, roles: str, dotenv: str) -> None:
     env_file.write_text(dotenv, encoding="utf-8")
     _write_models(tmp_path, roles)
     monkeypatch.setattr(env, "_ENV_FILE", env_file)
-    monkeypatch.setattr(env, "_MODELS_CONFIG", tmp_path / "models.yaml")
+    # Through the real seam rather than an internal attribute: the env var is how a process is
+    # pointed at another configuration in production, so patching it exercises what actually runs.
+    monkeypatch.setenv(config_paths.CONFIG_DIR_ENV, str(tmp_path))
     for name in (
         "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
         "ADS_DEV_KEY", "ADS_API_TOKEN", "TAVILY_API_KEY", "DEEPSEEK_API_KEY",
@@ -120,7 +122,7 @@ roles:
 
 def test_an_unreadable_models_config_falls_back_to_the_historical_keys(monkeypatch, tmp_path):
     """A config we cannot parse must not silently relax the check to nothing."""
-    monkeypatch.setattr(env, "_MODELS_CONFIG", tmp_path / "absent.yaml")
+    monkeypatch.setenv(config_paths.CONFIG_DIR_ENV, str(tmp_path))  # holds no models.yaml
     env_file = tmp_path / ".env"
     env_file.write_text(_SOURCES, encoding="utf-8")
     monkeypatch.setattr(env, "_ENV_FILE", env_file)

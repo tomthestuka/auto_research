@@ -27,8 +27,15 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from auto_research.config_paths import observations_yaml, orchestration_yaml
 
-DEFAULT_OBSERVATIONS_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "observations.yaml"
+
+#: Kept as a name because callers pass it as a default argument; it resolves through
+#: :mod:`auto_research.config_paths`, so a process configured against another directory reads that
+#: one. It is a function everywhere it matters and this alias only for the module's public API.
+def default_observations_config_path() -> Path:
+    """The ``observations.yaml`` this process reads."""
+    return observations_yaml()
 
 CATALOG_FILENAME = "catalog.json"
 
@@ -84,11 +91,11 @@ class ObservationsConfig(BaseModel):
 
 
 def load_observations_config(
-    path: str | Path = DEFAULT_OBSERVATIONS_CONFIG_PATH,
+    path: str | Path | None = None,
 ) -> ObservationsConfig:
-    """Load and validate observation locations from YAML."""
+    """Load and validate observation locations from YAML (``None`` = the configured one)."""
 
-    path = Path(path)
+    path = Path(path) if path is not None else observations_yaml()
     if not path.exists():
         raise RuntimeError(
             f"Config not found: {path}. Run `bash install.sh` from the repo root, or copy "
@@ -106,7 +113,7 @@ def load_observations_config(
 
 def _toolkit_root() -> Path:
     """``toolkit_root`` from ``config/orchestration.yaml`` — the ``research_toolkit`` checkout."""
-    path = DEFAULT_OBSERVATIONS_CONFIG_PATH.parent / "orchestration.yaml"
+    path = orchestration_yaml()
     try:
         with path.open("r", encoding="utf-8") as stream:
             data = yaml.safe_load(stream) or {}
@@ -140,7 +147,7 @@ def _import_healthcheck(toolkit_root: Path):
 
 def check_catalog_health(
     *,
-    config_path: str | Path = DEFAULT_OBSERVATIONS_CONFIG_PATH,
+    config_path: str | Path | None = None,
     toolkit_root: str | Path | None = None,
 ) -> None:
     """Launch-time preflight (no LLM): assert every mission's local data catalog is healthy.

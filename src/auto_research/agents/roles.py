@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ValidationError
 
+from auto_research.config_paths import orchestration_yaml
 from auto_research.agents.prompts import PromptRole, load_prompt
 from auto_research.agents.react import (
     DRIVE_CODER_TOOL,
@@ -1820,17 +1821,25 @@ def _react_loop_absolute_cap() -> int:
     return int(_orchestration_config().get("react_loop_absolute_cap", 60))
 
 
-@lru_cache(maxsize=1)
-def _orchestration_config() -> dict:
-    """Load and cache ``config/orchestration.yaml`` (best-effort)."""
+@lru_cache(maxsize=4)
+def _load_orchestration(config_path: Path) -> dict:
     import yaml
 
-    config_path = Path(__file__).resolve().parents[3] / "config" / "orchestration.yaml"
     try:
         with config_path.open("r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     except FileNotFoundError:
         return {}
+
+
+def _orchestration_config() -> dict:
+    """Load and cache the configured ``orchestration.yaml`` (best-effort).
+
+    Cached **on the resolved path** rather than on nothing: an override is a per-process decision
+    set before the process starts, so in a real run the key never changes, but keying on it means a
+    test that points the process elsewhere is not served the previous directory's answer.
+    """
+    return _load_orchestration(orchestration_yaml())
 
 
 @lru_cache(maxsize=1)
