@@ -134,7 +134,7 @@ protocol, §7).
 - `SlackHandler` / `TelegramHandler` / `WhatsAppHandler` — connector classes (see contracts above).
 
 ## Changelog
-Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
+Compacted 2026-09-01: entries through 2026-07-31 folded into themed ranges (detail in git history).
 
 - 2026-06-15 -> 2026-06-29 — **Package created and hardened (Phase 2 step 5).**
   `HumanQuery`/`HumanResponse` protocol; injectable `HumanHandler` + `resolve_human` fail-safe;
@@ -179,22 +179,20 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   "is this button still mine?" (a foreign `run_id` is another run; a foreign boot nonce is an earlier
   segment of *this* run, which `run_id` cannot detect because it is deliberately stable across a
   resume). Telegram registers its menu from the same list `/help` prints, so the two cannot drift.
-- 2026-07-31 — **`/stop` is Ctrl-C.** `_stop` calls `RunControl.interrupt()` — flag the run, then cancel
-  its task — instead of setting a flag and aborting in-flight tool calls for a pipeline that then wound
-  itself down over ~14 more model calls. The cancellation is *scheduled* (`call_soon`), not delivered
-  inside the handler, so the acknowledgement gets in flight before cleanup closes the connector. The
-  reply says what actually happens: work cancelled, sandbox processes killed, authoring branch reset if
-  a tool was being written, **no report composed**, and `resume=True` continues from the last completed
-  step. `abort_all` stays — the ⚡ button still cancels one role's in-flight call so a queued steer
-  lands at once.
-- 2026-07-31 — **`/status` investigates instead of being handed a digest.** `make_status_answer` builds
-  a `StatusMonitorAgent` (a real ReAct role) over `MonitorToolProvider`, and both compaction paths are
-  deleted (`_status_digest` — last 80 events at any level, flattened, 8k cap — and
-  `_deterministic_status`). The digest was the limit: it dropped every event's `data`, so the answers to
-  the questions people actually ask ("what did the reviewer decide?", "why did the gate reject it?")
-  were exactly the part thrown away, and its window was the tail at *any* level (44 L7 + 18 L10 against
-  6 significant events on a live run). **No fallback replaces it, by ruling:** `status_monitor` is a
-  required role so a misconfigured run fails at launch; transient provider errors are already retried at
-  the model layer; and a run whose provider is down cannot advance, so a second, lesser view of the same
-  log would report on a stalled run as if it were fine. Tests: `tests/test_hitl_commands.py`,
-  `tests/test_hitl.py`, `tests/test_run_control.py`.
+- 2026-07-31 — **`/stop` is Ctrl-C, and `/status` investigates instead of being handed a digest.**
+  `_stop` calls `RunControl.interrupt()` — flag the run, then cancel its task — instead of setting a flag
+  and aborting in-flight tool calls for a pipeline that then wound itself down over ~14 more model calls.
+  The cancellation is *scheduled* (`call_soon`), not delivered inside the handler, so the acknowledgement
+  gets in flight before cleanup closes the connector. The reply says what actually happens: work
+  cancelled, sandbox processes killed, authoring branch reset if a tool was being written, **no report
+  composed**, and `resume=True` continues from the last completed step. `abort_all` stays — the ⚡ button
+  still cancels one role's in-flight call so a queued steer lands at once. **`/status`:**
+  `make_status_answer` builds a `StatusMonitorAgent` (a real ReAct role) over `MonitorToolProvider`, and
+  both compaction paths are **deleted** (`_status_digest` — last 80 events at any level, flattened, 8k cap
+  — and `_deterministic_status`); the digest dropped every event's `data`, i.e. exactly the answers people
+  ask for ("what did the reviewer decide?", "why did the gate reject it?"), and windowed the tail at *any*
+  level (44 L7 + 18 L10 against 6 significant events on a live run). **No fallback replaces it, by
+  ruling:** `status_monitor` is a required role so a misconfigured run fails at launch; transient provider
+  errors are already retried at the model layer; and a run whose provider is down cannot advance, so a
+  second, lesser view of the same log would report on a stalled run as if it were fine. Tests:
+  `tests/test_hitl_commands.py`, `tests/test_hitl.py`, `tests/test_run_control.py`.

@@ -372,151 +372,135 @@ the author's vendor alone. `Leg.lead_correlated` now reports the second axis alo
 the measurement, not for this DOCS.
 
 ## 6. Changelog
+Compacted 2026-09-01: entries through 2026-08-27 folded into themed ranges (detail in git history).
 
-- 2026-08-18 — Package created for paper item 4. `drive_authoring` chosen as the trial unit over
-  the legacy `propose_and_pr`; the #2 brief recovered verbatim from its run ledger and frozen;
-  base pinned to `fa99ef8`; per-trial clone, ledger and `ContextVar` cost meter for concurrency;
-  no human handler, so a raise records as `needs_human`; preflight covering environment, brief,
-  base, validation products and the SDK CLI. Report separates terminal states from rounds and
-  reports fabrication as a signal for hand-reading. Deterministic suite `tests/test_author_bench.py`
-  (14 tests, no spend), including the proof that concurrent trials do not pool their spend.
-- 2026-08-18 — First batch launched (K=15, concurrency 4) and **aborted at 48 minutes with 0 of
-  15 trials finished**: the OpenAI account hit a zero credit balance, every co-lead call returned
-  `429 insufficient_quota`, and the transient-retry layer backed off through 42 s to 341 s waits
-  rather than failing, so the two gate-passing trials were never reviewed. OpenAI has no
-  key-failover path (rotation covers Anthropic only). Kept as
-  `logs/dev/author-bench/20260818T200942Z/` under an `ABORTED.md` that forbids quoting it.
-  It did measure the cost of authoring up to the gate, all four trials having reached it:
-  **$23.73 / $38.42 / $38.56 / $26.70**, of which the coder is 88 per cent. A complete trial is
-  therefore **$27 to $45**, against $13 to $30 projected from the Q21 authoring windows, which
-  priced tools authored onto a branch that already carried their chain-mates. K set to 10 for the
-  relaunch.
-
-- 2026-08-18 — **Targeted re-runs, merged reports, and the surface labelled.** `--only 5,6,7`
-  re-runs named trials keeping their numbers, and `--rescore DIR...` merges batches with a later
-  directory's trial replacing an earlier one of the same number, so a contaminated trial is
-  repaired rather than reported beside its replacement. Records now stamp
-  `human_channel: none (unattended)` and the report carries a "Measurement surface" section, after
-  a surface diff against production found the trial lead missing exactly `ask_human` and
-  `plan_and_debate` — the likely cause of trials grinding to the submit cap in a way attended runs
-  do not. Prompts verified unmodified (lead `prompts/analyst_lead.md`, coder `prompts/coder.md`).
+- 2026-08-18 — **Instrument built (paper item 4), first batch aborted, re-run/merge machinery added.**
+  `drive_authoring` chosen as the trial unit over the legacy `propose_and_pr`; the #2 brief recovered
+  verbatim from its run ledger and frozen; base pinned to `fa99ef8`; per-trial clone, ledger and
+  `ContextVar` cost meter for concurrency; no human handler, so a raise records as `needs_human`;
+  preflight over environment, brief, base, validation products and the SDK CLI. The report separates
+  terminal states from rounds and reports fabrication as a signal for hand-reading. Deterministic
+  suite `tests/test_author_bench.py` (14 tests, no spend), including the proof that concurrent trials
+  do not pool their spend.
+  **First batch (K=15, concurrency 4) aborted at 48 minutes with 0 of 15 trials finished:** the OpenAI
+  account hit a zero credit balance, every co-lead call returned `429 insufficient_quota`, and the
+  transient-retry layer backed off through 42 s to 341 s waits rather than failing, so the two
+  gate-passing trials were never reviewed. OpenAI had no key-failover path (rotation covered Anthropic
+  only). Kept as `logs/dev/author-bench/20260818T200942Z/` under an `ABORTED.md` that forbids quoting
+  it. It did measure authoring cost up to the gate, all four trials having reached it: **$23.73 /
+  $38.42 / $38.56 / $26.70**, of which the coder is 88 per cent — so a complete trial is **$27 to
+  $45**, against $13 to $30 projected from the Q21 authoring windows, which priced tools authored onto
+  a branch already carrying their chain-mates. **K set to 10** for the relaunch.
+  **Re-run and merge machinery, and the surface labelled.** `--only 5,6,7` re-runs named trials
+  keeping their numbers; `--rescore DIR...` merges batches with a later directory's trial replacing an
+  earlier one of the same number, so a contaminated trial is repaired rather than reported beside its
+  replacement. Records stamp `human_channel: none (unattended)` and the report carries a "Measurement
+  surface" section, after a surface diff against production found the trial lead missing exactly
+  `ask_human` and `plan_and_debate` — the likely cause of trials grinding to the submit cap in a way
+  attended runs do not. Prompts verified unmodified (`prompts/analyst_lead.md`, `prompts/coder.md`).
   Tests 14 → 20.
 
-- 2026-08-20 — **The benchmark became the model sweep (paper item 7).** New `legs.py` roster: a leg is
-  one (author member, reviewer arrangement) pair with its own K, concurrency ceiling and brand colour.
+- 2026-08-20 -> 2026-08-23 — **The benchmark became the model sweep (paper item 7), committed trials
+  kept their changesets, and the tests moved beside the instrument.** New `legs.py` roster: a leg is
+  one (author member, reviewer arrangement) pair with its own K, concurrency ceiling and brand colour;
   `--legs` selects them, legs run sequentially with trials concurrent inside, each leg's records land
-  under its own directory, and every record names its own author and reviewer so a merged report can
-  group them. The report grows a per-leg table only when more than one leg is present, and `--rescore`
-  keys on `(leg, trial)` — every leg numbers from one, so keying on the number alone would let one
-  leg's trial silently overwrite another's. **The single-leg report is byte-identical**, verified
-  against the batch already in the paper, so its published numbers are untouched.
-  Three findings from building it. **The DOCS was wrong** that tier and provider were already
-  configuration: the author harness read the `coder` role directly with no injection point, so
-  `build_authoring_session(coder=...)` had to be built. **A tier row cannot be an OpenAI author** with
-  the reviewer held fixed at the OpenAI co-lead, which is why that author appears only as a
-  correlated decorrelation row. And the live vendor probe **found the OpenAI primary key spent while
-  its fallback answered**, which exposed a real defect in the Codex author's key resolution (fixed in
-  `sandbox/DOCS.md`, same date) and is why the probe now fails over rather than reporting the first
-  refusal. Tests 20 → 34.
-
-- 2026-08-22 — **A committed trial now keeps its changeset.** `save_committed_patch` writes
+  under its own directory, and every record names its author and reviewer. The per-leg table appears
+  only when more than one leg is present, and `--rescore` keys on `(leg, trial)` — every leg numbers
+  from one, so keying on the number alone would let one leg's trial silently overwrite another's.
+  **The single-leg report is byte-identical**, verified against the batch already in the paper, so its
+  published numbers are untouched. Three findings from building it: **the DOCS was wrong** that tier
+  and provider were already configuration — the author harness read the `coder` role directly with no
+  injection point, so `build_authoring_session(coder=...)` had to be built; **a tier row cannot be an
+  OpenAI author** with the reviewer held fixed at the OpenAI co-lead, which is why that author appears
+  only as a correlated decorrelation row; and the live vendor probe **found the OpenAI primary key
+  spent while its fallback answered**, exposing a real defect in the Codex author's key resolution
+  (fixed in `sandbox/DOCS.md`, same date) and is why the probe now fails over rather than reporting
+  the first refusal. Tests 20 → 34.
+  **2026-08-22 — a committed trial now keeps its changeset.** `save_committed_patch` writes
   `committed.patch` into each committed trial's directory and the record names it. Found by asking
-  whether the correlated arm's five committed trees could be re-reviewed: they could not. The clones
-  were deleted (`keep_clones` off by default), the toolkit repository never received the commits, all
-  five SHAs were absent from every surviving `/tmp` clone (each of those sits at the pinned base), and
-  the ledger carries no diff — the gate records failing checks and a report hash, the review input
-  records a message count and a model. Reconstruction from the coder's own edits fails too, because
-  its tool inputs are capped at 4,000 characters and 8 of one trial's 41 write/edit payloads are
-  stored truncated; one trial committed a file the ledger records no write to, and another wrote
-  through six shell redirects. Tests 39 → 41 (both new ones cover this: the patch reapplies onto
-  a fresh clone at the base, and a committed trial's record names a patch that outlives its clone).
+  whether the correlated arm's **five committed trees** could be re-reviewed: they could not. The
+  clones were deleted (`keep_clones` off by default), the toolkit repository never received the
+  commits, all five SHAs were absent from every surviving `/tmp` clone (each sits at the pinned base),
+  and the ledger carries no diff — the gate records failing checks and a report hash, the review input
+  a message count and a model. Reconstruction from the coder's own edits fails too: its tool inputs
+  are capped at 4,000 characters and 8 of one trial's 41 write/edit payloads are stored truncated; one
+  trial committed a file the ledger records no write to, and another wrote through six shell
+  redirects. Tests 39 → 41 (the patch reapplies onto a fresh clone at the base; a committed trial's
+  record names a patch that outlives its clone).
+  **2026-08-23 — tests moved to `benchmarks/author_bench/tests/`**, the repository's `tests/` tree
+  being the pipeline's own suite. The move exposed a repo-root of `parents[1]`, which had been
+  resolving to the benchmark package itself and looking for `config/orchestration.yaml` inside it; it
+  is now `parents[3]` with the depth named.
 
-- 2026-08-23 — **Tests moved beside the instrument.** `tests/test_author_bench.py` is now
-  `benchmarks/author_bench/tests/`, because the repository's `tests/` tree is the pipeline's own
-  suite and a benchmark is a separate instrument with its own invariants. The move exposed a
-  repo-root of `parents[1]`, which had been resolving to the benchmark package itself and looking
-  for `config/orchestration.yaml` inside it; it is now `parents[3]` with the depth named.
-
-- 2026-08-24 — **The lead became a roster axis, because provider coupling has two of them (§5b).**
-  `Leg` gains `lead_provider`/`lead_model` and a `lead_correlated` property; `trial.py` gains
-  `build_pinned_lead`, mirroring the co-lead builder so the measurement lives in the roster rather
-  than machine-local config; each record now carries `lead` and
-  `lead_correlated_with_colead` so a merged report can group by either axis. Five panel-(b) legs
-  added, repeating every panel-(a) arm under a `gpt-5.6-sol` lead, plus the cell panel (a) cannot
-  reach (author correlated with the reviewer, lead not). Tests 41 → 46.
-  **Why:** panel (a) held the lead at `claude-opus-4-8` throughout, so its single zero-rejection
-  arm is equally explained by the author sharing the reviewer's provider or by the lead doing so,
-  and the author axis tracks nothing in that data while the lead axis tracks the whole effect.
-  **Two roster gaps closed by the new tests rather than by reading.** The panel-(a) GLM rows
-  carried the throttling finding in prose and set no ceiling, leaving it to whoever typed the
-  command, though the batch had voided every GLM trial above two in flight; both rows now cap at
-  two. And the concurrency test asserted that only the Claude legs cap themselves, which the
-  vendor ceilings make false; it now states the rule that holds, that a ceiling is a vendor's
-  limit wherever one exists.
-  **Not yet run.** 25 trials, roughly $700-900 at list prices with about $150 of that billed,
-  since the Claude author legs draw on the subscription.
-
-- 2026-08-25 — **The lead x co-lead grid, generated rather than written out.** Twenty cells
-  (`legs.GRID`), one per (lead, co-lead) pair, at a pinned `deepseek-v4-flash` author, K=5. The
-  roster splits into `CURATED` (the hand-chosen author sweep, unchanged) and `GRID` (a product of
-  two axis tables), because a factorial's cells have coordinates rather than rationales and twenty
-  literals would have hidden a missing cell. `--legs grid` selects it through the new `GROUPS`.
-  **Three things the grid needed that were genuinely missing, none of them generatable.** The
-  pinned-parameter table carried Anthropic and OpenAI only, so a Z.AI or Qwen lead would have run
-  at its vendor default against harmonised peers -- the exact "compares configurations rather than
-  models" error that table exists to prevent; all five vendors now have entries, Qwen at high
-  effort despite the measured latency, because parity is the property the measurement rests on and
-  latency is a cost rather than a confound. `build_pinned_lead`/`build_pinned_colead` hardcoded
-  `vision=True`, which cannot express the text-only reviewer the grid depends on, so vision is now
-  declared per axis member and carried onto the built member. And preflight probed the *author's*
-  vendor alone, which sufficed while every lead and reviewer came from the configured roles; a
-  cell can pin two vendors the author never touches, so `probe_chat_member` now probes each
-  distinct pinned member through `ModelHandle`, once per (provider, model) rather than per leg.
-  **Two test corrections, both widening rather than weakening.** The vendor-ceiling test read
-  `leg.provider`, which names the author seat only, so a cell pinning Z.AI as *lead* escaped its
-  measured ceiling entirely; it now checks the chat seats too. And the lead-pinning invariant keyed
-  on `purpose == "lead"`, which a grid leg is not; it now names the set of purposes allowed to move
-  the lead, so a new purpose has to join deliberately. Suite: 54 in this package, 1400 green
-  overall. Unrelated and pre-existing, recorded so it is not read as fallout: 11 `gate_bench`
+- 2026-08-24 -> 2026-08-25 — **The lead became a roster axis, the lead x co-lead grid was generated,
+  and the batch learned to run unattended.** `Leg` gained `lead_provider`/`lead_model` and a
+  `lead_correlated` property; `trial.py` gained `build_pinned_lead`, mirroring the co-lead builder so
+  the measurement lives in the roster rather than machine-local config; each record carries `lead` and
+  `lead_correlated_with_colead`. Five panel-(b) legs added, repeating every panel-(a) arm under a
+  `gpt-5.6-sol` lead, plus the cell panel (a) cannot reach (author correlated with the reviewer, lead
+  not). Tests 41 → 46. **Why:** panel (a) held the lead at `claude-opus-4-8` throughout, so its single
+  zero-rejection arm is equally explained by the author sharing the reviewer's provider or by the lead
+  doing so, and the author axis tracks nothing in that data while the lead axis tracks the whole
+  effect. **Two roster gaps closed by the new tests:** the panel-(a) GLM rows carried the throttling
+  finding in prose and set no ceiling, though the batch had voided every GLM trial above two in flight
+  — both rows now cap at two; and the concurrency test asserted that only the Claude legs cap
+  themselves, which the vendor ceilings make false, so it now states that a ceiling is a vendor's
+  limit wherever one exists. **Not yet run:** 25 trials, roughly $700-900 at list prices with about
+  $150 of that billed, since the Claude author legs draw on the subscription.
+  **2026-08-25 — the lead x co-lead grid, generated rather than written out.** Twenty cells
+  (`legs.GRID`), one per (lead, co-lead) pair, at a pinned `deepseek-v4-flash` author, **K=5**. The
+  roster splits into `CURATED` (the hand-chosen author sweep, unchanged) and `GRID` (a product of two
+  axis tables), because a factorial's cells have coordinates rather than rationales and twenty
+  literals would have hidden a missing cell; `--legs grid` selects it through the new `GROUPS`.
+  **Three things the grid needed, none generatable.** The pinned-parameter table carried Anthropic and
+  OpenAI only, so a Z.AI or Qwen lead would have run at its vendor default against harmonised peers —
+  the "compares configurations rather than models" error that table exists to prevent; all five
+  vendors now have entries, **Qwen at high effort despite the measured latency**, because parity is
+  the property the measurement rests on and latency is a cost rather than a confound.
+  `build_pinned_lead`/`build_pinned_colead` hardcoded `vision=True`, which cannot express the
+  text-only reviewer the grid depends on, so vision is declared per axis member and carried onto the
+  built member. And preflight probed the *author's* vendor alone; a cell can pin two vendors the
+  author never touches, so `probe_chat_member` now probes each distinct pinned member through
+  `ModelHandle`, once per (provider, model) rather than per leg. **Two test corrections, both widening
+  rather than weakening:** the vendor-ceiling test read `leg.provider`, which names the author seat
+  only, so a cell pinning Z.AI as *lead* escaped its measured ceiling entirely — it now checks the
+  chat seats too; and the lead-pinning invariant keyed on `purpose == "lead"`, which a grid leg is
+  not, so it now names the set of purposes allowed to move the lead. Suite: 54 in this package, 1400
+  green overall. Unrelated and pre-existing, recorded so it is not read as fallout: 11 `gate_bench`
   failures from planted mutants gone inert against a `research_toolkit` checkout that has advanced
-  past the corpus's pinned base.
-  **Not yet run.** 100 trials, order $600 at list prices from the measured $6.50 median, with
-  wall-clock the binding constraint at about 82 trial-hours.
+  past the corpus's pinned base. **Not yet run:** 100 trials, order $600 at list prices from the
+  measured $6.50 median, wall-clock the binding constraint at about 82 trial-hours.
+  **Detach, status and resume (second entry, same day), built before the two-day batch launched.**
+  Durability already held: `records.jsonl` is appended per trial under a lock, so a kill loses only
+  what was in flight. `--detach` spawns the batch orphaned through `graph.detached._spawn_orphaned`
+  (reused, not reinvented — the double fork survives the `/proc` link a VSCode logout walks), after
+  preflight rather than before it. `--status DIR` reports per-leg progress, terminal-state counts,
+  spend and pid liveness from the records rather than the report, which does not exist until the end.
+  `--resume DIR` recomputes gaps **per leg** — the pre-existing `--only` is global across legs and
+  would have re-run succeeded trials in a twenty-leg batch — and re-runs an `error` record while never
+  re-running a measurement. Both read a new `batch.json` the batch writes about itself, so a resume
+  cannot be handed the wrong flags. The end-of-run report renders from every record on disk, or a
+  resumed batch would have reported only its second sitting. Ten tests; package suite 54 → 63.
 
-- 2026-08-25 (second, same day) — **The grid made the batch a two-day unattended job, so detach,
-  status and resume were built before it launched.** Durability already held: `records.jsonl` is
-  appended per trial under a lock, so a kill loses only what was in flight. Three things did not.
-  `--detach` spawns the batch orphaned through `graph.detached._spawn_orphaned` (reused, not
-  reinvented: the double fork is there because `start_new_session` leaves the `/proc` link a VSCode
-  logout walks), after preflight rather than before it. `--status DIR` reports per-leg progress,
-  terminal-state counts, spend and pid liveness, reading the records rather than the report, since
-  the report does not exist until the end. `--resume DIR` recomputes gaps **per leg** — the
-  pre-existing `--only` is global across legs and would have re-run succeeded trials in a
-  twenty-leg batch — and re-runs an `error` record while never re-running a measurement. Both read
-  a new `batch.json` the batch writes about itself, so a resume cannot be handed the wrong flags.
-  The end-of-run report now renders from every record on disk, or a resumed batch would have
-  reported only its second sitting. Ten tests; package suite 54 → 63.
-
-- 2026-08-27 — **The trial's paths told every actor which experiment it was in; they are opaque
+- 2026-08-27 — **Leak: the trial's paths told every actor which experiment it was in; they are opaque
   now.** `mkdtemp(prefix=f"author_bench_{label}_")` and `direct_branch=f"author-bench-{label}"` put
   the campaign name and the leg slug into paths all three actors handle, and the leg slug names the
-  lead's vendor *and* the co-lead's. Measured on the 2026-08-26 grid: the lead typed such a path in
-  2,641 tool calls and the co-lead in 1,923, because `ReadOnlyToolProvider` renders its `roots` into
+  lead's vendor *and* the co-lead's. Measured on the 2026-08-26 grid: **the lead typed such a path in
+  2,641 tool calls and the co-lead in 1,923**, because `ReadOnlyToolProvider` renders its `roots` into
   the `read_file`/`list_dir` descriptions the model reads. A co-lead in the correlated arm could
-  therefore read `lead_anthropic_colead_anthropic` — the assignment it exists to be blind to.
-  Unlike the sibling leak found the same day in `gate_bench`, nothing here reveals an *answer*
-  (nothing is planted), so authoring outcomes stand; what it contaminates is the arm comparison,
-  which is the grid's whole purpose. The 100-trial grid is therefore re-run rather than reported.
+  therefore read `lead_anthropic_colead_anthropic` — the assignment it exists to be blind to. Unlike
+  the sibling leak found the same day in `gate_bench`, nothing here reveals an *answer* (nothing is
+  planted), so authoring outcomes stand; what it contaminates is the arm comparison, which is the
+  grid's whole purpose. **The 100-trial grid is therefore re-run rather than reported.**
   **The fix is to match production, not to compromise with it.** Production's lead roots are
-  `[run_dir(run_id), papers_dir(), toolkit_root]`, and a run id is a hex string, so no production
-  actor has ever been able to learn anything about its run from a path. The trial now mints an
-  opaque per-trial token, holds the clone *and the authoring worktrees* under it, names the branch
+  `[run_dir(run_id), papers_dir(), toolkit_root]` and a run id is a hex string, so no production actor
+  has ever been able to learn anything about its run from a path. The trial now mints an opaque
+  per-trial token, holds the clone *and the authoring worktrees* under it, names the branch
   `authoring-<token>`, and hands the lead that directory instead of the leg-named results tree.
   Because `make_review_hook` derives the co-lead's roots from the authoring worktree, one change
-  blinds all three actors. What looked like a tradeoff between blindness and a human-readable
-  layout was not one: records stay organised by leg, and no actor ever sees them.
-  **One artifact needed rescuing.** §9.9 writes a discarded attempt's diff as
-  `tool_author_failed_*.patch` under the authoring dir, which moved into the swept temp tree; those
-  are now copied into the trial's record directory before cleanup, guarded so a diagnostic can
-  never fail a trial. Three tests: the branch is opaque, no path an actor sees names the
-  experiment, and the leg-named tree never reaches a prompt. Package suite 63 → 65.
+  blinds all three actors; records stay organised by leg, and no actor ever sees them. **One artifact
+  needed rescuing:** §9.9 writes a discarded attempt's diff as `tool_author_failed_*.patch` under the
+  authoring dir, which moved into the swept temp tree; those are now copied into the trial's record
+  directory before cleanup, guarded so a diagnostic can never fail a trial. Three tests: the branch is
+  opaque, no path an actor sees names the experiment, and the leg-named tree never reaches a prompt.
+  Package suite 63 → 65.

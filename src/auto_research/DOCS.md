@@ -171,7 +171,7 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   via point / clone / start-fresh.
 
 ## Changelog
-Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
+Compacted 2026-09-01: entries through 2026-08-19 folded into themed ranges (detail in git history).
 
 - 2026-05-26 -> 2026-06-25 — **Phase 1 completed, Phase 2 begun, launch preflight built.** Phase 1:
   schemas, providers, observability, storage/retrieval, sources, prompts, agents, consensus,
@@ -185,9 +185,11 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   `obs_db_root` and missions discovered from disk. Resilience/UX: two Pydantic v2 warning families
   muted, `env.sandbox_call_timeout_default()`, `database_health` + `toolkit_root_configured` checks,
   one progress line per check, and a per-mission drift summary.
-- 2026-07-14 — **Domain-agnostic installer, increments 0–4.** Machine-local config
+
+- 2026-07-14 -> 2026-07-31 — **The domain-agnostic installer, retry-policy config, the catalog
+  relocation, and `/stop` as one interrupt.** *(Installer increments 0–4)* Machine-local config
   (`orchestration.yaml`, `observations.yaml`, `sandbox/analyst_env.sh`, `sandbox/repl_init.py`) is
-  gitignored with tracked `*.example` templates, and loaders raise a "copy the `.example` / run
+  gitignored with tracked `*.example` templates and loaders raise a "copy the `.example` / run
   install.sh" message; new keys `repl_init_py` (domain REPL session-setup hook, replacing the
   hardcoded XSPEC boot) and `analyze_probe` (stack smoke test, with a `check_analyze_probe`
   preflight). `install.sh` (thin bash: conda + the `auto_research` env, then the Python stage) +
@@ -199,47 +201,42 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   worktree), 5 paths, 6 write configs deriving `agent_fs_allow`, 7 preflight. Interactive via
   `questionary`, headless via `--answers` (fail-loud on a missing value). Scaffold templates live in
   `auto_research` and are written into the toolkit only at install-runtime, so the build agent never
-  edits `research_toolkit`. Increment 5 (`onboard_toolkit`) is deferred — it needs cross-domain
-  collaborators. Tests: `tests/test_setup.py`.
-- 2026-07-16 -> 2026-07-20 — **Retry policy config, and the catalog read relocated to the toolkit.**
-  `env.ProviderRetryPolicy`/`provider_retry_policy()` expose the "Internet stability" section
-  (`provider_retry_*`) backing `models.retry`, after two live runs died on unhandled Anthropic 529s
-  riding the SDKs' seconds-scale default retries. Per §2, the domain read of a mission's
-  `catalog.json` moved into `research_toolkit`'s new `catalog_utils` (reusing the trusted
-  `obsdb_catalog.neutral.read`, surfaced as the `data_catalog` tool); `observations.py` keeps only the
-  obs-db-location config + `check_catalog_health`, and `env.toolkit_root()` is the new accessor — so
-  auto_research stays pure orchestration and generic infra while domain reads live beside the writer.
-- 2026-07-31 — **`/stop` and Ctrl-C are one interrupt; the cooperative wind-down is gone.** A stop
-  used to be a flag the pipeline polled at safe points, which stopped a role's *tool use* and
-  nothing else: every role still made its terminal write-up call and the graph walked every
-  remaining stage (measured on this config: ~14 further model calls, several replaying a
-  100k-token trajectory, plus pdflatex), and because the stop truncated the workers' evidence the
-  lead judged the debate unconverged and ordered fresh revision rounds — stopping *manufactured*
-  work. The first write-up call after the stop is also what crashed the 2026-07-29 run. Now
-  `RunControl.interrupt()` cancels the run task, `run_research` converts that cancellation into
+  edits `research_toolkit`. Increment 5 (`onboard_toolkit`) is **deferred** — it needs cross-domain
+  collaborators. Tests: `tests/test_setup.py`. *(Retry + catalog)* `env.ProviderRetryPolicy`/
+  `provider_retry_policy()` expose the "Internet stability" section (`provider_retry_*`) backing
+  `models.retry`, after two live runs died on unhandled Anthropic 529s riding the SDKs'
+  seconds-scale default retries. Per §2 the domain read of a mission's `catalog.json` moved into
+  `research_toolkit`'s new `catalog_utils` (reusing the trusted `obsdb_catalog.neutral.read`,
+  surfaced as the `data_catalog` tool); `observations.py` keeps only the obs-db-location config +
+  `check_catalog_health`, and `env.toolkit_root()` is the new accessor. *(2026-07-31)* **`/stop` and
+  Ctrl-C are one interrupt; the cooperative wind-down is gone.** The polled stop flag stopped a
+  role's *tool use* and nothing else — every role still made its terminal write-up call and the
+  graph walked every remaining stage (measured on this config: ~14 further model calls, several
+  replaying a 100k-token trajectory, plus pdflatex), and because the stop truncated the workers'
+  evidence the lead judged the debate unconverged and ordered fresh revision rounds, so stopping
+  *manufactured* work; the first write-up call after a stop is also what crashed the 2026-07-29 run.
+  Now `RunControl.interrupt()` cancels the run task, `run_research` converts that cancellation into
   `UserInterruptionError`, and cleanup is deterministic and model-free. New public symbols:
   `run_control.UserInterruptionError`, `RunControl.interrupt`/`register_run_task`/
   `authoring_session`; `run_research(install_signal_handlers=)`.
 
-- 2026-08-10 — **New preflight check `api_key_fallbacks`** (`models.keys.check_api_key_fallbacks`),
-  registered immediately after `required_env` because that check is what loads `.env`. A
+- 2026-08-10 -> 2026-08-19 — **Two preflight corrections: fallback keys, and requirements derived
+  from config.** New check `api_key_fallbacks` (`models.keys.check_api_key_fallbacks`), registered
+  immediately after `required_env` because that check is what loads `.env`. A
   `<PROVIDER>_API_KEY_FALLBACK` is optional, so an unset one passes; what fails is a fallback that
-  cannot do its job — blank after stripping, identical to the primary, or set without a primary.
-  All three are silently deduplicated away by the key pool, which would leave a human believing a
-  run is protected against throttling when rotation has nowhere to go. Full design in
-  `models/DOCS.md`.
-
-- 2026-08-19 — **`check_required_env` derives its model keys from `config/models.yaml`.** The list
-  was written once and had drifted in both directions: it demanded `GOOGLE_API_KEY` from a config
-  with no Google member, and it could not know about the vendor variables the coder harnesses reach
-  DeepSeek, Z.AI and Alibaba Model Studio through (`key_env`), so a missing one surfaced inside an
-  author subprocess instead of at launch. Requirements now come from the configuration: a provider
-  a role names implies its SDK's variable, a member's `key_env` requires that variable exactly and
-  wins over the provider default (a plan-specific endpoint may use a different name), and the error
-  names which role/member wanted it. The alias table carries the three coder vendors' own
-  documented variables (`DEEPSEEK_API_KEY`, `ZAI_API_KEY`, `DASHSCOPE_API_KEY`) as well as the
-  three chat providers', so configuring one of them as a chat member later needs no `key_env`.
-  Tests: `tests/test_env.py` 1 → 8.
+  cannot do its job — blank after stripping, identical to the primary, or set without a primary —
+  all three being silently deduplicated away by the key pool, which would leave a human believing a
+  run is protected against throttling when rotation has nowhere to go (full design in
+  `models/DOCS.md`). **`check_required_env` derives its model keys from `config/models.yaml`:** the
+  hand-written list had drifted both ways — demanding `GOOGLE_API_KEY` from a config with no Google
+  member, and knowing nothing of the vendor variables the coder harnesses reach DeepSeek, Z.AI and
+  Alibaba Model Studio through (`key_env`), so a missing one surfaced inside an author subprocess
+  instead of at launch. Now: a provider a role names implies its SDK's variable, a member's
+  `key_env` requires that variable exactly and **wins over the provider default** (a plan-specific
+  endpoint may use a different name), and the error names which role/member wanted it. The alias
+  table carries the three coder vendors' documented variables (`DEEPSEEK_API_KEY`, `ZAI_API_KEY`,
+  `DASHSCOPE_API_KEY`) as well as the three chat providers', so configuring one of them as a chat
+  member later needs no `key_env`. Tests: `tests/test_env.py` 1 → 8.
 
 - 2026-09-01 — **Run-ledger field caps became config, and rose 2k/4k → 100k.** New
   `LedgerCaps`/`ledger_caps()` reading `ledger_arg_cap` / `ledger_result_cap` /

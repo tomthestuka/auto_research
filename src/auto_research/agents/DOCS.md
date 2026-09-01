@@ -312,7 +312,7 @@ Role wrappers:
   Method: `review_tool(tool_spec, *, diff, gate, tools=None) -> ToolReviewVerdict`.
 
 ## Changelog
-Compacted 2026-08-05: entries through 2026-07-28 folded into themed ranges (detail in git history).
+Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (detail in git history).
 
 - 2026-05-26 -> 2026-06-18 — **Agent wrappers built, ReAct-wired, then extended for Phase 2.** Reviewer,
   librarian I/O, analyst worker and analyst lead with native structured output / function calling,
@@ -358,66 +358,50 @@ Compacted 2026-08-05: entries through 2026-07-28 folded into themed ranges (deta
   19,074 → 3,789 (`gpt-5.5`) / 35,208 → 9,003 (`claude-sonnet-5`), the expanded definition sitting inside
   the conversation cache breakpoint.
 - 2026-07-29 -> 2026-07-31 — **Human control, then its replacement by the interrupt; `/status` reads the
-  ledger.** Mid-batch control landed first (a `/stop` skipping remaining calls with honest results, a
-  steer delivered right after the batch), together with `_record` actoring events by the **indexed
-  `agent_key`** (`analyst_worker_1`) — two workers had been indistinguishable in the log, so neither a
-  reader nor a human choosing a `/steer` target could tell them apart. Two days later `_react` stopped
-  reading the stop flag altogether: a `/stop` now cancels the run task, so the loop has nothing to
-  notice, and the top-of-iteration break, the mid-batch skip and their events were deleted. **Steering is
-  untouched** — a steer is a message and a message can wait. The lead publishes its live
-  `AuthoringSession` on `RunControl` while `drive_authoring` runs, so an interrupt can reset the toolkit
-  branch (that method's own `finally` sits inside the cancelled scope, where its awaits die first);
-  whichever path gets there first clears the handle, and `aclose()` is idempotent. **`MonitorToolProvider`
-  + `StatusMonitorAgent`:** a fourth provider exposing three tools over the run's own `monitor.jsonl` —
-  `brief_history` (the index, filterable by level/sequence/prefix/actor/team/substring),
-  `ledger_event(sequence, max_chars, bias)` (one event **with its payload**, windowed, negative `bias`
-  for the tail where a long dump keeps its errors) and `ledger_grep` (find by payload content, returning
-  index rows only). Three properties are structural, not prompted: **read-only** (no tool takes a path),
-  **bounded** (400 rows, 32k payload chars, clamped in code — an agent reading its own run log is the one
-  place a harness can feed itself without limit, cf. openai/codex#27131) and **fresh** (re-read per call).
-  Driven under `status_react_loop_cap` (default 6 — a human is waiting on a phone), asking once more with
-  no tools rather than returning silence on cap. `prompts/status_monitor.md` teaches the level convention
-  (1 = most important … 10 = chattiest, so "important only" is a *low* `max_lvl`). Tests:
-  `tests/test_run_control.py`, `tests/test_monitor_tools.py`.
-- 2026-08-05 — **`_react` replays the turn it received.** The loop used to build an
-  `AssistantToolUse` by copying `content`/`tool_calls`/`provider_blocks` off the response one field
-  at a time; `ModelResponse` is now the neutral assistant turn itself, so the loop appends it whole
-  (`messages.append(response)`) and `AssistantToolUse` is gone. This deletes a class of bug rather
-  than an instance of it: that copy silently dropped tool-search discovery blocks until 2026-07-27
-  and Anthropic `thinking` blocks until today, and it would have dropped the next part type too.
-  Adapters now own their provider's replay rule, each grounded in that provider's documentation
-  (see `models/DOCS.md`). Behaviour of the loop is otherwise unchanged — it still ends when the
-  model emits no tool call. Test: `tests/test_react_tools.py::test_react_replays_the_received_turn_whole`.
-- 2026-08-06 — **The terminal compose declares the loop's tools.** `_call_over_messages` and
-  `_structured_loop` take the same `ToolProvider` `_react` just used and pass
-  `tools=…, tool_choice="none"`: the compose replays a trajectory whose provider items reference
-  those tools, and a request that omits the declarations orphans them — the 400 that killed run
-  `8c75990e` on the co-lead's `review_tool` (see `models/DOCS.md`). `"none"` rather than `"auto"`
-  because the compose must answer; a model that calls again returns `parsed=None` and burns a
-  `structured_retry_cap` attempt. All seven compose sites pass their provider (reviewer `review`,
-  worker `analyze`, lead `adjudicate`/`clarify_for_author`/`decide_authoring`/
-  `finalize_authoring_outcome`, co-lead `review_tool`), and so does `StatusMonitorAgent`'s
-  cap-exhaustion fallback, which had the identical tool-less shape on the GPT reporter — a
-  plausible cause of the open *"`/status` returns silence on cap exhaustion"* defect. Payload-only
-  `_call` is unchanged (no trajectory, so nothing to declare). Tests:
-  `tests/test_react_tools.py::test_terminal_compose_declares_the_loops_tools`,
-  `::test_compose_without_tools_declares_none`, `tests/test_monitor_tools.py` updated.
-- 2026-08-06 — **`open_paper` no longer caps PDF size.** `_OPEN_PAPER_MAX_MB` (8 MB) is deleted
-  along with its stat-check and the sentence advertising it. It was the wrong layer: it could see
-  neither the provider in play nor the rest of the request, so it refused papers every provider
-  would have accepted while missing the limits that actually fail a call (page count, image count,
-  total payload). Those now live per adapter in `models/providers/_media.py`. The distinct-paper cap
-  (`_OPEN_PAPER_CAP`=6) stays — that one is about attention, not provider limits. Test:
-  `tests/test_react_tools.py::test_open_paper_no_longer_caps_size_itself`.
-
-- 2026-08-31 — **A malformed `read_file` argument no longer kills the caller.**
-  `ReadOnlyToolProvider.execute` coerced `offset`/`limit` with bare `int()` inside a `try` that
-  caught only `OSError`, so a model-sent `offset='150, '` raised `ValueError` out of the provider
-  — live, twice, in the gate-bench swapfix batch (claude_opus_5 on two real-base changesets,
-  $0.05 each, whole review lost). The [F11] rule applies on this path too: a malformed argument
-  is the model's slip to correct, surfaced as an `is_error` tool result naming the expectation,
-  never a crash. `ValueError`/`TypeError` now return that error outcome.
-  Test: `tests/test_react_tools.py::test_read_file_malformed_offset_is_a_tool_error_not_a_crash`.
+  ledger.** `_record` actors events by the **indexed `agent_key`** (`analyst_worker_1`), without which two
+  workers are indistinguishable and no `/steer` target can be named. Mid-batch stop-flag reading, the
+  top-of-iteration break, the mid-batch skip and their events were then **deleted**: a `/stop` cancels the
+  run task. **Steering is untouched** — a message can wait. The lead publishes its live `AuthoringSession`
+  on `RunControl` while `drive_authoring` runs so an interrupt can reset the toolkit branch (that method's
+  own `finally` dies inside the cancelled scope); first path there clears the handle, `aclose()` is
+  idempotent. **`MonitorToolProvider` + `StatusMonitorAgent`:** a fourth provider over the run's own
+  `monitor.jsonl` — `brief_history` (index, filterable by level/sequence/prefix/actor/team/substring),
+  `ledger_event(sequence, max_chars, bias)` (one event **with its payload**, windowed, negative `bias` for
+  the tail) and `ledger_grep` (by payload content, index rows only). Structural, not prompted:
+  **read-only** (no tool takes a path), **bounded** (400 rows, 32k payload chars, clamped in code — cf.
+  openai/codex#27131), **fresh** (re-read per call). Driven under `status_react_loop_cap` (default 6 — a
+  human is waiting on a phone), asking once more with no tools rather than returning silence on cap;
+  `prompts/status_monitor.md` teaches the level convention (1 = most important … 10 = chattiest, so
+  "important only" is a *low* `max_lvl`). Tests: `tests/test_run_control.py`,
+  `tests/test_monitor_tools.py`.
+- 2026-08-05 -> 2026-08-31 — **The replay seam, the terminal compose, and two layering corrections.**
+  `_react` appends the turn it received whole (`messages.append(response)`); `AssistantToolUse` is gone,
+  `ModelResponse` being the neutral assistant turn itself. The old field-by-field copy of
+  `content`/`tool_calls`/`provider_blocks` had silently dropped tool-search discovery blocks until
+  2026-07-27 and Anthropic `thinking` blocks until 2026-08-05; adapters now own their provider's
+  documented replay rule (`models/DOCS.md`), and the loop still ends when the model emits no tool call.
+  **The terminal compose declares the loop's tools:** `_call_over_messages`/`_structured_loop` take the
+  same `ToolProvider` `_react` just used and pass `tools=…, tool_choice="none"`, since a compose replaying
+  a trajectory that references those tools orphans them if the declarations are omitted — the 400 that
+  killed run `8c75990e` on the co-lead's `review_tool`. `"none"` rather than `"auto"` because the compose
+  must answer; a model that calls again returns `parsed=None` and burns a `structured_retry_cap` attempt.
+  All seven compose sites pass their provider (reviewer `review`, worker `analyze`, lead
+  `adjudicate`/`clarify_for_author`/`decide_authoring`/`finalize_authoring_outcome`, co-lead
+  `review_tool`), as does `StatusMonitorAgent`'s cap-exhaustion fallback, which had the identical
+  tool-less shape on the GPT reporter — a plausible cause of the open *"`/status` returns silence on cap
+  exhaustion"* defect. Payload-only `_call` is unchanged (no trajectory, nothing to declare).
+  **`open_paper` no longer caps PDF size:** `_OPEN_PAPER_MAX_MB` (8 MB) and its stat-check are deleted as
+  the wrong layer, blind to the provider and to the rest of the request; the limits that actually fail a
+  call (page count, image count, total payload) live per adapter in `models/providers/_media.py`. The
+  distinct-paper cap (`_OPEN_PAPER_CAP`=6) stays — attention, not provider limits. **[F11] applies to a malformed argument:**
+  `ReadOnlyToolProvider.execute` coerced `offset`/`limit` with bare `int()` inside a `try` catching only
+  `OSError`, so a model-sent `offset='150, '` raised `ValueError` out of the provider — live, twice, in the
+  gate-bench swapfix batch (claude_opus_5 on two real-base changesets, $0.05 each, whole review lost); it
+  is the model's slip to correct, so `ValueError`/`TypeError` now return an `is_error` tool result naming
+  the expectation, never a crash. Tests: `tests/test_react_tools.py`
+  `::test_react_replays_the_received_turn_whole`, `::test_terminal_compose_declares_the_loops_tools`,
+  `::test_compose_without_tools_declares_none`, `::test_open_paper_no_longer_caps_size_itself`,
+  `::test_read_file_malformed_offset_is_a_tool_error_not_a_crash`; `tests/test_monitor_tools.py` updated.
 
 - 2026-09-01 — **Ledger field caps read from config at call time.** `_EVENT_ARG_CAP` (2,000) and
   `_EVENT_RESULT_CAP` (4,000) are replaced by `_event_arg_cap()` / `_event_result_cap()`, which

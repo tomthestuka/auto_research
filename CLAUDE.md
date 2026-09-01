@@ -981,8 +981,10 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
 
 ## Changelog
 
-Compacted 2026-08-05: entries through 2026-07-31 are folded into themed date ranges keeping tag ids,
-rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detail is in git history.
+Compacted 2026-08-05 (entries through 2026-07-31) and again **2026-09-01 (entries through
+2026-08-25)**: folded into themed date ranges keeping tag ids, rulings, rejected alternatives,
+measured numbers, and NOT-LIVE-TESTED / LIVE-VERIFIED markers; the narrative detail is in git
+history. Token-level preservation of the second pass was checked mechanically, not by eye.
 
 - 2026-05-27 -> 2026-06-16 — **Phase 1, then Phase 2 steps 0–7: the whole author→gate→review→commit
   flow.** Phase 1: the LangGraph team end-to-end (schemas, provider registry, observability, SQLite
@@ -1102,719 +1104,447 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   deleted with **no fallback**, `status_monitor` joining `REQUIRED_ROLES`. **NOT LIVE TESTED:** a real
   `/stop` mid-authoring, where the branch reset is the whole point.
 
-- 2026-08-03 — **Two data-honesty fixes: one bad ADS record, and a GPG-encrypted download.** ADS
-  occasionally serves a **relative** URL where `FullTextLink.url` is an `HttpUrl`, and the
-  `ValidationError` escaped `search_literature` entirely — `nasa_ads` returned nothing for that query
-  while arxiv and web answered. The record is now skipped and every well-formed link beside it kept
-  (a bad link costs one link, never the source). **[H9]** (research_toolkit scope): HEASARC serves an
-  observation still inside its proprietary period **GPG-encrypted**, and four layers independently
-  defined "present" as *a filename matching a product regex* — so a complete download read as empty
-  ground, the agent's catalog query returned **no line at all**, and re-acquisition was the correct
-  inference from what it was told (live: SS 433 `04004001`, ~25 min re-fetched to no effect). Fixed with
-  **one shared rule** (`neutral.split_lock`/`is_locked`/`LOCK_SUFFIX`) in the module every layer already
-  imports, patterns matching wrapper-stripped, and a readable copy ranked above an encrypted twin.
-  Encryption state is **derived from the recorded path, never stored** (it changes out of band, so a
-  decryption surfaces as ordinary drift for `repair`). Human rulings: a locked product keeps its **honest**
-  level and is marked `LOCKED, NOT USABLE` on its catalog line (the mark, not a demoted level, is what
-  callers read); a repeat request consults the archive's `public_date` (`heasarc.availability`, one
-  metadata row) instead of re-transferring; only `.gpg` is recognised, an unknown suffix stays unknown.
-  Folded in **O4**: the `data_catalog` brief said "mission" five times against a schema with no such
-  argument. The human runs `obsdb_catalog repair_all` once, out of band.
-
-- 2026-08-03 -> 2026-08-05 — **The replay seam: three run-killers, then the unification that removes the
-  class.** With tool search on, part of the transcript is authored by the *provider*, and for the first
-  time we hand back items we did not build. Three live 400s followed in one week, each the same mistake
-  wearing a new face — we re-type a provider's record into a smaller shape of our own, so anything we did
-  not think to keep is destroyed at ingest: `Unknown parameter: 'input[2].created_by'` (the Responses API
-  **accepts a smaller vocabulary than it emits**; openai-python **#3008**/**#2323**/**#2670** ask for an
-  `.as_input()` helper the SDK does not ship), `Missing namespace for function_call` (a discovered tool is
-  addressed by a namespace we had rebuilt away), and `tool_search_call … without its required 'reasoning'
-  item`. Interim fixes carried the provider's record whole (`ToolCall.provider_fields`; an inverted
-  `_UNCARRIED_ITEM_TYPES` default so an unanticipated item type rides along; `_as_input_item` filtering by
-  **name and by value** once at capture, which is what protects prompt caching — the hazard is applying a
-  different *rule* on different turns, not one that reads values). **Then the root cause, 2026-08-05:**
-  `ModelHandle.call` treated `schema` and `tools` as mutually exclusive — **self-imposed**, asserted in
-  four places, and a live probe showed all three providers accept both in one request. That exclusivity
-  forced the terminal compose to declare no tools, which *is* the request shape behind the 2026-07-29
-  `Tool reference … not found` killer and its `include_discovery` amputation. It is gone, and **the
-  response type now IS the assistant turn:** `AssistantToolUse` deleted, `ConversationMessage =
-  ModelMessage | ModelResponse | ToolResultMessage`, and `_react` appends the response it received instead
-  of hand-copying three fields into a twin — the copy that had silently dropped tool-search blocks until
-  2026-07-27 and `thinking` until now. `provider_blocks` → **`provider_parts`, allowlist deleted** (we were
-  reading 3 of Anthropic's 16 block types; the set is never complete). **Replay follows each provider's own
-  documentation** — Anthropic *"echo the assistant message exactly as received"*, Google stateless mode
-  *"MUST always resend all `thought` blocks exactly as they were received"*, OpenAI's pass-back guidance —
-  so Anthropic and Google echo the whole array while OpenAI keeps its capture-time input projection, whose
-  field allowlist is now **derived from the SDK's own `ResponseInputItemParam` union** (27 types). Google
-  also stops using the `.text`/`.function_calls` accessors (they flatten a mixed turn and hide
-  `thought_signature`) and captures the signature onto `provider_fields` — the **[I8]** mechanism, not yet
-  live-verified. **Two rules had been wrong because they were inferred from 400s rather than read from the
-  docs** (a "thinking first" reassembly order and a "drop only tool-referencing blocks" filter — the docs
-  forbid rebuilding or filtering at all); a request declaring no tools therefore carries no provider parts
-  and rebuilds from the interpreted views. Live-verified 2026-08-05 on both providers: second-turn replay
-  of a full Anthropic turn (`thinking → server_tool_use → tool_search_tool_result → thinking → tool_use`)
-  and a tool-less structured compose over the same trajectory. The cheap live test that caught two of the
-  three 400s for cents — `test_live_tool_search.py::test_live_second_turn_after_discovery`, after the first
-  cost ~$10 of live analysis — now covers the terminal compose too. Suite 649 → 665. **Deferred, recorded:**
-  `stop_reason` is still not modelled (`_react` infers "done" from the absence of tool calls, so
-  `max_tokens`/`refusal`/`pause_turn` all read as a clean finish); tool `input_schema`s get no dialect
-  normalization; the tool_use `caller` field is dropped on a synthesized-turn rebuild; letting the terminal
-  compose declare its tools would put it back on the documented echo path. **Also observed live on those
-  runs** (all first-time evidence): durable resume re-entered the analysis node with no literature repeat,
-  the ledger stayed append-only across the kill, cost seeded from the ledger, locked-ObsID handling worked
-  end to end on both providers, and **Anthropic context editing fired in a real analysis** (two edits, ~26k
-  tokens cleared each) — though its collision with tool search (§13 watch item (a)) was not exercised, both
-  edits landing while the worker was already writing up. Open from the same runs: **[F3]** the filesystem
-  guard denies `2>/dev/null` and trains agents into `cd <dir> && <relative>` form the command check cannot
-  inspect at all.
-
-- 2026-08-06 — **The unification finished, after it let a fourth run-killer through.** The
-  2026-08-05 pass deleted the `schema`/`tools` *assertions* but not the branching: both adapters
-  still ran `if schema is not None: … return` **before** `if tools is not None`, so passing both
-  silently dropped the tools (only Google merged them) — and the test named for that property
-  asserted `parsed` came back rather than that the tools reached the request, so it passed against
-  an adapter honouring neither. The terminal compose therefore still could not declare tools, the
-  tool-less request still dropped every carried provider part, and the `function_call` items a few
-  lines below still replayed unconditionally, orphaning the reasoning items they require. Live run
-  `8c75990e` (Q21) died on exactly that at **$29.50**, one step before its first commit — gate
-  passed, GPT co-lead composing its verdict — with `b-run-q21-0803c`'s 400 verbatim. **The fix is
-  the one already recorded as deferred:** each adapter builds ONE request (schema and tools
-  independent) and runs ONE extraction; `tool_choice` gains **`"none"`** (`"none"` / `{"type":
-  "none"}` / `mode="NONE"`, each read from that provider's own docs), and every request that
-  replays a trajectory declares its tools — so `include_provider_parts` is **deleted** rather than
-  narrowed. The drop rule had been inherited from the 2026-07-29 discovery-trim, where only a
-  *tool-referencing* item was ever the problem; applied to the whole part list it created the
-  orphan. `StatusMonitorAgent`'s cap-exhaustion fallback had the same shape (a plausible cause of
-  the open *"`/status` returns silence"* defect). **The probe ran before the code, for cents**
-  (`tmp_scripts/probe_tool_choice_none.py`): Anthropic's `messages.parse` accepts
-  `output_format` + `tools` + `tool_choice` + `thinking` in one call — the risk that could have
-  forced a redesign — and OpenAI accepts `tools` + `tool_choice="none"` + `text.format`. The new
-  live test covers what shipped the bug: an **ordinary function-call** trajectory, where every
-  prior live test had exercised tool-search discovery instead; re-running the file also
-  re-confirmed that a tool-less compose over a discovery trajectory still 400s, which is why no
-  caller may use that shape. Suite 665 → 670, live 7/7 both providers. **Lesson recorded:** a
-  removed assertion is not a removed behaviour, and a test that asserts the *result* of a call
-  cannot see that a parameter was ignored — assert on the request. **Immediate sequel, same day:**
-  the relaunch died 80 min / $5.36 in on `NameError: name 'tools' is not defined` — two of the
-  seven compose sites were patched by pattern with `tools=tools` where the local is `self.tools`,
-  in `decide_authoring` and `clarify_for_author`, branches no deterministic test exercises. A
-  `NameError` is invisible until its branch runs, and the branches that only run deep inside a
-  live run are the expensive ones to find that way. Fixed, and the class is now closed by
-  `tests/test_no_undefined_names.py` — a scope-aware AST guard (module/function/class/closure/
-  comprehension/lambda, annotations skipped under PEP 563) that fails on any name read out of
-  scope, parametrized per module. A naive version is useless here (183 false positives from
-  closures alone); pyflakes would do it but is not in the env, and a test may not depend on a
-  linter that is not installed. Suite 670 → 760. **And the altitude mistake behind it:** the live
-  tests call `provider.call` directly, so they never execute `roles.py` — two layers were changed
-  and only one was live-exercised. Two guards close that: `tests/test_compose_declares_loop_tools.py`
-  asserts, per call site, that the compose declares **the same** `tools` expression its own
-  `_react` used (catching a correctly-spelled but wrong name, which the undefined-name guard
-  cannot), and `tests/test_live_schema_matrix.py` sends **all nine** structured schemas we can
-  emit — `ReviewVerdict`, `AnalystReport`, `AuthoringDecision`, `ToolReviewVerdict`,
-  `_ClarifyReply`, `SearchRequest`, `MemoryRecord`, `ResearchReport`, `LatexReport` — to **both**
-  providers with tools declared, validating each response against its model. Every earlier live
-  check of the structured path had used a two-field toy schema, so "big real schema alongside a
-  tools array" had never been sent to any provider; **18/18 pass** (~112 s). Suite 760 → 768.
-  **Then the human asked the two questions the tests still dodged — attach real history, and check
-  whether one session mixes schemas — and the first found a bug the same change had introduced.**
-  The lead's `adjudicate` attaches a report workspace (adding `edit_report`/`review_report`) for
-  its loop and detaches it in a `finally`; the safety-net compose ran *after* that, so it declared
-  `self.tools` **minus** the two tools whose `tool_use` blocks the replayed trajectory can name —
-  the 2026-07-29 `Tool reference … not found` shape, reintroduced in a new place. Source-text
-  equality could not see it (both sites say `self.tools`; the *object* mutates between them), so
-  the compose moved inside the `try` and a runtime guard joined the static one
-  (`test_react_tools.py::test_compose_declares_the_tools_the_loop_ACTUALLY_had`, a provider whose
-  surface shrinks). The worker's `analyze` was safe by construction — its provider is built with
-  the workspace and never mutated. **On schema mixing: it does not happen** — every role method
-  emits exactly one schema, its tool-less fallback included, and each action builds a fresh
-  `[system, payload]` seed, so no trajectory is ever replayed under a different schema; pinned by
-  `test_one_conversation_carries_exactly_one_schema`. New live test
-  `test_live_compose_with_real_schema_after_a_real_trajectory` sends two real tool-calling turns
-  then the `none` compose with `AnalystReport`/`ToolReviewVerdict` on both providers — and its log
-  is the confirmation the original probe missed: the OpenAI turn carried a **`reasoning`** item,
-  replayed beside its `function_call` with tools declared, and was accepted (the probe's repro leg
-  had been inconclusive because that turn emitted none). Suite 768 → 770; live 4/4.
-
-- 2026-08-07 — **The multimodal boundary had no guard at all; now each adapter gates its own.**
-  Run `8c75990e` reached its **fifth commit** — five tools authored, every one gate-passed and
-  co-lead-approved first try — then died at **$116.10** on the census re-run with `400 … image
-  dimensions exceed max allowed size for many-image requests: 2000 pixels`. The rule is Anthropic's:
-  past **20 image blocks** a request's per-image dimension cap tightens to 2000 px, and a worker's
-  own newly-authored plotter returned 3 PNGs per call that replay inline on every later request, so
-  the count crossed 20 with a 2677x1554 figure aboard. **The audit was the finding:** we base64'd
-  whatever we were handed on all three providers, checking neither count, dimensions, bytes, total
-  payload, nor mime — the one guard in the system was `_OPEN_PAPER_MAX_MB = 8` in the *tool* layer,
-  which could see neither the provider nor the rest of the request, refused papers every provider
-  would have taken, and never saw a figure. **The gate belongs in the adapter** because we are
-  stateless: it holds the whole conversation plus this call's attachments before sending, which is
-  exactly the set a volume limit is defined over. New `providers/_media.py` (walk → plan → resize →
-  page-count); each adapter declares `_LIMITS` with every value quoted from its own docs, because
-  they differ enough that a shared cap would be wrong for all three (Google's **20 MB inline** total
+- 2026-08-03 -> 2026-08-07 — **The replay seam, the self-imposed exclusivity behind it, and the
+  first multimodal guard.** **Data honesty first:** one malformed ADS `esource` record (a relative
+  URL where `FullTextLink.url` is an `HttpUrl`) had zeroed the whole `nasa_ads` source — now the
+  record is skipped and every well-formed link beside it kept, *a bad link costs one link, never
+  the source*. **[H9]**: HEASARC serves a still-proprietary observation **GPG-encrypted**, and four
+  layers independently defined "present" as a filename matching a product regex, so a complete
+  download read as empty ground and re-acquisition was the correct inference from what the agent
+  was told (live: SS 433 `04004001`, ~25 min to no effect). Fixed with **one shared rule**
+  (`neutral.split_lock`/`is_locked`/`LOCK_SUFFIX`) in the module every layer already imports.
+  Human rulings: a locked product keeps its **honest** level and is marked `LOCKED, NOT USABLE` on
+  its catalog line (the mark, not a demoted level, is what callers read); a repeat request consults
+  the archive's `public_date` (`heasarc.availability`) instead of re-transferring; encryption state
+  is **derived from the recorded path, never stored**; only `.gpg` is recognised. Folded in **O4**
+  (the `data_catalog` brief said "mission" five times against a schema with no such argument).
+  **Then the replay seam.** With tool search on, part of the transcript is authored by the
+  *provider*, and three live 400s in one week were the same mistake wearing new faces — we re-typed
+  a provider's record into a smaller shape of our own, destroying at ingest anything we had not
+  thought to keep: `Unknown parameter: 'input[2].created_by'` (the Responses API **accepts a
+  smaller vocabulary than it emits**; openai-python **#3008**/**#2323**/**#2670** ask for the
+  `.as_input()` helper the SDK does not ship), `Missing namespace for function_call`, and
+  `tool_search_call … without its required 'reasoning' item`. Interim fixes carried the provider's
+  record whole (`ToolCall.provider_fields`; an inverted `_UNCARRIED_ITEM_TYPES` default;
+  `_as_input_item` filtering **by name and by value** once at capture, which is what protects
+  prompt caching — the hazard is a different *rule* on different turns, not one that reads values).
+  **Root cause, 2026-08-05:** `ModelHandle.call` treated `schema` and `tools` as mutually
+  exclusive — **self-imposed**, asserted in four places, and a live probe showed all three
+  providers accept both. That exclusivity forced the terminal compose to declare no tools, which
+  *is* the request shape behind the 2026-07-29 `Tool reference … not found` killer and its
+  `include_discovery` amputation. Gone, and **the response type now IS the assistant turn**:
+  `AssistantToolUse` deleted, `ConversationMessage = ModelMessage | ModelResponse |
+  ToolResultMessage`, `_react` appends the response it received instead of hand-copying three
+  fields into a twin (the copy had silently dropped tool-search blocks until 2026-07-27 and
+  `thinking` until now). `provider_blocks` → **`provider_parts`, allowlist deleted** (we read 3 of
+  Anthropic's 16 block types; the set is never complete). **Replay follows each provider's own
+  documentation** — Anthropic *"echo the assistant message exactly as received"*, Google stateless
+  *"MUST always resend all `thought` blocks exactly as they were received"*, OpenAI's pass-back
+  guidance — so Anthropic and Google echo the whole array while OpenAI keeps its capture-time
+  projection, whose field allowlist is derived from the SDK's own `ResponseInputItemParam` union
+  (27 types). Google stopped using `.text`/`.function_calls` (they flatten a mixed turn and hide
+  `thought_signature`) and captures the signature onto `provider_fields` — the **[I8]** mechanism,
+  **not yet live-verified**. Two rules had been wrong because inferred from 400s rather than read
+  from docs (a "thinking first" reassembly order; a "drop only tool-referencing blocks" filter —
+  the docs forbid rebuilding or filtering at all). **The unification then let a fourth run-killer
+  through (2026-08-06):** the *assertions* were deleted but not the branching — both adapters still
+  ran `if schema is not None: … return` **before** `if tools is not None`, so passing both silently
+  dropped the tools, and the test named for that property asserted `parsed` came back rather than
+  that the tools reached the request. Live run `8c75990e` (Q21) died on exactly that at **$29.50**,
+  one step before its first commit. Fix: each adapter builds ONE request and runs ONE extraction;
+  `tool_choice` gains **`"none"`** (`"none"` / `{"type": "none"}` / `mode="NONE"`, each read from
+  that provider's docs), every request that replays a trajectory declares its tools, and
+  `include_provider_parts` is **deleted rather than narrowed**. The probe ran before the code, for
+  cents (`tmp_scripts/probe_tool_choice_none.py`) — as did the cheap live test that caught two of
+  the three 400s, after the first had cost ~$10 of live analysis. **Immediate sequel:** the relaunch died 80 min /
+  $5.36 in on `NameError: name 'tools' is not defined` — two of seven compose sites patched by
+  pattern with `tools=tools` where the local is `self.tools` — in `decide_authoring` and
+  `clarify_for_author`, branches no deterministic test exercises. Closed by `tests/test_no_undefined_names.py`, a scope-aware AST guard (a naive version
+  gives 183 false positives from closures alone; pyflakes would do it but is not in the env, and a
+  test may not depend on an uninstalled linter). **And the altitude mistake behind it:** live tests
+  called `provider.call` directly and never executed `roles.py`. Two guards close that —
+  `test_compose_declares_loop_tools.py` (per call site, the compose declares **the same** `tools`
+  expression its own `_react` used) and `test_live_schema_matrix.py` (all **nine** structured
+  schemas to **both** providers with tools declared; 18/18, ~112 s). Suite 665 → 770; live 7/7 both
+  providers on tool search and 4/4 on the new real-schema compose. Then the human's two questions
+  found one more: the lead's `adjudicate` attaches a report workspace and detaches it in a
+  `finally`, and the safety-net compose ran *after* that, declaring `self.tools` **minus** the two
+  tools the replayed trajectory can name — source-text equality could not see it (the *object*
+  mutates), so the compose moved inside the `try` and a runtime guard joined the static one.
+  **Schema mixing does not happen**: every role method emits exactly one schema, its tool-less
+  fallback included, pinned by `test_one_conversation_carries_exactly_one_schema`.
+  **Deferred, recorded:** `stop_reason` is still not modelled (`_react` infers "done" from the
+  absence of tool calls, so `max_tokens`/`refusal`/`pause_turn` all read as a clean finish); tool
+  `input_schema`s get no dialect normalization; the tool_use `caller` field is dropped on a
+  synthesized-turn rebuild. **Also observed live on those runs** (first-time evidence): durable
+  resume re-entered the analysis node with no literature repeat, the ledger stayed append-only
+  across the kill, cost seeded from the ledger, locked-ObsID handling worked end to end on both
+  providers, and **Anthropic context editing fired in a real analysis** (two edits, ~26k tokens
+  each) — though its collision with tool search (§13 watch item (a)) was not exercised. Open from
+  the same runs: **[F3]** the filesystem guard denies `2>/dev/null` and trains agents into
+  `cd <dir> && <relative>` form the command check cannot inspect.
+  **2026-08-07, the multimodal boundary had no guard at all.** Run `8c75990e` reached its **fifth
+  commit** — five tools authored, every one gate-passed and co-lead-approved first try — then died
+  at **$116.10** on `400 … image dimensions exceed max allowed size for many-image requests: 2000
+  pixels`. Anthropic's rule: past **20 image blocks** the per-image dimension cap tightens to
+  2000 px, and a worker's own newly-authored plotter returned 3 PNGs per call that replay inline on
+  every later request. **The audit was the finding:** we base64'd whatever we were handed on all
+  three providers, checking neither count, dimensions, bytes, total payload, nor mime; the one
+  guard in the system was `_OPEN_PAPER_MAX_MB = 8` in the *tool* layer, which could see neither the
+  provider nor the rest of the request. **The gate belongs in the adapter** because we are
+  stateless: it holds the whole conversation plus this call's attachments before sending. New
+  `providers/_media.py` (walk → plan → resize → page-count); each adapter declares `_LIMITS` quoted
+  from its own docs, because a shared cap would be wrong for all three (Google's **20 MB inline**
   is the tightest ceiling; Anthropic's >20-block rule the sharpest edge). An over-limit image is
   **resized**, a document **withheld**, and either way a model-visible note names the file and the
   reason — silent absence is what invites invention. A resize touches only the transmitted copy, so
-  `FigureRef.sha256` still identifies the artifact a human reproduces. **Nothing downscales unless a
-  limit would otherwise be breached** — the human caught the framing error in the first proposal:
+  `FigureRef.sha256` still identifies the artifact a human reproduces. **Nothing downscales unless
+  a limit would otherwise be breached** — the human caught the framing error in the first proposal:
   providers already resize server-side and bill the smaller version, so client-side downscaling
-  saves **no tokens**, only payload. Also closes the mime half of **[V-3]** (open since July) and
-  deletes `_OPEN_PAPER_MAX_MB`. **Files API deferred** (§12) as a cost/latency change that would not
-  have prevented this: per Anthropic's docs a `file_id` image is still an image block, still counted
-  against 20, still measured against 2000 px. New deps `pillow` (previously undeclared — transitive
-  via matplotlib) and `pypdf`. Suite 770 → 780; live proof is
-  `test_live_many_image_request_that_used_to_400`, which sends the exact 21-image shape that died
-  and gets back *"I received 21 panels."*
+  saves **no tokens**, only payload. Closes the mime half of **[V-3]**; deletes
+  `_OPEN_PAPER_MAX_MB`. **Files API deferred** (§12) as a cost/latency change that would not have
+  prevented this (a `file_id` image is still an image block, still counted against 20, still
+  measured against 2000 px). New deps `pillow`, `pypdf`. Suite 770 → 780; live proof
+  `test_live_many_image_request_that_used_to_400` sends the exact 21-image shape that died.
 
-- 2026-08-10 — **A second Anthropic key, because the two failures that stall or kill a run are
-  quotas of the *key*, not of Anthropic.** One retry policy answered everything by waiting: a 429
+- 2026-08-10 -> 2026-08-18 — **Key failover, and the per-provider error taxonomies it needed.**
+  The two failures that stall or kill a run are quotas of the *key*, not of the provider: a 429
   cost up to ~30 min of cooldown per call across 8 attempts, and a spent credit balance — a
-  non-transient 400 — killed the run outright (2026-07-22). Neither is provider capacity, and a key
-  from another organization clears both at once, which no cooldown can do. `models/keys.py` holds a
-  process-global per-provider key pool (`ANTHROPIC_API_KEY` + optional `ANTHROPIC_API_KEY_FALLBACK`);
-  `retry.is_key_scoped_provider_error` splits that class off — 429 / `rate_limit_error`,
-  `billing_error`, and a 400 naming the credit balance — and `call_with_transient_retry` consults an
-  injected `rotate_key` **before** its cooldown, retrying immediately at no cooldown and no retry
-  budget. **The triggers were read from Anthropic's error taxonomy, not inferred from the failures we
-  happened to see** (the 2026-08-05 lesson): `.type` is what separates `billing_error` from the
-  `permission_error` sharing its 403, and 529/5xx are excluded because provider capacity is identical
-  on every key. 401 is excluded too, deliberately — a revoked key is a configuration fault a human
-  must see, not one to route around. Rotation offers each key once per call and then falls through to
-  the existing path, so a 429 on every key still waits and a balance spent on every key still raises
-  honestly; because the live key is process state, rotation is bidirectional *across* calls and
-  neither key is stranded. **Bidirectional rotation is only safe for a quota that refills, which
-  the first draft missed and a pre-launch read of the actual Q21 terminal caught:** that run died
-  on the credit-balance 400 with `$231.65` spent, so its primary is *permanently* dead — and
-  rotating back onto a dead key the first time the fallback hit a routine 429 would have made that
-  key's non-transient 400 the exception that raises, converting a one-minute wait into a dead run,
-  strictly worse than having no fallback at all. So `is_exhausted_key_error` splits the
-  non-refilling subset (spent balance) from the refilling one (429), and a balance failure
-  **retires** that key for the process (`KeyPool.retire_active`); a 429 never does. Every key
-  retired ⇒ rotation returns `None` and the run fails honestly instead of looping. Three seams
-  follow from "the SDK resolves the env var once per client":
-  the Anthropic adapter now passes `api_key=` explicitly, the coder subprocess gets the live key
-  stamped on **only after a rotation** (`merge_flow._with_live_anthropic_key`, leaving the common path
-  byte-identical), and each switch records a `provider.key_rotation` ledger event naming the slot,
-  never the key. New preflight check `api_key_fallbacks` rejects the three fallbacks the pool silently
-  deduplicates away — blank, identical to the primary, set without a primary — because each would
-  leave a human believing a run is protected when rotation has nowhere to go. **Stated limit, not
-  papered over:** rate limits are per-organization, so the fallback must be a different org for the
-  429 half to help (§13). Anthropic-only by choice (§1 minimal); the pool is provider-keyed.
-  `tests/test_provider_key_failover.py` (40); suite 781 → 821. **LIVE-VERIFIED the same day on the Q21
-  resume**, against the very failure that had killed that run: the first Anthropic call of the resumed
-  run (`analyst_worker/claude_sonnet_5`, seq 3647) took the credit-balance 400, rotated to `fallback1`,
-  retired the dead key, and the run continued — spend unchanged at $231.65, because a request refused
-  before any tokens is never billed. Preflight went 10/10 → **11/11** with `api_key_fallbacks`. What the
-  resume does *not* yet exercise is a 429 on both keys and a rotation preceding a coder session
-  (`tmp_remaining_livetest.md` K1).
+  non-transient 400 — killed a run outright. `models/keys.py` holds a process-global per-provider
+  key pool (`ANTHROPIC_API_KEY` + optional `…_FALLBACK`); `retry.is_key_scoped_provider_error`
+  splits that class off — 429 / `rate_limit_error`, `billing_error`, and a 400 naming the credit
+  balance — and `call_with_transient_retry` consults an injected `rotate_key` **before**
+  its cooldown, retrying at no cooldown and no retry budget. **Triggers were read from the vendor's
+  error taxonomy, not inferred from the failures we happened to see:** `.type` separates
+  `billing_error` from the `permission_error` sharing its 403; 529/5xx are excluded because
+  provider capacity is identical on every key; **401 is excluded deliberately** — a revoked key is
+  a configuration fault a human must see. **Bidirectional rotation is only safe for a quota that
+  refills**, which a pre-launch read of the Q21 terminal caught: that run died on the credit-balance
+  400 with **$231.65** spent, so rotating back onto a dead key at the fallback's next routine 429
+  would convert a one-minute wait into a dead run — strictly worse than no fallback. So
+  `is_exhausted_key_error` splits the non-refilling subset and a balance failure **retires** that
+  key for the process (`KeyPool.retire_active`); a 429 never does; every key retired ⇒ the run fails
+  honestly. Three seams follow from "the SDK resolves the env var once per client": the Anthropic
+  adapter passes `api_key=` explicitly, the coder subprocess gets the live key stamped on **only
+  after a rotation** (leaving the common path byte-identical), and each switch records
+  `provider.key_rotation` naming the slot, never the key. New preflight `api_key_fallbacks` rejects
+  the three fallbacks the pool silently deduplicates away. **Stated limit:** rate limits are
+  per-organization, so the fallback must be a different org for the 429 half to help (§13).
+  `tests/test_provider_key_failover.py` (40); suite 781 → 821. **LIVE-VERIFIED the same day on the
+  Q21 resume**, against the very failure that killed it: the first Anthropic call rotated, retired
+  the dead key, and continued — spend unchanged at $231.65, because a request refused before any
+  tokens is never billed. Preflight 10/10 → **11/11**. **NOT covered:** a 429 on both keys, and a
+  rotation preceding a coder session (`tmp_remaining_livetest.md` K1).
+  **2026-08-18, the authoring-reliability instrument (paper item 4).** `benchmarks/author_bench`
+  runs one fixed brief K times through the **production** lead-driven loop
+  (`AnalystLeadAgent.drive_authoring`), deliberately not the legacy `propose_and_pr` auto-loop whose
+  rework caps §9.10 records as unused on that path. The brief is **not written for the benchmark**:
+  it is the Opus lead's own `ToolSpec` from run `46ed6671`, recovered verbatim and frozen, so §3's
+  walkthrough becomes trial 0 of the same distribution and the brief keeps its real ambiguities.
+  Trials clone the toolkit at `fa99ef8` (parent of the commit that landed the tool), each on its own
+  branch. Concurrency rests on the cost meter being a `ContextVar`: each trial installs its own
+  **inside its own task**, or K trials each report the batch total. No human handler is wired, so a
+  raise records as the `needs_human` terminal (§9.6) rather than being answered for. The report
+  separates **terminal states** (which partition K) from **rounds** (events inside a trial) — a
+  correction the paper's Table 6 needs too — and reports fabrication as a signal for hand-reading
+  rather than a count. **The first batch (K=15) died at 48 minutes and $122.26 with 0 trials
+  finished**, on `429 insufficient_quota` / `credit_balance_exhausted` from the GPT co-lead, which
+  exposed the second item: the key pool was provider-generic but the **error vocabulary** was not.
+  Anthropic reports a spent balance as a 400/403 `billing_error` while **OpenAI reports every key
+  quota as a 429** and only `code` separates the refilling one from the four that do not. Adding
+  OpenAI to `ROTATING_PROVIDERS` alone would have rotated, never retired, and bounced back onto the
+  dead primary. Both predicates now take a **required** `provider` and read a per-provider table
+  citing that provider's own documentation, shapes taken version-exact from the SDKs (openai 2.38.0
+  parses `.type`/`.code` from `body["error"]`). An unrefillable quota now **raises once rotation is
+  exhausted** instead of taking the transient path. `AsyncOpenAI` sends `api_key=` explicitly.
+  **Google stays unwired and the reason is recorded**: its two documentation pages disagree on the
+  vocabulary, neither publishes the response body, and google-genai's `APIError.code` is the HTTP
+  status integer where OpenAI's is a string code, so a shared field read would misclassify
+  silently. Measured on the way: a full authoring trial costs **$27–45** against the $13–30
+  projected from the Q21 windows (which had priced tools authored onto a branch already carrying
+  their chain-mates); `papers/FANGZ/DOCS.md` §8/§8.4 corrected, K set to 10. Suite 821 → 957.
 
-- 2026-08-18 — **Authoring-reliability instrument (paper item 4), and key failover generalized to
-  OpenAI.** `benchmarks/author_bench` runs one fixed brief K times through the **production**
-  lead-driven loop (`AnalystLeadAgent.drive_authoring`), deliberately not the legacy
-  `propose_and_pr` auto-loop whose rework caps §9.10 already records as unused on that path. The
-  brief is not written for the benchmark: it is the Opus lead's own `ToolSpec` from run `46ed6671`
-  (analysis #2), recovered verbatim from that run's ledger and frozen, so §3's walkthrough becomes
-  trial 0 of the same distribution and the brief keeps its real ambiguities — its proposed checks
-  name two synthetic fixture ObsIDs that the original authoring resolved by writing controlled CSVs
-  into the test's own `tmp_path` instead. Trials clone the toolkit at `fa99ef8`, the parent of the
-  commit that landed the tool, each on its own branch, so the live checkout is untouched and trials
-  cannot see each other. Concurrency rests on the cost meter being a `ContextVar`: each trial
-  installs its own **inside its own task**, or K trials would each report the batch total. No human
-  handler is wired, so a raise records as the `needs_human` terminal (§9.6) rather than being
-  answered for. The report separates **terminal states** (which partition K) from **rounds**
-  (events inside a trial), a correction the paper's Table 6 needs too, and reports fabrication as a
-  signal for hand-reading rather than a count.
-  **The first batch (K=15) died at 48 minutes and $122.26 with 0 trials finished**, on
-  `429 insufficient_quota` / `credit_balance_exhausted` from the GPT co-lead, and that exposed the
-  second item. The key pool was already provider-generic; the **error vocabulary** was not.
-  Anthropic reports a spent balance as a 400/403 `billing_error`, so `is_exhausted_key_error`
-  short-circuited "any 429 refills" — true there, false at OpenAI, where every key quota is a 429
-  and only `code` separates the refilling one from the four that do not. Adding OpenAI to
-  `ROTATING_PROVIDERS` alone would have rotated, never retired the dead primary, and bounced back
-  onto it at the fallback's next rate limit: the failure retirement exists to prevent. Both
-  predicates now take a **required** `provider` and read a per-provider table whose every entry
-  cites that provider's own documentation, with shapes taken version-exact from the SDKs
-  (openai 2.38.0 parses `.type`/`.code` from `body["error"]`) and confirmed against the live error.
-  An unrefillable quota now **raises once rotation is exhausted** instead of taking the transient
-  path — the 48 minutes were spent backing off against a balance no wait could restore. `AsyncOpenAI`
-  sends `api_key=` explicitly. **Google stays unwired and the reason is recorded**: its own two
-  documentation pages disagree on the vocabulary, neither publishes the response body, and
-  google-genai's `APIError.code` is the HTTP status integer where OpenAI's is a string code, so a
-  shared field read would misclassify silently. Measured on the way: a full authoring trial costs
-  **$27–45** through the whole loop against the $13–30 projected from the Q21 windows, which had
-  priced tools authored onto a branch already carrying their chain-mates; `papers/FANGZ/DOCS.md`
-  §8/§8.4 corrected, K set to 10. Suite 821 → 957 (`tests/test_author_bench.py` 14,
-  `test_provider_key_failover.py` 40 → 49).
-
-- 2026-08-19 — **The author became swappable: a second harness, and the `coder` role now names
-  which one.** Paper item 7 (the model-tier sweep) needs authors other than Claude Sonnet, and the
-  research answered the shape of that work: **alt models are not a harness problem** — DeepSeek,
-  Z.AI GLM and Alibaba Model Studio each publish an Anthropic-dialect endpoint documented for Claude
-  Code *and* a Responses endpoint documented for Codex — while **a second harness is real work**.
-  Codex-first was chosen because all three vendors are natively Codex-capable, so one backend opens
-  every leg with no gateway. New `sandbox/coder/`: `CoderBackend` is three methods
-  (`connect`/`drive`/`disconnect`), which is all the authoring flow ever needed from an author, so
-  the gate, the co-lead review, `approve_edit`, the per-attempt base ref and the failure reset are
-  untouched; `claude_sdk.py` holds today's wires verbatim and re-exports them from `merge_flow` so
-  callers and tests are unchanged; `codex_sdk.py` is the new one. `RoleModelConfig` gained
-  `harness`/`base_url`/`key_env`, `ProviderName` gained the three harness-only vendors (whose
-  members resolve to a `HarnessOnlyProvider` that raises if anything tries to chat with them), and
-  two preflight checks refuse an impossible pairing or an unlaunchable harness before any model is
-  built. **Decorrelation needed no new rule** — it reads the author's vendor, so a DeepSeek author
-  and the GPT co-lead separate on their own.
-  **The harness swap is not neutral, and the differences were measured rather than assumed** (live
-  probe, cents): Codex's `workspace-write` + `writableRoots` turns `agent_fs_allow` into an
-  **OS-enforced write jail** (half of §12, finally), `.git` is read-only inside it so the coder's
-  git ban stops being a prefix rule, and its per-call token counts let coder spend be priced by the
-  same code as every chat role instead of the Claude SDK's opaque session dollars. Against that:
+- 2026-08-19 -> 2026-08-20 — **The author became a swappable parameter, launch checks learned to
+  warn, and the OS jail met its first real author.** Paper item 7 needs authors other than Claude
+  Sonnet, and the research answered the shape: **alt models are not a harness problem** (DeepSeek,
+  Z.AI GLM and Alibaba each publish an Anthropic-dialect endpoint documented for Claude Code *and*
+  a Responses endpoint documented for Codex) while **a second harness is real work**. Codex-first
+  was chosen because all three vendors are natively Codex-capable. New `sandbox/coder/`:
+  `CoderBackend` is three methods (`connect`/`drive`/`disconnect`), which is all the flow ever
+  needed from an author, so the gate, the co-lead review, `approve_edit`, the per-attempt base ref
+  and the failure reset are untouched. `RoleModelConfig` gained `harness`/`base_url`/`key_env`;
+  `ProviderName` gained the three harness-only vendors (resolving to a `HarnessOnlyProvider` that
+  raises if anything tries to chat with them); two preflight checks refuse an impossible pairing
+  before any model is built. **Decorrelation needed no new rule** — it reads the author's vendor.
+  **The harness swap is not neutral, and was measured rather than assumed:** Codex's
+  `workspace-write` + `writableRoots` turns `agent_fs_allow` into an **OS-enforced write jail**,
+  `.git` is read-only inside it so the coder's git ban stops being a prefix rule, and its per-call
+  token counts let coder spend be priced by the same code as every chat role. Against that,
   **Codex reads are ungated** (full-disk read access is documented design; a command the sandbox
-  permits is never offered to the client's approval handler), so a crossing is recorded as
-  `coder.read_outside_allowlist` and nothing more — a §4 boundary the Claude legs enforce and the
-  Codex legs do not, to be stated wherever a Codex leg is reported. Escalation moved to an
-  in-process Streamable-HTTP MCP endpoint on loopback with a per-session bearer token, because
-  `ask_lead` and `ask_human` must keep reaching the live lead object and the run's HITL connector.
-  The role prompt rides as `developerInstructions` (layering over Codex's own tool instructions)
-  rather than replacing them.
-  **The full OS jail was priced the same day and is light, not heavy:** Landlock active,
-  unprivileged user namespaces enabled, `bwrap` present, and PyXspec + the toolkit importing inside
-  a jail that binds only the allow-list while denying `auto_research` and `~/.claude` — the last of
-  which is also the one conflict, since the Claude author authenticates from the credentials there.
-  New deps: `openai-codex==0.147.0` (pip; it pulls its own version-matched CLI binary, which is why
-  no conda `codex` is pinned — SDK and app-server share a protocol). Suite 967 → 995
-  (`tests/test_coder_backends.py`). **NOT LIVE TESTED:** a real authoring attempt on the Codex
-  harness (the probe exercised the harness, not the flow), and no alt-vendor credential exists yet.
-
-- 2026-08-19 (same day, follow-up) — **The coder's live coverage became a matrix, and the harness
-  table was narrowed to what the code can do.** The three `claude_sdk` alt-vendor rows are gone:
-  those vendors do publish an Anthropic-dialect endpoint, but the Claude backend sets no
+  permits is never offered to the client's approval handler), so a crossing is only recorded as
+  `coder.read_outside_allowlist` — a §4 boundary the Claude legs enforce and the Codex legs do not,
+  **to be stated wherever a Codex leg is reported**. Escalation moved to an in-process
+  Streamable-HTTP MCP endpoint on loopback with a per-session bearer token. New dep
+  `openai-codex==0.147.0`. **The three `claude_sdk` alt-vendor rows were then removed**: those
+  vendors do publish an Anthropic-dialect endpoint, but the Claude backend sets no
   `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` and no model-name mapping, so a member naming one
-  would have silently authored on Claude — a table that promises more than the backend delivers is
-  worse than a short table. Five pairs remain, and `sandbox/coder/harness.py` records why the other
-  three are absent. **`tests/test_live_coder_matrix.py`** is the coder analogue of the schema
-  matrix: one warm session per leg, walked through nine stimuli in the order a real attempt produces
-  them (seed brief, gate rejection, co-lead rejection, lead instruction, governance-file read, git
-  attempt, `ask_lead`, lengthening trajectory), with every stimulus **frozen out of real ledgers**
-  rather than written for the test (`tests/fixtures/coder_history.json`;
-  `tmp_scripts/extract_coder_history.py` mines it). Assertions stay on our side of the boundary and
-  a leg skips on a missing credential, so two legs run today and three wait on vendor keys.
-  **It caught two defects before it caught anything about a harness.** Its own first invocation died
-  on a missing import, which is the `NameError` class the 2026-08-06 static guard exists to prevent
-  — in a file that guard did not scan. `tests/test_no_undefined_names.py` now scans `tests/` and
-  `benchmarks/` too, and that widening immediately found a real latent one: `test_live_agents.py`
-  still constructed a `LibrarianSearcherAgent` for a role deleted from config, so that live test
-  would have died the moment anyone ran it. **Lesson, matching the original:** a test that only runs
-  behind an env flag has fewer chances to be caught than a rare source branch, so the guard belongs
-  over the tests as much as over the package.
-  **Then the matrix found the two Codex defects it was built to find, neither visible to any
-  deterministic test.** The escalation tools never reached their handler: MCP servers are read when
-  the app-server **process** starts, not per thread, so a server passed at thread start never
-  connected — and once registered correctly, an MCP tool call is offered to the client as an
-  **elicitation** whose reply vocabulary is the MCP spec's `{"action": "accept"}`, so answering with
-  the `{"decision": …}` used for patch approvals reads as a rejection and the author is told *"user
-  rejected MCP tool call"* while our handler is never called. This is the
-  read-the-contract-don't-infer-it lesson again, at a new boundary: two shapes arrive on one
-  callback and they do not share a vocabulary. Second defect: the read audit resolved Codex's
-  **relative** command paths against this process's cwd, recording 47 crossings for ordinary
-  in-worktree reads — and a second path bug behind it, since `cwd` is a `RootModel` whose `str()`
-  is `root='/tmp/…'`, cost 40 more. An audit that cries wolf hides the crossing it exists to show.
-  All fixed and pinned; the escalation round-trip is now live-verified end to end on Codex (model →
-  localhost MCP → in-process handler → answer). **One finding was about the test:** demanding an
-  *edit* in response to a recorded rejection asks a throwaway toolkit to contain the files that
-  rejection names, so the cells assert **delivery** and record the rest. Suite 995 → 1101.
-
-- 2026-08-19 (third, same day) — **Launch checks learned two things: what the config actually
-  needs, and how to say "unproven".** `check_required_env` had a hand-written key list that drifted
-  in both directions — it demanded `GOOGLE_API_KEY` from a config with no Google member, and knew
-  nothing of the vendor variables the coder harnesses authenticate with, so a missing one surfaced
-  inside an author subprocess instead of at launch. Requirements are now **derived from
-  `config/models.yaml`**: a provider a role names implies its own SDK's variable, a member's
-  `key_env` requires exactly that variable and beats the provider default (a plan-specific endpoint
-  may use another name), and the failure names the role/member that wanted each missing key. The
-  alias table carries all six vendors, so configuring DeepSeek, Z.AI or Qwen as *chat* members in
-  the model sweep needs no `key_env` at all.
-  **New warning tier.** Preflight was pass-or-raise, which cannot express a precondition that is
-  satisfiable and unproven at once. `PreflightWarning` fills that: the launch continues, the line
-  reads `WARNING`, the caution records at level 2, and the summary counts warnings apart from
-  failures. Its first user is the Qwen coder pairing (§13): configured against the endpoint the
-  vendor documents, never run, because the account is not entitled. Blocking that launch would be
-  wrong and passing silently would make a first-time failure look like a defect in the flow.
-  The live matrix classifies it the same way — a leg whose vendor refuses the account on the seed
-  turn **skips carrying that refusal** rather than failing, since nine downstream cells reporting
-  nine consequences of one cause would bury the cause. Four of five legs are live-probed.
-  Suite 1101 → 1112.
-
-- 2026-08-20 — **The OS-level jail is built and shipped off.** The Codex measurement made the case
-  concrete: a coder read this repository's own backend, docs, test and the harness's config file
-  unprompted, 36 crossings in one session, because that harness grants full-disk reads by design and
-  our guard only inspects the paths a model names. `sandbox/jail.py` turns `agent_fs_allow` into a
-  `bwrap` mount plan for all four process kinds that touch a disk — both author harnesses (through
-  their own binary-path options, so a vendor's argv changes cannot break the wrapping), the analyst
-  REPL, and the gate's Layer-B pytest, that last one **network-denied** because a mergeability
-  verdict must depend on the data on disk (§9.4), verified against all 30 existing suites first.
+  would have silently authored on Claude — *a table that promises more than the backend delivers is
+  worse than a short table*. Five pairs remain; `harness.py` records why the other three are absent.
+  **`tests/test_live_coder_matrix.py`** is the coder analogue of the schema matrix: one warm session
+  per leg through nine stimuli in the order a real attempt produces them, every stimulus **frozen
+  out of real ledgers** rather than written for the test. **It caught two defects before it caught
+  anything about a harness:** its own first invocation died on a missing import — the `NameError`
+  class the static guard exists to prevent, in a file that guard did not scan — so the guard now
+  scans `tests/` and `benchmarks/` too, which immediately found a real latent one
+  (`test_live_agents.py` constructing a role deleted from config). **Lesson: a test behind an env
+  flag has fewer chances to be caught than a rare source branch.** Then it found the two Codex
+  defects it was built for, neither visible to a deterministic test: MCP servers are read when the
+  app-server **process** starts, not per thread, so a server passed at thread start never connected;
+  and once registered, an MCP tool call arrives as an **elicitation** whose reply vocabulary is the
+  MCP spec's `{"action": "accept"}`, so answering with the `{"decision": …}` used for patch
+  approvals reads as a rejection and the author is told *"user rejected MCP tool call"* while our
+  handler is never called — **read-the-contract-don't-infer-it at a new boundary: two shapes arrive
+  on one callback and they do not share a vocabulary.** Second: the read audit resolved Codex's
+  **relative** command paths against this process's cwd (47 false crossings), and behind it `cwd` is
+  a `RootModel` whose `str()` is `root='/tmp/…'` (40 more) — *an audit that cries wolf hides the
+  crossing it exists to show*. Escalation is now live-verified end to end on Codex. One finding was
+  about the test: demanding an *edit* in response to a recorded rejection asks a throwaway toolkit
+  to contain the files that rejection names, so those cells assert **delivery** and record the rest.
+  **Launch checks, same day:** `check_required_env` had a hand-written key list that drifted both
+  ways; requirements are now **derived from `config/models.yaml`** (a provider a role names implies
+  its SDK's variable; a member's `key_env` beats the provider default), and the failure names the
+  role/member that wanted each missing key. New **`PreflightWarning`** tier — preflight was
+  pass-or-raise, which cannot express a precondition that is satisfiable and unproven at once; the
+  launch continues, the line reads `WARNING`, and the summary counts warnings apart from failures.
+  Its first user is the **Qwen coder pairing, UNVERIFIED** (§13): configured against the documented
+  endpoint, never run, because the account is not entitled — blocking would be wrong and passing
+  silently would make a first-time failure look like a defect in the flow. A leg whose vendor
+  refuses the account on the seed turn **skips carrying that refusal** rather than failing, since
+  nine downstream cells reporting nine consequences of one cause would bury the cause.
+  **The OS-level jail was built and shipped OFF** (`agent_os_jail: false`; `sandbox/jail.py`): the
+  Codex measurement made the case concrete — a coder read this repository's own backend, docs, test
+  and the harness's config file unprompted, **36 crossings in one session**. `bwrap` turns
+  `agent_fs_allow` into a mount plan for all four process kinds that touch a disk (both author
+  harnesses through their own binary-path options, the analyst REPL, and the gate's Layer-B pytest
+  **network-denied**, because a mergeability verdict must depend on the data on disk, §9.4);
   `agent_fs_readonly` splits the list, which makes the jail *tighter* than the guard rather than a
-  copy of it: nothing writes to the conda environment, HEASoft or CALDB.
-  **Four rules it learned by failing, each now pinned.** bwrap creates a mount point's parents
-  itself, so only the **outermost** symlinked path may get a link — recreating symlinked ancestors,
-  then a nested root, killed all 30 suites twice with "Can't mkdir parents". A later bind lands on
-  top of an earlier one, so roots are applied **outermost first** or declaration order silently
-  decides which of a nested read-only/writable pair wins. The jailed process is pid 1 of its own
-  namespace, so `--die-with-parent` is what keeps the interrupt path's kill total. And the finding
-  worth carrying: **the allow-list was never exercised as a mount plan**, so nobody had to know it
-  was incomplete — every file in PyXspec's package directory is a symlink four levels up into a
-  sibling of `$HEADAS`, which produced an importable-looking namespace package and an `ImportError`
-  on the first real symbol, thirty suites deep instead of at launch. The HEASoft release root joined
-  the list, and `check_os_jail_probe` now runs the configured `analyze_probe` **inside** the jail at
-  launch. Two failure modes on purpose: a missing `bwrap` or denied user namespaces **warns** (that
-  is the configuration every earlier run used), while a jail that breaks the science stack **fails**
-  the launch rather than failing every tool call separately. Feasibility was measured before any of
-  this was written — Landlock active, unprivileged user namespaces enabled, `bwrap` present, PyXspec
-  importing inside a jail that denies `auto_research` and `~/.claude` — and the Claude author's
-  credential file is bound as a single read-only file so the subscription path and every measured
-  cost figure survive a hidden home. Shipped **off** (`agent_os_jail: false`); what remained was a
-  live authoring attempt under it and egress control for the three processes that keep the network.
-  **The authoring attempt happened the same day and the jail did not survive it intact** — see the
-  third 2026-08-20 entry: four startup defects, then the structural one (this harness's own sandbox
-  is bubblewrap, so jailing it nests the same mechanism). Now fixed and live-verified, with the
-  harness sandbox standing down when the jail is on. **Egress control remains the open item.**
-  Tests: `tests/test_jail.py` (19 → 28). Suite 1115 → 1136.
-
-- 2026-08-20 (second, same day) — **The author became a parameter, so the model sweep is a benchmark
-  rather than a config edit — and building it found a key the coder could never reach.** Paper item 7
-  (the coder model sweep, §6.2 Table 8) needs one fixed brief authored by several vendors, and the
-  authoring flow could not express that: `build_authoring_session` resolved the model id one way, the
-  author provider a second way for review routing, and `_build_backend` resolved the harness member a
-  third way, each reading the `coder` role independently. One `coder: RoleModelConfig` parameter now
-  carries all three facts (`_resolve_coder_provider` deleted, `_resolve_coder_model` reduced to an
-  accessor), which is a simplification rather than an addition: the three could previously disagree.
-  Harness dispatch is now proven by *passing* members instead of monkeypatching ambient config, which
-  is what production does. Second seam: `make_review_hook(..., allow_correlated=False)`, the only way
-  past the decorrelation boundary, opt-in and set by no production caller, because the same-provider
-  arm is otherwise inexpressible — an injected co-lead is asserted decorrelated too. Every review
-  under it emits `review.correlated`, since a verdict reached that way does not carry production's
-  guarantee, and the launch preflight still guards the configured roles.
-  **The sweep lives in `benchmarks/author_bench`** (the human's call): a *leg* is one (author member,
+  copy of it. **Four rules learned by failing, each now pinned:** bwrap creates a mount point's
+  parents itself, so only the **outermost** symlinked path may get a link; a later bind lands on top
+  of an earlier one, so roots are applied **outermost first**; the jailed process is pid 1 of its own
+  namespace, so `--die-with-parent` keeps the interrupt path's kill total. And the finding worth
+  carrying: **the allow-list was never exercised as a mount plan**, so nobody had to know it was
+  incomplete — every file in PyXspec's package directory is a symlink four levels up into a sibling
+  of `$HEADAS`, producing an importable-looking namespace package and an `ImportError` on the first
+  real symbol, thirty suites deep instead of at launch. The HEASoft release root joined the list and
+  `check_os_jail_probe` now runs the configured `analyze_probe` **inside** the jail at launch. Two
+  failure modes on purpose: a missing `bwrap` or denied user namespaces **warns**; a jail that
+  breaks the science stack **fails** the launch.
+  **The author became a parameter, so the model sweep is a benchmark rather than a config edit.**
+  `build_authoring_session` resolved the model id one way, the author provider a second way for
+  review routing, and `_build_backend` the harness member a third — one `coder: RoleModelConfig`
+  parameter now carries all three facts (`_resolve_coder_provider` deleted, `_resolve_coder_model`
+  reduced to an accessor), which is a simplification: the three could previously disagree. Harness dispatch is proven by *passing* members instead of monkeypatching ambient
+  config. Second seam: `make_review_hook(..., allow_correlated=False)`, opt-in and set by no
+  production caller, because the same-provider arm is otherwise inexpressible; every review under it
+  emits `review.correlated`. The sweep lives in `benchmarks/author_bench` (the human's call): a *leg* is one (author member,
   reviewer arrangement) pair with its own K, concurrency ceiling and vendor brand colour; legs run
-  sequentially with trials concurrent inside; the report grows a per-leg table only when a batch has
-  more than one leg, and the single-leg report is **byte-identical** to the one already in the paper.
-  Two structural rulings came out of the roster. **A tier row cannot be an OpenAI author**: the tier
-  axis needs the reviewer held fixed, and the configured co-lead is OpenAI, so such a row would vary
-  two things at once — it appears instead as a deliberately correlated row, with decorrelation
-  elaborated in the text. **The decorrelation panel holds the author at the campaign default** and
-  moves only the reviewer, which makes the existing K=10 batch its cross-provider arm for free;
-  `claude-opus-5` is the pinned same-provider reviewer because the reviewer swap found it the
-  strongest, so a cost there is a strong result and no cost an honest negative one. The **Qwen row is
-  absent, not substituted**, with the reason recorded in code. The subscription session cap that
-  contaminated six of ten trials in the first batch is now a **concurrency ceiling on the roster row**
-  rather than something the operator must remember.
-  **The finding: the Codex author never consulted the key pool.** It resolved its vendor key from the
-  raw environment variable at two places, so it always launched on the *primary* even after a chat
-  role had rotated off a spent one — worse than the §13 note that a session in flight keeps its key,
-  because it never *started* from the live key. Surfaced by the new per-leg vendor probe: the OpenAI
-  primary was out of credits (`429 credit_balance_exhausted`) while the configured fallback answered,
-  so an OpenAI author was unrunnable at the same moment its own co-lead was answering normally. One
-  shared `resolve_vendor_key` now reads the pool for a rotating provider whose member names that
-  provider's standard primary variable, and the raw variable otherwise — a plan-specific variable must
-  not be shadowed, and a harness-only vendor has no cited error taxonomy so it never rotates. It
-  returns a **log-safe slot name**, never the value. The probe uses the same resolver *and fails over*,
-  because the pool only advances reactively: at launch it still holds the spent primary, so the probe
-  is the run's first real call and retires a spent key for the process, leaving the batch to launch
-  its authors on the key that answered instead of discovering the dead one inside an author
-  subprocess after each trial's lead spend is gone. **Human ruling on cost reporting:** the paper
-  states one list-price USD figure with no billed-versus-notional split ("the science won't care
-  whether those were billed from a subscription or an API key"), and the Claude coder is *not* moved
-  onto an API key to make its spend real, because it is too expensive to bill that way. Suite
-  1136 → 1160.
-
-- 2026-08-20 (third, same day) — **The OS jail met its first author, and needed five fixes to
-  survive it.** §12 recorded "a live authoring attempt under it" as the jail's remaining work; the
-  coder sweep supplied one, and every layer failed in turn — all at startup, all for $0, which is
-  the only reason this was cheap. (1) The launcher **never bound the binary it execs**: both
-  harnesses ship their CLI inside the orchestration environment, a tree `agent_fs_allow` deliberately
-  does not name, so `bwrap` failed `execvp` on all 40 trials. (2) **Bind and exec disagreed on the
-  path spelling** — the bind resolved symlinks, the exec did not, so the Claude author still failed
-  after its own directory was bound, while Codex survived because for it the two coincide. The launch
-  check I had just written resolved as well, so it reported "reachable" while the launcher failed:
-  *a check that normalises differently from the thing it checks is not a check.* (3) Codex was
-  pointed at the **operator's own settings directory**, absent from the jail. (4) Both CLIs keep
-  state in **SQLite** and the runtime dir is an **NFS** mount, where it cannot take locks, so author
-  homes moved to local disk. (5) A label derived from the clone's *directory name* collided across
-  every concurrent author, because every trial clones into a directory called `repo`.
-  **The structural one was last: this harness's own sandbox IS bubblewrap.** Jailing it nests the
-  same mechanism — Codex cannot spawn `codex-linux-sandbox`, every shell command is rejected, and the
-  author reaches the gate having read and written nothing, which reads as a weak model rather than as
-  broken plumbing. The coder diagnosed it itself and escalated to the lead, the §9.6 path behaving as
+  sequentially with trials concurrent inside, and the single-leg report stays **byte-identical** to
+  the one already in the paper. **Two structural rulings from the roster:** a tier row **cannot** be an
+  OpenAI author (the tier axis needs the reviewer held fixed and the configured co-lead is OpenAI,
+  so such a row would vary two things at once — it appears instead as a deliberately correlated
+  row); and the decorrelation panel **holds the author at the campaign default** and moves only the
+  reviewer, which makes the existing K=10 batch its cross-provider arm for free, with
+  `claude-opus-5` the pinned same-provider reviewer because the reviewer swap found it strongest.
+  The **Qwen row is absent, not substituted**, with the reason recorded in code. **The finding: the
+  Codex author never consulted the key pool** — it resolved its vendor key from the raw environment
+  at two places, so it always launched on the *primary* even after a chat role had rotated off a
+  spent one, worse than the §13 note that a session in flight keeps its key. One shared
+  `resolve_vendor_key` now reads the pool for a rotating provider naming that provider's standard
+  primary variable, and the raw variable otherwise (a plan-specific variable must not be shadowed;
+  a harness-only vendor has no cited taxonomy so it never rotates), returning a **log-safe slot
+  name**. The per-leg probe uses the same resolver *and fails over*, because the pool only advances
+  reactively. **Human ruling on cost reporting:** the paper states one list-price USD figure with no
+  billed-versus-notional split, and the Claude coder is *not* moved onto an API key to make its
+  spend real, because it is too expensive to bill that way.
+  **The jail then met its first author and needed five fixes**, all at startup, all for $0 — the
+  only reason it was cheap. (1) The launcher **never bound the binary it execs** (both harnesses
+  ship their CLI inside the orchestration environment, a tree `agent_fs_allow` deliberately does not
+  name), so `bwrap` failed `execvp` on all 40 trials. (2) **Bind and exec disagreed on the path
+  spelling** — the bind resolved symlinks, the exec did not — and the launch check resolved as well,
+  so it reported "reachable" while the launcher failed: *a check that normalises differently from
+  the thing it checks is not a check.* (3) Codex was pointed at the operator's own settings
+  directory, absent from the jail. (4) Both CLIs keep state in **SQLite** and the runtime dir is an
+  **NFS** mount where it cannot take locks, so author homes moved to local disk. (5) A label derived
+  from the clone's *directory name* collided across every concurrent author. **The structural one
+  was last: this harness's own sandbox IS bubblewrap**, so jailing it nests the same mechanism —
+  Codex cannot spawn `codex-linux-sandbox`, every shell command is rejected, and the author reaches
+  the gate having read and written nothing, which reads as a weak model rather than as broken
+  plumbing. The coder diagnosed it itself and escalated to the lead, the §9.6 path behaving as
   designed. **Human ruling: one enforcement layer.** The harness sandbox stands down when the kernel
-  jail is on, and `coder_policy` tightens the author to two writable places (its working tree and its
-  own settings home), which is *stricter* than the `workspace-write` surrendered: the observation
-  database is read-only, so no author can write a data file where a fabricated result would have to
-  live, and the temp root is absent entirely so one author cannot read another's solution — a
-  contamination that would have invalidated a repeated-trial measurement rather than broken anything
-  visibly. **Live-verified end to end**: two concurrent authors per harness starting jailed, the
-  Claude pair authenticating from the subscription and replying, and a full production trial
-  authoring both toolkit halves plus tests and passing the deterministic gate on its second
-  submission. Suite 1136 → 1176. **Two process lessons.** A hand-built probe is not the production
-  path: mine failed with the jail *off* too, which is the only reason I did not read its failure as a
-  code defect. And the config-flip lesson recurred twice in one session — two tests asserted against
-  whatever `agent_os_jail` happened to be on this host, and both now sweep it.
+  jail is on, and `coder_policy` tightens the author to two writable places, which is *stricter*
+  than the `workspace-write` surrendered: the observation database is read-only, so no author can
+  write a data file where a fabricated result would have to live, and the temp root is absent
+  entirely so one author cannot read another's solution — a contamination that would have
+  invalidated a repeated-trial measurement rather than broken anything visibly. **Live-verified end
+  to end**: two concurrent authors per harness starting jailed, the Claude pair authenticating from
+  the subscription, and a full production trial authoring both toolkit halves plus tests and passing
+  the deterministic gate on its second submission. **Two process lessons.** A hand-built probe is
+  not the production path (mine failed with the jail *off* too, the only reason I did not read its
+  failure as a code defect). And the config-flip lesson recurred twice in one session — two tests
+  asserted against whatever `agent_os_jail` happened to be on this host, and both now sweep it.
+  Suite 967 → 1176. **Open:** egress control for the three processes that keep the network; turning
+  the flag on by default. **NOT LIVE TESTED at the time:** a real authoring attempt on the Codex
+  harness (the probe exercised the harness, not the flow).
 
-- 2026-08-24 — **The three harness-only vendors became chat members, so the lead and co-lead are a
-  provider axis rather than a constant.** §8.5 of the paper DOCS found that the coder sweep varied
-  the reviewer's provider and the lead's together, because the lead was Anthropic in all five arms;
-  separating them needs leads and co-leads from more than two vendors. DeepSeek, Z.AI and Alibaba
-  Model Studio each already publish an OpenAI **Responses** endpoint — the dialect our OpenAI
-  adapter speaks — so this was a factoring, not three new adapters: `providers/_responses.py` holds
-  the wire logic (input projection, capture-time field filtering, replay ordering, one
-  request/one extraction) and each vendor module holds a `ResponsesVendor` of documented facts
-  beside its citations, mirroring how `_media.py` already splits mechanics from per-provider policy.
-  Copying 540 lines written against three run-killers in one week would have forked those fixes
-  four ways. `CHAT_PROVIDERS` is now all six; `HarnessOnlyProvider` remains for any future unwired
-  vendor.
+- 2026-08-24 -> 2026-08-25 — **Six chat vendors, two routes to a structured answer, and role
+  eligibility decided per role.** §8.5 of the paper DOCS found the coder sweep varied the reviewer's
+  provider and the lead's together, because the lead was Anthropic in all five arms; separating them
+  needs leads and co-leads from more than two vendors. DeepSeek, Z.AI and Alibaba each already
+  publish an OpenAI **Responses** endpoint, so this was a factoring, not three new adapters:
+  `providers/_responses.py` holds the wire logic and each vendor module holds a `ResponsesVendor` of
+  documented facts beside its citations, mirroring how `_media.py` splits mechanics from
+  per-provider policy. Copying 540 lines written against three run-killers in one week would have
+  forked those fixes four ways. `CHAT_PROVIDERS` is now all six.
   **Every flag was read from the vendor's docs and then probed, because a compatibility table says
-  what is *accepted*, not what is *honoured*** — and that distinction decided who may hold a role.
-  **DeepSeek** honours a strict schema exactly (bare JSON, declared keys, both its models), calls
-  functions, and accepts the `tools`+`schema`+`tool_choice="none"` compose shape, so it is a full
-  member: **11/11 live** on all nine real schemas plus both trajectory composes. **Z.AI accepts
-  `text.format` and ignores it**, answering once with prose carrying no JSON and once with a fenced
-  object whose keys the schema never declared. A 200 with invented keys cannot be caught downstream,
-  so `supports_strict_schema=False` refuses the request with a reason instead; its documented
-  workaround (schema in the prompt) did return exact keys on a nested schema, but once, so nothing
-  is wired on one draw. DeepSeek also rejects `prompt_cache_key`, which the lead role sends on every
-  cached call.
-  **Two defects only a live probe could find, both now per-vendor flags.** Its strict mode accepts a
-  **narrower `format` set** and enumerates it in the refusal ("expected one of `email`, `hostname`,
-  `ipv4`, `ipv6`, `uuid`"), which refused three of the nine schemas for carrying a date field. And
-  its validator **does not follow a `$ref` inside an `anyOf` branch**, so every `X | None` field
-  broke: the cheap fix was probed first and merely moved the error to "An object with no properties
-  is not allowed", which is what proves the reference is never followed, while inlining the
-  definition is accepted and validates. The inliner is deliberately narrow (only a branch whose sole
-  key is `$ref`, never through a definition already open on the path) and its **first version
-  recursed without bound** — caught by its own guard test, not by any schema we send.
-  **Live tests now route through `ModelHandle` rather than `provider.call`.** Both frontier primaries
-  were out of credit that day (Anthropic 400 credit balance, OpenAI 429 `credit_balance_exhausted`)
-  and 22 legs failed against working fallback keys, because key rotation lives in the layer the live
-  tests skipped. Routing through the handle fixes that and also closes the altitude gap recorded on
-  2026-08-06, where a live test could not see a defect introduced above the adapter. The same move
-  exposed a stale monkeypatch target that resolved for Anthropic and raised for OpenAI, now derived
-  from the vendor registry instead of spelled per leg.
-  **Qwen ships unverified**: its key authenticates and lists 162 models, but every inference call is
-  refused `AccessDenied.Unpurchased` on both dialects and with a current model id, so it is a
-  billing gate rather than our wiring; its documented Responses hosts are workspace-scoped and do
-  not include the one `HARNESS_ENDPOINTS` names, recorded rather than silently changed. New deps:
-  none. Suite 1008 -> 1058; live 36/1-skipped on the schema matrix and 7/7 on tool search.
+  what is *accepted*, not what is *honoured*** — and that decided who may hold a role. **DeepSeek**
+  honours a strict schema exactly (**11/11 live** on all nine real schemas plus both trajectory
+  composes). **Z.AI accepts `text.format` and ignores it**, answering once with prose carrying no
+  JSON and once with a fenced object whose keys the schema never declared; a 200 with invented keys
+  cannot be caught downstream, so `supports_strict_schema=False` refuses the request with a reason
+  instead. Its documented workaround (schema in the prompt) returned exact keys once, so nothing is
+  wired on one draw (its forced-tool route later measured **12/12 live** on the real schemas, one
+  transient vendor auth blip passing on retry). DeepSeek also rejects `prompt_cache_key`. **Two defects only a live probe could
+  find:** DeepSeek's strict mode accepts a **narrower `format` set** and enumerates it in the
+  refusal (`email`, `hostname`, `ipv4`, `ipv6`, `uuid`), which refused three of nine schemas for a
+  date field; and its validator **does not follow a `$ref` inside an `anyOf` branch**, so every
+  `X | None` broke — the cheap fix merely moved the error to "An object with no properties is not
+  allowed", which is what proves the pointer is never resolved.
+  **A structured answer now has two routes.** The human's insight found the way through: **a coding
+  harness never uses structured output** — Claude Code's and Codex's own editing tools are
+  JSON-Schema functions, so any vendor that works inside those harnesses must handle schema-shaped
+  tool arguments. `ResponsesVendor.schema_via_tool` declares one synthetic tool whose parameters
+  *are* the schema and pins `tool_choice` to it; the loop's own tools stay declared beside it, and
+  the emit call is consumed into `parsed`, never surfaced as a `tool_call` the ReAct loop would
+  execute. A vendor that declines the forced call raises rather than returning a quiet
+  `parsed=None`. **Two of my own defensive choices were wrong and were corrected by measurement:**
+  DeepSeek's narrow `format` allowlist had been applied to Z.AI and Qwen as well, but that narrowing
+  is imposed by *DeepSeek's* validator, which they never reach — *enforce what a vendor refuses,
+  never what another one does*. **One measured quirk:** GLM intermittently fills an optional field
+  with the *string* `"null"`, schema-valid against a `string` branch and a type error for anything
+  else, and it reaches the authoring path (`AuthoringDecision` carries two optional floats).
+  `_normalise_null_strings` coerces a literal `"null"` to `None` **only** where the schema permits
+  null and no branch accepts a plain string — it normalises spelling, never content — and exact
+  constrained strings (enum/const/pattern `"null"`) keep their data value.
+  **"Cannot resolve a `$ref`" was never one property, and the boolean encoding it is deleted.**
+  Prompted by the human asking whether we had actually *tried* sending references to each vendor —
+  we had not; Z.AI had inlining enabled purely by analogy and was never tested. Measured at 5 draws
+  per cell, every cell 0/5 or 5/5, no variance: **DeepSeek** refuses `anyOf:[{$ref},null]` 0/5 but
+  takes `items:{$ref}` 5/5; **Z.AI** takes both 5/5; **Qwen** takes `anyOf` 5/5 and refuses `items`
+  0/5. **Qwen forced the redesign:** it needs opposite treatment in the two positions, so a
+  per-vendor boolean is wrong whichever way it is set — and blanket dereferencing was *causing* its
+  `anyOf` failures (a working 5/5 shape driven to 0/5). `inline_anyof_refs` and the blanket inliner
+  are gone; `resolve_refs_in` names the positions a vendor is *measured* to need, defaulting to
+  none; Z.AI's shim was **deleted rather than switched off**, per the human's instruction.
+  DeepSeek's rule, probed six ways: every `anyOf` branch must carry a literal `type`, checked
+  *before* any reference is followed. **No dependency was added** — `jsonref` does blanket
+  dereferencing, which the data says is wrong for Qwen. **Two process notes:** a closed third-party
+  issue was cited as support when a live measurement of our own request already existed — *the probe
+  was always the authority, and the human was right to force the re-check*; and writing the
+  position-aware resolver **reintroduced the same unbounded-recursion bug fixed an hour earlier**,
+  caught by its own guard test, not by review.
+  **Qwen came alive, and the last defect was ours.** Activating Model Studio cleared the entitlement
+  gate. `ResearchReport` and `AuthoringDecision` failed at *every* reasoning effort (10/11/8 errors),
+  always at `figures.0`/`references.0`/`sections.0` — the `list[Model]` fields — which showed the cause was
+  structural: our inliner rewrote `$ref` only inside `anyOf`, so list-item schemas stayed unresolved
+  and the model **invented** a shape (a made-up `figure_id`, none of the required fields).
+  Dereferencing the whole schema and dropping `$defs` fixes it. **The durable lesson: the two compat
+  vendors fail the same way in opposite shapes** — DeepSeek *rejects* an unresolved reference (HTTP
+  400, found in minutes); Qwen *accepts* and fabricates a plausible object (HTTP 200, found only
+  because Pydantic rejected it downstream). *A rejection announces itself; an invention looks like
+  an answer.* It is the argument for keeping strict validation at the role layer rather than
+  trusting a 200. **Two corrections the human's questions forced:** `structured_retry_cap: 2`
+  already retries off-schema output at the role layer, and the live tests sit *below* that loop, so
+  they measure raw single-shot behaviour and made Qwen look worse than a real run will; and thinking
+  was never disabled — `reasoning.effort: none` is strictly worse (it breaks `AuthoringDecision`),
+  so the right trade is keeping thinking and *offering* the emit tool. Qwen refuses a named
+  `tool_choice` while thinking — **the same rule Anthropic documents** — so the emit tool is
+  declared under `auto` with a final instruction that the call IS the answer; a prompt ending "do
+  not call any tool" would forbid the answer itself. **Qwen's credentials had to be understood
+  first:** the key class decides the host, an `sk-mr-` Coding Plan key is valid only on
+  `coding-intl` where `/responses` **404s** (so that plan can drive neither harness nor adapter),
+  and only a pay-as-you-go key on `dashscope-intl` serves us; `tmp_scripts/check_qwen_entitlement.py`
+  sweeps every documented host. `harness.py`'s endpoint was correct all along and its doubt is
+  retracted. **Live: 55 passed / 2 skipped / 0 failed** across all five vendors; the schema matrix ran 36 with
+  1 skipped and tool search 7/7 on the day the compat vendors were wired.
+  **Live tests moved onto `ModelHandle`** rather than `provider.call`: both frontier primaries were
+  out of credit that day and 22 legs failed against working fallback keys, because key rotation
+  lives in the layer those tests skipped — which also closes the 2026-08-06 altitude gap.
+  **2026-08-25, role eligibility decided per role instead of per tier.** §6 had one blanket clause,
+  "reviewer-tier and analyst models must be vision-capable", which is a tier statement about a
+  per-role fact. Audited against the call sites: three roles are sent figures (reviewer, analyst
+  lead, analyst worker) and the **analyst co-lead is not, by construction** — `review_tool` passes
+  no images and its tool set is read-file/list-dir/web-search with the knowledge-base tools off. Two
+  smaller findings: the `coder`'s `vision: true` is dead config (an author is a harness subprocess,
+  never a `ModelHandle`), and the flag is a **declaration, not a guard** — it gates the call-time
+  `images=` channel only, not figures arriving on a tool result ([V-2]). **The DeepSeek exclusion
+  was right and its stated reason was wrong:** the vendor's Responses guide lists `deepseek-v4-pro`
+  and its vision guide documents the vision model with exactly the limits that had been deleted.
+  **Human ruling: the code stands** (`images_accepted=False`), because the project declines a
+  multimodal path its vendor labels experimental and will revisit on a non-experimental one — but
+  the *justification* is replaced, since "the vendor has no vision model" is a fact a later reader
+  would act on and would be wrong. **The recurring rule at a new address: read *every* page the
+  vendor publishes for the capability, not the one already open.** **The grid** agreed this session
+  is a **4 x 5 lead x co-lead grid at a pinned author** (`deepseek-v4-flash` on Codex, K=5, 100
+  trials): leads Anthropic/OpenAI/Z.AI/Alibaba, co-leads those four plus DeepSeek (which reviews
+  without vision on `deepseek-v4-pro`); Google out of both axes on **[I8]**. Because DeepSeek
+  authors but cannot lead, the author-correlated and lead-correlated cells are fully crossed and
+  never coincide — the four arms §8.5 says do not exist — at the cost of the doubly-correlated cell
+  being structurally unreachable, so **no interaction is estimable**. The four author-correlated
+  cells run only through `make_review_hook(allow_correlated=True)` and each records
+  `review.correlated`. **What the grid decides is §9.3 itself:** that rule binds the *author's*
+  vendor and says nothing about the lead's, and the coder sweep's own data does not support the
+  author as the operative axis — if the lead-correlated diagonal moves and the author-correlated
+  column does not, the rule binds the wrong actor. **Qwen latency became a controlled live-test
+  axis** rather than an inherited default: an 11-leg `qwen3.8-max` probe took 517.12 s against
+  Sonnet's 78.14 s, output-token count explained 98.6% of it, and Alibaba's reference identified the
+  omitted setting (`reasoning.effort` defaults to `medium`); the matrix now runs at explicit
+  `minimal` for `qwen3.8-max` and `qwen3.7-plus`, with a focused sweep of `none`/`minimal`/`medium`.
+  `none` stays a measured mechanical-call option rather than the full-matrix default because it
+  previously broke `AuthoringDecision`. Qwen sends Alibaba's documented session-cache header
+  (`x-dashscope-session-cache: enable`) on every Responses request, the vendor defaulting it off,
+  and both schema probes pass `cache_prefix=True`. Responses clients disable the SDK's two hidden
+  retries and cap one HTTP attempt at 300 s; `retry.py` remains the sole, visible retry owner. A
+  Qwen terminal response that both emits structured data and requests a working tool is rejected as
+  premature for bounded retry; a root `$ref` expands only in Pydantic's bare `$ref` + `$defs` form,
+  preserving JSON Schema 2020-12 sibling constraints. Alibaba recommends workspace-specific domains
+  for stability; member `base_url` is the deployment-time path once the workspace ID is known.
   **Open, awaiting a ruling:** whether GLM gets a row in the lead x co-lead matrix given that its
-  structured path is unmeasured (handoff [I14]).
+  structured path is unmeasured (handoff [I14]). Suite 1008 → 1081.
 
-- 2026-08-24 (second, same day) — **A structured answer now has two routes, because a vendor can
-  accept the parameter that requests one and ignore it.** Z.AI answers `text.format` with
-  `strict: true` at HTTP 200 and then writes prose, or an object whose keys the schema never
-  declared. A 200 with invented keys cannot be caught downstream, which is worse than a rejection.
-  The human's insight found the way through: **a coding harness never uses structured output** —
-  Claude Code's and Codex's own editing tools are JSON-Schema functions, so any vendor that works
-  inside those harnesses must handle schema-shaped tool arguments. `ResponsesVendor.schema_via_tool`
-  therefore declares one synthetic tool whose parameters *are* the schema and pins `tool_choice` to
-  it. Live-verified with the real `ToolReviewVerdict` on **both** dialects Z.AI publishes, and then
-  across the whole nine-schema matrix. The loop's own tools stay declared beside the emit tool, so a
-  replayed trajectory still resolves every item that names one — forcing the emit tool is what
-  replaces `tool_choice="none"` there — and the emit call is consumed into `parsed`, never surfaced
-  as a `tool_call` the ReAct loop would try to execute. A vendor that declines the forced call
-  raises rather than returning a quiet `parsed=None`.
-  **Two of my own defensive choices were wrong and were corrected by measurement.** DeepSeek's
-  narrow `format` allowlist had been applied to Z.AI and Qwen as well; that narrowing is imposed by
-  *DeepSeek's strict-mode validator*, which these vendors never reach, and Z.AI demonstrably accepts
-  `format: date` in tool parameters — so it is now DeepSeek-only, per the standing rule to enforce
-  what a vendor refuses rather than what another one does.
-  **And the forced-tool route has one measured quirk, which the fix must not overstate.** GLM
-  intermittently fills an optional field with the *string* `"null"`: schema-valid against a
-  `string` branch and a type error for anything else (live, `SearchRequest.since`). The same call
-  emitted correct JSON `null` for an optional model field and real floats for both tolerances, so it
-  is intermittent, which is the worse shape for a batch — and it reaches the authoring path, whose
-  `AuthoringDecision` carries two optional floats. `_normalise_null_strings` coerces a literal
-  `"null"` to `None` **only** where the schema permits null and no branch accepts a plain string, so
-  `float | None` and `date | None` are unambiguous while `str | None` is left exactly as written. It
-  normalises spelling, never content. Writing its tests caught two bugs in the first implementation:
-  a date field is `{"type": "string", "format": "date"}`, so an "any string branch" exclusion skipped
-  the very case it was written for, and `tool_specs.items` is a `$ref` the walk could not follow.
-  **Live tests were also moved onto `ModelHandle`** rather than calling `provider.call` directly:
-  both frontier primaries were out of credit and 22 legs failed against working fallback keys,
-  because key rotation lives in the layer those tests skipped. That also closes the altitude gap
-  recorded on 2026-08-06. The move exposed a monkeypatch target that resolved for Anthropic and
-  raised for OpenAI once the wire logic was shared, now derived from the vendor registry.
-  Suite 1058 -> 1073; Z.AI 12/12 live on the real schemas (one transient vendor auth blip, passing on
-  retry), Qwen skipping with the vendor's own refusal quoted.
-
-- 2026-08-24 (third, same day) — **Qwen came alive, and the last defect turned out to be ours: a
-  compatibility layer does not resolve `$ref`.** Activating Model Studio cleared the entitlement
-  gate, and with all five vendors reachable the remaining failures were schema-shaped rather than
-  vendor-shaped. `ResearchReport` and `AuthoringDecision` failed on Qwen at *every* reasoning
-  effort (10/11/8 errors, always at `figures.0`, `references.0`, `sections.0` — the `list[Model]`
-  fields), which is what showed the cause was structural: our inliner rewrote `$ref` only inside
-  `anyOf`, so list-item schemas stayed unresolved and the model **invented** a shape for them (a
-  made-up `figure_id`, none of the required fields). Dereferencing the whole schema and dropping
-  `$defs` fixes it; the narrow version is gone.
-  **The two compat vendors fail the same way in opposite shapes, and that is the durable lesson.**
-  DeepSeek *rejects* an unresolved reference (HTTP 400, found in minutes); Qwen *accepts* and
-  fabricates a plausible object (HTTP 200, found only because Pydantic rejected it downstream). A
-  rejection announces itself; an invention looks like an answer. It is the argument for keeping
-  strict validation at the role layer rather than trusting a 200, and for treating "the vendor
-  answered" as no evidence at all.
-  **Two corrections the human's questions forced, both of which had been wrong in my picture.**
-  `structured_retry_cap: 2` already retries off-schema output at the role layer, so no retry
-  needed building — and the live tests sit *below* that loop, calling `ModelHandle.call` directly,
-  so they measure raw single-shot behaviour and made Qwen look worse than a real run will.
-  Thinking was never disabled: it runs at each vendor's default, and `reasoning.effort: none` is
-  strictly worse (it breaks `AuthoringDecision` while default and high both validate), so the
-  right trade is keeping thinking and *offering* the emit tool rather than disabling thinking to
-  force it. Qwen refuses a named `tool_choice` while thinking — **the same rule Anthropic
-  documents** for its own thinking models — so the emit tool is declared under `auto` with a final
-  instruction that the call IS the answer. That instruction exists because a prompt written for
-  native structured output may end "do not call any tool", which on this route forbids the answer
-  itself; measured, it produced no emit call at all.
-  **Qwen's credentials also had to be understood before any of this could run:** the key class
-  decides the host, an `sk-mr-` Coding Plan key is valid only on `coding-intl` where `/responses`
-  404s (so that plan can drive neither harness nor adapter), and only a pay-as-you-go key on
-  `dashscope-intl` serves us. `tmp_scripts/check_qwen_entitlement.py` sweeps every documented host
-  and names the remedy. `harness.py`'s endpoint was correct all along and its doubt is retracted.
-  **Live: 55 passed / 2 skipped / 0 failed** across all five vendors on the nine real schemas plus
-  the trajectory compose. Suite 1075 -> 1078. The lead x co-lead grid is now genuinely 5x5.
-  **Corrected 2026-08-25: it is 4x5.** The lead is sent figures and DeepSeek is text-only under the
-  ruling recorded that day, so DeepSeek reviews but does not lead; Google is excluded from both by
-  [I8], its second tool call in any loop being a hard 400.
-
-- 2026-08-24 (fourth, same day) — **"Cannot resolve a `$ref`" was never one property, and the
-  boolean that encoded it is deleted.** Prompted by the human asking whether we had actually
-  *tried* sending references to each vendor: we had not. Z.AI had inlining enabled purely by
-  analogy with DeepSeek and was never tested; the general claim rested on two data points from
-  different vendors. Measured properly at 5 draws per cell, every cell 0/5 or 5/5, no variance:
-
-  | vendor | `anyOf: [{$ref}, null]` | `items: {$ref}` |
-  |---|---|---|
-  | DeepSeek | refused 0/5 | fine 5/5 |
-  | Z.AI | fine 5/5 | fine 5/5 |
-  | Qwen | fine 5/5 | refused 0/5 |
-
-  **Qwen is what forced the redesign:** it needs opposite treatment in the two positions, so a
-  per-vendor boolean is wrong whichever way it is set — and blanket dereferencing was *causing*
-  its `anyOf` failures (a working 5/5 shape driven to 0/5, answering with a JSON-encoded string in
-  an object field). `inline_anyof_refs` and the blanket inliner are gone; `resolve_refs_in` names
-  the positions a vendor is measured to need, defaulting to none. Z.AI's shim was deleted rather
-  than switched off, per the human's instruction.
-  **DeepSeek's rule, probed six ways** (default endpoint, `/beta`, `/beta` strict function-calling,
-  and the `$defs`/`$def`/`definitions` spellings): every `anyOf` branch must carry a literal
-  `type`, checked *before* any reference is followed — adding the type moves the error to "An
-  object with no properties is not allowed", which is what proves the pointer is never resolved.
-  Its docs list `anyOf` and `$ref` as supported and are silent on the combination, so this is
-  measured rather than read. The community search that opened the question also **independently
-  corroborated the narrow `format` allowlist**, which had been derived only from an error message.
-  **No dependency was added.** `jsonref` does blanket dereferencing, which the data says is wrong
-  for Qwen, so the library solves a problem we no longer have; the ~60 lines kept do something no
-  library does, resolve selectively by position.
-  **Two process notes.** A closed third-party issue ("not planned") was cited as support when a
-  live measurement of our own request already existed — the probe was always the authority, and
-  the human was right to force the re-check. And writing the position-aware resolver
-  **reintroduced the same unbounded-recursion bug fixed an hour earlier** (expand with the path
-  recorded, then re-walk the expansion with the path forgotten); the guard test caught it, not
-  review. Suite 1081.
-
-- 2026-08-25 — **DeepSeek and Qwen live-probe trouble was separated into documented capability
-  limits, endpoint behavior, and local transformations.** DeepSeek's Responses API
-  accepts only `deepseek-v4-flash` and substitutes placeholder text for image/file inputs; the
-  prior vision-experimental model claim had no official source, so its descriptor now withholds
-  figures with a visible note. Alibaba's newer `qwen3.8-max` page lists image/text/video input and
-  native visual understanding, so Qwen figures remain enabled. Alibaba's current Responses docs
-  confirm custom functions, `allowed_tools`, and workspace-specific regional endpoints; three fresh Qwen
-  terminal-tool variants stalled past 130 seconds (`allowed_tools` past six minutes). Its legacy
-  endpoint remains functional, while Alibaba recommends workspace-specific domains for higher
-  stability; member `base_url` is the deployment-time path once the workspace ID is known. The
-  last live-verified automatic choice remains in production pending a stable response.
-
-  Two local schema bugs were fixed: exact constrained strings such as enum/const/pattern `"null"`
-  retain their data value, while an invalid optional spelling still normalizes to JSON null; and a
-  root `$ref` expands only in Pydantic's bare `$ref` + `$defs` form, preserving JSON Schema 2020-12
-  sibling constraints. A Qwen terminal response that both emits structured data and requests a
-  working tool is now rejected as premature for bounded retry. Responses clients also disable the
-  SDK's two hidden retries and cap one HTTP attempt at 300 seconds; `retry.py` remains the sole,
-  visible retry owner. Qwen now sends Alibaba's documented session-cache header whenever the
-  caller marks a stable prefix; the vendor defaults that cache off. Focused provider/media suite:
-  100.
-
-- 2026-08-25 — **Qwen caching is now the adapter default and explicit in both schema probes.**
-  Alibaba's `x-dashscope-session-cache: enable` header rides every Qwen Responses request, while
-  both the direct nine-schema live matrix and the two real-trajectory compose paths pass
-  `cache_prefix=True`. This removes caller omission as a source of Qwen latency while preserving
-  the common provider interface; the live matrix remains the measurement of endpoint tail latency.
-
-- 2026-08-25 — **Qwen latency became a controlled live-test axis instead of an inherited
-  default.** The successful 11-leg `qwen3.8-max` probe took 517.12 s against Sonnet's 78.14 s;
-  across the nine direct calls, output-token count explained 98.6% of Qwen latency and Alibaba's
-  Responses reference identified the omitted setting: `reasoning.effort` defaults to `medium`.
-  `tests/test_live_schema_matrix.py` now runs the full nine-schema + two-trajectory matrix at
-  explicit `minimal` reasoning for both `qwen3.8-max` and the balanced `qwen3.7-plus`, preserving
-  the existing `(provider_name, provider, model)` fixture. A focused, identical `MemoryRecord`
-  request sweeps `none`/`minimal`/`medium` on both models; logs are model-specific and retain
-  elapsed time, cache reads, output tokens, and reasoning tokens per call. `none` stays a measured
-  mechanical-call option rather than the full-matrix default because it previously broke the
-  complex `AuthoringDecision` shape.
-
-- 2026-08-25 (second, same day) — **Role eligibility was decided per role instead of per tier, and
-  the lead x co-lead grid was sized from it.** §6 had one blanket clause, "reviewer-tier and analyst
-  models must be vision-capable", which is a tier statement about a per-role fact. Audited against
-  the call sites: three roles are sent figures (reviewer, analyst lead, analyst worker) and the
-  **analyst co-lead is not**, by construction rather than by accident — `review_tool` passes no
-  images and its tool set is read-file/list-dir/web-search with the knowledge-base tools off, so a
-  code reviewer never receives a plot. The clause now names those three. Two smaller findings from
-  the same audit: the `coder`'s `vision: true` is dead config, an author being a harness subprocess
-  and never a `ModelHandle`, and the flag is a declaration rather than a guard, since it gates the
-  call-time `images=` channel only and not figures arriving on a tool result ([V-2]).
-  **The DeepSeek exclusion was right and its stated reason was wrong.** The previous day's entry
-  recorded that DeepSeek's Responses API accepts only `deepseek-v4-flash` and that the removed
-  `deepseek-v4-flash-vision-exp` descriptor "had no vendor source". The vendor's Responses guide
-  lists three models including `deepseek-v4-pro`, and its vision guide documents the vision model
-  with exactly the limits that had been deleted. Human ruling: the code stands
-  (`images_accepted=False`), because the project declines a multimodal path its vendor labels
-  experimental and will revisit on a non-experimental one — but the *justification* is replaced,
-  since "the vendor has no vision model" is a fact a later reader would act on and would be wrong,
-  where "we decline the experimental one" is a decision they can reopen. The recurring rule
-  (2026-08-05) applies at a new address: read **every** page the vendor publishes for the
-  capability, not the one page already open. The Responses reference was read; the vision guide,
-  which is where that vendor documents image support, was not.
-  **The grid.** §8.5 of `papers/FANGZ/DOCS.md` records a confound: the analyst lead was Anthropic in
-  all five arms of the coder sweep, so the reviewer's provider moved with the lead's and neither
-  could be credited. The measurement agreed this session is a **4 x 5 lead x co-lead grid at a
-  pinned author**, `deepseek-v4-flash` on the Codex harness, K=5, 100 trials. Leads are Anthropic,
-  OpenAI, Z.AI and Alibaba; co-leads are those four plus DeepSeek, which reviews without vision on
-  `deepseek-v4-pro`. Google is out of both axes on [I8]. Because DeepSeek authors but cannot lead,
-  the author-correlated and lead-correlated cells are fully crossed and never coincide — the four
-  arms §8.5 says do not exist — at the cost of the doubly-correlated cell being structurally
-  unreachable, so no interaction is estimable. The four author-correlated cells run only through
-  `make_review_hook(allow_correlated=True)` and each records `review.correlated`.
-  **What the grid decides is §9.3 itself:** that rule binds the *author's* vendor and says nothing
-  about the lead's, and the coder sweep's own data does not support the author as the operative
-  axis. If the lead-correlated diagonal moves and the author-correlated column does not, the rule
-  binds the wrong actor. Docs-only this session; no code changed.
-
-- 2026-08-31 — **Submission snapshots: an authoring attempt is durable from the moment it meets
-  the gate.** Real-run ledgers show coding is the chunk that eats most time and money, and the
+- 2026-08-31 — **Submission snapshots: an authoring attempt is durable from the moment it meets the
+  gate.** Real-run ledgers show coding is the chunk that eats most time and money, and the
   checkpoint map had a hole exactly there: LangGraph resumes at node granularity, `approve_edit`
   commits are durable, the per-attempt base ref heals the branch — but everything between "coder
-  starts" and "commit" was volatile, so a review-provider failure on a gate-passed tree cost a
-  full re-authoring. `AuthoringSession.run_gate_step` now persists every submission (after the
-  §9.9 coder-commit backstop, before the scan) as a patch + verdict record under
+  starts" and "commit" was volatile, so a review-provider failure on a gate-passed tree cost a full
+  re-authoring. `AuthoringSession.run_gate_step` now persists every submission (after the §9.9
+  coder-commit backstop, before the scan) as a patch + verdict record under
   `run_dir/authoring/submissions/<tool>/`, failed submissions included; on resume,
-  `build_authoring_session` restores the latest snapshot only onto its exact recorded base ref,
-  seeds the coder with the restored tree and its outstanding feedback, and the gate re-runs on
-  the restored tree — no stored verdict is trusted, `commit ⇔ gate ∧ review` stays defined over
-  the live tree, `approve_edit` stays the sole commit path, and the placement follows the
-  existing discipline (durable state under the run dir; tree, never process; resume re-enters at
-  a boundary by re-running the step). `commit()` discards the tool's record; a snapshot that
-  fails to apply is discarded — an economy, never a dependency. Same session: the swapfix
-  batch's 8 review-stage errors were investigated (none internet/throttle: 2 were our
-  `ReadOnlyToolProvider` bare-`int()` crash on a model-sent `offset='150, '`, fixed to an
-  `is_error` tool result per the [F11] rule and re-run clean; 6 are known vendor
-  structured-output shapes, now ruled to count as failing the item — `swap._review_errored`
-  keeps them in the denominators). **LIVE-VERIFIED 2026-09-01**
+  `build_authoring_session` restores the latest snapshot **only onto its exact recorded base ref**,
+  seeds the coder with the restored tree and its outstanding feedback, and the gate re-runs on the
+  restored tree — **no stored verdict is trusted**, `commit ⇔ gate ∧ review` stays defined over the
+  live tree, `approve_edit` stays the sole commit path, and the placement follows the existing
+  discipline (durable state under the run dir; tree, never process; resume re-enters at a boundary
+  by re-running the step). `commit()` discards the tool's record; a snapshot that fails to apply is
+  discarded — **an economy, never a dependency**. Same session: the swapfix batch's 8 review-stage
+  errors were investigated (none internet/throttle: 2 were our `ReadOnlyToolProvider` bare-`int()`
+  crash on a model-sent `offset='150, '`, fixed to an `is_error` tool result per the [F11] rule and
+  re-run clean; 6 are known vendor structured-output shapes, now ruled to count as failing the item
+  — `swap._review_errored` keeps them in the denominators). **LIVE-VERIFIED 2026-09-01**
   (`tests/test_live_snapshot_resume.py`): real coder + gate + co-lead on the frozen run-46ed6671
   brief; killed mid-review with no cleanup; heal → restore → the new session continued on the
-  restored tree through two more gate-passed submissions and ended in an honest no-commit within
-  the review cap. The full-run (`run_research(resume=True)`) leg of the §13 durable-resume list
-  stays open; the authoring-attempt leg is closed.
+  restored tree through two more gate-passed submissions and ended in an honest no-commit within the
+  review cap. The full-run (`run_research(resume=True)`) leg of the §13 durable-resume list stays
+  open; the authoring-attempt leg is closed.
 
 - 2026-09-01 (second, same day) — **Turning the human channel off was already done; what was
   broken was what the system says when it is off.** A benchmark plan was choosing between three

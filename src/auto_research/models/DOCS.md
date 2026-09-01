@@ -483,7 +483,7 @@ turns on one distinction:
   decoding); `tools=` uses `messages.create`.
 
 ## Changelog
-Compacted 2026-08-05: entries through 2026-08-03 folded into themed ranges (detail in git history).
+Compacted 2026-09-01: entries through 2026-08-28 folded into themed ranges (detail in git history).
 
 - 2026-05-26 -> 2026-06-22 — Provider abstraction built and made fully native across OpenAI, Anthropic
   and Google: config-driven role groups, structured output, function calling, ReAct tool-turn replay,
@@ -546,270 +546,208 @@ Compacted 2026-08-05: entries through 2026-08-03 folded into themed ranges (deta
   digest deleted there is nothing behind it, so a missing role must fail at launch. **The test gap that
   let three of these ship:** the live tool-search test stopped after turn 1 and never handed the
   provider's records back; `test_live_second_turn_after_discovery` now does.
-- 2026-08-05 — **`ModelResponse` is the neutral assistant turn; the provider's parts are carried whole.**
-  `schema` and `tools` were **self-imposed** as mutually exclusive (asserted in four places); a live probe
-  showed all three providers accept both in one request. That exclusivity is what forced the terminal
-  compose to declare no tools — the request shape behind the 2026-07-29 run-killer and its
-  `include_discovery` amputation — and it is gone. **The response type now IS the assistant turn:**
-  `AssistantToolUse` deleted, `ConversationMessage = ModelMessage | ModelResponse | ToolResultMessage`,
-  and `_react` appends the response it received instead of hand-copying three fields into a twin — the
-  copy that had silently dropped tool-search blocks until 2026-07-27 and `thinking` until today.
-  `provider_blocks` → **`provider_parts`, allowlist deleted** (we read 3 of Anthropic's 16 block types;
-  the set is never complete — `anthropic 0.104.1`'s `ContentBlock` union already lacks the documented
-  `fallback` block). **Replay follows each provider's own documentation** (Anthropic: *"echo the assistant
-  message exactly as received"*; Google stateless mode: *"MUST always resend all `thought` blocks exactly
-  as they were received"*; OpenAI: recommended pass-back, items between the last user message and the
-  function-call output untouched), so Anthropic and Google echo the whole array while OpenAI keeps its
-  capture-time projection — whose field allowlist is now **derived from the SDK's own
-  `ResponseInputItemParam` union** (27 types), load-bearing once the carrier is open, since an unmapped
-  type previously got no filtering. Google also stops reading the `.text`/`.function_calls` accessors
-  (they flatten a mixed turn and hide `thought_signature`) and captures the signature onto
-  `ToolCall.provider_fields` — the [I8] mechanism, **not yet live-verified**. **Two rules were wrong before
-  the docs were read**, both inferred from live 400s: a "thinking first" reassembly order and a "drop only
-  the tool-referencing blocks" filter — the docs forbid rebuilding or filtering at all. A request declaring
-  no tools carries no provider parts and rebuilds from the interpreted views. Live-verified 2026-08-05 on
-  both providers (Anthropic `thinking → server_tool_use → tool_search_tool_result → thinking → tool_use`
-  echoed intact; tool-less structured compose over the same trajectory). Tests: `tests/test_providers.py`
-  (open carrier, verbatim echo, tool-less rebuild, synthesized-turn rebuild, schema+tools together,
-  SDK-derived allowlist, Gemini signature round trip), `tests/test_react_tools.py`, `test_tool_search.py`
-  + `test_context_editing.py` updated; suite 657 → 665. **Deferred, recorded here:** `stop_reason` is not
-  modelled (`_react` infers "done" from the absence of tool calls, so `max_tokens`/`refusal`/`pause_turn`
-  all read as a clean finish); tool `input_schema`s get no dialect normalization; the tool_use `caller`
-  field is dropped on a synthesized-turn rebuild; letting the terminal compose declare its tools would put
-  it back on the documented echo path.
-- 2026-08-06 — **The unification finished: one request builder, and no tool-less replay.**
-  The 2026-08-05 pass removed the `schema`/`tools` *assertions* but not the branching: both
-  adapters still ran `if schema is not None: … return` **before** `if tools is not None`, so
-  passing both silently dropped the tools (only Google merged them), and
-  `test_schema_and_tools_are_not_mutually_exclusive` passed anyway because it asserted `parsed`
-  came back rather than that the tools reached the request. The terminal compose therefore still
-  could not declare tools, `include_provider_parts=tools is not None` still dropped every carried
-  part on that path, and the `function_call` items a few lines below still replayed
-  unconditionally — orphaning the reasoning items they require. That killed live run `8c75990e`
-  at **$29.50**, one step before its first commit, with the same 400 as `b-run-q21-0803c`
-  (`Item 'fc_…' of type 'function_call' was provided without its required 'reasoning' item`) on
-  the GPT co-lead's `review_tool` compose. **Now:** each adapter builds ONE request (schema and
-  tools independent; Anthropic keeps `parse` vs `create` only because `output_format` lives on
-  `parse`) and runs ONE extraction filling `content`/`parsed`/`tool_calls`/`provider_parts`;
-  `tool_choice` gains `"none"` — `"none"` (OpenAI), `{"type": "none"}` (Anthropic),
-  `mode="NONE"` (Google), each read from that provider's own documentation; `_call_over_messages`
-  / `_structured_loop` take the provider `_react` just used and declare it with
-  `tool_choice="none"`, so a compose keeps its declarations while being forbidden to call (with
-  `"auto"` the model can call again and return `parsed=None`, burning a `structured_retry_cap`
-  attempt); and **`include_provider_parts` is deleted** — with every replaying request declaring
-  its tools, the drop branch was dead code that could only reintroduce the bug. The same shape
-  was fixed in `StatusMonitorAgent`'s cap-exhaustion fallback, a plausible cause of the open
-  *"`/status` returns silence"* defect, since that call replayed a trajectory with no tools
-  declared on the GPT reporter. **Live-verified 2026-08-06 on both providers before any code was
-  written** (`tmp_scripts/probe_tool_choice_none.py`, cents): OpenAI accepts
-  `tools` + `tool_choice="none"` + `text.format`, and Anthropic's `messages.parse` accepts
-  `output_format` + `tools` + `tool_choice` + `thinking` in one call — the one risk that could
-  have forced a redesign. New live test `test_live_compose_declares_its_tools` covers the shape
-  that shipped this bug: an **ordinary function-call** trajectory (the co-lead's tools are
-  resident harness tools), where every prior live test had exercised tool-search discovery
-  instead. Also fixed there: `test_live_tool_search_defers_and_discovers` compared
-  `usage.input_tokens`, which is net of cache, so a warm prefix made an all-resident baseline
-  report 443 tokens against a 35k prompt — it now compares uncached + cache-read. Suite 665 → 670;
-  live 7/7 on both providers.
-
-- 2026-08-06 — **Multimodal guards, one per adapter ([V-5]).** Live run `8c75990e` died at
-  **$116.10** — after all five of its authored tools had committed — on `400 … image dimensions
-  exceed max allowed size for many-image requests: 2000 pixels`. Anthropic tightens its per-image
-  dimension cap once a request carries **more than 20 image blocks**; a worker's newly-authored
-  plotter returned 3 PNGs per call, each replays inline at its tool-result turn on every later
-  request, the count crossed 20, and `dcf_panels.png` was 2677x1554. The audit that followed found
-  **no guard of any kind** in any adapter — we base64'd whatever we were handed, checking neither
-  count, dimensions, bytes, total payload, nor mime. New `providers/_media.py` holds the mechanics
-  (walk, plan, resize, page-count); each adapter holds its own `_LIMITS` with every value quoted
-  from that provider's docs. Also closes the mime half of **[V-3]**: an unsupported mime can no
-  longer reach an image block on any provider. **Files API deferred** (§12) — it is a cost/latency
-  improvement, and by Anthropic's own docs would not have prevented this crash, since a `file_id`
-  image is still an image block, still counted against 20, still measured against 2000 px.
-  `open_paper`'s 8 MB cap is deleted in the same change: the gate belongs where the whole request
-  is visible. New deps: `pillow` (previously undeclared, transitive via matplotlib) and `pypdf`.
-  Tests: `tests/test_media_guards.py` (the 20/21 boundary, oldest-first eviction, mime routing,
-  page limit, and that an under-limit request stays **byte-identical**); live
-  `test_live_figure_vision.py::test_live_many_image_request_that_used_to_400` sends the exact
-  21-image shape that died and Anthropic now answers *"I received 21 panels."* Suite 770 → 780.
-
-- 2026-08-10 — **A second API key, because a rate limit and a spent balance are quotas of the
-  *key*, not of Anthropic.** The one retry policy we had treats every failure as something to
-  wait out: a 429 stalled a call up to ~30 min across 8 cooldowns, and a spent credit balance —
-  a non-transient 400 — killed the run outright (observed 2026-07-22). Both clear instantly on a
-  key from another organization, which waiting cannot do. New `keys.py` holds a process-global
-  per-provider key pool (`ANTHROPIC_API_KEY` + optional `ANTHROPIC_API_KEY_FALLBACK`);
-  `retry.is_key_scoped_provider_error` splits that class off — 429 / `rate_limit_error`,
-  `billing_error`, and a 400 whose message names the credit balance, each read from Anthropic's
-  own error taxonomy rather than inferred from a live failure — and `call_with_transient_retry`
-  consults an injected `rotate_key` **before** its cooldown logic, retrying immediately at no
-  cooldown and no budget cost. 529/5xx/connection failures are explicitly *not* rotated (provider
-  capacity is identical on every key) and 401 is deliberately excluded (a revoked key is a
-  configuration fault a human must see). Rotation offers each key once per call and then falls
-  through to the existing path, so a 429 on every key still waits and a balance spent on every
-  key still raises; because the live key is process state, rotation is bidirectional across
-  calls and neither key is stranded. The Anthropic adapter now passes `api_key=` explicitly (the
-  SDK resolves the env var once per client, and after a rotation that value is stale), the coder
-  subprocess gets the live key stamped onto its environment only when it has rotated
-  (`merge_flow._with_live_anthropic_key`, so the common path is byte-identical), and each switch
-  records a `provider.key_rotation` monitor event naming the slot, never the key. New preflight
-  check `api_key_fallbacks` rejects a fallback that is blank, identical to the primary, or set
-  without a primary — the three shapes `KeyPool` silently deduplicates away, which would leave a
-  human believing a run is protected when rotation has nowhere to go. **Stated limit:** Anthropic
-  rate limits are per-organization, so the fallback must be a different org for the 429 half to
-  help; the check cannot see the org and does not pretend to. Anthropic-only by choice, and guarded
-  rather than merely intended: `ROTATING_PROVIDERS` stops a provider whose adapter ignores the pool
-  from rotating, which would keep the SDK-resolved key *and* skip the cooldown — a failover that
-  looks like it works. Adding a provider is one adapter line plus that tuple. Tests:
-  `tests/test_provider_key_failover.py` (33). Suite 781 → 814.
-
-- 2026-08-18 — **Key failover generalized to OpenAI, and the taxonomy split per provider.** An
+- 2026-08-05 -> 2026-08-06 — **One request, one extraction; and the multimodal guard ([V-5], [V-3]).**
+  `schema`/`tools` mutual exclusivity was **self-imposed** (asserted in four places); a live probe
+  showed all three providers accept both, and it was what forced the terminal compose to declare no
+  tools — the 2026-07-29 run-killer and its `include_discovery` amputation. **The response type now IS
+  the assistant turn:** `AssistantToolUse` deleted, `ConversationMessage = ModelMessage |
+  ModelResponse | ToolResultMessage`, `_react` appends the response it received instead of hand-copying
+  three fields (that copy had silently dropped tool-search blocks until 2026-07-27 and `thinking` until
+  now); `provider_blocks` → **`provider_parts`, allowlist deleted** (we read 3 of Anthropic's 16 block
+  types; `anthropic 0.104.1`'s `ContentBlock` union already lacks the documented `fallback` block).
+  **Replay follows each provider's own documentation** — Anthropic *"echo the assistant message exactly
+  as received"*, Google stateless *"MUST always resend all `thought` blocks exactly as they were
+  received"*, OpenAI's pass-back leaving items between the last user message and the function-call
+  output untouched — so Anthropic and Google echo the whole array while OpenAI keeps its capture-time
+  projection, whose field allowlist is **derived from the SDK's own `ResponseInputItemParam` union**
+  (27 types; an unmapped type previously got no filtering). Google stops reading the
+  `.text`/`.function_calls` accessors (they flatten a mixed turn and hide `thought_signature`) and
+  captures the signature onto `ToolCall.provider_fields` — the **[I8]** mechanism, **not yet
+  live-verified**. **Two rules inferred from live 400s were wrong** (a "thinking first" reassembly
+  order, a "drop only the tool-referencing blocks" filter): the docs forbid rebuilding or filtering at
+  all, and a request declaring no tools carries no provider parts and rebuilds from the interpreted
+  views. Live-verified 2026-08-05 on both providers (Anthropic `thinking → server_tool_use →
+  tool_search_tool_result → thinking → tool_use` echoed intact; tool-less structured compose over the
+  same trajectory). Suite 657 → 665.
+  **2026-08-06 finished it.** Removing the *assertions* left the branching (`if schema is not None: …
+  return` **before** `if tools is not None`, so passing both silently dropped the tools — only Google
+  merged them); `include_provider_parts=tools is not None` still dropped every carried part, and
+  `function_call` items replayed without their required reasoning items; live run `8c75990e` died at
+  **$29.50**, one step before its first commit, with `b-run-q21-0803c`'s 400 verbatim (`Item 'fc_…' of
+  type 'function_call' was provided without its required 'reasoning' item`) on the GPT co-lead's
+  `review_tool` compose, while `test_schema_and_tools_are_not_mutually_exclusive` passed throughout by
+  asserting `parsed` came back rather than that the tools reached the request. Each adapter now builds
+  ONE request (schema and tools independent; Anthropic keeps `parse` vs `create` only because
+  `output_format` lives on `parse`) and runs ONE extraction filling
+  `content`/`parsed`/`tool_calls`/`provider_parts`; `tool_choice` gains **`"none"`** — `"none"`
+  (OpenAI), `{"type": "none"}` (Anthropic), `mode="NONE"` (Google), each read from that provider's own
+  documentation — and `_call_over_messages`/`_structured_loop` declare the tools `_react` just used
+  under it (under `"auto"` the model can call again and return `parsed=None`, burning a
+  `structured_retry_cap` attempt). **`include_provider_parts` is deleted** rather than narrowed: with
+  every replaying request declaring its tools it was dead code that could only reintroduce the bug.
+  Same shape fixed in `StatusMonitorAgent`'s cap-exhaustion fallback, a plausible cause of the open
+  *"`/status` returns silence"* defect. **Probed live before any code was written**
+  (`tmp_scripts/probe_tool_choice_none.py`, cents): OpenAI accepts `tools` + `tool_choice="none"` +
+  `text.format`; Anthropic's `messages.parse` accepts `output_format` + `tools` + `tool_choice` +
+  `thinking` in one call. New live test `test_live_compose_declares_its_tools` covers an **ordinary
+  function-call** trajectory, where every prior live test had exercised tool-search discovery; also
+  fixed, `test_live_tool_search_defers_and_discovers` compared `usage.input_tokens`, net of cache (a
+  warm prefix made an all-resident baseline report 443 tokens against a 35k prompt), and now compares
+  uncached + cache-read. Suite 665 → 670; live 7/7 both providers. **Deferred, recorded:**
+  `stop_reason` is not modelled (`_react` infers "done" from the absence of tool calls, so
+  `max_tokens`/`refusal`/`pause_turn` all read as a clean finish); tool `input_schema`s get no dialect
+  normalization; the tool_use `caller` field is dropped on a synthesized-turn rebuild.
+  **[V-5], same day: no adapter had any media guard at all** — neither count, dimensions, bytes, total
+  payload, nor mime was checked. Run `8c75990e` then died at **$116.10**, after all five of its
+  authored tools had committed, on `400 … image dimensions exceed max allowed size for many-image
+  requests: 2000 pixels`: Anthropic tightens its per-image dimension cap once a request carries **more
+  than 20 image blocks**, a worker's newly-authored plotter returned 3 PNGs per call that replay inline
+  on every later request, and `dcf_panels.png` was 2677x1554. New `providers/_media.py` holds the
+  mechanics (walk, plan, resize, page-count); each adapter holds its own `_LIMITS` with every value
+  quoted from that provider's docs. Closes the mime half of **[V-3]** and deletes `open_paper`'s 8 MB
+  cap (the gate belongs where the whole request is visible). **Files API deferred** (§12): by
+  Anthropic's own docs it would not have prevented this, a `file_id` image still being an image block,
+  still counted against 20, still measured against 2000 px. New deps `pillow` (previously undeclared,
+  transitive via matplotlib) and `pypdf`. Tests `tests/test_media_guards.py` (20/21 boundary,
+  oldest-first eviction, mime routing, page limit, under-limit request **byte-identical**); live
+  `test_live_figure_vision.py::test_live_many_image_request_that_used_to_400` sends the exact 21-image
+  shape that died and Anthropic answers *"I received 21 panels."* Suite 770 → 780.
+- 2026-08-10 -> 2026-08-19 — **Key failover, its per-provider error taxonomy, and the harness-only
+  vendors.** A rate limit and a spent balance are quotas of the **key**, not of the provider, and one
+  wait-it-out policy answered both: a 429 stalled a call up to ~30 min across 8 cooldowns, and a spent
+  credit balance — a non-transient 400 — killed the run outright (observed 2026-07-22). New `keys.py`
+  holds a process-global per-provider key pool (`ANTHROPIC_API_KEY` + optional
+  `ANTHROPIC_API_KEY_FALLBACK`); `retry.is_key_scoped_provider_error` splits that class off — 429 /
+  `rate_limit_error`, `billing_error`, and a 400 whose message names the credit balance, each read from
+  Anthropic's own error taxonomy rather than inferred from a live failure — and
+  `call_with_transient_retry` consults an injected `rotate_key` **before** its cooldown, retrying
+  immediately at no cooldown and no budget cost. 529/5xx/connection are explicitly **not** rotated
+  (provider capacity is identical on every key) and **401 is deliberately excluded** (a revoked key is
+  a configuration fault a human must see). Rotation offers each key once per call then falls through,
+  so a 429 on every key still waits and a balance spent on every key still raises; the live key being
+  process state makes rotation bidirectional across calls, stranding neither. The Anthropic adapter
+  passes `api_key=` explicitly (the SDK resolves the env var once per client, so after a rotation that
+  value is stale); the coder subprocess gets the live key stamped on **only when it has rotated**
+  (`merge_flow._with_live_anthropic_key`, common path byte-identical); each switch records a
+  `provider.key_rotation` monitor event naming the slot, never the key. New preflight
+  `api_key_fallbacks` rejects the three shapes `KeyPool` silently deduplicates away — blank, identical
+  to the primary, set without a primary. **Stated limit:** Anthropic rate limits are per-organization,
+  so the fallback must be a different org for the 429 half to help; the check cannot see the org and
+  does not pretend to. Anthropic-only by choice, and guarded: `ROTATING_PROVIDERS` stops a provider
+  whose adapter ignores the pool from rotating, which would keep the SDK-resolved key *and* skip the
+  cooldown. Tests `tests/test_provider_key_failover.py` (33); suite 781 → 814.
+  **2026-08-18 generalized it to OpenAI: the vocabulary, not the pool, was Anthropic-specific.** An
   authoring-benchmark batch died on `429 insufficient_quota` / `credit_balance_exhausted` with the
   co-lead unable to review, after 48 minutes of backoff against a balance no wait could restore.
-  The pool was already provider-generic; what was not is the **error vocabulary**. Anthropic
-  reports a spent balance as a 400/403 `billing_error`, so `is_exhausted_key_error` short-circuited
-  "any 429 refills" — true for Anthropic, false for OpenAI, where every key quota is a 429 and only
-  `code` separates the one that refills from the four that do not. Adding OpenAI to
-  `ROTATING_PROVIDERS` alone would therefore have rotated onto the fallback, never retired the dead
-  primary, and bounced back onto it at the fallback's next routine rate limit — the exact failure
-  retirement exists to prevent. So both predicates now take a **required** `provider` and read a
-  per-provider rules table, each entry citing that provider's own error documentation; the shapes
-  are version-exact from the SDKs (openai 2.38.0 parses `.type`/`.code` out of `body["error"]`) and
-  were confirmed against the live failure. A second change follows from the same reading: an
-  unrefillable quota **raises once rotation is exhausted** instead of taking the transient path,
-  since OpenAI's arrives as a 429 and reads as retryable by status alone. `AsyncOpenAI` now sends
-  `api_key=` explicitly. **Google stays out**: its troubleshooting guide says `RESOURCE_EXHAUSTED`
-  while its error reference says `quota_exceeded`/`rate_limit_exceeded`, neither publishes the
-  response body, and google-genai's `APIError.code` is the HTTP status integer where OpenAI's is a
-  string code — a shared field read would misclassify silently, and it is off the critical path
-  (§6). Tests: `tests/test_provider_key_failover.py` 40 → 49, including the same 429 classified
-  oppositely under each provider. Suite 948 → 957.
-
-- 2026-08-19 — **`ProviderName` widened to the harness-only vendors, and the coder member gained a
-  harness handle.** A `coder` model can now be served by DeepSeek, Z.AI or Alibaba Model Studio and
-  driven by an author harness, so the registry has to resolve members whose provider has no chat
-  adapter: `provider_for` returns a `HarnessOnlyProvider` for those, which answers the one question
-  the registry asks (which vendor serves it) and raises with the reason if anything ever tries to
-  hold a conversation with it. `RoleModelConfig` gained `harness`, `base_url` and `key_env`, all
-  optional, so every existing chat member is unchanged. Decorrelation needed no new rule: a
-  DeepSeek-served coder reads as provider `deepseek`, which the existing
-  `select_decorrelated_member` already separates from the GPT co-lead. The legality table and its
-  two launch checks live in `sandbox/coder/harness.py` (see `sandbox/DOCS.md`).
-
-- 2026-08-24 — **The three harness-only vendors became chat members, and the Responses wire logic
-  became shared.** The lead and co-lead were only ever configurable across Anthropic and OpenAI,
-  which is what confined the paper's provider-coupling measurement to one lead vendor. DeepSeek,
-  Z.AI and Alibaba Model Studio each already publish an OpenAI **Responses** endpoint (the dialect
-  our OpenAI adapter speaks, as the coder harness table records), so the work was a factoring
-  rather than three new adapters: `providers/_responses.py` now holds the wire logic — input
-  projection, capture-time field filtering, replay ordering, one-request/one-extraction — and each
-  vendor module holds a `ResponsesVendor` of documented facts beside its citations. `openai.py` is
-  that descriptor plus its `MediaLimits`; `deepseek.py`, `zai.py` and `dashscope.py` are new.
-  Copying 540 lines written against three run-killers in one week would have forked those fixes
-  four ways.
-  **Every capability flag is read from the vendor's own docs and then probed, because a
-  compatibility table states what is *accepted*, not what is *honoured*.** That distinction was
-  not academic: DeepSeek honours `text.format` with `strict: true` exactly (bare JSON, declared
-  keys, on both its models) and calls functions and accepts the `tools`+`schema`+
-  `tool_choice="none"` compose shape, so it is a full member; **Z.AI accepts the same parameter
-  and ignores it**, answering once with prose containing no JSON and once with a fenced object
-  whose keys the schema never declared. A 200 with invented keys cannot be caught downstream, so
-  `supports_strict_schema=False` makes the adapter refuse a schema with a specific reason instead.
-  DeepSeek also rejects `prompt_cache_key` outright, which our lead role sends on every cached
-  call, so the flag is load-bearing rather than cosmetic.
-  **Two smaller consequences.** `MediaLimits` gained `images_accepted`, because DeepSeek serves
-  vision on `deepseek-v4-flash-vision-exp` alone and answers 400 elsewhere; a text-only model now
-  withholds a figure with a model-visible note rather than sending it into a refusal. And
-  `resolve_vendor_key` moved from the Codex backend into `keys.resolve_key`, since the chat
-  adapters need the identical resolution and a run must not authenticate two of its own actors
-  from different keys; the old name is re-exported.
-  **Qwen ships unverified**: its key authenticates and lists 162 models, but every inference call
-  is refused `AccessDenied.Unpurchased` on both dialects and with a current model id, so it is a
-  billing gate rather than our wiring. Its documented Responses hosts are workspace-scoped and do
-  not include the one the coder harness table names, which is recorded in `dashscope.py` rather
-  than silently changed. Tests: new `tests/test_responses_vendors.py` (44) sweeps every vendor for
-  endpoint, explicit key, per-flag gating and shared wire behaviour, asserting on the **request**
-  rather than the result; `tests/test_live_schema_matrix.py` gained DeepSeek across all nine real
-  schemas and a schema-less leg for Z.AI and Qwen. Suite 1008 -> 1053.
-
-- 2026-08-25 — **Live-probe failures were traced to capability mismatch plus two local schema
-  transformations.** DeepSeek's official Responses reference supports only
-  `deepseek-v4-flash` and substitutes placeholder text for image/file input; the prior
-  `deepseek-v4-flash-vision-exp` entry had no vendor source, so DeepSeek now sets
-  `images_accepted=False` and makes figure omission explicit and model-visible. Alibaba's newer
-  `qwen3.8-max` page lists image/text/video input and native visual understanding, so Qwen figures
-  remain enabled; the broader catalog's text-generation heading alone is not a modality limit.
-  Qwen's current Responses documentation does document custom function tools, recommends
-  workspace-specific endpoints while retaining legacy endpoints, and includes `allowed_tools`.
-  Three fresh Qwen calls using automatic, `allowed_tools`, and named terminal choice all stalled
-  past 130 seconds (`allowed_tools` past six minutes). The legacy endpoint is still functional,
-  while Alibaba recommends workspace-specific regional domains for higher stability. The
-  production choice policy remains the last live-verified shape instead of encoding an
-  unverified workaround; deployments can select the recommended domain through member
-  `base_url` once its workspace ID is known.
-
-  The schema audit found two independent data-integrity bugs. Null normalization used the
-  *presence* of `enum` to classify every constrained string as non-string, so a legitimate enum,
-  const, or pattern value `"null"` became JSON null. It now tests whether the exact spelling is
-  accepted. Root dereferencing also replaced any schema carrying `$ref`, discarding its 2020-12
-  sibling constraints; only the bare `$ref` + `$defs` root form is expanded now. Qwen's automatic
-  terminal route also rejects a mixed emit-plus-working-tool response as premature instead of
-  accepting an unfinished result. The OpenAI SDK otherwise gives each request ten minutes and
-  retries it twice; this also explains why a nominal per-attempt probe timeout looked ineffective.
-  Responses clients now use one 300-second attempt so the repository's visible
-  retry layer is the sole retry owner. Qwen's documented session-cache header is also sent for
-  `cache_prefix=True`; the vendor disables that cache by default, so the prior adapter silently
-  forfeited it on the long ReAct trajectories where it matters. Focused provider/media tests: 100
-  passed.
-
-- 2026-08-25 — **Qwen session caching became adapter-wide and explicit in both live schema paths.**
-  Alibaba disables Responses session caching by default, so the Qwen descriptor's documented
-  `x-dashscope-session-cache: enable` header now rides every adapter request. Both the direct
-  nine-schema matrix and the two trajectory-compose probes pass `cache_prefix=True`, keeping their
-  intent visible and allowing stable prefixes to receive the vendor's latency and cost benefit.
-
-- 2026-08-25 — **The live schema matrix now measures both Qwen tiers and explicit reasoning
-  effort.** `qwen3.7-plus` joins `qwen3.8-max` through the existing
-  `(provider_name, provider, model)` fixture, so both models traverse all nine real schemas and
-  both real-trajectory composes through the same DashScope adapter. Qwen matrix legs set
-  `reasoning.effort=minimal` explicitly instead of inheriting Alibaba's slower `medium` default;
-  a separate identical `MemoryRecord` request sweeps `none`/`minimal`/`medium` on both models.
-  Development logs are model-specific and now retain elapsed time plus input, cache-read, output,
-  and reasoning token counts, including per-call trajectory measurements.
-
-- 2026-08-25 — **DeepSeek's text-only treatment is a policy decision, and the reason recorded for
-  it was wrong.** The 2026-08-25 entry above states that DeepSeek's Responses API accepts only
-  `deepseek-v4-flash` and that the removed `deepseek-v4-flash-vision-exp` entry "had no vendor
-  source". Both claims are false against the vendor's own documentation, read this session. The
-  Responses guide lists `deepseek-v4-flash / deepseek-v4-pro / deepseek-v4-flash-vision-exp` as
-  supported and says image input is replaced with placeholder text on models other than the vision
-  one; the vision guide documents that model with a full limit set — 600 images, 8192 px per side
-  dropping to 4096 at 15 or more, 32 MiB per image, 48 MiB body, JPEG/PNG/GIF/WebP — and names the
-  Responses API among the endpoints that accept it. The deleted `_LIMITS` values were that source,
-  transcribed correctly.
-  **The code is unchanged and stays unchanged** (`images_accepted=False`), on a human ruling taken
-  the same day: this project declines to depend on a multimodal path its vendor labels
-  experimental, and revisits when DeepSeek ships a non-experimental one. What changes is only the
-  justification, because the two are not interchangeable — "the vendor has no vision model" is a
-  fact a later reader would act on and would be wrong, while "we decline the experimental one" is a
-  decision they can reopen. The standing rule that produced the error is the one already in
-  `feedback_read_provider_docs_before_encoding_rules`: read every relevant page for the vendor, not
-  the one page that happens to be open. The Responses reference alone was read; the vision guide,
-  which is where that vendor documents its image support, was not.
-  **Second correction from the same reading:** `deepseek-v4-pro` is accepted by the Responses
-  endpoint, so it is reachable through this adapter with no new wiring. Every DeepSeek
-  structured-output flag here — `supports_strict_schema`, `strict_schema_formats`,
-  `resolve_refs_in` — was measured on `deepseek-v4-flash` only and is **unprobed on Pro**, which
-  matters because the lead x co-lead grid adopts Pro as a co-lead emitting `ToolReviewVerdict`.
-  Probe before that grid runs.
-
-- 2026-08-28 — **`_dump_prompt` documented (built 2026-08-27 for the gate-bench leak audit, sync
-  was missed).** `types.py` gains `PROMPT_DUMP_ENV = "AUTO_RESEARCH_PROMPT_DUMP"`: when that
-  variable names a file, `ModelHandle.call` appends one JSON record per call — role, member,
-  provider/model, the whole normalized conversation, the tool definitions and `tool_choice`,
-  schema and attachments — after the request is assembled and before dispatch, so a leak audit
-  reads the actual prompt every actor received rather than a hand-built reconstruction (the
-  2026-08-27 hand-rebuilt scan missed the worktree-path leak for exactly that reason; the
-  rationale lives in `_dump_prompt`'s docstring). With the flag unset the cost is one
-  `os.environ.get` and the request is byte-identical; serialization is best-effort
-  (`default=str`) and dump failures are swallowed so the hook can never fail a run. Evidence
-  use: `logs/dev/leak-scan/20260827T093104Z/prompts_readable.txt`.
+  Anthropic reports a spent balance as a 400/403 `billing_error`, so `is_exhausted_key_error`
+  short-circuited "any 429 refills" — true there, false at OpenAI, where every key quota is a 429 and
+  only `code` separates the one that refills from the four that do not; adding OpenAI to
+  `ROTATING_PROVIDERS` alone would have rotated onto the fallback, never retired the dead primary, and
+  bounced back onto it at the fallback's next routine rate limit. Both predicates now take a
+  **required** `provider` and read a per-provider rules table whose every entry cites that provider's
+  own error documentation, shapes version-exact from the SDKs (openai 2.38.0 parses `.type`/`.code` out
+  of `body["error"]`) and confirmed against the live failure; an unrefillable quota **raises once
+  rotation is exhausted** instead of taking the transient path, since OpenAI's arrives as a 429 and
+  reads as retryable by status alone. `AsyncOpenAI` sends `api_key=` explicitly. **Google stays out**:
+  its troubleshooting guide says `RESOURCE_EXHAUSTED` while its error reference says
+  `quota_exceeded`/`rate_limit_exceeded`, neither publishes the response body, and google-genai's
+  `APIError.code` is the HTTP status integer where OpenAI's is a string code — a shared field read
+  would misclassify silently — and it is off the critical path (§6). Tests 40 → 49, including the same
+  429 classified oppositely under each provider; suite 948 → 957.
+  **2026-08-19: `ProviderName` widened to the harness-only vendors.** A `coder` model can be served by
+  DeepSeek, Z.AI or Alibaba Model Studio and driven by an author harness, so `provider_for` returns a
+  `HarnessOnlyProvider` for those: it answers which vendor serves the member and raises with the reason
+  if anything ever tries to hold a conversation with it. `RoleModelConfig` gained `harness`, `base_url`
+  and `key_env`, all optional, so every existing chat member is unchanged. Decorrelation needed no new
+  rule: a DeepSeek-served coder reads as provider `deepseek`, which `select_decorrelated_member`
+  already separates from the GPT co-lead. The legality table and its two launch checks live in
+  `sandbox/coder/harness.py` (see `sandbox/DOCS.md`).
+- 2026-08-24 -> 2026-08-28 — **The Responses factoring: six vendors, each capability measured; and the
+  prompt dump.** DeepSeek, Z.AI and Alibaba Model Studio each already publish an OpenAI **Responses**
+  endpoint (the dialect our OpenAI adapter speaks), so widening the lead/co-lead axis beyond Anthropic
+  and OpenAI was a factoring, not three new adapters: `providers/_responses.py` holds the wire logic —
+  input projection, capture-time field filtering, replay ordering, one request / one extraction — and
+  each vendor module holds a `ResponsesVendor` of documented facts beside its citations. `openai.py` is
+  that descriptor plus its `MediaLimits`; `deepseek.py`, `zai.py` and `dashscope.py` are new. Copying
+  540 lines written against three run-killers in one week would have forked those fixes four ways.
+  **Every flag is read from the vendor's own docs and then probed: a compatibility table states what
+  is *accepted*, not what is *honoured*.** DeepSeek honours `text.format` with
+  `strict: true` exactly (bare JSON, declared keys, on both its models), calls functions, and accepts
+  the `tools`+`schema`+`tool_choice="none"` compose shape, so it is a full member; it **rejects
+  `prompt_cache_key`** outright, which our lead role sends on every cached call, so the flag is
+  load-bearing rather than cosmetic. **Z.AI accepts the same parameter and ignores it** — once prose
+  containing no JSON, once a fenced object whose keys the schema never declared — and a 200 with
+  invented keys cannot be caught downstream, so `supports_strict_schema=False` makes the adapter refuse
+  a schema with a specific reason instead. `MediaLimits` gained `images_accepted`, so a text-only model
+  withholds a figure with a model-visible note rather than sending it into a refusal;
+  `resolve_vendor_key` moved from the Codex backend into `keys.resolve_key` (old name re-exported),
+  since a run must not authenticate two of its own actors from different keys. **Qwen shipped
+  unverified**: its key authenticates and lists 162 models, but every inference call was refused
+  `AccessDenied.Unpurchased` on both dialects and with a current model id — a billing gate rather than
+  our wiring — and its documented Responses hosts are workspace-scoped and do not include the one the
+  coder harness table names, recorded in `dashscope.py` rather than silently changed. Tests: new
+  `tests/test_responses_vendors.py` (44) sweeps every vendor for endpoint, explicit key, per-flag
+  gating and shared wire behaviour, **asserting on the request rather than the result**;
+  `tests/test_live_schema_matrix.py` gained DeepSeek across all nine real schemas and a schema-less leg
+  for Z.AI and Qwen. Suite 1008 -> 1053.
+  **2026-08-25 — Qwen endpoint behaviour, and two local schema bugs.** Alibaba's newer `qwen3.8-max`
+  page lists image/text/video input and native visual understanding, so Qwen figures remain enabled
+  (the catalog's text-generation heading alone is not a modality limit). Its Responses docs document
+  custom function tools, include `allowed_tools`, and recommend workspace-specific
+  regional domains for higher stability while retaining the legacy endpoint, which is still functional;
+  three fresh Qwen terminal-tool variants (automatic, `allowed_tools`, named terminal choice) all
+  stalled past 130 seconds (`allowed_tools` past six minutes), so the production choice policy
+  **remains the last live-verified shape instead of encoding an unverified workaround**, and a
+  deployment selects the recommended domain through member `base_url` once its workspace ID is known.
+  Two data-integrity bugs: null normalization had used the *presence* of `enum` to classify every
+  constrained string as non-string, so a legitimate enum, const, or pattern value `"null"` became JSON
+  null — it now tests whether the exact spelling is accepted; and root dereferencing had replaced any
+  schema carrying `$ref`, discarding its 2020-12 sibling constraints — only the bare `$ref` + `$defs`
+  root form is expanded now. A Qwen terminal response that both emits structured data and requests a
+  working tool is rejected as premature for bounded retry. The OpenAI SDK otherwise gives each request
+  ten minutes and retries it **twice** (which also explains why a nominal per-attempt probe timeout
+  looked ineffective), so Responses clients disable those hidden retries and cap one HTTP attempt at
+  **300 seconds**, leaving `retry.py` the sole visible retry owner. Focused provider/media suite: **100
+  passed**.
+  **Qwen session caching became adapter-wide and explicit in both live schema paths:** Alibaba disables
+  Responses session caching by default, so the descriptor's documented `x-dashscope-session-cache:
+  enable` header rides every Qwen request whenever the caller marks a stable prefix — the prior adapter
+  silently forfeited it on the long ReAct trajectories where it matters — and both the direct
+  nine-schema matrix and the two trajectory composes pass `cache_prefix=True`. **Qwen latency then
+  became a controlled live-test axis:** `qwen3.7-plus` joins `qwen3.8-max` through the existing
+  `(provider_name, provider, model)` fixture, so both models traverse all nine real schemas and both
+  real-trajectory composes through the same DashScope adapter; Qwen matrix legs set
+  `reasoning.effort=minimal` explicitly instead of inheriting Alibaba's slower `medium` default, and a
+  separate identical `MemoryRecord` request sweeps `none`/`minimal`/`medium` on both models.
+  Development logs are model-specific and retain elapsed time plus input, cache-read, output and
+  reasoning token counts, including per-call trajectory measurements.
+  **DeepSeek's text-only treatment is a policy decision, and the reason first recorded for it was
+  wrong.** The claims that DeepSeek's Responses API accepts only `deepseek-v4-flash` and that the
+  removed `deepseek-v4-flash-vision-exp` entry "had no vendor source" are both false against the
+  vendor's own documentation: the Responses guide lists `deepseek-v4-flash / deepseek-v4-pro /
+  deepseek-v4-flash-vision-exp` as supported and says image input is replaced with placeholder text on
+  models other than the vision one, while the vision guide documents that model with a full limit set —
+  **600 images, 8192 px per side dropping to 4096 at 15 or more, 32 MiB per image, 48 MiB body,
+  JPEG/PNG/GIF/WebP** — and names the Responses API among the endpoints that accept it; the deleted
+  `_LIMITS` values were that source, transcribed correctly. **Human ruling: the code is unchanged and
+  stays unchanged** (`images_accepted=False`) — the project declines to depend on a multimodal path its
+  vendor labels experimental, and revisits when DeepSeek ships a non-experimental one. Only the
+  justification changes: "the vendor has no vision model" is a fact a later reader would act on and
+  would be wrong, where "we decline the experimental one" is a decision they can reopen. The standing
+  rule that produced the error is `feedback_read_provider_docs_before_encoding_rules` — read every
+  relevant page (the Responses reference was read; the vision guide was not). **Second correction:**
+  `deepseek-v4-pro` is accepted by the Responses endpoint, so it is reachable here with no new wiring —
+  but every DeepSeek structured-output flag (`supports_strict_schema`, `strict_schema_formats`,
+  `resolve_refs_in`) was measured on `deepseek-v4-flash` only and is **unprobed on Pro**, which matters
+  because the lead x co-lead grid adopts Pro as a co-lead emitting `ToolReviewVerdict`. Probe before
+  that grid runs.
+  **2026-08-28 — `_dump_prompt` documented** (built 2026-08-27 for the gate-bench leak audit; the sync
+  was missed). `types.py` gains `PROMPT_DUMP_ENV = "AUTO_RESEARCH_PROMPT_DUMP"`: when that variable
+  names a file, `ModelHandle.call` appends one JSON record per call — role, member, provider/model, the
+  whole normalized conversation, the tool definitions and `tool_choice`, schema and attachments — after
+  the request is assembled and before dispatch, so a leak audit reads the actual prompt every actor
+  received rather than a hand-built reconstruction (the 2026-08-27 hand-rebuilt scan missed the
+  worktree-path leak for exactly that reason; rationale in `_dump_prompt`'s docstring). With the flag
+  unset the cost is one `os.environ.get` and the request is byte-identical; serialization is
+  best-effort (`default=str`) and dump failures are swallowed so the hook can never fail a run.
+  Evidence use: `logs/dev/leak-scan/20260827T093104Z/prompts_readable.txt`.

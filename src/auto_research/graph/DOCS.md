@@ -220,7 +220,7 @@ verdicts, two iteration counters, and the cap.
 - `DEFAULT_WORKER_COUNT` — default analyst worker count (currently 2).
 
 ## Changelog
-Compacted 2026-08-05: entries through 2026-07-29 folded into themed ranges (detail in git history).
+Compacted 2026-09-01: entries through 2026-07-31 folded into themed ranges (detail in git history).
 
 - 2026-05-26 -> 2026-06-26 — **Graph/runtime built, ReAct-wired, then made reviewer-driven.** Six-node
   LangGraph incl. `compose_report`, two capped feedback edges, Studio wiring, per-run workspace, one
@@ -242,48 +242,39 @@ Compacted 2026-08-05: entries through 2026-07-29 folded into themed ranges (deta
   reparented to init at spawn — a real VSCode logout killed a live run because graceful teardown kills
   process *trees* by walking `/proc` parent→child links, which `start_new_session` does not sever (the
   original verification had SIGKILLed the kernel, so no cleanup ran and the gap never showed).
-- 2026-07-22 — **Durable mid-run resume, Stages 1–3.** New `graph/checkpoint.py`; `run_research` always
-  compiles with a per-run `AsyncSqliteSaver` at `run_dir/checkpoint.sqlite` (`thread_id=run_id`,
-  `durability="sync"`), snapshotting `ResearchState` after every node; `resume=True` invokes with input
-  `None` to continue from the latest snapshot (the in-flight node re-runs; its ReAct history is not
-  persisted) and records a `run.resume` event. **No silent non-durable fallback** — a
+- 2026-07-22 -> 2026-07-31 — **Durable resume (Stages 1–3), the cost/summary ledger, and the interrupt
+  path (Stage 4).** New `graph/checkpoint.py`: `run_research` always compiles with a per-run
+  `AsyncSqliteSaver` at `run_dir/checkpoint.sqlite` (`thread_id=run_id`, `durability="sync"`), snapshotting
+  `ResearchState` after every node; `resume=True` invokes with input `None` (the in-flight node re-runs;
+  its ReAct history is not persisted) and records `run.resume`. **No silent non-durable fallback** — a
   `checkpointer_available` preflight fails the launch if `langgraph-checkpoint-sqlite` is absent.
   `run_research_nohup(resume=True)` relaunches a dead/`failed` backend (mutually exclusive with
   `overwrite`); CLI `--resume`. Stage 2: the resume calls `heal_toolkit_branch_if_dirty` **before**
-  `run_preflight`, resetting a dirty `ai` branch to the persisted per-attempt base ref so the clean-tree
-  check passes instead of looping forever (`run.resume.heal`). Stage 3: `build_graph(run_control=)` and
-  stop-aware review edges (both **deleted 2026-07-31**, below), plus the `CommandContext` attached to a
-  command-capable connector. **The full killed-and-resumed run was NOT LIVE TESTED then** (it passed
-  four times later, 2026-08-03).
-- 2026-07-29 — **Cost meter, end-of-run summary, and an append-only backend log.** `run_research`
-  installs the run's `CostMeter` before any model client (so every monitor line carries accumulated
-  spend, preflight included), pins the monitor's `run_id` to the **run's** id (it used to mint an
-  unrelated `uuid4`, leaving log lines untraceable to their run dir), adds `cost_usd` to `run.finish`,
-  and records a derived `run.summary` on both the success and failure paths — rendered by
-  `ResearchRun.summary()`, the CLI text output, and `detached._partial` for a `RunDied`. `backend.log`
-  is now appended: the orphan spawner opened it with `"w"`, so a `--resume` relaunch erased the dead
-  attempt's traceback — the very thing `RunDied` points the human at. Only `overwrite=True` (which
-  removes the run dir) is destructive; the `result.json` unlink on relaunch stays, since a stale
-  `failed` marker must not read as done and its reason survives as the ledger's `run.error`.
-- 2026-07-31 — **The interrupt path (§12 Stage 4, the graceful-shutdown half of the bundle).**
-  `run_research` registers its task on `RunControl` at start, so a `/stop` (or SIGINT/SIGTERM under
-  `install_signal_handlers=True`, which only the CLI and the detached backend pass) cancels it
-  wherever it is awaiting — a model call in flight, a 25-minute download, an hour-long HITL wait.
-  A `CancelledError` carrying `run_control.stop_requested` is ours: the task is `uncancel()`-ed,
-  `_interrupt_cleanup` runs under `asyncio.shield` (teardown otherwise dies with the scope it is
-  in — the hole that left sandbox children alive and the authoring branch dirty), and
-  `UserInterruptionError` is raised naming the run dir and ledger. A `CancelledError` *without* the
-  flag is re-raised untouched, never relabelled as a human stop. `_interrupt_cleanup` is three
-  ordered phases — **kill** every process that can write (each sandbox and its descendants), then
-  **repair** (the live `AuthoringSession.aclose()`, i.e. reset the branch to the attempt's base ref;
-  reversing this order lets the coder re-dirty the branch a moment after the reset), then **close
-  and record** (MCP, HITL connector, `run.interrupted`, the derived `run.summary`). Every step is
-  bounded (`_INTERRUPT_STEP_TIMEOUT_S` 10 s, 30 s for the reset) and guarded: a wedged step logs
-  `run.interrupt.step_timeout` and yields, because an interrupt that hangs in teardown is the
-  failure this design removes — a branch left dirty by a timeout is still caught by the next
-  launch's clean-tree preflight and by the resume-time heal. **No model is called on this path and
-  no report is composed.** `reconstruct_run` raises `UserInterruptionError` (not `RunDied`) for an
-  `interrupted` marker, so a detached notebook run sees the same exception as an in-process one.
-  Removed with the old design: `build_graph(run_control=)` and the two review edges' stop clauses
-  (both unreachable once a stop cancels rather than winds down). Tests:
+  `run_preflight`, resetting a dirty `ai` branch to the persisted per-attempt base ref
+  (`run.resume.heal`). Stage 3: `build_graph(run_control=)` + stop-aware review edges (**both deleted
+  2026-07-31**, being unreachable once a stop cancels rather than winds down) and the `CommandContext` on
+  a command-capable connector. **The full killed-and-resumed run was NOT LIVE TESTED then** (it passed
+  four times later, 2026-08-03). **Cost/summary (2026-07-29):** `run_research` installs the run's
+  `CostMeter` before any model client (so every monitor line, preflight included, carries accumulated
+  spend), pins the monitor's `run_id` to the **run's** id (it had minted an unrelated `uuid4`), adds
+  `cost_usd` to `run.finish`, and records a derived `run.summary` on the success *and* failure paths —
+  rendered by `ResearchRun.summary()`, the CLI text output and `detached._partial` for a `RunDied`. `backend.log` is **appended**, not opened `"w"` (a
+  `--resume` relaunch had erased the dead attempt's traceback, the thing `RunDied` points the human at);
+  only `overwrite=True` is destructive, and the `result.json` unlink on relaunch stays so a stale `failed`
+  marker cannot read as done (its reason survives as the ledger's `run.error`). **Interrupt path
+  (2026-07-31):** `run_research` registers its task on `RunControl`, so a `/stop` — or SIGINT/SIGTERM
+  under `install_signal_handlers=True`, which only the CLI and the detached backend pass — cancels it
+  wherever it awaits. A `CancelledError` carrying `run_control.stop_requested` is ours: the task is
+  `uncancel()`-ed, `_interrupt_cleanup` runs under `asyncio.shield` (teardown otherwise dies with the
+  scope it is in, leaving sandbox children alive and the branch dirty), and `UserInterruptionError` is
+  raised naming the run dir and ledger; a `CancelledError` *without* the flag is re-raised untouched,
+  never relabelled as a human stop. `_interrupt_cleanup` is three ordered phases — **kill** every process
+  that can write (each sandbox and its descendants), **repair** (the live `AuthoringSession.aclose()`,
+  i.e. reset the branch to the attempt's base ref; the reverse order lets the coder re-dirty the branch a
+  moment after the reset), then **close and record** (MCP, HITL connector, `run.interrupted`, the derived
+  `run.summary`). Every step is bounded (`_INTERRUPT_STEP_TIMEOUT_S` 10 s, 30 s for the reset); a wedged
+  step logs `run.interrupt.step_timeout` and yields, a branch left dirty by a timeout being caught by the
+  next launch's clean-tree preflight and the resume-time heal. **No model is called on this path and no
+  report is composed.** `reconstruct_run` raises `UserInterruptionError` (not `RunDied`) for an
+  `interrupted` marker, so a detached notebook run sees the same exception as an in-process one. Tests:
   `tests/test_interrupt.py` (+15).

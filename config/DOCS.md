@@ -275,100 +275,90 @@ The same numbers are kept in `tests/test_live_coder_matrix.py: _PRICES` for the 
 that file constructs, since a live leg needs them without being configured here.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Configuration now covers model groups/pricing,
-  vision/document flags, mission observation roots, runtime data dir, ReAct/structured caps,
-  disabled tools, report formats, and the Phase 2 `coder` + non-Anthropic
-  `analyst_colead` roles with authoring rework caps.
-- 2026-06-12 — Phase 2 step 3 added `code_gate.yaml`, the human-tunable no-fabrication
-  gate config for hard-fail vocabulary/RNG patterns, review-only literal-array findings, and
-  marked synthetic-ObsID allowlists; compacted changelog and documented `runtime_dir` plus
-  current ReAct cap semantics.
-- 2026-06-15 -> 2026-06-18 — Phase 2 steps 5 and 7 config: `orchestration.yaml` gained
-  `human_channel` + `human_channel_ping_timeout_s` (raise-to-human default channel and
-  launch-ping timeout) and `tool_author_branch` (default `ai`) + `tool_author_cap` (default 3)
-  for runtime tool authoring/resume. `observations.yaml` was restructured to a single
-  `obs_db_root` (the per-mission `obs_db_path` map is gone); `observations.py` now discovers
-  missions from disk — a `<root>/<MISSION>` subdir is a mission iff it holds a `catalog.json`.
-  Documented that `analyze_env` must include **`astroquery`** (for `heasarc_utils` acquire) and
-  added `environment-analyst.yml` (the analyst sandbox conda env spec) created via
-  `conda env create` per `README.md` §2b.
-- 2026-06-22 — Added `sandbox_call_timeout_s` (default 300): the global sandbox per-tool-call
-  timeout. A live run showed every tool call is SIGTERM-killed at ~300s (exit 124) regardless of
-  the tool's internal timeout, so a slow HEASARC download never completed. A package's
-  `<domain>_utils/tool_config.yaml` (`call_timeout_s` per tool) overrides this, no upper clamp;
-  read by `ToolkitRegistry.call_timeout_ceiling` (see `sandbox/DOCS.md`).
-- 2026-06-24 — Added `orchestration.yaml.react_loop_absolute_cap` (default 60, fix-list #5.5):
-  the hard ceiling on total ReAct iterations. `react_loop_cap` (30) now bounds only the
-  budget-consuming iterations; the analyst lead's budget-free `plan_and_debate` design rounds are
-  uncounted against it and bounded only by this backstop.
-- 2026-07-06 — **C1: bare ambiguous descriptors moved from hard-fail to soft finding.**
+Compacted 2026-09-01: entries through 2026-08-20 folded into themed ranges (detail in git history).
+
+- 2026-05-26 -> 2026-06-24 — **The config surface: models, gate, HITL, authoring, timeouts, caps.**
+  Model groups/pricing, vision/document flags, mission observation roots, the runtime data dir
+  (`runtime_dir`), ReAct/structured caps, disabled tools, report formats, the Phase 2 `coder` +
+  non-Anthropic `analyst_colead` roles with authoring rework caps. Step 3 added `code_gate.yaml`,
+  the human-tunable no-fabrication gate config: hard-fail vocabulary/RNG patterns, review-only
+  literal-array findings, marked synthetic-ObsID allowlists. Steps 5 and 7 added, in
+  `orchestration.yaml`, `human_channel` + `human_channel_ping_timeout_s` (raise-to-human default
+  channel and launch-ping timeout) and `tool_author_branch` (default `ai`) + `tool_author_cap`
+  (default 3) for runtime tool authoring/resume. `observations.yaml` was restructured to a single
+  `obs_db_root` (the per-mission `obs_db_path` map is gone), missions discovered from disk — a
+  `<root>/<MISSION>` subdir is a mission iff it holds a `catalog.json`. `analyze_env` must include
+  **`astroquery`** (for `heasarc_utils` acquire); `environment-analyst.yml` (the analyst sandbox
+  conda env spec) is created via `conda env create` per `README.md` §2b. `sandbox_call_timeout_s`
+  (default 300) is the global sandbox per-tool-call timeout — every call is SIGTERM-killed at ~300s
+  (exit 124) whatever the tool's internal timeout — overridden per tool by a package's
+  `<domain>_utils/tool_config.yaml` `call_timeout_s` with no upper clamp, read by
+  `ToolkitRegistry.call_timeout_ceiling` (`sandbox/DOCS.md`). `react_loop_absolute_cap` (default 60,
+  fix-list #5.5) is the hard ceiling on total ReAct iterations; `react_loop_cap` (30) now bounds
+  only budget-consuming iterations, so the lead's budget-free `plan_and_debate` design rounds are
+  uncounted and bounded only by this backstop.
+
+- 2026-07-06 -> 2026-07-08 — **Gate-scan C1 demotion, and the Anthropic thinking sweep.** **C1:**
   `code_gate.yaml` reclassifies `synthetic`/`synthesized`/`synthesised`/`illustrative` from
-  `hard_fail_vocabulary` to `finding_vocabulary` — they recur in honest §9.5 disclosures
-  ("synthetic fixture", docstring "illustrative example") and taxed every authoring run a
-  rework round. Explicit fabrication phrases (`fake data`, `mock data`, `in operational mode
-  this would`, …) + all RNG patterns stay hard-fail; the co-lead judges the soft findings
-  (§9.4 two-pass). Config-only; `tests/test_gate.py` updated.
-- 2026-07-08 — **Reviewer group's Anthropic member swapped Opus 4.8 → Fable 5.** The reviewer
-  runs `_select_model`'s `handles[0]`, so its first member is now `claude-fable-5` (vision-capable,
-  §6) — a reasoning reviewer for adjudication and report authoring, where Opus 4.8 ran with
-  thinking off (the adapter sends no `thinking` field, and Opus treats that as disabled).
-  `priceMTk` → 10/50; `max_tokens` 16384 → 21000 because Fable's thinking is always-on and shares
-  the output budget — 21333 is the SDK non-streaming ceiling (`3600·max_tokens/128000 > 600`
-  raises; a streaming report call would lift it). Requires the org to allow ≥30-day retention
-  (Fable 400s under zero-data-retention). GPT-5.5 and Gemini members unchanged; `analyst_colead`
-  stays non-Anthropic (§9.3). `tests/test_models.py` + README updated.
-- 2026-07-08 — **Adaptive thinking enabled on all Anthropic chat members.** Added
-  `thinking: {type: adaptive}` to the `parameters` of every Anthropic member the chat adapter
-  drives: reviewer (Fable, already always-on), analyst_lead (Opus), analyst_worker (Sonnet),
-  librarian_io (Sonnet). They previously ran thinking-OFF — the adapter sends no `thinking` field
-  and Opus/Sonnet treat omission as disabled, so only the GPT (`reasoning.effort`) and Gemini
-  (`thinking_config`) members reasoned. `max_tokens` raised for headroom (thinking is billed and
-  shares the output budget even at `display:omitted`): lead/worker 16384 → 21000, librarian
-  8192 → 12000 (reviewer already 21000); all ≤ the 21333 non-streaming ceiling. Live-verified that
-  adaptive thinking is compatible with the adapter's tool-loop reconstruction (no thinking-block
-  preservation needed), forced `tool_choice`, and `messages.parse` structured output. **coder
-  excluded**: it runs the Claude Agent SDK (`merge_flow` reads only its model id; `parameters`
-  ignored) and already reasons at the SDK default. `effort` deliberately not set —
-  `output_config.effort` collides with the `.parse()` structured-output path; `thinking` alone is
-  safe on both paths.
-- 2026-07-14 — **Install-script increment 0: machine-local config as gitignored + tracked
-  `*.example`.** `orchestration.yaml`, `observations.yaml`, `sandbox/analyst_env.sh`, and the new
-  `sandbox/repl_init.py` are now gitignored; each ships a tracked `*.example` template. Added two
-  `orchestration.yaml` keys: `repl_init_py` (path to a Python file exec'd at REPL-subprocess boot
-  for domain session setup — replaces the hardcoded XSPEC/relxill boot in `persistent.py`, closing
-  the deepest domain leak S1) and `analyze_probe` (a one-line stack smoke-test used by the
-  installer, preflight, and the `bash_exec` description). Launch config loaders now raise a
-  "copy the `.example` / run install.sh" message on a missing live file. Migration for an existing
-  checkout: `git rm --cached config/orchestration.yaml config/observations.yaml
-  src/auto_research/sandbox/analyst_env.sh` (the live files stay on disk).
-- 2026-07-22 — **Context-management keys (`context_mgmt_*`) for Anthropic provider-native context
-  editing.** Added `context_mgmt_enabled` (default false), `context_mgmt_trigger_tokens` (120000),
-  `context_mgmt_clear_at_least_tokens` (20000), `context_mgmt_keep_tool_uses` (3) to
-  `orchestration.yaml` + `.example`; read via `env.context_editing_config`. Enables the long-loop
-  context-pressure valve (clear oldest tool results server-side once a request crosses the token
-  watermark — see `models/DOCS.md`). Ships **disabled** because the beta path is **NOT LIVE TESTED
-  as of 2026-07-22** (blocked by an Anthropic credit-balance 400); run `tests/test_live_context_editing.py`
-  and flip `context_mgmt_enabled: true` once credits return. Protocol strings `context_mgmt_beta_header`/
-  `context_mgmt_strategy` default in code, overridable, kept out of the sample config.
+  `hard_fail_vocabulary` to `finding_vocabulary` (they recur in honest §9.5 disclosures and taxed
+  every authoring run a rework round); explicit fabrication phrases (`fake data`, `mock data`, `in
+  operational mode this would`, …) **and all RNG patterns stay hard-fail**, the co-lead judging the
+  soft findings (§9.4 two-pass). Config-only; `tests/test_gate.py` updated. **Reviewer's Anthropic
+  member swapped Opus 4.8 → `claude-fable-5`** (the reviewer runs `_select_model`'s `handles[0]`, so
+  its first member is now Fable — vision-capable §6, a reasoning reviewer for adjudication and
+  report authoring): `priceMTk` → 10/50, `max_tokens` 16384 → 21000 because Fable's thinking is
+  always-on and shares the output budget, 21333 being the SDK non-streaming ceiling
+  (`3600·max_tokens/128000 > 600` raises; a streaming report call would lift it). Requires the org
+  to allow ≥30-day retention (Fable 400s under zero-data-retention). GPT-5.5 and Gemini members
+  unchanged; `analyst_colead` stays non-Anthropic (§9.3). **`thinking: {type: adaptive}` added to
+  the `parameters` of every Anthropic chat member** — reviewer (Fable), analyst_lead (Opus),
+  analyst_worker (Sonnet), librarian_io (Sonnet), all previously thinking-OFF since the adapter
+  sends no `thinking` field and omission reads as disabled, leaving only the GPT
+  (`reasoning.effort`) and Gemini (`thinking_config`) members reasoning. `max_tokens` raised for
+  headroom (thinking is billed and shares the output budget even at `display:omitted`): lead/worker
+  16384 → 21000, librarian 8192 → 12000, reviewer already 21000, all ≤ 21333. Live-verified
+  compatible with the adapter's tool-loop reconstruction (no thinking-block preservation needed),
+  forced `tool_choice`, and `messages.parse` structured output. **coder excluded** — it runs the
+  Claude Agent SDK (`merge_flow` reads only its model id; `parameters` ignored) and already reasons
+  at the SDK default. `effort` **deliberately not set**: `output_config.effort` collides with the
+  `.parse()` path, `thinking` alone is safe on both. `tests/test_models.py` + README updated.
 
-- 2026-07-27 — Added `tool_search_enabled` (default **false**) for provider-native tool search /
-  lazy tool loading, plus the overridable protocol strings `tool_search_anthropic_tool` /
-  `tool_search_openai_tool` (defaulted in code, kept out of the sample config). Every
-  `research_toolkit` tool defers; harness tools stay resident. Measured on `gpt-5.5` with the
-  real 25-tool manifest: 19,004 → 2,382 resident tokens. **NOT LIVE TESTED** — run
-  `tests/test_live_tool_search.py` before flipping it true.
-- 2026-07-28 — **`context_mgmt_enabled` and `tool_search_enabled` flipped `true`** in both `orchestration.yaml` and the tracked `orchestration.yaml.example`, after each feature's env-gated live test passed on 2026-07-28 (the Anthropic key that blocked them since 2026-07-27 was reinstated). Context editing passed unchanged; tool search needed a one-value fix to the Anthropic search-tool `name` first (see `models/DOCS.md`). The two protocol-string keys (`tool_search_anthropic_tool` / `tool_search_openai_tool`) still default in code and stay out of the sample config — note that `tool_search_anthropic_tool` carries the **dated** type and the adapter derives the undated `name` from it, so overriding it needs only the dated string.
+- 2026-07-14 -> 2026-07-28 — **Machine-local config, the two long-loop valves, and their flip.**
+  *(Installer increment 0)* `orchestration.yaml`, `observations.yaml`, `sandbox/analyst_env.sh` and
+  the new `sandbox/repl_init.py` are gitignored with tracked `*.example` templates; loaders raise a
+  "copy the `.example` / run install.sh" message on a missing live file. New keys: `repl_init_py`
+  (a Python file exec'd at REPL-subprocess boot for domain session setup, replacing the hardcoded
+  XSPEC/relxill boot in `persistent.py` — closing the deepest domain leak S1) and `analyze_probe`
+  (a one-line stack smoke-test used by the installer, preflight and the `bash_exec` description).
+  Migration for an existing checkout: `git rm --cached config/orchestration.yaml
+  config/observations.yaml src/auto_research/sandbox/analyst_env.sh` (live files stay on disk).
+  *(Context editing)* `context_mgmt_enabled` (default false), `context_mgmt_trigger_tokens`
+  (120000), `context_mgmt_clear_at_least_tokens` (20000), `context_mgmt_keep_tool_uses` (3) in
+  `orchestration.yaml` + `.example`, read via `env.context_editing_config` — the Anthropic
+  provider-native long-loop context-pressure valve (clear oldest tool results server-side once a
+  request crosses the token watermark, `models/DOCS.md`); shipped **disabled** because that beta
+  path was **NOT LIVE TESTED as of 2026-07-22** (blocked by an Anthropic credit-balance 400).
+  Protocol strings `context_mgmt_beta_header`/`context_mgmt_strategy` default in code, overridable,
+  kept out of the sample config. *(Tool search)* `tool_search_enabled` (default false) + overridable
+  `tool_search_anthropic_tool`/`tool_search_openai_tool` (defaulted in code, kept out of the sample
+  config): every `research_toolkit` tool defers, harness tools stay resident; measured on `gpt-5.5`
+  with the real 25-tool manifest, 19,004 → 2,382 resident tokens; **NOT LIVE TESTED** at the time.
+  *(2026-07-28)* **Both flags flipped `true`** in `orchestration.yaml` and the tracked
+  `orchestration.yaml.example` after each env-gated live test passed (the Anthropic key blocking
+  them since 2026-07-27 was reinstated): context editing passed unchanged, tool search needed a
+  one-value fix to the Anthropic search-tool `name` first (`models/DOCS.md`). Both protocol-string
+  keys still default in code and stay out of the sample config — `tool_search_anthropic_tool`
+  carries the **dated** type and the adapter derives the undated `name` from it, so overriding it
+  needs only the dated string.
 
-- 2026-08-19 — **Published token rates written down for the harness vendors.** litellm prices
-  Anthropic, OpenAI and DeepSeek; it does not know `glm-*` or `qwen*`, so a member for either books
-  real usage at a zero rate and reports `$0.00` (observed: a Z.AI leg, 40 calls, $0.00). The rates
-  now live in a table above with their source and date — Z.AI's from their own pricing page, Qwen's
-  from aggregators because the vendor's page renders by script, labelled as unconfirmed. Also
-  recorded: DeepSeek's new peak/off-peak multipliers and Model Studio's batch/caching discounts,
-  neither of which a static per-model rate can express.
-
-- 2026-08-20 — **`agent_os_jail` and `agent_fs_readonly` added** (default off). The first turns
-  `agent_fs_allow` into a bwrap mount plan for every runtime process; the second names the roots
-  mounted read-only. Enabling it required one allow-list correction that only a mount plan could
+- 2026-08-19 -> 2026-08-20 — **Harness-vendor token rates, and the OS-jail keys.** litellm prices
+  Anthropic, OpenAI and DeepSeek but not `glm-*` or `qwen*`, so a member for either books real usage
+  at a zero rate and reports `$0.00` (observed: a Z.AI leg, 40 calls, $0.00). The rates now live in
+  a table above with source and date — Z.AI's from their own pricing page, Qwen's from aggregators
+  because the vendor's page renders by script, labelled unconfirmed. Also recorded: DeepSeek's
+  peak/off-peak multipliers and Model Studio's batch/caching discounts, neither expressible as a
+  static per-model rate. **`agent_os_jail` and `agent_fs_readonly` added (default off):** the first
+  turns `agent_fs_allow` into a bwrap mount plan for every runtime process, the second names the
+  roots mounted read-only. Enabling it required one allow-list correction only a mount plan could
   reveal — the HEASoft release root, because PyXspec's files symlink out of `$HEADAS` — which is why
   a launch check now runs `analyze_probe` inside the jail.

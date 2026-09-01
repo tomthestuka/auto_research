@@ -904,7 +904,7 @@ the hook mapping a fake-model verdict — no live LLM).
     via `select_decorrelated_member`. Registered in `auto_research.preflight`.
 
 ## Changelog
-Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
+Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (detail in git history).
 
 - 2026-05-26 -> 2026-06-16 — **Phase 1 sandbox/tooling, then the whole Phase 2 authoring flow.**
   Manifest-based `ToolkitRegistry` (disabled-tool filtering, provider-native tool defs), persistent
@@ -980,114 +980,66 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   can write), and `AuthoringSession.aclose()` is idempotent since the interrupt path closes it from
   shielded cleanup. Tests: `tests/test_interrupt.py`.
 
-- 2026-08-10 — **The coder subprocess follows an Anthropic key rotation.** The Agent SDK
-  authenticates from its own process environment, so a rate limit or spent-balance rotation in the
-  orchestrator (`models/keys.py`) would otherwise launch the next coding session on the throttled
-  or exhausted key. `_build_options` now runs its `env` through `_with_live_anthropic_key`, which
-  stamps `ANTHROPIC_API_KEY` **only when the live key differs from the process environment's** —
-  so with no rotation the options are unchanged and the SDK keeps inheriting the parent env
-  exactly as before. Sessions already connected are unaffected. Tests:
-  `tests/test_provider_key_failover.py::test_coder_env_{is_untouched_while_the_primary_key_is_live,carries_the_rotated_key}`.
-
-- 2026-08-19 — **A second author harness: the `coder` role now names a harness, and Codex is one.**
-  New `coder/` package. `CoderBackend` (`connect`/`drive`/`disconnect`) is everything the authoring
-  flow needs from an author, so the gate, the review, the commit, the per-attempt base ref and the
-  failure reset are untouched by which process wrote the code. `claude_sdk.py` holds today's SDK
-  wires verbatim (they still re-export from `merge_flow`, so existing callers and tests are
-  unchanged) and `codex_sdk.py` adds the Codex app-server. `merge_flow._build_backend` dispatches on
-  `coder_member().harness`; `AuthoringSession` holds a backend instead of an SDK client.
-  **Which pairings exist is a table, not an inference** (`coder/harness.py`): a harness speaks one
-  wire dialect, and each non-native row carries the endpoint its vendor documents for that harness
-  (verified 2026-08-19 against DeepSeek's, Z.AI's and Alibaba Model Studio's own pages). Anthropic
-  publishes no Responses endpoint and OpenAI no Anthropic-dialect one, so those pairs are absent
-  rather than rejected. Two preflight checks (`coder_harness_supported`, `coder_harness_available`)
-  run before any model is built.
-  **Three seams differ and one is a real regression.** Codex has no per-tool allow-list, so the
-  allow-list becomes `writableRoots` under `workspace-write` — the OS-enforced write jail this
-  project has deferred since Phase 2 began, and `.git` is read-only inside it, which makes the
-  coder's git ban structural rather than a deny-rule. Escalation moves to an in-process
-  Streamable-HTTP MCP endpoint (`escalation_server.py`, loopback + per-session bearer token) because
-  `ask_lead` and `ask_human` must keep reaching the live lead object and the run's HITL connector.
-  **Reads are the regression:** Codex grants full-disk read access by design and asks no approval to
-  read, so a crossing is recorded as `coder.read_outside_allowlist` rather than prevented; the
-  preventive form is the §12 OS jail.
-  **Measured rather than assumed** (live probe, ~$0.02): under `approvalPolicy="untrusted"` with
-  `approvalsReviewer="user"` a patch approval reaches the client handler and a denial is honoured,
-  but a shell command the sandbox already permits arrives with **no** approval request — so the
-  handler is a second line, not the command gate. `developerInstructions` and `baseInstructions`
-  were both honoured; the role prompt goes in as the former, layering over Codex's own account of
-  its tools rather than replacing it. Also observed: the Python SDK *merges* `CodexConfig.env` into
-  the inherited environment (the TypeScript SDK documents replacement), and it reports real token
-  classes per model call, so Codex-leg coder spend is priced by the same code as every chat role
-  instead of arriving as an opaque session dollar figure.
-  Tests: `tests/test_coder_backends.py` (25, incl. the live-shaped approval payloads and a real
-  loopback MCP round-trip) plus the env-gated `tests/test_live_coder_matrix.py` over every leg.
-  Suite 967 → 995.
-
-- 2026-08-19 — **The coder's live coverage became a matrix, and the legality table was narrowed to
-  what the code can do.** The three `claude_sdk` alt-vendor rows are gone: those vendors do document
-  an Anthropic-dialect endpoint, but the Claude backend sets no base URL or auth token, so a member
-  naming one would have silently authored on Claude. The table now lists five pairs, and the module
-  records why the other three are absent so nobody re-derives it.
-  **`tests/test_live_coder_matrix.py`** walks one warm session per leg through nine stimuli in the
-  order a real attempt produces them, with the stimuli frozen out of real ledgers
-  (`tests/fixtures/coder_history.json`, built by `tmp_scripts/extract_coder_history.py`: an actual
-  2 kB lead instruction, an actual `no_fabrication.vocabulary` rejection, an actual three-issue
-  co-lead rejection, an actual coder question). Legs skip on a missing credential, so two run today
-  and three wait on vendor keys.
-  **Writing it immediately paid for itself twice.** Its own first invocation died on a missing
-  import — the `NameError` class the 2026-08-06 guard exists to prevent, in a file that guard did
-  not scan — so `tests/test_no_undefined_names.py` now scans `tests/` and `benchmarks/` as well as
-  the package, and that extension found a real latent defect: `tests/test_live_agents.py` still
-  constructed a `LibrarianSearcherAgent` for a role deleted from config, so that live test would
-  have `NameError`ed the moment anyone ran it. Both fixed. Suite 995 → 1093 (the guard is
-  parametrized per file, so scanning the tests and benchmarks added ~98 cases).
-  **Then it found what it was built for: four Codex defects, none visible to a deterministic
-  test.** (1) *MCP servers are read when the app-server **process** starts, not per thread*, so an
-  escalation server passed in `thread_start(config=…)` never connected and its tools were absent
-  from the author's surface; the whole config now goes in as flattened `--config` overrides
-  (`_flatten_overrides`, TOML literals). (2) *An MCP tool call is offered as an **elicitation***
-  (`mcpServer/elicitation/request`, `_meta.codex_approval_kind = "mcp_tool_call"`) whose reply
-  vocabulary is the MCP spec's `{"action": "accept"}` — answering with the `{"decision": …}` used
-  for patch approvals reads as a rejection, and the author is told *"user rejected MCP tool call"*
-  while our handler is never reached. Two shapes arrive on one callback and they do not share a
-  vocabulary; a server the runtime did not configure is now declined. (3) *Codex's command parse
-  yields paths **relative** to the command's cwd*, so resolving them against this process's cwd
-  recorded 47 crossings for ordinary in-worktree reads. (4) *`cwd` is a `RootModel`*, so `str()` on
-  it yields `root='/tmp/…'` and the base path was garbage — 40 further false crossings after fix
-  (3). An audit that cries wolf hides the one real crossing it exists to show.
-  **One finding was about the test, not the harness:** requiring an *edit* in response to a
-  recorded rejection asks a throwaway toolkit to contain files the rejection names, so the cells
-  now assert **delivery** (the turn produced a reply and activity) and record `tree_changed` as
-  data. All pinned deterministically (`test_coder_backends.py` 25 → 33).
-  **Both credentialled legs then passed** (6m46s, `logs/dev/coder-matrix/`): the escalation
-  round-trip works end to end on each harness (`ask_lead` 3 / `ask_human` 2 on Claude, 3 / 1 on
-  Codex — model → localhost MCP → in-process handler → answer), neither harness let the coder
-  commit, every stimulus produced a reply, and spend was booked on both ($1.84 notional on the
-  subscription, $1.29 real). **The read asymmetry is now measured rather than argued:** the Claude
-  leg refused the governance file (marker absent, zero crossings recorded) while the Codex leg read
-  it and the audit recorded exactly **2** crossings — the real one and nothing else, against 47 and
-  40 false ones before the two path fixes. An audit is only worth having at that precision.
-
-- 2026-08-19 — **Vendor keys seeded; four of five coder legs live-probed, and Qwen recorded as
-  untested rather than quietly skipped.** DeepSeek and Z.AI answered on the first trivial turn;
-  Qwen refused every attempt with HTTP 400 `AccessDenied.Unpurchased` across three models and all
-  three documented hosts, which the host-by-model probe attributed to entitlement rather than
-  wiring (the pay-as-you-go host recognised the key; the CN and token-plan hosts answered
-  `InvalidApiKey`). Three records now carry that: `UNVERIFIED_PAIRINGS` in `coder/harness.py`, a
-  new **`PreflightWarning`** tier so `check_coder_harness_supported` cautions at launch without
-  blocking it (the caution lands on the ledger at level 2, and the summary counts warnings
-  separately from failures), and a skip in the live matrix carrying the vendor's own refusal.
-  **The skip is a classification, not a convenience:** an unentitled account is an environment
-  fact, and letting nine downstream cells report nine consequences of one cause would bury it.
-  A leg that refuses on the seed turn stops there and reports the refusal, so it starts passing
-  for real the moment the account is entitled. Also fixed on the way: a failed Codex turn returned
-  an empty string, which the lead would read as a silent no-op — it now returns
-  `[harness error] …` carrying the vendor's message, which is what made the Qwen diagnosis legible
-  at all. Suite 1108 → 1112.
-
-- 2026-08-19 — **The coder matrix is green on every credentialled leg, and it paid for itself
-  four more times on the way.** Final sheet (`logs/dev/coder-matrix/`, ten cells per leg):
+- 2026-08-10 -> 2026-08-19 — **The coder subprocess follows a key rotation, then a second author
+  harness and the live matrix that vetted it.** **Key rotation:** `_build_options` runs its `env`
+  through `_with_live_anthropic_key`, stamping `ANTHROPIC_API_KEY` **only when the live key
+  (`models/keys.py`) differs from the process environment's** — no rotation ⇒ options unchanged,
+  connected sessions unaffected
+  (`tests/test_provider_key_failover.py::test_coder_env_{is_untouched_while_the_primary_key_is_live,carries_the_rotated_key}`).
+  **Second harness:** new `coder/` package. `CoderBackend` (`connect`/`drive`/`disconnect`) is
+  everything the authoring flow needs from an author, so gate, review, commit, per-attempt base ref and
+  failure reset are untouched by which process wrote the code; `claude_sdk.py` holds today's SDK wires
+  verbatim (still re-exported from `merge_flow`, callers and tests unchanged), `codex_sdk.py` adds the
+  Codex app-server, `merge_flow._build_backend` dispatches on `coder_member().harness`,
+  `AuthoringSession` holds a backend. Legal pairings are a table (`coder/harness.py`), each non-native
+  row carrying the endpoint its vendor documents (verified 2026-08-19 against DeepSeek's, Z.AI's and
+  Alibaba Model Studio's own pages); Anthropic publishes no Responses endpoint and OpenAI no
+  Anthropic-dialect one, so those pairs are **absent rather than rejected**. Preflights
+  `coder_harness_supported` / `coder_harness_available` run before any model is built. **Codex seams:**
+  the allow-list becomes `writableRoots` under `workspace-write` (the OS-enforced write jail deferred
+  since Phase 2 began), `.git` read-only inside it, so the git ban is structural, not a deny-rule; escalation moves to an in-process Streamable-HTTP MCP endpoint (`escalation_server.py`,
+  loopback + per-session bearer token — `ask_lead`/`ask_human` must reach the live lead object and the
+  run's HITL connector); **reads are the regression**, full-disk read access being documented design, so
+  a crossing is only recorded as `coder.read_outside_allowlist` and the preventive form is the §12 OS
+  jail. Measured, not assumed (live probe ~$0.02): under `approvalPolicy="untrusted"` +
+  `approvalsReviewer="user"` a patch approval reaches the client handler and a denial is honoured, but a
+  shell command the sandbox already permits arrives with **no** approval request (the handler is a
+  second line, not the command gate); `developerInstructions` and `baseInstructions` are both honoured,
+  the role prompt riding as the former to layer over Codex's own tool account **rather than replacing
+  it**; the Python SDK *merges* `CodexConfig.env` into the inherited environment (the TypeScript SDK
+  documents replacement); per-model-call token classes price Codex-leg spend by the same code as every
+  chat role. `tests/test_coder_backends.py` (25, incl. live-shaped approval payloads and a real loopback
+  MCP round-trip) + env-gated `tests/test_live_coder_matrix.py`; suite 967 → 995.
+  **The matrix.** The three `claude_sdk` alt-vendor rows are gone (that backend sets no base URL or auth
+  token, so a member naming one would have silently authored on Claude); five pairs remain, the module
+  recording why the other three are absent. `tests/test_live_coder_matrix.py` walks one warm session per
+  leg through nine stimuli in real-attempt order, frozen out of real ledgers
+  (`tests/fixtures/coder_history.json` via `tmp_scripts/extract_coder_history.py`: a 2 kB lead
+  instruction, a `no_fabrication.vocabulary` rejection, a three-issue co-lead rejection, a coder
+  question); legs skip on a missing credential. Its first invocation died on a missing import — the
+  `NameError` class the 2026-08-06 guard prevents, in a file that guard did not scan — so
+  `tests/test_no_undefined_names.py` now scans `tests/` and `benchmarks/`, finding
+  `tests/test_live_agents.py` still constructing a `LibrarianSearcherAgent` for a deleted role (suite
+  995 → 1093, ~98 cases). **Four Codex defects, none visible to a deterministic test:** (1) MCP
+  servers are read when the app-server **process** starts, not per thread, so a server passed in
+  `thread_start(config=…)` never connected — the config now rides as flattened `--config` overrides
+  (`_flatten_overrides`, TOML literals); (2) an MCP tool call arrives as an **elicitation**
+  (`mcpServer/elicitation/request`, `_meta.codex_approval_kind = "mcp_tool_call"`) answered in the MCP
+  spec's `{"action": "accept"}`, so the `{"decision": …}` used for patch approvals reads as a rejection
+  ("user rejected MCP tool call") with our handler never reached, and a server the runtime did not
+  configure is now declined; (3) command-parse paths are **relative** to the command's cwd — 47 false
+  crossings; (4) `cwd` is a `RootModel` whose `str()` yields `root='/tmp/…'` — 40 more. Test-design
+  finding: demanding an *edit* asks a throwaway toolkit to contain the files a recorded rejection names,
+  so cells assert **delivery** and record `tree_changed` as data (`test_coder_backends.py` 25 → 33).
+  **Vendor keys.** DeepSeek and Z.AI answered on the first turn; Qwen refused every attempt with HTTP
+  400 `AccessDenied.Unpurchased` across three models and all three documented hosts — entitlement, not
+  wiring (the pay-as-you-go host recognised the key; the CN and token-plan hosts said `InvalidApiKey`).
+  Recorded three ways: `UNVERIFIED_PAIRINGS` in `coder/harness.py`; a new **`PreflightWarning`** tier so
+  `check_coder_harness_supported` cautions at launch without blocking (ledger level 2; the summary
+  counts warnings apart from failures); and a live-matrix skip carrying the vendor's own refusal — a
+  **classification, not a convenience**. A failed Codex turn had returned an empty string the lead reads
+  as a silent no-op; it now returns `[harness error] …` carrying the vendor's message. Suite 1108 → 1112.
+  **Final sheet** (`logs/dev/coder-matrix/`, ten cells per leg):
 
   | leg | model | usage | cost | reads outside the allow-list |
   |---|---|---|---|---|
@@ -1097,125 +1049,100 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   | `codex`+zai | `glm-5.3` | 69 calls | $0.527 | 2 |
   | `codex`+dashscope | `qwen3.7-plus` | — | — | skipped: account not entitled |
 
-  Every leg keeps its working tree across turns, refuses to commit, is offered both escalation
-  tools and reaches their in-process handlers when it calls them, and books usage for every model
-  call. **The DeepSeek row is the finding:** unprompted, that coder read `coder/codex_sdk.py` (the
-  backend driving it), `sandbox/DOCS.md`, `tests/test_live_coder_matrix.py` (the test harnessing
-  it), that test's fixture, the installed Codex SDK sources and `~/.codex/config.toml`. The §2/§4
-  boundary as a measurement: denied on the Claude harness, recorded-and-allowed on Codex, and
-  exactly what the §12 `bwrap` jail blocks.
-  **Four defects found by running it.** (1) `glm-5.3` refuses every turn unless a reasoning effort
-  is named ("This model always engages in thinking and cannot be disabled; please use low, high, or
-  max"), so a member's `parameters` now flow into the Codex config and a vendor requirement travels
-  as configuration rather than a special case. (2) litellm knows `qwen3.7-plus` and carries no rates,
-  which priced a leg at $0.00 under an authoritative-looking `source="litellm"` and shadowed
-  `priceMTk`; a rate-less entry is now treated as absent. (3) `_touched_paths` sliced git porcelain
-  at a fixed offset and clipped the first character of a path. (4) Three assertions measured model
-  compliance rather than the harness contract — a reply's wording, a tool being *called* rather than
-  *offered*, a priced cost rather than a booked one — and two legs failed on the first of those
-  while behaving correctly. The contract is what the matrix asserts now; behaviour is recorded.
-  Suite 1112 → 1115.
+  Both credentialled legs green (6m46s): escalation round-trips end to end on each harness (`ask_lead`
+  3 / `ask_human` 2 on Claude, 3 / 1 on Codex — model → localhost MCP → in-process handler → answer),
+  neither harness let the coder commit, spend booked on both ($1.84 notional on the subscription, $1.29
+  real). **Read asymmetry, measured:** the Claude leg refused the governance file (zero crossings), the
+  Codex leg read it with exactly **2** recorded, against the false counts before the path fixes. **The DeepSeek row is the finding:** unprompted it read `coder/codex_sdk.py`,
+  `sandbox/DOCS.md`, `tests/test_live_coder_matrix.py`, that test's fixture, the installed Codex SDK
+  sources and `~/.codex/config.toml` — the §2/§4 boundary as a measurement, denied on Claude,
+  recorded-and-allowed on Codex, exactly what the §12 `bwrap` jail blocks. Four more defects found by
+  running it: `glm-5.3` refuses every turn unless a reasoning effort is named ("This model always
+  engages in thinking and cannot be disabled; please use low, high, or max"), so a member's `parameters`
+  now flow into the Codex config; litellm knows `qwen3.7-plus` with no rates, pricing a leg at $0.00
+  under an authoritative-looking `source="litellm"` that shadowed `priceMTk` (a rate-less entry is now
+  treated as absent); `_touched_paths` sliced git porcelain at a fixed offset, clipping a path's first
+  character; three assertions measured model compliance rather than the harness contract (a reply's
+  wording, a tool *called* rather than *offered*, a priced rather than a booked cost) — the contract is
+  what the matrix asserts now, behaviour is recorded. Suite 1112 → 1115.
 
-- 2026-08-20 — **The author became a parameter, the correlated reviewer became measurable, and the
-  Codex author stopped launching on a key the run had abandoned.** Three changes, all needed by the
-  paper's coder model sweep, all defaulting to the previous behaviour.
-  (1) **One coder member replaces three config reads.** `build_authoring_session`, `propose_and_pr`
-  and `AnalystLeadAgent.drive_authoring` take `coder: RoleModelConfig | None`; `_build_backend` takes
-  `member=` instead of `coder_model=` and no longer calls `coder_member()` itself. The model id, the
-  provider that routes the review, and the harness that spawns the author now come from one object,
-  so they cannot disagree; `_resolve_coder_provider` is deleted and `_resolve_coder_model` is a thin
-  accessor. `test_coder_backends.py` proves harness dispatch by *passing* members rather than by
-  monkeypatching ambient config, which is what production does now.
-  (2) **`make_review_hook(..., allow_correlated=False)`** — the only way past the decorrelation
-  boundary, opt-in, and set by no production caller. It exists so the sweep can measure what
-  decorrelation is worth by running the same brief with a same-provider reviewer. Every review under
-  it emits a `review.correlated` event, because a verdict reached that way does not carry the
-  guarantee the same verdict carries in production.
-  (3) **`coder.codex_sdk.resolve_vendor_key`** — the Codex author resolved its vendor key from the
-  raw environment variable at two places, so it always launched on the **primary** even after a chat
-  role had rotated off a spent one. Found while probing the sweep's legs: the OpenAI primary was out
-  of credits (`429 credit_balance_exhausted`) while the configured fallback answered, so an OpenAI
-  author was unrunnable at the same moment its own co-lead was answering normally. This is worse than
-  the §13 note that a session in flight keeps its key: it never *started* from the live key. Now one
-  shared resolver reads the pool for a rotating provider whose member names that provider's standard
-  primary variable, and the raw variable otherwise (a plan-specific variable must not be shadowed,
-  and harness-only vendors have no cited taxonomy so they never rotate). A pooled key overrides an
-  inherited environment value; an environment-sourced one does not. Suite 1136 → 1160.
-
-- 2026-08-20 (jail, first live authoring attempt) — **The OS jail had never run an author, and it
-  showed.** Turning it on for the coder sweep failed four distinct ways, each hidden behind the last,
-  every one at startup for $0. (1) **The launcher never bound the binary it execs** — both harnesses
-  ship their CLI inside the orchestration environment, which the allow-list deliberately does not
-  name, so `bwrap` failed `execvp` on all 40 trials. It now binds the binary's parent directory
-  read-only. (2) **Bind and exec disagreed on the path spelling**: the bind resolved symlinks, the
-  exec did not, so on this host the Claude author still failed after its directory was bound. Codex
-  survived only because for it the two coincide. The launch check resolved too, so it reported
-  "reachable" while the launcher failed — *a check that normalises differently from the thing it
-  checks is not a check*. (3) **Codex was pointed at the operator's own settings directory**, absent
-  from the jail; it now gets a fresh one, which our own code comment had claimed for months.
-  (4) **Both CLIs keep state in SQLite and the runtime dir is NFS**, where it cannot lock, so author
-  homes moved to local disk. Plus one defect of the fix itself: the re-addressed credential was built
-  from the unresolved runtime path while the home is bound resolved, and a label derived from the
-  clone's *directory name* collided across every concurrent author, since every trial clones into a
-  directory called `repo`.
-  **Then the real one: this harness's own sandbox IS bubblewrap**, so jailing it nests the same
-  mechanism — Codex cannot spawn `codex-linux-sandbox`, every shell command is rejected, and the
-  author reaches the gate having read and written nothing, which reads as a weak model rather than as
-  broken plumbing. The coder diagnosed it itself and escalated, which is the honest-failure path
-  working. Resolved as **one enforcement layer**: the harness sandbox stands down when the kernel jail
-  is on, and `coder_policy` tightens the author to two writable places (working tree, own settings
-  home) so the result is *stricter* than the `workspace-write` it replaces — the observation database
-  is read-only, and the temp root is absent so one author cannot read another's solution.
-  **Live-verified end to end**: two concurrent authors per harness starting jailed, the Claude pair
-  authenticating from the subscription and answering, and a full production trial authoring both
-  toolkit halves plus tests and passing the deterministic gate on its second submission. Tests
-  `tests/test_jail.py` 19 → 28, suite 1136 → 1176. **Lesson recorded:** a hand-built probe is not the
-  production path — mine failed with the jail *off* too, which is the only reason I did not read its
-  failure as a code defect.
-
-- 2026-08-31 — **Submission snapshots: the authoring checkpoint just before the gate scans.**
-  Coding is a run's most expensive chunk, and everything between "coder starts" and
-  `approve_edit` was volatile: a crash anywhere in an attempt — including a review-provider
-  failure on an already gate-passed tree — reset the branch to the base ref and forced a full
-  re-authoring (~$27–45 lost to save a ~$1–3 review). The submission is the natural durability
-  boundary. `AuthoringSession.run_gate_step` now persists the working tree at every submit,
-  after the §9.9 coder-commit backstop and before the scan, as
-  `run_dir/authoring/submissions/<tool>/submit_NN.patch` + `state.json` (base ref, branch,
-  spec id, and — appended as they land — the gate outcome and the co-lead's issues); every
-  submission is kept, failed ones included. `build_authoring_session` (direct-branch mode)
-  restores the latest snapshot **only when its recorded base ref equals current HEAD** — the
-  condition that makes a restore safe across chains and heals — via `git apply` (a working-tree
-  write; `approve_edit` stays the sole commit path), marks the session `restored_submission`,
-  and the seed message gains a "Restored prior work" section carrying the last feedback, so the
-  stateless-restartable coder continues over the durable substance (tree + feedback) rather
-  than restarting. The gate re-runs on the restored tree: no stored verdict is ever trusted,
-  and `commit ⇔ gate ∧ review` stays defined over the live tree. `commit()` discards the
-  tool's snapshots (the work now lives in git); an unappliable snapshot is discarded and
-  authoring starts clean (the snapshot is an economy, never a dependency); worktree
-  (non-direct) mode is unchanged. Snapshots live under the run's authoring dir, outside both
-  repos, so the failure reset, `heal_toolkit_branch_if_dirty`, and the clean-tree preflight
-  neither see nor destroy them. Events: `authoring.snapshot.saved` (L5) / `.restored` (L3) /
-  `.error` (L4). New module functions: `save_submission_snapshot`,
+- 2026-08-20 -> 2026-08-31 — **The author became a parameter, the OS jail met its first author, and an
+  authoring attempt became durable at the gate.** **(1) One coder member replaces three config reads:**
+  `build_authoring_session`, `propose_and_pr` and `AnalystLeadAgent.drive_authoring` take
+  `coder: RoleModelConfig | None`; `_build_backend` takes `member=` instead of `coder_model=`; model id,
+  review-routing provider and spawning harness come from one object so they cannot disagree;
+  `_resolve_coder_provider` deleted, `_resolve_coder_model` a thin accessor; `test_coder_backends.py`
+  proves dispatch by *passing* members rather than monkeypatching ambient config. **(2)
+  `make_review_hook(..., allow_correlated=False)`** — the only way past the decorrelation boundary,
+  opt-in, set by no production caller, so the sweep can measure what decorrelation is worth; every
+  review under it emits `review.correlated`. **(3)
+  `coder.codex_sdk.resolve_vendor_key`** — the Codex author read its vendor key from the raw environment
+  variable at two places, so it always launched on the **primary** even after a chat role had rotated
+  off a spent one (found with the OpenAI primary out of credits, `429 credit_balance_exhausted`, while
+  the configured fallback answered): worse than the §13 note that a session in flight keeps its key,
+  because it never *started* from the live one. One shared resolver now reads the pool for a rotating
+  provider whose member names that provider's standard primary variable, the raw variable otherwise (a
+  plan-specific variable must not be shadowed; harness-only vendors have no cited taxonomy so they never
+  rotate); a pooled key overrides an inherited environment value, an environment-sourced one does not.
+  Suite 1136 → 1160.
+  **The jail's first author** failed four ways, each hidden behind the last, all at startup for $0:
+  the launcher **never bound the binary it execs** (both CLIs ship inside the orchestration environment
+  the allow-list deliberately does not name — `bwrap` failed `execvp` on all 40 trials; it now binds the
+  binary's parent read-only); **bind and exec disagreed on the path spelling** (the bind resolved
+  symlinks, the exec did not, so the Claude author still failed while Codex survived only because for it
+  the two coincide — and the launch check resolved too, reporting "reachable" while the launcher failed:
+  *a check that normalises differently from the thing it checks is not a check*); **Codex was pointed at
+  the operator's own settings directory**, absent from the jail, now a fresh one; **both CLIs keep state
+  in SQLite while the runtime dir is NFS**, which cannot lock, so author homes moved to local disk. Two
+  defects of the fix: the re-addressed credential was built from the unresolved runtime path while the
+  home is bound resolved, and a label from the clone's *directory name* collided across concurrent
+  authors (every trial clones into a directory called `repo`). **Then the structural one: this harness's
+  own sandbox IS bubblewrap**, so jailing it nests the same mechanism — Codex cannot spawn
+  `codex-linux-sandbox`, every shell command is rejected, and the author reaches the gate having read
+  and written nothing, reading as a weak model rather than broken plumbing; the coder diagnosed it and
+  escalated, the honest-failure path working. Resolved as **one enforcement layer**: the harness sandbox
+  stands down when the kernel jail is on, and `coder_policy` tightens the author to two writable places
+  (working tree, own settings home), *stricter* than the `workspace-write` it replaces — the observation
+  database is read-only and the temp root absent, so one author cannot read another's solution. **Live-verified end to end:** two concurrent authors per harness starting jailed,
+  the Claude pair authenticating from the subscription and answering, and a full production trial
+  authoring both toolkit halves plus tests and passing the deterministic gate on its second submission.
+  `tests/test_jail.py` 19 → 28; suite 1136 → 1176. **Lesson recorded:** a hand-built probe is not the
+  production path — mine failed with the jail *off* too.
+  **Submission snapshots (2026-08-31)** close the volatile stretch between "coder starts" and
+  `approve_edit`, where any crash (incl. a review-provider failure on a gate-passed tree) reset the
+  branch to the base ref and forced a full re-authoring — ~$27–45 lost to save a ~$1–3 review.
+  `AuthoringSession.run_gate_step` persists the working tree at every submit, after the §9.9
+  coder-commit backstop and before the scan, as `run_dir/authoring/submissions/<tool>/submit_NN.patch` +
+  `state.json` (base ref, branch, spec id, and — appended as they land — the gate outcome and the
+  co-lead's issues); every submission is kept, failed ones included. `build_authoring_session`
+  (direct-branch mode) restores the latest snapshot **only when its recorded base ref equals current
+  HEAD** via `git apply` (a working-tree write; `approve_edit` stays the sole commit path), marks the
+  session `restored_submission`, and seeds the coder with a "Restored prior work" section carrying the
+  last feedback (continuation over tree + feedback, not a restart). The gate re-runs on the restored
+  tree: no stored verdict is ever trusted and `commit ⇔ gate ∧ review` stays defined over the live
+  tree. `commit()` discards the tool's snapshots; an unappliable snapshot is
+  discarded and authoring starts clean (an economy, never a dependency); worktree (non-direct) mode is
+  unchanged. Snapshots live under the run's authoring dir, outside both repos, so the failure reset,
+  `heal_toolkit_branch_if_dirty` and the clean-tree preflight neither see nor destroy them. Events
+  `authoring.snapshot.saved` (L5) / `.restored` (L3) / `.error` (L4); new `save_submission_snapshot`,
   `find_submission_snapshot`, `restore_submission_snapshot`, `discard_submission_snapshots`,
-  `_working_tree_patch`, `_update_last_submission`. Tests: `tests/test_merge_flow.py`
-  (checkpoint→reset→restore round-trip incl. the seed section; moved-base-ref refusal;
-  commit cleanup; corrupt-patch discard). Suite 41/41 + adjacent 278 green.
-  **LIVE-VERIFIED 2026-09-01** (`tests/test_live_snapshot_resume.py`, production functions
-  only, real Sonnet coder + real gate + real GPT co-lead, the frozen run-46ed6671 brief on a
-  clone at its base SHA): phase 1 authored to a gate pass, the in-flight review was cancelled
-  with no cleanup (a hard kill's shape); `heal_toolkit_branch_if_dirty` reset the branch,
-  the rebuilt session restored submission 1, the new coder continued on the restored tree
-  (submits 2–4, each gate-judged, two full co-lead reviews), ending in an honest no-commit
-  (review rejected within the 2-round cap — a correct outcome; the commit path stays covered
-  deterministically). 48:40 wall. Three attempts to get there, each a real finding: (1) a
-  clone nested under `/tmp/pytest-of-*` is deleted by the coder's own pytest runs rotating
-  that basetemp (keep worktrees out of pytest's basetemp — [F7] family); (2) live tests must
-  `load_dotenv()` (the co-lead needs keys); (3) a revoked subscription OAuth token surfaces
-  as ordinary coder text ("Failed to authenticate…") and burns gate rounds on an empty tree —
-  the [A13] shape; an early-abort guard on auth-failure replies is a recorded candidate.
-  Attempt 1 also live-demonstrated the honest-failure moat: with its worktree destroyed
-  mid-attempt, the coder escalated, diagnosed the deletion correctly, found the tool already
-  shipped in the real toolkit, and stopped rather than fabricate.
+  `_working_tree_patch`, `_update_last_submission`; `tests/test_merge_flow.py` covers the
+  checkpoint→reset→restore round-trip incl. the seed section, the moved-base-ref refusal, commit cleanup
+  and corrupt-patch discard (41/41 + adjacent 278 green). **LIVE-VERIFIED 2026-09-01**
+  (`tests/test_live_snapshot_resume.py`, production functions only, real Sonnet coder + real gate + real
+  GPT co-lead, the frozen run-46ed6671 brief on a clone at its base SHA): phase 1 authored to a gate
+  pass; the in-flight review was cancelled with no cleanup (a hard kill's shape);
+  `heal_toolkit_branch_if_dirty` reset the branch; the rebuilt session restored submission 1 and the new
+  coder continued on the restored tree (submits 2–4, each gate-judged, two full co-lead reviews), ending
+  in an honest no-commit within the 2-round review cap — a correct outcome; **the commit path stays
+  covered deterministically, not live.** 48:40 wall. Three attempts, each a finding: (1) a clone nested
+  under `/tmp/pytest-of-*` is deleted by the coder's own pytest runs rotating that basetemp (keep
+  worktrees out of pytest's basetemp — [F7] family); (2) live tests must `load_dotenv()`; (3) a revoked
+  subscription OAuth token surfaces as ordinary coder text ("Failed to authenticate…") and burns gate
+  rounds on an empty tree — the [A13] shape, with an early-abort guard on auth-failure replies a
+  recorded candidate. Attempt 1 also live-demonstrated the honest-failure moat: worktree destroyed
+  mid-attempt, the coder escalated, diagnosed the deletion, found the tool already shipped in the real
+  toolkit, and stopped rather than fabricate.
 
 - 2026-09-01 — **The author's `ask_human` answered with the author's own question; three
   different failures were one indistinguishable string.** Both harnesses expose `ask_human` over
