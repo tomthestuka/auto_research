@@ -1795,5 +1795,9 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   `ReadOnlyToolProvider` bare-`int()` crash on a model-sent `offset='150, '`, fixed to an
   `is_error` tool result per the [F11] rule and re-run clean; 6 are known vendor
   structured-output shapes, now ruled to count as failing the item — `swap._review_errored`
-  keeps them in the denominators). NOT LIVE TESTED: a real killed-mid-authoring run resumed
-  through a snapshot restore (joins the §13 durable-resume live-test list).
+  keeps them in the denominators). **LIVE-VERIFIED 2026-09-01**
+  (`tests/test_live_snapshot_resume.py`): real coder + gate + co-lead on the frozen run-46ed6671
+  brief; killed mid-review with no cleanup; heal → restore → the new session continued on the
+  restored tree through two more gate-passed submissions and ended in an honest no-commit within
+  the review cap. The full-run (`run_research(resume=True)`) leg of the §13 durable-resume list
+  stays open; the authoring-attempt leg is closed.

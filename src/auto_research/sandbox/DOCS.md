@@ -1200,3 +1200,19 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   `_working_tree_patch`, `_update_last_submission`. Tests: `tests/test_merge_flow.py`
   (checkpoint→reset→restore round-trip incl. the seed section; moved-base-ref refusal;
   commit cleanup; corrupt-patch discard). Suite 41/41 + adjacent 278 green.
+  **LIVE-VERIFIED 2026-09-01** (`tests/test_live_snapshot_resume.py`, production functions
+  only, real Sonnet coder + real gate + real GPT co-lead, the frozen run-46ed6671 brief on a
+  clone at its base SHA): phase 1 authored to a gate pass, the in-flight review was cancelled
+  with no cleanup (a hard kill's shape); `heal_toolkit_branch_if_dirty` reset the branch,
+  the rebuilt session restored submission 1, the new coder continued on the restored tree
+  (submits 2–4, each gate-judged, two full co-lead reviews), ending in an honest no-commit
+  (review rejected within the 2-round cap — a correct outcome; the commit path stays covered
+  deterministically). 48:40 wall. Three attempts to get there, each a real finding: (1) a
+  clone nested under `/tmp/pytest-of-*` is deleted by the coder's own pytest runs rotating
+  that basetemp (keep worktrees out of pytest's basetemp — [F7] family); (2) live tests must
+  `load_dotenv()` (the co-lead needs keys); (3) a revoked subscription OAuth token surfaces
+  as ordinary coder text ("Failed to authenticate…") and burns gate rounds on an empty tree —
+  the [A13] shape; an early-abort guard on auth-failure replies is a recorded candidate.
+  Attempt 1 also live-demonstrated the honest-failure moat: with its worktree destroyed
+  mid-attempt, the coder escalated, diagnosed the deletion correctly, found the tool already
+  shipped in the real toolkit, and stopped rather than fabricate.
