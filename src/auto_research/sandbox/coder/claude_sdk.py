@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from auto_research.sandbox.coder.events import CODER_TEXT_CAP, cap_text, emit
+from auto_research.sandbox.coder.events import cap_text, coder_text_cap, emit
 
 
 def _make_escalation_server(

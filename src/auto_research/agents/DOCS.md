@@ -418,3 +418,11 @@ Compacted 2026-08-05: entries through 2026-07-28 folded into themed ranges (deta
   is the model's slip to correct, surfaced as an `is_error` tool result naming the expectation,
   never a crash. `ValueError`/`TypeError` now return that error outcome.
   Test: `tests/test_react_tools.py::test_read_file_malformed_offset_is_a_tool_error_not_a_crash`.
+
+- 2026-09-01 — **Ledger field caps read from config at call time.** `_EVENT_ARG_CAP` (2,000) and
+  `_EVENT_RESULT_CAP` (4,000) are replaced by `_event_arg_cap()` / `_event_result_cap()`, which
+  read `env.ledger_caps()` per record; the values move to `orchestration.yaml` and default to
+  100,000. Rationale and the measurement behind the number are in the root `DOCS.md` entry of the
+  same date. Nothing about what an agent can *read* changes — `MonitorToolProvider` windows an
+  event payload independently.
+

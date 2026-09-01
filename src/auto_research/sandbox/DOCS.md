@@ -887,7 +887,7 @@ the hook mapping a fake-model verdict — no live LLM).
   serving the two escalation tools from **this** process (the handlers must reach the live lead
   object and the run's HITL connector). Loopback, ephemeral port, per-session bearer token;
   `url`, `env()` and `token_env` are what a harness needs, `start()`/`aclose()` its lifecycle.
-- `coder.events.emit` / `cap_text` / `CODER_TEXT_CAP` — the shared ledger emission, so a backend
+- `coder.events.emit` / `cap_text` / `coder_text_cap()` — the shared ledger emission, so a backend
   records without importing the flow that drives it. `merge_flow._emit`/`_cap_text` alias them.
 - `merge_flow._build_backend(...)` → a `CoderBackend` — the harness dispatch, on
   `coder_member().harness`. For Codex it turns the `agent_fs_allow` list into `writableRoots` and
@@ -1216,3 +1216,41 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   Attempt 1 also live-demonstrated the honest-failure moat: with its worktree destroyed
   mid-attempt, the coder escalated, diagnosed the deletion correctly, found the tool already
   shipped in the real toolkit, and stopped rather than fabricate.
+
+- 2026-09-01 — **The author's `ask_human` answered with the author's own question; three
+  different failures were one indistinguishable string.** Both harnesses expose `ask_human` over
+  MCP, and every MCP stack turns an exception raised inside a tool handler into an `isError`
+  result carrying only `str(exc)` (`mcp/server/lowlevel/server.py:583`;
+  `claude_agent_sdk/_internal/query.py:694`). `resolve_human` raises `HumanInputRequired(
+  query.headline)`, so a coder asking *"Which calibration epoch applies?"* was answered with
+  *"Which calibration epoch applies?"* — measured, not inferred. It reads as a harness bug,
+  invites a retry, and burns author turns, which is the coder-pressure path. Worse, the catch is
+  `except Exception`, so a **missing** handler, a **broken connector** (`ConnectionError`) and a
+  **wrong-typed** handler (`TypeError`) all arrived identically at the author *and* in the ledger
+  (`coder.ask_human` fires before the call; `coder.ask_human.answer` simply never appears) — a
+  live channel fault was indistinguishable from a healthy unattended run.
+  `_make_ask_human_handler` now **classifies before the boundary**: unattended →
+  `coder.ask_human.unattended` (L3) and a re-raised `HumanInputRequired` carrying the new
+  `UNATTENDED_GUIDANCE`; channel fault → `coder.ask_human.error` (L1) and a `RuntimeError` naming
+  the fault. Both stay a tool **error**, so an unanswered question is never dressed as an answer
+  and no `.answer` event is written for either; the typed `HumanInputRequired` still reaches any
+  caller that catches it, so the §9.8 contract and `author_bench/trial.py`'s fail-safe are
+  unchanged. `UNATTENDED_GUIDANCE` sends the author to the **web first and hard** (the strongest
+  resource it has with nobody to ask), then `ask_lead`, then to reason and state the assumption
+  in the code and its test — and is **domain-neutral by construction**, naming channels rather
+  than kinds of document, because `prompts/coder.md` and the toolkit are not tied to one field.
+  Also: `CODER_TEXT_CAP` became `coder_text_cap()`, read from config at call time (see the root
+  `DOCS.md` entry of the same date). Tests: `tests/test_coder_backends.py` 46 → 49.
+
+- 2026-09-01 (same day) — **What the audit found in the surrounding wiring, recorded because it
+  overturned a plan premise.** Withholding the tool (the "option (b)" a benchmark plan was about
+  to choose) **was already the code** for three of the four asking roles: `ask_human` is appended
+  only when a handler is wired (`react.py:1196` worker; `react.py:1904-1906` lead and reviewer)
+  and the lead's authoring loop passes `include_plan_and_debate=human_handler is not None`
+  (`roles.py:1460`), so headless the worker, lead and reviewer **cannot ask** and
+  `HumanInputRequired` is unreachable from them. The corresponding "catch it at the trial
+  boundary" arm was therefore **dead code**: `author_bench/trial.py:411`'s `except
+  HumanInputRequired` has never fired across ~180 trial records (every terminal is
+  `committed`/`failed`/`error`; zero `needs_human`), and that file's docstring claim to the
+  contrary is wrong. The author was the only live exposure, which is what the entry above fixes.
+

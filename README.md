@@ -166,7 +166,11 @@ SIGINT/SIGTERM route to the same interrupt (a library caller's signals are never
 `~/.auto_research` if omitted) lives **outside both repos** and is not committed. It holds
 the SQLite DB, figures/artifacts, per-worker sandbox scratch, run logs (each run's
 `monitor.jsonl` — the single source of truth for its trace **and** its cost), and
-reviewer reports. On an accepted verdict,
+reviewer reports. The ledger is the run's **durable** record, read long after the run by any
+offline scoring or audit pass, so its per-field text caps are config rather than constants
+(`ledger_arg_cap` / `ledger_result_cap` / `ledger_coder_text_cap`, each 100,000 characters);
+a longer field keeps a `[+N chars]` marker so what was dropped stays countable. What the
+`/status` reporter can pull into its own context is capped separately and independently. On an accepted verdict,
 `runs/{run_id}/reviewer/report/` holds `report.jsonl` (machine handle for upstream
 planning teams), `report.tex` + symlinked `figures/` and `papers/` (human LaTeX project;
 the References section is `\href` links into `papers/`, gate-checked to resolve to real

@@ -26,6 +26,7 @@ from auto_research.agents.react import (
     SourceToolProvider,
 )
 from auto_research.consensus import IODebateToConverge
+from auto_research.env import ledger_caps
 from auto_research.monitor import RunMonitor
 from auto_research.models import (
     ModelGroupHandle,
@@ -353,7 +354,7 @@ class AgentRole:
                     await self._record(
                         f"{self.role}.{action}.steer", level=3,
                         summary=f"{self.role} received a human steer",
-                        data={"message": _cap_text(steer, _EVENT_ARG_CAP)},
+                        data={"message": _cap_text(steer, _event_arg_cap())},
                     )
             response = await self.model.call(
                 messages,
@@ -398,7 +399,7 @@ class AgentRole:
                         # JSONL alone (terminal ignores these keys).
                         "args": _cap_text(
                             json.dumps(dict(call.arguments), default=str, sort_keys=True),
-                            _EVENT_ARG_CAP,
+                            _event_arg_cap(),
                         ),
                     },
                 )
@@ -440,7 +441,7 @@ class AgentRole:
                         "figure_count": len(outcome.figures),
                         # Returned text at full fidelity (capped); args live on the paired
                         # `tool_call` input event above.
-                        "text": _cap_text(outcome.text, _EVENT_RESULT_CAP),
+                        "text": _cap_text(outcome.text, _event_result_cap()),
                     },
                 )
                 if self.run_control is not None:
@@ -454,7 +455,7 @@ class AgentRole:
                     f"{self.role}.{action}.steer",
                     level=3,
                     summary=f"{self.role} received a human steer (mid-batch)",
-                    data={"message": _cap_text(steer, _EVENT_ARG_CAP)},
+                    data={"message": _cap_text(steer, _event_arg_cap())},
                 )
             # Budget accounting: an iteration consumes budget unless EVERY tool it called is
             # free (e.g. plan_and_debate). Free-only iterations advance `iteration` (so the
@@ -1875,9 +1876,16 @@ _STDOUT_MEM_CAP = 8_000
 _STDERR_MEM_CAP = 2_000
 
 # Per-field caps for tool-call args/results recorded into the monitor JSONL (full-fidelity
-# diagnosis without unbounded log growth — see monitor/DOCS.md).
-_EVENT_ARG_CAP = 2_000
-_EVENT_RESULT_CAP = 4_000
+# diagnosis without unbounded log growth — see monitor/DOCS.md). Read from config at call time
+# (``ledger_arg_cap`` / ``ledger_result_cap``) rather than fixed here, because the ledger is the
+# run's durable record and an offline scoring pass reads it long after: the value a batch used
+# has to travel with that batch's config, not with whatever the source said at the time.
+def _event_arg_cap() -> int:
+    return ledger_caps().arg
+
+
+def _event_result_cap() -> int:
+    return ledger_caps().result
 
 
 def _cap_text(text: str, limit: int) -> str:

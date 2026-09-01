@@ -139,3 +139,25 @@ Compacted 2026-08-05: the 2026-07-29 cluster folded into one entry (detail in gi
   truncates the JSONL — it appends and continues numbering from the last readable event, while
   `write_jsonl()` refuses to rewrite the live ledger from chatter-filtered memory. Tests:
   `tests/test_monitor.py`, `tests/test_preflight.py`.
+
+- 2026-09-01 — **Per-field ledger caps became config and rose 2,000/4,000 → 100,000**
+  (`orchestration.yaml: ledger_arg_cap` / `ledger_result_cap` / `ledger_coder_text_cap`; the
+  accessor is `env.ledger_caps()`). The ledger is the run's durable record, so these bound what
+  an **offline** scoring or audit pass can still read months later — which is why the value now
+  travels with a batch's config instead of with the source. Measured over real ledgers first: the
+  heaviest run hid 6.50 M characters behind 1,027 trimmed fields (7.92 → 14.42 MB uncapped, 1.8×),
+  trimming is almost entirely an *authoring* phenomenon, and the largest single field was 68 kB.
+  A trimmed field keeps its `"[+N chars]"` marker, so the drop stays countable — that marker is
+  what made the measurement possible at all. **The read path is unchanged and separately capped**
+  (`MonitorToolProvider.ledger_event` windows a payload at 8,000 chars default / 32,000 max with
+  a `bias` offset; `ledger_grep` returns index rows only), so a larger on-disk event cannot flood
+  the `/status` reporter's context.
+
+- 2026-09-01 (same day) — **New author-escalation events:** `coder.ask_human.unattended` (L3, the
+  author raised on an unattended run and was told to ground it itself) and `coder.ask_human.error`
+  (L1, the human channel itself failed). Previously both, and a genuine answer's absence, were
+  indistinguishable — `coder.ask_human` fires before the call and `coder.ask_human.answer` simply
+  never appeared, so a broken connector read exactly like a healthy headless run. Neither new
+  event is followed by `.answer`: an unanswered question is never recorded as answered. Detail in
+  `sandbox/DOCS.md`.
+

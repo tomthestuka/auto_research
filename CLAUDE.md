@@ -847,6 +847,20 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   already-recorded `sk-sp-` trap to `sk-mr-`. The usable path is pay-as-you-go plus activation.
   `tmp_scripts/check_qwen_entitlement.py` sweeps every documented host and names both the accepting
   host and the remedy, so this is a seconds-long re-check rather than a re-investigation.
+- **An unattended run's action space is narrower than its prompts once said, and MCP still
+  flattens what the author is told.** `ask_human`/`plan_and_debate` reach a role's tool list only
+  when a `human_handler` is wired, so headless the worker, lead and reviewer **cannot ask** —
+  which also makes `author_bench/trial.py`'s `needs_human` terminal unreachable from them (never
+  once fired in ~180 trials; its docstring says otherwise and is wrong). The three prompts that
+  named those tools unconditionally were made conditional 2026-09-01, but **both already-published
+  benchmark batches ran with the old text**, so a lead in those batches was instructed to settle a
+  design through a channel it did not have — state that whenever those numbers are compared with
+  later ones. Residual on the author side: `_make_ask_human_handler` now classifies *unattended*
+  from *channel fault* before the boundary, yet MCP's `except Exception` still converts both into
+  an `isError` carrying only `str(exc)`, so the distinction survives in the **ledger** events
+  (`coder.ask_human.unattended` / `.error`) and in the message text, never in a type the author
+  can branch on. A harness that let a tool return a typed failure would close that; none does.
+
 - **Coder git-ban is best-effort (deny-rule) on the Claude harness.** Its Bash deny-rule
   (`disallowed_tools=["Bash(git:*)", "Bash(git)"]`, §9.9) blocks the obvious `git …`, but prefix
   matching can be slipped (pipes, `$(…)`, env prefixes, `python -c subprocess`). The Codex harness
@@ -1801,3 +1815,50 @@ rulings, rejected alternatives, and NOT-LIVE-TESTED markers; the narrative detai
   restored tree through two more gate-passed submissions and ended in an honest no-commit within
   the review cap. The full-run (`run_research(resume=True)`) leg of the §13 durable-resume list
   stays open; the authoring-attempt leg is closed.
+
+- 2026-09-01 (second, same day) — **Turning the human channel off was already done; what was
+  broken was what the system says when it is off.** A benchmark plan was choosing between three
+  ways to close HITL for an unattended batch, and reading the code retired two of the three
+  options as already-decided or dead. **Withholding the tool was the existing behaviour** for the
+  worker, lead and reviewer (the providers append `ask_human` only when a handler is wired;
+  `include_plan_and_debate=human_handler is not None`), so `HumanInputRequired` is unreachable
+  from them and the "record it as a `needs_human` terminal" arm has **never fired in ~180
+  `author_bench` trials**. The author was the only live exposure — and its failure was not a lost
+  trial but a **mirror**: every MCP stack turns a handler exception into an `isError` carrying
+  only `str(exc)`, and `resolve_human` raises `HumanInputRequired(query.headline)`, so a coder
+  asking *"Which calibration epoch applies?"* was answered with *"Which calibration epoch
+  applies?"*. Measured by probe, not inferred. The same `except Exception` also made a **broken
+  connector** and a **wrong-typed handler** indistinguishable from an absent human, at the author
+  *and* in the ledger. Fixed by classifying before the boundary: `coder.ask_human.unattended` +
+  a re-raised `HumanInputRequired` carrying the new domain-neutral `UNATTENDED_GUIDANCE` (search
+  the web first and hard, then `ask_lead`, then reason and state the assumption in the code and
+  its test), versus `coder.ask_human.error` + a `RuntimeError` naming the fault. **Both stay a
+  tool error** — the rejected alternative was a canned *answer*, which would write content no
+  human wrote into the ledger as a reply and, on the budget-free `plan_and_debate`, open a free
+  retry loop bounded only by `react_loop_absolute_cap` (up to ~100 extra full model calls on a
+  growing context). The typed raise still reaches every catching caller, so §9.8 is unchanged.
+  **The genuine behaviour change was the prompts:** `analyst_lead.md` told the lead to settle a
+  non-trivial design *via* `plan_and_debate` and to close it with a final such turn, and
+  `reviewer.md`/`coder.md` named `ask_human` unconditionally — headless, instructions to use
+  tools the role was never given, and **true of both published batches**, now a stated cross-batch
+  difference. All three take the conditional positive form `analyst_worker.md` already used.
+  **Second item, measured before it was decided:** the run ledger's per-field caps (2,000 args /
+  4,000 results / 4,000 coder text) were raised to 100,000 and moved into `orchestration.yaml`.
+  Scanning the `[+N chars]` markers of real ledgers showed the heaviest run (`8c75990e`, five
+  tools authored, $116) hiding **6.50 M characters behind 1,027 trimmed fields** — 7.92 → 14.42 MB
+  uncapped, **1.8×** — while a non-authoring run is 1.0×, i.e. trimming is almost entirely an
+  *authoring* phenomenon. Largest single field 68 kB, so 100k keeps everything observed and still
+  bounds a pathological blob; 14 trials cost order 0.2–0.35 GB. Config rather than constants
+  because the ledger is the **durable** record an offline scoring pass reads long after, so the
+  value a batch used must travel with that batch — and read at call time, since a constant
+  captured at import makes a config key look wired while doing nothing. The read side needed
+  nothing: `MonitorToolProvider` already windows a payload at 8,000/32,000 chars with a `bias`
+  offset and `ledger_grep` returns index rows only, so write cap and agent context are
+  independent. **Process note:** the caps were the only irreversible choice in the batch's design
+  — every other scoring decision can be revisited offline from the archive, but text trimmed at
+  write time is gone — which is why they were measured rather than argued. Suite 1447 → 1462
+  (`test_coder_backends.py` 46 → 49, `test_env.py` 8 → 15, `test_prompts.py` 15 → 20).
+  **Unrelated pre-existing failures observed and left alone** (§3: consult before fixing): nine
+  `benchmarks/gate_bench/tests/test_gate_bench.py` cases fail on `.pytest_cache` files leaking
+  into the synthetic-repo comparison.
+

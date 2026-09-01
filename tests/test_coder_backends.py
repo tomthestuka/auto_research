@@ -579,6 +579,75 @@ def test_ask_human_with_no_handler_raises_rather_than_hanging_or_inventing():
         asyncio.run(handler("Which calibration epoch applies to this observation?"))
 
 
+def test_unattended_ask_human_tells_the_author_what_to_do_instead_of_echoing_it():
+    """The mirror bug: the raise carried ``query.headline``, so MCP handed the author back its
+    OWN question as the error text — a coder asking "Which epoch applies?" was answered with
+    "Which epoch applies?". It must carry the unattended guidance instead, and that guidance
+    must send the author to the web first (the strongest resource it has with nobody to ask)."""
+    from auto_research.hitl import HumanInputRequired
+    from auto_research.sandbox.merge_flow import UNATTENDED_GUIDANCE, _make_ask_human_handler
+
+    question = "Which calibration epoch applies to this observation?"
+    monitor = _Monitor()
+    handler = _make_ask_human_handler(None, model="matrix", monitor=monitor)
+    with pytest.raises(HumanInputRequired) as excinfo:
+        asyncio.run(handler(question))
+
+    text = str(excinfo.value)
+    assert text == UNATTENDED_GUIDANCE
+    assert question not in text, "the author's own question came back as the answer"
+    lowered = text.lower()
+    assert "search the web" in lowered and "ask_lead" in lowered
+    # Domain-neutral: `prompts/coder.md` and the toolkit are not tied to one field, so the
+    # guidance names channels rather than kinds of document.
+    for domain_word in ("mission", "calibration memo", "observation", "spectra"):
+        assert domain_word not in lowered, f"guidance leaked a domain assumption: {domain_word}"
+
+    events = [name for name, _ in monitor.events]
+    assert events == ["coder.ask_human", "coder.ask_human.unattended"]
+    assert "coder.ask_human.answer" not in events, "an unanswered question was recorded as answered"
+
+
+def test_a_broken_human_channel_is_classified_apart_from_an_absent_one():
+    """Every MCP stack turns a handler exception into an ``isError`` result carrying only
+    ``str(exc)``, so a *missing* handler, a *broken connector* and a *wrong-typed* handler used
+    to be one indistinguishable string — to the author and in the ledger alike. A live channel
+    fault looked exactly like a healthy unattended run."""
+    from auto_research.hitl import HumanInputRequired
+    from auto_research.sandbox.merge_flow import _make_ask_human_handler
+
+    def broken(query):
+        raise ConnectionError("slack socket closed")
+
+    monitor = _Monitor()
+    handler = _make_ask_human_handler(broken, model="matrix", monitor=monitor)
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(handler("Which epoch?"))
+
+    # A fault, not the headless fail-safe — the two must not share a type.
+    assert not isinstance(excinfo.value, HumanInputRequired)
+    text = str(excinfo.value)
+    assert "ConnectionError" in text and "slack socket closed" in text
+    assert "ask_lead" in text, "the author was not told what is still reachable"
+
+    events = dict(monitor.events)
+    assert "coder.ask_human.error" in events
+    assert "coder.ask_human.unattended" not in events
+    assert "coder.ask_human.answer" not in events
+    assert "ConnectionError" in events["coder.ask_human.error"]["error"]
+
+
+def test_a_wrong_typed_handler_is_a_channel_fault_not_an_absent_human():
+    from auto_research.sandbox.merge_flow import _make_ask_human_handler
+
+    monitor = _Monitor()
+    handler = _make_ask_human_handler(lambda query: 42, model="matrix", monitor=monitor)
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(handler("Which epoch?"))
+    assert "TypeError" in str(excinfo.value)
+    assert "coder.ask_human.error" in dict(monitor.events)
+
+
 def test_ask_human_with_a_handler_returns_its_answer_verbatim():
     from auto_research.sandbox.merge_flow import _make_ask_human_handler
 

@@ -49,7 +49,7 @@ from auto_research.sandbox.coder.claude_sdk import (  # noqa: F401 — re-export
     _record_coder_cost,
     _with_live_anthropic_key,
 )
-from auto_research.sandbox.coder.events import CODER_TEXT_CAP, cap_text, emit
+from auto_research.sandbox.coder.events import cap_text, coder_text_cap, emit
 from auto_research.schemas import GateReport, HumanQuery, MergeFlowResult, ToolReviewVerdict, ToolSpec
 
 # Type aliases for the injectable hooks (stubs in step 2; real impls in steps 3/4).
@@ -285,7 +285,7 @@ def _observation_paths() -> dict[str, str]:
 # harness records under the same names without importing the flow that drives it.
 # ----------------------------------------------------------------------------
 
-_CODER_TEXT_CAP = CODER_TEXT_CAP
+_coder_text_cap = coder_text_cap
 _cap_text = cap_text
 _emit = emit
 
@@ -311,9 +311,46 @@ def _make_ask_lead_handler(lead: Any, *, monitor: Any | None = None) -> Callable
     return handler
 
 
+# What the author is told when it raises to a human on an unattended run. Reached as a tool
+# ERROR, never as an answer: `resolve_human` raising is what MCP turns into an `isError` result,
+# so nothing a human did not say is ever recorded as a human reply (no `.answer` event fires).
+# Deliberately domain-neutral — the toolkit is not tied to one field, so this names channels
+# rather than kinds of document (cf. CLAUDE.md §4 on runtime prompts).
+UNATTENDED_GUIDANCE = (
+    "No attending human on this run — this question reaches nobody, so ground the decision "
+    "yourself and keep going.\n"
+    "1. SEARCH THE WEB FIRST, and search it hard: this is the strongest resource you have here. "
+    "Look for how others have solved this, for worked examples, and for the authoritative "
+    "documentation of the library, format, tool or instrument involved. Read the primary source "
+    "rather than a summary of it, and search again with different wording before concluding "
+    "nothing exists.\n"
+    "2. Ask the analyst lead with `ask_lead` for the domain or convention call — the lead is "
+    "reachable and knows this codebase.\n"
+    "3. Reason to the best answer the evidence supports, and state the assumption you made — "
+    "in the code, and in the test that covers it.\n"
+    "When it stays genuinely unresolvable after all three, say so plainly and stop."
+)
+
+
 def _make_ask_human_handler(
     human_handler: HumanHandler | None, *, model: str = "", monitor: Any | None = None
 ) -> Callable[..., Awaitable[str]]:
+    """Serve the author's ``ask_human`` and classify what happens when it cannot be answered.
+
+    Both harnesses expose ``ask_human`` over MCP, and every MCP stack turns an exception raised
+    in a tool handler into an ``isError`` result carrying only ``str(exc)``. That flattens three
+    different situations into one shape the author cannot tell apart, so the classification has
+    to happen HERE, before the boundary:
+
+    * **unattended** (no handler wired, the §9.8 headless fail-safe) — expected, and the author
+      is told what to do instead (``UNATTENDED_GUIDANCE``); ledger event ``coder.ask_human.unattended``.
+    * **channel fault** (the connector raised, or returned the wrong type) — a real fault that
+      used to be indistinguishable from an unattended run in both the author's view and the
+      ledger; ledger event ``coder.ask_human.error``, and the author is pointed at ``ask_lead``.
+
+    Both re-raise so the call stays a tool **error**: an unanswered question is never dressed up
+    as an answer, and no ``coder.ask_human.answer`` event is written for either.
+    """
     async def handler(message: str, *, kind: str = "blocked") -> str:
         query = HumanQuery(
             kind=kind if kind in ("clarify_science", "clarify_code", "blocked") else "blocked",
@@ -326,7 +363,28 @@ def _make_ask_human_handler(
             summary=f"coder raised to the human ({query.kind}): {_cap_text(message, 80)}",
             data={"kind": query.kind, "message": _cap_text(message)},
         )
-        response = await resolve_human(human_handler, query)  # raises HumanInputRequired if None
+        try:
+            response = await resolve_human(human_handler, query)
+        except HumanInputRequired as exc:
+            await _emit(
+                monitor, "coder.ask_human.unattended", level=3,
+                summary="coder raised to a human on an unattended run; told to ground it itself",
+                data={"kind": query.kind, "headline": query.headline},
+            )
+            raise HumanInputRequired(UNATTENDED_GUIDANCE) from exc
+        except Exception as exc:  # noqa: BLE001 — a broken channel is a fault, not an absent human
+            await _emit(
+                monitor, "coder.ask_human.error", level=1,
+                summary=f"the human channel failed for the coder: {type(exc).__name__}",
+                data={"kind": query.kind, "headline": query.headline,
+                      "error": f"{type(exc).__name__}: {_cap_text(str(exc), 500)}"},
+            )
+            raise RuntimeError(
+                f"the human channel failed ({type(exc).__name__}: {exc}), so this question "
+                "reached nobody. The analyst lead is still reachable — use `ask_lead` — and the "
+                "web search tools still work; ground the decision from those and state the "
+                "assumption you made."
+            ) from exc
         await _emit(
             monitor, "coder.ask_human.answer", level=3,
             summary="human answered the coder",

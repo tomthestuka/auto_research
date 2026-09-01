@@ -120,6 +120,14 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - `sandbox_call_timeout_default() -> int` — resolves `sandbox_call_timeout_s` from
   `orchestration.yaml` (default 300): the global sandbox per-tool-call timeout a tool's
   `tool_config.yaml` overrides per tool (`auto_research.sandbox.registry`).
+- `LedgerCaps(arg, result, coder_text)` / `ledger_caps() -> LedgerCaps` — per-field character
+  caps for text recorded into the run ledger, from `orchestration.yaml` (`ledger_arg_cap`,
+  `ledger_result_cap`, `ledger_coder_text_cap`, each default 100,000). A longer field is trimmed
+  with a `"[+N chars]"` marker, so what was dropped stays countable. Read at **call time** by
+  `agents.roles._event_arg_cap`/`_event_result_cap` and `sandbox.coder.events.coder_text_cap`,
+  never captured at import. A non-positive or malformed value falls back to the default — a 0
+  would silence the durable record. Independent of the *read* side: `MonitorToolProvider` windows
+  an event payload separately, so raising these never widens an agent's context.
 - `ProviderRetryPolicy(max_retries, base_cooldown_s, max_cooldown_s)` /
   `provider_retry_policy() -> ProviderRetryPolicy` — the transient-provider retry knobs
   from `orchestration.yaml` (`provider_retry_max` 8, `provider_retry_base_cooldown_s` 60,
@@ -232,3 +240,21 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   documented variables (`DEEPSEEK_API_KEY`, `ZAI_API_KEY`, `DASHSCOPE_API_KEY`) as well as the
   three chat providers', so configuring one of them as a chat member later needs no `key_env`.
   Tests: `tests/test_env.py` 1 → 8.
+
+- 2026-09-01 — **Run-ledger field caps became config, and rose 2k/4k → 100k.** New
+  `LedgerCaps`/`ledger_caps()` reading `ledger_arg_cap` / `ledger_result_cap` /
+  `ledger_coder_text_cap`; `agents.roles` and `sandbox.coder.events` read them at call time
+  (the former module constants `_EVENT_ARG_CAP`/`_EVENT_RESULT_CAP`/`CODER_TEXT_CAP` are gone —
+  a constant captured at import would make the config key look wired while doing nothing).
+  **Measured before deciding**, over real ledgers: the heaviest run (`8c75990e`, five tools
+  authored, $116) hid **6.50 M characters behind 1,027 trimmed fields**, so uncapping takes it
+  7.92 → 14.42 MB (**1.8×**); a non-authoring run is 1.0×, i.e. trimming is almost entirely an
+  authoring phenomenon (`coder.tool_result` 2.03 M, co-lead review 1.06 M, lead `drive_authoring`
+  1.04 M). Largest single field 68 kB, so 100k retains everything observed while still bounding a
+  pathological blob. Config rather than source **because the ledger is the run's durable record**
+  and an offline scoring pass reads it long after: the value a batch used has to travel with that
+  batch. The read side needed nothing — `MonitorToolProvider` already windows a payload at 8,000
+  chars default / 32,000 max with a `bias` offset and `ledger_grep` returns index rows only — so
+  the write cap and the context an agent can pull are independent. Tests: `tests/test_env.py`
+  8 → 15.
+

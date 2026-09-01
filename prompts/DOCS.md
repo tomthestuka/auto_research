@@ -202,3 +202,21 @@ logic here.
   (role line + `Responsibilities:`), with the reporter framing made explicit: ground every number
   in an event actually read, and distinguish "it did not happen" from "the log does not record it"
   — the exact gap a live `/status` hit when it could not see a verdict's content.
+
+- 2026-09-01 — **The human-only tools are now named conditionally, in `analyst_lead.md`,
+  `reviewer.md` and `coder.md`.** `ask_human` and `plan_and_debate` are appended to a role's tool
+  definitions **only when a `human_handler` is wired**, so on an unattended run they do not exist
+  — but three prompts named them unconditionally: `analyst_lead.md` instructed the lead to settle
+  a non-trivial design *via* `plan_and_debate` and to close it with a final `plan_and_debate`
+  turn, `reviewer.md` told the reviewer to reach the human for a request ambiguity, and
+  `coder.md` listed `ask_human` as escalation rung 3. Headless, each was an instruction to use a
+  tool the role was never given — and that was true of both already-published benchmark batches,
+  so it is a stated difference in any cross-batch comparison. All three now take the conditional,
+  positive-action form `analyst_worker.md` already used ("when an `ask_human` tool is offered …;
+  when it is absent …"), and each names what to do instead: settle the design on the evidence and
+  write it into the brief; adopt a stated reading and carry it as a limitation; search the web
+  hard, settle with `ask_lead`, and state the assumption in the code and its test. Pinned by
+  `tests/test_prompts.py::test_a_prompt_naming_a_human_only_tool_says_it_may_be_absent`, with a
+  companion test asserting the guard actually reaches all four roles rather than silently
+  skipping. Tests: `tests/test_prompts.py` 15 → 20 (+3 skips).
+

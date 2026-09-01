@@ -332,6 +332,47 @@ def tool_search_config() -> ToolSearchConfig:
     )
 
 
+class LedgerCaps(NamedTuple):
+    """Per-field character caps applied to text recorded into the run ledger (monitor JSONL)."""
+
+    arg: int
+    result: int
+    coder_text: int
+
+
+_LEDGER_CAP_DEFAULTS = LedgerCaps(arg=100_000, result=100_000, coder_text=100_000)
+
+
+def ledger_caps() -> LedgerCaps:
+    """Run-ledger field caps from config/orchestration.yaml.
+
+    Keys: ``ledger_arg_cap`` / ``ledger_result_cap`` / ``ledger_coder_text_cap``. A field longer
+    than its cap is trimmed with a ``"[+N chars]"`` marker, so what was dropped stays countable.
+
+    These bound the run's **durable record**, which is what an offline scoring pass reads long
+    after the run — so they are config rather than source constants, and the value a batch used
+    is recorded with it. Measured 2026-09-01 over real ledgers: at the former 2k/4k a five-tool
+    authoring run hid 6.5M characters behind 1,027 trimmed fields and its largest single field
+    was 68 kB, so 100k retains everything observed while still bounding a pathological blob.
+    The *read* side is capped separately and independently (``MonitorToolProvider`` windows an
+    event payload), so raising these never widens what an agent can pull into its context.
+    """
+    cfg = _orch_config()
+
+    def _read(key: str, fallback: int) -> int:
+        try:
+            value = int(cfg.get(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+        return value if value > 0 else fallback
+
+    return LedgerCaps(
+        arg=_read("ledger_arg_cap", _LEDGER_CAP_DEFAULTS.arg),
+        result=_read("ledger_result_cap", _LEDGER_CAP_DEFAULTS.result),
+        coder_text=_read("ledger_coder_text_cap", _LEDGER_CAP_DEFAULTS.coder_text),
+    )
+
+
 def sandbox_call_timeout_default() -> int:
     """Global default sandbox per-tool-call timeout (seconds) from config/orchestration.yaml.
 

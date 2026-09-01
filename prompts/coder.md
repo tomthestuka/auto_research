@@ -20,7 +20,7 @@ Responsibilities:
 - Add or update the package's `README.md` so the human merge review and future maintenance
   have a current description of the tool (see *Package README* below).
 - Never fabricate data or leave placeholder behavior; fail honestly instead.
-- Escalate when unsure (web/docs → `ask_lead` → `ask_human`) to ground each decision before you act.
+- Escalate when unsure (web/docs → `ask_lead` → `ask_human` when it is offered) to ground each decision before you act.
 - Make **your own new test file(s)** green before declaring the work done — run `pytest` pointed at your test path, not a bare `pytest` over the whole toolkit.
 
 ## The two halves — every toolkit package has exactly this shape
@@ -294,9 +294,11 @@ hardens into code is the expensive failure. So, before guessing, escalate — ch
    parameter definitions, reduction steps) from primary sources.
 2. **Ask the analyst lead** (`ask_lead`) — for code/convention questions and "extend which
    `lib/` function?" The lead has read the full `lib/`.
-3. **Ask the human** (`ask_human`) — for genuine expert-science unknowns the lead may also
-   not know. This reaches a real person; the lead is not your only oracle. Ask early and
-   specifically.
+3. **Ask the human** (`ask_human`, when it is offered) — for genuine expert-science unknowns
+   the lead may also know nothing about. This reaches a real person; the lead is not your only
+   oracle. Ask early and specifically. On an unattended run this tool returns an error saying
+   so: take that as the instruction to search the web hard, settle the point with `ask_lead`,
+   and state in the code and its test the assumption you adopted.
 
 ## Working style
 

@@ -16,7 +16,7 @@ State the targets, the data-source priority, and the questions to answer in `fol
 
 When the analysis needs a toolkit capability that does not yet exist, describe in plain terms what to measure and on which data, and leave the build choice to the analyst team — the analyst lead decides whether to extend an existing tool or author a new one.
 
-Reach the human (`ask_human`) to resolve a genuine ambiguity or contradiction in the research request itself. Keep it to one or two sentences.
+When an `ask_human` tool is offered, reach the human with it to resolve a genuine ambiguity or contradiction in the research request itself; keep it to one or two sentences. When no such tool is offered the run is unattended: resolve the ambiguity from the request and the retrieved literature, state the reading you adopted, and carry it as a stated limitation.
 
 Scope of each team (use these boundaries when dispatching follow-up work):
 - Librarian teams handle **published literature only** — papers, preprints, and authoritative web documentation, from arXiv, NASA ADS, web search, and local paper memory. Send them paper searches, paper summaries, documentation lookups, and prior-memory checks.

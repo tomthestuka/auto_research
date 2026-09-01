@@ -184,3 +184,52 @@ roles:
         env.check_required_env()
     assert "DASHSCOPE_TOKEN_PLAN_KEY" in str(excinfo.value)
     assert "DASHSCOPE_API_KEY" not in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- ledger field caps
+
+
+def _orch(monkeypatch, mapping: dict) -> None:
+    monkeypatch.setattr(env, "_orch_config", lambda: mapping)
+
+
+def test_ledger_caps_default_to_100k_when_the_config_is_silent(monkeypatch) -> None:
+    """A config predating the keys keeps a working, generous cap rather than an accidental 0."""
+    _orch(monkeypatch, {})
+    caps = env.ledger_caps()
+    assert (caps.arg, caps.result, caps.coder_text) == (100_000, 100_000, 100_000)
+
+
+def test_ledger_caps_are_read_from_config_so_a_batch_records_its_own_value(monkeypatch) -> None:
+    """The ledger is the run's durable record and an offline scoring pass reads it long after,
+    so the cap a batch used has to travel with that batch's config rather than with the source."""
+    _orch(monkeypatch, {"ledger_arg_cap": 7, "ledger_result_cap": 8, "ledger_coder_text_cap": 9})
+    caps = env.ledger_caps()
+    assert (caps.arg, caps.result, caps.coder_text) == (7, 8, 9)
+
+
+@pytest.mark.parametrize("bad", [0, -1, "nope", None])
+def test_a_malformed_or_zero_ledger_cap_falls_back_rather_than_silencing_the_ledger(
+    monkeypatch, bad
+) -> None:
+    """A 0 or a typo would truncate every field to nothing — a silently empty durable record is
+    strictly worse than an over-large one."""
+    _orch(monkeypatch, {"ledger_arg_cap": bad, "ledger_result_cap": bad,
+                        "ledger_coder_text_cap": bad})
+    caps = env.ledger_caps()
+    assert (caps.arg, caps.result, caps.coder_text) == (100_000, 100_000, 100_000)
+
+
+def test_the_ledger_consumers_read_the_cap_at_call_time(monkeypatch) -> None:
+    """Pinned because the previous shape captured the value at import: a module constant would
+    make the config key look wired while doing nothing."""
+    from auto_research.agents import roles as roles_mod
+    from auto_research.sandbox.coder import events as coder_events
+
+    _orch(monkeypatch, {"ledger_arg_cap": 11, "ledger_result_cap": 12,
+                        "ledger_coder_text_cap": 5})
+    assert roles_mod._event_arg_cap() == 11
+    assert roles_mod._event_result_cap() == 12
+    assert coder_events.coder_text_cap() == 5
+    # cap_text with no explicit limit follows the config, and states what it dropped.
+    assert coder_events.cap_text("abcdefghij") == "abcde… [+5 chars]"
