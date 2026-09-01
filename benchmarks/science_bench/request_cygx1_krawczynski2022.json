@@ -1,0 +1,75 @@
+{
+  "provenance": {
+    "project_id": "cygx1_reproduce_krawczynski2022_polarization",
+    "research_db_index": 12,
+    "recovered_from": "notebooks/usage_example.ipynb, the #12 run cell",
+    "prior_run_id": "bf1e39e079c79282b28e36af13492edb",
+    "prior_run_date": "2026-07-10",
+    "prior_verdict": "accepted (caveated)",
+    "quantity_labels_from": "papers/FANGZ/data_benchmark_compare_krawczynski2022.csv",
+    "modification": "The question is the notebook's verbatim, plus one appended STEP 10 naming the fourteen quantities and their units and asking for each as value +/- error with the artifact it came from. The context is verbatim. Nothing else differs.",
+    "starting_state": "Each trial gets a private copy of the two observations holding the archive's Level-2 event lists and the group's own filter_inst_bkg_IXPE.sh background-rejected lists beside them, and no measurement of any kind -- no polarization cubes, PHA spectra, time-segment cuts, CSVs or region files. That is the state run bf1e39e0 began from, which is what makes it a reference point. An archive-only copy was tried first and is a different, harder task: the pinned toolkit's loader globs only the _rej lists, so it fails outright without them."
+  },
+  "quantities": [
+    {
+      "label": "May_PD_2-8keV_PCUBE",
+      "unit": "percent"
+    },
+    {
+      "label": "May_PA_2-8keV_PCUBE",
+      "unit": "deg"
+    },
+    {
+      "label": "June_PD_2-8keV_PCUBE",
+      "unit": "percent"
+    },
+    {
+      "label": "June_PA_2-8keV_PCUBE",
+      "unit": "deg"
+    },
+    {
+      "label": "Combined_PD_2-8keV_PCUBE",
+      "unit": "percent"
+    },
+    {
+      "label": "Combined_PA_2-8keV_PCUBE",
+      "unit": "deg"
+    },
+    {
+      "label": "May_XSPEC_PD_polconst",
+      "unit": "percent"
+    },
+    {
+      "label": "May_XSPEC_PA_polconst",
+      "unit": "deg"
+    },
+    {
+      "label": "May_LinearFit_PD_A_at1keV",
+      "unit": "percent"
+    },
+    {
+      "label": "May_LinearFit_PD_B_slope",
+      "unit": "percent/keV"
+    },
+    {
+      "label": "May_PD_2-3keV",
+      "unit": "percent"
+    },
+    {
+      "label": "May_PD_3-4keV",
+      "unit": "percent"
+    },
+    {
+      "label": "May_PD_4-6keV",
+      "unit": "percent"
+    },
+    {
+      "label": "May_PD_6-8keV",
+      "unit": "percent"
+    }
+  ],
+  "request": {
+    "question": "Cyg X-1 project (#12) — Independent Reproduction of Cyg X-1 May-2022 IXPE Polarization Measurements.\n\nTargets and datasets (IXPE, mission = \"ixpe\"):\n- Cyg X-1: 01002901 (2022 May, ~241 ks), 01250101 (2022 June ToO, ~86 ks)\n\nWe independently re-derive the IXPE polarization of Cygnus X-1 reported by Krawczynski et al. (2022, Science) using the same Level-2 data (May 2022 obs 01002901 and June 2022 ToO 01250101) and benchmark our numbers against their Tables S1-S2. With the standard ixpeobssim PCUBE analysis and an XSPEC Stokes I,Q,U cross-check (tbabs*polconst*powerlaw) we obtain the 2-8 keV polarization degree (PD), angle (PA), 1-sigma errors, MDP99, significance, and the energy-resolved PD(E)/PA(E) spectra. The deliverable is a quantitative this-work-vs-paper agreement table with each difference expressed in sigma, confirming the robustness of the headline hard-state coronal polarization and the reported PD-increase-with-energy. The forbidden corona-geometry/ray-tracing modelling of the original paper is explicitly NOT reproduced; only standard-measurement polarization products are.\n\nAnalysis prescription:\nSTEP 1 - DATA RETRIEVAL & VERIFICATION. Locate Level-2 event files for Cyg X-1 obs_id 01002901 (2022 May, ~241 ks) and 01250101 (2022 June ToO, ~86 ks) in the local IXPE archive (three DU files per obs, *.fits.gz). Verify all six files exist; ABORT with a clear FAILED report if any is missing (do NOT fabricate). Read each event header to confirm OBJECT matches Cyg X-1, extract RA/DEC, TSTART/TSTOP, MJDREFI/MJDREFF, and response/IRF strings. Decompress to a working directory if any tool rejects gzipped input.\n\nSTEP 2 - SMOKE TEST (one DU, one obs). Import ixpeobssim.core.pipeline. On a single DU file of 01002901 run xpbin algorithm='PCUBE', emin=2.0, emax=8.0, ebins=1, letting irfname auto-resolve from headers (irfname=None); if auto-resolution fails, glob installed MRFs under <ixpeobssim>/caldb/ixpe/gpd/cpf/mrf and pick the obssim<DATE>:vNN (zero-padded, e.g. v013) matching the 2022 epoch and weighting flavor. Read the output with ixpeobssim.binning.polarization.xBinnedPolarizationCube and confirm non-empty PD/PA/MDP99. Use help() to confirm at runtime the exact accessor names for PD, PA (and errors), and MDP99. Record them; all later steps use these accessors, NOT hand-rolled numpy arithmetic on raw Q/U.\n\nSTEP 3 - REGION & WEIGHTING SETUP (match the paper, CORRECT UNITS). Paper used a circular source region radius ~80 arcsec and a concentric background annulus inner ~150 / outer ~310 arcsec. CRITICAL: ixpeobssim xpselect --rad/--innerrad are in ARCMINUTES. Convert: source --rad=80/60=1.33 arcmin; annulus --innerrad=150/60=2.50, --rad=310/60=5.17 arcmin. Use NEFF-weighted events (xpbin acceptcorr=True, weights=True). For EACH DU of EACH obs run xpselect TWICE on the same event file: (a) SOURCE --ra <src_ra> --dec <src_dec> --rad 1.33; (b) BACKGROUND --ra --dec --rad 5.17 --innerrad 2.50. Keep source and background event files separate per DU. Compute the extraction AREAS: A_src = pi*1.33^2, A_bkg = pi*(5.17^2 - 2.50^2) arcmin^2 (area ratio ~11.5). To verify the paper's >70x source/background claim, compare AREA-NORMALIZED surface brightness: divide each region's 2-8 keV count rate by its area, then take the ratio (source-rate/A_src) / (bkg-rate/A_bkg). Report this corrected ratio (expected ~70x); do NOT compare raw counts or unscaled rates.\n\nSTEP 4 - BACKGROUND-SUBTRACTED PCUBE (native ixpeobssim background tooling). For 01002901, in a single 2-8 keV bin, produce a SOURCE polarization cube and a BACKGROUND polarization cube with xpbin algorithm='PCUBE' (emin=2.0, emax=8.0, ebins=1, acceptcorr=True, weights=True): pass the three per-DU SOURCE event files to one xpbin call (DU combination handled natively) and the three per-DU BACKGROUND event files to a second xpbin call. Subtract the background at the Stokes level using ixpeobssim's NATIVE background machinery: run the ixpeobssim background-subtraction utility (xpbkgsubtract / the xBinnedPolarizationCube subtraction supported by the framework) supplying the SOURCE and BACKGROUND cubes and the geometric BACKSCAL = A_src/A_bkg so the background is correctly area-scaled before subtraction with modulation-factor-aware error propagation. Do NOT search the cube-reader object for a method that does not exist; confirm the correct entry point in the smoke test via --help/help(). Read PD, PA (1-sigma errors), MDP99 and significance from the background-subtracted cube via the accessors. If the native subtraction utility cannot be run, report this step as FAILED and rely on the XSPEC BACKFILE route (STEP 7) for the background-subtracted measurement.\n\nSTEP 5 - BROADBAND 2-8 keV POLARIZATION (primary deliverable). From STEP 4 report the background-subtracted DU-combined 2-8 keV PD, PA (1-sigma), q=Q/I, u=U/I, MDP99 and significance for 01002901 (paper: PD=4.01+/-0.20%, PA=-20.7+/-1.4 deg, ~20 sigma). Also produce per-DU (det1/det2/det3) background-subtracted cubes by running the STEP-4 procedure on each DU's source/background pair separately, and read PD, PA, q, u, significance per DU to compare with paper Table S1 (Q/I, U/I) and Table S2 (PD, PA, significance).\n\nSTEP 6 - ENERGY-RESOLVED POLARIZATION (PD(E), PA(E)). Re-run the STEP-4 source/background PCUBE procedure with the paper's four energy bands using ebinalg=LIST and ebinning edges [2,3,4,6,8] keV, and separately with the EXACT grid that reproduces the paper's fit statistics: the paper reports chi2=4.04 for 9 DOF on a 2-parameter linear fit, i.e. 9+2 = 11 energy bins. Use 11 equal-width bins of 6/11 keV across 2-8 keV (edges = 2 + k*6/11 for k=0..11). For each band read background-subtracted PD, PA, errors, significance from the cube accessors (DU-combined). Tabulate the four-band results against Table S2. Fit the 11-bin PD(E) with scipy.optimize.curve_fit using (a) a constant and (b) a linear model PD = A + B*(E/keV - 1); report A, B, errors, chi2/dof (linear dof = 11-2 = 9) for both, and the constant-model rejection probability (chi2 survival function). Compare to the paper's A=(2.9+/-0.4)%, B=(0.58+/-0.15)%, linear chi2=4.04/9 (p=0.909), and the 99.93% constant-model rejection (~3.4 sigma PD-increase-with-energy). Also fit PA(E) with a constant and report its chi2/dof and p-value (paper p=0.575).\n\nSTEP 7 - XSPEC SPECTROPOLARIMETRIC CROSS-CHECK (native BACKFILE background subtraction). For 01002901 build IXPE Stokes I, Q, U spectra for EACH DU using xpbin algorithms PHA1, PHA1Q, PHA1U on BOTH the SOURCE and BACKGROUND event files from STEP 3. Generate/associate CALDB ARF/MRF/RMF (ixpecalcarf for the source region; NEFF weighting). CRITICAL BACKSCAL: ixpeobssim PHA1/PHA1Q/PHA1U does NOT write a correct BACKSCAL for an annulus, so before loading into XSPEC use a HEASoft header editor (fthedit / fparkey) to write BACKSCAL = A_src into each SOURCE PHA header and BACKSCAL = A_bkg into each BACKGROUND PHA header (consistent units), so XSPEC area-scales the background by A_src/A_bkg rather than 1:1. In PyXSPEC load the three DUs' I,Q,U source spectra, attach the matching background spectra via BACKFILE for each of I, Q, U, and fit tbabs*polconst*powerlaw over 2-8 keV (fix NH~0.44e22 if needed for stability; tie polconst PD and PA across DUs). Read the 2-8 keV PD and PA with 68.3% errors from the polconst parameters and compare to PCUBE and to the paper's XSPEC column (PD=3.9+/-0.2%, PA=-21+/-1 deg).\n\nSTEP 8 - JUNE ToO & COMBINED CHECK (native combination). Repeat STEP 3-4 (broadband 2-8 keV background-subtracted PCUBE) for 01250101 (June); report DU-combined PD, PA, errors. To combine May+June, do NOT sum Stokes counts by hand: pass ALL six source event files (3 DU x 2 obs) to one xpbin PCUBE call and ALL six background event files to a second, then apply the STEP-4 native background subtraction (with the same BACKSCAL=A_src/A_bkg) to obtain the combined PD, PA, errors from the cube accessors. As independent confirmation, also load the May and June I,Q,U source+BACKFILE spectra together in one PyXSPEC session and fit a single tied polconst. Compare to the paper's June PD=3.84+/-0.31%, PA=-25.7+/-2.3 deg and combined PD=3.95+/-0.17%, PA=-22.2+/-1.2 deg.\n\nSTEP 9 - COMPARISON TABLE (final deliverable). Build a CSV of this-work vs paper-reference vs difference and significance = |this-paper| / sqrt(sigma_this^2 + sigma_paper^2) for every quantity: 2-8 keV PD, PA (May, June, combined); the four energy-band PD/PA; the per-DU 2-8 keV Q/I,U/I,PD,PA (Tables S1/S2); the linear-fit A,B; and the XSPEC cross-check PD/PA. Flag any quantity discrepant at >3 sigma and discuss likely causes (CALDB version, weighting flavor, region size). Save all PCUBE FITS, Stokes spectra and responses, fit results, the comparison CSV, a Figure-S5-style PD(E)/PA(E) plot, and a Figure-S3-style q-u plane plot to the project output directory. If any real tool step cannot run, report it as FAILED rather than substituting synthetic values.\n\nRelevant literature: Krawczynski, H. et al. — Polarized X-rays constrain the disk-jet geometry in the black hole X-ray binary Cygnus X-1 (https://ui.adsabs.harvard.edu/abs/2022Sci...378..650K); Baldini, L. et al. — ixpeobssim: A simulation and analysis framework for the Imaging X-ray Polarimetry Explorer (https://ui.adsabs.harvard.edu/abs/2022SoftX..1901194B); Weisskopf, M. C. et al. — Imaging X-ray Polarimetry Explorer: prelaunch (https://ui.adsabs.harvard.edu/abs/2022JATIS...8b6002W)\n\n\nSTEP 10 - NAMED-QUANTITY REPORT (required, in addition to STEP 9). The final report must state each of the following fourteen quantities explicitly, as `value +/- error` in the unit given, together with the artifact each was read from (the file path or tool output that produced it). Report a quantity as NOT MEASURED, with the reason, whenever this run did not produce it - an honest gap is a correct answer and a fabricated number is not. Report the value this run measured; never substitute, adjust toward, or back-fill from any published value.\n\n   1. May_PD_2-8keV_PCUBE   [percent]\n   2. May_PA_2-8keV_PCUBE   [deg]\n   3. June_PD_2-8keV_PCUBE   [percent]\n   4. June_PA_2-8keV_PCUBE   [deg]\n   5. Combined_PD_2-8keV_PCUBE   [percent]\n   6. Combined_PA_2-8keV_PCUBE   [deg]\n   7. May_XSPEC_PD_polconst   [percent]\n   8. May_XSPEC_PA_polconst   [deg]\n   9. May_LinearFit_PD_A_at1keV   [percent]\n  10. May_LinearFit_PD_B_slope   [percent/keV]\n  11. May_PD_2-3keV   [percent]\n  12. May_PD_3-4keV   [percent]\n  13. May_PD_4-6keV   [percent]\n  14. May_PD_6-8keV   [percent]\n\nUse these labels verbatim so the report is machine-readable. State each quantity once, in a clearly delimited block or table; the surrounding prose is unrestricted.",
+    "context": "- Both observations are IXPE observations (mission = \"ixpe\"). Data is local-first: Cyg X-1 01002901 (2022 May) and 01250101 (2022 June ToO).\n- This is an independent reproduction: Krawczynski et al. 2022 (Science, Tables S1-S2) report the answer, so their published numbers are the external BENCHMARK to compare against, NEVER a target to match. Report the real measured PD, PA, errors, MDP99, significance and fit parameters exactly as produced, and flag any quantity discrepant with the paper at >3 sigma as an honest, valuable result — do NOT tune arguments, hand-roll Stokes arithmetic, or back-fill any value to make this work agree with the paper. Only standard-measurement polarization products are in scope; the paper's corona-geometry/ray-tracing modelling is not.\n- An honest failed/needs_human outcome (e.g. a required data file missing, or a capability that cannot be made available) is an acceptable, correct result — never fabricate a polarization measurement or an agreement with the paper. If the environment is broken, abort and report.\n"
+  }
+}

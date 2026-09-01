@@ -479,3 +479,50 @@ def test_both_harness_launchers_bind_their_worktree(tmp_path):
     assert f"--bind {worktree}" in claude
     if codex_body:
         assert f"--bind {worktree}" in codex_body
+
+
+def test_the_codex_launcher_is_not_written_into_the_working_tree(tmp_path, monkeypatch):
+    """A runtime artifact in `research_toolkit` breaks the next tool in an authoring chain.
+
+    Writing the launcher into the worktree left an untracked `.codex-jailed` behind after every
+    session, so the next link found a dirty branch, `check_toolkit_branch_clean` raised, and the
+    chain took the honest terminal. A codex author under the jail could land exactly ONE tool
+    (measured 2026-09-01: a five-tool chain committed the first and died on the second with one
+    untracked file). Invisible until then because `author_bench` authors one tool per trial.
+
+    §9.9 is the general rule this restores: the only thing the runtime puts in that repository is
+    an `approve_edit` commit.
+    """
+    from auto_research.sandbox.coder import codex_sdk
+
+    worktree = tmp_path / "toolkit"
+    worktree.mkdir()
+    (worktree / ".git").mkdir()
+
+    backend = codex_sdk.CodexBackend.__new__(codex_sdk.CodexBackend)
+    backend._worktree = worktree
+
+    from auto_research.sandbox import jail
+
+    monkeypatch.setattr(jail, "jail_enabled", lambda: True)
+    monkeypatch.setattr(jail, "jail_available", lambda: (True, ""))
+    written: dict[str, Path] = {}
+
+    def _fake_write_launcher(path, target, policy):
+        written["path"] = Path(path)
+        return Path(path)
+
+    monkeypatch.setattr(jail, "write_launcher", _fake_write_launcher)
+    monkeypatch.setattr(jail, "coder_policy", lambda **kw: object())
+    monkeypatch.setattr(jail, "coder_home", lambda label: tmp_path / "home" / label)
+    (tmp_path / "home").mkdir(exist_ok=True)
+
+    backend._jail_launcher("/usr/bin/codex")
+
+    assert "path" in written, "the launcher was never written"
+    launcher = written["path"].resolve()
+    assert worktree.resolve() not in launcher.parents, (
+        f"the launcher landed inside the working tree at {launcher}; the next tool in the chain "
+        f"would find a dirty branch"
+    )
+    assert launcher.name == ".codex-jailed"

@@ -25,6 +25,21 @@ machine-independent and tracked. The machine-specific files — `orchestration.y
 config loaders (`graph.runtime.load_orchestration_config`, `observations.load_observations_config`)
 raise a "copy the `.example` / run install.sh" message when a live file is absent.
 
+**This directory is the default, not the only one.** Every reader resolves the four files through
+`auto_research.config_paths`, which answers with this directory unless `AUTO_RESEARCH_CONFIG_DIR`
+names another. That exists so a process can be run against a whole different configuration — a
+different set of model seats, a different toolkit checkout, a different runtime and observation
+root — without editing anything here, which is what a repeated-trial experiment over the seats
+needs. It is an environment variable rather than a parameter because the readers include
+subprocesses (the sandbox REPL, the author harness, the gate's test runner) that inherit the
+environment and are not all Python.
+
+Two things stay pinned to the repository whatever a run is configured with: the `*.example`
+templates, since the installer writes a live configuration *from* them, and `.env`, since an API
+key is a property of the machine rather than of the experiment. When overriding, supply all four
+files: a directory missing one is read as that file being absent, which the loaders report as an
+uninstalled configuration rather than silently falling back here.
+
 ## Interfaces / Contracts
 - `models.yaml` — role → non-empty `members` list. Each member has `name`,
   `provider`, `model`, `vision`, `parameters`, and optional `documents` and

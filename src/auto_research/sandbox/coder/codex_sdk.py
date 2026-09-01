@@ -403,6 +403,7 @@ class CodexBackend:
         makes a read outside the allow-list impossible rather than merely recorded.
         """
         from auto_research.sandbox.jail import (
+            coder_home,
             coder_policy,
             jail_available,
             jail_enabled,
@@ -425,8 +426,23 @@ class CodexBackend:
         target = self._worktree if self._worktree.is_dir() else Path(".")
         # A label of this author's own, so concurrent authors do not share one settings directory:
         # a sweep runs several at once, and the CLI writes login state and history into it.
-        policy = coder_policy(label=self._jail_label(), extra_rw=(str(target),))
-        return str(write_launcher(target / ".codex-jailed", real, policy))
+        label = self._jail_label()
+        policy = coder_policy(label=label, extra_rw=(str(target),))
+        # The launcher lives in this author's own home, NOT in the working tree.
+        #
+        # Writing it into the tree left an untracked `.codex-jailed` behind after every session, so
+        # the *next* tool in an authoring chain found a dirty branch, `check_toolkit_branch_clean`
+        # raised, and the chain took the §9.6 honest terminal. A codex author under the jail could
+        # therefore land exactly ONE tool. Measured 2026-09-01: a five-tool chain committed
+        # `load_data` and died on link 2 with one untracked file in `git status`. Invisible until
+        # then because `author_bench` authors a single tool per trial and never reaches link 2.
+        #
+        # The home is bound writable by the policy and is unique per author, so the launcher is
+        # reachable inside the jail from there; `extra_rw` grants the working tree separately, so
+        # nothing about the sandbox depends on the script sitting inside the repository. Keeping
+        # runtime artifacts out of `research_toolkit` is also what §9.9 asks for: the only thing
+        # the runtime puts in that repository is an `approve_edit` commit.
+        return str(write_launcher(coder_home(label) / ".codex-jailed", real, policy))
 
     def _jail_label(self) -> str:
         """A settings-home label unique to this author.

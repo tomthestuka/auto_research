@@ -15,6 +15,7 @@ and the active Phase 2 build order in
 
 | Submodule | Step | Role |
 |---|---|---|
+| `config_paths.py` | — | Where the four config files are, resolved when asked for. `config_dir()` answers with the repository's own `config/` unless `AUTO_RESEARCH_CONFIG_DIR` names another, so a process can be run against a different configuration and every reader agrees. Before it, eleven modules each computed the location relative to their own source file. |
 | `env.py` | — | Launch-time `.env` loading and required-env check (`check_required_env()`, whose model-key requirements are **derived from `config/models.yaml`**: one group per provider a role is configured with, or the exact variable a member names with `key_env`); small `orchestration.yaml` accessors (`runtime_data_dir`, `papers_dir`, `sandbox_call_timeout_default`, `provider_retry_policy`). |
 | `setup.py` | — | The install-script Python stage (`python -m auto_research.setup`, run by `install.sh`): discovers defaults, prompts (interactive `questionary`) or reads `--answers` (headless), then writes the gitignored `config/orchestration.yaml` + `observations.yaml` from their `*.example` templates (deriving `agent_fs_allow` from the answered paths) and runs the preflight smoke test. |
 | `preflight.py` | — | Launch-time deterministic **checklist** (`Preflight` / async `run_preflight()`): runs every no-LLM precondition, and carries a warning tier (`PreflightWarning`) for a precondition that is satisfiable but never proven live — the launch continues and the caution is recorded (`.env` shape, API-key fallback usability, runtime DB schema health, author↔reviewer decorrelation, toolkit git identity/branch, data-catalog health, `analyze_probe` stack smoke-test, human-channel ping) before any model client is built. |
@@ -43,6 +44,18 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - Package exports `RunMonitor` for notebook and test instrumentation.
 - Each submodule documents its own interface in its `DOCS.md`. Cross-module
   contracts go through `auto_research.schemas`.
+- `auto_research.config_paths.config_dir()` / `orchestration_yaml()` / `models_yaml()` /
+  `observations_yaml()` / `code_gate_yaml()` — the configuration directory and the four files in
+  it, resolved **per call**. Unset, they are the repository's own `config/`, which is every
+  ordinary run. `AUTO_RESEARCH_CONFIG_DIR` overrides them, and being an environment variable is
+  the point: the sandbox REPL, the author harness and the gate's test runner are subprocesses that
+  inherit it, and two of the three are not Python, so nothing process-local could reach them.
+  Setting it before the process starts is also what makes the four `lru_cache`d readers harmless —
+  and those now key on the resolved path rather than on nothing, so a test that moves the directory
+  is not served a stale answer. The installer is deliberately not routed through here: it writes
+  the live configuration *from* the tracked `.example` templates, which live in the repository
+  whatever a run is configured with. Secrets likewise stay at the repository root — an API key is a
+  property of the machine, not of the experiment.
 - `auto_research.env.check_required_env()` loads the repo-root `.env` with
   `override=False` and validates required keys before SDK clients are constructed. The source keys
   (ADS, Tavily) are fixed; the **model keys are derived from `config/models.yaml`** — a provider a

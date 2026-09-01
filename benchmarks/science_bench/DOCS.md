@@ -23,8 +23,9 @@ performance being measured, and it cannot be passed by luck.
 Development code, not runtime code: it lives outside `src/auto_research/`, nothing in the pipeline
 imports it, and it never runs during a research run.
 
-**Built so far:** the measurement design (this module). The per-trial environment, the driver, the
-scheduler and the scoring are not built.
+**Built so far:** the measurement design, the per-trial environment, the frozen question, the trial
+driver, and the CLI with its preflight, scheduler and leak scanner. Block 0 has run. The scoring —
+the ledger-derived tier, the fourteen-quantity extractor and the figures — is not built.
 
 ## 2. Architecture
 
@@ -171,6 +172,131 @@ seat comparison. The consequence belongs in the write-up: the honest-failure rat
 explicitly an **unattended** figure, and an attended lead can spend a question where an unattended
 one must spend a rework round or stop.
 
+### A trial's private world
+
+A trial is a whole research run, and a run resolves its own seats, paths and caps from the
+configuration directory it was launched against. So an arm reaches a run as a *configuration*, not
+as an argument, and the harness writes one per trial: four YAML files, a toolkit checkout at the
+pinned base, an observation database holding only what the question needs, and an empty runtime
+directory. Nothing is shared but the machine.
+
+The seats, the four paths and the filesystem allow-list are what differ; every cap, flag and
+timeout is inherited, because those are the pipeline being measured. Rewriting the allow-list
+alongside the paths is the step that is easy to forget and fatal to omit: it names the old roots
+literally, so a trial pointed at private paths whose allow-list still named the shared ones would
+have every one of its own reads denied, and under the kernel jail its data would not even be
+mounted.
+
+**The observation database is copied, not linked, and filtered per file.** The master archive is
+1.2 TB of irreplaceable data; a hardlink clone shares inodes with it, so an in-place write in a
+trial reaches the original with no undo — and this question's own prescription tells the tree to
+edit FITS headers in place and to decompress files. The copy is confined to Level 2, which is what
+the question analyses.
+
+The per-file filter is the load-bearing part. The May observation's event directory holds 1,023
+files, six of which are the archive's own event lists; the rest are earlier runs' products,
+**including the polarization cubes this question exists to compute**. A trial cloned by directory
+would find the answer already on disk. Only files matching the archive's own naming are taken, and
+copying nothing is a hard failure rather than an empty trial, since a filter that has drifted from
+the layout would otherwise produce a run that fails as science. The catalog is then reconciled by
+the toolkit's own recovery path against what was actually copied, so the clone is consistent by the
+same rules the launch health check applies — measured: 1,023 + 321 files down to 6 + 6, catalog
+recomputed to level 2, in about a minute and 4 GB.
+
+### The question, frozen
+
+Recovered verbatim from the run that posed it on 2026-07-10, so a trial is the same task that run
+attempted and that run is a reference point rather than a different experiment. One step is
+appended, and it names the task rather than the answer: the fourteen quantities and their units,
+each asked for as a value with its error **and the artifact it came from** — which is what
+separates a number this run measured from one transcribed out of the paper. It says explicitly that
+a quantity this run did not produce must be reported as not measured with the reason, because the
+alternative to an honest gap is an invented number.
+
+The bytes are hashed and the hash is stamped into every batch. The answer key lives in the
+manuscript's data directory, which is on no root any actor may read — not a secret, since the paper
+is published and the tree is told to read it, but the values a trial is scored against should not
+sit on a path the trial can reach.
+
+### One trial
+
+The driver spawns the production entry point — the same command the detached backend spawns —
+pointed at the private configuration, and then waits, collects, and writes one record. It does not
+call the public detached entry, because that derives the run directory from *its own* configuration
+and the point of a trial is that its configuration is not the batch's; everything below that one
+line is reused. Liveness is process existence, never log freshness: this question spends most of
+its time in a silent reduction.
+
+**Two outcomes, and conflating them would make the scoring meaningless.** *Infrastructure* is
+whether the run got to speak: finished, crashed with a marker, stopped by a human, or vanished
+writing nothing — only the last two are the harness's fault and only those are re-runnable.
+*Measurement* is what the run concluded, and under the governing ruling every value of it is a
+correct outcome: the pipeline always reaches a verdict, and a verdict of "this is not verifiable",
+plainly stated, is a success. Everything derived is read from the run's own ledger, since the
+production flow already writes structured verdicts. Cost needs no special handling — each trial is
+its own process, so its spend is its own by construction.
+
+A record is appended the moment its trial ends, so a batch killed at hour thirty loses only what
+was in flight. The runtime directory is kept: it holds the ledger, the figures and the report, and
+the whole scoring pass is offline over exactly those. The toolkit checkout and the data copy are
+swept, being reproducible from the pinned base and the archive.
+
+### Scheduling, and why a single concurrency number will not do
+
+Every run calls the pinned author and the pinned tool reviewer, and six of block 1's eleven slots
+carry the one vendor with a measured ceiling, so "launch ten" saturates it three times over. The
+scheduler starts a trial only when the roster's ceilings admit it, and the rule itself lives in
+`arms` beside the ceilings it reads, so it is designed and tested as data and merely enforced here.
+
+### The leak scan, and what block 0 caught
+
+Block 0 is one run of the anchor arm with the pipeline's own verbatim prompt recording switched on
+— the single chokepoint every actor's prompt passes through, which exists precisely because a
+hand-reassembled payload contains only the channels its author remembered. It is additive: it
+changes what is written down, never what is sent, which is what lets a clean block 0 count as
+block 1's first slot.
+
+**Its first launch leaked, five minutes in, and that is the whole argument for running it.** The
+workspace directory was called `science_bench`, so every downloaded-paper path in the librarian's
+prompt read `/data/.../science_bench/<hash>/papers/...`. It gives away no arm — and that is not the
+point: a model that knows it is inside a benchmark behaves differently in every seat, which is how
+a reviewer once quoted a benchmark's own framing back in its rationale. The run was killed for the
+price of a few paper downloads.
+
+The fix is structural rather than editorial. A word list lives with the roster, and building a
+trial world **refuses** a root that carries any of it, so no future workspace choice can leak past
+it; the default workspace name is empty of meaning; the preflight checks it before spending; and
+the guard test now exercises the real path construction, since the version that missed this had
+monkeypatched away the very function that builds the paths.
+
+**The scanner reads paths, not prose, and that distinction is what keeps it usable.** Its first
+version ran the word list over whole records and reported forty-nine leaks over five records, of
+which one was real — the others were an abstract saying *probe*, a fit called an *anchor*, and the
+actor's own model name. A guard that cries wolf is one somebody switches off over the run that
+matters. So the list is applied to the path-shaped substrings a record contains, and separately, as
+an exact match, to the few strings that cannot occur in scientific prose. Coverage is reported
+beside the findings, because a clean scan over a dump holding only the librarian says nothing about
+the lead. The author is absent from the dump entirely — it is a subprocess speaking its harness's
+own protocol — so its paths are read from the run's ledger instead.
+
+### The channel that is measured rather than closed
+
+The run directory is a read root for the lead and the reviewer, and it holds a console log whose
+lines are prefixed `role(model)` for every role, plus a ledger carrying a `role/member` on every
+cost line. Either one, read whole, hands an actor the whole arm.
+
+Production makes that root readable deliberately -- a role investigating its own run is a feature,
+and it is how the status reporter works at all -- so closing it would make this benchmark's
+pipeline differ from the one it claims to measure, on the strength of a behaviour no run has been
+observed to exhibit. The handling is therefore to **detect**: the scan reports any actor tool call
+whose arguments name one of those files. A trial where nothing touched them is clean; a trial where
+something did is a contaminated trial that is known rather than one that is not. If prevention is
+later preferred, the mechanism exists already -- the filesystem guard denies specific basenames
+inside an allowed root -- and it is a per-trial addition to that list.
+
+This was found by an audit of the first live ledger, not by design review: the paths a trial is
+*handed* had been checked, and the files sitting inside them had not.
+
 ## 3. Interfaces / Contracts
 
 | Symbol | Meaning |
@@ -201,6 +327,61 @@ one must spend a rework round or stop.
 | `schedule(slots, ceilings=None) -> list[list[RunSlot]]` | A planning aid that packs slots into waves respecting every ceiling; raises rather than looping if a single run cannot meet one. |
 | `without_recording(slot) -> RunSlot` | The same slot as an ordinary batched run, which is what makes "block 0 counts" checkable. |
 | `BRAND_COLOURS` | Vendor identity for the figures, shared with `author_bench` so the two sweeps read as one campaign. |
+| `CAMPAIGN_WORDS` / `forbidden_in_path(path)` | What may never appear in a path an actor is handed, and everything in one that does. Campaign words matched as substrings (the leak was a directory name inside a longer path); seat identities as whole tokens (three letters of a vendor appear inside ordinary words). |
+
+### `environment` — a trial's private world
+
+| Symbol | Meaning |
+|---|---|
+| `TrialEnvironment` | Where one trial's configuration, toolkit, data and runtime directory live. |
+| `TrialEnvironment.run_dir` | The run's own directory, derived from *this* trial's runtime root — which is how a batch watches a run it is not configured like. |
+| `TrialEnvironment.process_env(base?)` | The caller's environment plus the configuration-directory variable. |
+| `materialize(arm, run_id, *, workspace_root, base_ref, …)` | Build the world and return where everything landed. Refuses a root whose path carries anything an actor must not read. |
+| `models_config(arm, source)` | The trial's `models.yaml`: the arm's five seats written, every other role copied. Pure. |
+| `orchestration_config(source, *, toolkit_root, runtime_dir, papers_dir, obs_root)` | The live one with its four paths redirected **and its allow-list rewritten**. Pure. |
+| `observations_config(obs_root)` | One line, pointing at the private copy. |
+| `clone_toolkit(dest, source, base_ref, branch)` | A private checkout at the pinned base on the branch the runtime authors onto; returns the base SHA. |
+| `copy_observation(source, dest)` | Copy one observation's archive files and only those; returns what was taken and what was left. |
+| `build_observation_database(dest, source, obsids, mission, toolkit_root)` | The private database, catalog reconciled by the toolkit's own recovery path. |
+| `teardown(environment, *, keep_artifacts=True)` | Reclaim the toolkit checkout and the data copy; keep the runtime directory the scoring pass reads. |
+| `QUESTION_OBSIDS` / `QUESTION_MISSION` / `RAW_DIRECTORIES` / `RAW_FILES` / `RAW_EVENT_LIST` | The observations, and the archive-file allow-list that keeps earlier runs' answers out. |
+
+### `request` — the frozen question
+
+| Symbol | Meaning |
+|---|---|
+| `load_request()` | The question, context and constraints, as the pipeline's own request type. |
+| `quantities()` | The fourteen quantities and units, in the order the question lists them, keyed to the answer key's own labels. |
+| `request_provenance()` | Where it came from, what was added, and the run it is comparable to. |
+| `request_sha256()` | The hash stamped into every batch. |
+
+### `trial` — one run
+
+| Symbol | Meaning |
+|---|---|
+| `TrialConfig` | Workspace, records directory, base ref, stamps, chatter, retention, poll interval. |
+| `run_trial(slot, cfg) -> dict` | One whole research run; returns its record. Never raises. |
+| `build_argv(run_id, chatter)` | The production command, with the human channel explicitly closed. |
+| `launch(environment, *, chatter, prompt_dump=None)` | Spawn it orphaned into its own configuration; `prompt_dump` is block 0's verbatim recording. |
+| `wait_for(run_dir, *, poll_seconds)` | Block until terminal; liveness is process existence, never log freshness. |
+| `summarise_ledger(path)` | Rounds, tools committed, scan hits, spend by role, and how often the tree wanted a human. |
+| `measured_outcome(result, ledger)` | What the run concluded — every value of which is a correct outcome. |
+| `collect_stamps(toolkit_source, base_ref)` | Code, base, gate configuration and question, so two batches can be told apart. |
+| `append_record` / `load_records` | Durable per-trial append; tolerant read for a live batch. |
+| `BASE_REF` | `5accf33` — the toolkit state before this question's own tool chain existed. |
+
+### `__main__` — the CLI
+
+| Symbol | Meaning |
+|---|---|
+| `preflight(slots, *, workspace)` | Every check decidable without a model call; returns the problems, empty if good. |
+| `run_batch(slots, cfg, *, concurrency)` | Run the slots under the roster's vendor ceilings and the global limit. |
+| `scan_prompts(path)` | Leaks in a verbatim dump, and which actors it covers. |
+| `scan_ledger_paths(path)` | The author's half, read from the ledger its prompts never reach. |
+| `scan_actor_reads(path)` / `SEAT_NAMING_ARTIFACTS` | Whether any actor read a run artifact that names every seat. Matches the filenames inside a tool call's *arguments*, since every ledger line contains its own run's paths. |
+| `batch_status(dir)` | Progress read from the records; costs nothing. |
+| `parse_slots(spec)` | `None` = all of block 1; `'2-11'` / `'1,4,7'` = exactly those. |
+| `DEFAULT_WORKSPACE` | Where trial worlds are built. Outside the allow-list, and empty of meaning. |
 
 Invariants a caller may rely on, each pinned by a test: block 1 is balanced as described; run ids
 are unique across the whole campaign and carry no part of their condition; `BLOCK0 is BLOCK1[0]`;
@@ -210,11 +391,16 @@ decorrelated from each other.
 
 ## 4. Dependencies
 
-Nothing. The module is frozen dataclasses and pure functions over the standard library — no
-pipeline import, no configuration read, no filesystem, no network. That is deliberate: the design
+`arms` depends on nothing: frozen dataclasses and pure functions over the standard library, no
+pipeline import, no configuration read, no filesystem, no network. That is deliberate — the design
 has to be reviewable and testable before any of the machinery that spends money exists.
 
-Its tests need only `pytest`. Nothing depends on this package.
+The rest import `auto_research.config_paths` (the configuration seam), `auto_research.schemas` (the
+request type), and, at launch time only, `auto_research.env`, `auto_research.graph.detached` and
+`auto_research.models.types`. A trial's *process* is the production entry point, so at run time the
+dependency is the whole pipeline plus the analyst environment with the science stack, the
+`research_toolkit` checkout the trials clone from, and the observation archive they copy from.
+Nothing depends on this package.
 
 ## 5. Dictionary-level reference
 
@@ -238,6 +424,18 @@ Its tests need only `pytest`. Nothing depends on this package.
   from the totals.
 - **`RunSlot.verbatim_recording`** — set only on block 0. Instrumentation on the harness side of the
   boundary: it changes what is written down, never what any actor is sent.
+- **`RAW_EVENT_LIST`** — the archive's own naming for an event list, and the only thing copied out
+  of the event directory. Everything else there was produced by an earlier run, the polarization
+  cubes included.
+- **`copy_observation`** — copying nothing raises rather than returning an empty directory: a
+  filter that has drifted from the layout would otherwise produce a trial that runs and fails as
+  science, which reads as a weak arm.
+- **`TrialConfig.keep_artifacts`** — on by default. The runtime directory is the entire input to
+  the offline scoring pass.
+- **`run_trial`** — never raises: a broken trial is recorded with an infrastructure status so one
+  failure cannot end a batch of fourteen multi-hour runs.
+- **`RunSlot.verbatim_recording` → `launch(prompt_dump=…)`** — switches on the pipeline's own
+  recording. Additive by construction: it changes what is written down, never what is sent.
 - **`schedule`** — a planning aid, not the runtime scheduler. Real runs finish at different times,
   so a live batch refills from a queue rather than running in lockstep; the value of this function
   is that it terminates with no empty wave, which is what proves no arm is permanently inadmissible
@@ -259,3 +457,24 @@ Its tests need only `pytest`. Nothing depends on this package.
   `high`; `max` is unverified against all four Responses-dialect vendors, and an unaccepted effort
   string rejects every call rather than degrading it. Kept as one constant so a probe that
   establishes `max` changes one line.
+- **2026-09-01** — Steps 2b, 3, 4 and 5. `environment` builds a trial's private world (config
+  directory, toolkit clone at the pinned base on the authoring branch, per-file-filtered
+  observation copy with the catalog reconciled by the toolkit's own recovery path, private runtime
+  and papers directories); `request` freezes the recovered question plus the fourteen-quantity step
+  and hashes it; `trial` launches the production entry point into that world, waits, and records
+  one row separating infrastructure from measurement; `__main__` adds the preflight, the
+  vendor-ceiling scheduler, the status view and the leak scanner. Verified live with no model
+  spend: materialisation takes about a minute and 4 GB, reduces 1,023 + 321 event files to 6 + 6,
+  and a process launched against the result resolves every seat, path and allow-list root to the
+  trial with the catalog health check passing.
+  **Block 0's first launch leaked and was killed five minutes in**: the workspace was named
+  `science_bench`, which reached the librarian's verbatim prompt inside every downloaded-paper
+  path. Fixed structurally — a word list beside the roster, a refusal in the world-builder, a
+  meaningless default workspace name, a preflight check, and a guard test that exercises the real
+  path construction rather than a stub of it (the version that missed this had monkeypatched away
+  the function that builds the paths). The scanner that found it then had to be narrowed from whole
+  records to path-shaped substrings: over five records it reported forty-nine leaks of which one
+  was real, the rest being an abstract saying *probe*, a fit called an *anchor*, and the actor's own
+  model name. Relaunched clean. 98 tests; suite 1,366.
+  One production change came with this: the orphaning spawner takes an optional environment
+  addition, which is how a trial process is pointed at its own configuration.

@@ -593,6 +593,64 @@ def schedule(slots: Sequence[RunSlot], ceilings: dict[str, int] | None = None) -
     return waves
 
 
+# ── What may never appear in a path an actor is handed ──────────────────────
+
+
+#: Words that would tell an actor it is inside an experiment, matched anywhere in a path.
+#:
+#: Not the arm -- something worse and easier to miss. A model that learns it is being benchmarked
+#: behaves differently whatever its seat: on 2026-08-27 a reviewer quoted the benchmark's own
+#: framing back in its rationale. Substring rather than token matching, because the leak this list
+#: exists for was the campaign's own directory name embedded in a longer path.
+CAMPAIGN_WORDS: tuple[str, ...] = (
+    "science_bench", "sciencebench", "sweep", "replicate", "treatment",
+    "block0", "block1", "block2",
+)
+
+#: Words dropped from the list above, kept here with the reason so nobody re-adds them.
+#:
+#: ``benchmark``/``bench`` are hopeless **in this campaign specifically**: the science question is
+#: an independent reproduction benchmarked against a published paper, so the word is in the
+#: dispatched prescription, in the reviewer's instructions and in the toolkit's own vocabulary.
+#: It also matched ``ixpeobssim``'s own ``ixpeobssimdata/benchmarks`` directory. The distinctive
+#: string ``science_bench`` is matched exactly and separately, which is what actually mattered.
+#:
+#: ``anchor``, ``control``, ``experiment`` and ``probe`` are ordinary astrophysics: a fit is
+#: anchored, a corona controls cooling, relaxation experiments are a modelling term, and X-ray
+#: polarimetry probes geometry. Together they produced 47 false positives in one run.
+RETIRED_WORDS: tuple[str, ...] = (
+    "benchmark", "bench", "anchor", "control", "experiment", "probe",
+)
+
+
+def forbidden_in_path(path: object) -> list[str]:
+    """Everything in ``path`` that an actor must not be able to read there.
+
+    Two kinds, matched two ways. Campaign words are matched as substrings, because the leak that
+    produced this function was the word ``science_bench`` sitting inside a longer directory name.
+    Seat identities -- vendors, models, level slugs -- are matched as whole tokens, since three
+    letters of a vendor name appear inside ordinary words and a guard that cries wolf is one
+    somebody turns off.
+
+    Returns the offending strings so a failure can name them, rather than a bare boolean.
+    """
+    import re as _re
+
+    text = str(path).lower()
+    found = [word for word in CAMPAIGN_WORDS if word in text]
+
+    seats = {seat.slug for seat in (*LEADS, *REVIEWERS, CODER, COLEAD)}
+    seats |= {seat.model.lower() for seat in (*LEADS, *REVIEWERS, CODER, COLEAD)}
+    seats |= {seat.provider for seat in (*LEADS, *REVIEWERS, CODER, COLEAD)}
+    seats |= {pair.slug for pair in WORKER_PAIRS}
+    for pair in WORKER_PAIRS:
+        for member in pair.members:
+            seats |= {member.slug, member.model.lower(), member.provider}
+    tokens = set(_re.split(r"[^a-z0-9.]+", text))
+    found += sorted(seat for seat in seats if seat.lower() in tokens)
+    return sorted(set(found))
+
+
 def without_recording(slot: RunSlot) -> RunSlot:
     """The same slot as a batched run: identical but for the recording flag.
 

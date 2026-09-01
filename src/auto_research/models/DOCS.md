@@ -459,12 +459,15 @@ turns on one distinction:
   model group. Method: `member(name: str) -> ModelHandle`.
 - `REQUIRED_ROLES` — required role names that must appear in config: `reviewer`,
   `analyst_lead`, `analyst_worker`, `librarian_io`, `coder`, `analyst_colead`.
-- `DEFAULT_CONFIG_PATH` — default path to `config/models.yaml`.
+- The default `models.yaml` comes from `auto_research.config_paths.models_yaml()`, resolved per
+  call, so a process pointed at another configuration resolves its roles from that one. The old
+  `DEFAULT_CONFIG_PATH` constant is gone: a module-level default argument is evaluated at import
+  and cannot see an override set afterwards.
 - `ModelRegistry(config: ModelsConfig)` — loaded registry. Method:
   `resolve(role: str) -> ModelGroupHandle`.
-- `load_registry(path: str | Path = DEFAULT_CONFIG_PATH) -> ModelRegistry` —
+- `load_registry(path: str | Path | None = None) -> ModelRegistry` —
   load and validate a registry from YAML.
-- `resolve(role: str, path: str | Path = DEFAULT_CONFIG_PATH) ->
+- `resolve(role: str, path: str | Path | None = None) ->
   ModelGroupHandle` — convenience role resolver.
 - `provider_for(name: ProviderName) -> ModelProvider` — construct a provider
   adapter for a config provider. A provider outside `CHAT_PROVIDERS` gets a

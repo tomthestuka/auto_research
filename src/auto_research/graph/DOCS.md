@@ -214,7 +214,10 @@ verdicts, two iteration counters, and the cap.
   the run computed).
 - `_default_graph()` — synchronous; builds the compiled graph with all defaults from
   config. Called at import time by `serve.py` for LangGraph Studio.
-- `load_orchestration_config(path?)` — loads `config/orchestration.yaml`; returns dict.
+- `load_orchestration_config(path=None)` — loads the configured `orchestration.yaml`; returns a
+  dict. `None` asks `auto_research.config_paths`, resolved per call rather than captured as a
+  default argument (which would be evaluated at import and pin the answer before a caller could
+  point the process elsewhere).
 - `serve.py` — LangGraph Studio entry point; exposes `graph = _default_graph()` at
   module level so `langgraph dev` can import it. Referenced by `langgraph.json`.
 - `DEFAULT_WORKER_COUNT` — default analyst worker count (currently 2).
@@ -238,7 +241,8 @@ Compacted 2026-09-01: entries through 2026-07-31 folded into themed ranges (deta
   `run_id`, with `overwrite` guarded by process-based liveness and `RunDied` on a dead run. Two live
   failures followed: liveness now treats a **zombie** as dead (a backend that died at preflight stays
   unreaped in the notebook kernel's process table, and `overwrite=True` refused with a useless "kill
-  <pid>" hint — a zombie ignores signals), and `_spawn_orphaned` **double-forks** so the backend is
+  <pid>" hint — a zombie ignores signals), and `_spawn_orphaned(argv, log_path, env=None)`
+  **double-forks** so the backend is
   reparented to init at spawn — a real VSCode logout killed a live run because graceful teardown kills
   process *trees* by walking `/proc` parent→child links, which `start_new_session` does not sever (the
   original verification had SIGKILLed the kernel, so no cleanup ran and the gap never showed).

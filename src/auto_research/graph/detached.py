@@ -198,10 +198,14 @@ def reconstruct_run(request: ResearchRequest | str, run_directory: Path, run_id:
 # Runs in a short-lived intermediary interpreter: spawn the backend in its own session,
 # report its pid on stdout, exit. The intermediary's death orphans the backend at once.
 _ORPHAN_SPAWNER = """\
-import json, subprocess, sys
+import json, os, subprocess, sys
 argv = json.loads(sys.argv[1])
+env = json.loads(sys.argv[3]) if len(sys.argv) > 3 else None
 with open(sys.argv[2], "a", encoding="utf-8") as log:
-    proc = subprocess.Popen(argv, stdout=log, stderr=log, start_new_session=True)
+    proc = subprocess.Popen(
+        argv, stdout=log, stderr=log, start_new_session=True,
+        env=(dict(os.environ, **env) if env else None),
+    )
 print(proc.pid, flush=True)
 """
 # Opened for APPEND, not write: a resumed run re-spawns the backend over the same `backend.log`,
@@ -210,7 +214,9 @@ print(proc.pid, flush=True)
 # `overwrite=True`, which removes the run dir first.
 
 
-def _spawn_orphaned(argv: list[str], log_path: Path) -> int:
+def _spawn_orphaned(
+    argv: list[str], log_path: Path, env: dict[str, str] | None = None
+) -> int:
     """Spawn ``argv`` detached **and orphaned** (double-fork) and return its pid.
 
     ``start_new_session`` alone shields the backend from signals and from the kernel
@@ -218,10 +224,18 @@ def _spawn_orphaned(argv: list[str], log_path: Path) -> int:
     VSCode/Jupyter teardown kills process TREES by walking exactly that link (observed
     2026-07-16: a logout killed a live detached run seconds before reconnect, while
     unrelated user processes survived). A short-lived intermediary starts the backend
-    and exits immediately, reparenting it to init: no ancestry, nothing to walk."""
+    and exits immediately, reparenting it to init: no ancestry, nothing to walk.
+
+    ``env`` **adds to** the caller's environment rather than replacing it, so a caller can
+    hand the backend one variable — which is how a process is pointed at a configuration
+    other than the repository's — without having to reconstruct a working environment for
+    a science stack it does not know the shape of. The default is unchanged: inherit."""
+    argv_json = json.dumps(argv)
+    command = [sys.executable, "-c", _ORPHAN_SPAWNER, argv_json, str(log_path)]
+    if env:
+        command.append(json.dumps(env))
     helper = subprocess.run(
-        [sys.executable, "-c", _ORPHAN_SPAWNER, json.dumps(argv), str(log_path)],
-        capture_output=True, text=True, timeout=60, check=True,
+        command, capture_output=True, text=True, timeout=60, check=True,
     )
     return int(helper.stdout.strip())
 

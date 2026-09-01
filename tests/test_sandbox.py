@@ -621,3 +621,43 @@ class TestBashExecIsolation:
         assert elapsed < 3, "did not return at the timeout — group kill/drain hung"
         time.sleep(3.5)  # long enough for a surviving grandchild to have run
         assert not marker.exists(), "grandchild survived the timeout process-group kill"
+
+
+def test_the_jail_supersedes_the_command_scan_without_blocking_everything(monkeypatch, tmp_path):
+    """Retiring the shell-command path scan must mean 'nothing denied', not 'deny with no reason'.
+
+    `forbidden_in_command` returns `None` for a clean command and a string for a denied one, and
+    the caller tests `is not None`. Returning an empty list to mean 'skip the check' therefore
+    rejected EVERY shell command — a total block dressed as a relaxation. Caught by the existing
+    sandbox tests before it reached a paid run; pinned here so it cannot come back.
+    """
+    import asyncio
+
+    from auto_research.agents import react
+    from auto_research.agents.react import SandboxToolProvider
+
+    sb = _FakeSandbox(mcp_fn=lambda k, a: {"exit_code": 0, "stdout": a.get("command", ""), "stderr": ""})
+    reg = _FakeRegistry(known={"mcp.builtin.bash_exec"}, mcp={"mcp.builtin.bash_exec"})
+
+    for jailed in (True, False):
+        monkeypatch.setattr(react, "_jail_supersedes_command_check", lambda: jailed)
+        prov = SandboxToolProvider(reg, sb, cwd=tmp_path)
+        out = asyncio.run(prov.execute("mcp.builtin.bash_exec", {"command": "echo hi"}))
+        assert not out.is_error, f"a clean command was rejected with jail={jailed}"
+        assert "path not permitted" not in out.text
+
+
+def test_a_denied_path_is_still_denied_when_no_jail_is_running(monkeypatch, tmp_path):
+    """The scan stays in force on a host with no kernel enforcement to fall back on."""
+    import asyncio
+
+    from auto_research.agents import react
+    from auto_research.agents.react import SandboxToolProvider
+
+    monkeypatch.setattr(react, "_jail_supersedes_command_check", lambda: False)
+    sb = _FakeSandbox(mcp_fn=lambda k, a: {"exit_code": 0, "stdout": "", "stderr": ""})
+    reg = _FakeRegistry(known={"mcp.builtin.bash_exec"}, mcp={"mcp.builtin.bash_exec"})
+    prov = SandboxToolProvider(reg, sb, cwd=tmp_path)
+    prov._guard = react.PathGuard(roots=[tmp_path])
+    out = asyncio.run(prov.execute("mcp.builtin.bash_exec", {"command": "cat /etc/shadow"}))
+    assert out.is_error and "path not permitted" in out.text

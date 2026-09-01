@@ -34,21 +34,64 @@ def test_readonly_provider_denies_governance_files(tmp_path):
     assert not asyncio.run(p.execute("read_file", {"path": str(tmp_path / "notes.py")})).is_error
 
 
-def test_worker_sandbox_guard_blocks_auto_research(tmp_path):
-    """Workers' builtin file tools are jailed to the allow-list; auto_research is denied."""
+def test_worker_file_tools_deny_auto_research(tmp_path):
+    """The in-process file tools are the guard's own job, and it is the only thing doing it.
+
+    `read_file`/`list_dir` run inside the orchestrator, so no OS jail can reach them; this check is
+    all that stands between a role and the orchestration repo (§2/§4).
+    """
     if not load_fs_allowlist():
-        pytest.skip("agent_fs_allow not configured — jail inactive")
+        pytest.skip("agent_fs_allow not configured — guard inactive")
 
     class _Reg:
         def kind_for_function(self, name):
             return f"mcp.builtin.{name}"
 
     p = SandboxToolProvider(_Reg(), sandbox=None, cwd=tmp_path)  # guard denies before sandbox use
+    out = asyncio.run(p.execute("read_file", {"path": "/data/fzhou/auto_research/x.py"}))
+    assert out.is_error and "not permitted" in out.text
+
+
+def test_shell_commands_are_confined_by_whichever_layer_is_actually_running(tmp_path, monkeypatch):
+    """Two mechanisms, one property, and which one applies depends on the host.
+
+    With an OS jail running, the orchestration repo is not in the mount namespace at all, so the
+    command-string scan is redundant and is retired -- it enforced nothing the kernel does not, and
+    cost false positives (a python glob reading as a path, a `cwd`-relative path reading as
+    absolute). Without a jail there is no kernel enforcement to fall back on, so the scan stays.
+
+    This test asserts the *second* half directly, because a unit test cannot observe a mount
+    namespace; the jail's own suite covers that side.
+    """
+    from auto_research.agents import react
+
+    if not load_fs_allowlist():
+        pytest.skip("agent_fs_allow not configured — guard inactive")
+
+    class _Reg:
+        def kind_for_function(self, name):
+            return f"mcp.builtin.{name}"
+
+    monkeypatch.setattr(react, "_jail_supersedes_command_check", lambda: False)
+    p = SandboxToolProvider(_Reg(), sandbox=None, cwd=tmp_path)
     out = asyncio.run(p.execute(
         "bash_exec", {"command": "cat /data/fzhou/auto_research/src/auto_research/sandbox/gate.py"}))
     assert out.is_error and "not permitted" in out.text
-    out2 = asyncio.run(p.execute("read_file", {"path": "/data/fzhou/auto_research/x.py"}))
-    assert out2.is_error and "not permitted" in out2.text
+
+    # And with a jail running the same command is passed through to the sandbox, where the kernel
+    # confines it -- the point being that it is no longer rejected *here*.
+    monkeypatch.setattr(react, "_jail_supersedes_command_check", lambda: True)
+    p2 = SandboxToolProvider(_Reg(), sandbox=None, cwd=tmp_path)
+    try:
+        out2 = asyncio.run(p2.execute(
+            "bash_exec",
+            {"command": "cat /data/fzhou/auto_research/src/auto_research/sandbox/gate.py"}))
+        message = out2.text
+    except Exception as exc:  # noqa: BLE001 — it got past the guard and into the fake registry
+        message = f"{type(exc).__name__}: {exc}"
+    # Whatever happens next, it is no longer a path rejection: the command went on to the sandbox,
+    # which is where the kernel confines it.
+    assert "not permitted" not in message
 
 
 def _names(provider):

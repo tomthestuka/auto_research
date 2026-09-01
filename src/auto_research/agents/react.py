@@ -23,6 +23,21 @@ from typing import Any, Protocol
 from auto_research.env import tool_search_config
 from auto_research.observations import load_observations_config
 from auto_research.sandbox.fs_guard import GOVERNANCE_BASENAMES, PathGuard
+
+
+def _jail_supersedes_command_check() -> bool:
+    """Whether an OS jail is actually running, making the shell-command path scan redundant.
+
+    Both halves are required: configured **and** available. A host without ``bwrap``, or with user
+    namespaces denied, keeps the old best-effort scan rather than losing confinement entirely --
+    that host has no kernel enforcement to fall back on.
+    """
+    try:
+        from auto_research.sandbox.jail import jail_available, jail_enabled
+
+        return bool(jail_enabled()) and bool(jail_available()[0])
+    except Exception:  # noqa: BLE001 — a guard that cannot decide keeps the stricter behaviour
+        return False
 from auto_research.schemas import (
     DocumentRef,
     FigureCitation,
@@ -1224,11 +1239,24 @@ class SandboxToolProvider:
             args["cwd"] = str(self.cwd)
 
         # Filesystem allow-list on the builtin file tools (the raw read/list/bash surface).
-        # bash_exec is checked by the absolute paths it NAMES (best-effort); read_file/list_dir
-        # by their target. Denies the auto_research repo + governance files (§2/§4).
+        # read_file/list_dir are checked by their target and always: they run IN THIS PROCESS, so
+        # no OS jail can reach them, and this guard is the only thing standing between the lead or
+        # the reviewer and the filesystem (§2/§4). bash_exec is different -- see below.
         denied = None
         if kind == "mcp.builtin.bash_exec":
-            denied = self._guard.forbidden_in_command(args.get("command", ""))
+            # Superseded by the OS jail where one is running. The command check scans a command
+            # STRING for absolute-looking substrings, which enforces nothing the kernel jail does
+            # not already enforce -- and the jail also catches the implicit reads a string scan
+            # cannot see. What the string scan does add is false positives: a python glob
+            # `f'{root}/{o}/event_l2/ixpe{o}_det*'` reads as a path `/event_l2/ixpe`, and a path
+            # relative to a `cwd` reads as `/pcube_timeseg_01002901.csv`. Measured 2026-09-01: four
+            # rejections in one run across two actors, three of them consecutive on one worker,
+            # each costing a loop iteration. A model that exhausts its budget fighting a path
+            # checker is indistinguishable from one that could not do the work.
+            # `None` means "nothing denied" here -- an empty list would be a *rejection* with an
+            # empty reason, i.e. every shell command blocked. The suite caught exactly that.
+            denied = None if _jail_supersedes_command_check() else \
+                self._guard.forbidden_in_command(args.get("command", ""))
         elif kind in ("mcp.builtin.read_file", "mcp.builtin.list_dir"):
             target = args.get("path")
             if target is not None and not self._guard.is_allowed(target):
