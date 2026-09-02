@@ -754,3 +754,32 @@ Compacted 2026-09-01: entries through 2026-08-28 folded into themed ranges (deta
   unset the cost is one `os.environ.get` and the request is byte-identical; serialization is
   best-effort (`default=str`) and dump failures are swallowed so the hook can never fail a run.
   Evidence use: `logs/dev/leak-scan/20260827T093104Z/prompts_readable.txt`.
+- 2026-09-02 — **The per-call output cap is gone wherever it is optional** (user ruling). A cap buys
+  no cost protection: a vendor bills the tokens it generated either way, so the cap's only effect
+  is on the call that hits it — and the failure it produces is total. Measured the same day with
+  `tests/test_live_form_shapes.py`: `deepseek-v4-pro` at `reasoning.effort: high`, sent the real
+  `author_chain` tool under `max_output_tokens: 8000`, returned an **empty 200** —
+  `output_tokens: 8000, reasoning_tokens: 8000`, `provider_parts: ['reasoning']`. It had spent the
+  entire allowance reasoning about a large tool schema and emitted nothing, billed in full.
+  **The margin is the part worth keeping:** at 21,000 the same call filed a correct two-link
+  chain, and **uncapped it used 19,772 output tokens of which 17,458 were reasoning** — so the
+  figure that looked generous was within ~6% of choking as well, and a slightly harder brief would
+  have taken it out too. Uncapped it also filed *three* links rather than two, with a real `None`
+  in the optional float on the third (no `"null"`-string quirk on this path). The cap was the whole
+  cause, and no safe value for it was ever identifiable from the outside. Paying for
+  nothing is strictly worse than the unbounded case, and inside a benchmark trial a choked lead
+  call is a *corrupted* measurement rather than a cheap one. `max_output_tokens` is therefore
+  dropped from every Responses-dialect member on a substantive path (`_responses.py` splats
+  `**config.parameters`, so omitting the key omits it from the request and the vendor uses its own
+  maximum) and from all four vendors in `benchmarks/science_bench/arms._PINNED_PARAMETERS`.
+  **Anthropic keeps its number and must**: the Messages API requires `max_tokens` and
+  `providers/anthropic.py` falls back to **1024** without it, so removing it there would be a
+  silent 20x truncation — the exact failure the ruling targets. 21000 is the ceiling for
+  non-streaming calls (21333), i.e. the maximum available rather than a choice, and the librarian's
+  Anthropic member was raised from 12000 to it (its "light role, small outputs" figure was a guess,
+  and adaptive thinking shares that budget). Two caps left in place deliberately: `status_monitor`
+  at 2048, whose tightness is a *latency* decision with a stated reason and which sits on no
+  measured path, and the `coder` member's, which is dead config (an author is a harness subprocess,
+  never a `ModelHandle`). **The trade, stated:** a cap does bound the worst case of one pathological
+  call and removing it removes that bound; the choke has now been measured and the runaway has not,
+  which is what makes the trade the right way round rather than free.

@@ -47,20 +47,22 @@ load_dotenv()
 # every seat that could ever be handed this tool. Model ids are named here the way
 # `tests/test_live_schema_matrix.py` names them: a live test states the vendor build it measured,
 # while the runtime still resolves its own models from config.
-# The output budget is 21,000, which is what `config/models.yaml` gives every top-tier seat and
-# what `benchmarks/science_bench/arms.py` pins for every vendor. It is not a round number chosen
-# here: at 8,000 this test measured `deepseek-v4-pro` returning an empty 200 on the real form —
-# `output_tokens: 8000, reasoning_tokens: 8000, parts: ['reasoning']`, i.e. `high` effort spent the
-# entire budget reasoning about a large tool schema and emitted nothing. That is a fact about the
-# budget, not about the form, and a live test that sends a request production never sends measures
-# the wrong thing. (It is also why the first record was misleading: it said only `text: ""`, which
-# reads as "the model said nothing" — hence the `usage` in every record below.)
+# No per-call output cap on the Responses-dialect vendors, which is what production sends after
+# the 2026-09-02 ruling — and this test is where the reason was measured. At 8,000,
+# `deepseek-v4-pro` at `high` effort returned an empty 200 on the real form:
+# `output_tokens: 8000, reasoning_tokens: 8000`, `parts: ['reasoning']`. It had spent the entire
+# allowance reasoning about a large tool schema and emitted nothing — billed in full, delivering
+# nothing, which is strictly worse than no cap at all. Anthropic keeps a number because its
+# Messages API requires one and the adapter falls back to 1024 without it.
+#
+# It is also why every record below carries `usage`: the first one recorded only `text: ""`, which
+# reads as "the model said nothing" and hides the actual cause.
 MEMBERS = [
     ("anthropic", "claude-opus-5", {"thinking": {"type": "adaptive"}, "max_tokens": 21000}),
-    ("openai", "gpt-5.6-sol", {"max_output_tokens": 21000, "reasoning": {"effort": "high"}}),
-    ("dashscope", "qwen3.8-max", {"max_output_tokens": 21000, "reasoning": {"effort": "high"}}),
-    ("zai", "glm-5.3", {"max_output_tokens": 21000, "reasoning": {"effort": "high"}}),
-    ("deepseek", "deepseek-v4-pro", {"max_output_tokens": 21000, "reasoning": {"effort": "high"}}),
+    ("openai", "gpt-5.6-sol", {"reasoning": {"effort": "high"}}),
+    ("dashscope", "qwen3.8-max", {"reasoning": {"effort": "high"}}),
+    ("zai", "glm-5.3", {"reasoning": {"effort": "high"}}),
+    ("deepseek", "deepseek-v4-pro", {"reasoning": {"effort": "high"}}),
 ]
 
 # Domain-neutral in its shape and specific in its content: one capability that exists in `lib/`

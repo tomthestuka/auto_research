@@ -100,12 +100,24 @@ PRICES_UNREAD: tuple[str, ...] = ("glm-5.3-flash",)
 #: that establishes ``max`` changes one line rather than four.
 PINNED_EFFORT = "high"
 
+# No per-call output cap on the four Responses-dialect vendors (user ruling 2026-09-02). A cap
+# buys no cost protection — a vendor bills the tokens it generated either way — while a cap that
+# is too low destroys the call it was meant to bound: measured the same day, `deepseek-v4-pro` at
+# `high` effort on the real `author_chain` tool returned an empty 200 having spent all 8,000 of
+# its allowance on reasoning (`reasoning_tokens: 8000`, the only part present). Paying in full for
+# nothing is strictly worse than the unbounded case, and a choked lead call inside a trial is a
+# corrupted measurement, not a cheap one. Omitting the key omits it from the request, so each
+# vendor uses its own maximum.
+#
+# Anthropic keeps its number because the Messages API **requires** `max_tokens` and the adapter
+# falls back to 1024 without it — removing it there would be a silent 20x truncation. 21000 is the
+# ceiling for non-streaming calls (21333), so it is the maximum available rather than a choice.
 _PINNED_PARAMETERS: dict[str, dict[str, object]] = {
     "anthropic": {"thinking": {"type": "adaptive"}, "max_tokens": 21000},
-    "openai": {"max_output_tokens": 21000, "reasoning": {"effort": PINNED_EFFORT}},
-    "zai": {"max_output_tokens": 21000, "reasoning": {"effort": PINNED_EFFORT}},
-    "dashscope": {"max_output_tokens": 21000, "reasoning": {"effort": PINNED_EFFORT}},
-    "deepseek": {"max_output_tokens": 21000, "reasoning": {"effort": PINNED_EFFORT}},
+    "openai": {"reasoning": {"effort": PINNED_EFFORT}},
+    "zai": {"reasoning": {"effort": PINNED_EFFORT}},
+    "dashscope": {"reasoning": {"effort": PINNED_EFFORT}},
+    "deepseek": {"reasoning": {"effort": PINNED_EFFORT}},
 }
 
 
