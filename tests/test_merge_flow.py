@@ -928,3 +928,82 @@ def test_an_unappliable_snapshot_is_discarded_and_authoring_starts_clean(tmp_pat
     assert resumed.restored_submission is None
     assert not snap.exists()
     assert "Restored prior work" not in resumed.initial_message
+
+
+# ── an approved commit is the new base ref (§9.9) ────────────────────────────
+
+
+def test_a_submit_after_a_commit_does_not_revert_it(tmp_path):
+    """The §9.9 gate-entry backstop must not eat ``approve_edit``'s own commit.
+
+    ``submit_for_review`` stays available after a successful commit (it is budget-free in the
+    lead's loop and the loop continues past a commit), and the backstop reverts on a moved HEAD.
+    With the base ref left at the pre-commit HEAD it cannot tell the two apart, so a second
+    submit reverted the approved commit and re-ran the whole gate+review cycle — three times on
+    one link in a live trial, at a full cycle each.
+    """
+    from auto_research.sandbox.merge_flow import approve_edit as real_approve
+
+    repo = _toolkit_repo(tmp_path)
+    (repo / "demo_utils" / "tests").mkdir(parents=True, exist_ok=True)
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "tests dir", "--allow-empty")
+    _git(repo, "checkout", "-q", "-b", "ai")
+
+    mon = _RecordingMonitor()
+    session = _direct_session(tmp_path, repo, approve_edit=real_approve, monitor=mon)
+    _coder_edits(repo)
+    gate = asyncio.run(session.run_gate_step())
+    assert asyncio.run(session.run_review_step(gate)).approved
+    sha = asyncio.run(session.commit("land it"))
+
+    assert session._base_ref == sha, "the landed commit IS the attempt's base now"
+    asyncio.run(session.run_gate_step())          # the lead submits again
+
+    assert _git_out(repo, "rev-parse", "HEAD").strip() == sha, "the approved commit survives"
+    assert not mon.of("coder.committed"), "an approved commit is not a coder slip"
+
+
+def test_a_commit_advances_the_persisted_base_ref(tmp_path):
+    """The resume-time heal resets ``--hard`` to the persisted base ref, so a commit has to
+    advance the file too — otherwise a hard kill after an approved commit heals *behind* it and
+    the tool is silently gone from the branch."""
+    from auto_research.sandbox.merge_flow import _read_persisted_base_ref, approve_edit as real_approve
+
+    repo = _toolkit_repo(tmp_path)
+    (repo / "demo_utils" / "tests").mkdir(parents=True, exist_ok=True)
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "tests dir", "--allow-empty")
+    _git(repo, "checkout", "-q", "-b", "ai")
+    run_dir = tmp_path / "run"
+    (run_dir / "authoring").mkdir(parents=True)
+
+    session = build_authoring_session(
+        _spec(), toolkit_root=repo, worktree_base=run_dir / "authoring",
+        direct_branch="ai", lead=_FakeLead(), coder=_coder_member("fake-model"),
+        run_gate=_pass_gate, run_review=_pass_review,
+        sdk_client_factory=lambda options: _FakeClient(), approve_edit=real_approve,
+    )
+    base = session._base_ref
+    assert _read_persisted_base_ref(run_dir) == base
+
+    _coder_edits(repo)
+    sha = asyncio.run(session.commit("land it"))
+    assert _read_persisted_base_ref(run_dir) == sha != base
+
+
+def test_aclose_after_a_commit_leaves_the_commit_alone(tmp_path):
+    """``aclose`` skips the failure reset once ``committed`` is set; with the base ref advanced,
+    the reset would also have nothing behind the commit to go back to."""
+    from auto_research.sandbox.merge_flow import approve_edit as real_approve
+
+    repo = _toolkit_repo(tmp_path)
+    (repo / "demo_utils" / "tests").mkdir(parents=True, exist_ok=True)
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "tests dir", "--allow-empty")
+    _git(repo, "checkout", "-q", "-b", "ai")
+
+    session = _direct_session(tmp_path, repo, approve_edit=real_approve)
+    _coder_edits(repo)
+    sha = asyncio.run(session.commit("land it"))
+    asyncio.run(session.aclose())
+
+    assert _git_out(repo, "rev-parse", "HEAD").strip() == sha
+    assert (repo / "demo_utils" / "lib" / "retbb.py").is_file()

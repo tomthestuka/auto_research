@@ -13,6 +13,7 @@ from auto_research.models.providers._media import (
     MediaLimits,
     MediaPlan,
     caption_with_note,
+    nonmedia_weight,
     plan_for_call,
 )
 from auto_research.models.types import (
@@ -120,7 +121,13 @@ class AnthropicProvider:
         max_tokens = params.pop("max_tokens", 1024)
         # One media plan for the WHOLE request: the count/dimension/payload rules are defined over
         # everything the request carries, and this is the only point that sees all of it (§stateless).
-        plan = plan_for_call(messages, images, documents, _LIMITS)
+        # The media budget is the request ceiling MINUS everything else this request
+        # carries: Anthropic's limits are "on the entire request payload, including any
+        # other content sent alongside PDFs" (.../build-with-claude/pdf-support).
+        plan = plan_for_call(
+            messages, images, documents, _LIMITS,
+            reserved_bytes=nonmedia_weight(messages, tools=tools),
+        )
         system, provider_messages = _to_anthropic_messages(messages, plan)
 
         # Documents (e.g. PDFs the reviewer opens) go at the FRONT — a stable position
@@ -229,6 +236,14 @@ class AnthropicProvider:
                     "description": tool.get("description", ""),
                     "input_schema": tool.get("input_schema", {"type": "object", "properties": {}}),
                 }
+                # Strict mode is OPT-IN per tool and off by default: without it Anthropic
+                # documents that Claude "might return incompatible types or omit required
+                # fields", which is exactly what a live lead did to a required chain
+                # (2026-09-02). A tool that asks for enforcement gets it; the schema must then
+                # sit inside the compilable subset (`additionalProperties: false` on every
+                # object, every property in `required`), which `react._strictify` guarantees.
+                if tool.get("strict"):
+                    entry["strict"] = True
                 # Deferred tools stay out of the system-prompt prefix; Claude pulls one in
                 # via the search tool, which appends a ``tool_reference`` inline in the
                 # conversation, so the cached prefix is untouched. Live-verified 2026-07-28: the

@@ -30,14 +30,20 @@ from __future__ import annotations
 
 import base64
 import io
-from collections.abc import Sequence
+import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from auto_research.schemas import DocumentRef, FigureRef
 
-from ..types import ConversationMessage, ToolResultMessage
+from ..types import ConversationMessage, ModelMessage, ToolResultMessage
 
 _MB = 1024 * 1024
+
+# Flat per-part allowance for the JSON envelope around one block (keys, quoting, commas,
+# role wrappers). Rounded generously: the reserve exists to be safe, not exact.
+_PART_OVERHEAD = 256
 
 
 @dataclass(frozen=True)
@@ -143,12 +149,15 @@ def iter_media(
     return items
 
 
-def plan_media(items: Sequence[MediaItem], limits: MediaLimits) -> MediaPlan:
+def plan_media(
+    items: Sequence[MediaItem], limits: MediaLimits, reserved_bytes: int = 0
+) -> MediaPlan:
     """Decide, for the request as a whole, what to send, shrink, or drop.
 
     Order of application: mime routing, then the per-item caps (pages, bytes, dimensions — the
     dimension cap tightens once the block count crosses the provider's threshold), then the
-    whole-request payload budget, which evicts oldest-first until the request fits.
+    whole-request payload budget, which evicts oldest-first until the request fits alongside
+    ``reserved_bytes`` of non-media content (see :func:`_apply_request_budget`).
     """
     plan = MediaPlan()
     kept: list[tuple[MediaItem, Resolved]] = []
@@ -168,7 +177,7 @@ def plan_media(items: Sequence[MediaItem], limits: MediaLimits) -> MediaPlan:
         if not resolved.dropped:
             kept.append((item, resolved))
 
-    _apply_request_budget(kept, limits)
+    _apply_request_budget(kept, limits, reserved_bytes)
     return plan
 
 
@@ -280,25 +289,38 @@ def _resolve_document(item: MediaItem, limits: MediaLimits) -> Resolved:
 
 
 def _apply_request_budget(
-    kept: list[tuple[MediaItem, Resolved]], limits: MediaLimits
+    kept: list[tuple[MediaItem, Resolved]], limits: MediaLimits, reserved: int = 0
 ) -> None:
     """Evict oldest-first, in place, until the encoded payload fits the request ceiling.
 
     Base64 inflates by 4/3, and that inflated form is what the request carries, so the budget is
     measured on the encoded size. The current turn's evidence is the most relevant, so the oldest
     media is what goes.
+
+    ``reserved`` is the weight of everything in the request that is **not** media — the system
+    prompt, the tool definitions, the whole conversation's text, the JSON scaffolding — so the
+    media budget is what is left after that, never the whole ceiling. Anthropic states the rule
+    for both of its document limits: *"Both limits are on the entire request payload, including
+    any other content sent alongside PDFs"*
+    (platform.claude.com/docs/en/build-with-claude/pdf-support). Budgeting media against the
+    full ceiling therefore admits a request the provider refuses: measured on the 413 that killed
+    run ``fbb93f26`` at its final node, two PDFs came to 33,512,296 encoded bytes against a
+    33,554,432 ceiling — the guard stopped with **42 KB** of headroom for a conversation orders
+    of magnitude larger, and no media-guard event fired.
     """
     if not limits.max_request_bytes:
         return
+    ceiling = max(0, limits.max_request_bytes - max(0, reserved))
     encoded = [(item, res, len(res.data or b"") * 4 // 3) for item, res in kept]
     total = sum(size for _, _, size in encoded)
     for item, res, size in encoded:
-        if total <= limits.max_request_bytes:
+        if total <= ceiling:
             return
         res.note = (
-            f"[withheld] {item.path.name}: {size / _MB:.1f} MB would put this request over the "
-            f"provider's {limits.max_request_bytes / _MB:.0f} MB ceiling; the most recent media "
-            "was kept."
+            f"[withheld] {item.path.name}: {size / _MB:.1f} MB does not fit the "
+            f"{ceiling / _MB:.1f} MB left for media under the provider's "
+            f"{limits.max_request_bytes / _MB:.0f} MB request ceiling once the rest of this "
+            "request is counted; the most recent media was kept."
         )
         res.data = None
         total -= size
@@ -352,14 +374,69 @@ def caption_with_note(caption: str, resolved: Resolved) -> str:
     return f"{caption}\n{resolved.note}" if resolved.note else caption
 
 
+def nonmedia_weight(
+    messages: Sequence[ConversationMessage],
+    *,
+    tools: Sequence[Mapping[str, Any]] | None = None,
+    extra: Sequence[str] = (),
+) -> int:
+    """Bytes this request will carry that are **not** media, for the payload reserve.
+
+    What each adapter passes as ``reserved_bytes`` to :func:`plan_for_call`. The whole-request
+    ceiling covers everything, so the media budget is the ceiling minus this; without it the
+    guard fills the ceiling and the conversation pushes the request over it (the 413 in
+    :func:`_apply_request_budget`).
+
+    Deliberately an estimate over the **neutral** conversation rather than a provider's assembled
+    payload: the payload cannot be built until the media plan exists, so an exact figure would be
+    circular. It counts what dominates — message text, tool-call arguments, tool-result text,
+    every verbatim provider part, and the declared tool schemas — with a flat per-part allowance
+    for JSON scaffolding, and rounds **up** wherever it is unsure, because under-reserving is the
+    failure mode that costs a request and over-reserving only withholds a figure with a note.
+    """
+    total = 0
+    for message in messages:
+        if isinstance(message, ModelMessage):
+            total += len(message.content.encode("utf-8")) + _PART_OVERHEAD
+        elif isinstance(message, ToolResultMessage):
+            for part in message.results:
+                total += len(part.content.encode("utf-8")) + len(part.tool_call_id)
+                total += len(part.name) + _PART_OVERHEAD
+        else:  # ModelResponse — the provider's own turn, replayed verbatim
+            total += len(message.content.encode("utf-8")) + _PART_OVERHEAD
+            for call in message.tool_calls:
+                total += _json_bytes(call.arguments) + _json_bytes(call.provider_fields)
+                total += len(call.name) + len(call.id) + _PART_OVERHEAD
+            for part in message.provider_parts:
+                total += _json_bytes(part) + _PART_OVERHEAD
+    for tool in tools or ():
+        total += _json_bytes(tool) + _PART_OVERHEAD
+    for text in extra:
+        total += len(text.encode("utf-8")) + _PART_OVERHEAD
+    return total
+
+
+def _json_bytes(value: Any) -> int:
+    """Serialized size of one JSON-ish payload; an unserializable value falls back to ``repr``."""
+    try:
+        return len(json.dumps(value, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return len(repr(value).encode("utf-8"))
+
+
 def plan_for_call(
     messages: Sequence[ConversationMessage],
     images: Sequence[FigureRef],
     documents: Sequence[DocumentRef],
     limits: MediaLimits,
+    reserved_bytes: int = 0,
 ) -> MediaPlan:
-    """One call: walk the whole request, then decide. What each adapter invokes."""
-    return plan_media(iter_media(messages, images, documents), limits)
+    """One call: walk the whole request, then decide. What each adapter invokes.
+
+    ``reserved_bytes`` is the non-media weight of this same request
+    (:func:`nonmedia_weight`); the media budget is the provider's ceiling minus it.
+    """
+    return plan_media(iter_media(messages, images, documents), limits, reserved_bytes)
 
 
 __all__ = [
@@ -369,6 +446,7 @@ __all__ = [
     "Resolved",
     "caption_with_note",
     "iter_media",
+    "nonmedia_weight",
     "plan_for_call",
     "plan_media",
 ]

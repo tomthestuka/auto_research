@@ -116,7 +116,13 @@ providers by editing YAML alone
 
   Checks apply in order — mime, count, pages, per-item bytes, dimensions, then the whole-request
   payload budget, which evicts **oldest-first** (the current turn's evidence is what the model is
-  reasoning about). An image that breaches a dimension or byte limit is **resized**; a document,
+  reasoning about) against the ceiling **minus the request's non-media weight**. That reserve is
+  what makes the whole-request rule real: Anthropic states both of its document limits are *"on
+  the entire request payload, including any other content sent alongside PDFs"*, so budgeting
+  media against the full ceiling admits a request the provider refuses (a live 413 with 42 KB of
+  headroom left for the conversation). Each adapter measures its own with `nonmedia_weight` and
+  passes it as `reserved_bytes`. An image that breaches a dimension or byte limit is **resized**;
+  a document,
   which cannot be, is **withheld**. Either way the block is replaced by a model-visible note naming
   the file and the reason — never a silent absence, which is what invites invention. A resize
   changes only the transmitted copy: the artifact and its `FigureRef.sha256` are untouched, so the
@@ -783,3 +789,34 @@ Compacted 2026-09-01: entries through 2026-08-28 folded into themed ranges (deta
   never a `ModelHandle`). **The trade, stated:** a cap does bound the worst case of one pathological
   call and removing it removes that bound; the choke has now been measured and the runaway has not,
   which is what makes the trade the right way round rather than free.
+
+- **2026-09-02 (second) — the media budget reserves the non-media request weight.** Run
+  `fbb93f26` died at its last node, `review_analysis`, on Anthropic `413 request_too_large`, and
+  **no media-guard event fired** — the guard had judged the payload legal. Measured from the
+  ledger: the reviewer held two PDFs (24.6 MB + 0.47 MB raw, one opened twice and deduped by
+  sha256) coming to **33,512,296 encoded bytes against the 33,554,432 ceiling**, so the guard
+  stopped with **42 KB** of headroom for a request whose system prompt, tool definitions and five
+  iterations of tool results were orders of magnitude larger. The ceiling was being applied to a
+  *subset* of what counts toward it. Anthropic states the rule for both of its document limits:
+  *"Both limits are on the entire request payload, including any other content sent alongside
+  PDFs"* (.../build-with-claude/pdf-support). New `_media.nonmedia_weight` estimates what the
+  request carries besides media — message text, tool-call arguments, tool-result text, every
+  verbatim provider part, the declared tool schemas, plus a flat per-part JSON allowance — and
+  every adapter passes it as `plan_for_call(..., reserved_bytes=…)`, so eviction now happens while
+  there is still room for the text that has to travel with it. It is deliberately an **estimate
+  over the neutral conversation**, because the payload cannot be built until the plan exists and an
+  exact figure would be circular; it rounds up, since under-reserving costs the whole request while
+  over-reserving withholds one figure with a note.
+  **No per-document byte cap was added**, and that is a reading of the docs rather than a
+  preference: the PDF page publishes only the whole-request ceiling and the page count, so a
+  per-file limit would be a number we invented — which `MediaLimits` explicitly forbids
+  (`0` means "not documented for this provider"). The deleted `_OPEN_PAPER_MAX_MB` stays deleted.
+  **Residual, stated:** eviction is oldest-first by design (the current turn's evidence is the most
+  relevant), so a single near-ceiling document now survives while several small ones are evicted
+  one at a time to make room for it. Before this change nothing was evicted and the request died,
+  so the fix is strictly better — but *which* media survives is now load-bearing where it was not.
+  **The Files API is not the escape route** and is worth recording as such: Anthropic recommends
+  `file_id` references "to keep request payloads small", but anthropic-sdk-python#1098 reports a
+  413 at ~6.49 MB of *referenced* PDFs with an ~18 KB HTTP body, i.e. an undocumented ~6.3 MB
+  combined ceiling enforced during server-side extraction, unanswered. It would trade a documented
+  32 MB ceiling for a tighter undocumented one. Four new tests in `tests/test_media_guards.py`.

@@ -27,6 +27,7 @@ import pytest
 from auto_research.models.providers._media import (
     MediaLimits,
     iter_media,
+    nonmedia_weight,
     plan_for_call,
     plan_media,
 )
@@ -294,3 +295,81 @@ def test_anthropic_adapter_resizes_a_many_image_request(tmp_path, monkeypatch):
     for block in blocks:
         data = base64.b64decode(block["source"]["data"])
         assert max(_dimensions(data)) <= 2000
+
+
+# ── the ceiling covers the whole payload, not just the media ──────────────────────────────────
+
+
+def test_the_media_budget_reserves_the_non_media_request_weight(tmp_path):
+    """Media that fits the ceiling *alone* still has to leave room for the rest of the request.
+
+    Anthropic states the rule for both document limits: "Both limits are on the entire request
+    payload, including any other content sent alongside PDFs". Budgeting media against the full
+    ceiling is what killed run `fbb93f26` at its final node with a 413 and no media-guard event:
+    two PDFs came to 33,512,296 encoded bytes under a 33,554,432 ceiling, leaving 42 KB for a
+    conversation orders of magnitude larger.
+    """
+    figures = [_figure(_png(tmp_path / f"r{i}.png", (400, 400), noisy=True)) for i in range(3)]
+    encoded = [len(f.path.read_bytes()) * 4 // 3 for f in figures]
+    conversation = [ModelMessage(role="user", content="c" * 20_000)]
+    reserve = nonmedia_weight(conversation)
+    # A ceiling the media fits exactly, and does not fit once the conversation is counted.
+    limits = MediaLimits(
+        image_mimes=frozenset({"image/png"}),
+        max_request_bytes=sum(encoded) + 1024,
+    )
+    turn = _turn_with(figures)
+
+    unreserved = plan_media(iter_media([turn]), limits)
+    assert not any(unreserved.resolve(f).dropped for f in figures), "fits on media alone"
+
+    reserved = plan_media(iter_media([turn]), limits, reserve)
+    dropped = [f for f in figures if reserved.resolve(f).dropped]
+    assert dropped, "the reserve must bite where the bare ceiling did not"
+    assert figures.index(dropped[-1]) < figures.index(figures[-1]), "oldest went first"
+    note = reserved.resolve(dropped[0]).note or ""
+    assert "left for media" in note and dropped[0].path.name in note
+
+
+def test_nonmedia_weight_counts_text_tool_defs_and_provider_parts(tmp_path):
+    """Every non-media channel that rides the request is counted, because the reserve is only
+    safe if it is not systematically low. Rounded up: under-reserving costs the whole request,
+    over-reserving withholds one figure with a note."""
+    from auto_research.models.types import ModelResponse, ToolCall
+
+    text = ModelMessage(role="user", content="u" * 5_000)
+    assert nonmedia_weight([text]) > 5_000
+
+    result = ToolResultMessage(
+        results=[ToolResultPart(tool_call_id="t1", name="read_file", content="r" * 8_000)]
+    )
+    assert nonmedia_weight([result]) > 8_000
+
+    turn = ModelResponse(
+        content="a" * 100,
+        tool_calls=[ToolCall(id="t1", name="read_file", arguments={"path": "p" * 3_000})],
+        provider_parts=[{"type": "thinking", "thinking": "z" * 4_000}],
+    )
+    assert nonmedia_weight([turn]) > 7_000
+
+    tools = [{"name": "read_file", "description": "d" * 6_000, "input_schema": {}}]
+    assert nonmedia_weight([], tools=tools) > 6_000
+
+    # Every part of one request adds up rather than any single one dominating.
+    total = nonmedia_weight([text, result, turn], tools=tools)
+    assert total > 5_000 + 8_000 + 7_000 + 6_000
+
+
+def test_an_unserializable_tool_call_argument_still_contributes_weight():
+    """The reserve never silently reads as zero because a value would not JSON-encode: an
+    under-reserve is the failure that costs a request."""
+    from auto_research.models.types import ModelResponse, ToolCall
+
+    class _Opaque:
+        def __repr__(self) -> str:
+            return "o" * 4_000
+
+    turn = ModelResponse(
+        tool_calls=[ToolCall(id="t1", name="tool", arguments={"blob": _Opaque()})]
+    )
+    assert nonmedia_weight([turn]) > 3_000

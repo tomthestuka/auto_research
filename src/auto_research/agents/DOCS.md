@@ -545,3 +545,23 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   composed `AuthoringDecision`), and `test_live_schema_matrix` keeps its `AuthoringDecision` row
   relabelled **shape-only**: no role composes it any more, but it is still the strictest shape
   this project sends and the row keeps the output-schema side from regressing silently.
+- 2026-09-02 (third) — **The context drop is LIVE-VERIFIED, and so is the rest of the cycle.** Block
+  0's fifth attempt ran the forms topology in production end to end. What the ledger shows, in
+  order: the lead read `lib/` for 11 iterations, filed `author_chain` with an **empty** chain at
+  iteration 12 — the exact state that killed the previous attempt at $19.43 — had it **rejected by
+  the handler** with a message naming the fix, refiled a real 4-link chain one turn later, and
+  opened a coding session. So the bad state is still *expressible* (no provider was enforcing
+  `minItems`, because `strict` had never been set) but is now *recoverable in one turn* rather than
+  fatal. That gap is what the same-day `strict: true` work closes.
+  **Link 1 (`ixpe_pcube_polarimetry`) committed as `4424dd0`** after 4 gate passes, 4 reviews, 3
+  rejections and 662 coder turns — `commit ⇔ gate ∧ review` held throughout, and the model never
+  issued git. Every rejection was a real defect; **two were in a `reuse_products` cache the lead
+  added itself mid-authoring**, which is a scope-creep finding recorded separately.
+  **The drop, measured at the session boundary:** link 1's conversation ended at **27 tool results /
+  ~142,739 tokens** per context edit; link 2's first edit came back at **12 results / ~78,682** —
+  a 64k reduction, and *identical* to what link 1 itself opened at, i.e. the conversation returned
+  to its pre-coding baseline instead of accumulating. Without it, link 4 would have opened carrying
+  four coder transcripts; the pre-refactor lead cleared ~86k on **every** turn with no boundary to
+  cut at. Also observed working: the budget split (`react_loop_cap` per cycle stage, the absolute
+  cap per link, `submit_for_review` exempt via `_CYCLE_FREE_TOOLS` — recorded as `free=True` with
+  the budget not advancing) and the pre-gate submission snapshot firing on every submit.

@@ -122,7 +122,10 @@ class DebateToConverge:
         A cycle that authored a chain ends before judging, because a committed tool is evidence
         the current reports predate: the workers rerun **once** on whatever committed (or on the
         failure note) and the lead judges the fresh reports in the next cycle (A8/A11). Bounded by
-        ``tool_author_cap``, which does not consume debate rounds.
+        ``tool_author_cap``, which does not consume debate rounds. The rerun is driven by the
+        **commit count**, not by which form arrived: an honest terminal filed from inside the
+        authoring stage (§9.6) ends the chain, and its committed prefix still has to become
+        callable before any report is final.
         """
 
         if not workers:
@@ -176,7 +179,16 @@ class DebateToConverge:
                 },
             )
 
-            if outcome.authored_chain:
+            if outcome.authored_chain or outcome.committed >= 1:
+                # Acting on the commit count, NOT only on which form was filed: an honest
+                # terminal (§9.6) is reachable from inside the authoring stage, and filing it
+                # there ends the CHAIN, never the analysis. Whatever committed still has to
+                # become callable before any report is final — [A11] is the only thing that
+                # makes a freshly authored tool usable in the same run, and gating the resume
+                # on `authored_chain` alone let a mid-chain terminal discard it (observed live:
+                # two gated, approved, committed tools returned `exit 127 Tool not registered`).
+                # Terminates: each pass here needs ≥1 commit and every commit spends an author
+                # credit, so `tool_author_cap` bounds how often this branch can be taken.
                 reports, task = await self._resume_after_authoring(
                     workers, task, outcome, reports
                 )

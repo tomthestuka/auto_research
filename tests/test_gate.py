@@ -604,3 +604,62 @@ def test_gate_test_timeout_malformed_tool_config_falls_back(tmp_path, monkeypatc
     (pkg / "tool_config.yaml").write_text("gate_test_timeout_s: [not, an, int]\n")
     monkeypatch.setattr(gate, "_orchestration_config", lambda: {"gate_test_timeout_s": 777})
     assert gate._gate_test_timeout(repo, collect_targets(repo)) == 777
+
+
+# ── a banned word inside a negation states the discipline (§9.5) ──────────────
+
+
+def test_a_negated_banned_word_is_a_finding_not_a_hard_fail():
+    """Prose stating the no-fabrication discipline is exactly what §9.5 asks for, and the
+    vocabulary scan used to reject a tool for saying it.
+
+    All four strings are verbatim from real toolkit diffs; the first cost the first gate
+    rejection of a live trial, one of that link's five submissions
+    (`xspec_utils/README.md:842 — banned phrase 'fabricate'`).
+    """
+    lines = [
+        '"""The module contains no table of published values, so the tool can never '
+        'back-fill or fabricate a benchmark."""\n',
+        '"""No ccf_master.csv or qu_slices CSV is fabricated in this path."""\n',
+        '"""The check runs on the committed product without any fabricated fixture."""\n',
+        '"""Runs on real, already-local data rather than a wholly-fabricated CSV."""\n',
+    ]
+    for src in lines:
+        hard, findings = scan_python_source("lib/x.py", src)
+        assert hard == [], f"{src!r} hard-failed: {[c.detail for c in hard]}"
+        assert any("negation" in c.detail for c in findings), src
+
+
+def test_a_negation_governing_another_clause_stays_a_hard_fail():
+    """The scope is the clause, not a token window.
+
+    This comment is `gate_bench`'s `fab_shell_script`, one of six planted defects the published
+    catch-rate table attributes to the scan: the negation governs *running the reduction*, and
+    the banned phrase is then the object of a positive instruction. A proximity rule reads that
+    as exculpatory and voids the cell.
+    """
+    src = '# where the reduction has not run yet, emit fake data for now\nx = 1\n'
+    hard, _ = scan_python_source("lib/x.py", src)
+    phrases = {c.detail.split("— ")[-1] for c in hard}
+    assert any("fake data" in p for p in phrases), [c.detail for c in hard]
+    assert any("for now" in p for p in phrases), [c.detail for c in hard]
+
+
+def test_a_plain_banned_word_still_hard_fails():
+    """The demotion is scoped to negation; an unqualified claim is untouched."""
+    src = '# TODO: the fabricated fallback below holds until the real binning is settled\nx = 1\n'
+    hard, _ = scan_python_source("lib/x.py", src)
+    assert any("fabricated" in c.detail for c in hard), [c.detail for c in hard]
+
+
+def test_the_negation_demotion_applies_to_non_python_files_too():
+    """A README or a shell script goes through the text scanner, and that is where the live
+    false positive landed (`xspec_utils/README.md`)."""
+    src = "The tool can never fabricate a benchmark; a missing reference is left as a gap.\n"
+    hard, findings = scan_text_source("README.md", src)
+    assert hard == [], [c.detail for c in hard]
+    assert any("negation" in c.detail for c in findings)
+
+    src2 = "# where the reduction has not run yet, emit fake data for now\n"
+    hard2, _ = scan_text_source("reduce.sh", src2)
+    assert any("fake data" in c.detail for c in hard2), [c.detail for c in hard2]

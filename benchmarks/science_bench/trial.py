@@ -188,6 +188,35 @@ async def wait_for(run_directory: Path, *, poll_seconds: float) -> str:
         await asyncio.sleep(poll_seconds)
 
 
+# ── The record against the repository ───────────────────────────────────────
+
+
+def unreachable_commits(toolkit_root: Path, commit_shas: list[str]) -> list[str]:
+    """Which SHAs the ledger recorded as committed are no longer reachable in the toolkit.
+
+    A property of the run's *record versus the repository*, which nothing inside the authoring
+    session can see: the session emits a ``commit`` event when ``approve_edit`` lands one, and a
+    later ``submit_for_review`` on the same session used to revert it (fixed by advancing the
+    per-attempt base ref on commit). That reverted three approved commits in one live trial and
+    was invisible until the git log was read by hand, because every layer of the record still
+    showed a ``commit`` event for each. This is the cheap detector for the whole class: an
+    approved commit that is gone means something reverted approved work.
+
+    Reachability is taken over **all** refs rather than one branch name, because the trial's
+    private clone carries exactly the authoring branch and the harness is not told which name
+    the live configuration gave it. Ledger SHAs are 10-character prefixes, so membership is by
+    prefix. Best-effort: a missing or unreadable checkout returns nothing to report rather than
+    failing a measured trial.
+    """
+    if not commit_shas:
+        return []
+    try:
+        reachable = _git(Path(toolkit_root), "rev-list", "--all").split()
+    except (subprocess.CalledProcessError, OSError):
+        return []
+    return [sha for sha in commit_shas if not any(full.startswith(sha) for full in reachable)]
+
+
 # ── What the ledger says happened ───────────────────────────────────────────
 
 
@@ -382,6 +411,10 @@ async def run_trial(slot: RunSlot, cfg: TrialConfig) -> dict[str, Any]:
             record["error"] = result.get("error")
         record["measured"] = measured_outcome(result, ledger)
         record.update(ledger)
+        # Before teardown: the private checkout is what the ledger's commits must still be in.
+        record["commits_unreachable"] = unreachable_commits(
+            environment.toolkit_root, ledger.get("commit_shas") or []
+        )
     except Exception as exc:  # noqa: BLE001 — one broken trial must never end a batch
         record["infrastructure"] = "error"
         record["error"] = f"{type(exc).__name__}: {exc}"

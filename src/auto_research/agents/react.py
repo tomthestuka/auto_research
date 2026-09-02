@@ -1188,6 +1188,49 @@ class LeadCycleOutcome:
         return self.filed == ANOTHER_ROUND_TOOL
 
 
+def _nullable(schema: dict) -> dict:
+    """A schema that also permits ``null``, as ``anyOf`` with a literal type on every branch.
+
+    Strict mode requires **every** non-nullable property to appear in ``required``, so a field the
+    Pydantic model treats as optional has to be *nullable* rather than absent. ``anyOf`` is chosen
+    over a type array because it is what all four dialects are measured or documented to take: it
+    is on Anthropic's supported list, Qwen accepts it 5/5, and DeepSeek's validator requires each
+    branch to carry a literal ``type`` — which both branches here do.
+    """
+    description = schema.pop("description", "")
+    return {"anyOf": [schema, {"type": "null"}], "description": description}
+
+
+def _strictify(schema: dict) -> dict:
+    """Make an ``input_schema`` satisfy strict mode's two structural requirements, recursively.
+
+    Strict mode (``strict: true``) is what turns a declared schema into an enforced one — the
+    provider constrains sampling so the arguments cannot violate it. Both providers require the
+    same two things of every object: ``additionalProperties: false``, and **every** property
+    listed in ``required``. Optionality is then expressed by nullability (see :func:`_nullable`),
+    not by omission from ``required``.
+
+    Applied at definition time rather than written by hand at each level, because the requirement
+    is "every object, however deep" and a hand-maintained version drifts the moment a field is
+    added. A schema that keeps an unsupported keyword earns a 400 with details, so this is
+    checked by construction rather than hoped for.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    out = dict(schema)
+    for key in ("anyOf", "allOf"):
+        if isinstance(out.get(key), list):
+            out[key] = [_strictify(branch) for branch in out[key]]
+    if isinstance(out.get("items"), dict):
+        out["items"] = _strictify(out["items"])
+    properties = out.get("properties")
+    if isinstance(properties, dict):
+        out["properties"] = {name: _strictify(sub) for name, sub in properties.items()}
+        out["required"] = list(out["properties"])
+        out["additionalProperties"] = False
+    return out
+
+
 def _field_desc(model: type, name: str) -> str:
     """The ``description`` Pydantic carries for ``model``'s field ``name``.
 
@@ -1226,7 +1269,6 @@ def _validation_data_schema() -> dict:
                     "description": _field_desc(ValidationDataset, "synthetic"),
                 },
             },
-            "required": ["mission", "obsid"],
         },
     }
 
@@ -1244,12 +1286,11 @@ def _proposed_checks_schema() -> dict:
                     "type": "string",
                     "description": _field_desc(ProposedCheck, "description"),
                 },
-                "tolerance": {
+                "tolerance": _nullable({
                     "type": "number",
                     "description": _field_desc(ProposedCheck, "tolerance"),
-                },
+                }),
             },
-            "required": ["kind", "description"],
         },
     }
 
@@ -1292,35 +1333,45 @@ def _tool_spec_schema() -> dict:
                 "enum": _field_enum(ToolSpec, "request_kind"),
                 "description": _field_desc(ToolSpec, "request_kind"),
             },
-            "observed_issue": {
+            "observed_issue": _nullable({
                 "type": "string",
                 "description": _field_desc(ToolSpec, "observed_issue"),
-            },
+            }),
             "validation_data": _validation_data_schema(),
             "proposed_checks": _proposed_checks_schema(),
-            "replication_tolerance": {
+            "replication_tolerance": _nullable({
                 "type": "number",
                 "description": _field_desc(ToolSpec, "replication_tolerance"),
-            },
-            "notes": {"type": "string", "description": _field_desc(ToolSpec, "notes")},
+            }),
+            "notes": _nullable(
+                {"type": "string", "description": _field_desc(ToolSpec, "notes")}
+            ),
         },
-        "required": [
-            "science_context",
-            "expected_behavior",
-            "proposed_tool_name",
-            "target_domain",
-            "disposition",
-            "validation_data",
-        ],
+        # `required` is deliberately absent: `_strictify` sets it to EVERY property, because
+        # strict mode requires exactly that and expresses optionality through nullability instead
+        # (see `_nullable`). Listing a subset here would be overwritten and would misdescribe the
+        # contract to anyone reading it.
     }
 
 
 def author_chain_tool_def() -> dict:
     """Definition for ``author_chain`` — file the ordered chain and open the coding session.
 
-    ``minItems: 1`` is the point: "author, with nothing to author" is unfileable, so the state
-    that killed a run (``should_author=true`` with an empty chain) is inexpressible rather than
-    rejected after the fact.
+    **The first link is a required property, not the first element of a non-empty array**, and
+    that distinction is the whole point. "Author, with nothing to author" is the state that killed
+    a live run ($19.43, 2026-09-01) and it must be *ungeneratable*, not merely rejected.
+
+    An earlier version of this tool expressed the rule as ``tool_specs`` with ``minItems: 1``, and
+    a lead filed an empty array through it anyway (observed live 2026-09-02) — because cardinality
+    keywords are enforced on **no** path. Anthropic's strict mode is opt-in per tool and its
+    compilable subset drops range/cardinality constraints (the SDKs strip `minimum`/`maxLength`
+    and friends outright), so `minItems` was documentation the model could read and ignore. What
+    *is* enforced, once strict mode is on, is `required` — so the rule is expressed as a required
+    property here, which also degrades correctly on every vendor that enforces nothing: a model
+    filling the schema at all fills `first_link`.
+
+    The handler still checks, because "degrades correctly" is not "cannot happen" until strict
+    mode is on for every seat.
     """
     return {
         "name": AUTHOR_CHAIN_TOOL,
@@ -1338,15 +1389,23 @@ def author_chain_tool_def() -> dict:
             "then steer each one with drive_coder and finish it with submit_for_review. File "
             "hold_authoring instead when the request resolves without new code."
         ),
-        "input_schema": {
+        "strict": True,
+        "input_schema": _strictify({
             "type": "object",
             "properties": {
-                "tool_specs": {
-                    "type": "array",
-                    "minItems": 1,
+                "first_link": {
+                    **_tool_spec_schema(),
                     "description": (
-                        "The chain, in dependency order — at least one link. Each entry is one "
-                        "coding session's brief."
+                        "The FIRST tool to author — the one nothing else in the chain depends on "
+                        "(acquire before reduce before analyse before plot). Filing this form "
+                        "means authoring this tool, so it is required."
+                    ),
+                },
+                "additional_links": {
+                    "type": "array",
+                    "description": (
+                        "The rest of the chain after first_link, still in dependency order. Omit "
+                        "it when one tool is the whole chain."
                     ),
                     "items": _tool_spec_schema(),
                 },
@@ -1358,8 +1417,7 @@ def author_chain_tool_def() -> dict:
                     ),
                 },
             },
-            "required": ["tool_specs"],
-        },
+        }),
     }
 
 
@@ -1375,7 +1433,8 @@ def hold_authoring_tool_def() -> dict:
             "the workers should do with the tools they already have — the analysts read your "
             "reason. This is a correct outcome carrying no obligation to author."
         ),
-        "input_schema": {
+        "strict": True,
+        "input_schema": _strictify({
             "type": "object",
             "properties": {
                 "reason": {
@@ -1388,7 +1447,7 @@ def hold_authoring_tool_def() -> dict:
                 },
             },
             "required": ["reason"],
-        },
+        }),
     }
 
 
@@ -1403,7 +1462,8 @@ def request_another_round_tool_def() -> dict:
             "the measurement, the data and the check. Available while the round cap still allows a "
             "round; once it does not, adjudicate on the evidence you have with submit_adjudication."
         ),
-        "input_schema": {
+        "strict": True,
+        "input_schema": _strictify({
             "type": "object",
             "properties": {
                 "rationale": {
@@ -1422,7 +1482,7 @@ def request_another_round_tool_def() -> dict:
                 },
             },
             "required": ["rationale", "what_to_probe"],
-        },
+        }),
     }
 
 
@@ -1437,7 +1497,8 @@ def submit_adjudication_tool_def() -> dict:
             "review_report; this call files exactly what edit_report last saved. Filing is the "
             "only way your report leaves this loop. Takes no arguments."
         ),
-        "input_schema": {"type": "object", "properties": {}},
+        "strict": True,
+        "input_schema": _strictify({"type": "object", "properties": {}}),
     }
 
 
@@ -1455,7 +1516,8 @@ def submit_terminal_report_tool_def() -> dict:
             "happens next. Report real results, or report none: never fabricate a result to cover "
             "the gap."
         ),
-        "input_schema": {
+        "strict": True,
+        "input_schema": _strictify({
             "type": "object",
             "properties": {
                 "status": {
@@ -1468,7 +1530,7 @@ def submit_terminal_report_tool_def() -> dict:
                 },
             },
             "required": ["status"],
-        },
+        }),
     }
 
 
@@ -1498,11 +1560,17 @@ async def execute_author_chain(cycle: LeadCycle, arguments: Mapping[str, Any]) -
     blocked = _out_of_stage(cycle, AUTHOR_CHAIN_TOOL)
     if blocked is not None:
         return blocked
-    raw = arguments.get("tool_specs")
-    if not isinstance(raw, list) or not raw:
+    # `first_link` is a required property and `additional_links` the optional tail, so the chain
+    # is assembled here rather than sent as one array whose emptiness no provider checks. The
+    # guard below is the backstop for a vendor enforcing neither `required` nor anything else.
+    first = arguments.get("first_link")
+    rest = arguments.get("additional_links") or []
+    raw = ([first] if isinstance(first, dict) else []) + (list(rest) if isinstance(rest, list) else [])
+    if not raw:
         return ToolOutcome(
             text=(
-                "author_chain needs 'tool_specs': the ordered chain, at least one brief. File "
+                "author_chain needs 'first_link': the brief for the first tool to author (and "
+                "'additional_links' for the rest of the chain, in dependency order). File "
                 "hold_authoring when the request resolves without new code."
             ),
             is_error=True,
@@ -1516,9 +1584,11 @@ async def execute_author_chain(cycle: LeadCycle, arguments: Mapping[str, Any]) -
             fields = "; ".join(
                 f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}" for err in exc.errors()
             )
-            problems.append(f"link {position}: {fields}")
+            label = "first_link" if position == 1 else f"additional_links[{position - 2}]"
+            problems.append(f"{label}: {fields}")
         except (TypeError, AttributeError) as exc:
-            problems.append(f"link {position}: {type(exc).__name__}: {exc}")
+            label = "first_link" if position == 1 else f"additional_links[{position - 2}]"
+            problems.append(f"{label}: {type(exc).__name__}: {exc}")
     if problems:
         return ToolOutcome(
             text="These chain links are incomplete — fix them and file again:\n"

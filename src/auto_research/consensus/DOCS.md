@@ -186,3 +186,21 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   description and unimplemented in code is worse than one never stated. A cycle that files no form
   and wrote no report raises rather than composing one ([F6]). The eleven behavioural tests in
   `tests/test_consensus_authoring.py` pass **unchanged in intent** against the new topology.
+
+- **2026-09-02 (second) — the rerun follows the commit count, never the filed form.** A cycle
+  whose lead filed `submit_terminal_report` from **inside** the authoring stage returned with
+  `authored_chain` False, so `_resume_after_authoring` never ran: no `registry.reload()`, no
+  `sandbox.restart()`, no worker rerun. Observed live (block 0 attempt 5): links 1-2 committed
+  `ixpe_pcube_polarimetry` and `ixpe_pol_energy_fit`, link 3 exhausted its submissions, the lead
+  stopped honestly, and the reviewer's send-back then had a worker call the freshly committed tool
+  and receive `[exit 127] Tool not registered`. Two gated, co-lead-approved, committed tools that
+  the analysis could not use. **§9.6 and [A11] met at a stage §9.6 was opened into, and §9.6 won by
+  control flow rather than by decision.** `strategy.run` now branches on
+  `outcome.authored_chain or outcome.committed >= 1`: an honest terminal filed from the authoring
+  stage ends the **chain**, never the analysis, and its committed prefix still has to become
+  callable before any report is final. The §9.6 terminal keeps its meaning where it is a real
+  terminal — with nothing committed there is no new evidence to rerun on, and the honest report
+  stands. **Termination:** each pass through the branch needs at least one commit and every commit
+  spends an author credit, so `tool_author_cap` bounds it. `tests/test_consensus_authoring.py`
+  gains `test_terminal_filed_mid_chain_still_reloads_restarts_and_reruns` (verified to fail
+  against the old condition) and `test_terminal_with_nothing_committed_still_ends_the_analysis`.

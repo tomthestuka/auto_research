@@ -18,8 +18,10 @@ parameter vectors, energy bins):
   Tier 1 HARD-FAIL  — banned vocabulary (comments/docstrings/strings), any RNG (seeded
                       or not), placeholder function bodies.
   Tier 3 FINDING    — incompleteness-marker vocabulary (e.g. a test "stub", "not
-                      implemented") and numeric-literal arrays returned/plotted/framed:
-                      recorded on the report but NOT a failure; the step-4 co-lead judges intent.
+                      implemented"), a banned word inside an explicit negation (prose stating
+                      the discipline rather than breaking it), and numeric-literal arrays
+                      returned/plotted/framed: recorded on the report but NOT a failure; the
+                      step-4 co-lead judges intent.
 
 All scan lists live in ``config/code_gate.yaml`` (tunable without a code edit).
 
@@ -171,6 +173,41 @@ def _match_vocabulary(text_low: str, vocab: list[str]) -> list[str]:
     ]
 
 
+# Clause boundaries: a comma, semicolon, colon, or a dash used as punctuation. A negation
+# governing one clause says nothing about the next, which is exactly what separates prose
+# stating the discipline from prose deferring the work.
+_CLAUSE_BOUNDARY = re.compile(r"[,;:]|\s--?\s|\s[—–]\s|—")
+_NEGATION_WORDS = frozenset({"no", "not", "never", "cannot", "nor", "neither", "without"})
+_NEGATION_PHRASES = ("rather than", "instead of")
+
+
+def _negated(text_low: str, phrase: str) -> bool:
+    """Whether ``phrase`` sits inside an explicit negation, in the same clause.
+
+    A banned word appearing in a negated construction is the §9.5 discipline being *stated*,
+    not violated — "the tool can never fabricate a benchmark", "without any fabricated
+    fixture", "on real data rather than a fabricated CSV". Hard-failing those rejects a tool
+    for documenting the very rule the scan enforces, which cost a real submission live
+    (2026-09-02). Such a match is demoted to the co-lead-judged finding tier, the same
+    treatment already given to bare descriptors and to RNG patterns.
+
+    **Scope is the clause, not a token window.** A window is wrong in the direction that
+    matters: ``# where the reduction has not run yet, emit fake data for now`` negates
+    *running the reduction* and then positively instructs the fabrication, and a proximity
+    rule reads that as exculpatory. Requiring the cue in the same comma/semicolon-delimited
+    clause, before the phrase, keeps that a hard fail while demoting the honest disclosures.
+    A missed negation degrades to today's hard fail; a spurious one degrades to a finding the
+    co-lead reads — both directions stay safe.
+    """
+    index = text_low.find(phrase)
+    if index < 0:
+        return False
+    clause = _CLAUSE_BOUNDARY.split(text_low[:index])[-1]
+    if any(p in clause for p in _NEGATION_PHRASES):
+        return True
+    return bool(_NEGATION_WORDS & set(re.findall(r"[a-z']+", clause)))
+
+
 def _dotted_name(node: ast.AST) -> str:
     """Reconstruct a dotted attribute/name chain (``np.random.default_rng``)."""
     parts: list[str] = []
@@ -313,7 +350,12 @@ def scan_python_source(
                 key = (lineno, phrase)
                 if key not in seen_vocab:
                     seen_vocab.add(key)
-                    _hard("no_fabrication.vocabulary", lineno, f"banned phrase {phrase!r}")
+                    if _negated(low, phrase):
+                        _find("no_fabrication.vocabulary_finding", lineno,
+                              f"banned phrase {phrase!r} inside a negation (recorded, not a "
+                              "hard-fail)")
+                    else:
+                        _hard("no_fabrication.vocabulary", lineno, f"banned phrase {phrase!r}")
             for phrase in _match_vocabulary(low, finding_vocab):
                 key = (lineno, phrase)
                 if key not in seen_vocab:
@@ -414,10 +456,17 @@ def scan_text_source(
             key = (lineno, phrase)
             if key not in seen:
                 seen.add(key)
-                hard.append(CheckResult(
-                    name="no_fabrication.vocabulary", layer="A", passed=False,
-                    detail=f"{rel_path}:{lineno} — banned phrase {phrase!r}",
-                ))
+                if _negated(low, phrase):
+                    findings.append(CheckResult(
+                        name="no_fabrication.vocabulary_finding", layer="A", passed=True,
+                        detail=f"{rel_path}:{lineno} — banned phrase {phrase!r} inside a "
+                               "negation (recorded, not a hard-fail)",
+                    ))
+                else:
+                    hard.append(CheckResult(
+                        name="no_fabrication.vocabulary", layer="A", passed=False,
+                        detail=f"{rel_path}:{lineno} — banned phrase {phrase!r}",
+                    ))
         for phrase in _match_vocabulary(low, finding_vocab):
             key = (lineno, phrase)
             if key not in seen:

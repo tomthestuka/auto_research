@@ -1268,3 +1268,45 @@ def test_the_distinctive_string_still_catches_the_original_leak(tmp_path):
         encoding="utf-8",
     )
     assert any("science_bench" in f for f in cli.scan_ledger_paths(ledger))
+
+
+# ── the record against the repository ────────────────────────────────────────
+
+
+def _repo_with_one_commit(root: Path) -> tuple[Path, str]:
+    import subprocess
+
+    root.mkdir(parents=True, exist_ok=True)
+    run = lambda *a: subprocess.run(  # noqa: E731 — a local shorthand, three call sites
+        ["git", *a], cwd=str(root), check=True, capture_output=True, text=True
+    )
+    run("init", "-q", "-b", "ai")
+    run("config", "user.email", "t@t"); run("config", "user.name", "t")
+    (root / "tool.py").write_text("x = 1\n")
+    run("add", "-A"); run("commit", "-qm", "one")
+    sha = run("rev-parse", "HEAD").stdout.strip()
+    return root, sha
+
+
+def test_a_recorded_commit_missing_from_the_branch_is_flagged(tmp_path):
+    """The cheap detector for "something reverted approved work".
+
+    A `submit_for_review` after a successful commit reverted that commit, and every layer of the
+    record still showed a `commit` event for the SHA — it was invisible until the git log was
+    read by hand. Only something outside the authoring session can compare the two.
+    """
+    repo, sha = _repo_with_one_commit(tmp_path / "toolkit")
+
+    # Ledger SHAs are 10-character prefixes, so membership is by prefix.
+    assert trial.unreachable_commits(repo, [sha[:10]]) == []
+    assert trial.unreachable_commits(repo, ["deadbeef01"]) == ["deadbeef01"]
+    assert trial.unreachable_commits(repo, [sha[:10], "deadbeef01"]) == ["deadbeef01"]
+
+
+def test_the_reachability_check_never_fails_a_measured_trial(tmp_path):
+    """Best-effort: no commits to check, or no checkout left to check them against, reports
+    nothing rather than raising inside a trial that otherwise succeeded."""
+    repo, _ = _repo_with_one_commit(tmp_path / "toolkit")
+    assert trial.unreachable_commits(repo, []) == []
+    assert trial.unreachable_commits(tmp_path / "absent", ["deadbeef01"]) == []
+    assert trial.unreachable_commits(tmp_path / "not_a_repo", ["deadbeef01"]) == []

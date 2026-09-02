@@ -1196,3 +1196,36 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   `committed`/`failed`/`error`; zero `needs_human`), and that file's docstring claim to the
   contrary is wrong. The author was the only live exposure, which is what the entry above fixes.
 
+- **2026-09-02 (second) — an approved commit becomes the attempt's base ref, and a negated banned
+  word is a judged finding.**
+  **`commit()` advances `_base_ref`** (in memory and in `run_dir/authoring/current_base_ref`).
+  The base ref means "the commit this attempt's work sits on", so once `approve_edit` lands one,
+  that commit *is* the base. It was never advanced, and three readers took the stale value: the
+  §9.9 gate-entry backstop reverts on `HEAD != _base_ref` without consulting `self.committed`, so
+  it could not tell an approved commit from a coder-slipped one and **a `submit_for_review` after a
+  successful commit reverted that commit**; `aclose`'s failure reset would reset *behind* a
+  legitimate commit; and `heal_toolkit_branch_if_dirty` does a `reset --hard` to the persisted
+  value, so a hard kill after a commit would have healed the tool off the branch. Observed live
+  (block 0 attempt 5, link 2): `1523349` -> reverted -> `49bbc53` -> reverted -> `da507d7`, three
+  full gate+review revolutions at ~$0.71 each, self-limiting only because the next link re-recorded
+  the base ref. **Pre-existing, not from the forms refactor** (`drive_authoring` had the same
+  exposure since `c2253d5`); the refactor multiplies it, N links giving N post-commit
+  opportunities over one conversation. Guarding the revert with `if not self.committed` would fix
+  the first reader and leave the other two wrong. Three tests in `tests/test_merge_flow.py`, each
+  verified to fail against the unfixed code.
+  **The no-fabrication scan demotes a negated banned word** to the co-lead-judged finding tier
+  (`_negated`, applied in both `scan_python_source` and `scan_text_source`). A banned word inside
+  an explicit negation is the §9.5 discipline being *stated* — "the tool can never fabricate a
+  benchmark", "without any fabricated fixture" — and hard-failing it rejects a tool for
+  documenting the rule the scan enforces. The measurement that forced it: across every production
+  ledger on disk, **4 of 27 gate runs failed and all 4 were vocabulary failures**, every sampled
+  instance a negation; nothing else has ever hard-failed Layer A in production. Cost is one of five
+  submissions per firing, roughly once per authoring run. **Scope is the clause, not a token
+  window**, and that distinction was measured rather than argued: `gate_bench`'s `fab_shell_script`
+  plants `# where the reduction has not run yet, emit fake data for now`, where the negation
+  governs a different clause, and the proximity rule first proposed demotes it — voiding one of the
+  six mutants the published catch-rate table attributes to the scan. `tmp_scripts/
+  gate_bench_negation_rescan.py` re-scans the whole 134-entry corpus offline (LLM-free, $0) and
+  reports **0 moved** under the shipped predicate and **1 moved (`fab_shell_script`) under
+  `--naive`**, which is what proves the check can see a move at all. A missed negation degrades to
+  today's hard fail; a spurious cue degrades to a finding the co-lead reads.

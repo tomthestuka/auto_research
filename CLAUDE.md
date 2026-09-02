@@ -991,6 +991,33 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   disagree on the vocabulary, neither publishes the response body, and its SDK's `APIError.code` is
   the HTTP status integer where OpenAI's is a string code — so no rule is cited for it and it never
   rotates.
+- **Which media survives an eviction is now load-bearing, and the Files API is not the way out.**
+  The media budget reserves the request's non-media weight (2026-09-02), so eviction actually
+  happens where it previously did not — and eviction is **oldest-first** by design (the current
+  turn's evidence is the most relevant). A single near-ceiling document therefore survives while
+  several small ones are dropped one at a time to make room for it: a reviewer holding one 24 MB
+  paper and five small ones keeps the 24 MB one. Strictly better than the prior behaviour, where
+  nothing was evicted and the request 413'd, but the *choice* is a policy nobody has measured. A
+  size-aware eviction (drop the largest that would free enough) is the obvious alternative and is
+  **not** built — it inverts the relevance ordering the module states, so it needs a ruling rather
+  than an edit. Related: the §12 Files API item would **not** fix this and looks worse than the
+  inline path on the evidence — Anthropic recommends `file_id` references "to keep request payloads
+  small", but anthropic-sdk-python#1098 reports a 413 at ~6.49 MB of *referenced* PDFs with an
+  ~18 KB HTTP body, i.e. an undocumented ~6.3 MB combined ceiling enforced during server-side
+  extraction, unanswered by maintainers. It would trade a documented 32 MB ceiling for a tighter
+  undocumented one.
+- **`web_fetch` has no size bound, and it is the one by-value payload that still does not.**
+  Observed live 2026-09-02 in a science-sweep trial: a single `web_fetch` returned **159,668
+  characters** — the largest tool result of the run by 14x, the next being `review_report` at 11.6k
+  and the toolkit's own `ixpe_pcube_timeseg` at 8.2k. Nothing broke, because Anthropic context
+  editing absorbed it, but the page then dominated that worker's context and was re-cleared on
+  **every** subsequent turn (~111k tokens per edit, repeatedly), crowding out real evidence and
+  paying for it each time. This is the shape the `open_paper` 8 MB refusal was written for (§13
+  history: an oversized paper rides by value in every later call and blew a 413 cap) and the shape
+  `read_file` avoids by paging with a stated resume offset. The fix is a character cap **at entry**
+  in `execute_web_fetch` with a model-visible truncation marker naming what was cut — downstream is
+  too late, since the payload is already in the trajectory. Not built: found mid-run, and §3 gates
+  a fix on a human ruling.
 
 ---
 
@@ -1721,3 +1748,89 @@ history. Token-level preservation of the second pass was checked mechanically, n
   1399 → 1663; new `tests/test_lead_forms.py` (41), `tests/test_schema_descriptions.py` (19),
   `tests/test_live_lead_cycle.py` (3 cells), and the eleven behavioural tests in
   `tests/test_consensus_authoring.py` pass **unchanged in intent**.
+
+- 2026-09-02 (third, same day) — **Six plumbing fixes from block 0 attempt 5, and two of them were
+  limits measured in the wrong unit.** The attempt authored, gated, co-lead-approved and committed
+  two tools in 6h50m/$61.01 and still ended `status: failed`, so the whole batch of defects came
+  from one run's evidence rather than from speculation. **[1] The rerun follows the commit count,
+  not the filed form** — my own regression from the forms refactor. `submit_terminal_report` is
+  reachable from `AUTHOR_STAGE` on §9.6 grounds, and filing it there returned `authored_chain=False`,
+  so `_resume_after_authoring` never ran: no `registry.reload()`, no `sandbox.restart()`, no worker
+  rerun. Two committed tools then returned `[exit 127] Tool not registered` to the workers the
+  reviewer sent back to use them. §9.6 and [A11] met at a stage §9.6 was opened into, and **§9.6 won
+  by control flow rather than by decision**; `strategy.run` now branches on `authored_chain or
+  committed >= 1`, so an honest terminal from the authoring stage ends the **chain**, never the
+  analysis. Bounded because each pass needs a commit and every commit spends an author credit.
+  **[2] An approved commit becomes the attempt's base ref** — pre-existing since `c2253d5`
+  (2026-06-30), not from the refactor, which merely multiplies it N-ways over one conversation.
+  `commit()` never advanced `_base_ref`, and three readers took the stale value: the §9.9
+  gate-entry backstop reverts on a moved HEAD without consulting `self.committed`, so **a
+  `submit_for_review` after a successful commit reverted that commit** (live: `1523349` → reverted →
+  `49bbc53` → reverted → `da507d7`, three full gate+review revolutions at ~$0.71 each, self-limiting
+  only because the next link re-recorded the base ref); `aclose`'s failure reset would reset *behind*
+  a legitimate commit; and `heal_toolkit_branch_if_dirty` does a `reset --hard` to the **persisted**
+  value, so a hard kill after a commit would have healed the tool off the branch. Advancing both the
+  in-memory and the on-disk value fixes all three at once — guarding the revert with
+  `if not self.committed` fixes one and leaves two wrong. **[3] The media budget reserves the
+  non-media request weight.** The run died at its last node on `413 request_too_large` with **zero
+  media-guard events**, and the measurement was the finding: two PDFs came to **33,512,296 encoded
+  bytes against the 33,554,432 ceiling**, i.e. the guard stopped with **42 KB** of headroom for a
+  conversation orders of magnitude larger. Anthropic states the rule for both document limits —
+  *"Both limits are on the entire request payload, including any other content sent alongside PDFs"*
+  (.../build-with-claude/pdf-support) — so the ceiling was being applied to a subset of what counts
+  toward it. New `_media.nonmedia_weight` estimates message text, tool-call arguments, tool-result
+  text, every verbatim provider part and the declared tool schemas plus a flat per-part JSON
+  allowance; all three adapters pass it as `reserved_bytes`. Deliberately an estimate over the
+  *neutral* conversation, because the payload cannot be built until the plan exists; it rounds up,
+  since under-reserving costs the request and over-reserving withholds one figure with a note. **No
+  per-document byte cap was added**, and that is a reading of the docs rather than a preference: the
+  PDF page publishes only the whole-request ceiling and the page count, so a per-file limit would be
+  a number we invented — which `MediaLimits` forbids by construction. Claude Code has the same
+  defect, filed as claude-code#56691 (*"token context budgets and serialized request-body bytes are
+  decoupled"*) and **closed as not planned**; several sibling reports show a 413 driving an infinite
+  loop, where we at least die loudly. **[4] A negated banned word is a judged finding, and the
+  scoping rule was measured rather than argued.** Across every production ledger on disk, **4 of 27
+  gate runs failed and all 4 were vocabulary failures** — every sampled instance a negation, e.g.
+  *"The module contains no table of published values … the tool can never back-fill or fabricate a
+  benchmark"*. Nothing else has ever hard-failed Layer A in production, so the only thing the
+  deterministic vocabulary tier had ever caught was code stating the discipline it enforces, at
+  roughly one submission per authoring run. The user's question — *does this void previous
+  `gate_bench` results?* — was the right one and the answer was yes for the rule first proposed:
+  a **token-window** negation cue demotes `fab_shell_script` (`# where the reduction has not run
+  yet, emit fake data for now`), one of the six mutants the published catch-rate table attributes
+  to the scan, because the negation governs a different clause than the banned phrase. A
+  **clause-scoped** cue separates them; `tmp_scripts/gate_bench_negation_rescan.py` re-scans the
+  whole 134-entry corpus offline (LLM-free, $0) and reports **0 moved** under the shipped predicate
+  and **1 moved under `--naive`** — the second half being what proves the check can see a move at
+  all, rather than being a probe that cries nothing. `prompts/coder.md` already warned against
+  writing such a disclaimer, so this is the suspenders half catching what the belt did not.
+  **[5] Authoring is bound to the filed brief** (prompt-level, both actors): the lead added an
+  unrequested cache the coder then shipped cache-invalidation bugs in (~3 submissions), and the
+  coder shipped an entire second tool inside another link's brief (~2 submissions, and it is what
+  pulled [4]'s banned word into the diff). The gate's structural check verifies a manifest entry
+  *exists*, never that the submission is only the brief, and the co-lead notices only by
+  *inheriting the extra tool's obligations* — so scope creep is priced as review cycles and never
+  named. `analyst_lead.md` now bounds a steer to the filed link and sends a new capability to its
+  own link; `coder.md` says ship one capability and name a second to the lead. Also folded in: for
+  any tool that reuses, caches or overlays an artifact, `proposed_checks` must require that a
+  **foreign but plausible** artifact is rejected (same group, same binning, different observation)
+  — precisely the case both of that run's too-weak bindings passed on their first fix. No gate-side
+  scope check is proposed: a legitimate review fix also changes the diff, so one cannot be specified
+  honestly. **[6] Every recorded commit is checked against the repository.** `trial.
+  unreachable_commits` cross-checks each ledger `commit` SHA against `git rev-list --all` in the
+  trial's private checkout before teardown. [2] reverted three approved commits and the ledger
+  recorded a `commit` event for each, including SHAs no longer on the branch; it was invisible until
+  the git log was read by hand, which is exactly the class a record-versus-repository check catches.
+  **The theme, stated because it recurred four times in one run:** a limit expressed in a unit that
+  does not bound what actually fails — a moved HEAD standing in for provenance, a PDF *count*
+  standing in for bytes, an output cap consumed entirely by reasoning, a 1000-*line* window
+  returning 159,668 characters. Every fix here except [1] and [6] is a unit correction.
+  **Residual, recorded in §13:** with the reserve in place eviction actually fires, and it is
+  oldest-first, so a single near-ceiling document now survives while several small ones are dropped
+  to make room for it — better than a dead request, but a policy nobody has measured. **15 new
+  deterministic tests**, each of the five code fixes verified to fail against the unfixed code
+  before being kept: `tests/test_consensus_authoring.py` 11 → 13, `tests/test_merge_flow.py`
+  41 → 44, `tests/test_media_guards.py` 8 → 12, `tests/test_gate.py` 52 → 56,
+  `benchmarks/science_bench/tests/test_science_bench.py` 108 → 110. Full suite **1700 passed /
+  159 skipped / 9 failed**, the nine being the pre-existing `.pytest_cache` leak into
+  `gate_bench`'s synthetic-repo comparison, unchanged and still untouched (§3).

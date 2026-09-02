@@ -3,7 +3,8 @@
     AUTO_RESEARCH_LIVE_FORM_SHAPES=1 pytest tests/test_live_form_shapes.py -s
 
 **Why this exists.** The whole lead-as-forms refactor turns on one tool. `author_chain`'s argument
-is a **list of objects** (`tool_specs: [ToolSpec, …]`), which in JSON Schema is `items: {$ref}` —
+nests objects (`first_link: ToolSpec` plus `additional_links: [ToolSpec, …]`), and the array half
+is `items: {$ref}` in JSON Schema —
 measured 2026-08-24 as the exact position **Qwen refuses** (0/5 draws) while DeepSeek is the mirror
 case, each needing opposite treatment. That measurement was taken on **output** schemas, and a
 tool's `input_schema` travels a different path through each adapter, so it did not settle this.
@@ -63,6 +64,10 @@ MEMBERS = [
     ("dashscope", "qwen3.8-max", {"reasoning": {"effort": "high"}}),
     ("zai", "glm-5.3", {"reasoning": {"effort": "high"}}),
     ("deepseek", "deepseek-v4-pro", {"reasoning": {"effort": "high"}}),
+    # Wired and holding a graph role, so it is measured here even though [I8] records its
+    # multi-turn tool use as broken: a cell that reports a limitation is a result, and being
+    # absent from the matrix is not. Its thinking control is per-vendor, hence the different key.
+    ("google", "gemini-3.5-flash", {"thinking_config": {"thinking_level": "high"}}),
 ]
 
 # Domain-neutral in its shape and specific in its content: one capability that exists in `lib/`
@@ -167,7 +172,10 @@ def test_live_vendor_fills_the_nested_author_chain_form(provider_name, model, pa
         f"the real handler rejected {provider_name}:{model}'s arguments: {record['handler_text']}"
     )
     assert cycle.filed == AUTHOR_CHAIN_TOOL
-    assert cycle.decision is not None and cycle.decision.tool_specs, "an empty chain is unfileable"
+    assert cycle.decision is not None and cycle.decision.tool_specs, (
+        "an empty chain came through: `first_link` is a required property, so this means the "
+        "vendor enforced neither it nor anything else"
+    )
     for spec in cycle.decision.tool_specs:
         # Validated into the real model by the handler; these are the lead-owned fields that
         # appeared in no channel before the forms existed.

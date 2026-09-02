@@ -28,6 +28,7 @@ from auto_research.agents.roles import _ClarifyReply
 from auto_research.models.providers.anthropic import AnthropicProvider
 from auto_research.models.providers.dashscope import DashscopeProvider
 from auto_research.models.providers.deepseek import DeepSeekProvider
+from auto_research.models.providers.google import GoogleProvider
 from auto_research.models.providers.openai import OpenAIProvider
 from auto_research.models.providers.zai import ZaiProvider
 from auto_research.models.types import (
@@ -96,6 +97,13 @@ PROVIDERS = [
     # trajectory tests, with only the model id changing. This catches model-specific behaviour
     # hidden by a vendor-wide descriptor (notably tool/schema compatibility and ref handling).
     ("dashscope", DashscopeProvider(), "qwen3.7-plus"),
+    # Google is here because it is WIRED and holds a graph role (`librarian_io`'s third member),
+    # not because it is expected to pass every cell. Its multi-turn tool use is the known-broken
+    # axis ([I8]), so some cells are expected to record a limitation — and that is a measurement.
+    # It had been absent from this list entirely, which meant the one adapter with a documented
+    # defect was also the one nobody measured; `tests/test_provider_matrix.py` now fails if any
+    # wired vendor goes missing again.
+    ("google", GoogleProvider(), "gemini-3.5-flash"),
 ]
 
 QWEN_MODELS = ["qwen3.8-max", "qwen3.7-plus"]

@@ -42,6 +42,7 @@ from auto_research.models.providers._media import (
     MediaLimits,
     MediaPlan,
     caption_with_note,
+    nonmedia_weight,
     plan_for_call,
 )
 from auto_research.models.types import (
@@ -426,7 +427,10 @@ class ResponsesProvider:
         vendor = self.vendor
         # One media plan for the WHOLE request (§stateless: this is the only point that sees
         # every image in the conversation plus this call's attachments at once).
-        plan = plan_for_call(messages, images, documents, vendor.limits_for(config.model))
+        plan = plan_for_call(
+            messages, images, documents, vendor.limits_for(config.model),
+            reserved_bytes=nonmedia_weight(messages, tools=tools),
+        )
         input_items = _to_responses_input(messages, plan)
         cache_kwargs = (
             {"prompt_cache_key": config.name}
@@ -516,7 +520,12 @@ class ResponsesProvider:
                     "name": tool["name"],
                     "description": tool.get("description", ""),
                     "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
-                    "strict": False,
+                    # Per-tool rather than blanket-False: a form whose whole purpose is that a
+                    # required field cannot be left blank has to be enforced, and `strict` is the
+                    # only thing that enforces it. Everything else stays permissive, because a
+                    # strict schema must sit in the compilable subset and most tools here are not
+                    # written for it.
+                    "strict": bool(tool.get("strict", False)),
                 }
                 # Deferred: OpenAI keeps the name+description resident and withholds only the
                 # parameter schema until the model discovers the tool, injecting it at the END

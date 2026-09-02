@@ -57,6 +57,7 @@ hard_fail_code_patterns:
 
 # ── Tier 3: vocabulary (FINDINGS → co-lead review, not hard-fail) ──
 # Incompleteness markers + bare ambiguous descriptors that recur in honest §9.5 disclosures.
+# A Tier-1 word inside an explicit negation lands here too (clause-scoped, in gate.py).
 finding_vocabulary:
   - stub
   - stubbed

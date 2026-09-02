@@ -366,6 +366,7 @@ This was found by an audit of the first live ledger, not by design review: the p
 | `wait_for(run_dir, *, poll_seconds)` | Block until terminal; liveness is process existence, never log freshness. |
 | `summarise_ledger(path)` | Rounds, tools committed, scan hits, spend by role, and how often the tree wanted a human. |
 | `measured_outcome(result, ledger)` | What the run concluded — every value of which is a correct outcome. |
+| `unreachable_commits(toolkit_root, commit_shas)` | Which ledger-recorded commit SHAs are no longer reachable in the trial's checkout — the detector for reverted approved work. |
 | `collect_stamps(toolkit_source, base_ref)` | Code, base, gate configuration and question, so two batches can be told apart. |
 | `append_record` / `load_records` | Durable per-trial append; tolerant read for a live batch. |
 | `BASE_REF` | `5accf33` — the toolkit state before this question's own tool chain existed. |
@@ -500,3 +501,16 @@ Nothing depends on this package.
   hang — the observed failures all died in minutes — and a deadline risks killing a legitimately
   long reduction, which is what this question spends most of its time doing. `--status` makes a
   stall visible; a bounded wait is a change to propose, not to assume.
+
+- **2026-09-02 — every recorded commit is checked against the repository.** `trial.
+  unreachable_commits(toolkit_root, commit_shas)` cross-checks each ledger `commit` event's SHA
+  against `git rev-list --all` in the trial's private checkout, before teardown, and the result
+  lands on the record as `commits_unreachable`. This is a property of the *run's record versus the
+  repository*, which nothing inside the authoring session can see: a `submit_for_review` after a
+  successful commit used to revert that commit (fixed by advancing the per-attempt base ref), and
+  every layer of the record still showed a `commit` event for the reverted SHA — the defect was
+  invisible until the git log was read by hand. Reachability is taken over **all** refs rather than
+  one branch name, because the private clone carries exactly the authoring branch and the harness is
+  not told the name the live configuration gave it; ledger SHAs are 10-character prefixes, so
+  membership is by prefix. Best-effort — a missing or unreadable checkout reports nothing rather
+  than failing a measured trial. Two tests in `tests/test_science_bench.py`.

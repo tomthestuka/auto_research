@@ -13,6 +13,7 @@ from auto_research.models.providers._media import (
     MediaLimits,
     MediaPlan,
     caption_with_note,
+    nonmedia_weight,
     plan_for_call,
 )
 from auto_research.models.types import (
@@ -290,7 +291,10 @@ class GoogleProvider:
 
         # One media plan for the WHOLE request (§stateless: this is the only point that sees
         # every image in the conversation plus this call's attachments at once).
-        plan = plan_for_call(messages, images, documents, _LIMITS)
+        plan = plan_for_call(
+            messages, images, documents, _LIMITS,
+            reserved_bytes=nonmedia_weight(messages, tools=tools),
+        )
         system, contents = _to_gemini_contents(messages, types, plan)
         extra_parts: list[Any] = []
         for document in documents:

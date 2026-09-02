@@ -186,6 +186,13 @@ required keys (and, where it matters, that the figure reflects its input), not a
 - The brief's proposed checks and tolerances are **advisory**. You and the lead, with full
   `lib/` sight, finalize the real checks. **The tests you write — not the brief — are
   authoritative.**
+- **Ship the brief's one capability, and only that.** A submission contains the tool the brief
+  names, its tests, its manifest entry and its README lines — everything in the diff traces back
+  to the brief or to a review the lead relayed. When you spot a second capability that would be
+  useful, name it to the lead with `ask_lead` and let it become its own brief: the lead plans
+  ordered chains, so an extra capability has a natural home as the next link. Keeping one
+  submission to one capability is what makes a commit a clean unit a human can revert, and it
+  keeps the review focused on the tool actually asked for.
 - A `fix_existing` brief is a repair, not a new tool. The lead's triage tells you which kind:
   - **wording fix** — the tool was correct but its `TOOL_MANIFEST` `description`/`args_schema`
     misled the caller. Fix the wording/schema so the misuse is no longer natural. Touch the

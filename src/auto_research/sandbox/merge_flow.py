@@ -1044,10 +1044,25 @@ class AuthoringSession:
     async def commit(self, message: str) -> str:
         """Land one atomic commit (§9.9 ``approve_edit``) — the **only** place the runtime
         commits. Caller guarantees gate-pass ∧ review-pass. Sets :attr:`committed` so
-        :meth:`aclose` skips the failure-path tree reset."""
+        :meth:`aclose` skips the failure-path tree reset, and **advances the per-attempt base
+        ref** (in memory and on disk) to the commit it just landed, so nothing downstream mistakes
+        an approved commit for a coder-slipped one."""
         commit_sha = self._approve_edit(self.worktree, message=message)
         self.committed = True
         self.last_commit_sha = commit_sha
+        # The base ref means "the commit this attempt's work sits on", so once approve_edit lands
+        # one, that commit IS the base. Advancing it here corrects all three readers at once:
+        # the §9.9 gate-entry backstop below (which reverts on a moved HEAD and cannot otherwise
+        # tell this legitimate commit from a coder's illegitimate one — a later submit_for_review
+        # reverted an approved commit, observed live), `aclose`'s failure reset (which would
+        # otherwise reset *behind* a legitimate commit), and the resume-time heal, which does a
+        # `reset --hard` to the persisted value after a hard kill.
+        self._base_ref = commit_sha
+        if self._direct_branch is not None and self._worktree_base is not None:
+            try:
+                _base_ref_path(self._worktree_base).write_text(commit_sha, encoding="utf-8")
+            except OSError:
+                pass  # best-effort, exactly as the initial write in build_authoring_session
         # The committed work now lives in git; the snapshot record has nothing left to restore.
         discard_submission_snapshots(self._worktree_base, self.tool_spec.proposed_tool_name)
         await _emit(

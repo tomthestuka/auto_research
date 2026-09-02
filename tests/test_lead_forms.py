@@ -98,22 +98,35 @@ def _workspace(tmp_path: Path, report: AnalystReport | None) -> ReportWorkspace:
 # ── the impossible state is inexpressible ────────────────────────────────────
 
 
-def test_author_chain_requires_at_least_one_link_in_its_own_schema():
-    """The schema, not a validator after the fact, is what refuses an empty chain.
+def test_author_chain_expresses_at_least_one_link_as_a_REQUIRED_PROPERTY():
+    """Cardinality is enforced on no path; ``required`` is. So the rule is a required property.
 
-    This is the whole point of the refactor: ``should_author=true`` with an empty ``tool_specs``
-    was schema-VALID output that a Pydantic validator then killed the run over.
+    The first version of this tool said ``tool_specs: {minItems: 1}``, and a live lead filed an
+    empty array straight through it (2026-09-02) — Anthropic's strict mode is opt-in per tool and
+    its compilable subset drops range/cardinality keywords anyway, so `minItems` was prose the
+    model could read and ignore. Expressed as a required *property*, an empty chain is
+    ungeneratable under strict mode and degrades correctly without it: a model filling the schema
+    at all fills `first_link`.
     """
-    schema = author_chain_tool_def()["input_schema"]
-    assert schema["required"] == ["tool_specs"]
-    assert schema["properties"]["tool_specs"]["minItems"] == 1
+    definition = author_chain_tool_def()
+    schema = definition["input_schema"]
+    # Enforcement is opt-in per tool and we now ask for it: without `strict` the provider
+    # documents that the model may omit required fields, which is what happened live.
+    assert definition["strict"] is True
+    assert schema["properties"]["first_link"]["type"] == "object"
+    assert "first_link" in schema["required"]
+    # Strict mode requires EVERY property in `required`, so optionality is nullability instead —
+    # `additional_links` is listed but may arrive as an empty array.
+    assert set(schema["required"]) == set(schema["properties"])
+    assert schema["additionalProperties"] is False
 
 
-def test_author_chain_handler_refuses_an_empty_list_and_names_the_other_branch():
-    """Belt to the schema's suspenders — and it points at the form that DOES fit."""
+def test_author_chain_handler_refuses_an_empty_chain_and_names_the_other_branch():
+    """The backstop for a vendor that enforces neither ``required`` nor anything else — which is
+    every vendor until strict mode is on for every seat. It also points at the form that fits."""
     cycle = _cycle()
     out = _run(
-        ReadOnlyToolProvider(roots=[], cycle=cycle).execute(AUTHOR_CHAIN_TOOL, {"tool_specs": []})
+        ReadOnlyToolProvider(roots=[], cycle=cycle).execute(AUTHOR_CHAIN_TOOL, {})
     )
     assert out.is_error
     assert HOLD_AUTHORING_TOOL in out.text
@@ -125,7 +138,8 @@ def test_author_chain_files_the_ordered_chain_as_an_authoring_decision():
     second = {**GOOD_LINK, "proposed_tool_name": "ixpe_pcube_timeseg_plot"}
     out = _run(
         ReadOnlyToolProvider(roots=[], cycle=cycle).execute(
-            AUTHOR_CHAIN_TOOL, {"tool_specs": [GOOD_LINK, second], "rationale": "read lib/ first"}
+            AUTHOR_CHAIN_TOOL,
+            {"first_link": GOOD_LINK, "additional_links": [second], "rationale": "read lib/ first"},
         )
     )
     assert not out.is_error
@@ -145,11 +159,11 @@ def test_a_malformed_link_comes_back_as_a_correction_naming_the_field():
     broken = {k: v for k, v in GOOD_LINK.items() if k != "target_domain"}
     out = _run(
         ReadOnlyToolProvider(roots=[], cycle=cycle).execute(
-            AUTHOR_CHAIN_TOOL, {"tool_specs": [GOOD_LINK, broken]}
+            AUTHOR_CHAIN_TOOL, {"first_link": GOOD_LINK, "additional_links": [broken]}
         )
     )
     assert out.is_error
-    assert "link 2" in out.text and "target_domain" in out.text
+    assert "additional_links[0]" in out.text and "target_domain" in out.text
     assert cycle.filed is None and cycle.decision is None
 
 
@@ -388,17 +402,25 @@ def test_every_form_field_carries_a_description(factory):
 def test_the_chain_link_schema_asks_for_every_lead_owned_field():
     """``target_domain`` and ``disposition`` are the lead's architectural call and were required
     while appearing in no channel the model could read."""
-    link = author_chain_tool_def()["input_schema"]["properties"]["tool_specs"]["items"]
-    assert set(link["required"]) == {
+    link = author_chain_tool_def()["input_schema"]["properties"]["first_link"]
+    # Under strict mode every property is required, so the lead-owned fields are present by
+    # construction; what this pins is that they EXIST and carry their enum/cardinality.
+    assert {
         "science_context",
         "expected_behavior",
         "proposed_tool_name",
         "target_domain",
         "disposition",
         "validation_data",
-    }
+    } <= set(link["required"])
+    assert set(link["required"]) == set(link["properties"])
     assert link["properties"]["disposition"]["enum"] == ["extend_existing", "new_package"]
     assert link["properties"]["validation_data"]["minItems"] == 1
+    # The fields Pydantic treats as optional are NULLABLE rather than absent from `required`,
+    # which is the only way strict mode can express an optional field.
+    for optional in ("observed_issue", "replication_tolerance", "notes"):
+        branches = link["properties"][optional]["anyOf"]
+        assert {"type": "null"} in branches, optional
 
 
 # ── the loop contract: a rejected form is a correction, a filed one is the end ──
@@ -459,7 +481,7 @@ def test_an_out_of_stage_form_does_not_end_the_loop():
         cycle,
         [
             (SUBMIT_ADJUDICATION_TOOL, {}),  # out of stage → correction
-            (AUTHOR_CHAIN_TOOL, {"tool_specs": [GOOD_LINK]}),  # in stage → files, ends
+            (AUTHOR_CHAIN_TOOL, {"first_link": GOOD_LINK}),  # in stage → files, ends
             (HOLD_AUTHORING_TOOL, {"reason": "never reached"}),
         ],
     )
