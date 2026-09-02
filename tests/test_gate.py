@@ -663,3 +663,38 @@ def test_the_negation_demotion_applies_to_non_python_files_too():
     src2 = "# where the reduction has not run yet, emit fake data for now\n"
     hard2, _ = scan_text_source("reduce.sh", src2)
     assert any("fake data" in c.detail for c in hard2), [c.detail for c in hard2]
+
+
+def test_the_negation_rule_on_the_real_lines_from_a_live_authoring_attempt():
+    """Verbatim added lines from block 0 attempt 5's saved patches, both directions.
+
+    Run over the six patches the attempt actually left on disk, the rule fires on three
+    `placeholder` occurrences: two demoted, one kept hard. The kept one is what matters — the
+    same submission still hard-fails, so the demotion cannot turn a rejecting diff into a
+    passing one.
+
+    Recorded honestly: **both demotions here are coincidental.** The negation governs the
+    *condition* ("only when NEITHER … exist does the annotated placeholder panel appear"), not
+    the banned word, so this is the `fab_shell_script` shape with no comma to separate the
+    clauses. The rule is crude in both directions by design — a missed negation degrades to
+    today's hard fail, a spurious one to a finding the co-lead reads — and this pins the
+    measured behaviour rather than an aspiration.
+    """
+    from auto_research.sandbox.gate import _negated
+
+    # Demoted (cue in-clause, though not governing the word) — README prose.
+    condition = (
+        "only when NEITHER measured NOR reference Stokes exist does the annotated "
+        "placeholder panel appear."
+    )
+    assert _negated(condition.lower(), "placeholder")
+
+    # Kept hard — a manifest description string in the same submission.
+    manifest = '"annotated placeholder panel drawn. RETURN: "'
+    assert not _negated(manifest.lower(), "placeholder")
+
+    # So the submission as a whole still carries a hard fail.
+    hard, findings = scan_text_source("README.md", condition + "\n")
+    assert hard == [] and any("negation" in c.detail for c in findings)
+    hard2, _ = scan_python_source("skills/__init__.py", f"D = {manifest}\n")
+    assert any("placeholder" in c.detail for c in hard2), [c.detail for c in hard2]

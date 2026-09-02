@@ -943,6 +943,22 @@ async def execute_submit(session: Any) -> ToolOutcome:
     Returns a verdict the lead diagnoses: a gate failure (fix via drive_coder), a review rejection
     (drive_coder or respond_to_review), or a successful commit. Bounded by ``session.submit_cap``
     (each submit runs the gate twice + a GPT review — expensive)."""
+    if getattr(session, "committed", False) and not _has_pending_changes(session):
+        # The tool already landed and nothing has changed since. Submitting again would scan an
+        # empty changeset and then ask `approve_edit` to commit nothing, which exits non-zero and
+        # raises out of this tool call ([F6]: `_react` does not catch tool exceptions). Observed
+        # live before the base ref advanced on commit: the lead submitted after its own commit
+        # and the §9.9 backstop reverted the approved commit, so the cycle silently repeated —
+        # three times on one link, at a full gate + co-lead review each. Budget-free, because
+        # answering a question is not a submission.
+        return ToolOutcome(
+            text=(
+                f"{session.tool_spec.proposed_tool_name} is already committed "
+                f"({(session.last_commit_sha or '')[:10]}) and nothing has changed since. "
+                "Authoring for this tool is done — move on to the next link, or drive_coder "
+                "first if you want to change something and then submit that."
+            )
+        )
     if session.submits_used >= session.submit_cap:
         return ToolOutcome(
             text=(
@@ -986,6 +1002,16 @@ async def execute_submit(session: Any) -> ToolOutcome:
             "co-lead approved — the tool is on the authoring branch. Authoring for this tool is done."
         )
     )
+
+
+def _has_pending_changes(session: Any) -> bool:
+    """Whether the session holds unlanded work; True for a session that cannot answer.
+
+    A stub session in a test (or any object without the method) is treated as having work, so
+    the guard above never changes behaviour for a caller that does not model a tree.
+    """
+    check = getattr(session, "pending_changes", None)
+    return True if check is None else bool(check())
 
 
 def respond_to_review_tool_def() -> dict:

@@ -950,6 +950,28 @@ class AuthoringSession:
         whichever one it is."""
         return await self._backend.drive(message)
 
+    def pending_changes(self) -> bool:
+        """Whether the tree holds work this attempt has not yet landed.
+
+        False right after :meth:`commit` (the tree is clean and HEAD *is* the base ref), and
+        True again as soon as the coder edits something. Read by ``execute_submit`` so a submit
+        with nothing new is answered rather than executed: the gate would scan an empty
+        changeset and ``approve_edit`` would then run ``git commit`` with nothing staged, which
+        exits non-zero and raises out of the tool call — an [F6] run-killer, since ``_react``
+        does not catch tool exceptions.
+
+        Best-effort: a git failure reports True, so an unreadable tree falls through to the
+        gate (which reports its own verdict) instead of silently refusing a real submission.
+        """
+        try:
+            if _git_in(self.worktree, "status", "--porcelain").strip():
+                return True
+            if self._base_ref is None:
+                return True
+            return _git_in(self.worktree, "rev-parse", "HEAD").strip() != self._base_ref
+        except RuntimeError:
+            return True
+
     async def run_gate_step(self) -> GateReport:
         """Run the deterministic gate over the current tree (§9.4). First applies the §9.9
         backstop: if the coder slipped in a commit (HEAD moved off this attempt's base), undo it

@@ -724,7 +724,10 @@ the hook mapping a fake-model verdict — no live LLM).
   (one warm-session coder turn → response text; L0 self-correction inside), `run_gate_step()` →
   `GateReport` (applies the §9.9 commit-backstop, then the deterministic gate — mechanical, only
   *satisfiable*), `run_review_step(gate)` → `ToolReviewVerdict` (the provider-decorrelated
-  co-lead — *debatable*), `commit(message)` → sha (the only commit path; sets `committed`),
+  co-lead — *debatable*), `commit(message)` → sha (the only commit path; sets `committed` and
+  advances the per-attempt base ref, in memory and on disk), `pending_changes()` → bool
+  (whether the tree holds unlanded work — False right after a commit, True again on the next
+  edit; `execute_submit` reads it so a no-op submit is answered, never executed),
   `aclose()` (disconnect + §9.9 non-committed direct-branch tree reset). `propose_and_pr` drives
   these in the auto-loop; the analyst lead's authoring ReAct tools drive the *same* primitives
   directly (so the lead diagnoses each verdict rather than the run terminating).
@@ -1211,8 +1214,21 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   the base ref. **Pre-existing, not from the forms refactor** (`drive_authoring` had the same
   exposure since `c2253d5`); the refactor multiplies it, N links giving N post-commit
   opportunities over one conversation. Guarding the revert with `if not self.committed` would fix
-  the first reader and leave the other two wrong. Three tests in `tests/test_merge_flow.py`, each
-  verified to fail against the unfixed code.
+  the first reader and leave the other two wrong.
+  **Advancing the base ref alone is not enough, and the first draft of this fix was worse than the
+  bug.** With the revert gone, a post-commit `submit_for_review` scans an *empty* changeset and
+  then asks `approve_edit` to `git commit` with nothing staged — a non-zero exit that raises
+  straight out of the tool call, and `_react` does not catch tool exceptions ([F6]). Caught by
+  replaying the ledger's actual sequence through `execute_submit` rather than calling
+  `run_gate_step` directly, which is what the first test did. So `AuthoringSession.
+  pending_changes()` reports whether the tree holds unlanded work (clean **and** `HEAD == base_ref`
+  ⇒ nothing pending), and `execute_submit` answers a no-op submit with a model-visible "already
+  committed, nothing has changed" instead of executing it — **budget-free**, since answering a
+  question is not a submission, where the live run spent two of its five on this. The guard keys
+  on *nothing changed*, never on *already committed*, so a genuine follow-up after a commit still
+  gates, reviews and lands its increment. Four tests in `tests/test_merge_flow.py`, each verified
+  against the unfixed code: with only the guard removed the second submit raises, and with the
+  base-ref advance removed as well it reverts.
   **The no-fabrication scan demotes a negated banned word** to the co-lead-judged finding tier
   (`_negated`, applied in both `scan_python_source` and `scan_text_source`). A banned word inside
   an explicit negation is the §9.5 discipline being *stated* — "the tool can never fabricate a

@@ -525,12 +525,15 @@ def test_stop_flag_no_longer_gates_authoring():
 
 
 class TerminalMidChainLead(AuthoringLead):
-    """A lead that commits a link and then files the honest terminal from the authoring stage.
+    """A lead that files the honest terminal from inside the authoring stage.
 
-    The exact live shape (§9.6 is reachable from every stage): link 1 commits, link 2 exhausts
-    its submissions, and the lead stops honestly *inside* the chain. ``filed`` is then the
-    terminal rather than ``author_chain``, and gating the resume on which form arrived is what
-    let two gated, approved, committed tools reach the analysts unregistered.
+    Shaped on the real trajectory of block 0 attempt 5, read back from its ledger: a 3-link
+    chain in which links 1-2 commit, link 3 exhausts its five submissions, and the lead files
+    `submit_terminal_report` **inside** link 3 rather than returning `author_chain`. The
+    production event is `analyst.lead.cycle | filed=submit_terminal_report committed=2`, so the
+    outcome the strategy has to act on carries a terminal form *and* a non-zero commit count —
+    and gating the resume on which form arrived is what let two gated, approved, committed
+    tools reach the analysts unregistered.
     """
 
     async def run_cycle(self, task, reports, **kwargs):
@@ -539,7 +542,7 @@ class TerminalMidChainLead(AuthoringLead):
             outcome.filed = TERMINAL_REPORT_TOOL
             outcome.report = AnalystReport(
                 summary="the chain stopped short; reporting honestly",
-                findings=["one tool landed, the next could not be made mergeable"],
+                findings=["two tools landed, the third could not be made mergeable"],
                 status="failed",
             )
         return outcome
@@ -549,26 +552,31 @@ def test_terminal_filed_mid_chain_still_reloads_restarts_and_reruns():
     """A terminal filed from the authoring stage ends the CHAIN, never the analysis (A11).
 
     Whatever committed still has to become callable: without the registry reload and a sandbox
-    restart the freshly committed tool is not registered, and the reran workers get
-    ``exit 127 Tool not registered`` on the capability the run just built.
+    restart the freshly committed tools are not registered, and the reran workers get
+    ``exit 127 Tool not registered`` on the capability the run just built — which is what the
+    reviewer's send-back actually received in attempt 5.
     """
     state = {"authored": 0}
     calls: list = []
     workers = [AuthoringWorker("w1", state, stop_after=1), AuthoringWorker("w2", state, stop_after=1)]
-    lead = TerminalMidChainLead(should_author=True, converge_on=1, state=state, calls=calls)
+    # The live shape: three links, the third fails, the terminal is filed with committed=2.
+    lead = TerminalMidChainLead(
+        should_author=True, converge_on=1, state=state, calls=calls, chain_len=3, fail_on=3,
+    )
     registry = FakeRegistry()
 
     final = asyncio.run(
         DebateToConverge(
-            max_rounds=3, registry=registry, tool_author_cap=3,
+            max_rounds=3, registry=registry, tool_author_cap=12,
             toolkit_root=TOOLKIT, direct_branch="ai",
         ).run(workers, lead, AnalysisTask(question="q"))
     )
 
-    assert len(calls) == 1               # one link authored and committed
-    assert registry.reloads == 1         # discovery refreshed despite the terminal
+    assert len(calls) == 3               # three links attempted, as the ledger shows
+    assert lead._committed_total == 2    # links 1-2 landed, link 3 did not
+    assert registry.reloads == 1         # discovery refreshed despite the terminal form
     assert all(w.sandbox.restarts == 1 for w in workers)
-    assert all(w.calls == 2 for w in workers)  # the workers reran on the committed tool
+    assert all(w.calls == 2 for w in workers)  # the workers reran on the committed prefix
     # The analysis continued to a judged report rather than shipping the mid-chain terminal.
     assert final.summary == "final"
 

@@ -333,8 +333,7 @@ def test_the_media_budget_reserves_the_non_media_request_weight(tmp_path):
 
 def test_nonmedia_weight_counts_text_tool_defs_and_provider_parts(tmp_path):
     """Every non-media channel that rides the request is counted, because the reserve is only
-    safe if it is not systematically low. Rounded up: under-reserving costs the whole request,
-    over-reserving withholds one figure with a note."""
+    safe if it is not systematically low."""
     from auto_research.models.types import ModelResponse, ToolCall
 
     text = ModelMessage(role="user", content="u" * 5_000)
@@ -358,6 +357,56 @@ def test_nonmedia_weight_counts_text_tool_defs_and_provider_parts(tmp_path):
     # Every part of one request adds up rather than any single one dominating.
     total = nonmedia_weight([text, result, turn], tools=tools)
     assert total > 5_000 + 8_000 + 7_000 + 6_000
+
+
+def test_the_reserve_is_never_below_what_the_adapter_actually_sends():
+    """The reserve must round **up** against the real on-the-wire non-media payload.
+
+    Under-reserving is the failure mode that costs a whole request, so the property worth
+    pinning is an inequality against the translator itself rather than a hand-picked constant —
+    which keeps it true as the adapter's message shapes change. Measured against the verbatim
+    record of the reviewer call that actually 413'd (12 messages, 6 tools, a five-round ReAct
+    trajectory): the true payload was 72,124 bytes and the reserve 81,787, i.e. **1.13x**. This
+    reconstructs that shape from our own types at the same scale.
+    """
+    import json as _json
+
+    from auto_research.models.providers._media import MediaPlan
+    from auto_research.models.providers.anthropic import _to_anthropic_messages
+    from auto_research.models.types import ModelResponse, ToolCall
+
+    messages: list = [
+        ModelMessage(role="system", content="S" * 9_200),
+        ModelMessage(role="user", content="U" * 12_000),
+    ]
+    for i in range(5):
+        messages.append(
+            ModelResponse(
+                content=f"turn {i} narration " + "a" * 400,
+                tool_calls=[ToolCall(id=f"t{i}", name="read_file",
+                                     arguments={"path": f"/x/{i}", "offset": i, "limit": 200})],
+                provider_parts=[{"type": "thinking", "thinking": "z" * 1_500}],
+            )
+        )
+        messages.append(
+            ToolResultMessage(
+                results=[ToolResultPart(tool_call_id=f"t{i}", name="read_file",
+                                        content="r" * 6_000)]
+            )
+        )
+    tools = [
+        {"name": n, "description": "d" * 600, "input_schema": {"type": "object",
+         "properties": {"path": {"type": "string"}}, "required": ["path"]}}
+        for n in ("read_file", "list_dir", "text_search", "open_paper", "web_search", "web_fetch")
+    ]
+
+    system, provider_messages = _to_anthropic_messages(messages, MediaPlan())
+    wire = len(_json.dumps(
+        {"system": system, "messages": provider_messages, "tools": tools}, default=str
+    ).encode())
+    reserve = nonmedia_weight(messages, tools=tools)
+
+    assert reserve >= wire, f"reserve {reserve} under-reserves the {wire}-byte payload"
 
 
 def test_an_unserializable_tool_call_argument_still_contributes_weight():

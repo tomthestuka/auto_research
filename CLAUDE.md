@@ -419,9 +419,14 @@ toolkit.**
    `request_another_round` / `submit_adjudication` / `submit_terminal_report`). The branch it
    picks *is* the decision, so the branch and the fields it must fill arrive together, each
    question carrying its own description — the channel a Pydantic `#` comment never reached.
-   `author_chain` requires at least one link **in its own schema**, so "author, with nothing to
-   author" is inexpressible rather than rejected after the fact (a run died on that state being
-   expressible, 2026-09-01). Every form is declared for the whole cycle and the *handler*
+   `author_chain` asks for at least one link **in its own schema** (`minItems: 1`) **and its handler
+   refuses a chain without one**, which is the layer that actually holds. Measured 2026-09-02: the
+   Opus lead filed `author_chain` carrying only `rationale`, `tool_specs` absent — a provider does
+   not enforce `minItems` on a tool `input_schema` the way it constrains structured output, so
+   "author, with nothing to author" is **expressible and rejected**, not inexpressible. The
+   rejection is an `is_error` result naming the missing field, which `_react` treats as a
+   correction; that lead recovered on its next turn and filed a real 4-link chain. (A run died on
+   this state going *unrejected*, 2026-09-01 — the schema is the belt, the handler the suspenders.) Every form is declared for the whole cycle and the *handler*
    enforces the stage, because a declared tool set that shrinks mid-conversation is a documented
    run-killer; the caps stay in Python (`debate_max_rounds`, `tool_author_cap`), so the loop
    chooses *what* and the harness decides *how many times*. Filing the chain then **spawns a
@@ -1771,7 +1776,16 @@ history. Token-level preservation of the second pass was checked mechanically, n
   a legitimate commit; and `heal_toolkit_branch_if_dirty` does a `reset --hard` to the **persisted**
   value, so a hard kill after a commit would have healed the tool off the branch. Advancing both the
   in-memory and the on-disk value fixes all three at once — guarding the revert with
-  `if not self.committed` fixes one and leaves two wrong. **[3] The media budget reserves the
+  `if not self.committed` fixes one and leaves two wrong. **And advancing it alone was worse than
+  the bug**, which the tests as first written did not see: with the revert gone, a post-commit
+  submit scans an *empty* changeset and then asks `approve_edit` to `git commit` with nothing
+  staged — a non-zero exit raising straight out of the tool call, and `_react` does not catch tool
+  exceptions ([F6]). Found by replaying the ledger's real sequence through `execute_submit`
+  instead of calling `run_gate_step` directly, on the user's question of whether the tests
+  simulated the actual trajectory. New `AuthoringSession.pending_changes()`; `execute_submit`
+  answers a no-op submit with "already committed, nothing has changed", **budget-free** (the live
+  run spent two of five submissions on this), keyed on *nothing changed* rather than *already
+  committed* so a genuine follow-up still lands. **[3] The media budget reserves the
   non-media request weight.** The run died at its last node on `413 request_too_large` with **zero
   media-guard events**, and the measurement was the finding: two PDFs came to **33,512,296 encoded
   bytes against the 33,554,432 ceiling**, i.e. the guard stopped with **42 KB** of headroom for a
@@ -1804,33 +1818,82 @@ history. Token-level preservation of the second pass was checked mechanically, n
   and **1 moved under `--naive`** — the second half being what proves the check can see a move at
   all, rather than being a probe that cries nothing. `prompts/coder.md` already warned against
   writing such a disclaimer, so this is the suspenders half catching what the belt did not.
-  **[5] Authoring is bound to the filed brief** (prompt-level, both actors): the lead added an
-  unrequested cache the coder then shipped cache-invalidation bugs in (~3 submissions), and the
-  coder shipped an entire second tool inside another link's brief (~2 submissions, and it is what
-  pulled [4]'s banned word into the diff). The gate's structural check verifies a manifest entry
-  *exists*, never that the submission is only the brief, and the co-lead notices only by
-  *inheriting the extra tool's obligations* — so scope creep is priced as review cycles and never
-  named. `analyst_lead.md` now bounds a steer to the filed link and sends a new capability to its
-  own link; `coder.md` says ship one capability and name a second to the lead. Also folded in: for
+  **Run over the six patches the attempt actually left on disk, the rule fires three times and the
+  honest reading is mixed:** two `placeholder` occurrences in README prose are demoted and one in a
+  manifest description string stays hard — so that submission still hard-fails and no real verdict
+  moves — but **both demotions are coincidental**, the negation governing the *condition* (*"only
+  when NEITHER … exist does the annotated placeholder panel appear"*) rather than the banned word.
+  That is the `fab_shell_script` shape with no comma to separate the clauses, i.e. the rule is crude
+  in both directions, which is what makes the safe-direction argument load-bearing rather than
+  decorative. A word-distance cut would separate all six observed cases at ≤5 words and was
+  **rejected as fitting a threshold to six points**. Pinned verbatim in `tests/test_gate.py`. None
+  of the three occurrences was ever gated — they entered the tree after that link's fifth
+  submission, consistent with all five of its gate runs passing.
+  **[5] One link is one capability, one commit** (prompt-level) — **and the first version of this
+  fix was aimed at the wrong actor.** It was written from the diff and the review issues; reading
+  the `author_chain` arguments the lead actually filed reversed both attributions. The cache was
+  **in link 1's brief** (*"Region selection (cached)"*, sidecar design spelled out), not bolted on
+  by a mid-authoring steer; and `benchmark_compare` was **in link 2's brief** as *"### Function 2"*
+  with a full signature, so the coder built exactly what it was asked rather than smuggling a tool
+  in. The costs re-verified and stand: two of link 1's three rejections are that cache's
+  invalidation bugs (stale across regions, then validity never bound to the Level-2 inputs — the
+  same feature one level deeper each time), link 2's single rejection is
+  `test_repro_benchmark_compare` missing because §9.4's obligation attaches to a tool deriving
+  significance values, and one commit (`da507d7`) landed two tools, weakening §9.9's
+  one-tool-one-commit-one-clean-revert. So the remedy moved from authoring time to **planning**
+  time: `analyst_lead.md` states the rule in the chain-planning paragraph, where a helper, a cache
+  or a comparison step is simply the next link. The coder-side edit was **rewritten rather than
+  kept** — "ship one capability" would have told it to refuse a two-function brief, inverting the
+  standing rule that the brief is a settled plan to execute; it now says everything in the diff
+  traces to the brief or a relayed review, and reserves `ask_lead` for a capability nobody asked
+  for. The gate's structural check verifies a manifest entry *exists*, never that the submission is
+  only the brief, and the co-lead notices only by *inheriting* the extra capability's obligations —
+  so a multi-capability link is priced as review cycles and never named. Also folded in: for
   any tool that reuses, caches or overlays an artifact, `proposed_checks` must require that a
   **foreign but plausible** artifact is rejected (same group, same binning, different observation)
   — precisely the case both of that run's too-weak bindings passed on their first fix. No gate-side
   scope check is proposed: a legitimate review fix also changes the diff, so one cannot be specified
   honestly. **[6] Every recorded commit is checked against the repository.** `trial.
-  unreachable_commits` cross-checks each ledger `commit` SHA against `git rev-list --all` in the
+  commit_reachability` cross-checks each ledger `commit` SHA against `git rev-list --all` in the
   trial's private checkout before teardown. [2] reverted three approved commits and the ledger
   recorded a `commit` event for each, including SHAs no longer on the branch; it was invisible until
   the git log was read by hand, which is exactly the class a record-versus-repository check catches.
+  It returns `(checked, unreachable)` rather than one list because the first draft failed in the
+  silent direction, and pointing it at attempt 5's real ledger is what showed it: the private clone
+  is swept at teardown, so a missing repository answered `[]` — a clean bill of health for the run
+  that reverted two approved commits.
   **The theme, stated because it recurred four times in one run:** a limit expressed in a unit that
   does not bound what actually fails — a moved HEAD standing in for provenance, a PDF *count*
   standing in for bytes, an output cap consumed entirely by reasoning, a 1000-*line* window
   returning 159,668 characters. Every fix here except [1] and [6] is a unit correction.
+  **Process note, and it is the reusable part.** Every fix here was tested and three of the tests
+  were shaped by *my* model of the trajectory rather than by the run's own record. Asked whether
+  they simulated the real one, reading the ledger back answered it three ways: [1]'s production
+  event is `analyst.lead.cycle | filed=submit_terminal_report committed=2` — the fake's shape was
+  right but its chain was one link where the real one was three with the third failing, now
+  matched; [2]'s test called `run_gate_step` directly and so never met `execute_submit`, which is
+  where the new crash lived; and [6] run against the real ledger returned a clean `[]` because the
+  checkout it needed had been swept. **Two of the three defects were in the code that *reads* a
+  result, not in the code under test** — the same shape as the 2026-09-01 probe-helper lesson, and
+  the reason a ledger replay is worth more than a hand-built fake even when the fake is faithful.
+  **Extending the same check to [3], [4] and [5] found three more things, and the last is the one
+  that matters.** [3]: the verbatim prompt dump holds the exact request that 413'd, and against it
+  the reserve is 81,787 bytes where the guard had left 42,136 of headroom, so the fix does prevent
+  that 413 — and the reserve is **1.13x** the true 72,124-byte wire payload, i.e. it rounds up as
+  documented. (A first comparison said 0.92x; it measured against the *dump's* serialization, which
+  carries `raw`/`usage`/`parsed` fields no request ever sends. Recorded because the wrong number
+  nearly produced a correction to code that was right.) [4]: the rule's two firings on real diffs
+  are both coincidental, above. [5]: **reading the filed briefs reversed both of its attributions**
+  — see [5]. And a fourth, unrelated to the six: the lead filed `author_chain` with `tool_specs`
+  **absent**, so §9.3's "inexpressible" claim about `minItems: 1` is false; a provider does not
+  enforce it on a tool `input_schema`, the handler's `is_error` is what held, and the lead recovered
+  on its next turn. §9.3 and the wording around it are corrected.
   **Residual, recorded in §13:** with the reserve in place eviction actually fires, and it is
   oldest-first, so a single near-ceiling document now survives while several small ones are dropped
-  to make room for it — better than a dead request, but a policy nobody has measured. **15 new
+  to make room for it — better than a dead request, but a policy nobody has measured. **18 new
   deterministic tests**, each of the five code fixes verified to fail against the unfixed code
   before being kept: `tests/test_consensus_authoring.py` 11 → 13, `tests/test_merge_flow.py`
-  41 → 44, `tests/test_media_guards.py` 8 → 12, `tests/test_gate.py` 52 → 56,
-  `benchmarks/science_bench/tests/test_science_bench.py` 108 → 110. Full suite **1700 passed /
+  41 → 45, `tests/test_media_guards.py` 8 → 12, `tests/test_gate.py` 52 → 56,
+  `benchmarks/science_bench/tests/test_science_bench.py` 108 → 110. Full suite **1703 passed /
   159 skipped / 9 failed**, the nine being the pre-existing `.pytest_cache` leak into
   `gate_bench`'s synthetic-repo comparison, unchanged and still untouched (§3).

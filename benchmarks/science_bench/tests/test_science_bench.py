@@ -1298,15 +1298,22 @@ def test_a_recorded_commit_missing_from_the_branch_is_flagged(tmp_path):
     repo, sha = _repo_with_one_commit(tmp_path / "toolkit")
 
     # Ledger SHAs are 10-character prefixes, so membership is by prefix.
-    assert trial.unreachable_commits(repo, [sha[:10]]) == []
-    assert trial.unreachable_commits(repo, ["deadbeef01"]) == ["deadbeef01"]
-    assert trial.unreachable_commits(repo, [sha[:10], "deadbeef01"]) == ["deadbeef01"]
+    assert trial.commit_reachability(repo, [sha[:10]]) == (True, [])
+    assert trial.commit_reachability(repo, ["deadbeef01"]) == (True, ["deadbeef01"])
+    assert trial.commit_reachability(repo, [sha[:10], "deadbeef01"]) == (True, ["deadbeef01"])
 
 
-def test_the_reachability_check_never_fails_a_measured_trial(tmp_path):
-    """Best-effort: no commits to check, or no checkout left to check them against, reports
-    nothing rather than raising inside a trial that otherwise succeeded."""
+def test_an_unreadable_checkout_reports_unchecked_not_all_clear(tmp_path):
+    """"Could not look" must never be recorded as "nothing wrong".
+
+    The trial's private checkout is swept at teardown, so a single-list version answers `[]` for
+    a missing repository — exactly what a healthy run answers. Caught by pointing the first draft
+    at attempt 5's real ledger, whose clone was already gone: it reported no unreachable commits
+    for a run that had two reverted ones in it.
+    """
+    assert trial.commit_reachability(tmp_path / "absent", ["deadbeef01"]) == (False, [])
+    assert trial.commit_reachability(tmp_path / "not_a_repo", ["deadbeef01"]) == (False, [])
+
+    # Nothing recorded is genuinely nothing to check, and that is a real all-clear.
     repo, _ = _repo_with_one_commit(tmp_path / "toolkit")
-    assert trial.unreachable_commits(repo, []) == []
-    assert trial.unreachable_commits(tmp_path / "absent", ["deadbeef01"]) == []
-    assert trial.unreachable_commits(tmp_path / "not_a_repo", ["deadbeef01"]) == []
+    assert trial.commit_reachability(repo, []) == (True, [])

@@ -933,15 +933,22 @@ def test_an_unappliable_snapshot_is_discarded_and_authoring_starts_clean(tmp_pat
 # ── an approved commit is the new base ref (§9.9) ────────────────────────────
 
 
-def test_a_submit_after_a_commit_does_not_revert_it(tmp_path):
-    """The §9.9 gate-entry backstop must not eat ``approve_edit``'s own commit.
+def test_a_submit_after_a_commit_neither_reverts_nor_raises(tmp_path):
+    """The real post-commit-submit trajectory, driven through ``execute_submit``.
 
-    ``submit_for_review`` stays available after a successful commit (it is budget-free in the
-    lead's loop and the loop continues past a commit), and the backstop reverts on a moved HEAD.
-    With the base ref left at the pre-commit HEAD it cannot tell the two apart, so a second
-    submit reverted the approved commit and re-ran the whole gate+review cycle — three times on
-    one link in a live trial, at a full cycle each.
+    Attempt 5's ledger, link 2: ``review.result approved`` → ``commit … 1523349`` → **another**
+    ``submit_for_review`` → ``coder.committed`` ("auto-reverted") → the whole gate + co-lead
+    cycle again. ``submit_for_review`` stays available after a commit (budget-free in the lead's
+    loop, and the loop continues past one), and the §9.9 backstop reverts on a moved HEAD, so
+    with the base ref left behind it could not tell an approved commit from a coder slip.
+
+    Two things have to hold, and the second is why this drives the tool rather than
+    ``run_gate_step``: the approved commit survives, **and** the call does not raise. With the
+    base ref advanced but nothing else changed, the gate would scan an empty changeset and
+    ``approve_edit`` would run ``git commit`` with nothing staged — a non-zero exit that raises
+    straight out of the tool call, and ``_react`` does not catch tool exceptions ([F6]).
     """
+    from auto_research.agents.react import execute_submit
     from auto_research.sandbox.merge_flow import approve_edit as real_approve
 
     repo = _toolkit_repo(tmp_path)
@@ -952,15 +959,47 @@ def test_a_submit_after_a_commit_does_not_revert_it(tmp_path):
     mon = _RecordingMonitor()
     session = _direct_session(tmp_path, repo, approve_edit=real_approve, monitor=mon)
     _coder_edits(repo)
-    gate = asyncio.run(session.run_gate_step())
-    assert asyncio.run(session.run_review_step(gate)).approved
-    sha = asyncio.run(session.commit("land it"))
 
+    assert "COMMITTED" in asyncio.run(execute_submit(session)).text
+    sha = _git_out(repo, "rev-parse", "HEAD").strip()
     assert session._base_ref == sha, "the landed commit IS the attempt's base now"
-    asyncio.run(session.run_gate_step())          # the lead submits again
+    assert not session.pending_changes()
 
+    outcome = asyncio.run(execute_submit(session))   # the lead submits again
+
+    assert not outcome.is_error
+    assert "already committed" in outcome.text
     assert _git_out(repo, "rev-parse", "HEAD").strip() == sha, "the approved commit survives"
     assert not mon.of("coder.committed"), "an approved commit is not a coder slip"
+    assert session.submits_used == 1, "answering a question is not a submission"
+
+
+def test_a_real_follow_up_after_a_commit_still_lands(tmp_path):
+    """The no-op guard keys on *nothing changed*, not on *already committed*.
+
+    A lead that drives the coder again after a commit — a genuine follow-up — must still be able
+    to gate, review and land the increment, or the guard would trade one failure for another.
+    """
+    from auto_research.agents.react import execute_submit
+    from auto_research.sandbox.merge_flow import approve_edit as real_approve
+
+    repo = _toolkit_repo(tmp_path)
+    (repo / "demo_utils" / "tests").mkdir(parents=True, exist_ok=True)
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "tests dir", "--allow-empty")
+    _git(repo, "checkout", "-q", "-b", "ai")
+
+    session = _direct_session(tmp_path, repo, approve_edit=real_approve)
+    _coder_edits(repo)
+    asyncio.run(execute_submit(session))
+    first = _git_out(repo, "rev-parse", "HEAD").strip()
+
+    (repo / "demo_utils" / "lib" / "retbb.py").write_text("def add_retbb(i):\n    return i + 1\n")
+    assert session.pending_changes()
+    assert "COMMITTED" in asyncio.run(execute_submit(session)).text
+
+    second = _git_out(repo, "rev-parse", "HEAD").strip()
+    assert second != first and session._base_ref == second
+    assert session.submits_used == 2
 
 
 def test_a_commit_advances_the_persisted_base_ref(tmp_path):
