@@ -53,12 +53,20 @@ pytestmark = pytest.mark.skipif(
     reason="set AUTO_RESEARCH_LIVE_MODEL_TESTS=1 to spend provider tokens",
 )
 
-# Every schema reachable from `roles.py`; the five marked COMPOSE also ride the terminal
+# Every schema reachable from `roles.py`; the ones marked COMPOSE also ride the terminal
 # compose, which is the path that now declares tools.
+#
+# `AuthoringDecision` is **no longer composed by any role** — the lead's turn ends by filing a
+# form, and the harness builds this object from the arguments. The row is kept because it is still
+# the strictest shape this project sends a provider (a required list of nested objects, each with
+# its own nested list), and that shape now travels as `author_chain`'s tool `input_schema`. The
+# input-schema side is measured separately, on all five vendors, by
+# `tests/test_live_form_shapes.py`; this row keeps the output-schema side from silently
+# regressing while the model class still exists.
 SCHEMAS = [
     ("ReviewVerdict", ReviewVerdict),          # COMPOSE (reviewer.review)
-    ("AnalystReport", AnalystReport),          # COMPOSE (analyze / adjudicate / finalize)
-    ("AuthoringDecision", AuthoringDecision),  # COMPOSE (lead.decide_authoring)
+    ("AnalystReport", AnalystReport),          # COMPOSE (analyze / lead report terminals)
+    ("AuthoringDecision", AuthoringDecision),  # shape-only: the nested chain, no longer composed
     ("ToolReviewVerdict", ToolReviewVerdict),  # COMPOSE (colead.review_tool)
     ("_ClarifyReply", _ClarifyReply),          # COMPOSE (lead.clarify_for_author)
     ("SearchRequest", SearchRequest),

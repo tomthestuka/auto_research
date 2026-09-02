@@ -12,6 +12,7 @@ from langgraph.graph import END
 from auto_research.graph import build_graph
 from auto_research.graph.builder import _resolve_cited_paths
 from auto_research.retrieval import RetrievalBackend
+from auto_research.agents.react import SUBMIT_ADJUDICATION_TOOL, LeadCycleOutcome
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -113,15 +114,17 @@ class FakeWorker:
 
 
 class FakeLead:
+    """One cycle, one filed form — the lead interface consensus needs."""
+
     def __init__(self):
         self.adjudications = 0
 
-    async def judge_convergence(self, task, reports, *, round_index, max_rounds):
-        return ReviewVerdict(accepted=True, rationale="converged")
-
-    async def adjudicate(self, task, reports, *, sources=None):
+    async def run_cycle(self, task, reports, *, sources=None, **kwargs):
         self.adjudications += 1
-        return AnalystReport(summary=f"final {self.adjudications}", findings=["final"])
+        return LeadCycleOutcome(
+            filed=SUBMIT_ADJUDICATION_TOOL,
+            report=AnalystReport(summary=f"final {self.adjudications}", findings=["final"]),
+        )
 
 
 def _invoke(graph, request: ResearchRequest, *, max_iterations: int = 3):

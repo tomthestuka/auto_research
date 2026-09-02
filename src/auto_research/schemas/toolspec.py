@@ -40,9 +40,20 @@ class ValidationDataset(MessageModel):
     result computed on it.
     """
 
-    mission: NonEmptyStr  # e.g. "IXPE", "NICER", "NuSTAR", or a source name for lit tools
-    obsid: NonEmptyStr
-    synthetic: bool = False
+    mission: NonEmptyStr = Field(
+        description='The mission this input belongs to, e.g. "IXPE", "NICER", "NuSTAR" — or a '
+                    "source name for a literature tool."
+    )
+    obsid: NonEmptyStr = Field(
+        description="The observation identifier, exactly as it appears in the archive."
+    )
+    synthetic: bool = Field(
+        default=False,
+        description=(
+            "True only for a marked synth… ObsID generated as DATA under the mission path — never "
+            "for anything a toolkit function fabricates, which is banned outright."
+        ),
+    )
 
 
 class ProposedCheck(MessageModel):
@@ -57,9 +68,18 @@ class ProposedCheck(MessageModel):
     provider's strict structured output (OpenAI rejects every open map, §7).
     """
 
-    kind: NonEmptyStr
-    description: NonEmptyStr
-    tolerance: float | None = None  # optional; lead-finalised
+    kind: NonEmptyStr = Field(
+        description=(
+            'Free-text family hint, e.g. "known-input", "metamorphic", "differential", '
+            '"injection-recovery" — or a family nobody has listed, when the tool needs one.'
+        )
+    )
+    description: NonEmptyStr = Field(
+        description="What the check asserts, concretely enough for the coder to write it."
+    )
+    tolerance: float | None = Field(
+        default=None, description="Optional numeric tolerance for this check."
+    )
 
 
 class AnalystToolRequest(MessageModel):
@@ -79,71 +99,163 @@ class AnalystToolRequest(MessageModel):
     strict structured output (§7).
     """
 
-    # Why the gap is raised. ``fix_existing`` reports an in-use defect (§9.3 L5); the lead
-    # triages wrongly-called vs genuinely-buggy. ``new_capability`` is the default.
-    request_kind: RequestKind = "new_capability"
+    request_kind: RequestKind = Field(
+        default="new_capability",
+        description=(
+            "'new_capability' when the toolkit cannot do this at all; 'fix_existing' when a tool "
+            "you called misbehaved. The lead decides the cause; you report which of the two you "
+            "are raising."
+        ),
+    )
 
-    science_context: NonEmptyStr  # what is being measured; why the toolkit can't do it
-    expected_behavior: NonEmptyStr  # prose signature + I/O the tool should provide
-    proposed_tool_name: NonEmptyStr  # a *suggested* tool/function name; the lead may rename
+    science_context: NonEmptyStr = Field(
+        description="What is being measured; why the toolkit can't do it."
+    )
+    expected_behavior: NonEmptyStr = Field(
+        description="Prose signature + I/O the tool should provide."
+    )
+    proposed_tool_name: NonEmptyStr = Field(
+        description="A suggested tool/function name (the lead may rename)."
+    )
 
-    # For ``fix_existing``: the wrong/surprising behaviour the worker observed (the symptom).
-    observed_issue: str | None = None
+    observed_issue: str | None = Field(
+        default=None,
+        description="For 'fix_existing': the wrong/surprising behaviour observed.",
+    )
 
-    # The core of verifiability: the real input(s) that exposed the gap — the ObsID the
-    # check/regression runs against (§9.1). At least one, even for a brand-new capability.
-    validation_data: list[ValidationDataset] = Field(min_length=1)
+    validation_data: list[ValidationDataset] = Field(
+        min_length=1,
+        description=(
+            "At least one real ObsID the tool's checks run against — the input that exposed the "
+            "gap becomes the regression input."
+        ),
+    )
 
-    # Free-text catch-all — e.g. *suggested* check ideas the lead may adopt or drop.
-    notes: str | None = None
+    notes: str | None = Field(
+        default=None,
+        description="Optional: suggested check ideas the lead may adopt or drop.",
+    )
 
 
 class ToolSpec(MessageModel):
-    """An analyst's brief proposing a new (or extended) ``research_toolkit`` tool."""
+    """One link of the authoring chain — **the opening prompt of a coding session**.
 
-    id: NonEmptyStr = Field(default_factory=lambda: f"toolspec-{uuid4().hex[:12]}")
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    Not a classification of how novel a gap is. This object is handed straight to
+    ``drive_authoring``, which seeds a coder session with it: what is written here is what an
+    engineer reads before touching the toolkit. Write it as instructions to that engineer.
 
-    # Why this brief exists. ``fix_existing`` reports an in-use defect (L5); the lead
-    # triages wrongly-called vs genuinely-buggy. ``new_capability`` is the default.
-    request_kind: RequestKind = "new_capability"
+    Every field below carries a ``description``, and that is load-bearing rather than tidy: a
+    ``#`` comment never reaches the JSON Schema the model is given, so a field explained only in
+    a comment is a field the model must fill blind. A run died on exactly that (2026-09-01).
+    """
 
-    science_context: NonEmptyStr  # what is being measured; why the toolkit can't do it
-    expected_behavior: NonEmptyStr  # prose signature + I/O the tool should provide
-    proposed_tool_name: NonEmptyStr  # the tool/function name to author (or fix)
+    id: NonEmptyStr = Field(
+        default_factory=lambda: f"toolspec-{uuid4().hex[:12]}",
+        description="Set automatically; leave it alone.",
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Set automatically; leave it alone.",
+    )
 
-    # For ``fix_existing``: the wrong/surprising behaviour the analyst observed (the
-    # symptom). The ObsID that exposed it goes in ``validation_data`` — it becomes the
-    # regression input. The analyst only reports; the lead classifies the cause.
-    observed_issue: str | None = None
+    request_kind: RequestKind = Field(
+        default="new_capability",
+        description=(
+            "'new_capability' when the toolkit cannot do this at all; 'fix_existing' when a tool "
+            "that already exists misbehaves. Choose deliberately — this is not a default to "
+            "accept: a capability that exists in lib/ but is not exposed as a tool is still "
+            "'new_capability' with disposition 'extend_existing'."
+        ),
+    )
 
-    # Where the two halves land. ``target_domain`` is an existing ``<domain>_utils``
-    # package (extend) or the proposed new package name (new). ``disposition`` is the
-    # proposer/lead's architectural call; the Sonnet author executes it. Both are the
-    # lead's stated *intent*: the deterministic gate verifies where the tool actually
-    # landed from the diff (the touched ``*_utils`` packages), never from these fields —
-    # a descriptive ``target_domain`` here degrades only the coder brief, it cannot doom
-    # the gate ([A12]).
-    target_domain: NonEmptyStr
-    disposition: Disposition
+    science_context: NonEmptyStr = Field(
+        description="What is being measured; why the toolkit can't do it."
+    )
+    expected_behavior: NonEmptyStr = Field(
+        description=(
+            "The brief itself, and the coder builds only what this says. Algorithm-level: the "
+            "signature, the exact procedure, the edge cases, the tests to add. Write it as a "
+            "general capability serving the whole class of question, not this run's instance."
+        )
+    )
+    proposed_tool_name: NonEmptyStr = Field(
+        description="The tool/function name to author (or fix)."
+    )
 
-    # The core of verifiability: at least one real input the checks run against (§9.1).
-    validation_data: list[ValidationDataset] = Field(min_length=1)
+    observed_issue: str | None = Field(
+        default=None,
+        description=(
+            "For 'fix_existing': the wrong or surprising behaviour observed — the symptom only. "
+            "The ObsID that exposed it goes in validation_data, where it becomes the regression "
+            "input."
+        ),
+    )
 
-    # Advisory and revisable — the committed tests are authoritative (§9.4).
-    proposed_checks: list[ProposedCheck] = Field(default_factory=list)
+    target_domain: NonEmptyStr = Field(
+        description=(
+            "Which <domain>_utils package the work lands in — an existing one when extending "
+            "(e.g. 'xspec_utils'), or the name you propose for a new one. Yours to decide: read "
+            "the relevant lib/ first."
+        )
+    )
+    disposition: Disposition = Field(
+        description=(
+            "'extend_existing' when the capability already exists in lib/ and only needs "
+            "surfacing as a skills/ tool, or when an existing package gains a function — prefer "
+            "this. 'new_package' only when the capability is genuinely absent and no existing "
+            "package is the right home. Your architectural call; the coder executes it."
+        )
+    )
 
-    # Tolerance for the human-half (``lib/``) ↔ ai-half (``skills/``) replication at the
-    # human merge (§9.2/§9.9). Optional here — lead-finalised.
-    replication_tolerance: float | None = None
+    validation_data: list[ValidationDataset] = Field(
+        min_length=1,
+        description=(
+            "At least one REAL input the tool's checks run against — this is what makes the tool "
+            "verifiable rather than merely tested."
+        ),
+    )
 
-    notes: str | None = None
+    proposed_checks: list[ProposedCheck] = Field(
+        default_factory=list,
+        description=(
+            "The must-have tests, which you own: the implementer must not be the sole author of "
+            "its own grader. At minimum a capability test that fails if the tool produced only "
+            "well-shaped metadata without doing its job, and an independent differential against "
+            "already-trusted code rather than the tool's own new helper."
+        ),
+    )
+
+    replication_tolerance: float | None = Field(
+        default=None,
+        description=(
+            "Optional. Tolerance within which a human re-running the lib/ half must reproduce "
+            "the tool's result at merge. Omit when no numeric tolerance applies."
+        ),
+    )
+
+    notes: str | None = Field(
+        default=None, description="Anything else the coder should know. Optional."
+    )
 
 
 class AuthoringDecision(MessageModel):
-    """The analyst lead's structured decision on whether to author tools now (§9.3).
+    """The authoring decision, **constructed by the harness from a filed form** (§9.3).
 
-    Returned by ``AnalystLeadAgent.decide_authoring`` after the lead browses the full
+    No model fills this object any more. The lead files either ``author_chain`` (an ordered chain
+    of :class:`ToolSpec`, at least one, enforced by the tool's own schema) or ``hold_authoring``
+    (a reason), and the handler builds this from whichever arrived. The consumer — the consensus
+    strategy — is unchanged.
+
+    That indirection is the fix for a real failure. While this WAS a structured-output schema the
+    model filled, ``tool_specs`` was optional in the JSON Schema it received, the rule making it
+    mandatory lived in the validator below where the model could not see it, and no field carried
+    a description at all. A lead that concluded "the capability exists in lib/ but is unexposed"
+    had no way to say so: ``should_author=false`` was described only as the verdict for a
+    mis-called request. It answered ``true`` with no specs — schema-valid — and the validator
+    killed the run (2026-09-01, $19.43). The validator is kept below as an assertion on the
+    harness's own construction; from a filed form the state it rejects is unreachable.
+
+    Formerly returned by ``AnalystLeadAgent.decide_authoring`` after the lead browsed the full
     ``lib/`` source (read-only) and reads the analysis prescription for the gap(s) a worker
     raised. The lead — not the weaker Sonnet coder — owns the architectural call, so each
     ``ToolSpec`` it returns carries the finalised ``disposition``/``target_domain`` (extend an
@@ -158,10 +270,19 @@ class AuthoringDecision(MessageModel):
     surfaces only the first gap it hits; the lead expands to the full chain from the prescription.
     """
 
-    should_author: bool  # False when the "gap" was really a mis-called existing tool
-    # The ordered dependency chain to author this cycle (empty ⇔ not authoring).
-    tool_specs: list[ToolSpec] = Field(default_factory=list)
-    rationale: str = ""
+    should_author: bool = Field(
+        description=(
+            "Harness-set: True when the lead filed author_chain, False when it filed "
+            "hold_authoring."
+        )
+    )
+    tool_specs: list[ToolSpec] = Field(
+        default_factory=list,
+        description="The ordered chain the lead filed; empty when it held.",
+    )
+    rationale: str = Field(
+        default="", description="The lead's stated reasoning, carried through from the form."
+    )
 
     @model_validator(mode="after")
     def _require_specs_when_authoring(self) -> "AuthoringDecision":

@@ -11,12 +11,9 @@ from auto_research.monitor import RunMonitor
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
-    AuthoringDecision,
     DocumentRef,
-    MergeFlowResult,
     ReviewVerdict,
     ToolResult,
-    ToolSpec,
 )
 from auto_research.storage import MemoryRecord
 
@@ -34,56 +31,35 @@ class WorkerLike(Protocol):
 
 
 class LeadLike(Protocol):
-    """Lead interface needed by consensus."""
+    """Lead interface needed by consensus — one cycle, one call.
 
-    async def judge_convergence(
-        self,
-        task: AnalysisTask,
-        reports: Sequence[AnalystReport],
-        *,
-        round_index: int,
-        max_rounds: int,
-    ) -> ReviewVerdict:
-        """Judge whether worker reports have converged."""
+    The five separate actions this used to name (judge convergence, adjudicate, decide authoring,
+    drive it, finalize an honest failure) are branches the lead now takes *inside* one ReAct loop
+    by filing a form, so consensus asks for a cycle and reads which form came back. What consensus
+    keeps is the counting: the round cap, the authoring budget, and the reload/restart/rerun.
+    """
 
-    async def adjudicate(
+    async def run_cycle(
         self,
         task: AnalysisTask,
         reports: Sequence[AnalystReport],
         *,
         sources: Sequence[str] | None = None,
-    ) -> AnalystReport:
-        """Synthesize the final report. ``sources`` names each report's worker (V-4), so the lead
-        keys its per-worker figure catalog and can cite any worker's figure from any round."""
-
-    async def decide_authoring(
-        self,
-        reports: Sequence[AnalystReport],
-    ) -> AuthoringDecision:
-        """Decide whether to author a tool for the workers' ``tool_request``s (§9.3)."""
-
-    async def drive_authoring(
-        self,
-        tool_spec: ToolSpec,
-        *,
-        toolkit_root: Path,
-        worktree_base: Path,
+        rounds_left: int = 0,
+        author_budget: int = 0,
+        toolkit_root: Path | None = None,
+        worktree_base: Path | None = None,
         direct_branch: str | None = None,
         colead: Any | None = None,
         human_handler: Any | None = None,
-    ) -> MergeFlowResult:
-        """Drive one tool through authoring via the lead's own ReAct loop (§9.3 B-topology):
-        the lead steers the coder + submits to gate/review and diagnoses each verdict, owning the
-        session lifecycle. Returns the terminal ``MergeFlowResult``."""
+    ) -> Any:
+        """Run one cycle and return its :class:`~auto_research.agents.react.LeadCycleOutcome`.
 
-    async def finalize_authoring_outcome(
-        self,
-        task: AnalysisTask,
-        reports: Sequence[AnalystReport],
-        tool_spec: ToolSpec,
-        result: MergeFlowResult,
-    ) -> AnalystReport:
-        """Compose the terminal report after an authoring attempt did not commit (§9.6)."""
+        ``sources`` names each report's worker (V-4), so the lead keys its per-worker figure
+        catalog and can cite any worker's figure from any round. ``rounds_left`` and
+        ``author_budget`` are the caps consensus owns; the rest is the authoring wiring the lead
+        needs to build a session per chain link (§9.9: that code, never the model, issues git).
+        """
 
 
 class ConsensusStrategy(Protocol):
@@ -133,15 +109,20 @@ class DebateToConverge:
         lead: LeadLike,
         task: AnalysisTask,
     ) -> AnalystReport:
-        """Run worker debate until convergence or the hard round cap, authoring tools as needed.
+        """Run worker debate until the lead files a report, authoring tools as needed.
 
-        Workers gather evidence via their own tool loops inside ``analyze()``. When ≥1 report
-        carries a ``tool_request`` and authoring is wired, the lead decides
-        (``decide_authoring``) and — on a committed tool — the registry is reloaded, sandboxes
-        restarted, the task augmented with provenance, and workers rerun (a *resume*, bounded
-        by ``tool_author_cap``, not counting toward ``max_rounds``). A truncated shared summary
-        of each worker's last tool results is injected into task instructions before each
-        subsequent round.
+        Workers gather evidence via their own tool loops inside ``analyze()``. The lead then takes
+        one **cycle** — a single ReAct loop over a single conversation (``run_cycle``) in which it
+        investigates and ends by filing a form: ``author_chain``/``hold_authoring`` while a tool
+        request is open, then ``request_another_round`` or a report terminal. This method acts on
+        whichever form arrived and owns every count: the debate round cap, the authoring budget,
+        the registry reload, the sandbox restart and the worker rerun. The loop chooses *what*;
+        this chooses *how many times*.
+
+        A cycle that authored a chain ends before judging, because a committed tool is evidence
+        the current reports predate: the workers rerun **once** on whatever committed (or on the
+        failure note) and the lead judges the fresh reports in the next cycle (A8/A11). Bounded by
+        ``tool_author_cap``, which does not consume debate rounds.
         """
 
         if not workers:
@@ -164,74 +145,154 @@ class DebateToConverge:
         author_budget = self.tool_author_cap if self.toolkit_root is not None else 0
         debate_round = 0
         while True:
-            # --- authoring / resume phase (§9.10 step 7, A8) — one decision per reports set; the
-            # lead's whole tool chain is authored, then workers rerun once and loop back here so a
-            # gap the chain plan missed can re-drive a follow-up chain (bounded by budget). ---
-            if (
-                author_budget > 0
-                and any(r.tool_request is not None for r in reports)
-            ):
-                resumed, final_report, reports, task, author_budget = (
-                    await self._maybe_author_and_resume(
-                        workers, lead, task, reports, author_budget
-                    )
-                )
-                if final_report is not None:
-                    # Authoring credits are exhausted and nothing ever committed: the lead composed
-                    # the honest §9.6 terminal report. Return it — the reviewer adjudicates
-                    # downstream (the reviewer is the sole I/O; no debate-spin, no bypass).
-                    return final_report
-                if resumed:
-                    continue  # workers rerun on the committed prefix / failure note; a residual
-                    #            gap re-drives a follow-up attempt, bounded by author_budget (A11)
-
-            # --- debate phase ---
-            debate_round += 1
-            verdict = await lead.judge_convergence(
+            outcome = await lead.run_cycle(
                 task,
                 reports,
-                round_index=debate_round,
-                max_rounds=self.max_rounds,
+                sources=_source_keys(workers),
+                # Rounds the cap still allows AFTER this cycle — what request_another_round is
+                # measured against, so the handler can refuse it with the cap named.
+                rounds_left=max(0, self.max_rounds - debate_round - 1),
+                author_budget=author_budget,
+                toolkit_root=self.toolkit_root,
+                worktree_base=self.worktree_base or self.toolkit_root,
+                direct_branch=self.direct_branch,
+                colead=self.colead,
+                human_handler=self.human_handler,
             )
+            author_budget = outcome.author_budget
             await _record(
                 self.monitor,
-                "analyst.lead.convergence",
-                level=7,
-                summary=f"Lead judged analyst debate round {debate_round}",
+                "analyst.lead.cycle",
+                level=6,
+                summary=f"Lead filed {outcome.filed or 'nothing'}",
                 actor="analyst_lead",
-                data={"round_index": debate_round, "verdict": verdict},
+                data={
+                    "filed": outcome.filed,
+                    "round_index": debate_round + 1,
+                    "committed": outcome.committed,
+                    "author_budget": author_budget,
+                    "decision": outcome.decision,
+                    "verdict": outcome.verdict,
+                },
             )
-            if verdict.accepted or debate_round >= self.max_rounds:
-                # V-4: the lead owns figures now — it accumulates a per-worker catalog (append-only
-                # across rounds/iterations) and CITES the subset for its report. The strategy no
-                # longer force-carries last-round figures (the old dedup pass, which dropped any
-                # figure not re-emitted this round); it just passes the worker source keys.
-                final = await lead.adjudicate(task, reports, sources=_source_keys(workers))
-                await _record(
-                    self.monitor,
-                    "analyst.lead.adjudication",
-                    level=5,
-                    summary="Lead synthesized final analyst report",
-                    actor="analyst_lead",
-                    data={"report": final, "round_index": debate_round},
-                )
-                return final
 
-            # --- revision round ---
-            revised: list[AnalystReport] = []
-            for index, worker in enumerate(workers):
-                report = await worker.analyze(task, peer_reports=_peers_for(reports, index))
-                revised.append(report)
+            if outcome.authored_chain:
+                reports, task = await self._resume_after_authoring(
+                    workers, task, outcome, reports
+                )
+                continue
+
+            if outcome.wants_another_round and debate_round + 1 < self.max_rounds:
+                debate_round += 1
                 await _record(
                     self.monitor,
-                    "analyst.worker.revision",
+                    "analyst.lead.convergence",
                     level=7,
-                    summary=f"Analyst worker {index + 1} revised report",
-                    actor=f"worker-{index + 1}",
-                    data={"round_index": debate_round, "report": report},
+                    summary=f"Lead sent the analysts back for round {debate_round + 1}",
+                    actor="analyst_lead",
+                    data={"round_index": debate_round, "verdict": outcome.verdict},
                 )
-            reports = revised
-            task = self._augment_with_peer_tools(workers, task)
+                task = _augment_with_probe(task, outcome.verdict)
+                reports = await self._revision_round(workers, task, reports, debate_round)
+                task = self._augment_with_peer_tools(workers, task)
+                continue
+
+            if outcome.report is None:
+                # No form filed and no report written: there is genuinely nothing the lead
+                # produced. Composing one here would put a runtime-authored report into the
+                # record, which sits closer to fabrication than the failure it hides ([F6]).
+                raise RuntimeError(
+                    "the analyst lead ended its cycle without filing a report "
+                    f"(filed={outcome.filed!r}); no report was written to stand in for it"
+                )
+            await _record(
+                self.monitor,
+                "analyst.lead.adjudication",
+                level=5,
+                summary="Lead filed the final analyst report",
+                actor="analyst_lead",
+                data={
+                    "report": outcome.report,
+                    "round_index": debate_round + 1,
+                    "filed": outcome.filed,
+                },
+            )
+            return outcome.report
+
+    async def _resume_after_authoring(
+        self,
+        workers: Sequence[WorkerLike],
+        task: AnalysisTask,
+        outcome: Any,
+        reports_unchanged: Sequence[AnalystReport],
+    ) -> tuple[list[AnalystReport], AnalysisTask]:
+        """Rerun the workers once on whatever the chain committed (A8/A11).
+
+        Each authored link leaves a provenance note on the task so a reran worker uses the new
+        tool rather than re-reporting the gap, and a non-commit leaves a failure note so the
+        lead's next cycle adapts instead of repeating the plan. Discovery is reloaded and the
+        sandboxes restarted only when ≥1 tool committed — there is new code to import only then;
+        a chain that committed nothing still reruns so the workers see the failure note.
+        """
+        specs = list(outcome.decision.tool_specs) if outcome.decision is not None else []
+        for spec, result in zip(specs, outcome.authored):
+            if result.status == "committed":
+                task = _augment_with_authored_tool(task, spec, result)
+            else:
+                task = _augment_with_failed_tool(task, spec, result)
+        if outcome.committed >= 1:
+            if self.registry is not None and hasattr(self.registry, "reload"):
+                self.registry.reload()
+            for worker in workers:
+                sandbox = getattr(worker, "sandbox", None)
+                if sandbox is not None and hasattr(sandbox, "restart"):
+                    await sandbox.restart()
+        exhausted = outcome.committed == 0 and outcome.author_budget <= 0
+        await _record(
+            self.monitor,
+            "analyst.tool.chain_resume",
+            level=6,
+            summary=(
+                f"Resuming after authoring: committed={outcome.committed}, "
+                f"budget_left={outcome.author_budget}"
+            ),
+            actor="analyst_lead",
+            data={
+                "committed": outcome.committed,
+                "author_budget": outcome.author_budget,
+                "rerunning_workers": not exhausted,
+            },
+        )
+        if exhausted:
+            # Credits spent with nothing ever committed: there is no capability to rerun on, and
+            # rerunning would only re-surface the same gap at the cost of a full worker round. The
+            # existing reports carry the failure notes, so the lead judges them and files its
+            # honest terminal in the next cycle (§9.6).
+            return list(reports_unchanged), task
+        reports = await self._initial_reports(workers, task)
+        return reports, self._augment_with_peer_tools(workers, task)
+
+    async def _revision_round(
+        self,
+        workers: Sequence[WorkerLike],
+        task: AnalysisTask,
+        reports: list[AnalystReport],
+        debate_round: int,
+    ) -> list[AnalystReport]:
+        """One debate round: every worker revises with its peers' reports in view."""
+        revised: list[AnalystReport] = []
+        for index, worker in enumerate(workers):
+            report = await worker.analyze(task, peer_reports=_peers_for(reports, index))
+            revised.append(report)
+            await _record(
+                self.monitor,
+                "analyst.worker.revision",
+                level=7,
+                summary=f"Analyst worker {index + 1} revised report",
+                actor=f"worker-{index + 1}",
+                data={"round_index": debate_round, "report": report},
+            )
+        return revised
 
     async def _initial_reports(
         self, workers: Sequence[WorkerLike], task: AnalysisTask
@@ -250,146 +311,6 @@ class DebateToConverge:
                 data={"report": report},
             )
         return reports
-
-    async def _maybe_author_and_resume(
-        self,
-        workers: Sequence[WorkerLike],
-        lead: LeadLike,
-        task: AnalysisTask,
-        reports: list[AnalystReport],
-        author_budget: int,
-    ) -> tuple[bool, AnalystReport | None, list[AnalystReport], AnalysisTask, int]:
-        """Author the lead's whole tool chain; resume on commit, finalize honestly on a non-commit (§9.6).
-
-        The lead plans an **ordered dependency chain** (``decision.tool_specs``); this authors the
-        tools **sequentially, one session at a time**, stopping at the first non-commit, then reruns
-        the workers **once** on whatever committed (A8) — not one tool then a full rerun per tool.
-        Because authoring stops at the first failure, everything committed is a complete,
-        dependency-satisfied prefix, so the reload/rerun fires whenever ≥1 tool committed (A11).
-        Returns
-        ``(resumed, final_report, reports, task, author_budget)``:
-        - ``resumed=True`` — authoring made progress worth another loop: ≥1 tool committed (reload +
-          restart + rerun the workers on the committed prefix), OR nothing committed but credits
-          remain (rerun the workers on a failure note so they refine their request and the lead's
-          next decision adapts). Either way loop back — a residual gap / still-missing capability
-          re-drives a follow-up attempt, bounded by ``author_budget`` (A11: recover, never choke on
-          one failed session).
-        - ``final_report`` set — credits are exhausted and NOTHING ever committed; the lead composed
-          the honest §9.6 terminal report (``finalize_authoring_outcome``); ``run()`` returns it and
-          the reviewer adjudicates downstream.
-        - both falsy — the lead declined to author (a mis-called tool); fall through to debate.
-        The LLM never issues git — this code calls ``merge_flow.propose_and_pr`` per tool (§9.9).
-        """
-        decision = await lead.decide_authoring(reports)
-        await _record(
-            self.monitor,
-            "analyst.lead.authoring_decision",
-            level=6,
-            summary="Lead decided on tool authoring",
-            actor="analyst_lead",
-            data={"decision": decision},
-        )
-        if not decision.should_author or not decision.tool_specs:
-            return False, None, reports, task, author_budget
-
-        # A8: author the lead's whole ordered dependency chain sequentially, one session at a
-        # time, BEFORE rerunning workers. Each tool commits atomically to the shared authoring
-        # branch (direct-branch mode: worktree == toolkit_root), so the next tool's coder + its
-        # Layer-B gate tests see the prior tool's committed code on disk — no registry reload or
-        # sandbox restart is needed *between* chain tools (only the workers need discovery/REPL
-        # refresh, once, before they rerun). B-topology (§9.3, A1): the lead drives the coder +
-        # gate + review through its OWN ReAct loop per tool; the LLM never issues git —
-        # build_authoring_session/approve_edit do (§9.9).
-        from auto_research.sandbox.merge_flow import ToolkitBranchUnclean
-
-        committed = 0
-        failed_spec: ToolSpec | None = None
-        failed_result: MergeFlowResult | None = None
-        for spec in decision.tool_specs:
-            if author_budget <= 0:
-                break  # budget exhausted — rerun the workers on whatever committed
-            author_budget -= 1  # an authoring attempt is expensive — bound it regardless of outcome
-            try:
-                result = await lead.drive_authoring(
-                    spec,
-                    toolkit_root=self.toolkit_root,
-                    worktree_base=self.worktree_base or self.toolkit_root,
-                    direct_branch=self.direct_branch,
-                    colead=self.colead,
-                    human_handler=self.human_handler,
-                )
-            except ToolkitBranchUnclean as exc:
-                # The authoring branch was dirty when this attempt began — a tree dirtied mid-run
-                # (the across-a-death case is repaired by the resume-time heal). Degrade to the
-                # honest §9.6 terminal instead of crashing the whole run (an F6-class run-killer);
-                # the reviewer adjudicates it downstream.
-                await _record(
-                    self.monitor,
-                    "analyst.tool.branch_unclean",
-                    level=2,
-                    summary=f"Authoring branch unclean — honest terminal ({spec.proposed_tool_name})",
-                    actor="analyst_lead",
-                    data={"error": repr(exc)},
-                )
-                unclean = MergeFlowResult(
-                    tool_spec_id=getattr(spec, "id", None) or spec.proposed_tool_name,
-                    status="failed",
-                    reason=f"authoring branch was not clean at attempt start: {exc}",
-                )
-                final = await lead.finalize_authoring_outcome(task, reports, spec, unclean)
-                return False, final, reports, task, author_budget
-            await _record(
-                self.monitor,
-                "analyst.tool.authored",
-                level=5,
-                summary=f"Tool authoring {result.status}: {spec.proposed_tool_name}",
-                actor="analyst_lead",
-                data={"result": result},
-            )
-            if result.status != "committed":
-                # Honest failure (gate/review cap exhausted or human-block). Authoring stops at the
-                # first failure, so anything committed earlier is a complete, dependency-satisfied
-                # prefix. Record why (a task note the reran workers see) so the next decision adapts
-                # rather than repeating the failed plan, then break — the resume logic below decides
-                # recover-vs-finalize from what committed and the remaining budget (A11).
-                failed_spec, failed_result = spec, result
-                task = _augment_with_failed_tool(task, spec, result)
-                break
-            # Provenance note per committed tool so reran workers know it landed.
-            task = _augment_with_authored_tool(task, spec, result)
-            committed += 1
-
-        if committed == 0 and author_budget <= 0:
-            # Credits exhausted and NOTHING ever committed — no capability to resume on, and
-            # re-running would only re-surface the same gap. Compose the honest §9.6 terminal
-            # report; the reviewer adjudicates it downstream (sole I/O). Never fabricated.
-            final = await lead.finalize_authoring_outcome(task, reports, failed_spec, failed_result)
-            return False, final, reports, task, author_budget
-
-        # Resume (A11: recover, never choke on one failed session). Reload discovery + restart
-        # sandboxes ONLY when ≥1 tool committed (there is new code to import); a committed==0
-        # failure has nothing to reload but still loops back so the lead re-attempts on the failure
-        # note, burning a credit. Always rerun the workers ONCE — they use the freshly committed
-        # tools and/or see the failure note and refine — then loop back. Bounded by author_budget.
-        if committed >= 1:
-            if self.registry is not None and hasattr(self.registry, "reload"):
-                self.registry.reload()
-            for worker in workers:
-                sandbox = getattr(worker, "sandbox", None)
-                if sandbox is not None and hasattr(sandbox, "restart"):
-                    await sandbox.restart()
-        await _record(
-            self.monitor,
-            "analyst.tool.chain_resume",
-            level=6,
-            summary=f"Resuming after authoring: committed={committed}, budget_left={author_budget}",
-            actor="analyst_lead",
-            data={"committed": committed, "author_budget": author_budget,
-                  "failed_tool": getattr(failed_spec, "proposed_tool_name", None)},
-        )
-        reports = await self._initial_reports(workers, task)
-        task = self._augment_with_peer_tools(workers, task)
-        return True, None, reports, task, author_budget
 
     def _augment_with_peer_tools(
         self,
@@ -445,6 +366,36 @@ def _augment_with_failed_tool(task: AnalysisTask, tool_spec: Any, result: Any) -
         f"  tool: {tool_spec.proposed_tool_name} (domain: {tool_spec.target_domain})\n"
         f"  outcome: {getattr(result, 'status', 'failed')}\n"
         f"  reason: {reason}"
+    )
+    new_instructions = "\n\n".join(filter(None, [task.instructions, note]))
+    return AnalysisTask(
+        question=task.question,
+        instructions=new_instructions,
+        previous_report=task.previous_report,
+    )
+
+
+def _augment_with_probe(task: AnalysisTask, verdict: Any) -> AnalysisTask:
+    """Hand the lead's ``request_another_round`` dispatch text to every worker, verbatim.
+
+    The form's description promises exactly that ("your dispatch text reaches every worker
+    verbatim as their next instruction"), so the promise is kept here — a constraint stated in a
+    tool description and unimplemented in code is worse than one never stated. Returns the task
+    unchanged when the verdict carries no dispatch text.
+    """
+    probe = (getattr(verdict, "follow_up", None) or "").strip()
+    if not probe:
+        return task
+    rationale = (getattr(verdict, "rationale", None) or "").strip()
+    note = "\n".join(
+        filter(
+            None,
+            [
+                "The analyst lead reviewed this round and asks for one more, on this specifically:",
+                f"  what to probe: {probe}",
+                f"  why: {rationale}" if rationale else "",
+            ],
+        )
     )
     new_instructions = "\n\n".join(filter(None, [task.instructions, note]))
     return AnalysisTask(

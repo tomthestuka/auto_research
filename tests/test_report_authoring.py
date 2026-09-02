@@ -261,6 +261,7 @@ class _LeadModel:
     def arm(self, cited):
         self.next_cited = cited
         self.emitted = False
+        self.filed = False
 
     async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
                    images=(), documents=(), cache_prefix=False):
@@ -274,6 +275,11 @@ class _LeadModel:
                         arguments={"summary": "lead synthesis", "cited_figures": self.next_cited},
                     )
                 ]
+            )
+        if not self.filed:
+            self.filed = True
+            return ModelResponse(
+                tool_calls=[ToolCall(id="f1", name="submit_adjudication", arguments={})]
             )
         return ModelResponse(content="done")
 
@@ -291,15 +297,17 @@ def test_lead_adjudicate_cites_across_worker_sources(tmp_path):
     r0 = _AR(summary="w0", figures=[_fig("a", "PCUBE")])
     r1 = _AR(summary="w1", figures=[_fig("b", "bench")])
     model.arm([{"source": "analyst_worker_1", "index": 1}, {"source": "analyst_worker_0", "index": 1}])
-    final = _run(
-        lead.adjudicate(
+    outcome = _run(
+        lead.run_cycle(
             AnalysisTask(question="x"), [r0, r1], sources=["analyst_worker_0", "analyst_worker_1"]
         )
     )
+    final = outcome.report
     # citation order defines the report figure order (Figure 1 = the first cited = worker_1's bench)
     assert [f.caption for f in final.figures] == ["bench", "PCUBE"]
-    # the report tools were cleared off the shared provider after adjudication
+    # the report tools and the form desk were cleared off the shared provider after the cycle
     assert lead.tools.report_workspace is None
+    assert lead.tools.cycle is None
 
 
 def test_lead_catalog_accumulates_across_iterations(tmp_path):
@@ -308,29 +316,40 @@ def test_lead_catalog_accumulates_across_iterations(tmp_path):
     lead, model = _lead(tmp_path)
     # iteration 1 — worker_0 produced OLD; the lead cites it
     model.arm([{"source": "analyst_worker_0", "index": 1}])
-    _run(lead.adjudicate(AnalysisTask(question="x"), [_AR(summary="w0", figures=[_fig("old", "OLD")])],
-                         sources=["analyst_worker_0"]))
+    _run(lead.run_cycle(AnalysisTask(question="x"), [_AR(summary="w0", figures=[_fig("old", "OLD")])],
+                        sources=["analyst_worker_0"]))
     # iteration 2 — worker_0's new report carries only NEW; OLD is gone from the report...
     model.arm([{"source": "analyst_worker_0", "index": 1}, {"source": "analyst_worker_0", "index": 2}])
-    final = _run(lead.adjudicate(AnalysisTask(question="x"), [_AR(summary="w0", figures=[_fig("new", "NEW")])],
-                                 sources=["analyst_worker_0"]))
+    final = _run(lead.run_cycle(AnalysisTask(question="x"), [_AR(summary="w0", figures=[_fig("new", "NEW")])],
+                                sources=["analyst_worker_0"])).report
     # ...but the lead's catalog kept OLD (slot 1) and appended NEW (slot 2), so both are citable
     assert [f.caption for f in final.figures] == ["OLD", "NEW"]
 
 
-def test_lead_adjudicate_safety_net_without_tools(tmp_path):
-    """No tool provider → plain structured compose, catalog figures attached, cited_figures empty."""
+def test_lead_cycle_without_tools_reports_nothing_rather_than_composing_one(tmp_path):
+    """The compose safety net is gone, and its absence is the contract.
+
+    With no tool surface there is no form to file and nothing to investigate with, so the cycle
+    returns the failure rather than a report the runtime wrote. A runtime-synthesized report sits
+    closer to fabrication than the absence it papers over ([F6], the same ruling that dropped the
+    terminal-compose guard).
+    """
 
     class _StructModel:
+        def __init__(self):
+            self.calls = 0
+
         async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
                        images=(), documents=(), cache_prefix=False):
+            self.calls += 1
             return ModelResponse(parsed={"summary": "plain synthesis", "findings": []})
 
-    lead = AnalystLeadAgent(model=_StructModel(), prompt="p")  # no tools attached
-    final = _run(
-        lead.adjudicate(AnalysisTask(question="x"), [_AR(summary="w0", figures=[_fig("a", "PCUBE")])],
-                        sources=["analyst_worker_0"])
+    model = _StructModel()
+    lead = AnalystLeadAgent(model=model, prompt="p")  # no tools attached
+    outcome = _run(
+        lead.run_cycle(AnalysisTask(question="x"), [_AR(summary="w0", figures=[_fig("a", "PCUBE")])],
+                       sources=["analyst_worker_0"])
     )
-    assert final.summary == "plain synthesis"
-    assert [f.caption for f in final.figures] == ["PCUBE"]  # attached directly (no citation path)
-    assert final.cited_figures == []
+    assert outcome.filed is None
+    assert outcome.report is None
+    assert model.calls == 0  # no model was asked to compose a stand-in

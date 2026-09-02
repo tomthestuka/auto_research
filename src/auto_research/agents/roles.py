@@ -14,8 +14,17 @@ from pydantic import BaseModel, ValidationError
 from auto_research.config_paths import orchestration_yaml
 from auto_research.agents.prompts import PromptRole, load_prompt
 from auto_research.agents.react import (
+    ADJUDICATE_STAGE,
+    AUTHOR_CHAIN_TOOL,
+    AUTHOR_STAGE,
+    DECIDE_STAGE,
     DRIVE_CODER_TOOL,
     EDIT_REPORT_TOOL,
+    HOLD_AUTHORING_TOOL,
+    LEAD_CYCLE_TERMINALS,
+    LEAD_FORM_TOOLS,
+    LeadCycle,
+    LeadCycleOutcome,
     MonitorToolProvider,
     PLAN_AND_DEBATE_TOOL,
     REVIEW_REPORT_TOOL,
@@ -25,6 +34,7 @@ from auto_research.agents.react import (
     SUBMIT_TOOL,
     SandboxToolProvider,
     SourceToolProvider,
+    _written_report,
 )
 from auto_research.consensus import IODebateToConverge
 from auto_research.env import ledger_caps
@@ -306,6 +316,7 @@ class AgentRole:
         on_result=None,
         free_tools: frozenset[str] = frozenset(),
         absolute_cap: int | None = None,
+        terminal_tools: frozenset[str] = frozenset(),
     ) -> tuple[list, list[FigureRef], list[DocumentRef]]:
         """Run an inner ReAct loop: gather evidence by calling tools to completion.
 
@@ -327,6 +338,22 @@ class AgentRole:
         design debate) is a hard ceiling on TOTAL iterations — the runaway-free-tool backstop;
         when ``None`` it defaults to ``cap`` (so non-opt-in callers are unchanged).
 
+        ``terminal_tools`` names tools whose successful call **ends the loop**: the role has
+        filed the form its turn exists to produce, and there is nothing further to gather. The
+        loop stops after appending that call's result, so the trajectory stays valid (every
+        ``tool_use`` keeps its ``tool_result``) and the filed arguments are readable from
+        :attr:`last_filed_form`.
+
+        Before this existed the convention was carried entirely by prose — ``submit_for_review``'s
+        description tells the model *"this is the ONLY way to finish"* — and enforced afterwards by
+        Python inspecting side effects (``session.committed``, ``workspace.written_report``). A
+        model that simply kept calling tools ran to its cap, and a model that stopped without
+        filing looked identical to one that had. Naming the terminal tools makes the loop's own
+        exit condition match the contract the descriptions state.
+
+        A terminal tool whose handler returns ``is_error`` does **not** end the loop: a rejected
+        form is a correction to act on, which is what lets the phase check live in the handler.
+
         Returns ``(messages, figures, documents)``: the full trajectory (seed + all
         turns) for a terminal :meth:`_call_over_messages`, the figures produced by
         tools, and the documents a tool attached (e.g. PDFs opened via ``open_paper``).
@@ -339,6 +366,10 @@ class AgentRole:
         figures: list[FigureRef] = []
         documents: list[DocumentRef] = []
         seen_docs: set[str] = set()
+        # Which terminal form this loop filed, and with what. `None` after the loop means the
+        # role never filed one — the failure the caller has to treat as such.
+        self.last_filed_form: tuple[str, dict] | None = None
+        filed_terminal = False
         budget_cap = max(1, cap)
         absolute_ceiling = max(budget_cap, absolute_cap) if absolute_cap is not None else budget_cap
         budget_used = 0
@@ -445,6 +476,12 @@ class AgentRole:
                         "text": _cap_text(outcome.text, _event_result_cap()),
                     },
                 )
+                # A terminal form, accepted by its handler, is this loop's answer. Recorded here
+                # but acted on after the whole batch is appended, so the trajectory never ends
+                # mid-batch with a `tool_use` whose `tool_result` was dropped.
+                if call.name in terminal_tools and not outcome.is_error:
+                    self.last_filed_form = (call.name, dict(call.arguments))
+                    filed_terminal = True
                 if self.run_control is not None:
                     batch_steers.extend(self.run_control.drain_steer(self.agent_key))
             messages.append(ToolResultMessage(results=result_parts))
@@ -480,6 +517,24 @@ class AgentRole:
                     ],
                 },
             )
+            # The form is filed and its result is on the trajectory: stop. Placed after the whole
+            # batch is appended and accounted for, so a turn that filed alongside other calls
+            # still leaves every `tool_use` paired with its `tool_result`.
+            if filed_terminal:
+                await self._record(
+                    f"{self.role}.{action}.filed",
+                    level=3,
+                    summary=(
+                        f"{self.role} filed {self.last_filed_form[0]} — "
+                        f"{action} loop complete"
+                    ),
+                    data={
+                        "form": self.last_filed_form[0],
+                        "iteration": iteration,
+                        "budget_used": budget_used,
+                    },
+                )
+                break
         return messages, figures, documents
 
     async def _record(
@@ -1121,6 +1176,140 @@ class AnalystWorkerAgent(AgentRole):
         )
 
 
+# Budget-free in the lead's cycle loop: the human design channel (§5.5), the two report-writing
+# tools (V-4 — refining a report is not evidence-gathering), and the authoring tools that are
+# separately bounded by the session's own submit/debate caps.
+_CYCLE_FREE_TOOLS: frozenset[str] = frozenset(
+    {
+        PLAN_AND_DEBATE_TOOL,
+        EDIT_REPORT_TOOL,
+        REVIEW_REPORT_TOOL,
+        SUBMIT_TOOL,
+        RESPOND_TO_REVIEW_TOOL,
+    }
+)
+
+
+def _cycle_instruction(cycle: LeadCycle, reports: Sequence[Any], rounds_left: int) -> str:
+    """The one instruction that opens the cycle: what to settle, and which form settles it.
+
+    Per-form detail lives in the form descriptions the model reads beside the schema, so this
+    stays short — it names the stage the cycle opens at and the forms that leave it.
+    """
+    lines = [
+        "This is your turn on the analysts' work. You investigate as long as you need "
+        "(read_file, list_dir, web_search, data_catalog) and end the turn by FILING A FORM — "
+        "the form you pick is your decision, and its own description says what it needs.",
+    ]
+    if cycle.stage == DECIDE_STAGE:
+        raised = [
+            r.tool_request.proposed_tool_name
+            for r in reports
+            if getattr(r, "tool_request", None) is not None
+        ]
+        lines.append(
+            "A worker reports the toolkit lacks capability the analysis needs "
+            f"({', '.join(raised) or 'see the reports'}). Settle that first: read the target "
+            "lib/ source, then file author_chain with the ordered chain to write, or "
+            "hold_authoring when the request resolves without new code. Judging the analysts "
+            "comes after."
+        )
+    else:
+        lines.append(
+            "Judge the analysts' work: write your report with edit_report (citing figures by "
+            "their [source:index] handle), check it with review_report, and file it with "
+            "submit_adjudication — or send the analysts back with request_another_round "
+            f"({rounds_left} round(s) still allowed)."
+        )
+    lines.append(
+        "submit_terminal_report is open at every stage: an honest stop is a correct outcome "
+        "with no quality penalty. Report real results, or report none — never fabricate a "
+        "result to fill a gap."
+    )
+    return " ".join(lines)
+
+
+def _stage_note(what_happened: str, cycle: LeadCycle) -> str:
+    """A harness-voiced user turn marking a stage boundary, with the next step named.
+
+    Written in the harness's own voice (a ``user`` turn) rather than as an assistant turn: a
+    synthesized assistant turn would put words in the model's mouth in the durable record, which
+    is the shape rejected on 2026-09-01.
+    """
+    return (
+        f"[{what_happened}] Judge the analysts' work now: write your report with edit_report "
+        "(citing figures by their [source:index] handle), check it with review_report, and file "
+        "it with submit_adjudication — or send the analysts back with request_another_round while "
+        f"the cap allows ({cycle.rounds_left} round(s) left). submit_terminal_report stays open."
+    )
+
+
+def _drop_coding_middle(messages: list, mark: int) -> list:
+    """Drop a finished coding session's transcript, keeping its outcome anchor (§ step 6).
+
+    The lead's context otherwise carries a whole ``drive_coder`` ⇄ coder transcript per authored
+    tool; in one live authoring phase the provider-native valve cleared ~86,000 tokens on every
+    turn. The cut is semantic rather than size-triggered:
+
+        [… author_chain filed]  [drive_coder ⇄ coder × N]  [submit_for_review + its result …]
+              kept (before mark)      DROPPED                        kept
+
+    Both survivors are turns the lead actually produced or actually received — its own brief,
+    and its own submit call whose result carries the real commit SHA, gate verdict and review
+    verdict. Nothing is synthesized in their place.
+
+    Three mechanical conditions, each from a rule already paid for: whole turns only (Anthropic
+    documents *echo the assistant message exactly as received*, so filtering inside a turn is
+    out); every ``tool_use`` leaves with its ``tool_result`` (a half-dropped pair is a 400); and
+    the anchor is real, not written by us. Safe for this role because all of the lead's tools are
+    resident, so no dropped turn can de-activate a discovered tool (§13 watch item (a)).
+
+    Returns ``messages`` unchanged when the span holds no submit at all (the lead gave up without
+    submitting): there is no anchor to keep, and dropping the span would leave the failure
+    unexplained.
+    """
+    anchor = None
+    for index in range(len(messages) - 1, mark - 1, -1):
+        message = messages[index]
+        calls = getattr(message, "tool_calls", None) or ()
+        if any(c.name in (SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL) for c in calls):
+            anchor = index
+            break
+    if anchor is None:
+        return messages
+    tail = [messages[anchor]]
+    following = messages[anchor + 1] if anchor + 1 < len(messages) else None
+    if isinstance(following, ToolResultMessage):
+        tail.append(following)
+    return messages[:mark] + tail
+
+
+def _authoring_result(session: Any, spec: Any) -> MergeFlowResult:
+    """The terminal ``MergeFlowResult`` for one authoring attempt, read off its session.
+
+    ``committed`` is the only success, and it is set by ``approve_edit`` inside
+    ``submit_for_review`` on gate-pass ∧ review-pass — so this reads a fact, never a claim
+    (§9.9: commit ⇔ gate ∧ review, and code issues the git).
+    """
+    spec_id = getattr(session.tool_spec, "id", None) or spec.proposed_tool_name
+    if session.committed:
+        return MergeFlowResult(
+            tool_spec_id=spec_id, status="committed", branch=session.branch,
+            commit_sha=session.last_commit_sha, gate_report=session.last_gate,
+            review=session.last_review, reason="gate-pass and co-lead review-pass",
+        )
+    if session.last_review is not None and not session.last_review.approved:
+        reason = f"co-lead review unresolved: {session.last_review.rationale}"
+    elif session.last_gate is not None and not session.last_gate.passed:
+        reason = f"gate unresolved: {session.last_gate.reason}"
+    else:
+        reason = "lead concluded authoring without a mergeable tool"
+    return MergeFlowResult(
+        tool_spec_id=spec_id, status="failed", branch=session.branch,
+        gate_report=session.last_gate, review=session.last_review, reason=reason,
+    )
+
+
 class AnalystLeadAgent(AgentRole):
     """Analyst lead role: adjudicate worker reports into one report."""
 
@@ -1154,91 +1343,6 @@ class AnalystLeadAgent(AgentRole):
         self._figure_catalog: dict[str, list[FigureRef]] = {}
         self._round = 0
         self._last_report: AnalystReport | None = None
-
-    async def adjudicate(
-        self,
-        task: AnalysisTask,
-        reports: Sequence[AnalystReport],
-        *,
-        sources: Sequence[str] | None = None,
-    ) -> AnalystReport:
-        """Synthesize a final analysis report from worker reports (V-4).
-
-        Each worker's cited figures are accumulated into a per-worker catalog source (append-only,
-        across rounds/iterations), so the lead can cite any worker's figure from any round. With a
-        read-only ToolProvider attached, the lead ReAct-refines the report through edit_report /
-        review_report (citing figures by ``{worker, index}``); the report it persists is returned.
-        Otherwise it makes a plain structured call and attaches the accumulated figures directly.
-        """
-
-        self._round += 1
-        source_keys = list(sources) if sources is not None else [
-            f"analyst_worker_{i}" for i in range(len(reports))
-        ]
-        # Accumulate each worker's cited figures into its catalog source (append-only, deduped).
-        source_reports: dict[str, AnalystReport] = {}
-        for key, report in zip(source_keys, reports):
-            slot = self._figure_catalog.setdefault(key, [])
-            existing = {(str(f.path), f.sha256) for f in slot}
-            for fig in report.figures:
-                sig = (str(fig.path), fig.sha256)
-                if sig not in existing:
-                    existing.add(sig)
-                    slot.append(fig)
-            source_reports[key] = report  # latest report per source (for review_report(source))
-
-        payload = {
-            "task": task.model_dump(mode="json"),
-            "worker_reports": [report.model_dump(mode="json") for report in reports],
-            "worker_sources": source_keys,
-            "available_toolkits": list(self.available_toolkits),
-        }
-        all_figures = [fig for slot in self._figure_catalog.values() for fig in slot]
-        if self.tools is None:
-            report = await self._call(payload, AnalystReport, images=all_figures, action="adjudicate")
-            return report.model_copy(
-                update={"figures": _dedup_figures(all_figures), "cited_figures": []}
-            )
-
-        workspace = self._make_report_workspace(source_reports)
-        seed = [
-            ModelMessage(role="system", content=self.prompt),
-            ModelMessage(role="user", content=_payload_text(payload)),
-        ]
-        # Wire the per-round report workspace onto the shared provider ONLY for this adjudication
-        # (cleared in finally, so decide_authoring/drive_authoring never see edit_report/review_report).
-        previous_ws = getattr(self.tools, "report_workspace", None)
-        try:
-            if workspace is not None:
-                self.tools.report_workspace = workspace
-            messages, _, _ = await self._react(
-                seed_messages=seed, tools=self.tools, action="adjudicate",
-                cap=_react_loop_cap(),
-                free_tools=frozenset({EDIT_REPORT_TOOL, REVIEW_REPORT_TOOL}),
-                absolute_cap=_react_loop_absolute_cap(),
-            )
-            report = workspace.written_report if workspace is not None else None
-            if report is None:
-                # Safety net: no edit_report written — compose terminally, attaching the catalog
-                # figures. This sits INSIDE the try on purpose: the compose declares
-                # `self.tools`, and the `finally` below detaches the workspace, which would
-                # remove edit_report/review_report from the declared set while the trajectory
-                # being replayed can still name them — the "Tool reference 'x' not found in
-                # available tools" shape (run-killer 2026-07-29). The declarations must match
-                # the history they replay, so the compose runs while the loop's set is attached.
-                report = await self._call_over_messages(
-                    messages, AnalystReport, action="adjudicate", images=all_figures,
-                    tools=self.tools,
-                )
-                report = report.model_copy(
-                    update={"figures": _dedup_figures(all_figures), "cited_figures": []}
-                )
-        finally:
-            if hasattr(self.tools, "report_workspace"):
-                self.tools.report_workspace = previous_ws
-
-        self._last_report = report
-        return report
 
     def _make_report_workspace(
         self, source_reports: dict[str, AnalystReport]
@@ -1302,94 +1406,358 @@ class AnalystLeadAgent(AgentRole):
         )
         return reply.answer
 
-    async def judge_convergence(
+    # ------------------------------------------------------------------
+    # The cycle: ONE ReAct loop, ONE conversation, decisions filed as forms (§9.3).
+    # ------------------------------------------------------------------
+
+    def _accumulate_figures(
+        self, reports: Sequence[AnalystReport], sources: Sequence[str] | None
+    ) -> tuple[list[str], dict[str, AnalystReport], list[FigureRef]]:
+        """Fold each worker's cited figures into its catalog source (append-only, deduped).
+
+        The catalog is keyed by *worker*, accumulated across debate rounds AND rework iterations
+        (this instance persists), so a figure produced in any round stays citable — that is what
+        closed the "last-round-only" leak (V-4). Returns the source keys, the latest report per
+        source (for ``review_report(source)``), and every accumulated figure.
+        """
+        source_keys = (
+            list(sources)
+            if sources is not None
+            else [f"analyst_worker_{i}" for i in range(len(reports))]
+        )
+        source_reports: dict[str, AnalystReport] = {}
+        for key, report in zip(source_keys, reports):
+            slot = self._figure_catalog.setdefault(key, [])
+            existing = {(str(f.path), f.sha256) for f in slot}
+            for fig in report.figures:
+                sig = (str(fig.path), fig.sha256)
+                if sig not in existing:
+                    existing.add(sig)
+                    slot.append(fig)
+            source_reports[key] = report
+        all_figures = [fig for slot in self._figure_catalog.values() for fig in slot]
+        return source_keys, source_reports, all_figures
+
+    async def run_cycle(
         self,
         task: AnalysisTask,
         reports: Sequence[AnalystReport],
         *,
-        round_index: int,
-        max_rounds: int,
-    ) -> ReviewVerdict:
-        """Judge whether worker reports have converged."""
+        sources: Sequence[str] | None = None,
+        rounds_left: int = 0,
+        author_budget: int = 0,
+        toolkit_root: Path | None = None,
+        worktree_base: Path | None = None,
+        direct_branch: str | None = None,
+        colead: Any | None = None,
+        human_handler: Any | None = None,
+        coder: Any | None = None,
+        allow_correlated_review: bool = False,
+    ) -> LeadCycleOutcome:
+        """Run one analysis cycle as a single ReAct loop over a single conversation.
 
+        This is the lead's whole turn. Where the role used to be six separate conversations —
+        each re-seeded, each ending in a structured compose — it is now one loop in which the
+        lead states every decision by **filing a form**: ``author_chain`` or ``hold_authoring``
+        while a worker's tool request is open, then ``request_another_round`` or
+        ``submit_adjudication``, with ``submit_terminal_report`` reachable throughout. Which form
+        it picks *is* the decision, so the branch it takes and the fields it must fill arrive
+        together, each carrying its own description.
+
+        The topology is what fixes a real failure. Filing "author" with an empty chain used to be
+        schema-valid output that a validator then killed the run over ($19.43, 2026-09-01), and
+        the only rule saying otherwise lived where the model could not read it. ``author_chain``
+        now requires at least one link in its own schema, so that state cannot be expressed.
+
+        **Python still owns the counting.** ``rounds_left`` bounds the debate, ``author_budget``
+        bounds authoring attempts, the session lifecycle and every git operation stay here
+        (§9.9), and the caller reloads the registry and reruns the workers. The loop chooses
+        *what* to do; this method decides *how many times*.
+
+        **The coding middle is dropped at its own boundary.** After each chain link the
+        ``drive_coder`` transcript between the filed brief and the ``submit_for_review`` result is
+        removed from the conversation — whole turns only, no orphaned ``tool_use``, and nothing
+        synthesized: what survives is the lead's own filed form and its own submit call with the
+        real commit SHA on the result. Safe here specifically because the lead's tools are all
+        resident (``ReadOnlyToolProvider`` sets ``defer_loading`` on nothing), so no dropped turn
+        can de-activate a discovered tool (§13 watch item (a)).
+
+        Returns a :class:`LeadCycleOutcome`; ``filed=None`` means the lead never filed a form,
+        which the caller treats as the failure it is.
+        """
+
+        self._round += 1
+        source_keys, source_reports, all_figures = self._accumulate_figures(reports, sources)
+        workspace = self._make_report_workspace(source_reports)
+        authoring_possible = (
+            toolkit_root is not None
+            and author_budget > 0
+            and any(r.tool_request is not None for r in reports)
+        )
+        cycle = LeadCycle(
+            stage=DECIDE_STAGE if authoring_possible else ADJUDICATE_STAGE,
+            authoring_enabled=authoring_possible,
+            rounds_left=rounds_left,
+        )
         payload = {
             "task": task.model_dump(mode="json"),
             "worker_reports": [report.model_dump(mode="json") for report in reports],
-            "round_index": round_index,
-            "max_rounds": max_rounds,
-            "decision_semantics": (
-                "accepted=true means workers have converged enough for final synthesis; "
-                "accepted=false means another debate round is useful if the cap allows it."
-            ),
+            "worker_sources": source_keys,
+            "available_toolkits": list(self.available_toolkits),
+            "your_turn": _cycle_instruction(cycle, reports, rounds_left),
         }
-        figures = [figure for report in reports for figure in report.figures]
-        return await self._call(
-            payload,
-            ReviewVerdict,
-            images=figures,
-            action="judge_convergence",
-        )
-
-    async def decide_authoring(
-        self, reports: Sequence[AnalystReport]
-    ) -> AuthoringDecision:
-        """Decide whether to author a tool now for the workers' ``tool_request``s (§9.3, §9.10).
-
-        Called by ``DebateToConverge`` when ≥1 worker report carries a ``tool_request``. The
-        lead browses the **full** ``lib/`` source read-only (its ``ReadOnlyToolProvider`` is
-        rooted at ``toolkit_root``) to set the architectural disposition — *capability exists
-        but is unexposed* (``extend_existing``) vs *genuinely absent* (``new_package``) — and
-        to refine the workers' advisory specs. It returns the **ordered dependency chain**
-        (``tool_specs``: acquire → reduce → analyse → plot) the analysis needs — planned up front
-        from the full prescription, not just the first gap a worker surfaced — or
-        ``should_author=false`` when the "gap" was really a mis-called existing tool. Consensus —
-        not this method — authors the chain sequentially and reruns workers once (A8); it issues
-        the ``merge_flow.propose_and_pr`` calls (§9.9: code issues git, never the model).
-        """
-        requests = [r.tool_request for r in reports if r.tool_request is not None]
-        payload = {
-            "request": (
-                "Analyst workers report the toolkit lacks capability the analysis needs. Decide "
-                "whether to author now, and if so, finalise the ORDERED CHAIN of ToolSpecs the "
-                "whole analysis needs (tool_specs)."
-            ),
-            "tool_requests": [spec.model_dump(mode="json") for spec in requests],
-            "worker_reports": [report.model_dump(mode="json") for report in reports],
-            "decision_semantics": (
-                "A worker surfaces only the FIRST gap it hits (it cannot run past a missing step), "
-                "but you read the full analysis prescription in the reports — so plan the WHOLE "
-                "dependency chain the analysis needs, not just that first gap. Browse the toolkit's "
-                "lib/ source (read_file/list_dir) before deciding, then return tool_specs as an "
-                "ordered list in dependency order (acquire before reduce before analyse before "
-                "plot). For each ToolSpec set the target package, the disposition ('extend_existing' "
-                "when the capability already exists in lib/ and only needs surfacing as a skills/ "
-                "tool; 'new_package' when it is genuinely absent), and the verification checks. The "
-                "tools are authored back-to-back, each seeing the prior tool's committed code, and "
-                "the workers rerun once after the whole chain — so keep the data/analysis tool and "
-                "its companion plotter as separate entries in the SAME chain. should_author=false "
-                "(empty tool_specs) when the worker simply mis-called an existing tool. Never "
-                "fabricate; escalate via ask_human if blocked."
-            ),
-        }
+        outcome = LeadCycleOutcome(filed=None, author_budget=author_budget)
         if self.tools is None:
-            return await self._call(payload, AuthoringDecision, action="decide_authoring")
+            # No tool surface: there is no form to file and nothing to investigate with. The
+            # honest answer is the failure, not a composed report — a runtime-synthesized report
+            # sits closer to fabrication than the absence it papers over ([F6]).
+            return outcome
 
-        seed = [
-            ModelMessage(role="system", content=self.prompt),
-            ModelMessage(role="user", content=_payload_text(payload)),
-        ]
-        messages, _, _ = await self._react(
-            seed_messages=seed, tools=self.tools, action="decide_authoring",
-            cap=_react_loop_cap(),
-            # §5.5: the lead settles the toolkit design with the human via the budget-free
-            # plan_and_debate channel; those rounds don't count against react_loop_cap, only
-            # against the larger react_loop_absolute_cap backstop.
-            free_tools=frozenset({PLAN_AND_DEBATE_TOOL}),
-            absolute_cap=_react_loop_absolute_cap(),
+        provider = self.tools
+        previous_ws = getattr(provider, "report_workspace", None)
+        previous_cycle = getattr(provider, "cycle", None)
+        provider.report_workspace = workspace
+        provider.cycle = cycle
+        try:
+            messages: list = [
+                ModelMessage(role="system", content=self.prompt),
+                ModelMessage(role="user", content=_payload_text(payload)),
+            ]
+            first = True
+            while True:
+                # The budgets each stage had before the cycle existed, kept: the deciding and
+                # judging stages get `react_loop_cap` paid iterations under the absolute ceiling
+                # (what `decide_authoring` had), while a coding link gets the absolute cap as its
+                # own ceiling (what `drive_authoring` had, so inspecting a diff never starves it).
+                # The cycle re-enters per stage, so a stage cannot spend another stage's budget.
+                messages, _, _ = await self._react(
+                    seed_messages=messages,
+                    tools=provider,
+                    action="run_cycle",
+                    cap=_react_loop_cap(),
+                    images=all_figures if first else (),
+                    free_tools=_CYCLE_FREE_TOOLS,
+                    absolute_cap=_react_loop_absolute_cap(),
+                    terminal_tools=LEAD_FORM_TOOLS,
+                )
+                first = False
+                filed = cycle.filed
+                if filed is None:
+                    # Budget spent, or the model stopped without filing. A report it wrote but
+                    # never filed is real evidence it produced, so it is used rather than
+                    # discarded; nothing is composed on its behalf.
+                    outcome.report = _written_report(workspace)
+                    break
+                if filed in LEAD_CYCLE_TERMINALS:
+                    outcome.filed = filed
+                    outcome.report = cycle.report
+                    outcome.verdict = cycle.verdict
+                    break
+                # The authoring branch: act on the filed decision, then re-enter the same
+                # conversation for the judging stage.
+                outcome.decision = cycle.decision
+                cycle.filed = None
+                if filed == HOLD_AUTHORING_TOOL:
+                    cycle.stage = ADJUDICATE_STAGE
+                    messages.append(
+                        ModelMessage(
+                            role="user",
+                            content=_stage_note(
+                                "No tool is authored for this request. Judge the analysts' work "
+                                "now.",
+                                cycle,
+                            ),
+                        )
+                    )
+                    continue
+                messages = await self._author_chain(
+                    messages,
+                    provider,
+                    cycle,
+                    outcome,
+                    toolkit_root=toolkit_root,
+                    worktree_base=worktree_base,
+                    direct_branch=direct_branch,
+                    colead=colead,
+                    human_handler=human_handler,
+                    coder=coder,
+                    allow_correlated_review=allow_correlated_review,
+                )
+                if cycle.filed in LEAD_CYCLE_TERMINALS:
+                    # The lead stopped honestly mid-chain (§9.6) — a correct outcome.
+                    outcome.filed = cycle.filed
+                    outcome.report = cycle.report
+                    break
+                # The chain is authored, so the cycle ends here: a committed tool is evidence the
+                # current reports predate, and the caller reruns the workers on it ONCE before the
+                # lead judges a fresh set in a fresh cycle (A8). Authoring inside one cycle,
+                # judging in the next — the boundary is new external evidence, not a token count.
+                outcome.filed = AUTHOR_CHAIN_TOOL
+                break
+        finally:
+            provider.report_workspace = previous_ws
+            provider.cycle = previous_cycle
+
+        if outcome.report is not None:
+            self._last_report = outcome.report
+        return outcome
+
+    async def _author_chain(
+        self,
+        messages: list,
+        provider: Any,
+        cycle: LeadCycle,
+        outcome: LeadCycleOutcome,
+        *,
+        toolkit_root: Path | None,
+        worktree_base: Path | None,
+        direct_branch: str | None,
+        colead: Any | None,
+        human_handler: Any | None,
+        coder: Any | None,
+        allow_correlated_review: bool,
+    ) -> list:
+        """Author the filed chain link by link, over the lead's own conversation (A8).
+
+        Each link gets its own ``AuthoringSession``, swapped onto the shared provider so the
+        declared tool set never changes; authoring stops at the first non-commit, so whatever
+        committed is a complete, dependency-satisfied prefix. Every git operation is issued by
+        ``build_authoring_session`` / ``approve_edit``, never by the model (§9.9).
+
+        The cycle ends when this returns (the caller reruns the workers on what committed), so
+        only the per-link notes are ever read by the model — a note appended on the way out would
+        be written into a conversation nobody sees again. Returns the conversation with each
+        finished link's coding middle dropped.
+        """
+        from auto_research.sandbox.merge_flow import ToolkitBranchUnclean
+
+        specs = list(outcome.decision.tool_specs) if outcome.decision is not None else []
+        for position, spec in enumerate(specs, 1):
+            if outcome.author_budget <= 0:
+                break  # credits spent — the caller reruns the workers on whatever committed
+            outcome.author_budget -= 1
+            cycle.stage = AUTHOR_STAGE
+            messages.append(
+                ModelMessage(
+                    role="user",
+                    content=(
+                        f"Coding session {position} of {len(specs)} is open on "
+                        f"'{spec.proposed_tool_name}'. The coder has your brief and has produced a "
+                        "first attempt. Inspect it with read_file, steer it with drive_coder, and "
+                        "finish it with submit_for_review. submit_terminal_report stays open if "
+                        "this genuinely cannot be made mergeable — an honest stop is correct."
+                    ),
+                )
+            )
+            mark = len(messages)
+            try:
+                result = await self._drive_one_link(
+                    messages,
+                    provider,
+                    spec,
+                    toolkit_root=toolkit_root,
+                    worktree_base=worktree_base,
+                    direct_branch=direct_branch,
+                    colead=colead,
+                    human_handler=human_handler,
+                    coder=coder,
+                    allow_correlated_review=allow_correlated_review,
+                )
+            except ToolkitBranchUnclean as exc:
+                # The authoring branch was dirty when this link began — a tree dirtied mid-run
+                # (across-a-death is repaired by the resume-time heal). Degrade to an honest
+                # failed result rather than crashing the run (an F6-class run-killer); the lead
+                # reports it and the reviewer adjudicates downstream (A11).
+                await self._record(
+                    "analyst.tool.branch_unclean",
+                    level=2,
+                    summary=(
+                        f"Authoring branch unclean — link stopped ({spec.proposed_tool_name})"
+                    ),
+                    data={"error": repr(exc)},
+                )
+                result = MergeFlowResult(
+                    tool_spec_id=getattr(spec, "id", None) or spec.proposed_tool_name,
+                    status="failed",
+                    reason=f"authoring branch was not clean at attempt start: {exc}",
+                )
+            outcome.authored.append(result)
+            if result.status == "committed":
+                outcome.committed += 1
+            await self._record(
+                "analyst.tool.authored",
+                level=5,
+                summary=f"Tool authoring {result.status}: {spec.proposed_tool_name}",
+                data={"result": result.model_dump(mode="json")},
+            )
+            if cycle.filed in LEAD_CYCLE_TERMINALS:
+                # An honest terminal filed mid-session (§9.6). Its own turn lives inside the span
+                # the drop would remove, and the cycle ends here anyway — so the conversation is
+                # returned whole rather than cut.
+                return messages
+            messages = _drop_coding_middle(messages, mark)
+            if result.status != "committed":
+                break  # a dependency-satisfied prefix is what committed; stop here
+        return messages
+
+    async def _drive_one_link(
+        self,
+        messages: list,
+        provider: Any,
+        spec: ToolSpec,
+        *,
+        toolkit_root: Path | None,
+        worktree_base: Path | None,
+        direct_branch: str | None,
+        colead: Any | None,
+        human_handler: Any | None,
+        coder: Any | None,
+        allow_correlated_review: bool,
+    ) -> MergeFlowResult:
+        """Own one link's session lifecycle and run the lead's loop over it, in-conversation.
+
+        The same lifecycle :meth:`drive_authoring` owns for a standalone attempt — build,
+        connect, publish for interrupt cleanup, seed the coder, drive, read the terminal result,
+        ``aclose`` — with the loop running over ``messages`` (the cycle's one conversation) and
+        the session swapped onto the shared ``provider`` rather than a fresh one.
+        """
+        from auto_research.sandbox.merge_flow import build_authoring_session
+
+        session = build_authoring_session(
+            spec,
+            lead=self,
+            toolkit_root=toolkit_root,
+            worktree_base=worktree_base or toolkit_root,
+            colead=colead,
+            human_handler=human_handler,
+            coder=coder,
+            allow_correlated_review=allow_correlated_review,
+            direct_branch=direct_branch,
+            monitor=self.monitor,
         )
-        return await self._call_over_messages(
-            messages, AuthoringDecision, action="decide_authoring", tools=self.tools,
-        )
+        await session.connect()
+        if self.run_control is not None:
+            self.run_control.authoring_session = session
+        previous_session = getattr(provider, "authoring_session", None)
+        provider.authoring_session = session
+        try:
+            await session.drive(session.initial_message)
+            new_messages, _, _ = await self._react(
+                seed_messages=messages,
+                tools=provider,
+                action="drive_authoring",
+                cap=_react_loop_absolute_cap(),
+                free_tools=_CYCLE_FREE_TOOLS,
+                absolute_cap=_react_loop_absolute_cap(),
+                terminal_tools=LEAD_FORM_TOOLS,
+            )
+            messages[:] = new_messages
+            return _authoring_result(session, spec)
+        finally:
+            provider.authoring_session = previous_session
+            if self.run_control is not None and self.run_control.authoring_session is session:
+                self.run_control.authoring_session = None
+            await session.aclose()
 
     async def drive_authoring(
         self,
@@ -1512,87 +1880,7 @@ class AnalystLeadAgent(AgentRole):
             cap=_react_loop_absolute_cap(), free_tools=free,
         )
 
-        spec_id = session.tool_spec.id
-        if session.committed:
-            return MergeFlowResult(
-                tool_spec_id=spec_id, status="committed", branch=session.branch,
-                commit_sha=session.last_commit_sha, gate_report=session.last_gate,
-                review=session.last_review, reason="gate-pass and co-lead review-pass",
-            )
-        if session.last_review is not None and not session.last_review.approved:
-            reason = f"co-lead review unresolved: {session.last_review.rationale}"
-        elif session.last_gate is not None and not session.last_gate.passed:
-            reason = f"gate unresolved: {session.last_gate.reason}"
-        else:
-            reason = "lead concluded authoring without a mergeable tool"
-        return MergeFlowResult(
-            tool_spec_id=spec_id, status="failed", branch=session.branch,
-            gate_report=session.last_gate, review=session.last_review, reason=reason,
-        )
-
-    async def finalize_authoring_outcome(
-        self,
-        task: AnalysisTask,
-        reports: Sequence[AnalystReport],
-        tool_spec: ToolSpec,
-        result: MergeFlowResult,
-    ) -> AnalystReport:
-        """Compose the terminal analyst report after an authoring attempt did not commit (§9.6).
-
-        Called by ``DebateToConverge`` when ``propose_and_pr`` returns a non-committed result
-        (gate/review rework cap exhausted, or blocked on an absent human). The lead synthesizes
-        the workers' partial findings **with** the honest authoring failure into one terminal
-        :class:`AnalystReport` — documenting what was attempted, the capability that is
-        unavailable under the current construction and why — and sets ``status``:
-        ``needs_human`` when the flow blocked on a human, ``failed`` when the missing capability
-        blocks the request, or ``ok`` when partial results still answer it. There is no resume
-        and no re-authoring; the reviewer adjudicates this report downstream (the reviewer is the
-        sole I/O). Never fabricate a result to cover the gap.
-        """
-        payload = {
-            "task": task.model_dump(mode="json"),
-            "failed_tool": tool_spec.model_dump(mode="json"),
-            "authoring_result": {
-                "status": result.status,
-                "reason": result.reason,
-                "review": result.review.model_dump(mode="json") if result.review else None,
-            },
-            "worker_reports": [report.model_dump(mode="json") for report in reports],
-            "semantics": (
-                "An attempt to author the toolkit capability the analysis needs did NOT succeed "
-                f"(authoring status '{result.status}'). This is a correct outcome with no quality "
-                "penalty — compose ONE terminal report. Document what was attempted, the "
-                "capability that is unavailable under the current construction and why, and any "
-                "partial findings that genuinely hold. Set status='needs_human' when blocked on a "
-                "human, 'failed' when the missing capability blocks the request, or 'ok' when "
-                "partial results still answer it. Never fabricate a result to cover the gap; "
-                "report real results, or report none. Do not request the tool again."
-            ),
-        }
-        # Honest-failure terminal report: attach the workers' real (cited) figures directly and
-        # clear cited_figures — the model can't reproduce FigureRefs, and this path does not run the
-        # citation catalog (it composes terminally rather than via edit_report). _dedup_figures keeps
-        # the reviewer from a duplicate/garbage figure set (V-4 keeps the failure path honest too).
-        figures = _dedup_figures([figure for report in reports for figure in report.figures])
-        if self.tools is None:
-            report = await self._call(
-                payload, AnalystReport, images=figures, action="finalize_authoring_outcome"
-            )
-            return report.model_copy(update={"figures": figures, "cited_figures": []})
-        seed = [
-            ModelMessage(role="system", content=self.prompt),
-            ModelMessage(role="user", content=_payload_text(payload)),
-        ]
-        messages, _, _ = await self._react(
-            seed_messages=seed, tools=self.tools, action="finalize_authoring_outcome",
-            cap=_react_loop_cap(), images=figures,
-        )
-        report = await self._call_over_messages(
-            messages, AnalystReport, action="finalize_authoring_outcome", images=figures,
-            tools=self.tools,
-        )
-        return report.model_copy(update={"figures": figures, "cited_figures": []})
-
+        return _authoring_result(session, tool_spec)
 
 class StatusMonitorAgent(AgentRole):
     """The `/status` reporter: reads the run's own ledger and answers the human's question.

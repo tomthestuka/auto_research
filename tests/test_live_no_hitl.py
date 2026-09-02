@@ -340,10 +340,17 @@ STIMULI = {
 
 
 def _terminal_schemas() -> dict:
-    """Each role's real terminal output — the one its production code path composes."""
-    from auto_research.schemas import AnalystReport, AuthoringDecision, ReviewVerdict
+    """Each role's real terminal output — the one its production code path produces.
 
-    return {"analyst_worker": AnalystReport, "analyst_lead": AuthoringDecision,
+    The lead's is ``AnalystReport``: it used to compose an ``AuthoringDecision`` here, but its
+    turn now ends by *filing a form* rather than composing a schema, and both of its report
+    terminals (``submit_adjudication``, ``submit_terminal_report``) carry an ``AnalystReport``.
+    Composing that is the closest this probe can get to the real terminal while staying below
+    the ReAct loop, which is where it deliberately sits.
+    """
+    from auto_research.schemas import AnalystReport, ReviewVerdict
+
+    return {"analyst_worker": AnalystReport, "analyst_lead": AnalystReport,
             "reviewer": ReviewVerdict}
 
 

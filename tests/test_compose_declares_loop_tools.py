@@ -54,8 +54,62 @@ COMPOSES = _compose_sites()
 
 
 def test_every_compose_site_was_found() -> None:
-    """A refactor that renames the compose helper must not silently empty this file."""
-    assert len(COMPOSES) >= 7, f"expected the known compose sites, found {len(COMPOSES)}"
+    """A refactor that renames the compose helper must not silently empty this file.
+
+    Four, down from seven: the analyst lead's five actions became branches of one ReAct loop that
+    ends by filing a form, so its four composes (adjudicate, judge_convergence, decide_authoring,
+    finalize_authoring_outcome) no longer exist — a conversation with no output schema cannot
+    replay a trajectory under the wrong one. What remains are the reviewer's, the worker's, the
+    lead's author-clarification reply and the co-lead's. Lower the number only when a compose is
+    genuinely deleted, never to make this pass.
+    """
+    assert len(COMPOSES) >= 4, f"expected the known compose sites, found {len(COMPOSES)}"
+
+
+def test_the_leads_cycle_runs_every_react_on_one_shared_provider() -> None:
+    """The lead's cycle re-enters ``_react`` several times; all of them must declare one provider.
+
+    With no compose left, this is where the same hazard now lives. The cycle loops back for each
+    stage and once per chain link, and a second provider built mid-cycle would change the declared
+    tool set between re-entries — a replayed trajectory could then name a tool the request no
+    longer declares, which is the "Tool reference 'x' not found in available tools" run-killer
+    (2026-07-29). One object, swapped internally (the live ``authoring_session``), keeps the
+    declarations constant; ``ReadOnlyToolProvider.tool_definitions`` gates the authoring tools on
+    ``cycle.authoring_enabled`` rather than on that session for exactly this reason.
+    """
+    tree = ast.parse(ROLES.read_text(encoding="utf-8"), str(ROLES))
+    cycle_methods = {"run_cycle", "_author_chain", "_drive_one_link"}
+    seen: dict[str, set[str]] = {}
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        if fn.name not in cycle_methods:
+            continue
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "_react":
+                seen.setdefault(fn.name, set()).add(_kwarg_source(node, "tools") or "<missing>")
+    assert seen, "the lead's cycle methods were renamed — re-read roles.py"
+    declared = {expr for exprs in seen.values() for expr in exprs}
+    assert declared == {"provider"}, (
+        "every _react in the lead's cycle must run on the one shared provider; found "
+        f"{sorted(declared)} across {sorted(seen)}"
+    )
+
+
+def test_the_leads_cycle_has_no_compose() -> None:
+    """The cycle files a form instead of composing, so it declares no output schema at all."""
+    tree = ast.parse(ROLES.read_text(encoding="utf-8"), str(ROLES))
+    offenders = [
+        f"{fn.name}():{node.lineno}"
+        for fn in ast.walk(tree)
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and fn.name in {"run_cycle", "_author_chain", "_drive_one_link"}
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "attr", None) in ("_call_over_messages", "_call")
+    ]
+    assert not offenders, (
+        "the lead's cycle composed a structured answer; its answer is the filed form, and a "
+        "conversation carrying no schema is what makes the re-entries safe: " + ", ".join(offenders)
+    )
 
 
 @pytest.mark.parametrize(

@@ -994,6 +994,35 @@ def test_materialize_refuses_a_leaking_workspace_before_it_builds_anything(tmp_p
     assert not (leaking / BLOCK0.run_id).exists(), "it must refuse before building anything"
 
 
+def test_materialize_refuses_a_root_a_previous_attempt_already_used(tmp_path):
+    """A slot's ``run_id`` is deterministic, so a re-run lands on the previous attempt's world.
+
+    Measured 2026-09-02: a block-0 relaunch built into the prior attempt's root, **appended to its
+    `monitor.jsonl`** (the new preflight lines are numbered from event 648 and carry the prior
+    attempt's $19.43) and inherited its `checkpoint.sqlite`, while the toolkit path that attempt's
+    teardown had removed came back as an NFS stale file handle inside the OS jail. The corrupted
+    ledger is the dangerous half — it reads exactly like a real one — and the collision had already
+    overwritten a *completed, accepted* attempt's run directory before anyone looked.
+
+    It refuses rather than sweeps, because the runtime directory is kept on purpose and a silent
+    sweep would delete the evidence of the attempt somebody is re-running because they read it.
+    """
+    workspace = tmp_path / "ws"
+    stale = workspace / BLOCK0.run_id
+    (stale / "runtime").mkdir(parents=True)
+    (stale / "runtime" / "monitor.jsonl").write_text('{"event": "run.start"}\n', encoding="utf-8")
+
+    with pytest.raises(FileExistsError) as excinfo:
+        environment.materialize(BLOCK0.arm, BLOCK0.run_id,
+                                workspace_root=workspace, base_ref="HEAD")
+    message = str(excinfo.value)
+    assert "runtime" in message  # it names what is in the way
+    assert "mv " in message  # and the exact deliberate act that clears it
+    # It refused before touching anything: the stale world is intact and nothing new was built.
+    assert (stale / "runtime" / "monitor.jsonl").read_text().strip() == '{"event": "run.start"}'
+    assert not (stale / "toolkit").exists()
+
+
 def test_the_default_workspace_says_nothing_about_the_experiment():
     assert arms.forbidden_in_path(cli.DEFAULT_WORKSPACE) == []
 

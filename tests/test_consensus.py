@@ -5,6 +5,11 @@ from pathlib import Path
 
 import pytest
 
+from auto_research.agents.react import (
+    ANOTHER_ROUND_TOOL,
+    SUBMIT_ADJUDICATION_TOOL,
+    LeadCycleOutcome,
+)
 from auto_research.consensus import DebateToConverge
 from auto_research.schemas import AnalysisTask, AnalystReport, ReviewVerdict
 from auto_research.schemas.figures import FigureRef
@@ -26,23 +31,40 @@ class FakeWorker:
 
 
 class FakeLead:
+    """A lead that files one form per cycle, the way ``run_cycle`` does.
+
+    It mirrors the production handler in the one place that matters here: another round is only
+    filed while ``rounds_left`` allows one, because the real ``request_another_round`` handler
+    refuses it once the cap is spent (the cap is Python's, not the model's).
+    """
+
     def __init__(self, converge_on: int):
         self.converge_on = converge_on
+        self.cycles = 0
         self.judged_rounds: list[int] = []
+        self.rounds_left_seen: list[int] = []
         self.final_reports: list[AnalystReport] = []
         self.adjudicate_sources: list[str] | None = None
         self.adjudicate_reports: list[AnalystReport] = []
 
-    async def judge_convergence(self, task, reports, *, round_index, max_rounds):
-        self.judged_rounds.append(round_index)
-        return ReviewVerdict(
-            accepted=round_index >= self.converge_on,
-            rationale=f"round {round_index}",
-            needs_analysis_rework=round_index < self.converge_on,
-        )
-
-    async def adjudicate(self, task, reports, *, sources=None):
-        # V-4: the consensus now hands the lead the worker source keys; the lead owns figures.
+    async def run_cycle(
+        self, task, reports, *, sources=None, rounds_left=0, author_budget=0, **kwargs
+    ):
+        self.cycles += 1
+        self.judged_rounds.append(self.cycles)
+        self.rounds_left_seen.append(rounds_left)
+        if self.cycles < self.converge_on and rounds_left > 0:
+            return LeadCycleOutcome(
+                filed=ANOTHER_ROUND_TOOL,
+                verdict=ReviewVerdict(
+                    accepted=False,
+                    rationale=f"round {self.cycles}",
+                    needs_analysis_rework=True,
+                    follow_up="refit the segment",
+                ),
+                author_budget=author_budget,
+            )
+        # V-4: the consensus hands the lead the worker source keys; the lead owns figures.
         self.adjudicate_sources = list(sources) if sources is not None else None
         self.adjudicate_reports = list(reports)
         report = AnalystReport(
@@ -50,7 +72,9 @@ class FakeLead:
             findings=[report.findings[0] for report in reports],
         )
         self.final_reports.append(report)
-        return report
+        return LeadCycleOutcome(
+            filed=SUBMIT_ADJUDICATION_TOOL, report=report, author_budget=author_budget
+        )
 
 
 def test_debate_to_converge_stops_when_lead_accepts():

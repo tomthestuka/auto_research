@@ -42,7 +42,12 @@ from auto_research.agents.react import ReadOnlyToolProvider
 from auto_research.agents.roles import AnalystLeadAgent
 from auto_research.monitor import RunMonitor
 from auto_research.sandbox.workspace import create_run_workspace, run_dir
-from auto_research.schemas import AnalystReport, HumanResponse
+from auto_research.schemas import (
+    AnalysisTask,
+    AnalystReport,
+    HumanResponse,
+    MergeFlowResult,
+)
 from auto_research.schemas.toolspec import AnalystToolRequest, ToolSpec, ValidationDataset
 
 pytestmark = pytest.mark.skipif(
@@ -214,35 +219,40 @@ async def _run_authoring(fake_tk: Path, ts: str):
 
     await monitor.record("run", "run.start", level=1, summary="loader authoring live test",
                          data={"toolkit_root": str(fake_tk)})
-    decision = await lead.decide_authoring([report])
-    await monitor.record(
-        "analyst", "analyst.lead.authoring_decision", level=1,
-        summary=f"should_author={decision.should_author}", data={"decision": decision},
+    # ONE cycle does the whole thing: the lead triages, files `author_chain`, and drives each link
+    # through the coder + gate + co-lead review — all in its own conversation, with the coding
+    # middle dropped between links (A8; the sequencing used to live in this test's own loop).
+    outcome = await lead.run_cycle(
+        _task_for_report(report),
+        [report],
+        sources=["analyst_worker_0"],
+        rounds_left=0,
+        author_budget=3,
+        toolkit_root=fake_tk,
+        worktree_base=run_dir(run_id) / "authoring",
+        direct_branch="ai",
+        colead=None,  # resolves the GPT co-lead from config, decorrelated from the author
+        human_handler=handler,
     )
-    if not decision.should_author or not decision.tool_specs:
-        monitor.write_markdown(jsonl.with_suffix(".md"))
-        return decision, None
-
-    # A8: author the lead's whole chain sequentially, one session at a time, stopping on the first
-    # non-commit (downstream depends on it). A single-capability request yields a 1-tool chain.
-    result = None
-    for spec in decision.tool_specs:
-        result = await lead.drive_authoring(
-            spec,
-            toolkit_root=fake_tk,
-            worktree_base=run_dir(run_id) / "authoring",
-            direct_branch="ai",
-            colead=None,  # resolves the GPT co-lead from config, decorrelated from the Claude author
-            human_handler=handler,
-        )
-        await monitor.record(
-            "analyst", "analyst.tool.authored", level=1,
-            summary=f"authoring {result.status}: {spec.proposed_tool_name}", data={"result": result},
-        )
-        if result.status != "committed":
-            break
+    await monitor.record(
+        "analyst", "analyst.lead.cycle", level=1,
+        summary=f"filed={outcome.filed} committed={outcome.committed}",
+        data={"filed": outcome.filed, "decision": outcome.decision},
+    )
     monitor.write_markdown(jsonl.with_suffix(".md"))
-    return decision, result
+    result = outcome.authored[-1] if outcome.authored else None
+    return outcome.decision, result
+
+
+def _task_for_report(report) -> AnalysisTask:
+    """The analysis task the worker's blocked report belongs to."""
+    return AnalysisTask(
+        question=(
+            "Run the joint IXPE+NICER+NuSTAR spectro-polarimetric fit for the E5 epoch of "
+            "Cyg X-1."
+        ),
+        instructions="The worker is blocked on a missing loader; settle the toolkit question.",
+    )
 
 
 def test_loader_authoring_end_to_end(tmp_path):
@@ -254,11 +264,13 @@ def test_loader_authoring_end_to_end(tmp_path):
 
     decision, result = asyncio.run(_run_authoring(fake_tk, ts))
 
+    assert decision is not None, "the lead ended its cycle without filing an authoring form"
     print(f"\n=== AUTHORING DECISION === should_author={decision.should_author} "
           f"chain={[s.proposed_tool_name for s in decision.tool_specs]}")
     assert decision.should_author and decision.tool_specs, (
         f"lead declined to author: {decision.rationale}"
     )
+    assert result is not None, "author_chain was filed but no link was driven"
 
     print(f"=== AUTHORING RESULT === status={result.status} "
           f"sha={result.commit_sha} reason={result.reason}")
@@ -306,11 +318,16 @@ _CHAIN_NOTES = (
 )
 
 
-def test_chain_planning_returns_ordered_chain(tmp_path):
-    """A8: given a multi-step prescription against an empty toolkit, the real lead's decide_authoring
-    plans an ORDERED CHAIN of ≥2 tool_specs up front (not a single first-gap tool). Observational —
-    a human eyeballs the chain's names/dispositions/order from the logged MD; the deterministic
-    assertion is only that a multi-tool chain is planned."""
+def test_chain_planning_returns_ordered_chain(tmp_path, monkeypatch):
+    """A8: given a multi-step prescription against an empty toolkit, the real lead plans an ORDERED
+    CHAIN of ≥2 tool briefs up front (not a single first-gap tool). Observational — a human
+    eyeballs the chain's names/dispositions/order from the logged MD; the deterministic assertion
+    is only that a multi-tool chain is planned.
+
+    Planning is now one branch of the lead's cycle, and filing ``author_chain`` opens the coding
+    session on the first link — so the coding session is stubbed here to keep this test what it has
+    always been: the *plan*, at planning cost, with no coder, gate or science environment.
+    """
     from dotenv import load_dotenv
 
     load_dotenv()  # surface live LLM credentials (never read .env; just load it), as other live tests do
@@ -359,18 +376,38 @@ def test_chain_planning_returns_ordered_chain(tmp_path):
         tool_request=request, status="needs_human",
     )
 
+    async def _fake_link(self, messages, provider, spec, **kwargs):
+        return MergeFlowResult(
+            tool_spec_id=spec.id, status="committed", branch="ai", commit_sha="0" * 12,
+            reason="stubbed coding session (this test measures the plan, not the coder)",
+        )
+
+    monkeypatch.setattr(AnalystLeadAgent, "_drive_one_link", _fake_link)
+
     async def _plan():
         await monitor.record("run", "run.start", level=1, summary="A8 chain-planning live test")
-        decision = await lead.decide_authoring([report])
+        outcome = await lead.run_cycle(
+            AnalysisTask(
+                question="Survey broadband polarization vs hardness across the sample.",
+                instructions="The worker is blocked at the first step; settle the toolkit question.",
+            ),
+            [report],
+            sources=["analyst_worker_0"],
+            rounds_left=0,
+            author_budget=8,
+            toolkit_root=fake_tk,
+            worktree_base=run_dir(run_id) / "authoring",
+            direct_branch="ai",
+        )
         await monitor.record(
-            "analyst", "analyst.lead.authoring_decision", level=1,
-            summary=f"should_author={decision.should_author} n_tools={len(decision.tool_specs)}",
-            data={"decision": decision},
+            "analyst", "analyst.lead.cycle", level=1,
+            summary=f"filed={outcome.filed}", data={"decision": outcome.decision},
         )
         monitor.write_markdown(jsonl.with_suffix(".md"))
-        return decision
+        return outcome.decision
 
     decision = asyncio.run(_plan())
+    assert decision is not None, "the lead ended its cycle without filing an authoring form"
     names = [(s.proposed_tool_name, s.disposition) for s in decision.tool_specs]
     print(f"\n=== A8 CHAIN === should_author={decision.should_author} chain={names}")
     print(f"rationale: {decision.rationale}")

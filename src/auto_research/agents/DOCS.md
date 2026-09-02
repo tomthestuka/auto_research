@@ -133,6 +133,35 @@ listed in the lead's authoring-loop `free_tools` (slice 3), bounded by `submit_c
 `react_loop_absolute_cap`. They drive the **same** `AuthoringSession` primitives `propose_and_pr`
 drives in its auto-loop — the difference is *who* diagnoses each verdict (the lead, vs. the coder).
 
+**The lead's cycle forms (`LeadCycle`, §9.3).** The lead states every decision by *filing a form*
+rather than by composing a structured answer. When a `LeadCycle` is wired onto its provider, five
+forms are declared — `author_chain`, `hold_authoring`, `request_another_round`,
+`submit_adjudication`, `submit_terminal_report` (`LEAD_FORM_TOOLS`) — each passed to `_react` as a
+`terminal_tool`, so a successful call ends that loop with the filed arguments readable from
+`last_filed_form`. Three properties are the point:
+
+- **The impossible state is inexpressible.** `author_chain`'s `input_schema` requires
+  `tool_specs` with `minItems: 1`. Filing "author, with nothing to author" was schema-VALID
+  structured output that a Pydantic validator then killed a live run over ($19.43, 2026-09-01);
+  it cannot be expressed now. Same move as the gate deriving its target packages from the diff
+  rather than from an advisory field ([A12]).
+- **Every question carries its own description.** Each form field's prose is read from the
+  Pydantic `Field(description=...)` of the model it validates back into (`_field_desc`), so the
+  worker's view and the lead's view of one object cannot drift, and no field is filled blind —
+  a `#` comment never reaches JSON Schema, which is the defect behind that run.
+- **Declarations are constant; the handler enforces the stage.** `_authoring_declared()` gates the
+  three authoring tools on `cycle.authoring_enabled` rather than on a live `authoring_session`, so
+  swapping the session per chain link never changes the declared set. `_out_of_stage` returns an
+  `is_error` naming the stage and the forms open now; `submit_terminal_report` is in every stage
+  (§9.6: an honest stop is never out of reach).
+
+Handlers validate arguments back into the existing models — `AuthoringDecision`, `ReviewVerdict`,
+and (for both report terminals) whatever `edit_report` last wrote — so every downstream consumer
+is untouched. A malformed chain link comes back as a correction naming the field ([F11]), never a
+crash. `LeadCycleOutcome` is what `run_cycle` returns: the filed form, its product, and the
+authoring bookkeeping (`decision`, `authored`, `committed`, remaining `author_budget`) the caller
+needs to reload discovery and rerun the workers.
+
 When a `RunMonitor` is injected, role wrappers record high-chatter input,
 parsed output, raw model content, attachment counts, and errors. These records
 are for human inspection only and are never fed back into runtime prompts. Model-backed
@@ -151,7 +180,7 @@ Current role capability surfaces:
 | Librarian I/O | `SourceToolProvider` over arXiv, ADS, Tavily web, and local text search. | Real source/document input can produce structured search results or memory abstractions. |
 | Local retrieval | Pure-Python `text_search_paths()` over SQLite. | No runtime LLM role; returns local paper paths for reviewer attachments. |
 | Analyst worker | `SandboxToolProvider` over `research_toolkit` manifest tools plus MCP tools in a persistent sandbox, plus `web_search` + `web_fetch`. | Runs the full analysis tool chain inside `analyze()`, then reports grounded results and figures. |
-| Analyst lead | `ReadOnlyToolProvider` over run artifacts, papers, and `research_toolkit`; `web_search` + `web_fetch`. | Judges convergence, adjudicates, triages `ToolSpec`, and answers author questions. |
+| Analyst lead | `ReadOnlyToolProvider` over run artifacts, papers, and `research_toolkit`; `web_search` + `web_fetch`; the five **cycle forms** + the three authoring tools when a `LeadCycle` is wired. | One cycle: investigate, triage the tool request, drive the chain, judge, and file the form that carries the decision. Also answers author questions. |
 | Analyst co-lead | `ReadOnlyToolProvider` over the **toolkit worktree** (`include_text_search=False`) + `web_search` + `web_fetch`. | Provider-decorrelated **code review** of one authored tool: brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs (§9.3 step 4). |
 | Reviewer | `ReadOnlyToolProvider` over run artifacts, figures, papers, memory, and `research_toolkit` (to read tool source/`TOOL_MANIFEST` and confirm correct call parameters), plus `web_search` + `web_fetch`. | Dispatches, reviews, requests capped rework, and composes final report handles. |
 
@@ -223,25 +252,52 @@ Role wrappers:
   consensus peer summary. With no sandbox/registry it falls back to a plain structured call; a
   loop that never calls `edit_report` falls back to one terminal compose with catalog figures
   attached. `agent_key`/`report_dir` (set by runtime) name its catalog source + report folder.
-- `AnalystLeadAgent.adjudicate(task, reports, *, sources=None) -> AnalystReport` — accumulates
-  each worker's cited figures into a per-worker catalog source (keyed by `sources[i]`, append-only
-  across rounds/iterations), then **writes the adjudicated report via `edit_report`** citing
-  figures by `{worker, index}` when a `ReadOnlyToolProvider` is attached (the workspace is wired
-  onto it only for this call, cleared in `finally`); plain structured call with catalog figures
-  attached otherwise. The lead — not the consensus — now owns the report's figures (V-4).
-- `AnalystLeadAgent.judge_convergence(task, reports, *, round_index,
-  max_rounds) -> ReviewVerdict` judges whether worker reports have converged
-  enough for final synthesis.
+- `AnalystLeadAgent.run_cycle(task, reports, *, sources=None, rounds_left=0, author_budget=0,
+  toolkit_root=None, worktree_base=None, direct_branch=None, colead=None, human_handler=None,
+  coder=None, allow_correlated_review=False) -> LeadCycleOutcome` — **the lead's whole turn**, one
+  ReAct loop over one conversation. It investigates, then ends by **filing a form** (§9.3):
+  `author_chain` / `hold_authoring` while a worker's `tool_request` is open and credits remain,
+  then `request_another_round`, `submit_adjudication` or `submit_terminal_report`. The form it
+  picks *is* the decision, and each form's fields carry their own descriptions — the channel a
+  Pydantic `#` comment never reached. Replaces the four separate conversations
+  `adjudicate`/`judge_convergence`/`decide_authoring`/`finalize_authoring_outcome` were, and with
+  them the terminal composes: this conversation declares no output schema at all.
+  - **Stages.** `decide` (only when a request is open, credits remain and a toolkit is wired) →
+    `author` (one open coding session) → `adjudicate`. Every form is **declared for the whole
+    cycle** and the *handler* enforces the stage, because a declared set that shrinks mid-
+    conversation is the 2026-07-29 `Tool reference … not found` run-killer; an out-of-stage call
+    returns `is_error`, which `_react` treats as a correction rather than a finish.
+  - **Authoring ends the cycle.** `author_chain` authors the whole ordered chain link by link
+    (`_author_chain` → `_drive_one_link`, each link its own `AuthoringSession` swapped onto the
+    shared provider) and then returns with `filed="author_chain"`, so the caller reruns the
+    workers on what committed before the lead judges reports that predate it (A8).
+  - **The coding middle is dropped** between links (`_drop_coding_middle`): the filed brief and
+    the `submit_for_review` call with its real result survive; the `drive_coder` transcript goes.
+  - **Figures.** Accumulates each worker's cited figures into a per-worker catalog source (keyed by
+    `sources[i]`, append-only across rounds/iterations) and attaches them to the cycle's first
+    call; the report is written through `edit_report` citing `{worker, index}`. The lead — not the
+    consensus — owns the report's figures (V-4).
+  - **No tool surface ⇒ no report.** `self.tools is None` returns `filed=None, report=None` rather
+    than composing a stand-in ([F6]: a runtime-authored report sits closer to fabrication than the
+    absence it hides). A loop that wrote a report but never filed it has that report used — real
+    evidence it produced — while a loop that wrote nothing returns nothing.
 - `AnalystLeadAgent.clarify_for_author(message, *, kind) -> str` — answers a
   tool author's `ask_lead` clarification (the lead↔author channel, §9.3), sent as a single
   Markdown `message`; consults
   `web_search` (when a `ReadOnlyToolProvider` with a `web_source` is attached) before
   answering rather than guessing. Used by `merge_flow.propose_and_pr`.
-- `AnalystLeadAgent.finalize_authoring_outcome(task, reports, tool_spec, result) ->
-  AnalystReport` — composes the terminal report after a **non-committed** authoring attempt
-  (§9.6): documents the unavailable capability + partial findings and sets `status`
-  (`needs_human`/`failed`/`ok`); never fabricates, never re-requests the tool. Called by
-  `DebateToConverge` instead of re-authoring; the report flows to the reviewer (sole I/O).
+- `AnalystLeadAgent.drive_authoring(tool_spec, *, toolkit_root, worktree_base, ...) ->
+  MergeFlowResult` — **one** tool through authoring on its own conversation: build + connect an
+  `AuthoringSession`, seed the coder, run the lead's loop over `drive_coder` /
+  `submit_for_review` / `respond_to_review`, read the terminal result, `aclose`. `run_cycle`'s
+  `_drive_one_link` is the same lifecycle over the *cycle's* conversation; this standalone entry
+  remains because `benchmarks/author_bench` measures exactly it (its published K=10 batches
+  priced this call), so the instrument is unchanged by the cycle refactor.
+- The honest terminal after a non-committed attempt is no longer a separate method: authoring and
+  judging are stages of one cycle, so the lead meets the failure as a task note and files
+  `submit_terminal_report` (§9.6) — documenting the unavailable capability and any partial
+  findings that hold, never fabricating, never re-requesting the tool. The report flows to the
+  reviewer (sole I/O).
 - `AnalystColeadAgent.review_tool(tool_spec, *, diff, gate, tools=None) -> ToolReviewVerdict`
   — the Phase-2 step-4 provider-decorrelated **code review** (§9.3). Payload carries the
   `ToolSpec` brief, the authored `diff` bundle, and the (already-passed) `GateReport`
@@ -305,9 +361,10 @@ Role wrappers:
     `sandbox.is_alive` otherwise.
 - `AnalystLeadAgent` — analyst lead wrapper. `agent_key`/`report_dir` (set by runtime) name its
   report folder; `_figure_catalog` is the per-worker figure catalog (append-only across rounds +
-  iterations). Methods: `adjudicate(task, reports, *, sources=None)` (V-4: accumulate per-worker
-  catalog, write via `edit_report`), `judge_convergence()`, `clarify_for_author()`,
-  `finalize_authoring_outcome()`.
+  iterations). Methods: `run_cycle(...)` (the whole turn — one loop, one conversation, ends on a
+  filed form), `drive_authoring(...)` (one standalone authoring attempt, `author_bench`'s
+  instrument), `clarify_for_author()`. Internals: `_accumulate_figures()`, `_author_chain()`,
+  `_drive_one_link()`, `_make_report_workspace()`.
 - `AnalystColeadAgent` — Phase-2 provider-decorrelated co-lead reviewer wrapper.
   Method: `review_tool(tool_spec, *, diff, gate, tools=None) -> ToolReviewVerdict`.
 
@@ -432,4 +489,59 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   so — *"no worker report, no `tool_request`, no validation ObsID on disk"*), and the lead's
   provider carries `authoring_session=None`, so `should_author=false` is a **triage** verdict
   and no authoring was attempted or possible.
-
+- 2026-09-02 — **The analyst lead became one ReAct loop that files forms.** Block 0's third launch
+  died at $19.43 because the lead answered the authoring question with `should_author=true` and an
+  empty `tool_specs` — schema-VALID output a Pydantic validator then killed the run over. The cause
+  was the interface, not the model: the lead was **six separate conversations** (each re-seeded,
+  each ending in a compose), the `decide_authoring` payload was 27,208 characters of single-line
+  JSON in which the specification was 1,016 (3.7%), the schema marked the chain **optional** and
+  carried **no field descriptions at all** (every explanation was a `#` comment, which never
+  reaches JSON Schema), the one prose rule was stated only in the direction that did not bind
+  (*"should_author=false when the worker mis-called an existing tool"* — the lead's case was the
+  opposite), and the generic compose tail said *"do not describe intentions or plans"* while the
+  requested output **is** a plan. Now: `run_cycle` is the lead's whole turn — one loop, one
+  conversation, no output schema — ending when it **files a form** (`author_chain`,
+  `hold_authoring`, `request_another_round`, `submit_adjudication`, `submit_terminal_report`).
+  `adjudicate`/`judge_convergence`/`decide_authoring`/`finalize_authoring_outcome` are gone with
+  their composes; `drive_authoring` **stays**, because `benchmarks/author_bench` measures exactly
+  that call and its published K=10 batches priced it. `_react` gained `terminal_tools`, breaking
+  **after** the batch is appended so no `tool_use` is orphaned, and *not* breaking on an
+  `is_error` — which is what lets the stage check live in the handler. Four properties carry the
+  design: **the impossible state is inexpressible** (`author_chain` requires `minItems: 1`, so
+  "author with nothing to author" cannot be expressed — the [A12] move of removing a dependency on
+  a free-filled field); **every question carries its own description**, read from the Pydantic
+  `Field(description=...)` of the model it validates back into, so the worker's and the lead's view
+  of one object cannot drift; **declarations are constant** (`_authoring_declared()` gates the drive
+  tools on `cycle.authoring_enabled`, never on a live session, so swapping the session per chain
+  link cannot shrink the declared set — the 2026-07-29 run-killer); and **caps stay in Python**
+  (`rounds_left` is passed in and `request_another_round` is refused at zero with the cap named).
+  The **coding middle is dropped** at its own boundary (`_drop_coding_middle`): the filed brief and
+  the `submit_for_review` call with its real result survive, the `drive_coder` transcript goes,
+  whole turns only, nothing synthesized — safe here because `ReadOnlyToolProvider` sets
+  `defer_loading` on nothing, so no dropped turn can de-activate a discovered tool. A cycle with no
+  tool surface returns the failure rather than composing a stand-in ([F6]); a cycle that wrote a
+  report but never filed it has that report used, because it is real evidence the lead produced.
+  **The landmine was probed before the forms were written and was not there**
+  (`tmp_scripts/probe_nested_form.py`, cents): all five vendors accept a tool whose `input_schema`
+  nests an object array and fill ≥2 links with every required field — the 2026-08-24 Qwen
+  `items: {$ref}` refusal applies to **output** schemas only — with no `"null"`-string quirk, and
+  **all five classified `disposition` correctly unprompted**, which is direct evidence the failure
+  was informational rather than a model limitation. **LIVE-VERIFIED 2026-09-02**
+  (`tests/test_live_lead_cycle.py`, stimulus frozen out of that launch's own ledger): the Opus lead
+  ran a real 9-call cycle with the real prompt through `ModelHandle`, its catalog figures (2683 px,
+  above Anthropic's many-image dimension cap) rode the first request through the media guard, and it
+  filed `request_another_round` with a dispatch text naming the tools that **already exist** — the
+  launch-3 diagnosis, reached by the lead itself. Suite 1399 → 1663; new `tests/test_lead_forms.py`
+  (41) and `tests/test_live_lead_cycle.py`.
+- 2026-09-02 (second) — The nested-form measurement moved out of scratch and into the suite as
+  `tests/test_live_form_shapes.py` (env-gated, one call per vendor). It sends the **real**
+  `author_chain_tool_def()` to all five vendors that could ever hold a seat handed it, and
+  validates what comes back through the **real** handler into real `ToolSpec`s — so the property
+  the whole refactor turns on (a tool whose `input_schema` nests an object array is fillable
+  everywhere, the position the 2026-08-24 sweep found Qwen refusing on *output* schemas) is
+  re-runnable rather than a changelog note. `disposition` choice is recorded, never asserted:
+  which one a model picks is quality. Two live tests were also corrected for the new topology —
+  `test_live_no_hitl`'s lead terminal is `AnalystReport` (its turn ends on a filed form, not a
+  composed `AuthoringDecision`), and `test_live_schema_matrix` keeps its `AuthoringDecision` row
+  relabelled **shape-only**: no role composes it any more, but it is still the strictest shape
+  this project sends and the row keeps the output-schema side from regressing silently.

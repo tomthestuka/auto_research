@@ -40,8 +40,12 @@ class FigureCitation(MessageModel):
     the selection handle (menu), "Figure k" is the reference (finished report).
     """
 
-    source: NonEmptyStr
-    index: Annotated[int, Field(ge=1)]
+    source: NonEmptyStr = Field(
+        description="Catalog source, e.g. 'self' or 'analyst_worker_0'."
+    )
+    index: Annotated[int, Field(ge=1)] = Field(
+        description="1-based slot within that source (its [source:index] number)."
+    )
 
 
 class FiguredReport(MessageModel):
@@ -54,8 +58,17 @@ class FiguredReport(MessageModel):
     appears twice), so no separate dedup pass is needed.
     """
 
-    cited_figures: list[FigureCitation] = Field(default_factory=list)
-    figures: list[FigureRef] = Field(default_factory=list)
+    cited_figures: list[FigureCitation] = Field(
+        default_factory=list,
+        description=(
+            "The figures this report places, as catalog handles in the order they should appear. "
+            "Cite every figure the prose refers to; an uncited catalog figure is dropped."
+        ),
+    )
+    figures: list[FigureRef] = Field(
+        default_factory=list,
+        description="Resolved by the runtime from cited_figures; leave it alone.",
+    )
 
 
 class DocumentRef(MessageModel):

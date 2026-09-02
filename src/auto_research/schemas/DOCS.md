@@ -16,9 +16,22 @@ One module per logical message family:
 - `analysis.py` — analyst task/report messages.
 - `review.py` — reviewer verdicts.
 - `toolspec.py` — the worker→lead `AnalystToolRequest`, the Phase-2 lead→coder
-  tool-authoring brief (`ToolSpec`), and the lead's `AuthoringDecision`.
+  tool-authoring brief (`ToolSpec`), and `AuthoringDecision` — which **no model fills any more**:
+  the lead files `author_chain` or `hold_authoring` and the handler constructs it (its validator
+  is kept as an assertion on the harness's own construction, where the state it rejects is
+  unreachable).
 - `merge.py` — Phase-2 tool-authoring flow results (gate report, co-lead review,
   `propose_and_pr` outcome).
+
+**Every field a model fills carries `Field(description=...)`, and that is load-bearing rather than
+tidy.** A `#` comment never reaches the JSON Schema (or tool `input_schema`) the model is given, so
+a field explained only in a comment is a field filled blind. A live run died on exactly that
+(2026-09-01, $19.43): `AuthoringDecision.tool_specs` was optional in the schema, no field carried a
+description, and the rule making the chain mandatory lived in a validator the model could not see.
+`tests/test_schema_descriptions.py` makes the rule permanent — it walks every model a model fills
+and fails on an undescribed field. Two exemptions, both by name: models the *runtime* resolves
+rather than the model (`FigureRef`), and auto-set bookkeeping (`id`, `created_at`, whose
+descriptions say "set automatically; leave it alone").
 
 All public models are re-exported from `auto_research.schemas`. Figures are
 carried by **reference** (`FigureRef`), never embedded
@@ -80,8 +93,9 @@ carried by **reference** (`FigureRef`), never embedded
   response schema free of any open map (so a GPT-backed worker can compose it under strict
   structured output, §7). `AnalystReport.tool_request: AnalystToolRequest | None`.
 - `ToolSpec` (Phase 2) is the **lead→coder** tool-authoring brief the lead finalises from a
-  worker's `AnalystToolRequest` in `decide_authoring` (CLAUDE.md §9.3). It is a *brief, not a
-  frozen contract*: `science_context`/`expected_behavior` (prose), `proposed_tool_name`,
+  worker's `AnalystToolRequest` and files on the `author_chain` form (CLAUDE.md §9.3). It is the
+  **opening prompt of a coding session** — what an engineer reads before touching the toolkit —
+  and a *brief, not a frozen contract*: `science_context`/`expected_behavior` (prose), `proposed_tool_name`,
   `target_domain` + `disposition` (`"extend_existing"`|`"new_package"`, the proposer/lead's
   call), `validation_data: list[ValidationDataset]` (≥1 required), advisory
   `proposed_checks: list[ProposedCheck]` (open-ended `kind` hint, not an enum), optional
@@ -235,3 +249,17 @@ carried by **reference** (`FigureRef`), never embedded
 - 2026-07-06 — [A8] `AuthoringDecision.tool_spec` → ordered `tool_specs: list[ToolSpec]`, with the codebase's first `@model_validator` enforcing `should_author ⇒ len(tool_specs) ≥ 1`.
 - 2026-07-09 — [A12] `ToolSpec.target_domain`/`disposition` documented as advisory intent (no schema change): the deterministic gate verifies where a tool landed from the diff, not these fields, so a descriptive value can no longer doom the gate.
 - 2026-07-14 — V-4: figures by citation. Added `FigureCitation{source, index}` and the `FiguredReport` base (`cited_figures` + runtime-resolved `figures`); `AnalystReport` extends it. Citation replaces the old figure-dedup pass, closing the "last-round-only figures" leak.
+- 2026-09-02 — **Every model-filled field carries `Field(description=...)`**, across `ToolSpec`,
+  `AnalystToolRequest`, `ValidationDataset`, `ProposedCheck`, `AuthoringDecision`, `AnalystReport`,
+  `FiguredReport` and `FigureCitation`. A `#` comment never reaches the JSON Schema the model is
+  given, so a field explained only in a comment is a field filled blind — and a live run died on
+  exactly that ($19.43, 2026-09-01). Prose was lifted where it already existed (`ReviewVerdict` was
+  already complete; `edit_report_tool_def` already described `AnalystReport` and the worker's half
+  of the tool request), so the genuinely new text is the **lead-owned** fields: `target_domain`
+  (required, and previously named in no channel the model could read), `disposition`,
+  `proposed_checks`, `replication_tolerance`. `ToolSpec` is re-documented as *the opening prompt of
+  a coding session*, not a classification of how novel a gap is; `AuthoringDecision` as
+  **harness-constructed from a filed form** — no model fills it any more, and its cross-field
+  validator is kept as an assertion on our own construction, where the state it rejects is
+  unreachable. New `tests/test_schema_descriptions.py` (19) makes the rule permanent, exempting by
+  name only runtime-resolved models (`FigureRef`) and auto-set bookkeeping.

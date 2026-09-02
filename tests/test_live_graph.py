@@ -216,26 +216,23 @@ class LoggingLead:
     def __init__(self, agent: AnalystLeadAgent, events: list[dict]):
         self.agent = agent
         self.events = events
+        self.cycles = 0
 
-    async def judge_convergence(self, task, reports, *, round_index, max_rounds):
-        verdict = await self.agent.judge_convergence(
-            task, reports, round_index=round_index, max_rounds=max_rounds
-        )
+    async def run_cycle(self, task, reports, **kwargs):
+        self.cycles += 1
+        outcome = await self.agent.run_cycle(task, reports, **kwargs)
         self.events.append(
             _event(
-                f"lead_judge_round_{round_index}",
+                f"lead_cycle_{self.cycles}",
                 self.agent,
-                output=verdict.model_dump(mode="json"),
+                output={
+                    "filed": outcome.filed,
+                    "report": outcome.report.model_dump(mode="json") if outcome.report else None,
+                    "verdict": outcome.verdict.model_dump(mode="json") if outcome.verdict else None,
+                },
             )
         )
-        return verdict
-
-    async def adjudicate(self, task, reports, *, sources=None):
-        report = await self.agent.adjudicate(task, reports, sources=sources)
-        self.events.append(
-            _event("lead_adjudicate", self.agent, output=report.model_dump(mode="json"))
-        )
-        return report
+        return outcome
 
 
 def _event(event: str, agent, *, output=None):

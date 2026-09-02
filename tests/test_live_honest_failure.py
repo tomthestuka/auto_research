@@ -165,27 +165,69 @@ def _write(log_path, record: dict) -> None:
 
 # --- Probe 1: the analyst lead at a failed authoring loop -------------------------------------
 
-def test_live_lead_finalizes_failed_authoring():
+def test_live_lead_finalizes_failed_authoring(tmp_path):
+    """The honest terminal, filed rather than composed.
+
+    ``finalize_authoring_outcome`` was a separate conversation the strategy called after a failed
+    attempt. There is no such call any more: authoring and judging are stages of one cycle, so
+    the lead meets the failure as a note on its task and ends by filing ``submit_terminal_report``
+    (or ``submit_adjudication`` when partial results still answer the request). Same §9.6 property
+    — an honest failure is a correct outcome — reached through the form the lead files itself.
+    """
+    from auto_research.agents.react import (
+        ReadOnlyToolProvider,
+        SUBMIT_ADJUDICATION_TOOL,
+        TERMINAL_REPORT_TOOL,
+    )
+
     load_dotenv()
     registry = load_registry()
     lead = AnalystLeadAgent(model=registry.resolve("analyst_lead").handles[0])
+    lead.agent_key = "analyst_lead"
+    lead.report_dir = tmp_path
+    lead.tools = ReadOnlyToolProvider(roots=[tmp_path], include_text_search=False)
 
     task, reports, spec = _task(), _worker_reports(), _tool_spec()
     result = _failed_result(spec)
+    # The failure note the strategy appends to the task after a non-committed chain — the same
+    # text `_augment_with_failed_tool` writes, which is how the lead learns the outcome now.
+    task = task.model_copy(
+        update={
+            "instructions": "\n\n".join(
+                filter(
+                    None,
+                    [
+                        task.instructions,
+                        "An attempt to author a new tool did NOT commit — the capability is still "
+                        f"missing:\n  tool: {spec.proposed_tool_name} (domain: {spec.target_domain})"
+                        f"\n  outcome: {result.status}\n  reason: {result.reason}\n"
+                        "The authoring budget for this analysis is spent.",
+                    ],
+                )
+            )
+        }
+    )
     log_path = dev_log_path("honest-failure", "live_lead_finalize_failed_authoring", ".jsonl")
 
-    report = asyncio.run(lead.finalize_authoring_outcome(task, reports, spec, result))
+    outcome = asyncio.run(
+        lead.run_cycle(task, reports, sources=["analyst_worker_0"], rounds_left=0, author_budget=0)
+    )
+    report = outcome.report
 
-    _write(log_path, {"edge": "lead.finalize_authoring_outcome", "input": {
+    _write(log_path, {"edge": "lead.run_cycle", "input": {
         "task": task.model_dump(mode="json"),
         "tool_spec": spec.model_dump(mode="json"),
         "authoring_result": result.model_dump(mode="json"),
         "worker_reports": [r.model_dump(mode="json") for r in reports],
     }})
-    _write(log_path, {"edge": "lead.finalize_authoring_outcome", "output": report.model_dump(mode="json")})
-    print(f"\n[lead.finalize_authoring_outcome] status={report.status}\nsummary={report.summary}\n→ {log_path}")
+    _write(log_path, {"edge": "lead.run_cycle", "output": {
+        "filed": outcome.filed,
+        "report": report.model_dump(mode="json") if report else None,
+    }})
+    print(f"\n[lead.run_cycle] filed={outcome.filed} → {log_path}")
 
     # Structural contract only (LLM content is logged, not asserted, per the testing rules).
+    assert outcome.filed in (TERMINAL_REPORT_TOOL, SUBMIT_ADJUDICATION_TOOL)
     assert isinstance(report, AnalystReport)
     assert report.status in ("ok", "failed", "needs_human")
     assert report.summary.strip()

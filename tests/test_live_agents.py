@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
+from auto_research.agents.react import ReadOnlyToolProvider
 from auto_research.agents import (
     AnalystLeadAgent,
     AnalystWorkerAgent,
@@ -167,12 +168,21 @@ def test_live_role_wrappers_on_research_jobs(tmp_path, monkeypatch):
             failures,
         )
 
+        # The lead's whole turn is one cycle that ends by filing a form, so it needs the two
+        # things a cycle writes through: a report folder (edit_report's JSONL) and a tool
+        # surface (the forms live on the provider). Without them there is no form to file and
+        # the cycle returns the honest failure instead of a report.
         lead = AnalystLeadAgent(model=registry.resolve("analyst_lead").handles[0])
+        lead.agent_key = "analyst_lead"
+        lead.report_dir = log_path.parent
+        lead.tools = ReadOnlyToolProvider(
+            roots=[log_path.parent], include_text_search=False
+        )
         await _record(
             log_path,
             "analyst_lead/ixpe_only_fit_review",
             lead,
-            lead.adjudicate(
+            lead.run_cycle(
                 AnalysisTask(
                     question="Review whether this IXPE-only Cyg X-1 fit result is acceptable.",
                     instructions=IXPE_ONLY_BAD_FIT,
@@ -184,6 +194,8 @@ def test_live_role_wrappers_on_research_jobs(tmp_path, monkeypatch):
                         uncertainty="No NICER/NuSTAR joint data, residual plot, or external literature comparison was supplied.",
                     )
                 ],
+                sources=["analyst_worker_0"],
+                rounds_left=0,
             ),
             failures,
         )
@@ -240,6 +252,12 @@ async def _record(log_path, role, agent, task, failures):
 
 
 def _dump_output(output):
+    if hasattr(output, "filed"):  # a LeadCycleOutcome — the filed form is what it produced
+        return {
+            "filed": output.filed,
+            "report": output.report.model_dump(mode="json") if output.report else None,
+            "verdict": output.verdict.model_dump(mode="json") if output.verdict else None,
+        }
     if isinstance(output, list):
         return [item.model_dump(mode="json") if hasattr(item, "model_dump") else item for item in output]
     if hasattr(output, "model_dump"):

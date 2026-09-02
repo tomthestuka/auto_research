@@ -10,6 +10,13 @@ from pathlib import Path
 
 import pytest
 
+from auto_research.agents.react import (
+    ANOTHER_ROUND_TOOL,
+    AUTHOR_CHAIN_TOOL,
+    SUBMIT_ADJUDICATION_TOOL,
+    TERMINAL_REPORT_TOOL,
+    LeadCycleOutcome,
+)
 from auto_research.consensus import DebateToConverge
 from auto_research.schemas import (
     AnalysisTask,
@@ -91,6 +98,21 @@ class AuthoringWorker:
 
 
 class AuthoringLead:
+    """A lead shaped like ``run_cycle``: one cycle either authors a chain, or judges.
+
+    It mirrors the three production decisions the strategy depends on, and nothing else:
+
+    - the **authoring stage** exists only while a worker's request is open, credits remain and a
+      toolkit is wired (the same condition ``run_cycle`` computes), and a cycle that authors ends
+      *before* judging so the caller reruns the workers on what committed (A8);
+    - a link that cannot commit **stops the chain** there, leaving a dependency-satisfied prefix;
+    - credits spent with nothing ever committed files the honest terminal (§9.6) rather than
+      re-entering debate.
+
+    ``_drive_link`` is the seam a subclass overrides to inject a per-link failure (the real
+    ``_author_chain`` catches ``ToolkitBranchUnclean`` per link the same way).
+    """
+
     def __init__(
         self,
         *,
@@ -107,34 +129,23 @@ class AuthoringLead:
         self.decided = 0
         self.finalized = 0
         self.judged: list[int] = []
-        # B-topology (A1): the lead drives authoring itself; the test stubs the OUTCOME of
-        # drive_authoring (no real session/SDK) instead of monkeypatching propose_and_pr.
+        # B-topology (A1): the lead drives authoring itself; the test stubs the OUTCOME of each
+        # link (no real session/SDK) instead of monkeypatching propose_and_pr.
         self.state = state
         self.calls = calls
         self.author_status = author_status
-        # A8: decide_authoring plans an ordered chain of ``chain_len`` tools; ``fail_on`` (1-based)
-        # marks the drive_authoring call that returns a non-commit (to exercise a mid-chain stop).
+        # A8: one cycle plans an ordered chain of ``chain_len`` tools; ``fail_on`` (1-based) marks
+        # the link that returns a non-commit (to exercise a mid-chain stop).
         self.chain_len = chain_len
         self.fail_on = fail_on
         self._drive_calls = 0
+        self._committed_total = 0
+        # Attempts counted in run_cycle, not in _drive_link: a subclass that raises before the
+        # link runs has still attempted one, and that is what "nothing ever committed" measures.
+        self._attempts = 0
 
-    async def decide_authoring(self, reports) -> AuthoringDecision:
-        self.decided += 1
-        specs = (
-            [_toolspec(f"pcube_tool_{i}") for i in range(self.chain_len)]
-            if self.should_author
-            else []
-        )
-        return AuthoringDecision(
-            should_author=self.should_author,
-            tool_specs=specs,
-            rationale="fake decision",
-        )
-
-    async def drive_authoring(
-        self, tool_spec, *, toolkit_root, worktree_base, direct_branch=None,
-        colead=None, human_handler=None,
-    ) -> MergeFlowResult:
+    async def _drive_link(self, spec, *, direct_branch, toolkit_root) -> MergeFlowResult:
+        """One link's authoring outcome — the override point for an injected failure."""
         self._drive_calls += 1
         if self.calls is not None:
             self.calls.append({"direct_branch": direct_branch, "toolkit_root": toolkit_root})
@@ -142,28 +153,94 @@ class AuthoringLead:
         if not failed and self.state is not None:
             self.state["authored"] += 1
         return MergeFlowResult(
-            tool_spec_id=tool_spec.id,
+            tool_spec_id=spec.id,
             status="failed" if failed else "committed",
             branch=direct_branch or "ai",
             commit_sha=None if failed else "abc123def456",
             reason="fake",
         )
 
-    async def finalize_authoring_outcome(self, task, reports, tool_spec, result) -> AnalystReport:
-        self.finalized += 1
-        return AnalystReport(
-            summary="authoring impossible under current construction",
-            findings=["honest failure"],
-            status="failed",
-            uncertainty=result.reason,
+    async def run_cycle(
+        self,
+        task,
+        reports,
+        *,
+        sources=None,
+        rounds_left=0,
+        author_budget=0,
+        toolkit_root=None,
+        worktree_base=None,
+        direct_branch=None,
+        colead=None,
+        human_handler=None,
+    ):
+        from auto_research.sandbox.merge_flow import ToolkitBranchUnclean
+
+        authoring_open = (
+            toolkit_root is not None
+            and author_budget > 0
+            and any(r.tool_request is not None for r in reports)
         )
-
-    async def judge_convergence(self, task, reports, *, round_index, max_rounds) -> ReviewVerdict:
-        self.judged.append(round_index)
-        return ReviewVerdict(accepted=round_index >= self.converge_on, rationale="r")
-
-    async def adjudicate(self, task, reports, *, sources=None) -> AnalystReport:
-        return AnalystReport(summary="final", findings=["done"])
+        if authoring_open and self.should_author:
+            self.decided += 1
+            specs = [_toolspec(f"pcube_tool_{i}") for i in range(self.chain_len)]
+            outcome = LeadCycleOutcome(
+                filed=AUTHOR_CHAIN_TOOL,
+                decision=AuthoringDecision(
+                    should_author=True, tool_specs=specs, rationale="fake decision"
+                ),
+                author_budget=author_budget,
+            )
+            for spec in specs:
+                if outcome.author_budget <= 0:
+                    break
+                outcome.author_budget -= 1
+                self._attempts += 1
+                try:
+                    result = await self._drive_link(
+                        spec, direct_branch=direct_branch, toolkit_root=toolkit_root
+                    )
+                except ToolkitBranchUnclean as exc:
+                    result = MergeFlowResult(
+                        tool_spec_id=spec.id, status="failed", reason=f"unclean branch: {exc}"
+                    )
+                outcome.authored.append(result)
+                if result.status == "committed":
+                    outcome.committed += 1
+                    self._committed_total += 1
+                else:
+                    break
+            return outcome
+        if self._attempts > 0 and self._committed_total == 0 and author_budget <= 0:
+            # Credits spent, nothing ever committed: the honest §9.6 terminal, not another debate
+            # round. Judging never happens, so `judged` stays empty.
+            self.finalized += 1
+            return LeadCycleOutcome(
+                filed=TERMINAL_REPORT_TOOL,
+                report=AnalystReport(
+                    summary="authoring impossible under current construction",
+                    findings=["honest failure"],
+                    status="failed",
+                ),
+                author_budget=author_budget,
+            )
+        self.judged.append(len(self.judged) + 1)
+        if len(self.judged) < self.converge_on and rounds_left > 0:
+            return LeadCycleOutcome(
+                filed=ANOTHER_ROUND_TOOL,
+                verdict=ReviewVerdict(
+                    accepted=False,
+                    rationale="r",
+                    needs_analysis_rework=True,
+                    follow_up="probe further",
+                ),
+                author_budget=author_budget,
+            )
+        return LeadCycleOutcome(
+            filed=SUBMIT_ADJUDICATION_TOOL,
+            report=AnalystReport(summary="final", findings=["done"]),
+            author_budget=author_budget,
+        )
 
 
 def test_committed_authoring_reloads_restarts_and_reruns():
@@ -400,7 +477,7 @@ def test_mid_run_unclean_branch_degrades_to_honest_terminal():
     from auto_research.sandbox.merge_flow import ToolkitBranchUnclean
 
     class _UncleanLead(AuthoringLead):
-        async def drive_authoring(self, tool_spec, **kwargs):
+        async def _drive_link(self, spec, **kwargs):
             raise ToolkitBranchUnclean("research_toolkit has uncommitted changes on 'ai'")
 
     state = {"authored": 0}

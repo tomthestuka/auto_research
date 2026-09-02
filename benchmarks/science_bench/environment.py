@@ -412,6 +412,28 @@ def materialize(
             f"every tool description and shell command. Choose a workspace whose path says "
             f"nothing about the experiment."
         )
+    # The second structural guard, and it was paid for the same way as the first. A slot's
+    # `run_id` is deterministic — the seats and the replicate hash to it — so re-running a slot
+    # lands on the root the previous attempt used. On 2026-09-02 that was measured: a relaunch
+    # built into the prior attempt's world, the run **appended to its `monitor.jsonl`** (its
+    # preflight lines are numbered from event 648, carrying the prior attempt's $19.43) and
+    # inherited its `checkpoint.sqlite`, and the toolkit path the earlier teardown had removed
+    # came back as an NFS `Errno 116 Stale file handle` inside the OS jail. One of those is a
+    # corrupted measurement that reads like a real one; and the collision had already overwritten
+    # a *completed, accepted* attempt's run directory before anyone noticed.
+    #
+    # So a world is built in a fresh root or not at all. Sweeping instead would be worse: the
+    # runtime directory is kept on purpose (it holds the ledger, the figures and the report the
+    # whole scoring pass reads), so a silent sweep would delete the evidence of the attempt
+    # somebody is presumably re-running *because* they read it.
+    if root.exists():
+        contents = ", ".join(sorted(child.name for child in root.iterdir())) or "nothing"
+        raise FileExistsError(
+            f"the trial root {root} already exists (holding {contents}). A slot's run_id is "
+            f"deterministic, so this is a previous attempt's world: building into it appends to "
+            f"its ledger and inherits its checkpoint, which corrupts both records. Move or remove "
+            f"it deliberately, then re-run:\n\n  mv {root} {root}.superseded\n"
+        )
     config_dir = root / "config"
     toolkit_root = root / "toolkit"
     runtime_dir = root / "runtime"

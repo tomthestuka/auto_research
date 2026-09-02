@@ -478,3 +478,25 @@ Nothing depends on this package.
   model name. Relaunched clean. 98 tests; suite 1,366.
   One production change came with this: the orphaning spawner takes an optional environment
   addition, which is how a trial process is pointed at its own configuration.
+- **2026-09-02** — Block 0's launches 2 and 3, and the refactor they forced. Launch 2 ran clean of
+  leaks (the structural fix held) and confirmed one thing worth recording: the `claude-fable-5`
+  reviewer returned an ordinary literature verdict, so the refusal rate this design document once
+  cited for that model was **unsourced** and nothing in this repository supports it. **Launch 3
+  died at $19.43**, and the cause was the interface the lead was handed rather than the lead: it
+  answered the authoring question with `should_author=true` and an **empty** `tool_specs` — output
+  the schema permitted — and a Pydantic validator killed the run. The post-mortem is in the
+  project changelog; what matters here is that a batch cannot be spent against an interface with
+  that failure available, so the analyst lead was rebuilt as **one ReAct loop that files forms**
+  (`AnalystLeadAgent.run_cycle`) in which "author, with nothing to author" is inexpressible and
+  every question the lead answers carries its own description. Three clone/jail fixes landed with
+  the same launches: `_rej` event lists are copied (the pinned toolkit globs only those, so an
+  archive-only filter had made `load_data` fail on an empty glob — user ruling: add them, keep
+  measurements out), the Codex jail launcher moved out of the worktree (a codex+jail run could
+  land exactly one tool, invisible until a multi-tool chain), and the shell-command path scan
+  stands down when the kernel jail is enforcing the same allow-list (a false positive on a
+  relative path had cost one worker its entire contribution).
+  **Open, and deliberately not fixed here** (§3: consult before fixing): `trial.wait_for` has no
+  deadline, so a wedged run holds its concurrency slot indefinitely. Nothing has been observed to
+  hang — the observed failures all died in minutes — and a deadline risks killing a legitimately
+  long reduction, which is what this question spends most of its time doing. `--status` makes a
+  stall visible; a bounded wait is a change to propose, not to assume.

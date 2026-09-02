@@ -414,9 +414,23 @@ toolkit.**
    Sonnet ([§6](#6-config-driven-model-registry)), the architectural "edit existing vs author
    new" decision stays with the more-capable proposer (the lead, who reads the full `lib/`
    source), and the Sonnet author executes it.
-2. The **analyst lead spawns a Sonnet-tier Claude coding sub-agent** (the **author**) and
-   stays in an **interactive channel** with it during authoring — to clarify science/code as
-   it goes (this lead↔author loop is built in step 2 of [§9.10](#910-build-order-phase-2)).
+2. The **analyst lead runs one ReAct loop per analysis cycle and states every decision by
+   filing a form** (`run_cycle`; `author_chain` / `hold_authoring`, then
+   `request_another_round` / `submit_adjudication` / `submit_terminal_report`). The branch it
+   picks *is* the decision, so the branch and the fields it must fill arrive together, each
+   question carrying its own description — the channel a Pydantic `#` comment never reached.
+   `author_chain` requires at least one link **in its own schema**, so "author, with nothing to
+   author" is inexpressible rather than rejected after the fact (a run died on that state being
+   expressible, 2026-09-01). Every form is declared for the whole cycle and the *handler*
+   enforces the stage, because a declared tool set that shrinks mid-conversation is a documented
+   run-killer; the caps stay in Python (`debate_max_rounds`, `tool_author_cap`), so the loop
+   chooses *what* and the harness decides *how many times*. Filing the chain then **spawns a
+   Sonnet-tier coding sub-agent** (the **author**) per link, the lead staying in an
+   **interactive channel** with it during authoring — to clarify science/code as it goes (this
+   lead↔author loop is built in step 2 of [§9.10](#910-build-order-phase-2)). Between links the
+   coding transcript is dropped at its own boundary, keeping only the lead's filed brief and its
+   own submit call with the real commit SHA on the result: both turns it produced or received,
+   nothing synthesized in their place.
    The author writes both halves + tests in an **isolated git worktree/branch** on
    `research_toolkit`, using `xspec_utils` as the template, and — reading the **full `lib/`
    source**, not just the minimal `skills/` stubs — either **edits existing files to build on
@@ -541,9 +555,10 @@ cap pressures the agent to invent something on the last attempt. "Real results o
 results" is absolute.
 
 **The reviewer is the sole I/O — an honest failure is adjudicated, not bypassed.** When an
-authoring attempt does not commit, the analyst lead composes **one terminal report**
-(`finalize_authoring_outcome`) documenting the unavailable capability and any partial findings,
-rather than re-authoring or re-entering debate (closing the cap-exhausted authoring *spin*). That
+authoring attempt does not commit, the analyst lead files **one terminal report**
+(`submit_terminal_report`, one of its cycle forms — §9.3) documenting the unavailable capability
+and any partial findings, rather than re-authoring or re-entering debate (closing the
+cap-exhausted authoring *spin*). That
 report — like every analysis result — flows to the **reviewer**, who decides **finalize vs.
 bounded rework** (capped by `max_iterations`). On finalize a report is **always** composed
 (honouring `report_formats`), so the honest failure is *documented*, never silent. The
@@ -1638,3 +1653,71 @@ history. Token-level preservation of the second pass was checked mechanically, n
   `benchmarks/gate_bench/tests/test_gate_bench.py` cases fail on `.pytest_cache` files leaking
   into the synthetic-repo comparison.
 
+
+- 2026-09-02 — **The analyst lead became one ReAct loop that fills in forms, because the old shape
+  was what killed a run.** Block 0's third launch died at $19.43 on the lead answering the authoring
+  question with `should_author=true` and an **empty** `tool_specs`, twice, and a Pydantic validator
+  killing the run. The post-mortem found four channels, two silent and one actively misleading, and
+  none of them a model defect: the lead was **six separate conversations** (each re-seeded, each
+  ending in a structured compose, nothing carried between them); its harness tools at that moment
+  were four read-only ones that said nothing about authoring; the schema it received marked the
+  chain **optional** and carried **no field descriptions at all**, because every explanation in
+  `schemas/toolspec.py` was a `#` comment and *a comment never reaches JSON Schema*; the payload was
+  **27,208 characters of single-line JSON** in which the specification was 1,016 (3.7%) and the one
+  prose rule was stated **only in the direction that did not bind** ("`should_author=false` when the
+  worker mis-called an existing tool" — the lead's case was the opposite: the worker was right and
+  the capability existed in `lib/` unexposed); and the generic compose tail said *"do not describe
+  intentions or plans"* while the requested output **is** a plan. `target_domain` was required and
+  appeared in no channel at all. **The human's ruling was architectural**: one large ReAct loop whose
+  termination depends on the lead's own decision, where each turn files a form whose shape depends on
+  the previous entries and every question carries a description. Built as `AnalystLeadAgent.run_cycle`
+  — one loop, one conversation, **no output schema** — ending when the lead files `author_chain`,
+  `hold_authoring`, `request_another_round`, `submit_adjudication` or `submit_terminal_report`;
+  `adjudicate`/`judge_convergence`/`decide_authoring`/`finalize_authoring_outcome` are deleted with
+  their composes (7 compose sites → 4), and `LeadLike` shrank to that one method. **Forms are tools,
+  not a branching output schema**, for four reasons in order of weight: a tool `input_schema`'s
+  properties carry `description` and providers render them (this is the channel that fixes the bug);
+  conditional required-fields in JSON Schema is not portable across the six vendors; the project had
+  already settled that tools are the portable route (`ResponsesVendor.schema_via_tool`, on the
+  insight that a coding harness never uses structured output because its editing tools *are*
+  JSON-Schema functions); and it deletes the `tool_choice="none"` terminal compose, the request shape
+  behind two historical run-killers. Four properties carry the design: **the impossible state is
+  inexpressible** (`minItems: 1` — the [A12] move of removing a dependency on a free-filled field
+  rather than validating it); **every question carries its own description**, read from the Pydantic
+  `Field(description=...)` of the model it validates back into, so the worker's and the lead's view
+  of one object cannot drift; **declarations never shrink** (the drive tools are gated on
+  `cycle.authoring_enabled`, never on a live session, so swapping the session per chain link is
+  invisible to the declared set — the 2026-07-29 `Tool reference … not found` killer), with the
+  stage enforced by the **handler** returning `is_error`, which `_react` treats as a correction
+  rather than a finish; and **caps stay in Python** (`rounds_left` passed in, `request_another_round`
+  refused at zero with the cap named). **The coding middle is dropped at its own boundary**: after
+  each chain link the `drive_coder` transcript between the filed brief and the `submit_for_review`
+  result is removed — whole turns only (Anthropic documents *echo the assistant message exactly as
+  received*), no orphaned `tool_use`, and **nothing synthesized**, since both survivors are turns
+  the lead produced or received; a synthesized assistant turn would write content its apparent
+  author never wrote, the shape rejected on 2026-09-01. Safe for this role specifically because
+  `ReadOnlyToolProvider` sets `defer_loading` on **nothing**, so no dropped turn can de-activate a
+  discovered tool (§13 watch item (a)); the measurement that motivated it is the lead clearing
+  **~86,000 tokens every turn, 18 times** in one authoring phase. An authoring cycle **ends before
+  judging**, because a committed tool is evidence the current reports predate — the workers rerun
+  once and the lead judges a fresh set in the next cycle (A8), and credits spent with nothing
+  committed **skips** that rerun (nothing to load; re-running only re-surfaces the same gap), so the
+  §9.6 honest terminal is the lead filing `submit_terminal_report` rather than a separate
+  conversation. **`drive_authoring` deliberately stays** — `benchmarks/author_bench` measures
+  exactly that call and its published K=10 batches priced it, so deleting it would silently change
+  a published instrument. **The one design risk was probed before any form was written and was not
+  there** (`tmp_scripts/probe_nested_form.py`, cents, routed through `ModelHandle`): all five
+  vendors accept a tool whose `input_schema` nests an object array and fill ≥2 links with every
+  required field — the 2026-08-24 Qwen `items: {$ref}` refusal applies to **output** schemas only,
+  and there is no `"null"`-string quirk on this path — and **all five classified `disposition`
+  correctly unprompted**, which is direct evidence the launch-3 failure was *informational, not a
+  model limitation*. **LIVE-VERIFIED 2026-09-02** (`tests/test_live_lead_cycle.py`, stimulus frozen
+  verbatim out of that launch's own ledger rather than written for the test): the Opus lead ran a
+  real 9-call cycle on the real `prompts/analyst_lead.md` through `ModelHandle`, its catalog figures
+  (2683 px — above Anthropic's many-image dimension cap, so the media guard was genuinely exercised)
+  rode the first request, and it filed `request_another_round` with a dispatch text naming the tools
+  that **already exist** — the launch-3 diagnosis, reached by the lead itself. Also: the two
+  remaining `.pytest_cache` `gate_bench` failures are unchanged and still untouched (§3). Suite
+  1399 → 1663; new `tests/test_lead_forms.py` (41), `tests/test_schema_descriptions.py` (19),
+  `tests/test_live_lead_cycle.py` (3 cells), and the eleven behavioural tests in
+  `tests/test_consensus_authoring.py` pass **unchanged in intent**.

@@ -21,17 +21,33 @@ class AnalystReport(FiguredReport):
     the prose refers to figures as "Figure 1", "Figure 2", … in ``cited_figures`` order (V-4).
     """
 
-    summary: NonEmptyStr
-    findings: list[str] = Field(default_factory=list)
-    uncertainty: str | None = None
-    # Phase 2: set when the worker hits a capability the toolkit lacks (or an in-use defect)
-    # and raises it (CLAUDE.md §9.3). It carries only what the worker can state; the analyst
-    # lead finalises a ``ToolSpec`` from it in ``decide_authoring``.
-    tool_request: AnalystToolRequest | None = None
-    # Phase 2 (§9.6): a first-class terminal state so an honest failure (tool authoring
-    # exhausted its rework caps, blocked on a human, etc.) is a *correct* outcome with no
-    # quality penalty — never a reason to fabricate a result on the last retry.
-    status: Literal["ok", "failed", "needs_human"] = "ok"
+    summary: NonEmptyStr = Field(
+        description=(
+            "The report's own abstract: what was done and what it found, in prose. Refer to "
+            'figures as "Figure 1", "Figure 2", … in cited_figures order.'
+        )
+    )
+    findings: list[str] = Field(
+        default_factory=list,
+        description="Key findings, each a self-contained prose string.",
+    )
+    uncertainty: str | None = Field(
+        default=None, description="The dominant uncertainties / caveats (optional)."
+    )
+    tool_request: AnalystToolRequest | None = Field(
+        default=None,
+        description=(
+            "Raise ONLY when the toolkit lacks a capability the task needs, or an existing tool "
+            "misbehaves; otherwise omit. The analyst lead finalises the tool brief from this."
+        ),
+    )
+    status: Literal["ok", "failed", "needs_human"] = Field(
+        default="ok",
+        description=(
+            "'ok' when you completed the work; 'failed' / 'needs_human' are honest, penalty-free "
+            "outcomes — never fabricate a result to force 'ok'."
+        ),
+    )
 
 
 class AnalysisTask(MessageModel):

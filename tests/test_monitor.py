@@ -13,6 +13,11 @@ import pytest
 from auto_research.consensus import DebateToConverge
 from auto_research.graph.runtime import run_research
 from auto_research.monitor import MonitorEvent, RunMonitor, build_run_summary, render_run_summary
+from auto_research.agents.react import (
+    ANOTHER_ROUND_TOOL,
+    SUBMIT_ADJUDICATION_TOOL,
+    LeadCycleOutcome,
+)
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -318,11 +323,25 @@ def test_consensus_records_worker_and_lead_events() -> None:
             return AnalystReport(summary="worker report", findings=["f"])
 
     class Lead:
-        async def judge_convergence(self, task, reports, *, round_index, max_rounds):
-            return ReviewVerdict(accepted=True, rationale="done")
+        """Files one more round, then adjudicates — so both lead events fire."""
 
-        async def adjudicate(self, task, reports, *, sources=None):
-            return AnalystReport(summary="lead summary", findings=["final"])
+        def __init__(self):
+            self.cycles = 0
+
+        async def run_cycle(self, task, reports, *, sources=None, rounds_left=0, **kwargs):
+            self.cycles += 1
+            if self.cycles == 1 and rounds_left > 0:
+                return LeadCycleOutcome(
+                    filed=ANOTHER_ROUND_TOOL,
+                    verdict=ReviewVerdict(
+                        accepted=False, rationale="not yet", needs_analysis_rework=True,
+                        follow_up="probe further",
+                    ),
+                )
+            return LeadCycleOutcome(
+                filed=SUBMIT_ADJUDICATION_TOOL,
+                report=AnalystReport(summary="lead summary", findings=["final"]),
+            )
 
     report = asyncio.run(
         DebateToConverge(max_rounds=3, monitor=monitor).run(
@@ -335,7 +354,8 @@ def test_consensus_records_worker_and_lead_events() -> None:
     assert report.summary == "lead summary"
     events = [event.event for event in monitor.events]
     assert "analyst.worker.initial_report" in events
-    assert "analyst.lead.convergence" in events
+    assert "analyst.lead.cycle" in events        # one event per filed form
+    assert "analyst.lead.convergence" in events  # the round it sent back
     assert "analyst.lead.adjudication" in events
 
 

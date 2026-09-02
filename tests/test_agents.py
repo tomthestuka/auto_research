@@ -11,7 +11,7 @@ from auto_research.agents import (
     LibrarianIOAgent,
     ReviewerAgent,
 )
-from auto_research.models import ModelResponse
+from auto_research.models import ModelResponse, ToolCall
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -156,14 +156,52 @@ def test_analyst_worker_agent_exposes_toolkit_as_available_context_only():
     assert "xspec_utils" not in fake.messages[0].content
 
 
-def test_analyst_lead_agent_adjudicates_reports():
-    fake = FakeModel({"summary": "Final synthesis.", "findings": ["Workers agree."]})
+def test_analyst_lead_agent_adjudicates_reports(tmp_path):
+    """The lead's cycle: it writes its report with edit_report and files it — no compose.
+
+    The synthesis used to be a structured compose over one payload. It is now a form the lead
+    fills inside its loop, so what this checks is unchanged in intent — the worker reports reach
+    it, and the report it wrote is what comes back — while the mechanism is the disciplined write
+    path (edit_report) plus the terminal form.
+    """
+    from auto_research.agents.react import (
+        EDIT_REPORT_TOOL,
+        SUBMIT_ADJUDICATION_TOOL,
+        ReadOnlyToolProvider,
+    )
+
+    class FormsModel:
+        """Writes a report, then files it."""
+
+        def __init__(self):
+            self.messages = []
+            self.turn = 0
+
+        async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
+                       images=(), documents=(), cache_prefix=False):
+            self.messages = list(messages)
+            self.turn += 1
+            script = [
+                (EDIT_REPORT_TOOL, {"summary": "Final synthesis.", "findings": ["Workers agree."]}),
+                (SUBMIT_ADJUDICATION_TOOL, {}),
+            ]
+            if self.turn > len(script):
+                return ModelResponse(content="done")
+            name, arguments = script[self.turn - 1]
+            return ModelResponse(
+                tool_calls=[ToolCall(id=f"c{self.turn}", name=name, arguments=arguments)]
+            )
+
+    fake = FormsModel()
     agent = AnalystLeadAgent(model=fake, prompt="lead prompt")
+    agent.report_dir = tmp_path
+    agent.tools = ReadOnlyToolProvider(roots=[tmp_path], include_text_search=False)
     report = AnalystReport(summary="Worker result.")
 
-    final = asyncio.run(agent.adjudicate(AnalysisTask(question="Synthesize."), [report]))
+    outcome = asyncio.run(agent.run_cycle(AnalysisTask(question="Synthesize."), [report]))
 
-    assert final.findings == ["Workers agree."]
+    assert outcome.filed == SUBMIT_ADJUDICATION_TOOL
+    assert outcome.report.findings == ["Workers agree."]
     payload = _user_payload(fake)
     assert payload["worker_reports"][0]["summary"] == "Worker result."
 
