@@ -1026,6 +1026,47 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
 
 ---
 
+- **The coder can read the run's own record — accepted and measured, not closed (ruling
+  2026-09-03).** Re-audited over every event of run `fbb93f26` (attempt 6) by eleven independent
+  chunk audits: the coder's `grep -rl` over the run directory returned `backend.log`,
+  `monitor.jsonl` and the lead's report files (seq 4007), the ledger content it then parsed carried
+  `model` fields for the lead and worker 0, and two `backend.log` lines named **both workers'**
+  models (seq 4045) — three of the four varied seats; the reviewer's and co-lead's models never
+  reached it. The coder also hunted for the orchestration repo, `orchestration.yaml` and
+  `TOOL_MANIFEST` in site-packages (seq 4031–4042) and **the jail held**: only the conda env path
+  surfaced, whose `auto_research` install is editable and points at unmounted source. Human ruling:
+  `runtime_dir` **stays** on `agent_fs_allow` — agents may read their own logs — so the channel is
+  measured per trial by `science_bench --scan`'s actor-read check rather than closed; report
+  filenames no longer carry the model (`workspace.round_report_path`). The lead listed the run root
+  five times in that run and read nothing from it; no worker or reviewer touched it.
+- **The path guard denies `research_toolkit`'s own contract.** `PathGuard` denies
+  `CLAUDE.md`/`AGENTS.md`/`DOCS.md` by basename everywhere; the toolkit README's first line points
+  agents at its own `CLAUDE.md`, and in attempt 6 the co-lead followed it **once** (`AGENTS.md`,
+  the symlink; seq 4264–4265) and was refused. Human ruling: that file is safe and intended for
+  coding agents; scoping the denial by `toolkit_root` was written and then dropped as a guard-logic
+  change. Two wasted tool calls per run; the toolkit README is left as written.
+- **The author's environment inherited the operator's editor variables — FIXED 2026-09-03.**
+  `CLAUDE_CODE_EXECPATH` and a Copilot variable reached the coder's shell (seq 922, via
+  `_source_ini_env` on top of the launching terminal's environment); `_author_env` now drops
+  `CLAUDE*`/`COPILOT*`/`VSCODE*`. The `None` (inherit) branch, taken only when no analyst env is
+  configured, is unfiltered.
+- **`request_another_round` is not open at the author stage ([A20]).** A link's loop ends only on
+  a filed form, and after a `COMMITTED` submit the only form open is `submit_terminal_report`, so
+  the lead filed it — `status: needs_human` — after each of attempt 6's three commits; the rerun
+  followed the commit count regardless, so the outcome was right and the recorded terminal wrong.
+  Contaminates the Tier-0 terminal-state signal the science sweep scores. Not fixed (loop logic);
+  the trivial remedies are a sentence in the author-stage instruction and a scoring rule that a
+  terminal filed with `committed ≥ 1` is not a failure row.
+- **The reviewer-swap batches ran with a defect-only artifact in the reviewer's view.** Fixed in
+  the corpus builder 2026-09-03 (see changelog): `keep_only_passing_tests` left
+  `.pytest_cache/v/cache/lastfailed`, naming the honest test the plant breaks, in every pruned
+  defect worktree and in no control. Pruning entered on 2026-08-25, so the published 37-defect
+  table (08-17 batches) is unaffected; the paper's Table 3 / Fig. 4 source (`20260831T172738Z-
+  swapfix-*`) and every swap batch from 08-26 on carried it for the 20 pruned entries, and the
+  `qwen3_8_max` co-lead cited the file verbatim in two catches (08-27 swapclean). Records hold no
+  tool trajectories, so silent use by other legs cannot be excluded. **Open: re-run the swapfix
+  legs, or exclude the 20 entries with the reason stated.**
+
 ## Changelog
 
 Compacted 2026-08-05 (entries through 2026-07-31) and again **2026-09-01 (entries through
@@ -1897,3 +1938,39 @@ history. Token-level preservation of the second pass was checked mechanically, n
   `benchmarks/science_bench/tests/test_science_bench.py` 108 → 110. Full suite **1703 passed /
   159 skipped / 9 failed**, the nine being the pre-existing `.pytest_cache` leak into
   `gate_bench`'s synthetic-repo comparison, unchanged and still untouched (§3).
+
+- 2026-09-03 — **Two audits re-derived, and both prior conclusions were undersized.** Working tree
+  reset to `a82cec8` first; every change here is derived from that commit (human ruling: only
+  trivial changes outside core logic; the prior day's jail/guard/allow-list narrowing was
+  discarded untested). **Ledger audit** of attempt 6 (`fbb93f26`, 5437 events) by eleven
+  independent chunk auditors, decisive claims re-verified against the raw ledger: (1) "the coder
+  read a model string" understated it — seq 4007–4045 gave the coder the lead's *and both workers'*
+  models from `monitor.jsonl`/`backend.log` content; (2) "the co-lead tried `CLAUDE.md` twice" was
+  one refused `AGENTS.md` read (seq 4264–4265); (3) new: the coder's active hunt for the
+  orchestration repo and config (seq 4031–4042) was stopped by the jail — the one §4 success in
+  the run — and its shell carried `CLAUDE_CODE_EXECPATH`/`COPILOT_*` inherited from the launching
+  terminal (seq 922). Ruling: `runtime_dir` stays on every allow-list (agents may read their own
+  logs); the coder channel is measured, not closed. Applied: `merge_flow._author_env` drops
+  `CLAUDE*`/`COPILOT*`/`VSCODE*`; `workspace.round_report_path` drops the model slug; the three
+  lead tool descriptions and `analyst_lead.md` stop naming vendors (`test_prompts` guards every
+  `*_tool_def` and every runtime prompt); `science_bench`'s scanner walks the parsed record and
+  skips opaque keys and base64 blobs (11 → 1 reported leaks on the real dump, the real one kept).
+  **gate_bench test review** (Opus auditor, mechanism reproduced first-hand): the pruning step ran
+  pytest with its cache on, so every pruned defect worktree carried `.pytest_cache/v/cache/
+  lastfailed` naming the honest check the plant breaks, and no control did — a sixth prompt
+  channel the five-channel audit never enumerated, and the earlier `_TOOLING_ARTIFACT` filter in
+  the pair tests had made the guards blind to exactly it. **The guard hid the leak.** Used live by
+  `qwen3_8_max` in two catches; scope and the open re-run are in §13. Fixed: `-p no:cacheprovider`
+  + `PYTHONDONTWRITEBYTECODE=1` in `keep_only_passing_tests`, and a new pair test comparing the
+  full defect/control listings with **no** artifact filter (what `list_dir` returns) across all 25
+  matched pairs. Test corrections: the one-anchor pair test deleted (false by construction for
+  pruning families, verified against `keep_only_passing_tests`); `_NOT_BEHAVIOURAL` gains
+  `led_weighted_residuals_as_sample_variance` (fixture residuals `[-9,-3,3,9]` sum to zero, so the
+  arithmetic error cancels — verified) and loses `hole_g4_provenance_dict` (it **does** fail the
+  honest suite; the auditor's same claim about `hole_g6_manifest_import` was wrong — the control's
+  suite passes against it, 15/15, so it stays declared); the two hand-rolled artifact filters
+  unified. gate_bench 227 → 274 passed. The live 413 probe (`test_live_oversized_pdf_request_that_used_to_413`) is
+  re-added verbatim. Full suite 1709 → **1752 passed / 160 skipped / 0 failed**. **Process:** two inherited diagnoses
+  went wrong the same way — a filter or a summary standing in for the artifact — and both were
+  settled by reading the record itself (the ledger; a freshly built worktree). §13 gains five
+  entries.

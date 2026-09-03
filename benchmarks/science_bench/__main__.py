@@ -293,7 +293,7 @@ def scan_prompts(path: Path) -> tuple[list[str], dict[str, int]]:
         # combination of seats, not any one of them.
         own = {str(record.get("model", "")).lower(), str(record.get("provider", ""))}
         own |= set(str(record.get("model", "")).lower().replace("-", " ").split())
-        for leak in sorted(_leaks_in(line)):
+        for leak in sorted(_leaks_in(_scannable_text(record))):
             if leak not in own:
                 findings.append(f"line {number} ({record.get('role')}): {leak}")
     return findings, dict(coverage)
@@ -313,10 +313,44 @@ _UNMISTAKABLE = ("science_bench", "sciencebench", "block0", "block1", "block2")
 _PATHLIKE = re.compile(r"/[\w.+-]+/[\w./+-]{2,}")
 
 
-def _leaks_in(line: str) -> set[str]:
-    """Everything in one dumped record an actor must not be able to read."""
-    found = {word for word in _UNMISTAKABLE if word in line.lower()}
-    for candidate in _PATHLIKE.findall(line):
+#: Fields whose values are opaque provider bookkeeping, never prose an actor reads: an Anthropic
+#: extended-thinking ``signature``, the captured raw response, and provider/tool ids. Skipped
+#: rather than scanned. Message CONTENT is never under these keys, so an id that leaks through a
+#: brief (the 2026-08-27 gate_bench `ToolSpec.id` leak travelled inside content text) is still seen.
+_OPAQUE_KEYS = frozenset({"signature", "raw", "id", "tool_call_id", "thought_signature"})
+
+#: A long unbroken run of base64 alphabet. Anthropic thinking signatures are exactly this, they
+#: contain ``/``, and so the path regex read them as filesystem paths -- a scan of a real dump
+#: (2026-09-03) reported eleven leaks of which ten were the token ``w3`` occurring by chance inside
+#: encrypted reasoning blobs, while the one real leak came from the ledger half. A guard that cries
+#: wolf is one somebody switches off.
+_BASE64ISH = re.compile(r"^[A-Za-z0-9+/=_-]{40,}$")
+
+
+def _scannable_text(record: object) -> str:
+    """The prose of one dumped record: everything an actor could read, opaque blobs removed."""
+    parts: list[str] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for name, value in node.items():
+                if name not in _OPAQUE_KEYS:
+                    walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+        elif isinstance(node, str) and not _BASE64ISH.match(node):
+            parts.append(node)
+
+    walk(record)
+    return "\n".join(parts)
+
+
+def _leaks_in(text: str) -> set[str]:
+    """Everything in one record's readable text an actor must not be able to read. The prompt
+    dump passes ``_scannable_text(record)``; the ledger half passes the raw line."""
+    found = {word for word in _UNMISTAKABLE if word in text.lower()}
+    for candidate in _PATHLIKE.findall(text):
         found.update(arms.forbidden_in_path(candidate))
     return found
 

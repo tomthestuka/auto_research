@@ -460,7 +460,13 @@ independent reviewer precisely because the author's own verification did not cov
 what the inadequate-test row means. It replaced per-entry hand relaxation for one reason that is
 not tidiness: a hand-relaxed suite has to be re-relaxed whenever an honest check is added, and
 forgetting silently converts a reviewer catch into a free Layer-B catch. The rule is stated once
-and applied mechanically, so it cannot drift out of step with the suite.
+and applied mechanically, so it cannot drift out of step with the suite. **The pruning run leaves
+nothing behind** (`-p no:cacheprovider`, `PYTHONDONTWRITEBYTECODE=1`): it executes on the defect
+leg only, so any artifact it wrote would exist in every pruned defect worktree and in no control —
+which is exactly what happened until 2026-09-03, when `.pytest_cache/v/cache/lastfailed` named the
+dropped honest test to any reviewer that listed the worktree root (see the changelog).
+`test_a_pair_shows_the_reviewer_identical_root_listings` compares the two legs' full listings with
+no artifact filter, i.e. with the reviewer's eyes.
 
 **A behavioural defect must fail its matched control's committed tests**
 (`test_a_behavioural_defect_fails_the_honest_suite`). The oracle was already in the corpus: the
@@ -827,3 +833,31 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   re-run on the same frozen corpus and patched into that leg with a note, since their failure was the
   harness's, not the vendor's. Test:
   `tests/test_gate_bench.py::test_a_vendor_error_counts_as_failing_the_item`.
+
+- **2026-09-03 — the pruning step was a leak generator, and the guard tests had filtered it out of
+  sight.** `keep_only_passing_tests` ran pytest with its cache on, so every pruned defect worktree
+  (the 20 `expected="review"` ledger + codex entries) carried `.pytest_cache/v/cache/lastfailed`
+  naming the honest test the plant breaks, and no control did; the reviewer is rooted at the
+  worktree with an unfiltered `list_dir`. Reproduced first-hand on
+  `codex_led_separate_validity_masks`. **Used live:** `qwen3_8_max` cited `.pytest_cache/v/cache/
+  lastfailed` and `nodeids` verbatim in two catches (`20260827T094057Z-swapclean-qwen3_8_max`,
+  `codex_led_weighted_center_variance`, `codex_led_separate_validity_masks`). Scope: pruning entered
+  `857025e` (08-25), so the 08-17 published 37-defect table is clean; every swap batch from 08-26 on
+  — including the paper's Table 3 / Fig. 4 source `20260831T172738Z-swapfix-*` — carried it, and
+  records hold no tool trajectories, so silent use by the other legs cannot be excluded. **Open:
+  re-run the swapfix legs or exclude the 20 entries with the reason stated.** Fix: the pruning
+  subprocess runs `-p no:cacheprovider` with `PYTHONDONTWRITEBYTECODE=1`. New guard
+  `test_a_pair_shows_the_reviewer_identical_root_listings` compares the two legs' full listings
+  (only `.git` excluded) across all 25 matched pairs — deliberately **without** `_TOOLING_ARTIFACT`,
+  since that filter, added to make the pair tests pass, is what had made them blind to this.
+  Test corrections from the same review: the one-anchor pair test is deleted (a pruned defect
+  legitimately differs in the lib file and its test file, verified against
+  `keep_only_passing_tests`); `_NOT_BEHAVIOURAL` gains `led_weighted_residuals_as_sample_variance`
+  (fixture residuals `[-9, -3, 3, 9]` sum to zero, so the arithmetic error cancels) and loses
+  `hole_g4_provenance_dict` (its control's suite fails against it) — the review's same claim for
+  `hole_g6_manifest_import` was wrong (15/15 pass), so it stays declared; the two hand-rolled
+  `__pycache__`/`.git` filters are unified on `_TOOLING_ARTIFACT`. Suite 227 → 274 passed.
+  Residual from the review, recorded not fixed: the two `_NOT_BEHAVIOURAL` lists (this file's tests
+  and `mutants_ledger.py`) are independently hardcoded and disagree; `expected` has no sweep-check
+  (an ad-hoc sweep through `run_gate` found 0 mismatches over 126 synthetic entries); the leak-path
+  test at line ~988 uses a never-pruned mutant and so cannot see a pruning artifact.

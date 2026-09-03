@@ -1046,3 +1046,32 @@ def test_aclose_after_a_commit_leaves_the_commit_alone(tmp_path):
 
     assert _git_out(repo, "rev-parse", "HEAD").strip() == sha
     assert (repo / "demo_utils" / "lib" / "retbb.py").is_file()
+
+
+# ── the author's environment carries no host-tooling variables ────────────────
+
+
+def test_author_env_drops_host_tooling_variables(monkeypatch):
+    """Measured 2026-09-03 (run fbb93f26, seq 922): the coder ran `env | grep -i path` and read
+    `CLAUDE_CODE_EXECPATH=…/anthropic.claude-code-…/claude` and a Copilot variable, inherited from
+    the VS Code terminal that launched the backend. The science stack's own variables and the
+    vendor key must survive the filter untouched."""
+    from auto_research.sandbox import merge_flow, runner
+
+    sourced = {
+        "PATH": "/opt/heasoft/bin", "HEADAS": "/opt/heasoft", "HOME": "/home/x",
+        "ANTHROPIC_API_KEY": "sk-test", "CLAUDE_CODE_EXECPATH": "/ext/anthropic.claude-code/claude",
+        "CLAUDECODE": "1", "COPILOT_OTEL_FILE_EXPORTER_PATH": "/dev/null", "VSCODE_PID": "42",
+    }
+    monkeypatch.setattr(runner, "_source_ini_env", lambda ini: dict(sourced))
+    monkeypatch.setattr(
+        merge_flow, "_orchestration_config",
+        lambda: {"analyze_env": "/envs/astropy", "analyze_ini_sh": "/x/ini.sh"},
+    )
+    env = merge_flow._author_env(pathlib.Path("/tk"))
+    assert env is not None
+    for gone in ("CLAUDE_CODE_EXECPATH", "CLAUDECODE", "COPILOT_OTEL_FILE_EXPORTER_PATH", "VSCODE_PID"):
+        assert gone not in env, gone
+    assert env["HEADAS"] == "/opt/heasoft" and env["HOME"] == "/home/x"
+    assert env["ANTHROPIC_API_KEY"] == "sk-test"
+    assert env["PATH"].startswith("/envs/astropy/bin:") and env["PYTHONPATH"].startswith("/tk")

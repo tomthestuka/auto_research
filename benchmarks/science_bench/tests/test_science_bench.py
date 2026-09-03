@@ -1317,3 +1317,35 @@ def test_an_unreadable_checkout_reports_unchecked_not_all_clear(tmp_path):
     # Nothing recorded is genuinely nothing to check, and that is a real all-clear.
     repo, _ = _repo_with_one_commit(tmp_path / "toolkit")
     assert trial.commit_reachability(repo, []) == (True, [])
+
+
+def test_the_leak_scanner_ignores_base64_signature_blobs():
+    """Anthropic extended-thinking `signature` values are base64, contain `/`, and read as paths
+    to the path regex: a scan of attempt 6's dump reported eleven leaks, ten of them the token `w3`
+    inside an encrypted reasoning blob. A guard that cries wolf is one somebody switches off."""
+    record = {
+        "role": "analyst_lead",
+        "model": "claude-opus-5",
+        "messages": [
+            {"role": "assistant", "content": "",
+             "provider_parts": [{"type": "thinking",
+                                 "signature": "CAIS7QYKjgEIERgCKkC8HO74gjXMesCaWV87EIu6w3FBTULxYz7zLWc16hcPgcLq"}]}
+        ],
+    }
+    text = cli._scannable_text(record)
+    assert "CAIS7QYK" not in text, "an opaque signature must never reach the word list"
+    assert cli._leaks_in(text) == set()
+
+
+def test_the_leak_scanner_still_sees_a_real_path_leak():
+    """Suppressing noise must not suppress signal; a benchmark word inside message content is
+    content even when an opaque `id` key sits beside it."""
+    record = {
+        "role": "analyst_lead",
+        "model": "claude-opus-5",
+        "messages": [
+            {"role": "user", "content": "read /data/ar_runtime/ws/science_bench_block0/toolkit/x.py",
+             "id": "toolu_0123456789"},
+        ],
+    }
+    assert cli._leaks_in(cli._scannable_text(record)), "a genuine path leak must still fire"

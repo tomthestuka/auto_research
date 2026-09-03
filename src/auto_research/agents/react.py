@@ -860,8 +860,8 @@ async def execute_review_report(
 
 # ----------------------------------------------------------------------------
 # Lead-only tool-authoring tools (§9.3, B-topology). The analyst lead drives a live
-# AuthoringSession: it steers the Sonnet coder (drive_coder), submits to the deterministic
-# gate + GPT co-lead review (submit_for_review), and — slice 4 — debates a review challenge
+# AuthoringSession: it steers the coder (drive_coder), submits to the deterministic
+# gate + provider-decorrelated co-lead review (submit_for_review), and — slice 4 — debates a review challenge
 # (respond_to_review). Masked to the lead alone (a session is wired only on its provider).
 # ----------------------------------------------------------------------------
 
@@ -871,12 +871,12 @@ RESPOND_TO_REVIEW_TOOL = "respond_to_review"
 
 
 def drive_coder_tool_def() -> dict:
-    """Lead-only: instruct the Sonnet coder and read back its work. The lead is the plan owner;
+    """Lead-only: instruct the coder and read back its work. The lead is the plan owner;
     the coder executes. Budget-free in the lead's authoring loop (set via ``free_tools``)."""
     return {
         "name": DRIVE_CODER_TOOL,
         "description": (
-            "Instruct the coder (a Sonnet Claude-Code session) to write or revise the tool, then "
+            "Instruct the coder (a separate, less capable coding agent) to write or revise the tool, then "
             "read back what it did. The coder executes your plan — give concrete, algorithm-level "
             "instructions (signature, the exact procedure, edge cases, the tests to add), not a "
             "restated goal. It keeps the working files across your instructions, so iterate: "
@@ -905,7 +905,7 @@ def submit_tool_def() -> dict:
     return {
         "name": SUBMIT_TOOL,
         "description": (
-            "Submit the coder's current work to the deterministic gate and the independent GPT "
+            "Submit the coder's current work to the deterministic gate and the independent "
             "co-lead review. The gate is mechanical (determinism, no-fabrication, structure, the "
             "tool's own tests) — you can only satisfy it, by fixing the code via drive_coder. The "
             "review judges whether the plan and its tests are right and strict enough. On gate-pass "
@@ -923,7 +923,7 @@ def submit_tool_def() -> dict:
 
 async def execute_drive_coder(session: Any, arguments: Mapping[str, Any]) -> ToolOutcome:
     """Drive one coder turn over the live ``AuthoringSession`` (B-topology: lead steers, the
-    Sonnet coder executes). Returns the coder's narration for the lead to inspect."""
+    coder executes). Returns the coder's narration for the lead to inspect."""
     instructions = str(arguments.get("instructions") or "").strip()
     if not instructions:
         return ToolOutcome(
@@ -942,7 +942,7 @@ async def execute_submit(session: Any) -> ToolOutcome:
     on gate-pass ∧ review-pass (§9.9 commit ⇔ gate ∧ review — the lead never self-approves).
     Returns a verdict the lead diagnoses: a gate failure (fix via drive_coder), a review rejection
     (drive_coder or respond_to_review), or a successful commit. Bounded by ``session.submit_cap``
-    (each submit runs the gate twice + a GPT review — expensive)."""
+    (each submit runs the gate twice + a co-lead review — expensive)."""
     if getattr(session, "committed", False) and not _has_pending_changes(session):
         # The tool already landed and nothing has changed since. Submitting again would scan an
         # empty changeset and then ask `approve_edit` to commit nothing, which exits non-zero and
@@ -1022,7 +1022,7 @@ def respond_to_review_tool_def() -> dict:
         "description": (
             "Respond to the co-lead's most recent review rejection — defend the design or a specific "
             "test choice when you believe the challenge is unfounded or already addressed. The "
-            "independent GPT co-lead reconsiders your argument and re-issues its verdict: it concedes "
+            "independent co-lead reconsiders your argument and re-issues its verdict: it concedes "
             "only if genuinely persuaded (a sound argument, or evidence the issue is already handled) "
             "and holds firm against pressure. If it is persuaded and the gate still passes, the tool "
             "commits. Use this for a genuine disagreement; when the co-lead is right, fix the code via "

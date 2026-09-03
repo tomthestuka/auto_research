@@ -739,6 +739,11 @@ _DEFAULT_APPROVE_EDIT = approve_edit
 
 
 
+#: Environment-variable prefixes of the operator's own editor/agent tooling, dropped from the
+#: author's environment (see ``_author_env``).
+_HOST_TOOLING_PREFIXES = ("CLAUDE", "COPILOT", "VSCODE")
+
+
 def _author_env(toolkit_root: Path) -> dict[str, str] | None:
     """The environment the SDK author's ``Bash`` runs in — **identical to how the analyst
     sandbox and the gate execute toolkit code** (CLAUDE.md §9.4): the analyst conda interpreter
@@ -765,6 +770,12 @@ def _author_env(toolkit_root: Path) -> dict[str, str] | None:
         env = dict(_source_ini_env(ini_sh)) if ini_sh else dict(os.environ)
     except Exception:  # noqa: BLE001 — inherit rather than fail the whole options build
         return None
+    # Host-tooling variables ride in from the terminal that launched the run and are none of the
+    # author's business. Measured 2026-09-03 (run fbb93f26, ledger seq 922): the coder ran
+    # `env | grep -i path` and read `CLAUDE_CODE_EXECPATH=…/anthropic.claude-code-…/claude` and a
+    # Copilot variable out of it — constant across benchmark arms, so not condition-bearing, but
+    # host identity reaching an actor all the same.
+    env = {k: v for k, v in env.items() if not k.upper().startswith(_HOST_TOOLING_PREFIXES)}
     if analyze_env:
         env["PATH"] = f"{Path(analyze_env) / 'bin'}:" + env.get("PATH", "")
     existing_pp = env.get("PYTHONPATH", "")

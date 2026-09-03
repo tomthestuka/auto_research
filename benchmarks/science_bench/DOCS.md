@@ -519,3 +519,14 @@ Nothing depends on this package.
   that reverted two approved commits. "Could not look" and "nothing wrong" have to be
   distinguishable in the record an offline scoring pass reads. Two tests in
   `tests/test_science_bench.py`, the second built from that failure.
+
+- **2026-09-03 — the leak scanner walks the record instead of the line.** On attempt 6's real dump
+  `--scan` reported 11 leaks; 10 were the token `w3` occurring by chance inside base64
+  extended-thinking `signature` values, which contain `/` and so read as paths to `_PATHLIKE`.
+  `_scannable_text(record)` now walks the parsed record, skipping opaque keys (`signature`, `raw`,
+  `id`, `tool_call_id`, `thought_signature`) and base64-shaped strings, before `_leaks_in` sees
+  anything; the ledger half still passes the raw line. Message content is never under those keys,
+  so an id leaking through a brief (the 2026-08-27 `ToolSpec.id` shape) is still scanned. Two
+  tests. Also from the same audit, for the record the scan reads: the coder learned the lead's
+  and both workers' models from the run record (seq 4007–4045), `runtime_dir` stays on the
+  allow-list by ruling, and the actor-read check is what watches that channel per trial.

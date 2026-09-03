@@ -201,9 +201,11 @@ def read_memory(path: Path) -> str
 - `create_run_workspace()` creates `<runtime_dir>/runs/{run_id}/{key}/figures/`
   for each agent key and returns `{key: agent_dir}`.
 - `memory_path()` returns `{agent_dir}/memory.md` (parent created if absent).
-- `round_report_path()` returns `{agent_dir}/<role>_<model-slug>_round<n>_report.jsonl` — the
-  per-round inter-LLM report JSONL an analyst writes via `edit_report` (V-4), distinct from the
-  private `memory.md`. `n` is the monotonic debate round; the model label is slugified (`_slug`).
+- `round_report_path()` returns `{agent_dir}/<role>_round<n>_report.jsonl` — the per-round
+  inter-LLM report JSONL an analyst writes via `edit_report` (V-4), distinct from the private
+  `memory.md`. `n` is the monotonic debate round. `model` is accepted and unused: a filename is
+  readable by any agent whose allow-list covers the run directory, so the member stays in the
+  ledger (2026-09-03).
 - `append_memory()` appends bare terminal text; `read_memory()` returns contents or `""`.
 
 ### `MCPToolClient`
@@ -1245,3 +1247,17 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   reports **0 moved** under the shipped predicate and **1 moved (`fab_shell_script`) under
   `--naive`**, which is what proves the check can see a move at all. A missed negation degrades to
   today's hard fail; a spurious cue degrades to a finding the co-lead reads.
+
+- **2026-09-03 — attempt 6 re-audited; two trivial changes, one ruling.** Eleven independent chunk
+  audits over the full ledger (`fbb93f26`) found the coder's read of the run record larger than
+  first stated — the lead's and **both workers'** models, from `monitor.jsonl` and `backend.log`
+  content (seq 4007–4045) — and one refused `AGENTS.md` read by the co-lead (not two `CLAUDE.md`
+  attempts). New: the coder's hunt for the orchestration repo and config (seq 4031–4042) was
+  stopped by the jail; its shell carried `CLAUDE_CODE_EXECPATH` and a Copilot variable inherited
+  from the launching terminal (seq 922). **Ruling: `runtime_dir` stays on every allow-list** —
+  agents may read their own logs — so the coder channel is measured per trial rather than closed.
+  Changes: `merge_flow._author_env` drops `CLAUDE*`/`COPILOT*`/`VSCODE*` variables
+  (`_HOST_TOOLING_PREFIXES`; the unconfigured inherit branch is unfiltered);
+  `workspace.round_report_path` names `<role>_round<n>` only (`model` accepted, unused; `_slug`
+  deleted). Tests: `test_merge_flow.py::test_author_env_drops_host_tooling_variables`,
+  `test_report_authoring.py::test_round_report_path_names_role_and_round_but_never_the_model`.

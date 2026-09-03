@@ -425,6 +425,7 @@ def keep_only_passing_tests(repo: Path, package: str, *, timeout: int = 300) -> 
     Returns the node ids removed, so a builder can record what its plant is not pinned by.
     """
     import json as _json
+    import os as _os
     import re as _re
     import sys as _sys
 
@@ -434,9 +435,17 @@ def keep_only_passing_tests(repo: Path, package: str, *, timeout: int = 300) -> 
     dropped: list[str] = []
     # Iterate: removing one failing test can expose another (pytest -x stops at the first).
     for _ in range(60):
+        # No cache, no bytecode: this pytest runs on the DEFECT leg only, and anything it left
+        # behind would exist in the defect worktree and never in the control's. It did, until
+        # 2026-09-03: `.pytest_cache/v/cache/lastfailed` named the very honest test the plant
+        # breaks, the reviewer is rooted at the worktree with an unfiltered `list_dir`, and one
+        # reviewer (qwen3_8_max, swapclean batch) cited that file verbatim in two catches. The
+        # pair test that compares root listings without any artifact filter pins this.
         result = subprocess.run(
-            [_sys.executable, "-m", "pytest", "-q", "--no-header", "-x", f"{package}/tests"],
+            [_sys.executable, "-m", "pytest", "-q", "--no-header", "-x", "-p", "no:cacheprovider",
+             f"{package}/tests"],
             cwd=str(repo), capture_output=True, text=True, timeout=timeout,
+            env={**_os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
         if result.returncode == 0:
             return dropped

@@ -344,3 +344,139 @@ def test_live_many_image_request_that_used_to_400(tmp_path):
 
     print(f"[live] 21-image request accepted; reply: {(response.content or '')[:120]}")
     assert response.usage.input_tokens > 0, "the request reached the model"
+
+
+def test_live_oversized_pdf_request_that_used_to_413(tmp_path):
+    """The two real PDFs that killed run `fbb93f26`, in one request, through `ModelHandle`.
+
+    That run died at its very last node — `review_analysis`, with no report composed — on
+    Anthropic `413 request_too_large`, and **no media-guard event fired**: the guard had judged
+    the payload legal. Measured from its ledger, the reviewer held `arxiv_2206.06713v2.pdf`
+    (24.6 MB) and `arxiv_2307.14604v2.pdf` (0.47 MB), which base64 to 33,512,296 bytes against a
+    33,554,432 ceiling — 42 KB of headroom for a conversation orders of magnitude larger. The
+    ceiling was being applied to a subset of what counts toward it; Anthropic states the rule for
+    both of its document limits: "Both limits are on the entire request payload, including any
+    other content sent alongside PDFs".
+
+    The adapter now reserves the non-media weight, so the oldest document is withheld with a
+    model-visible note and the request goes through. Deterministic coverage is
+    `tests/test_media_guards.py`; only a live round trip proves the request the guard now
+    produces is one Anthropic actually accepts. Driven through `ModelHandle` rather than the
+    provider, so key rotation and the retry layer are in the path (the 2026-08-25 altitude fix).
+
+    Set `AUTO_RESEARCH_LIVE_413_PAPERS` to a directory holding those two PDFs if the run's world
+    has been swept.
+    """
+    from auto_research.models.providers._media import nonmedia_weight, plan_for_call
+    from auto_research.models.providers.anthropic import _LIMITS
+    from auto_research.schemas import DocumentRef
+
+    load_dotenv()
+    default = next(
+        (
+            p
+            for p in sorted(Path("/data/fzhou/ar_runtime/ws").glob("*attempt5*/papers"))
+            if p.is_dir()
+        ),
+        Path("/data/fzhou/ar_runtime/papers"),
+    )
+    papers = Path(os.getenv("AUTO_RESEARCH_LIVE_413_PAPERS", str(default)))
+    big = papers / "arxiv_2206.06713v2.pdf"
+    small = papers / "arxiv_2307.14604v2.pdf"
+    if not (big.is_file() and small.is_file()):
+        pytest.skip(f"the two PDFs from run fbb93f26 are not under {papers}")
+
+    def _doc(path: Path) -> DocumentRef:
+        return DocumentRef(
+            path=path,
+            title=path.stem,
+            mime_type="application/pdf",
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            created_at=datetime.now(),
+        )
+
+    # Emission order is the order they were opened, so "oldest first" evicts the small one.
+    documents = [_doc(small), _doc(big)]
+    raw = small.stat().st_size + big.stat().st_size
+    print(f"[live] documents: {raw:,} raw -> {raw * 4 // 3:,} encoded, ceiling 33,554,432")
+
+    # A trajectory the SIZE THE REVIEWER ACTUALLY CARRIED, and this is load-bearing: a first
+    # version of this probe used a two-message conversation, whose reserve was 21,583 bytes, so
+    # the request came to 33,533,879 and simply FIT. It passed while evicting nothing — proving
+    # only that Anthropic accepts ~33.5 MB, not that the guard works. The real call was 12
+    # messages over five ReAct rounds with six tools declared (72,124 bytes on the wire, reserve
+    # 81,787), which is what makes the reserve bite.
+    convo = [
+        ModelMessage(role="system", content="You review X-ray polarization analyses. " + "S" * 9_000),
+        ModelMessage(role="user", content="Name one paper you were given. " + "U" * 12_000),
+    ]
+    for index in range(5):
+        convo.append(
+            ModelResponse(
+                # No synthesized `thinking` part: Anthropic requires a `signature` on one it
+                # emitted, and inventing a block a provider never sent is the replay mistake
+                # the carrier design exists to prevent (a 400 caught it here).
+                content=f"Reading the analysis, step {index}. " + "a" * 2_000,
+                tool_calls=[
+                    ToolCall(id=f"c{index}", name="read_file",
+                             arguments={"path": f"/run/report/section_{index}.md", "limit": 200})
+                ],
+            )
+        )
+        convo.append(
+            ToolResultMessage(
+                results=[ToolResultPart(tool_call_id=f"c{index}", name="read_file",
+                                        content="r" * 9_000)]
+            )
+        )
+    tools = [
+        {"name": name, "description": "d" * 600,
+         "input_schema": {"type": "object", "properties": {"path": {"type": "string"}},
+                          "required": ["path"], "additionalProperties": False}}
+        for name in ("read_file", "list_dir", "text_search", "open_paper", "web_search", "web_fetch")
+    ]
+
+    reserve = nonmedia_weight(convo, tools=tools)
+    plan = plan_for_call(convo, (), documents, _LIMITS, reserved_bytes=reserve)
+    withheld = [d for d in documents if plan.resolve(d).dropped]
+    print(f"[live] reserve {reserve:,}; withheld {[Path(d.path).name for d in withheld]}")
+    assert withheld, (
+        f"the guard evicted nothing (reserve {reserve:,}), so this request would fit anyway and "
+        "the probe would pass without exercising the fix"
+    )
+    note = plan.resolve(withheld[0]).note or ""
+    assert Path(withheld[0].path).name in note and "withheld" in note, note
+
+    handle = load_registry().resolve("reviewer").member("claude_fable_5")
+    response = asyncio.run(handle.call(convo, documents=documents, tools=tools))
+
+    log = Path("logs/dev/media-reserve")
+    log.mkdir(parents=True, exist_ok=True)
+    (log / "live_413_probe.json").write_text(
+        json.dumps(
+            {
+                "raw_bytes": raw,
+                "encoded_bytes": raw * 4 // 3,
+                "reserve": reserve,
+                "withheld": [Path(d.path).name for d in withheld],
+                "reply": (response.content or "")[:400],
+                "tool_calls": [c.name for c in response.tool_calls],
+                "input_tokens": response.usage.input_tokens,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    answered = (response.content or "").strip() or [c.name for c in response.tool_calls]
+    print(f"[live] accepted; {response.usage.input_tokens:,} input tokens; answered: {answered}")
+    # The surviving 24.6 MB PDF has to have been *processed*, not merely accepted: a request
+    # whose documents were all withheld would return 200 just the same, so acceptance alone
+    # proves nothing. The input-token count is the evidence of delivery.
+    assert response.usage.input_tokens > 100_000, (
+        f"only {response.usage.input_tokens:,} input tokens — the surviving PDF did not reach "
+        "the model, so this proves acceptance without proving delivery"
+    )
+    # What the model *says* is deliberately not asserted (§10: never assert subjective LLM
+    # behaviour). The stimulus is filler sized to reproduce the real reserve, not a question
+    # worth answering, and an empty reply to it is recorded rather than failed.

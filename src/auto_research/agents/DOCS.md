@@ -94,7 +94,7 @@ caption verbatim (the `Figure N —` / `[source:index]` prefix comes from the pr
 The worker's catalog is one source `"self"` (its produced figures, appended live during the loop
 via `figure_sink`); the lead's is one source **per worker** (its cited figures), both append-only
 across debate rounds *and* rework iterations (the agent instances persist), which is what closes
-the "last-round-only figures" leak. Round files are `<role>_<model>_round<n>_report.jsonl`
+the "last-round-only figures" leak. Round files are `<role>_round<n>_report.jsonl`
 (`sandbox.workspace.round_report_path`; `n` = the monotonic debate round). Both tools are
 budget-free in the loop (report authoring, not evidence gathering); a loop that ends without an
 `edit_report` write falls back to one terminal structured compose with the catalog figures attached.

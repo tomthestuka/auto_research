@@ -22,7 +22,7 @@ from auto_research.agents.react import (
     execute_review_report,
     resolve_figure_citations,
 )
-from auto_research.sandbox.workspace import _slug, round_report_path
+from auto_research.sandbox.workspace import round_report_path
 from auto_research.schemas import AnalystReport, FigureCitation, FigureRef
 
 
@@ -232,15 +232,15 @@ def test_sandbox_provider_exposes_report_tools_only_with_workspace(tmp_path):
 # ── workspace path helper ──────────────────────────────────────────────────────
 
 
-def test_round_report_path_names_role_model_round(tmp_path):
+def test_round_report_path_names_role_and_round_but_never_the_model(tmp_path):
+    """A filename is readable by any agent whose allow-list covers the run directory (a coder's
+    `grep -rl` returned `analyst_lead_claude-opus-5_round1_report.jsonl`, 2026-09-03), so the
+    model stays out of the name; `model` remains in the signature so callers need no change."""
     p = round_report_path(tmp_path, role="analyst_worker", model="claude-opus-4-8", round_n=3)
-    assert p.name == "analyst_worker_claude-opus-4-8_round3_report.jsonl"
+    assert p.name == "analyst_worker_round3_report.jsonl"
     assert p.parent == tmp_path
-
-
-def test_slug_sanitizes_model_id():
-    assert _slug("gpt-5.5/high") == "gpt-5.5-high"
-    assert _slug("") == "model"
+    other = round_report_path(tmp_path, role="analyst_lead", model="gpt-5.5/high", round_n=1)
+    assert other.name == "analyst_lead_round1_report.jsonl"
 
 
 # ── lead path: per-worker catalog + citation + cross-iteration accumulation ────
