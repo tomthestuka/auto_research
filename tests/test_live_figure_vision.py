@@ -480,3 +480,101 @@ def test_live_oversized_pdf_request_that_used_to_413(tmp_path):
     # What the model *says* is deliberately not asserted (§10: never assert subjective LLM
     # behaviour). The stimulus is filler sized to reproduce the real reserve, not a question
     # worth answering, and an empty reply to it is recorded rather than failed.
+
+
+# ── the Qwen document glue: does a paper actually arrive as text AND figures? ──────────
+
+_QWEN_PAPER = Path(
+    "/data/fzhou/ar_runtime/ws/fbb93f2600d620b26baa9c71dc5e53d7/runtime/runs/"
+    "fbb93f2600d620b26baa9c71dc5e53d7/reviewer/report/papers/nasa_ads_2022Sci...378..650K.pdf"
+)
+
+
+class PaperVision(BaseModel):
+    sees_figures: bool
+    figure_count: int
+    first_figure_chart_type: str
+    first_figure_colors: str
+    published_polarization_degree: str
+    notes: str
+
+
+def test_live_qwen_receives_a_paper_as_text_and_figures(tmp_path):
+    """Alibaba serves no document channel, so a paper is parsed locally into the two channels
+    Anthropic and OpenAI build internally. This is the only test that proves BOTH arrive.
+
+    The discriminators are chosen so neither can be faked from the other. The **published
+    polarization degree** (`4.01 +/- 0.20 %`) exists only in the extracted *text*. The **colours**
+    of Figure 1's energy bands exist only in the *pixels* — the caption never names them, and the
+    figure is a vector polar plot that yields no embedded raster at all, so a model answering
+    correctly must have received a crop this pipeline rendered. That is the same design as
+    `_CAPTION` above: a field a text-only model cannot bluff.
+
+    Driven through `ModelHandle` so key rotation and retry are in the path, and through the real
+    `DashscopeProvider`, so the substitution happens where it happens in production.
+    """
+    from auto_research.models.providers.dashscope import DashscopeProvider
+    from auto_research.models.types import ModelHandle, RoleModelConfig
+    from auto_research.schemas import DocumentRef
+
+    load_dotenv()
+    if not os.getenv("DASHSCOPE_API_KEY"):
+        pytest.skip("DASHSCOPE_API_KEY is not set")
+    if not _QWEN_PAPER.is_file():
+        pytest.skip(f"reference paper not on this host: {_QWEN_PAPER}")
+
+    document = DocumentRef(
+        path=_QWEN_PAPER,
+        title="Krawczynski et al. 2022",
+        mime_type="application/pdf",
+        sha256=hashlib.sha256(_QWEN_PAPER.read_bytes()).hexdigest(),
+        created_at=datetime(2026, 9, 4),
+    )
+    handle = ModelHandle(
+        role="live_probe",
+        config=RoleModelConfig(
+            name="qwen_doc_probe",
+            provider="dashscope",
+            model="qwen3.8-max",
+            vision=True,
+            documents=True,
+            parameters={"reasoning": {"effort": "high"}},
+        ),
+        provider=DashscopeProvider(),
+    )
+    ask = (
+        "You are given one scientific paper. Set sees_figures=true ONLY if actual images are "
+        "present; if you received only text, set it false. Report figure_count (how many images "
+        "you were given), and for the FIRST figure state its chart type and the colours used for "
+        "the data series. Separately, quote the published 2-8 keV polarization degree with its "
+        "uncertainty exactly as the text gives it. Ground every field in what you actually "
+        "received; if something is absent, say so rather than inferring it."
+    )
+
+    response = asyncio.run(
+        handle.call(
+            [ModelMessage(role="user", content=ask)],
+            schema=PaperVision,
+            documents=[document],
+        )
+    )
+    vision = PaperVision.model_validate(response.parsed)
+    print("\n" + json.dumps(vision.model_dump(), indent=2))
+
+    log = Path("logs/dev/doc-glue")
+    log.mkdir(parents=True, exist_ok=True)
+    (log / "qwen_paper_vision.json").write_text(
+        json.dumps(vision.model_dump(), indent=2), encoding="utf-8"
+    )
+
+    # The text channel: a number that exists only in the extracted prose.
+    assert "4.0" in vision.published_polarization_degree, (
+        "the paper's headline value did not survive into the model's view"
+    )
+    # The image channel: colours the caption never names, on a vector plot that yields no
+    # embedded raster — answerable only from a rendered crop.
+    assert vision.sees_figures, "the model reports receiving no images"
+    colors = vision.first_figure_colors.lower()
+    assert sum(c in colors for c in ("red", "green", "blue", "orange")) >= 3, (
+        f"figure colours not recovered, so the crops did not land: {vision.first_figure_colors!r}"
+    )

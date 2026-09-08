@@ -45,3 +45,16 @@ dependencies:
       # `openai-codex-cli-bin`, which is the binary the SDK's app-server protocol is built against.
       - openai-codex==0.147.0
       - langgraph-checkpoint-sqlite>=3.1   # AsyncSqliteSaver for durable mid-run resume (§12); pulls aiosqlite + sqlite-vec
+      # Local document parsing for a vendor with no usable file channel
+      # (models/providers/_doc_parse.py). Alibaba's Responses API takes `input_file` by public
+      # `file_url` only and restricts PDF to `qwen3.5-ocr`, so a paper is parsed here into the
+      # same two channels Anthropic and OpenAI assemble internally: text plus figure images.
+      # Docling renders the page and crops the region its layout model found, which is what makes
+      # a *vector* plot recoverable -- extracting embedded rasters yields almost nothing on a
+      # scientific paper (measured: 11 of 15 figure pages carry none).
+      #
+      # INSTALL WITH THE CPU TORCH INDEX, or pip resolves the multi-GB CUDA build for no benefit:
+      #   pip install docling --extra-index-url https://download.pytorch.org/whl/cpu
+      # Pulls ~54 packages incl. torch+cpu (196 MB); ~400 MB of layout/table/OCR weights download
+      # on first *use* into ~/.cache/huggingface. Not on conda-forge.
+      - docling>=2.125

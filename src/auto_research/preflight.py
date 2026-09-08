@@ -131,6 +131,7 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     from auto_research.env import check_required_env
     from auto_research.graph.checkpoint import check_checkpointer_available
     from auto_research.models.keys import check_api_key_fallbacks
+    from auto_research.models.providers._doc_parse import check_document_parser_ready
     from auto_research.observations import check_catalog_health
     from auto_research.sandbox.merge_flow import (
         check_toolkit_branch_clean,
@@ -153,6 +154,7 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     preflight = Preflight()
     preflight.register("required_env", check_required_env)
     preflight.register("api_key_fallbacks", check_api_key_fallbacks)
+    preflight.register("document_parser_ready", check_document_parser_ready)
     preflight.register("checkpointer_available", check_checkpointer_available)
     preflight.register("database_health", check_database_health)
     preflight.register("author_reviewer_decorrelation", check_author_reviewer_decorrelation)

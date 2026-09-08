@@ -223,12 +223,21 @@ def test_the_text_only_zai_flagship_is_in_no_figure_seat():
     assert "glm-5.3-flash" in figure_models
 
 
-def test_the_reviewer_without_native_pdf_declares_it():
-    """Declared as data so the harness can act on it, rather than living in a caveat."""
-    qwen = next(seat for seat in REVIEWERS if seat.provider == "dashscope")
-    assert qwen.documents is False
-    fable = next(seat for seat in REVIEWERS if seat.provider == "anthropic")
-    assert fable.documents is True
+def test_every_reviewer_may_be_sent_documents_and_the_vendor_decides_the_route():
+    """Two different questions, and conflating them would kill four slots.
+
+    ``Seat.documents`` answers *may this seat be sent documents at all* -- and
+    ``ModelHandle.call`` RAISES on a mismatch rather than degrading, which is correct for a
+    genuinely mis-declared member and fatal for a reviewer, since it opens papers inside its own
+    loop and forwards them into the verdict call. Whether the *bytes* can travel is a separate
+    question the adapter answers per vendor, from that vendor's own reference.
+    """
+    from auto_research.models.providers.dashscope import DASHSCOPE_VENDOR
+
+    assert all(seat.documents for seat in REVIEWERS), (
+        "a reviewer that may not be sent documents raises when it opens a paper"
+    )
+    assert DASHSCOPE_VENDOR.accepts_inline_documents is False
 
 
 def test_each_worker_pair_is_provider_decorrelated():
@@ -468,7 +477,9 @@ def test_every_seat_carries_its_pinned_effort():
 def test_capability_flags_reach_the_written_member():
     """A declaration that does not survive into the config is a declaration that does nothing."""
     roles = environment.models_config(arm("opus", "qwen", "w1"), _SOURCE_MODELS)["roles"]
-    assert roles["reviewer"]["members"][0]["documents"] is False   # no native PDF
+    # Documents are permitted for every reviewer; a vendor with no usable file channel gets
+    # locally-parsed text plus figure crops instead (see the reviewer-seat test above).
+    assert roles["reviewer"]["members"][0]["documents"] is True
     assert roles["reviewer"]["members"][0]["vision"] is True
 
 

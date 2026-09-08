@@ -45,6 +45,16 @@ DASHSCOPE_VENDOR = ResponsesVendor(
     # object field), while `items: {$ref}` is the reverse, 0/5 as sent and 5/5 resolved.
     resolve_refs_in=frozenset({"items"}),
     supports_tool_search=False,
+    # Read off .../model-studio/qwen-api-via-openai-responses (2026-09-03), which rules the native
+    # path out twice over. The `input_file` part takes `file_url` -- "The public URL of the file.
+    # Required when `type` is `input_file`" -- and accepts neither inline base64 `file_data` (the
+    # shape this adapter builds) nor a `file_id`; and PDF input is "Currently only supported by
+    # `qwen3.5-ocr`", which is not a model any role here holds. A public URL is not available to
+    # us either: papers live as local files under the runtime directory, and publishing one to
+    # obtain a URL is not something a run may do. Alibaba does serve document *understanding*
+    # elsewhere -- upload with `purpose=file-extract`, then Qwen-Long or Qwen-Doc-Turbo -- but
+    # that is a different endpoint and a different model, not this seat.
+    accepts_inline_documents=False,
 )
 
 

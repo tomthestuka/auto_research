@@ -24,8 +24,9 @@ once -- so it is written literally and its balance is *asserted by test* rather 
 **Capability is declared, never assumed.** Every seat carries its own ``vision`` and ``documents``
 flags, so a vision-less member in a figure-bearing seat fails a test instead of a trial. Two
 eligibility facts are carried as data rather than prose: ``glm-5.3`` is text-only, so Z.AI's
-figure-seat level is ``glm-5.3-flash``; and ``qwen3.8-max`` has no native PDF, so its *reviewer*
-level declares ``documents=False`` until the extraction glue for the no-native-PDF reviewers lands.
+figure-seat level is ``glm-5.3-flash``; and Alibaba publishes no document channel this project can
+use, so the ``qwen3.8-max`` *reviewer* is sent a paper as locally-parsed text plus cropped figure
+images -- the two channels Anthropic and OpenAI assemble internally for a native PDF.
 
 **The campaign is three blocks, 14 runs.**
 
@@ -263,10 +264,18 @@ REVIEWERS: tuple[Seat, ...] = (
         slug="qwen",
         provider="dashscope",
         model="qwen3.8-max",
-        documents=False,
+        # `documents=True` even though Alibaba serves no usable document channel, and the
+        # distinction is what keeps four slots alive. This flag answers "may this seat be sent
+        # documents at all" -- and `ModelHandle.call` RAISES on a mismatch, which is right for a
+        # genuinely mis-declared member and fatal here, since the reviewer opens papers in its own
+        # loop and forwards them into the verdict call. Whether the *bytes* can travel is the
+        # adapter's question, answered per vendor: `DASHSCOPE_VENDOR.accepts_inline_documents` is
+        # False, so the adapter sends locally-parsed text plus cropped figures with a note saying
+        # so. That is the same pair of channels Anthropic and OpenAI build internally.
+        documents=True,
         note=(
-            "tied-first figure reader at a fifth of the price; no native PDF, so this arm needs "
-            "extraction glue with a model-visible note before it sees a paper"
+            "tied-first figure reader at a fifth of the price; no usable document channel, so a "
+            "paper reaches it as locally-parsed text plus cropped figures, declared as such"
         ),
     ),
 )

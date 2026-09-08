@@ -124,7 +124,33 @@ providers by editing YAML alone
   passes it as `reserved_bytes`. An image that breaches a dimension or byte limit is **resized**;
   a document,
   which cannot be, is **withheld**. Either way the block is replaced by a model-visible note naming
-  the file and the reason — never a silent absence, which is what invites invention. A resize
+  the file and the reason — never a silent absence, which is what invites invention.
+
+  **A vendor with no usable file channel gets the document assembled locally instead.**
+  `ResponsesVendor.accepts_inline_documents` declares whether a vendor takes the inline base64
+  `input_file` part this adapter builds. It is a *capability*, read from that vendor's own
+  reference, defaulting `True` (the OpenAI shape) so every unread vendor stays byte-identical on
+  the wire. Alibaba is the one `False`: its Create-a-response reference accepts `input_file` by
+  **`file_url` (a public URL) only** — neither `file_data` nor `file_id` — and restricts PDF input
+  to `qwen3.5-ocr`. Our papers are local files, and publishing one to obtain a URL is not something
+  a run may do.
+
+  What replaces it is not a downgrade invented for one vendor: Anthropic and OpenAI both ingest a
+  PDF as *text plus a rendered image per page* by their own documentation, so `_doc_parse` builds
+  the same two channels where the vendor does not. Docling **renders** the page and crops the
+  region its layout model detected — the reason a *vector* plot survives, where pulling embedded
+  rasters recovers almost nothing (measured on Krawczynski et al. 2022: 11 of 15 figure pages
+  carry no embedded image at all, because matplotlib/TikZ/R emit path operators, not image
+  XObjects).
+
+  Three properties keep it honest. The crops are added to the request **before** planning, so they
+  are counted, budgeted and evicted like any other image rather than bypassing the guard. The
+  extracted text is added to `reserved_bytes`, because it is request weight the plan cannot see.
+  And a parse failure reports the document **UNREAD** rather than letting it look empty — "I
+  received nothing" and "I received an empty paper" invite different and equally wrong inferences.
+  Results are cached on disk under `<runtime_dir>/parsed_docs/<sha256>/` (text, figure PNGs, and a
+  manifest naming the Docling version and `images_scale`), because a ReAct loop re-sends its
+  attachments every turn and the paper this was built for takes ~40 s to parse. A resize
   changes only the transmitted copy: the artifact and its `FigureRef.sha256` are untouched, so the
   provenance chain still points at the file a human reproduces. **Nothing is downscaled unless a
   limit would otherwise be breached** — providers already resize server-side to their processing
@@ -820,3 +846,25 @@ Compacted 2026-09-01: entries through 2026-08-28 folded into themed ranges (deta
   413 at ~6.49 MB of *referenced* PDFs with an ~18 KB HTTP body, i.e. an undocumented ~6.3 MB
   combined ceiling enforced during server-side extraction, unanswered. It would trade a documented
   32 MB ceiling for a tighter undocumented one. Four new tests in `tests/test_media_guards.py`.
+
+- **2026-09-03 — a vendor with no usable document channel now receives text plus figure crops.**
+  Found while gating the science sweep. Two defects, one visible and one latent. The visible one:
+  `ModelHandle.call` **raises** when documents reach a member declaring `documents: false`, and the
+  sweep's Qwen reviewer declared exactly that while the reviewer opens papers inside its own loop
+  and forwards them into the verdict call — four slots would have died at that node. Ruled to keep
+  the raise (right for a genuinely mis-declared member) and fix the declaration. The latent one:
+  `doc_mimes` is empty on all three Responses-dialect vendors and the check reads
+  `if limits.doc_mimes and ...`, so an empty set skipped the guard **entirely** and a raw base64
+  PDF was being sent to a vendor that accepts none.
+  Alibaba's Create-a-response reference (read 2026-09-03) rules the native path out twice —
+  `input_file` takes `file_url`, "The public URL of the file", and neither `file_data` nor
+  `file_id`; PDF input is "Currently only supported by `qwen3.5-ocr`" — so local parsing is the
+  only route rather than a preference. New `ResponsesVendor.accepts_inline_documents` (default
+  `True`, so OpenAI/DeepSeek/Z.AI wire bytes are unchanged, which matters because OpenAI shares
+  this adapter and a science-sweep slot had already run on it) and a new `_doc_parse` module:
+  Docling render-and-crop, disk cache keyed on `sha256`, manifest stamping the parser version.
+  **Docling rather than a lighter renderer** because extracting embedded images is measured to
+  recover almost nothing from a scientific paper, and its layout model crops the figure region
+  with its caption already linked. Six new tests in `tests/test_document_substitution.py`, each
+  verified to fail against the unflipped vendor flag; two `science_bench` tests rewritten from the
+  old decision to the new invariant. Suite 1752 → 1760.
