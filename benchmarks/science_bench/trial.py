@@ -57,6 +57,19 @@ BASE_REF = "5accf33"
 #: not busy-waiting rather than about latency.
 POLL_SECONDS = 15.0
 
+#: The forms that end an analyst-lead cycle. Their arguments carry the status the lead filed, which
+#: is the only place a terminal's *kind* is recorded -- the cycle event names the form but not the
+#: status, and the status is what [A20] turns on.
+_LEAD_FORMS = frozenset(
+    {
+        "submit_terminal_report",
+        "submit_adjudication",
+        "request_another_round",
+        "author_chain",
+        "hold_authoring",
+    }
+)
+
 
 @dataclass
 class TrialConfig:
@@ -243,6 +256,8 @@ def summarise_ledger(path: Path) -> dict[str, Any]:
     scan_findings: list[str] = []
     worker_statuses: list[str] = []
     reviewer_verdicts: list[bool] = []
+    lead_cycles: list[dict[str, Any]] = []
+    pending_form_status: str | None = None
     wanted_a_human = 0
     guard_rejections = 0
     schema_retries = 0
@@ -285,9 +300,32 @@ def summarise_ledger(path: Path) -> dict[str, Any]:
                 commit_shas.append(str(sha)[:10])
         elif event in ("analyst.analysis.report", "analyst.worker.initial_report",
                        "analyst.worker.revision"):
-            status = data.get("status")
+            # The status is nested under `report`, not at the top of `data`. Read flat, attempt
+            # 6's nine worker reports all came back `None` while the ledger actually held
+            # `ok` x4, `failed` x3, `needs_human` x2 -- a reader pointed at the wrong field,
+            # which looks like a run where no worker ever reported a status rather than a defect.
+            # The flat read stays as a fallback so an older ledger shape still parses.
+            report = data.get("report")
+            status = (report or {}).get("status") if isinstance(report, dict) else None
+            status = status or data.get("status")
             if status:
                 worker_statuses.append(str(status))
+        elif event.endswith(".tool_call") and data.get("tool") in _LEAD_FORMS:
+            # The form's own arguments carry the terminal status the lead chose.
+            try:
+                arguments = json.loads(data.get("args") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                arguments = {}
+            pending_form_status = arguments.get("status")
+        elif event == "analyst.lead.cycle":
+            lead_cycles.append(
+                {
+                    "filed": data.get("filed") or data.get("form"),
+                    "committed": int(data.get("committed") or 0),
+                    "status": pending_form_status,
+                }
+            )
+            pending_form_status = None
         elif event == "reviewer.analysis_review.verdict":
             if "accepted" in data:
                 reviewer_verdicts.append(bool(data["accepted"]))
@@ -328,6 +366,11 @@ def summarise_ledger(path: Path) -> dict[str, Any]:
         "rework_iterations": events.get("reviewer.analysis_review.verdict", 0),
         "worker_statuses": worker_statuses,
         "reviewer_verdicts": reviewer_verdicts,
+        # One entry per analysis cycle: which form the lead filed, how many tools that cycle
+        # committed, and the status it filed. This is what [A20] is scored from -- an authoring
+        # cycle that committed and then filed a terminal report is not a failure row, and the
+        # distinction is not visible anywhere else in the ledger.
+        "lead_cycles": lead_cycles,
         "wanted_a_human": wanted_a_human,
         "guard_rejections": guard_rejections,
         "schema_retries": schema_retries,

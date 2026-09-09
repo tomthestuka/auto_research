@@ -275,6 +275,23 @@ gets the same block, so a failure is as legible as a success.
 env flags (e.g. `AUTO_RESEARCH_LIVE_FULL_SUITE_TESTS=1`) and write logs under
 `logs/dev/step-N/`.
 
+Any test that drives a real role resolves its model the way production does, so it measures
+whatever `config/models.yaml` names. `--seats` (or `AUTO_RESEARCH_SEATS`) points a whole session at
+a configuration directory whose `models.yaml` names different members and whose other three files
+are copied byte for byte, so **any model can be put in any seat without editing configuration and
+without a test knowing**:
+
+```bash
+AUTO_RESEARCH_SEATS='analyst_lead=openai:gpt-5.6-terra,reviewer=dashscope:qwen3.8-max' \
+  AUTO_RESEARCH_LIVE_FIGURE_TESTS=1 pytest tests/test_live_figure_vision.py -s
+
+pytest tests/test_live_read_file.py \
+  --seats 'analyst_worker=anthropic:claude-sonnet-5|dashscope:qwen3.7-plus'
+```
+
+Members of one role are separated by `|`; a member may carry `!novision` or `!nodocs`. With no
+seat spec the session resolves the repository's own `config/` exactly as before.
+
 `--chatter` follows an XSPEC-style 1-10 verbosity scale; it filters live summaries and
 grouped Markdown, while the monitor JSONL still records the full agent, consensus, tool,
 and reviewer narrative.

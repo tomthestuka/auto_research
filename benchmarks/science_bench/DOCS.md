@@ -23,9 +23,17 @@ performance being measured, and it cannot be passed by luck.
 Development code, not runtime code: it lives outside `src/auto_research/`, nothing in the pipeline
 imports it, and it never runs during a research run.
 
-**Built so far:** the measurement design, the per-trial environment, the frozen question, the trial
-driver, and the CLI with its preflight, scheduler and leak scanner. Block 0 has run. The scoring —
-the ledger-derived tier, the fourteen-quantity extractor and the figures — is not built.
+**What is actually run is the demonstration** (ruling 2026-09-08): the incumbent seat assignment
+three times and one contrast assignment three times, five of those six runs new. The eleven-slot
+screening array is kept as the record of what was designed, selectable with `--block1`, and is not
+run. The reason is in [What is varied](#what-is-varied-and-what-is-held-fixed): the claim this
+measures is that a tree of weaker models still reaches a verifiable result or declines cleanly,
+which is an existence claim, and an existence claim is demonstrated rather than estimated.
+
+**Built:** the measurement design, the per-trial environment, the frozen question, the trial driver,
+the CLI with its preflight, scheduler and leak scanner, and the whole scoring pass — the
+ledger-derived tier, the frozen answer key, the deterministic fourteen-quantity extractor, the
+scorer and the report with its two figures. Block 0 has run and is the anchor's first trial.
 
 ## 2. Architecture
 
@@ -81,7 +89,54 @@ degraded run but a rejected call in every seat of every trial. A verified level 
 vendors is what parity across the axis actually requires, and it keeps this sweep comparable to the
 two batches beside which it is reported.
 
-### The campaign is three blocks, fourteen runs
+### What is run: the demonstration, six runs
+
+**The ruling (2026-09-08).** The screening array below estimates main effects from nine arms at
+one trial each with two degrees of freedom of pure error, for order $800-2,000 over two to three
+days. Two things were wrong with that as an instrument. The published floor for a stable per-cell
+estimate on agentic tasks is **8 to 16 trials** (arXiv 2512.06710, ICC convergence), so nine cells
+at n=1 could not carry a seat effect however it was analysed. And the claim the sweep exists to
+support is not a per-seat effect: it is that **a tree of visibly weaker models still reaches a
+verifiable result, or declines cleanly**, because the deterministic gate, the cross-provider tool
+review and the honest-failure floor carry the load rather than the models' judgment. That is an
+existence claim, and the way to establish one is to exhibit it.
+
+So: two seat assignments, three trials each. Three separates "always" from "sometimes" and is
+honest about not being an estimate; the report states the floor it does not reach and refuses a
+ranking.
+
+| Seat | Anchor | Contrast |
+|---|---|---|
+| reviewer | `claude-fable-5` | `qwen3.8-max` |
+| analyst lead | `claude-opus-5` | `gpt-5.6-terra` |
+| analyst workers | `claude-sonnet-5` + `gpt-5.6-terra` | `claude-sonnet-5` + `qwen3.7-plus` |
+| tool co-lead, coder, librarian, effort | pinned | pinned |
+
+**The contrast is chosen on independently measured capability, never on price**, and per seat,
+because the seats do not use the same ability. A reviewer needs scientific critique and figure
+reading and never sustains a long agentic loop; a lead plans, writes the brief the author executes
+and adjudicates across the longest loop in the pipeline; the workers plan and call tools. So the
+lead seat takes the strongest mid model on the sustained-tool-use axis (`gpt-5.6-terra`: Artificial
+Analysis index 42 against the frontier band's 47-53, Terminal-Bench 4.0 21.5% against 37-58%), the
+reviewer takes the model that is a real step down on critique while staying a first-rate figure
+reader (`qwen3.8-max`: index 40, CritPt 20 against `claude-fable-5`'s 30, but third on arena
+vision and first on tau3 banking), and the worker pair drops its OpenAI member from index 42 to
+`qwen3.7-plus` at 26. Every number is read off an independent board, and none of them is a design
+variable: the factor level is the model, named. Boards disagree at matched effort — the same
+`qwen3.8-max` is first on one and thirty-seventh on another — which is why the write-up carries
+them as caveated context only.
+
+Two structural facts to state rather than remove. The anchor's reviewer shares its lead's vendor
+and the contrast's does not, a coupling no measurement covers for the science seats (the lead x
+co-lead grid measured it null for *tool* review). And `claude-sonnet-5` stays in both worker pairs
+because, with `claude-haiku-4-5` excluded as an infrequently-updated model, it is already the
+lowest current Anthropic vision model.
+
+Attempt 6 **is** the anchor's first trial, by construction rather than by bookkeeping: a run id is
+a hash of the seats and the replicate index, so `demonstration()[0].run_id` resolves to the id that
+run already has and a completed trial cannot be double-counted or silently re-run.
+
+### The superseded design: three blocks, fourteen runs
 
 **Block 0 — leak probe, one run.** Before anything is batched, one run executes with verbatim
 recording of every actor's prompt, and that recording is read for the arm. This is the mandatory
@@ -371,6 +426,72 @@ This was found by an audit of the first live ledger, not by design review: the p
 | `append_record` / `load_records` | Durable per-trial append; tolerant read for a live batch. |
 | `BASE_REF` | `5accf33` — the toolkit state before this question's own tool chain existed. |
 
+### `extract` — the fourteen quantities, read by code
+
+| Symbol | Meaning |
+|---|---|
+| `ANSWER_KEY` / `load_answer_key(path=None)` | The frozen key beside the module, returned with its own sha256 so a scored record names the key that produced it. |
+| `extract_report(path, key=None) -> Extraction` | Read one report file. Any text format; `report.tex` is what the pipeline writes. |
+| `extract_text(text, labels) -> dict[str, Extracted]` | The same over a string, with `same artifact` back-references resolved. |
+| `Extracted` | One quantity as a report stated it: value, error, unit text, dual error, claimed reference value, source artifact, the window it was read from, or `not_reported`. |
+| `Extraction` | All fourteen for one report, plus `labels_found`, `labels_measured` and `compliant`. |
+| `find_report(run_dir)` | The report a trial wrote, machine handle first. |
+| `normalise(text)` | LaTeX as plain text, only the escapes that occur inside the labels and their numbers. |
+
+**No model is in this path.** The dispatched prescription names the fourteen quantities and asks
+for each under a verbatim label so the report is machine-readable, identically in every cell, which
+turns extraction into a keyed lookup. Attempt 6 complied and all fourteen of its values come back
+exactly, hand-checked. A report that does not comply is not silently patched: `compliant` is
+`False`, the missing labels are `not_reported` with the window that was searched, and the count of
+labels found is itself a Tier-0 fact about that tree.
+
+Three things it records rather than resolves, each because the two readings have different causes:
+the reference value the *tree* claims (a lower bound — attempt 6 states its claimed values in a
+prose-labelled table this does not parse), the unit text (a per-cent reported as a fraction is a
+unit error, not a wrong measurement), and a second uncertainty offered for the same value.
+
+### `score` — Tier 0 and Tier 1, frozen before any spend
+
+| Symbol | Meaning |
+|---|---|
+| `score_trial(record, *, report=None, key=None) -> TrialScore` | One trial: terminal classification plus the fourteen-quantity recovery. |
+| `score_batch(records, key=None)` | Every trial, in the order the batch recorded them. |
+| `score_quantities(extraction, key=None)` | Signed z per quantity against the frozen key. |
+| `classify_terminal(record) -> (state, correct)` | Which of `TERMINAL_STATES`, and whether it is a correct outcome. |
+| `a20_relabelled_cycles(record)` | How many terminal reports [A20] reclassifies. |
+| `angle_delta(this, paper, period=180)` | A periodic difference, wrapped into the half-open half-period. |
+| `trap_language(text)` | Candidate sentences for the deferred hand read. Never a verdict. |
+| `write_scores(out_dir, scores)` | `scores.jsonl` beside the batch's own records. |
+
+Four rules, each settled before a number was seen. **Signed z** is the pipeline's own comparison
+arithmetic and agrees in magnitude with `compare_to_benchmark`'s fourteen published values on every
+row, which is the free oracle a test uses. **A polarization angle is periodic modulo 180 degrees**,
+so its difference is wrapped before z is formed: PA is an orientation, and without the wrap a tree
+reporting the same angle as `+159.3` instead of `-20.7` scores as a hundred-sigma discrepancy for a
+convention choice. **Within tolerance** is the key's own three-sigma flag. **A unit mismatch never
+counts as recovered**, and is counted separately.
+
+`useful` is the pre-specified threshold: at least ten of fourteen within tolerance. `trap_reproduced`
+is the pattern the question was chosen for, computed in code — every PD low, every PA at zero — and
+a tree that reports the published values back scores fourteen-for-fourteen and fails it, which is
+the point. Whether a report *states* the offset as systematic is judgment, so Tier 2 is deferred
+and `trap_language` narrows a long report to a handful of sentences for a hand read.
+
+### `report` — tables and figures from the scores
+
+| Symbol | Meaning |
+|---|---|
+| `build_report(scores, stamps=None)` | The batch's Markdown report: provenance, the tree table, the full appendix table. |
+| `write_report(out_dir, scores, stamps=None)` | That, plus both figures and `scores.json`. |
+| `tree_table_markdown(scores)` / `tree_summary(group)` | One row per seat assignment, with `n` on every row. |
+| `appendix_table_markdown(scores, key=None)` | Every quantity of every run against the key, approximate values marked. |
+| `forest_figure(scores, path)` | Signed z per quantity, one panel per run, identical axes. |
+| `summary_scatter(scores, path)` | Recovery count against mean PD signed z, one point per trial. |
+
+The table is deliberately not a ranking, and the report says so in its own text with the variance
+floor cited. Both figure functions return `None` rather than writing an empty figure, since an
+empty figure is later mistaken for a result.
+
 ### `__main__` — the CLI
 
 | Symbol | Meaning |
@@ -381,7 +502,7 @@ This was found by an audit of the first live ledger, not by design review: the p
 | `scan_ledger_paths(path)` | The author's half, read from the ledger its prompts never reach. |
 | `scan_actor_reads(path)` / `SEAT_NAMING_ARTIFACTS` | Whether any actor read a run artifact that names every seat. Matches the filenames inside a tool call's *arguments*, since every ledger line contains its own run's paths. |
 | `batch_status(dir)` | Progress read from the records; costs nothing. |
-| `parse_slots(spec)` | `None` = all of block 1; `'2-11'` / `'1,4,7'` = exactly those. |
+| `parse_slots(spec, pool=None)` | `None` = every slot of `pool`, which defaults to the **demonstration**; `'2-6'` / `'1,4'` = exactly those. `--block1` passes the screening array as the pool. |
 | `DEFAULT_WORKSPACE` | Where trial worlds are built. Outside the allow-list, and empty of meaning. |
 
 Invariants a caller may rely on, each pinned by a test: block 1 is balanced as described; run ids
@@ -530,3 +651,87 @@ Nothing depends on this package.
   tests. Also from the same audit, for the record the scan reads: the coder learned the lead's
   and both workers' models from the run record (seq 4007–4045), `runtime_dir` stays on the
   allow-list by ruling, and the actor-read check is what watches that channel per trial.
+
+- **2026-09-08 — the array became a demonstration, and the scoring pass was built.**
+  **Design (ruling, user).** The eleven-slot screening array is superseded by six runs: the
+  incumbent seat assignment three times (attempt 6 is its first) and one contrast assignment three
+  times. Two reasons, and the second is the load-bearing one. Nine arms at n=1 with 2 df of pure
+  error cannot carry a seat effect at any price — the published floor for a stable per-cell
+  estimate on agentic tasks is 8-16 trials (arXiv 2512.06710) — and the claim being made was never
+  a per-seat effect: it is that a tree of weaker models still reaches a verifiable result or
+  declines cleanly, because the gate, the cross-provider review and the honest-failure floor carry
+  the load. An existence claim is demonstrated. The array is **kept** (`--block1`, its balance
+  still asserted) as the record of what was designed. New roster levels: `gpt-5.6-terra` as a lead,
+  `w4` = `claude-sonnet-5` + `qwen3.7-plus` as a worker pair, `arms.pinned_parameters` made public,
+  `qwen3.7-plus` priced off the vendor's own page (litellm knows the model and prices it at zero,
+  so without the entry that member bills nothing).
+  **Seats chosen per seat, on independent boards, never on price** (user correction: "each seat
+  values different abilities"). Lead takes the strongest mid model on sustained tool use; reviewer
+  takes a real step down on critique that is still a first-rate figure reader; workers drop their
+  OpenAI member two index points below the pair floor. Lowering reasoning effort was **rejected**
+  as the lever: effort is the campaign's pinned constant across both published batches, and a
+  low-effort model fails by quitting early (measured: `gpt-5.6-luna` low, 1.5% pass@1 at 12.5
+  steps) where a weaker model fails by thrashing — a different failure shape than the one under
+  study. `claude-haiku-4-5` excluded by the user as infrequently updated; it also scores 0% on
+  Terminal-Bench 4.0.
+  **Scoring built (steps 6-8), all deterministic, frozen before spend.** `answer_key.json` (the
+  fourteen paper values from the pipeline's own provenance-headed comparison CSV, itself what
+  `main.tex` publishes, hashed); `extract.py` (regex over the report's prescribed labels, no model);
+  `score.py` (Tier 0 terminal classification plus Tier 1 signed-z recovery); `report.py` (tree
+  table, full appendix table, forest figure, recovery scatter). New `--score DIR` runs the whole
+  pass offline for $0. **41 new tests**, and three defects were found by pointing the code at the
+  real artifact rather than at a fixture: the extractor's window spilled past the end of an item,
+  so eight of fourteen quantities inherited a **neighbour's** error as a dual error and every
+  `(same artifact)` back-reference inherited the wrong file; the unit alternation matched a bare
+  `percent` ahead of `percent/keV` and silently truncated the slope's unit; and `summarise_ledger`
+  read a worker's status at `data.status` where it lives at `data.report.status`, so attempt 6's
+  nine worker reports came back as nine `None`s while the ledger held `ok` x4, `failed` x3,
+  `needs_human` x2.
+  **[A20] implemented, and its first version was inert on the run it was written for.** The frozen
+  rule says a terminal report filed by a cycle that committed is not a failure row. Keyed on the
+  trial record's `measured.needs_human` — derived from *worker* statuses — it would never have
+  fired, so `summarise_ledger` now records `lead_cycles` (the form filed, that cycle's commit count,
+  the status filed) and the rule reads those: attempt 6 filed four terminal reports, three after a
+  commit. The want-a-human count is left exactly as the ledger derived it and the correction is
+  recorded as `terminals_relabelled`, because that count comes from `coder.ask_human*`/`hitl.*`
+  events which the mislabelled terminal never emits (attempt 6's ledger holds none at all), so
+  subtracting would have erased a genuine question asked elsewhere in the same run.
+  **Verified against attempt 6 end to end:** all fourteen labels found and measured, values
+  hand-checked, 14/14 within three sigma, 10/10 on the non-approximate rows, mean |z| 1.00, PD mean
+  signed z -1.39, PA max |z| 0.63, trap reproduced, `useful` true. A tree that reports the
+  published values back scores 14/14 and fails the trap, which a test pins.
+
+- **2026-09-08 (second) — vendor concurrency measured instead of inherited, and the seat probe
+  turned out to be measuring its own scaffolding.**
+  **Concurrency.** The two published batches carry ceilings for four vendors, but their *reasons*
+  are not interchangeable and Alibaba had never been measured at all — while the contrast tree puts
+  two Qwen seats in every trial, so concurrency three means six concurrent Qwen streams. Measured
+  (`tests/test_live_concurrency.py`, six concurrent structured calls per vendor through
+  `ModelHandle`, one alone as baseline): **zero refusals on all three vendors**, with slowdown 0.80
+  for `claude-opus-5`, 0.65 for `gpt-5.6-terra` and **1.69** for `qwen3.8-max` (17.2 s alone to
+  29.1 s median). So no vendor is capped here, on the distinction Z.AI forced: a vendor that
+  *refuses* turns above a ceiling corrupts a trial, one that merely slows costs wall clock. Two
+  stated limits: short single calls rather than a multi-hour loop with a large context, and the
+  Alibaba row taken on `qwen3.8-max` so `qwen3.7-plus` is assumed rather than measured. Also
+  re-derived: **the Claude ceiling of two in `author_bench` does not transfer** — it is the
+  *coder's subscription* session cap shared across concurrent author subprocesses, and this sweep
+  authors on DeepSeek/Codex with API-keyed Anthropic chat seats. Launch shape: anchor at
+  concurrency 2 and contrast at 3, run **sequentially**, because launching both at once puts nine
+  concurrent Anthropic streams up against the six measured.
+  **The seat probe was hand-rolled and one of its three cells measured nothing.** Its worker cell
+  built the agent itself with no sandbox and no registry, and `analyze()` runs its inner ReAct loop
+  only when both are attached, so that cell drove a worker that could not call a tool — making its
+  failure (`qwen3.7-plus` emitting a structured answer alongside `bash` calls) unattributable. The
+  probe now calls `graph.runtime`'s `readonly_tools_for` / `readonly_roots_for` /
+  `attach_worker_runtime`, which `run_research` itself calls. Two further defects surfaced for free
+  once it used the real seam: the sandbox refused to start because the probe passed none of the
+  `analyze_env`/`analyze_ini_sh`/`repl_init_py` configuration production reads (now owned by
+  `SandboxSettings.from_config`, so a caller cannot build a differently-configured REPL by
+  omission), and `shutdown` is a coroutine. **Re-run on the real wiring, all three seats hold:**
+  the Qwen reviewer received the paper as text plus all 15 figure crops and recovered both a
+  text-only value and pixel-only figure colours; the terra lead ran a 12-call cycle, was sent its
+  workers' figures, and filed a two-link `author_chain` whose rationale overruled the workers'
+  stale gap report from source; the `qwen3.7-plus` worker ran a 10-call loop over all 29 resident
+  tools, saw its peer's figure, and flagged both the synthetic and the GPG-locked ObsIDs as
+  unusable. Also added: a preflight check that the frozen answer key sits outside every read root
+  and allow-listed root, verified in both directions.

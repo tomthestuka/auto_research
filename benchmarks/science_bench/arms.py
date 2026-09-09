@@ -69,6 +69,10 @@ BRAND_COLOURS: dict[str, str] = {
 # liability.
 _PRICES: dict[str, dict[str, float]] = {
     "qwen3.8-max": {"input": 2.0, "output": 6.0},
+    # Read off Alibaba's own qwen3.7-plus page (Singapore/International region, <=256k input),
+    # 2026-09-08. litellm knows this model and carries no rates for it, so without this entry the
+    # demonstration's second worker bills nothing and the cost column quietly understates the arm.
+    "qwen3.7-plus": {"input": 0.4, "output": 1.6},
 }
 
 #: Models on an axis whose rate has not been read off the vendor's own page yet. Named rather than
@@ -122,6 +126,16 @@ _PINNED_PARAMETERS: dict[str, dict[str, object]] = {
 }
 
 
+def pinned_parameters(provider: str) -> dict[str, object]:
+    """The pinned call settings for one vendor, for a caller that has no :class:`Seat` yet.
+
+    Public because a live probe of a batch's condition has to send the batch's request: a probe
+    that let a vendor default its effort would measure a different configuration than the one it
+    exists to check. One table, read from here, so the two cannot drift.
+    """
+    return dict(_PINNED_PARAMETERS.get(provider, {}))
+
+
 @dataclass(frozen=True)
 class Seat:
     """One model in one role: what it is, what it can be sent, and what its vendor tolerates."""
@@ -153,8 +167,47 @@ class Seat:
     """How many concurrently running trials may use this vendor in any seat; ``None`` is uncapped.
 
     A vendor ceiling, not a role ceiling: a throttled lead, reviewer or worker stalls a run exactly
-    as a throttled author does. Z.AI is the measured case -- above two in flight it throttled 87 to
-    97 per cent of turns."""
+    as a throttled author does. Z.AI is the measured refusal case -- above two in flight it
+    throttled 87 to 97 per cent of turns, which voided every GLM trial run at concurrency three or
+    four.
+
+    **Measured for this campaign's vendors, 2026-09-08** (`tests/test_live_concurrency.py`, six
+    concurrent structured calls per vendor through `ModelHandle`, one call alone as the baseline):
+
+    | vendor | alone | median at 6 | slowdown | refusals |
+    |---|---|---|---|---|
+    | anthropic (`claude-opus-5`) | 11.0 s | 8.8 s | 0.80 | 0 |
+    | openai (`gpt-5.6-terra`) | 7.7 s | 4.9 s | 0.65 | 0 |
+    | dashscope (`qwen3.8-max`) | 17.2 s | 29.1 s | **1.69** | 0 |
+
+    So none of the three is capped here, and the reason is the distinction Z.AI forces: a vendor
+    that **refuses** turns above a ceiling corrupts a trial, while one that merely slows costs wall
+    clock. Alibaba is the second kind — it is the slowest vendor on the roster and gets 1.7x slower
+    again at six in flight, which is a throughput decision rather than a validity one.
+
+    Two limits of that measurement, stated rather than smoothed over: it is short single calls, not
+    a multi-hour ReAct loop carrying a large context, so the slowdown at real trial shape is
+    unmeasured; and the Alibaba row was taken on `qwen3.8-max`, so `qwen3.7-plus` (the contrast
+    tree's worker) is assumed to share its vendor's behaviour rather than measured.
+
+    The Claude ceiling of two that `author_bench` carries does **not** transfer to this campaign:
+    it is the *coder's subscription* session cap, shared across concurrent author subprocesses, and
+    this sweep's author is DeepSeek on Codex while its Anthropic seats are API-keyed chat roles.
+
+    **The author is the seat where concurrency costs processes, so it was measured separately**
+    (`tests/test_live_coder_concurrency.py`, 2026-09-08). Every other seat is one HTTP call on a
+    shared client, and a trial's pipeline is sequential -- workers run serially, then the lead,
+    then the reviewer -- so N concurrent trials put at most N chat calls in flight. The author is a
+    real subprocess with its own app-server, jail, temp home and vendor session, so five trials
+    mean five of those. Result at five concurrent DeepSeek/Codex sessions on the production
+    backend: **5/5 connected, 5/5 replied, 5/5 changed their working tree**, median 7.6 s against
+    11.0 s for one alone (0.7x, i.e. no penalty), zero errors and zero vendor refusals. Session
+    startup was 0.35-0.49 s in every case.
+
+    Its stated limit, the same one the chat probe has: this is startup plus one short turn, not a
+    sustained 40-to-70-minute authoring link, so multi-turn concurrency over an hour is inferred
+    rather than measured. `author_bench` has run this vendor at four concurrently with nothing
+    recorded against it, which is the nearest evidence for the long shape."""
 
     note: str = ""
     """Why this level is on the axis. One sentence, for the write-up."""
@@ -246,6 +299,16 @@ LEADS: tuple[Seat, ...] = (
         model="qwen3.8-max",
         note="tied-first figure reader and first on agentic tool use; its own effort setting is undocumented",
     ),
+    Seat(
+        slug="terra",
+        provider="openai",
+        model="gpt-5.6-terra",
+        note=(
+            "the demonstration's mid-tier lead: one clear tier below the frontier band on every "
+            "independent index (AA 42 against 47-53; Terminal-Bench 4.0 21.5% against 37-58%), "
+            "and the strongest mid model on the sustained-tool-use axis a lead's loop depends on"
+        ),
+    ),
 )
 
 #: The reviewer. Also sent figures. Cut from three levels to two on budget, keeping the strongest
@@ -308,6 +371,18 @@ WORKER_PAIRS: tuple[WorkerPair, ...] = (
         note=(
             "the informative pairing on cost-performance: the two members sit two orders of "
             "magnitude apart in price at comparable agentic scores"
+        ),
+    ),
+    WorkerPair(
+        slug="w4",
+        members=(
+            Seat(slug="sonnet", provider="anthropic", model="claude-sonnet-5"),
+            Seat(slug="qwenplus", provider="dashscope", model="qwen3.7-plus"),
+        ),
+        note=(
+            "the demonstration's worker pair: one step below the incumbent, holding the Anthropic "
+            "member (the lowest current Anthropic vision model) and dropping the OpenAI member "
+            "from AA 42 to 26; its rate is in the price table because litellm prices it at zero"
         ),
     ),
 )
@@ -491,6 +566,85 @@ BLOCK1: tuple[RunSlot, ...] = _slots()
 #: and the measurement it becomes cannot drift apart. Run it alone, read its verbatim prompts for
 #: the arm, and only then batch the remaining ten.
 BLOCK0: RunSlot = BLOCK1[0]
+
+# ── The demonstration: two trees, three trials each ────────────────────────────────────
+#
+# **What replaced the array, and why** (ruling 2026-09-08). Block 1 estimates main effects from
+# nine arms at one trial each with 2 df of pure error, and the literature's floor for a stable
+# per-cell estimate on agentic tasks is 8-16 trials (arXiv 2512.06710). It was also expensive:
+# order $800-2,000 over two to three days. The claim it was built to support is not a per-seat
+# effect anyway -- it is that a tree of visibly weaker models still reaches a verifiable result or
+# declines cleanly, because the gate, the cross-provider review and the honest-failure floor carry
+# the load rather than the model's judgment. That is an existence claim, and an existence claim is
+# demonstrated, not estimated.
+#
+# So: the incumbent tree at three trials, one contrast tree at three, everything else pinned. Five
+# new runs, since attempt 6 is already the anchor's first. The array below is **kept** as the
+# record of what was designed and is asserted by test; it is simply not run.
+#
+# The contrast is chosen on **independently measured capability**, never on price: gpt-5.6-terra
+# leads (AA 42, Terminal-Bench 4.0 21.5%), qwen3.8-max reviews (AA 40, first on tau3 banking,
+# third on arena vision, CritPt 20 against Fable's 30), and the worker pair drops its OpenAI
+# member from AA 42 to qwen3.7-plus at 26. Each seat is judged on the ability that seat uses: a
+# reviewer needs scientific critique and figure reading and does not need to sustain a long agentic
+# loop, a lead needs planning and adjudication across one, and the workers plan and call tools.
+
+#: The demonstration's two trees, as (lead, reviewer, worker-pair) slugs.
+DEMO_TREES: tuple[tuple[str, str, str, str], ...] = (
+    ("opus", "fable", "w1", "anchor / incumbent: the tree every published run of this pipeline used"),
+    (
+        "terra",
+        "qwen",
+        "w4",
+        "contrast: one tier down in all three varied seats on independent indices",
+    ),
+)
+
+#: How many trials each tree gets. Three separates "always" from "sometimes" and is honest about
+#: not being an estimate; the write-up states the floor it does not reach.
+DEMO_K = 3
+
+
+def demonstration(k: int = DEMO_K) -> tuple[RunSlot, ...]:
+    """The runs actually to be executed: each demonstration tree, ``k`` times.
+
+    The anchor's first replicate is attempt 6, already run, so its slot resolves to that same
+    ``run_id`` by construction -- the id is a hash of the seats and the replicate index, so a
+    completed trial cannot be double-counted or accidentally re-run under a new name.
+    """
+    if k < 1:
+        raise ValueError(f"the demonstration needs at least one trial per tree; got k={k}")
+    slots: list[RunSlot] = []
+    position = 1
+    for lead, reviewer, workers, note in DEMO_TREES:
+        chosen = arm(lead, reviewer, workers)
+        for replicate in range(1, k + 1):
+            slots.append(
+                RunSlot(
+                    index=position,
+                    arm=chosen,
+                    replicate=replicate,
+                    block="demo",
+                    verbatim_recording=(replicate == 1),
+                    note=note if replicate == 1 else f"replicate {replicate}",
+                )
+            )
+            position += 1
+    return tuple(slots)
+
+
+#: The demonstration's slots, built once.
+DEMO: tuple[RunSlot, ...] = demonstration()
+
+
+def demo_tree_slug(slot: RunSlot) -> str:
+    """Which demonstration tree a slot belongs to, for grouping a score by tree.
+
+    Derived from the arm rather than stored, and it is **report-side only**: like every other seat
+    label it never reaches a path, an id or anything an actor can read.
+    """
+    return f"{slot.arm.lead.slug}/{slot.arm.reviewer.slug}/{slot.arm.workers.slug}"
+
 
 #: What block 2 needs before it can exist. Recorded so a reader can tell an unassigned block from
 #: a forgotten one.

@@ -2,8 +2,12 @@
 
     python -m benchmarks.science_bench --check              # every no-model check, no spend
     python -m benchmarks.science_bench --block0             # the leak probe: one run, recorded
-    python -m benchmarks.science_bench --slots 2-11         # the rest of block 1
+    python -m benchmarks.science_bench --slots 2-6          # the rest of the demonstration
     python -m benchmarks.science_bench --status DIR         # progress and liveness, costs nothing
+    python -m benchmarks.science_bench --score  DIR         # tables and figures, no spend
+
+The default slot set is the **demonstration**: two seat assignments, three trials each. The
+11-slot screening array is kept under ``--block1`` as the record of what was designed.
 
 Every trial is a whole research run with authoring on: three chat roles, an author subprocess, a
 gate and a tool review, over hours. The report states what it cost.
@@ -19,13 +23,15 @@ import re
 import shutil
 import sys
 from collections import Counter
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
 
-from benchmarks.science_bench import arms, environment as env_mod, request as request_mod, trial
-from benchmarks.science_bench.arms import BLOCK0, BLOCK1, RunSlot
+from benchmarks.science_bench import arms, environment as env_mod, report as report_mod
+from benchmarks.science_bench import request as request_mod, score as score_mod, trial
+from benchmarks.science_bench.arms import BLOCK0, BLOCK1, DEMO, RunSlot, demo_tree_slug
 
 OUT_ROOT = trial.REPO_ROOT / "logs" / "dev" / "science-bench"
 
@@ -104,6 +110,36 @@ def preflight(slots: list[RunSlot], *, workspace: Path) -> list[str]:
         problems += [] if posed.question.strip() else ["the frozen question is empty"]
     except Exception as exc:  # noqa: BLE001
         problems.append(f"the frozen question does not load: {type(exc).__name__}: {exc}")
+
+    # The scoring key must sit outside every root an actor can read. Not secrecy -- this question's
+    # answer is published and the tree is *supposed* to read the paper -- but tamper hygiene: a
+    # scored artifact an actor could reach is not evidence about that actor. `runtime_dir`,
+    # `papers_dir` and `toolkit_root` are the lead's and reviewer's read roots, and the whole
+    # filesystem allow-list is what the OS jail mounts, so the key is checked against all of them
+    # rather than against the three by name.
+    try:
+        from benchmarks.science_bench import extract as extract_mod
+
+        key_path = Path(extract_mod.ANSWER_KEY).resolve()
+        if not key_path.is_file():
+            problems.append(f"the frozen answer key is missing: {key_path}")
+        readable = [
+            str(source.get(name))
+            for name in ("runtime_dir", "papers_dir", "toolkit_root")
+            if source.get(name)
+        ] + [str(root) for root in (source.get("agent_fs_allow") or [])]
+        for root in readable:
+            try:
+                resolved_root = Path(root).expanduser().resolve()
+            except OSError:
+                continue
+            if key_path.is_relative_to(resolved_root):
+                problems.append(
+                    f"the frozen answer key {key_path} sits inside {resolved_root}, which an "
+                    f"actor can read; move it outside every allow-listed and read root"
+                )
+    except Exception as exc:  # noqa: BLE001
+        problems.append(f"the answer key does not load: {type(exc).__name__}: {exc}")
 
     # ── the toolkit the trees author from ───────────────────────────────────
     if not (toolkit_source / ".git").is_dir():
@@ -451,10 +487,15 @@ def batch_status(directory: Path) -> str:
 # ── Entry ───────────────────────────────────────────────────────────────────
 
 
-def parse_slots(spec: str | None) -> list[RunSlot]:
-    """``None`` = all of block 1; ``'1'``/``'2-11'``/``'1,4,7'`` = exactly those."""
+def parse_slots(spec: str | None, pool: Sequence[RunSlot] | None = None) -> list[RunSlot]:
+    """``None`` = every slot of ``pool``; ``'1'``/``'2-11'``/``'1,4,7'`` = exactly those.
+
+    ``pool`` defaults to the demonstration, which is what is actually run: block 1's array is kept
+    as the record of what was designed and is selectable with ``--block1``.
+    """
+    slots = list(pool if pool is not None else DEMO)
     if not spec:
-        return list(BLOCK1)
+        return slots
     wanted: set[int] = set()
     for part in spec.split(","):
         part = part.strip()
@@ -463,10 +504,10 @@ def parse_slots(spec: str | None) -> list[RunSlot]:
             wanted.update(range(int(low), int(high) + 1))
         elif part:
             wanted.add(int(part))
-    chosen = [slot for slot in BLOCK1 if slot.index in wanted]
+    chosen = [slot for slot in slots if slot.index in wanted]
     unknown = wanted - {slot.index for slot in chosen}
     if unknown:
-        raise SystemExit(f"no such slot(s): {sorted(unknown)}; block 1 is 1-{len(BLOCK1)}")
+        raise SystemExit(f"no such slot(s): {sorted(unknown)}; this set is 1-{len(slots)}")
     return chosen
 
 
@@ -477,7 +518,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "recording of every actor's prompt. Read its transcript for the arm "
                              "before batching anything else; if it is clean it IS slot 1")
     parser.add_argument("--slots", default=None,
-                        help="which block-1 slots to run (e.g. 2-11); default all eleven")
+                        help="which slots of the selected set to run (e.g. 2-6); default all")
+    parser.add_argument("--block1", action="store_true",
+                        help="select the superseded 11-slot screening array instead of the "
+                             "demonstration. Kept as the record of what was designed; running it "
+                             "is a deliberate act, not the default")
+    parser.add_argument("--score", metavar="DIR", type=Path, default=None,
+                        help="score a finished batch from its records and reports, and write the "
+                             "report, tables and figures. No model, no spend")
     parser.add_argument("--concurrency", type=int, default=3,
                         help="trials in flight at once, under the roster's vendor ceilings")
     parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE,
@@ -521,7 +569,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {len(findings)} leak(s)" if findings else "  clean")
         return 1 if findings else 0
 
-    slots = [BLOCK0] if args.block0 else parse_slots(args.slots)
+    if args.score is not None:
+        records = trial.load_records(Path(args.score))
+        if not records:
+            print(f"no records under {args.score}")
+            return 1
+        for record in records:
+            slot = next((s for s in DEMO if s.run_id == record.get("run_id")), None)
+            if slot is not None:
+                record["tree"] = demo_tree_slug(slot)
+        scores = score_mod.score_batch(records)
+        score_mod.write_scores(Path(args.score), scores)
+        path = report_mod.write_report(Path(args.score), scores, {})
+        print(report_mod.build_report(scores, {}))
+        print(f"\n  wrote {path} and its two figures")
+        return 0
+
+    pool = BLOCK1 if args.block1 else DEMO
+    slots = [BLOCK0] if args.block0 else parse_slots(args.slots, pool)
 
     print(f"science_bench: {len(slots)} slot(s)")
     for slot in slots:

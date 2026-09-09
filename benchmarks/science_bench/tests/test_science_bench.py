@@ -64,10 +64,18 @@ def test_block1_has_eleven_slots_over_nine_distinct_arms():
 
 
 def test_each_lead_and_each_worker_pair_appears_three_times():
+    """Balance is over the levels **block 1 itself uses**, not over the whole roster.
+
+    The roster carries levels block 1 was never designed over -- ``terra`` and ``w4`` exist for the
+    demonstration -- so asserting against ``LEADS``/``WORKER_PAIRS`` would fail on any later
+    addition while saying nothing about this array. What must hold is that the array uses exactly
+    three leads and three pairs, three times each, and every one it names is a real roster level.
+    """
     leads = Counter(slot.arm.lead.slug for slot in BLOCK1)
     pairs = Counter(slot.arm.workers.slug for slot in BLOCK1)
-    assert set(leads) == {seat.slug for seat in LEADS}
-    assert set(pairs) == {pair.slug for pair in WORKER_PAIRS}
+    assert set(leads) <= {seat.slug for seat in LEADS}
+    assert set(pairs) <= {pair.slug for pair in WORKER_PAIRS}
+    assert len(leads) == 3 and len(pairs) == 3
     # The anchor's two replicates land on lead `opus` and pair `w1`, so those carry 5 rather than 3.
     distinct = {slot.arm for slot in BLOCK1}
     assert Counter(a.lead.slug for a in distinct) == {"opus": 3, "sol": 3, "qwen": 3}
@@ -75,8 +83,12 @@ def test_each_lead_and_each_worker_pair_appears_three_times():
 
 
 def test_every_lead_by_worker_pair_combination_appears_exactly_once():
-    combos = Counter((a.lead.slug, a.workers.slug) for a in {slot.arm for slot in BLOCK1})
-    assert len(combos) == len(LEADS) * len(WORKER_PAIRS)
+    """Full crossing of the levels the array uses: 3 leads x 3 pairs, each combination once."""
+    distinct = {slot.arm for slot in BLOCK1}
+    combos = Counter((a.lead.slug, a.workers.slug) for a in distinct)
+    used_leads = {a.lead.slug for a in distinct}
+    used_pairs = {a.workers.slug for a in distinct}
+    assert len(combos) == len(used_leads) * len(used_pairs) == 9
     assert set(combos.values()) == {1}
 
 
@@ -857,10 +869,17 @@ def test_block0_is_selected_alone_and_is_the_anchor_slot():
     assert BLOCK0.verbatim_recording is True
 
 
-def test_slot_selection_accepts_ranges_lists_and_the_whole_block():
-    assert [s.index for s in cli.parse_slots(None)] == list(range(1, 12))
-    assert [s.index for s in cli.parse_slots("2-11")] == list(range(2, 12))
-    assert [s.index for s in cli.parse_slots("1,4,7")] == [1, 4, 7]
+def test_slot_selection_defaults_to_the_demonstration():
+    """The default set is what is actually run; the screening array is behind ``--block1``."""
+    assert [s.index for s in cli.parse_slots(None)] == list(range(1, 7))
+    assert [s.index for s in cli.parse_slots("2-6")] == list(range(2, 7))
+    assert [s.index for s in cli.parse_slots("1,4")] == [1, 4]
+
+
+def test_the_screening_array_is_still_selectable_in_full():
+    assert [s.index for s in cli.parse_slots(None, BLOCK1)] == list(range(1, 12))
+    assert [s.index for s in cli.parse_slots("2-11", BLOCK1)] == list(range(2, 12))
+    assert cli.parse_args(["--block1"]).block1 is True
 
 
 def test_a_slot_that_does_not_exist_is_refused():

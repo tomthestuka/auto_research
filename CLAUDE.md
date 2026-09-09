@@ -1974,3 +1974,148 @@ history. Token-level preservation of the second pass was checked mechanically, n
   went wrong the same way — a filter or a summary standing in for the artifact — and both were
   settled by reading the record itself (the ledger; a freshly built worktree). §13 gains five
   entries.
+
+- 2026-09-08 — **The science sweep became a harness-capability demonstration, any model can now be
+  put in any seat for any live test, and the scoring pass found three reader defects by being
+  pointed at a real artifact.**
+  **The reframe (user ruling).** The 11-slot screening array is superseded by six runs: the
+  incumbent seat assignment three times (attempt 6 is its first, by hash rather than bookkeeping)
+  and one contrast assignment three times. Two reasons, and the second is the load-bearing one.
+  Nine arms at n=1 with 2 df of pure error cannot carry a seat effect at any price — the published
+  floor for a stable per-cell estimate on agentic tasks is **8-16 trials** (arXiv 2512.06710,
+  ICC convergence; n>=32 for complex reasoning) — and the claim was never a per-seat effect: it is
+  that **a tree of visibly weaker models still reaches a verifiable result or declines cleanly**,
+  because the gate, the cross-provider tool review and the honest-failure floor carry the load
+  rather than the models' judgment. An existence claim is demonstrated, not estimated, and it is
+  §9.1's own thesis rather than a new one. Cost falls from order $800-2,000 to order $300-600. The
+  array is **kept** (`--block1`, balance still asserted) as the record of what was designed.
+  **Grounded against the field first, and the grounding changed the wording.** "Harness
+  engineering" is a live 2026 framing (OpenAI Feb-2026, Anthropic Nov-2025, LangChain Mar-2026
+  "Agent = Model + Harness"), and the pro-harness evidence norm is *model fixed, harness varied,
+  repeats stated* (arXiv 2606.08529: pre-registered, 5 models x 3 scaffolds, 3 attempts per
+  question, a 28-point within-model swing). But two large-N papers cut the other way and a referee
+  will cite them: **2604.18805** (>25,000 runs over 8 domains: base model 41.4% of explained
+  variance, scaffold **1.5%**, "scaffold engineering alone cannot repair them") and **2608.14905**,
+  our own anchor (failures recur across all 8 harness x model combinations). So the claim to make is
+  the one neither can measure: the harness does not repair the deficit, it **converts** it into a
+  rejected commit or a plainly stated non-verifiable verdict instead of a plausible wrong number.
+  A survey claim that Confucius Code Agent (2512.10398) shows a weaker model beating a stronger one
+  at 52.7 vs 52.0 was **not** verifiable in that paper's abstract and is not cited.
+  **Seats chosen per seat, on independent boards, never on price** (user correction: "each seat
+  values different abilities"). Lead `gpt-5.6-terra` (AA 42 vs the frontier band's 47-53,
+  Terminal-Bench 4.0 21.5% vs 37-58%) because the lead's loop is the longest in the pipeline;
+  reviewer `qwen3.8-max` (AA 40, CritPt 20 against Fable's 30, yet arena-vision #3 and tau3-banking
+  #1) because that seat needs critique and figure reading and never sustains a long loop; workers
+  `claude-sonnet-5` + `qwen3.7-plus` (38, 26). **Lowering reasoning effort was rejected as the
+  lever**: effort is the campaign's pinned constant across both published batches, and a low-effort
+  model fails by *quitting early* (`gpt-5.6-luna` low: 1.5% pass@1 at 12.5 steps) where a weaker
+  model fails by thrashing — a different failure shape than the one under study. `claude-haiku-4-5`
+  excluded by the user as infrequently updated; it also scores 0% on Terminal-Bench 4.0.
+  **Any model in any seat, for any live test, through the configuration pointer.** Live tests that
+  drive a real role resolve their model the way production does, so they measured whatever
+  `models.yaml` named, and the alternative each reached for was a hand-built `ModelHandle` — which
+  is the 2026-08-06 altitude mistake. New `tests/seats.py` writes a whole configuration directory
+  with `models.yaml` overridden and the other three files copied **byte for byte**, and
+  `tests/conftest.py` applies it session-wide from `--seats` / `AUTO_RESEARCH_SEATS`
+  (`role=provider:model`, `|` between a role's members, `!novision`/`!nodocs`). Code under test
+  then resolves the overridden seat through its ordinary path with the media guard, key rotation,
+  retry and prompt loading all in front of it, knowing nothing about the mechanism. Three
+  properties make pointing a *running* process elsewhere safe, and the third is a constraint on the
+  helper rather than a fact about it: `load_registry()` holds no cache and resolves `models_yaml()`
+  per call; the four file-reading caches key on the **resolved path**; and the caches that hold a
+  *value* rather than a path (`_react_loop_cap`, `_structured_retry_cap`, the jail flags) are
+  unaffected **only because orchestration is copied unchanged** — a helper that also edited a cap
+  would be silently ineffective for anything already read once. Absent a seat spec the conftest is
+  a no-op, which a test asserts by requesting the session fixture rather than reimplementing it.
+  New `tests/test_seat_overrides.py` (27) and `tests/test_live_seat_probe.py` (3 cells, unrun):
+  reviewer reads a paper (a number only the text carries **and** figure colours only a rendered
+  crop can supply), lead sustains a real `run_cycle` and files a form, worker drives a real tool
+  loop and sees a peer figure — per-actor capability, not stage coverage (the 2026-08-20 lesson).
+  **Scoring built (steps 6-8), frozen before spend, no model in the loop.** `answer_key.json` (the
+  fourteen paper values from the pipeline's own provenance-headed comparison CSV, which is what
+  `main.tex` publishes, hashed), `extract.py`, `score.py`, `report.py`, and `--score DIR` for a $0
+  offline pass. Four rules settled before a number was seen: signed z is the pipeline's own
+  arithmetic (and agrees in magnitude with `compare_to_benchmark`'s fourteen published values on
+  every row, a free oracle a test uses); **a polarization angle is periodic modulo 180 degrees** so
+  its difference is wrapped, because otherwise a tree reporting the same angle as `+159.3` instead
+  of `-20.7` scores as a hundred-sigma discrepancy for a convention choice; within tolerance is the
+  key's own 3-sigma flag; and a **unit mismatch never counts as recovered**, being a different
+  failure with a different cause. `useful` = >=10 of 14 (user). A tree that reports the published
+  values back scores 14/14 and **fails** the trap, which a test pins.
+  **Three defects found by pointing the code at the real artifact instead of a fixture, and all
+  three were in the code that *reads* results.** (i) The extractor's window ran a fixed 420
+  characters past a label and so spilled into the next list item: eight of fourteen quantities
+  inherited a **neighbour's** error as a dual error, both genuine dual errors were missed, and every
+  `(same artifact)` back-reference inherited the wrong file. Bounded now at the earliest of the next
+  item, the next prescribed label, and the character cap. (ii) The unit alternation listed a bare
+  `percent` ahead of `percent/keV`, so the PD(E) slope's unit was silently truncated — first-match
+  wins, and the truncation hides exactly the unit error the field exists to catch. (iii)
+  `summarise_ledger` read a worker's status at `data.status` where it lives at `data.report.status`,
+  so attempt 6's nine worker reports came back as nine `None`s while the ledger held `ok` x4,
+  `failed` x3, `needs_human` x2.
+  **[A20] was implemented and its first version was inert on the very run it was written for.**
+  The frozen rule says a terminal report filed by a cycle that committed is not a failure row.
+  Keyed on the trial record's `measured.needs_human` — which is derived from *worker* statuses — it
+  would never have fired, so `summarise_ledger` now records `lead_cycles` (the form filed, that
+  cycle's commit count, the status filed) and the rule reads those: attempt 6 filed **four**
+  terminal reports, three of them after a commit. The want-a-human count is left exactly as the
+  ledger derived it and the correction is recorded as `terminals_relabelled`, because that count
+  comes from `coder.ask_human*`/`hitl.*` events which the mislabelled terminal never emits (that
+  ledger holds none at all) — subtracting would have erased a genuine question asked elsewhere in
+  the same run. Same shape as the 2026-09-02 unit-correction theme: a signal standing in for
+  something it does not bound.
+  **Verified end to end against attempt 6:** all fourteen labels found and measured, values
+  hand-checked against the report, 14/14 within 3 sigma, 10/10 on the non-approximate rows, mean
+  |z| 1.00, PD mean signed z -1.39, PA max |z| 0.63, trap reproduced, `useful` true. New roster
+  levels (`gpt-5.6-terra` lead, `w4` worker pair), `arms.pinned_parameters` made public, and
+  `qwen3.7-plus` priced off the vendor's own page because litellm knows the model and prices it at
+  **zero**, so without the entry that member bills nothing and its arm's cost is understated.
+  Three `science_bench` tests were **corrected rather than loosened**: block 1's balance is a
+  property of the three levels *it* uses, not of a roster that now also carries demonstration-only
+  levels. Suite 1752 -> 1868 (`test_seat_overrides.py` 27, `test_scoring.py` 41,
+  `test_no_undefined_names.py` 242, science_bench 112 -> 154).
+
+- 2026-09-08 (second, same day) — **A live probe was measuring its own scaffolding, so role wiring
+  now has one definition in the run path.** Found by the user's instruction to use the real
+  pipeline's injectable seams rather than a hand-rolled version, and it was right.
+  **The defect, and why it was worse than a wrong result.** The seat probe's worker cell built an
+  `AnalystWorkerAgent` by hand and attached **no sandbox and no registry**. `analyze()` runs its
+  inner ReAct tool loop only when both are present and otherwise falls back to a plain structured
+  call, so that cell drove a worker that could not call a tool. Its live failure —
+  `qwen3.7-plus` emitting a structured answer alongside `bash` calls, which `_responses.py`
+  rejects as premature — is therefore **unattributable**: a model that will not drive a loop and a
+  model that was never given one are indistinguishable from outside. The lead cell was wrong more
+  quietly, building a `ReadOnlyToolProvider` that differed from production's by five arguments.
+  Same class as the 2026-08-06 altitude lesson, one layer up: a test below the layer the defects
+  live in measures the test.
+  **The fix is one definition, called by the run path.** `graph/runtime.py` gains
+  `readonly_tools_for(role, ...)` (the reviewer's and the lead's loops, which differ by three
+  flags on purpose and refuse any other role rather than handing it a default),
+  `readonly_roots_for(run_id, toolkit_root)`, and `attach_worker_runtime(workers, ...)` (identity,
+  memory, sandbox, registry, stop-aborter). `run_research` calls all three instead of restating
+  them; behaviour-preserving, with `include_plan_and_debate` now derived from whether a human
+  handler exists rather than passed `True` and re-decided one layer down. Two incidental
+  confirmations while wiring the probe to them: both roles load their own prompt, so the
+  hand-passed `prompt=load_prompt(...)` was redundant, and sandbox teardown is `shutdown`, not
+  `close`. New `tests/test_role_wiring_seams.py` (8), a **static** guard because correctness here
+  cannot be asserted at runtime: the two constructors appear in the run path only inside their
+  factory, `run_research` actually calls both (else the factories would keep passing while
+  describing a role production no longer builds — the worst version, since a probe would then
+  measure a fiction with a factory's authority), the probe hand-rolls neither, and the two loops
+  still differ as documented.
+  **Two claims I made about the blast radius were wrong, and both were checked rather than
+  repeated.** "Six older live tests" came from a `head`-truncated grep: **nineteen** files
+  construct that wiring, of which six are live tests (`test_live_agents`,
+  `test_live_honest_failure`, `test_live_lead_cycle`, `test_live_loader_authoring` x3,
+  `test_live_no_hitl` x2, `test_live_report_rounds`), one more live test builds sandboxes directly
+  as its own subject (`test_live_sandbox_policy`), and the heavily-counted deterministic files
+  (`test_react_tools` 22, `test_lead_forms` 21) are unit tests *of* the provider, where
+  constructing it directly is the point. And "two of them back published measurements" is
+  **false**: no number in the manuscript is backed by any live test — grepping `main.tex` and its
+  evidence ledger for `test_live` returns nothing. The file that *does* back published numbers is
+  not a test: `benchmarks/author_bench/trial.py`, behind Table 6 and Fig. 5, hand-rolls the lead's
+  loop. Its comment claims it is wired as `runtime.py` wires it, and measuring both builds
+  confirms it — identical five tools (`list_dir`, `read_file`, the data catalog, `web_fetch`,
+  `web_search`) — so the published authoring numbers stand. It is left untouched: routing a
+  published instrument through the new factory is behaviour-preserving on this evidence but is the
+  human's call, not a side effect of a test fix.

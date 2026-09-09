@@ -1,0 +1,167 @@
+{
+  "question": "cygx1_reproduce_krawczynski2022_polarization",
+  "reference": "Krawczynski et al. 2022, Science 378, 650",
+  "source_artifact": "papers/FANGZ/data_benchmark_compare_krawczynski2022.csv",
+  "source_sha256": "5b83a0ec9c76a2604d1e917f4ac82ca50f4fd9321df5fe957f6528614472cf19",
+  "source_provenance": "compare_to_benchmark provenance: {\"created_at\": \"2026-07-10T14:22:33Z\", \"produced_by\": \"xspec_utils.lib.benchmark_compare.compare_to_benchmark\", \"sigma_flag\": 3.0}",
+  "published_as": "papers/FANGZ/main.tex table t:cygx1",
+  "sigma_flag": 3.0,
+  "useful_threshold_k": 10,
+  "frozen": "2026-09-08",
+  "quantities": {
+    "May_PD_2-8keV_PCUBE": {
+      "unit": "percent",
+      "paper_value": 4.01,
+      "paper_error": 0.2,
+      "paper_source": "Krawczynski+2022 Table S2 (DU-combined broadband)",
+      "approximate": false,
+      "periodic_deg": null,
+      "reference_value": 3.369,
+      "reference_error": 0.195,
+      "reference_z": 2.29478
+    },
+    "May_PA_2-8keV_PCUBE": {
+      "unit": "deg",
+      "paper_value": -20.7,
+      "paper_error": 1.4,
+      "paper_source": "Krawczynski+2022 Table S2 (DU-combined broadband)",
+      "approximate": false,
+      "periodic_deg": 180.0,
+      "reference_value": -20.453,
+      "reference_error": 1.659,
+      "reference_z": 0.113784
+    },
+    "June_PD_2-8keV_PCUBE": {
+      "unit": "percent",
+      "paper_value": 3.84,
+      "paper_error": 0.31,
+      "paper_source": "Krawczynski+2022 June ToO broadband",
+      "approximate": false,
+      "periodic_deg": null,
+      "reference_value": 3.732,
+      "reference_error": 0.304,
+      "reference_z": 0.248742
+    },
+    "June_PA_2-8keV_PCUBE": {
+      "unit": "deg",
+      "paper_value": -25.7,
+      "paper_error": 2.3,
+      "paper_source": "Krawczynski+2022 June ToO broadband",
+      "approximate": false,
+      "periodic_deg": 180.0,
+      "reference_value": -24.916,
+      "reference_error": 2.331,
+      "reference_z": 0.239412
+    },
+    "Combined_PD_2-8keV_PCUBE": {
+      "unit": "percent",
+      "paper_value": 3.95,
+      "paper_error": 0.17,
+      "paper_source": "Krawczynski+2022 May+June combined",
+      "approximate": false,
+      "periodic_deg": null,
+      "reference_value": 3.456,
+      "reference_error": 0.165,
+      "reference_z": 2.085205
+    },
+    "Combined_PA_2-8keV_PCUBE": {
+      "unit": "deg",
+      "paper_value": -22.2,
+      "paper_error": 1.2,
+      "paper_source": "Krawczynski+2022 May+June combined",
+      "approximate": false,
+      "periodic_deg": 180.0,
+      "reference_value": -21.727,
+      "reference_error": 1.365,
+      "reference_z": 0.260251
+    },
+    "May_XSPEC_PD_polconst": {
+      "unit": "percent",
+      "paper_value": 3.9,
+      "paper_error": 0.2,
+      "paper_source": "Krawczynski+2022 XSPEC tbabs*polconst*powerlaw",
+      "approximate": false,
+      "periodic_deg": null,
+      "reference_value": 3.36,
+      "reference_error": 0.14,
+      "reference_z": 2.211926
+    },
+    "May_XSPEC_PA_polconst": {
+      "unit": "deg",
+      "paper_value": -21.0,
+      "paper_error": 1.0,
+      "paper_source": "Krawczynski+2022 XSPEC tbabs*polconst*powerlaw",
+      "approximate": false,
+      "periodic_deg": 180.0,
+      "reference_value": -20.291,
+      "reference_error": 1.214,
+      "reference_z": 0.45078
+    },
+    "May_LinearFit_PD_A_at1keV": {
+      "unit": "percent",
+      "paper_value": 2.9,
+      "paper_error": 0.4,
+      "paper_source": "Krawczynski+2022 11-bin PD linear fit A (at 1 keV)",
+      "approximate": false,
+      "periodic_deg": null,
+      "reference_value": 1.724,
+      "reference_error": 0.341,
+      "reference_z": 2.237339
+    },
+    "May_LinearFit_PD_B_slope": {
+      "unit": "percent/keV",
+      "paper_value": 0.58,
+      "paper_error": 0.15,
+      "paper_source": "Krawczynski+2022 11-bin PD linear fit slope B",
+      "approximate": false,
+      "periodic_deg": null,
+      "reference_value": 0.534,
+      "reference_error": 0.114,
+      "reference_z": 0.244156
+    },
+    "May_PD_2-3keV": {
+      "unit": "percent",
+      "paper_value": 2.8,
+      "paper_error": 0.4,
+      "paper_source": "Krawczynski+2022 Table S2 band 2-3 keV (approx)",
+      "approximate": true,
+      "periodic_deg": null,
+      "reference_value": 2.584,
+      "reference_error": 0.246,
+      "reference_z": 0.459974
+    },
+    "May_PD_3-4keV": {
+      "unit": "percent",
+      "paper_value": 3.3,
+      "paper_error": 0.4,
+      "paper_source": "Krawczynski+2022 Table S2 band 3-4 keV (approx)",
+      "approximate": true,
+      "periodic_deg": null,
+      "reference_value": 2.873,
+      "reference_error": 0.241,
+      "reference_z": 0.914364
+    },
+    "May_PD_4-6keV": {
+      "unit": "percent",
+      "paper_value": 4.4,
+      "paper_error": 0.4,
+      "paper_source": "Krawczynski+2022 Table S2 band 4-6 keV (approx)",
+      "approximate": true,
+      "periodic_deg": null,
+      "reference_value": 3.755,
+      "reference_error": 0.279,
+      "reference_z": 1.322563
+    },
+    "May_PD_6-8keV": {
+      "unit": "percent",
+      "paper_value": 7.1,
+      "paper_error": 1.0,
+      "paper_source": "Krawczynski+2022 Table S2 band 6-8 keV (approx)",
+      "approximate": true,
+      "periodic_deg": null,
+      "reference_value": 4.986,
+      "reference_error": 0.638,
+      "reference_z": 1.782178
+    }
+  }
+}

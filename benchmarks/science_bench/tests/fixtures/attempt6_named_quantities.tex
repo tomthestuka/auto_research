@@ -1,0 +1,22 @@
+% FROZEN FIXTURE -- the Named-Quantity Report section of run fbb93f26 (attempt 6, 2026-09-03),
+% verbatim. Extracted rather than written for the test: a fixture written by hand would
+% measure a report shaped like the test's expectations. Regenerate with the report at
+% <run_dir>/reviewer/report/report.tex if the frozen run's artifacts move.
+\section{Named-Quantity Report}
+The fourteen prescribed quantities, stated verbatim (value $\pm 1\sigma$), each read from the artifact listed in the analysis record:
+\begin{enumerate}
+\item \textbf{May\_PD\_2-8keV\_PCUBE} $= 3.4534 \pm 0.1935$ percent (\texttt{pcube\_spectrum\_01002901.csv}, du=ALL, bin 0; cross-confirmed by \texttt{pcube\_timeseg\_01002901.csv}).
+\item \textbf{May\_PA\_2-8keV\_PCUBE} $= -20.670 \pm 1.605$ deg (same artifact).
+\item \textbf{June\_PD\_2-8keV\_PCUBE} $= 3.7486 \pm 0.3035$ percent (\texttt{pcube\_spectrum\_01250101.csv}; cross-confirmed by \texttt{pcube\_timeseg\_01250101.csv}).
+\item \textbf{June\_PA\_2-8keV\_PCUBE} $= -24.653 \pm 2.319$ deg (same artifact).
+\item \textbf{Combined\_PD\_2-8keV\_PCUBE} $= 3.5240 \pm 0.1637$ percent (\texttt{pcube\_spectrum\_01002901\_01250101.csv}, single native six-file PCUBE call, backscal ratio 0.0863767).
+\item \textbf{Combined\_PA\_2-8keV\_PCUBE} $= -21.778 \pm 1.331$ deg (same artifact).
+\item \textbf{May\_XSPEC\_PD\_polconst} $= 3.26 \pm 0.14$ percent raw; $\pm 0.56$ percent $\chi^2$-inflated (\texttt{xspec\_fit\_polconst\_may.json}, fit stat $22116.55/1335$).
+\item \textbf{May\_XSPEC\_PA\_polconst} $= -20.01 \pm 1.22$ deg raw; $\pm 4.96$ deg inflated (same artifact).
+\item \textbf{May\_LinearFit\_PD\_A\_at1keV} $= 1.8208 \pm 0.3370$ percent (\texttt{pol\_energy\_trend\_pcube\_spectrum\_may\_11bin\_ALL.json}).
+\item \textbf{May\_LinearFit\_PD\_B\_slope} $= 0.5342 \pm 0.1125$ percent/keV (same artifact).
+\item \textbf{May\_PD\_2-3keV} $= 2.6596 \pm 0.2442$ percent (\texttt{pcube\_spectrum\_01002901\_4band.csv}, bin 0).
+\item \textbf{May\_PD\_3-4keV} $= 2.9769 \pm 0.2393$ percent (same artifact, bin 1).
+\item \textbf{May\_PD\_4-6keV} $= 3.8502 \pm 0.2765$ percent (same artifact, bin 2).
+\item \textbf{May\_PD\_6-8keV} $= 5.0537 \pm 0.6314$ percent (same artifact, bin 3).
+\end{enumerate}

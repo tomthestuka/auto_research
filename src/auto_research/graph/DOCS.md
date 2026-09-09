@@ -198,6 +198,21 @@ verdicts, two iteration counters, and the cap.
 - `_resolve_cited_paths(verdict, reviewer) -> list[Path]` — resolves a verdict's
   `cited_paths` to `Path`s, keeping only papers the reviewer actually opened this run
   (no enforcement when the reviewer has no KB-tool provider, e.g. a test double).
+- `readonly_tools_for(role, *, roots, retrieval=None, web_source=None, human_handler=None,
+  model="") -> ReadOnlyToolProvider` — the read-only inspection loop production gives the
+  `reviewer` or the `analyst_lead`. The two differ on purpose: the lead gets the data catalog and,
+  when a human is reachable, the budget-free design channel, and is denied the paper knowledge
+  base, because it investigates toolkit source and the archive rather than literature. Any other
+  role raises rather than receiving a default loop.
+- `readonly_roots_for(run_id, toolkit_root) -> list[Path]` — the three roots those two roles may
+  read: the run directory, the papers directory, the toolkit.
+- `attach_worker_runtime(workers, *, run_id, registry, toolkit_root, analyze_env=None,
+  analyze_ini_sh=None, repl_init_py=None, mcp_client=None, run_control=None)
+  -> list[PersistentSandbox]` — gives each `AnalystWorkerAgent` its stable key, memory path,
+  report directory, one persistent sandbox and the registry, and registers the sandbox's aborter
+  so a human stop cancels an in-flight tool call. Returns the sandboxes for the caller to shut
+  down. **Without it a worker has no tool loop**: `analyze()` runs its inner ReAct loop only when
+  a sandbox and a registry are both attached, and otherwise falls back to a plain structured call.
 - `build_graph(...)` — constructs and compiles the six-node state graph
   (`literature`, `review_literature`, `analysis`, `review_analysis`,
   `finalize_run`, `compose_report`).
@@ -282,3 +297,25 @@ Compacted 2026-09-01: entries through 2026-07-31 folded into themed ranges (deta
   report is composed.** `reconstruct_run` raises `UserInterruptionError` (not `RunDied`) for an
   `interrupted` marker, so a detached notebook run sees the same exception as an in-process one. Tests:
   `tests/test_interrupt.py` (+15).
+
+- 2026-09-08 — **Role wiring extracted into three factories the run path itself calls.** A caller
+  that assembled a role by hand assembled a *different* role, and the worker was the sharp case:
+  `analyze()` runs its inner ReAct tool loop only when a sandbox and a registry are attached and
+  otherwise falls back to a plain structured call, so a hand-built worker looks like a worker,
+  answers like a worker, and never calls a tool. Measured the same day on the science sweep's seat
+  probe: its worker cell attached neither, so the failure it produced was **unattributable** — a
+  model that will not drive a loop and a model that was never given one are indistinguishable from
+  outside. Its lead cell was wrong more quietly, building a provider that differed from
+  production's by five arguments. `run_research` now calls `readonly_tools_for`,
+  `readonly_roots_for` and `attach_worker_runtime` rather than restating them, so there is one
+  definition of what each role can do. Behaviour-preserving: the reviewer and lead branches
+  reproduce the previous flag sets exactly, with `include_plan_and_debate` now derived from
+  whether a human handler exists (previously passed `True` unconditionally for the lead, which was
+  already conditional one layer down in the provider). New `tests/test_role_wiring_seams.py` (8)
+  is a static guard: the two constructors appear in the run path only inside their factory,
+  `run_research` actually calls both, the seat probe hand-rolls neither, and the lead's and
+  reviewer's loops still differ the way this document says. **Known second definitions, left
+  alone:** six live tests and `benchmarks/author_bench/trial.py` build a lead provider directly.
+  The benchmark's copy was checked rather than assumed and resolves to the identical five tools,
+  so the published Table 6 / Fig. 5 numbers are unaffected; no number in the paper is backed by a
+  live test at all.

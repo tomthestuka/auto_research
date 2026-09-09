@@ -165,6 +165,131 @@ def _builtin_server_config(
     }
 
 
+# ── Role wiring: one definition, used by the run path and by anything that probes it ──────
+#
+# These exist because a caller that assembles a role by hand assembles a *different* role. The
+# worker is the sharp case: `AnalystWorkerAgent.analyze` runs its inner ReAct tool loop only when a
+# sandbox and a registry are attached and otherwise falls back to a plain structured call, so a
+# hand-built worker looks like a worker, answers like a worker, and never calls a tool. A probe
+# built that way cannot tell a model that will not drive a loop from a model that was never given
+# one. Same shape for the reviewer and the lead, whose read-only providers differ from each other
+# by three flags and from a hand-rolled version by five arguments.
+#
+# `run_research` calls these, so a test that calls them is exercising the production wiring rather
+# than a copy of it that drifts.
+
+
+def readonly_tools_for(
+    role: str,
+    *,
+    roots: Sequence[Path],
+    retrieval: RetrievalBackend | None = None,
+    web_source: Any = None,
+    human_handler: HumanHandler | None = None,
+    model: str = "",
+) -> ReadOnlyToolProvider:
+    """The read-only inspection loop production gives ``role``.
+
+    ``role`` is ``"reviewer"`` or ``"analyst_lead"``, and the two differ deliberately. The lead
+    gets the data catalog and the budget-free design channel and is denied the paper knowledge
+    base, because it investigates toolkit source and the archive rather than literature; the
+    reviewer is the paper surface. Getting those flags wrong does not fail — it silently measures a
+    role the pipeline does not have.
+    """
+    if role not in ("reviewer", "analyst_lead"):
+        raise ValueError(f"no read-only tool loop is defined for role {role!r}")
+    lead = role == "analyst_lead"
+    return ReadOnlyToolProvider(
+        roots=list(roots),
+        retrieval=retrieval,
+        web_source=web_source,
+        include_data_catalog=lead,
+        # Only the lead gets plan_and_debate, and only when a human is actually reachable:
+        # headless, a role must not be handed a channel that cannot answer.
+        include_plan_and_debate=lead and human_handler is not None,
+        include_text_search=not lead,
+        human_handler=human_handler,
+        asked_by=role,
+        model=model,
+    )
+
+
+def readonly_roots_for(run_id: str, toolkit_root: Path) -> list[Path]:
+    """The three roots the reviewer and the lead may read: the run, the papers, the toolkit."""
+    from auto_research.sources.downloads import papers_dir
+
+    return [run_dir(run_id), papers_dir(), toolkit_root]
+
+
+@dataclass(frozen=True)
+class SandboxSettings:
+    """Where a worker's REPL comes from: the analysis environment and its boot scripts.
+
+    One definition, because these are read from configuration rather than chosen: a caller that
+    omits them does not get a slightly different sandbox, it gets a sandbox that refuses to start
+    (``analyze_ini_sh must be configured — no env fallback``). That is the right failure, and this
+    is how a caller outside a full run gets the same answer the run path gets.
+    """
+
+    analyze_env: Path | None
+    analyze_ini_sh: str | None
+    repl_init_py: str | None
+    analyze_probe: str | None
+
+    @classmethod
+    def from_config(cls, orch: dict[str, Any] | None = None) -> "SandboxSettings":
+        settings = orch if orch is not None else load_orchestration_config()
+        env = settings.get("analyze_env")
+        return cls(
+            analyze_env=Path(env) if env else None,
+            analyze_ini_sh=settings.get("analyze_ini_sh") or None,
+            repl_init_py=settings.get("repl_init_py") or None,
+            analyze_probe=settings.get("analyze_probe") or None,
+        )
+
+
+def attach_worker_runtime(
+    workers: Sequence[WorkerLike],
+    *,
+    run_id: str,
+    registry: ToolkitRegistry,
+    toolkit_root: Path,
+    sandbox_settings: SandboxSettings | None = None,
+    mcp_client: MCPToolClient | None = None,
+    run_control: RunControl | None = None,
+) -> list[PersistentSandbox]:
+    """Give each worker the identity, memory, sandbox and registry production gives it.
+
+    Returns the sandboxes so the caller can shut them down (``await sandbox.shutdown()``).
+    **Without this a worker has no tool loop at all**, which is the difference between measuring a
+    seat and measuring nothing. ``sandbox_settings`` defaults to the configured ones, so a caller
+    cannot accidentally build a worker whose REPL is configured differently from production's.
+    """
+    settings = sandbox_settings or SandboxSettings.from_config()
+    sandboxes: list[PersistentSandbox] = []
+    for index, worker in enumerate(workers):
+        if not isinstance(worker, AnalystWorkerAgent):
+            continue
+        key = f"analyst_worker_{index}"
+        worker.memory_path = memory_path(run_id, key)
+        worker.agent_key = key
+        worker.report_dir = agent_dir(run_id, key)
+        sandbox = PersistentSandbox(
+            toolkit_root=toolkit_root,
+            workdir=memory_path(run_id, key).parent,
+            analyze_env=settings.analyze_env,
+            analyze_ini_sh=settings.analyze_ini_sh,
+            repl_init_py=settings.repl_init_py,
+            mcp_client=mcp_client,
+        )
+        worker.sandbox = sandbox
+        worker.registry = registry
+        sandboxes.append(sandbox)
+        if run_control is not None:
+            run_control.register_aborter(key, sandbox.abort)
+    return sandboxes
+
+
 def _default_graph():
     """Build the compiled graph with all defaults from config.
 
@@ -360,11 +485,11 @@ async def run_research(
     debate_max_rounds = int(orch.get("debate_max_rounds", 3))
     tool_retry_cap = int(orch.get("tool_retry_cap", 3))
     toolkit_root = Path(orch["toolkit_root"])  # required; validated by the launch preflight
-    analyze_env_str = orch.get("analyze_env")
-    analyze_env = Path(analyze_env_str) if analyze_env_str else None
-    analyze_ini_sh: str | None = orch.get("analyze_ini_sh") or None
-    repl_init_py: str | None = orch.get("repl_init_py") or None
-    analyze_probe: str | None = orch.get("analyze_probe") or None
+    sandbox_settings = SandboxSettings.from_config(orch)
+    analyze_env = sandbox_settings.analyze_env
+    analyze_ini_sh = sandbox_settings.analyze_ini_sh
+    repl_init_py = sandbox_settings.repl_init_py
+    analyze_probe = sandbox_settings.analyze_probe
     disabled_tools: list[str] = orch.get("disabled_tools") or []
     report_retry_cap = int(orch.get("report_retry_cap", 2))
     default_formats: list[str] = orch.get("report_formats") or ["jsonl", "tex"]
@@ -408,19 +533,9 @@ async def run_research(
     agent_keys = ["reviewer", "analyst_lead"] + analyst_keys
     create_run_workspace(run_id, agent_keys)
 
-    # Assign memory paths to AnalystWorkerAgent instances (best-effort). agent_key + report_dir
-    # give the worker a stable figure-catalog source name and a folder for its per-round report
-    # JSONLs (V-4); the lead addresses each worker's catalog by this key.
-    for i, worker in enumerate(workers):
-        if isinstance(worker, AnalystWorkerAgent):
-            worker.memory_path = memory_path(run_id, analyst_keys[i])
-            worker.agent_key = analyst_keys[i]
-            worker.report_dir = agent_dir(run_id, analyst_keys[i])
-
     # Give the reviewer and lead a read-only inspection loop (run artifacts +
     # knowledge base), unless a caller pre-wired their own tools.
     from auto_research.sources import WebSource
-    from auto_research.sources.downloads import papers_dir
 
     # web_search is on for the reviewer and lead (and workers, wired at the provider) so any
     # role can confirm an authoritative-doc/science point against a primary source rather than
@@ -435,31 +550,20 @@ async def run_research(
     # tool source/manifests and confirm results came from correctly-parameterised tool
     # calls. Read-only/path-confined, no shell: the runtime never writes the toolkit (§2)
     # and this matches the §12 "read-only file-tree exploration" posture.
-    readonly_roots = [run_dir(run_id), papers_dir(), toolkit_root]
-    if getattr(reviewer, "tools", None) is None:
+    readonly_roots = readonly_roots_for(run_id, toolkit_root)
+    for target, role in ((reviewer, "reviewer"), (lead, "analyst_lead")):
+        if getattr(target, "tools", None) is not None:
+            continue  # a caller pre-wired its own
         try:
-            reviewer.tools = ReadOnlyToolProvider(
-                roots=readonly_roots, retrieval=retrieval, web_source=web_source,
-                human_handler=human_handler, asked_by="reviewer",
-                model=_model_label(reviewer.model) or "",
+            target.tools = readonly_tools_for(
+                role,
+                roots=readonly_roots,
+                retrieval=retrieval,
+                web_source=web_source,
+                human_handler=human_handler,
+                model=_model_label(target.model) or "",
             )
         except Exception:  # noqa: BLE001 - tools are optional; never block the run
-            pass
-    if getattr(lead, "tools", None) is None:
-        try:
-            lead.tools = ReadOnlyToolProvider(
-                roots=readonly_roots, retrieval=retrieval, web_source=web_source,
-                include_data_catalog=True,
-                # §5.5: only the lead gets the budget-free plan_and_debate design channel, to
-                # settle a toolkit design with the human before authoring (decide_authoring).
-                include_plan_and_debate=True,
-                # The paper knowledge base is the reviewer's surface, not the lead's:
-                # the lead investigates toolkit source + the data catalog, not papers.
-                include_text_search=False,
-                human_handler=human_handler, asked_by="analyst_lead",
-                model=_model_label(lead.model) or "",
-            )
-        except Exception:  # noqa: BLE001
             pass
 
     # V-4: give the lead a stable key + report folder for its per-round adjudicated report JSONLs.
@@ -566,26 +670,20 @@ async def run_research(
             run_control=run_control,
         )
 
-    # Spawn one persistent sandbox per AnalystWorkerAgent and give it the registry
-    # so its analyze() can run the inner ReAct tool loop (SandboxToolProvider).
-    sandboxes: list[PersistentSandbox] = []
-    for i, worker in enumerate(workers):
-        if isinstance(worker, AnalystWorkerAgent):
-            sandbox = PersistentSandbox(
-                toolkit_root=toolkit_root,
-                workdir=memory_path(run_id, analyst_keys[i]).parent,
-                analyze_env=analyze_env,
-                analyze_ini_sh=analyze_ini_sh,
-                repl_init_py=repl_init_py,
-                mcp_client=mcp_client,
-            )
-            worker.sandbox = sandbox
-            worker.registry = registry
-            sandboxes.append(sandbox)
-            # A human /stop cancels this worker's in-flight tool call instead of waiting for a
-            # safe point it may not reach for hours (a long download). Keyed by the same
-            # agent_key the steer channel addresses.
-            run_control.register_aborter(analyst_keys[i], sandbox.abort)
+    # Identity, memory, one persistent sandbox each and the registry — the wiring without which a
+    # worker has no tool loop. `attach_worker_runtime` is the one definition of it, so anything
+    # that drives a worker outside a full run (a probe, a benchmark) gets the same worker rather
+    # than a look-alike. It also registers each sandbox's aborter, so a human /stop cancels an
+    # in-flight tool call instead of waiting for a safe point hours away.
+    sandboxes = attach_worker_runtime(
+        workers,
+        run_id=run_id,
+        registry=registry,
+        toolkit_root=toolkit_root,
+        sandbox_settings=sandbox_settings,
+        mcp_client=mcp_client,
+        run_control=run_control,
+    )
 
     await run_monitor.record(
         "run",
