@@ -87,6 +87,68 @@ def test_a_nested_root_is_applied_after_its_parent(bwrap, tmp_path):
     assert applied.index(str(outer)) < applied.index(str(inner))
 
 
+def test_the_coder_policy_binds_dot_git_read_only_inside_every_writable_root(bwrap, tmp_path):
+    """The coder's git ban is a kernel rule, not a command-string rule.
+
+    A Bash deny-rule is prefix-matched and slips on a pipe, a subshell or ``python -c subprocess``
+    (§13). Making ``.git`` read-only inside the writable tree refuses the write itself, however it
+    is spelled, and leaves ``status``/``diff``/``log`` working — which is what the coder was denied
+    on 2026-09-09 while reporting its own change set (one wasted turn).
+    """
+    tree = tmp_path / "worktree"
+    (tree / ".git").mkdir(parents=True)
+    policy = jail.coder_policy(label="probe", extra_rw=(str(tree),))
+    assert str(tree) in policy.rw
+    assert str(tree / ".git") in policy.ro
+    argv = jail.jail_argv(policy)
+    applied = [
+        argv[index + 1] for index, token in enumerate(argv)
+        if token in {"--bind", "--ro-bind"} and argv[index + 1] in {str(tree), str(tree / ".git")}
+    ]
+    # Outermost first, or the writable tree would land on top and silently re-open .git.
+    assert applied.index(str(tree)) < applied.index(str(tree / ".git"))
+    assert (str(tree / ".git"), str(tree / ".git")) in _pairs(argv, "--ro-bind")
+
+
+@pytest.mark.skipif(not jail.bwrap_path(), reason="bwrap is not installed on this host")
+def test_a_jailed_process_can_read_git_history_and_cannot_write_it(tmp_path):
+    """The property itself, measured against a real repository rather than argv.
+
+    Asserting the flags proves the plan; only running it proves git behaves as the plan intends —
+    and the interesting half is that a *read* still works, since a read-only ``.git`` could
+    plausibly have broken ``status`` (it refreshes the index when it can).
+    """
+    import subprocess
+
+    tree = tmp_path / "repo"
+    tree.mkdir()
+    run = lambda *args: subprocess.run(  # noqa: E731 — one-line local
+        ["git", "-C", str(tree), *args], check=True, capture_output=True, text=True
+    )
+    run("init", "-q")
+    run("config", "user.email", "t@t")
+    run("config", "user.name", "t")
+    (tree / "f.txt").write_text("a\n", encoding="utf-8")
+    run("add", "f.txt")
+    run("commit", "-qm", "init")
+    (tree / "f.txt").write_text("a\nb\n", encoding="utf-8")
+
+    policy = JailPolicy(ro=(str(tree / ".git"),), rw=(str(tree),), network=False)
+    def jailed(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [*jail.jail_argv(policy), "--", "git", "-C", str(tree), *args],
+            capture_output=True, text=True,
+        )
+
+    assert jailed("status", "--short").returncode == 0
+    assert jailed("diff", "--stat").stdout.strip()
+    assert jailed("log", "--oneline").returncode == 0
+    for write in (("add", "f.txt"), ("commit", "-qm", "x"), ("checkout", "--", "f.txt")):
+        refused = jailed(*write)
+        assert refused.returncode != 0, f"{write} was allowed inside the jail"
+        assert "Read-only file system" in refused.stderr, refused.stderr
+
+
 def test_a_symlinked_root_is_reachable_by_its_configured_spelling(bwrap, tmp_path):
     """Roots are bound where they resolve, but every tool argument and observation path is written
     the configured way, so that spelling needs to exist inside the jail."""

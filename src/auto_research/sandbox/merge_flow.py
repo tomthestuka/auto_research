@@ -163,13 +163,26 @@ def _current_branch(root: Path) -> str:
     ).stdout.strip()
 
 
+def _dirty_paths(root: Path) -> list[str]:
+    """The paths making ``root`` dirty, or empty when it is clean.
+
+    Named rather than counted (N4): the unclean-branch error used to print remediation commands
+    and no paths, so slot 5's dirtying file (2026-09-08) is **permanently undetermined** — the
+    trial's clone was swept at teardown and the only record said "has uncommitted changes".
+
+    ``-uall`` for the same reason: plain ``--porcelain`` collapses a new directory to its own
+    name, so an untracked file inside one would still not be identified (this is why
+    ``gate.collect_all_changes`` uses it too).
+    """
+    out = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain", "-uall"],
+        capture_output=True, text=True,
+    ).stdout
+    return [line[3:].strip() for line in out.splitlines() if line.strip()]
+
+
 def _is_dirty(root: Path) -> bool:
-    return bool(
-        subprocess.run(
-            ["git", "-C", str(root), "status", "--porcelain"],
-            capture_output=True, text=True,
-        ).stdout.strip()
-    )
+    return bool(_dirty_paths(root))
 
 
 class ToolkitBranchUnclean(RuntimeError):
@@ -209,8 +222,9 @@ def check_toolkit_branch_clean(root: Path | None = None, branch: str | None = No
     if _is_dirty(root):
         raise ToolkitBranchUnclean(
             f"research_toolkit ({root}) has uncommitted changes on {branch!r}. A prior tool "
-            f"authoring may have failed terminally and left edits for you to inspect (§9.9). "
-            f"Review and clean before the next run, or re-run with resume=True to auto-heal:\n"
+            f"authoring may have failed terminally and left edits for you to inspect (§9.9).\n"
+            f"Uncommitted paths:\n" + "".join(f"  {p}\n" for p in _dirty_paths(root))
+            + f"Review and clean before the next run, or re-run with resume=True to auto-heal:\n"
             f"  git -C {root} status\n"
             f"  git -C {root} restore . && git -C {root} clean -fd   # discard, if appropriate"
         )
@@ -897,7 +911,6 @@ class AuthoringSession:
         self.tool_spec = tool_spec
         self.worktree = worktree
         self.branch = branch
-        self.committed = False  # flips True only after commit() lands; gates the failure reset
         self._closed = False  # aclose() is idempotent — the interrupt path may beat the finally
         # Lead-driven loop state (§9.3 B-topology): the most recent gate/review/commit, so a
         # caller (the lead's drive_authoring loop) can build the terminal MergeFlowResult from
@@ -908,6 +921,13 @@ class AuthoringSession:
         self.debates_used = 0
         self.last_gate: GateReport | None = None
         self.last_review: ToolReviewVerdict | None = None
+        # The durable record that this session landed a commit, and which one: set by commit(),
+        # never cleared, read by `_authoring_result` to build the terminal MergeFlowResult. It
+        # deliberately does NOT gate the failure reset — "this session ever committed" and "the
+        # work now in the tree is banked" are different questions, and a single latch answering
+        # both is what let a rejected tool survive on disk and become callable (F1, 2026-09-09).
+        # The reset asks `pending_changes()`; there is no separate boolean, because two fields
+        # encoding one fact is how the meanings drifted apart in the first place.
         self.last_commit_sha: str | None = None
         self._backend = backend
         self._base_ref = base_ref
@@ -1076,12 +1096,15 @@ class AuthoringSession:
 
     async def commit(self, message: str) -> str:
         """Land one atomic commit (§9.9 ``approve_edit``) — the **only** place the runtime
-        commits. Caller guarantees gate-pass ∧ review-pass. Sets :attr:`committed` so
-        :meth:`aclose` skips the failure-path tree reset, and **advances the per-attempt base
-        ref** (in memory and on disk) to the commit it just landed, so nothing downstream mistakes
-        an approved commit for a coder-slipped one."""
+        commits. Caller guarantees gate-pass ∧ review-pass. Records the commit on
+        :attr:`last_commit_sha`, and **advances the per-attempt base ref**
+        (in memory and on disk) to the commit it just landed, so nothing downstream mistakes an
+        approved commit for a coder-slipped one.
+
+        Advancing the base ref is also what makes the commit "banked" for
+        :meth:`pending_changes`, and therefore what makes :meth:`aclose` reset only the work that
+        came *after* this commit rather than skipping the reset entirely (F1)."""
         commit_sha = self._approve_edit(self.worktree, message=message)
-        self.committed = True
         self.last_commit_sha = commit_sha
         # The base ref means "the commit this attempt's work sits on", so once approve_edit lands
         # one, that commit IS the base. Advancing it here corrects all three readers at once:
@@ -1107,9 +1130,24 @@ class AuthoringSession:
         return commit_sha
 
     async def aclose(self) -> None:
-        """Disconnect the coder; on a non-committed direct-branch attempt, reset the tree to the
-        per-attempt base ref (§9.9 failure counterpart to ``approve_edit`` — saves a patch
-        artifact first, drops any coder-landed commit, leaves a clean tree at the right base).
+        """Disconnect the coder; on a direct-branch attempt holding **unbanked** work, reset the
+        tree to the per-attempt base ref (§9.9 failure counterpart to ``approve_edit`` — saves a
+        patch artifact first, drops any coder-landed commit, leaves a clean tree at the right
+        base).
+
+        The guard is :meth:`pending_changes`, not :attr:`committed` (F1, 2026-09-09). The old
+        guard asked *"did this session ever commit?"*, which is a latch that never clears, so a
+        session that committed one tool and then kept working on a rejected second one exited
+        **without** resetting. Its edits — ``lib/`` code, the ``skills/`` wrapper and a
+        ``TOOL_MANIFEST`` entry — then stayed on disk, and because ``ToolkitRegistry.reload``
+        discovers tools from the *tree* rather than from git, the rejected tool became callable
+        and its figures reached an accepted report (slot 2, 2026-09-08; the same shape produced a
+        scored quantity in slot 3). Asking the tree instead makes the reset fire on exactly the
+        work that was never banked, whether or not a commit preceded it.
+
+        A commit advances the base ref, so right after one ``pending_changes()`` is False and no
+        reset happens; the empty-diff case also writes no patch artifact
+        (``_save_diff_and_reset`` returns ``None``), so a clean close stays silent.
 
         Idempotent: a human interrupt closes the session from shielded cleanup (its normal
         ``finally`` is inside the cancelled scope), and the ``finally`` may still run afterwards —
@@ -1120,7 +1158,7 @@ class AuthoringSession:
             return
         self._closed = True
         await self._backend.disconnect()
-        if self._direct_branch is not None and not self.committed:
+        if self._direct_branch is not None and self.pending_changes():
             await _reset_direct_tree(
                 self._toolkit_root, base_ref=self._base_ref, artifact_dir=self._worktree_base,
                 monitor=self._monitor, tool_spec=self.tool_spec,

@@ -83,6 +83,32 @@ def _git(worktree: Path, *args: str) -> str:
     return out.stdout
 
 
+def collect_all_changes(worktree: Path) -> list[str]:
+    """Every changed path in ``worktree``, **unfiltered** — the wide enumeration (F2).
+
+    :func:`collect_targets` answers *"which files does this tool consist of"* and so drops
+    everything outside a ``*_utils`` package. That filter was then reused to answer *"did the
+    author touch anything it should not"*, over a list from which it had already removed every
+    violation — a check that could not fail for any input. Measured live 2026-09-08 (slot 4): 193
+    changed lines in ``obsdb_catalog``, the toolkit's one hand-built trusted catalog writer, were
+    never scanned, never tested, never shown to the reviewer, reported as "only allowed paths
+    touched", and unstageable — yielding a commit whose staged code imports a symbol defined only
+    in an unstaged file, so it does not run on a clean checkout.
+
+    This is the separate query that question needs. Ignored files never appear (``git status``
+    omits them), so ``__pycache__`` and ``.pytest_cache`` do not show up here.
+    """
+    status = _git(worktree, "status", "--porcelain", "-uall")
+    rels: list[str] = []
+    for line in status.splitlines():
+        if not line.strip():
+            continue
+        rel = line[3:].strip().split(" -> ")[-1]  # renames report "old -> new"
+        if rel:
+            rels.append(rel)
+    return sorted(set(rels))
+
+
 def collect_targets(worktree: Path) -> dict[Path, set[int] | None]:
     """Map each changed/new ``*_utils`` ``.py`` file → its added line numbers.
 
@@ -514,15 +540,39 @@ def scan_provenance(rel_path: str, source: str, *, added: set[int] | None = None
 _TEST_RE = re.compile(r"(^|/)(test_[^/]+|[^/]+_test)\.py$")
 
 
-def check_structural(worktree: Path, tool_spec: ToolSpec, targets: dict[Path, set[int] | None]) -> list[CheckResult]:
+def check_structural(
+    worktree: Path,
+    tool_spec: ToolSpec,
+    targets: dict[Path, set[int] | None],
+    all_changes: list[str] | None = None,
+) -> list[CheckResult]:
     out: list[CheckResult] = []
     rels = [str(p.relative_to(worktree)) for p in targets]
 
-    # (a) only allowed paths touched: every changed .py is under a *_utils package.
-    stray = [r for r in rels if not _TOOLKIT_PKG_RE.search(r)]
+    # (a) changes_allowed — the gate's third job, beside the no-fabrication scan and the double
+    # pytest run (§9.4). An **explicit allow-list**: a change is permitted only under a
+    # ``*_utils`` package, which is the layout `prompts/coder.md` already teaches and §9.2
+    # specifies. Everything else is rejected and named, `obsdb_catalog` included — the toolkit's
+    # hand-built trusted catalog writer is human + build-agent work (CLAUDE.md §3), never the
+    # runtime coder's, and a review that asks for a change inside it is an `ask_lead`.
+    #
+    # Computed over `collect_all_changes`, NOT over `targets`: the old check filtered its input
+    # through the very pattern it then tested, so it could not fail for any input (F2). An
+    # allow-list is also why a deny-list of protected packages was rejected — that would have left
+    # toolkit-root files and any future package not ending in `_utils` silently dropped, which is
+    # the shape whose cause went unidentified in slot 5.
+    #
+    # `run_gate` enumerates once, before Layer B executes, so an artifact a tool's own test writes
+    # into the worktree cannot trip this in the same run.
+    changes = collect_all_changes(worktree) if all_changes is None else all_changes
+    stray = [r for r in changes if not _TOOLKIT_PKG_RE.search(r)]
     out.append(CheckResult(
-        name="structural.allowed_paths", layer="A", passed=not stray,
-        detail="" if not stray else f"changes outside a *_utils package: {stray}",
+        name="structural.changes_allowed", layer="A", passed=not stray,
+        detail="" if not stray else (
+            f"changes outside a *_utils package: {stray}. Toolkit code lives in "
+            "<domain>_utils/{lib,skills,tests} (§9.2). Anything else — the catalog writer, "
+            "repo-root files, scratch — is not the coder's to edit: ask_lead instead."
+        ),
     ))
 
     # (b) a test file exists among the changes (untested tool is not mergeable, §9.4).
@@ -592,6 +642,47 @@ def _manifest_keys(source: str) -> list[str]:
 TestRunner = Callable[[Path, list[str]], Awaitable[dict]]
 
 
+def _layer_b_output_cap() -> int:
+    """How much pytest output a Layer-B failure keeps (``orchestration.yaml``, default 100000).
+
+    Read at call time, never captured at import, so the value a run used travels with that run.
+
+    Was a hardcoded 2,000-character tail (N1). With a chatty science suite that window is
+    *entirely* the warnings summary: measured live 2026-09-08 (slot 2), 119 warnings meant the
+    kept text was the warnings block plus pytest's ``short test summary info``, so the failing
+    test's **name** survived and every assertion and traceback was cut. The coder said so in its
+    own words — it ran the single test, the whole file, and the whole file twice more in fresh
+    copies, all green, and could not reproduce a failure it was never shown. That cost 3 h 28 m
+    and $16.26, 43.7% of the run's wall clock, and two of the fourteen named quantities.
+    """
+    try:
+        return int(_orchestration_config().get("gate_layer_b_output_cap", 100000))
+    except (TypeError, ValueError):
+        return 100000
+
+
+def _bounded_pytest_output(out: str) -> str:
+    """Bound pytest output for the report while keeping the parts a coder can act on (N1).
+
+    Keeps the **head and the tail**, not the tail alone. pytest prints failure detail — the
+    assertion and its traceback — *before* the warnings summary and the ``short test summary
+    info`` line, so a pure tail window keeps the least useful end. That is exactly what happened
+    live 2026-09-08 (slot 2): with 119 warnings the kept 2,000 characters were entirely the
+    warnings block plus the FAILED line, so the coder had the test's name and nothing about why.
+    It re-ran the suite four ways, all green, and reported that it could not reproduce a failure
+    it was never shown — 3 h 28 m and $16.26, and two of the fourteen named quantities lost.
+
+    Under the cap the output is returned whole; over it, two thirds from the front and one third
+    from the back, with a marker naming what was dropped so nothing looks complete when it is not.
+    """
+    cap = _layer_b_output_cap()
+    if len(out) <= cap:
+        return out
+    head, tail = (cap * 2) // 3, cap // 3
+    dropped = len(out) - head - tail
+    return f"{out[:head]}\n\n[... {dropped} characters of pytest output elided ...]\n\n{out[-tail:]}"
+
+
 def _layer_b_verdict(rc1: int, outcomes: dict[str, str], out1: str) -> tuple[bool, str]:
     """Decide Layer B pass/fail from the first run's exit code + per-test outcome map.
 
@@ -603,7 +694,7 @@ def _layer_b_verdict(rc1: int, outcomes: dict[str, str], out1: str) -> tuple[boo
     (→ rework or honest failure), never a silent pass.
     """
     if rc1 != 0:
-        return False, out1[-2000:]
+        return False, _bounded_pytest_output(out1)
     if not any(outcome == "PASSED" for outcome in outcomes.values()):
         return False, (
             f"Layer-B suite exited 0 but no test PASSED "
@@ -825,6 +916,9 @@ async def run_gate(
     cfg = config if config is not None else _code_gate_config()
 
     targets = collect_targets(worktree)
+    # Enumerated once, here, BEFORE Layer B runs: an artifact a tool's own test writes into the
+    # worktree must not be able to fail `changes_allowed` in the same gate run (F2).
+    all_changes = collect_all_changes(worktree)
 
     if test_runner is None:
         # Bind the per-package timeout into the default runner only; an injected runner keeps
@@ -867,7 +961,7 @@ async def run_gate(
             findings.extend(finds)
 
     # A.3 structural.
-    structural = check_structural(worktree, tool_spec, targets)
+    structural = check_structural(worktree, tool_spec, targets, all_changes)
     layer_a.extend(structural)
 
     # Summarising no-fabrication/provenance as explicit PASS checks aids the feedback msg.

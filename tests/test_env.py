@@ -10,24 +10,32 @@ from auto_research import config_paths, env
 
 
 def test_check_required_env_loads_project_dotenv(tmp_path, monkeypatch) -> None:
+    # These five are written by hand because each is the point of the test: three are
+    # *non-canonical* aliases, so resolving them is what proves the alias groups work.
+    aliases = [
+        "ANTHROPIC_API_KEY=test-anthropic",
+        "OPENAI_API_KEY=test-openai",
+        "GEMINI_API_KEY=test-google-alias",
+        "ADS_API_TOKEN=test-ads-alias",
+        "TAVILY_API_KEY=test-tavily",
+    ]
+    # Everything else the *project* configuration implies is derived rather than listed. The
+    # requirement comes from `config/models.yaml`, so a fixed list makes this test fail whenever a
+    # role gains a member from a new vendor — a valid config failing the check that exists to
+    # catch an invalid one. (Measured: adding the deepseek coder on 2026-09-09 did exactly that.)
+    model_groups, _ = env._model_key_groups()
+    named = {line.split("=", 1)[0] for line in aliases}
+    derived = [
+        f"{group[0]}=test-derived"
+        for group in (*env._REQUIRED, *model_groups)
+        if not set(group) & named
+    ]
     dotenv = tmp_path / ".env"
-    dotenv.write_text(
-        "\n".join(
-            [
-                "ANTHROPIC_API_KEY=test-anthropic",
-                "OPENAI_API_KEY=test-openai",
-                "GEMINI_API_KEY=test-google-alias",
-                "ADS_API_TOKEN=test-ads-alias",
-                "TAVILY_API_KEY=test-tavily",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    dotenv.write_text("\n".join([*aliases, *derived]), encoding="utf-8")
     monkeypatch.setattr(env, "_ENV_FILE", dotenv)
     # Clear every name the check consults — the fixed source keys and the model keys the
     # configuration implies — since `load_dotenv(override=False)` leaves a name that is already
     # set, and a real key in this process's environment would mask the file under test.
-    model_groups, _ = env._model_key_groups()
     for group in (*env._REQUIRED, *model_groups):
         for key in group:
             monkeypatch.delenv(key, raising=False)

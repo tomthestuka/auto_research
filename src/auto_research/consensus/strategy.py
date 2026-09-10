@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -74,6 +74,17 @@ class ConsensusStrategy(Protocol):
         """Run consensus and return a final report."""
 
 
+@dataclass
+class _AuthorCredits:
+    """How many authoring credits this analysis has already spent (N11).
+
+    A mutable holder, because :class:`DebateToConverge` is frozen and the count has to survive
+    every re-entry of ``run()`` that a reviewer send-back causes.
+    """
+
+    spent: int = 0
+
+
 @dataclass(frozen=True)
 class DebateToConverge:
     """Bounded analyst debate with lead convergence checks.
@@ -93,7 +104,15 @@ class DebateToConverge:
     tool_retry_cap: int = 3  # accepted, unused (the worker's react loop self-corrects)
     # --- Phase-2 step-7 authoring/resume (§9.10). All optional: when toolkit_root is unset
     # the strategy behaves exactly as Phase-1 debate (no authoring path). ---
-    tool_author_cap: int = 3  # max authoring attempts per analysis (the 3-gap chain bound)
+    tool_author_cap: int = 3  # max authoring attempts per ANALYSIS (the 3-gap chain bound)
+    # Credits already spent, carried across `run()` calls (N11). `tool_author_cap` is documented
+    # as a per-analysis ceiling, but the budget used to be a local initialised inside `run()`, and
+    # `run()` is re-entered on every reviewer send-back — so a send-back silently refilled it and
+    # the real ceiling was `max_iterations x tool_author_cap` (36, not 12). Human ruling
+    # 2026-09-09: per-analysis, never refilled. The strategy is built once per run
+    # (`graph/builder.py`, `graph/runtime.py`) and the node closes over it, so instance state is
+    # the right home — and it is a mutable holder because the strategy itself is frozen.
+    _credits: _AuthorCredits = field(default_factory=_AuthorCredits)
     toolkit_root: Path | None = None
     worktree_base: Path | None = None
     direct_branch: str | None = None  # runtime authoring branch (e.g. "ai"); None ⇒ worktree mode
@@ -145,7 +164,12 @@ class DebateToConverge:
         reports = await self._initial_reports(workers, task)
         task = self._augment_with_peer_tools(workers, task)
 
-        author_budget = self.tool_author_cap if self.toolkit_root is not None else 0
+        if self.toolkit_root is None:
+            author_budget = 0
+        else:
+            # Never refilled on re-entry: what is left is the cap minus what earlier cycles of
+            # this analysis already spent (N11).
+            author_budget = max(0, self.tool_author_cap - self._credits.spent)
         debate_round = 0
         while True:
             outcome = await lead.run_cycle(
@@ -162,6 +186,7 @@ class DebateToConverge:
                 colead=self.colead,
                 human_handler=self.human_handler,
             )
+            self._credits.spent += max(0, author_budget - outcome.author_budget)
             author_budget = outcome.author_budget
             await _record(
                 self.monitor,
@@ -371,7 +396,12 @@ def _augment_with_failed_tool(task: AnalysisTask, tool_spec: Any, result: Any) -
     """Append a note that an authoring attempt did NOT commit, so reran workers refine their
     request and the lead's next ``decide_authoring`` adapts (a different approach / revised brief)
     instead of repeating the failed plan (A11 recovery)."""
-    reason = (getattr(result, "reason", "") or "").strip()
+    # N8: the reason reaches the workers, the remediation does not. The raw
+    # `ToolkitBranchUnclean` text carries a §9.9 citation, an internal repo path and two
+    # destructive git commands, and it appeared three times in slot 4's worker prompt — in a role
+    # whose own prompt forbids it from touching git. A worker needs to know the capability is
+    # still missing; what a human should type is not its business.
+    reason = _worker_safe_reason(getattr(result, "reason", "") or "")
     note = (
         "An attempt to author a new tool did NOT commit — the capability is still missing. "
         "Consider a different approach or a revised brief before requesting it again:\n"
@@ -385,6 +415,23 @@ def _augment_with_failed_tool(task: AnalysisTask, tool_spec: Any, result: Any) -
         instructions=new_instructions,
         previous_report=task.previous_report,
     )
+
+
+def _worker_safe_reason(reason: str) -> str:
+    """The failure reason with operator remediation stripped (N8).
+
+    Keeps the first paragraph — what went wrong, which is what an analyst acts on — and drops any
+    line that is a shell command or a "review and clean" instruction addressed to a human.
+    """
+    kept: list[str] = []
+    for line in reason.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("git ", "$ ", "> ")) or " git -C " in stripped:
+            continue
+        if stripped.lower().startswith(("review and clean", "uncommitted paths")):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def _augment_with_probe(task: AnalysisTask, verdict: Any) -> AnalysisTask:

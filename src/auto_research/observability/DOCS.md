@@ -134,3 +134,14 @@ Compacted 2026-08-05: the 2026-07-29 entries folded into one (detail in git hist
   recorded 40 model calls at `$0.00` and no configured price could fix it. An entry whose input and
   output rates are both non-positive now falls through to `priceMTk`; a genuinely free model states
   that explicitly, which at least labels the zero as ours. Tests: `test_observability.py` 13 → 15.
+
+- 2026-09-09 — **N6: `traced_model_call` bills the exception path.** Usage was recorded only after
+  `provider_call()` returned, so an adapter that raises **after** a billable response made the
+  turn silently free — the vendor had generated and charged for those tokens; only our own
+  extraction rejected them. Slot 5's two failing structured attempts (~195k input tokens) appear
+  neither in its ledger nor in its reported $29.23. The call now runs under `try/except
+  BaseException`, records `getattr(exc, "billed_usage", None)` when present, and re-raises. The
+  producing side is `_responses._raise_billed`, which attaches the usage and re-raises the **same
+  exception type**, because the type is the role layer's retry contract. A provider refusal before
+  generation carries no `billed_usage` and is correctly billed as nothing — a request refused
+  before any tokens is never billed. Tests: `test_observability.py::test_n6_*` (2).

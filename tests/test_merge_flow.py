@@ -1030,8 +1030,9 @@ def test_a_commit_advances_the_persisted_base_ref(tmp_path):
 
 
 def test_aclose_after_a_commit_leaves_the_commit_alone(tmp_path):
-    """``aclose`` skips the failure reset once ``committed`` is set; with the base ref advanced,
-    the reset would also have nothing behind the commit to go back to."""
+    """A commit followed by nothing: ``aclose`` has no unbanked work to reset, so the commit and
+    its files survive untouched. (F1: the guard is ``pending_changes()``, and a commit advances
+    the base ref, so right after one there is provably nothing pending.)"""
     from auto_research.sandbox.merge_flow import approve_edit as real_approve
 
     repo = _toolkit_repo(tmp_path)
@@ -1046,6 +1047,86 @@ def test_aclose_after_a_commit_leaves_the_commit_alone(tmp_path):
 
     assert _git_out(repo, "rev-parse", "HEAD").strip() == sha
     assert (repo / "demo_utils" / "lib" / "retbb.py").is_file()
+
+
+# ── F1: "did this session commit?" is not "is the tree's work banked?" ────────
+
+
+def _f1_session(tmp_path, repo):
+    """A direct-branch session on a repo with a real ``approve_edit`` (so the base ref advances
+    to a real sha and ``pending_changes`` can tell banked from unbanked)."""
+    from auto_research.sandbox.merge_flow import approve_edit as real_approve
+
+    (repo / "demo_utils" / "tests").mkdir(parents=True, exist_ok=True)
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "tests dir", "--allow-empty")
+    _git(repo, "checkout", "-q", "-b", "ai")
+    return _direct_session(tmp_path, repo, approve_edit=real_approve)
+
+
+def test_f1_work_after_a_commit_is_reset_on_close(tmp_path):
+    """THE F1 REGRESSION. One session, two tools: the first commits, the second is rejected and
+    its edits are still on disk at close. Those edits must be reset.
+
+    Observed live 2026-09-08 (slot 2): the old guard was a commit latch set by
+    the first commit and never cleared, so this exact sequence exited **without** resetting. The
+    rejected tool's ``lib/`` code and its ``TOOL_MANIFEST`` entry stayed in the tree; because
+    ``ToolkitRegistry.reload`` discovers tools from the tree rather than from git, it became a
+    callable tool and its figures reached a reviewer-accepted report.
+    """
+    repo = _toolkit_repo(tmp_path)
+    session = _f1_session(tmp_path, repo)
+
+    _coder_edits(repo)                                   # tool 1
+    sha = asyncio.run(session.commit("land tool 1"))
+    assert not session.pending_changes()                 # banked
+
+    # tool 2, in the SAME session: rejected, never committed — the shape that survived.
+    rejected_lib = repo / "demo_utils" / "lib" / "plotter.py"
+    rejected_lib.write_text("def plot():\n    return 2\n")
+    manifest = repo / "demo_utils" / "skills" / "__init__.py"
+    manifest.write_text('TOOL_MANIFEST = {"demo_plot": {"fn": "plot"}}\n')
+    assert session.pending_changes()                     # unbanked
+
+    asyncio.run(session.aclose())
+
+    assert not rejected_lib.exists(), "rejected lib/ code must not survive the session"
+    assert not manifest.exists(), "a rejected TOOL_MANIFEST entry must not survive: the registry "\
+                                  "reloads from the tree, so leaving it makes the tool callable"
+    assert _git_out(repo, "status", "--porcelain") == ""
+    assert _git_out(repo, "rev-parse", "HEAD").strip() == sha, "the approved commit survives"
+    assert (repo / "demo_utils" / "lib" / "retbb.py").is_file(), "tool 1's committed file survives"
+    assert list((tmp_path / "wt").glob("tool_author_failed_*.patch")), "discarded work preserved"
+
+
+def test_f1_the_commit_record_survives_the_reset(tmp_path):
+    """``last_commit_sha`` is the durable record ``_authoring_result`` reads to report
+    ``status="committed"``. The F1 change must not clear it, or every successful commit would
+    report as a failed attempt."""
+    from auto_research.agents.roles import _authoring_result
+
+    repo = _toolkit_repo(tmp_path)
+    session = _f1_session(tmp_path, repo)
+
+    _coder_edits(repo)
+    sha = asyncio.run(session.commit("land it"))
+    (repo / "demo_utils" / "lib" / "leftover.py").write_text("x = 1\n")   # unbanked
+    asyncio.run(session.aclose())                                        # ... and reset away
+
+    assert session.last_commit_sha == sha
+    assert _authoring_result(session, session.tool_spec).status == "committed"
+
+
+def test_f1_a_clean_close_writes_no_patch_artifact(tmp_path):
+    """A session that closes with nothing unbanked writes no patch: ``_save_diff_and_reset``
+    returns ``None`` for an empty diff, so the now-routine close does not litter the run dir."""
+    repo = _toolkit_repo(tmp_path)
+    session = _f1_session(tmp_path, repo)
+
+    _coder_edits(repo)
+    asyncio.run(session.commit("land it"))
+    asyncio.run(session.aclose())
+
+    assert not list((tmp_path / "wt").glob("tool_author_failed_*.patch"))
 
 
 # ── the author's environment carries no host-tooling variables ────────────────

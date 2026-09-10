@@ -67,7 +67,12 @@ _ANTHROPIC_RULES = _KeyErrorRules(
     key_scoped_statuses=frozenset({429}),
     key_scoped_types=frozenset({"rate_limit_error", "billing_error"}),
     exhausted_types=frozenset({"billing_error"}),
-    exhausted_codes=frozenset(),
+    # The documented **spend-cap** 429. It has to sit in `exhausted_codes`, not in the message
+    # markers, because it arrives typed `rate_limit_error` and that type early-returns "refilling"
+    # before any marker is read — a marker here would have been inert. It carries no `retry-after`
+    # and never clears on its own, so classifying it as a refilling rate limit waits forever.
+    # Found while auditing F7; the first attempt at it was the inert version.
+    exhausted_codes=frozenset({"enforced_spend_limit_reached"}),
     exhausted_message_markers=("credit balance",),
 )
 
@@ -182,13 +187,72 @@ def is_key_scoped_provider_error(exc: BaseException, provider: str) -> bool:
     return any(marker in text for marker in rules.exhausted_message_markers)
 
 
-def is_transient_provider_error(exc: BaseException) -> bool:
+#: Vendors that report a transient condition under a **non-transient HTTP status**, so the status
+#: alone misclassifies it. Each entry is that vendor's own documented vocabulary, and the override
+#: applies ONLY on the statuses named — everything else on a 400 stays fatal, which is the
+#: exclusion that has repeatedly caught real request-shape defects.
+#:
+#: `dashscope` (Alibaba Model Studio). Measured live 2026-09-08 (slot 6, $11.45, one attempt, no
+#: retry): HTTP **400** with `code: "ServiceUnavailable"` and message `"<503> InternalError.Algo:
+#: ... [Too many requests. Your requests are being throttled due to system capacity limits.
+#: Please try again later.]"`. The vendor's own error reference documents `InternalError.Algo` at
+#: **HTTP 500** with the solution *"Retry first to rule out transient issues"*, and the entire
+#: `Throttling*` family at **429**; its compat-mode page lists 503 among the statuses it returns.
+#: So the condition is documented-transient and the 400 wrapper is undocumented.
+#: https://www.alibabacloud.com/help/en/model-studio/error-code
+#: https://www.alibabacloud.com/help/en/model-studio/compatibility-of-openai-with-dashscope
+#:
+#: The `code` alone cannot classify it: the same page documents **`400-ServiceUnavailableError`**
+#: ("Role must be user or assistant and Content length must be greater than 0") as a genuinely
+#: permanent malformed-request error. Only the message separates them, which is why the marker
+#: list is matched as **vocabulary, never as a bare three-digit substring** — real scientific
+#: output is full of those (`0.36692140104299825` contains "429").
+_TRANSIENT_BODY_OVERRIDES: dict[str, tuple[frozenset[int], frozenset[str], tuple[str, ...]]] = {
+    "dashscope": (
+        frozenset({400}),
+        frozenset({"serviceunavailable", "modelunavailable"}),
+        ("throttl", "system capacity", "try again later", "no capacity",
+         "<500>", "<502>", "<503>", "<504>"),
+    ),
+    # DeepSeek reports an overloaded inference cluster as the finish reason
+    # `insufficient_system_resource` rather than as an HTTP error; when that surfaces as an
+    # exception message it is the same documented-transient condition.
+    # https://api-docs.deepseek.com/api/create-chat-completion/
+    "deepseek": (frozenset({400}), frozenset(), ("insufficient_system_resource",)),
+}
+
+
+def _transient_by_body(provider: str, exc: BaseException) -> bool:
+    """Whether ``exc`` is a documented-transient condition wearing a non-transient status."""
+    rule = _TRANSIENT_BODY_OVERRIDES.get((provider or "").lower())
+    if rule is None:
+        return False
+    statuses, codes, markers = rule
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int) or status not in statuses:
+        return False
+    if _error_code(exc).strip().lower().replace("_", "").replace(".", "") in {
+        c.replace("_", "").replace(".", "") for c in codes
+    } and codes:
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in markers)
+
+
+def is_transient_provider_error(exc: BaseException, provider: str = "") -> bool:
     """True when ``exc`` is worth waiting out: overload/rate-limit/5xx/connection.
 
     Provider SDK errors carry an HTTP status as ``status_code`` (Anthropic/OpenAI)
     or ``code`` (Google genai); connection and timeout failures are the SDKs'
     connection-error types or raw httpx transport errors.
+
+    ``provider`` enables the per-vendor body override (F7) for the vendors documented in
+    :data:`_TRANSIENT_BODY_OVERRIDES` to report a transient condition under a status that reads
+    as permanent. Status-first stays the rule; the body is consulted only on the statuses that
+    vendor is documented to mislabel.
     """
+    if _transient_by_body(provider, exc):
+        return True
     status = getattr(exc, "status_code", None)
     if not isinstance(status, int):
         status = getattr(exc, "code", None)
@@ -264,7 +328,7 @@ async def call_with_transient_retry(
                 # OpenAI balance error, which arrives as a 429 and so reads as transient, held
                 # a benchmark batch in backoff for 48 minutes before anyone could act on it.
                 raise
-            if attempt >= active.max_retries or not is_transient_provider_error(exc):
+            if attempt >= active.max_retries or not is_transient_provider_error(exc, provider):
                 raise
             cooldown = min(
                 active.max_cooldown_s, active.base_cooldown_s * (2.0**attempt)

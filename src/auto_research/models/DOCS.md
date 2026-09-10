@@ -868,3 +868,60 @@ Compacted 2026-09-01: entries through 2026-08-28 folded into themed ranges (deta
   with its caption already linked. Six new tests in `tests/test_document_substitution.py`, each
   verified to fail against the unflipped vendor flag; two `science_bench` tests rewritten from the
   old decision to the new invariant. Suite 1752 → 1760.
+
+- 2026-09-09 — **F7: a documented-transient condition wearing a non-transient status; N6: an
+  adapter raise is still billed.** *F7:* slot 6 died in **one HTTP attempt**, 4.97 s after a
+  successful call ($11.45, zero tools), on Alibaba returning **HTTP 400** with
+  `code: "ServiceUnavailable"` and message `"<503> InternalError.Algo: ... [Too many requests ...
+  throttled ... Please try again later.]"`. `is_transient_provider_error` reads `status_code`
+  first; it is an `int`, so the string-`code` fallback on the next line is **unreachable**, 400 is
+  in neither transient set, and no message inspection existed for this provider at all. Zero
+  retries fired (proven by positive control: a sibling run's `retry.py` cooldown warning appears
+  in these logs, this run's has none), and the throttle was **not** self-inflicted — a sibling
+  made a successful call on the same key 31 s later at 0.007% of the documented 15,000 RPM.
+  New `_TRANSIENT_BODY_OVERRIDES` + `_transient_by_body`: status-first stays the rule, and the
+  body is consulted **only** on the statuses a vendor is documented to mislabel, per vendor, each
+  entry beside its own citation. `dashscope` (400) and `deepseek` (400,
+  `insufficient_system_resource`, which that vendor reports as a *finish reason*) are wired;
+  Anthropic and OpenAI need nothing, both publishing transient conditions under truthful statuses.
+  The `code` alone cannot classify it — the same page documents `400-ServiceUnavailableError` as a
+  permanent malformed request — so markers are matched as **vocabulary, never as a bare
+  three-digit substring** (`0.36692140104299825` contains "429"), pinned by a test.
+  `is_transient_provider_error` gains an optional `provider`; without it every 400 stays fatal, so
+  no other vendor becomes retryable by accident. **Adjacent gap closed:** Anthropic's documented
+  spend-cap 429 `enforced_spend_limit_reached` was absent; it now sits in `exhausted_codes`, not in
+  the message markers, because it arrives typed `rate_limit_error` and that type early-returns
+  "refilling" before any marker is read — the first attempt put it in the markers and was inert.
+  *N6:* usage was recorded only on `traced_model_call`'s return path, so a turn our own extraction
+  rejected after a billable response was silently free — slot 5's two failing structured attempts
+  (~195k input tokens) appear neither in its ledger nor in its reported $29.23. The four
+  `_responses.py` extraction raises now go through `_raise_billed(exc, response)`, which attaches
+  `billed_usage` and re-raises **the same exception type**, because the type is the role layer's
+  retry contract (`ValueError` retried, `RuntimeError` terminal). `traced_model_call` records
+  `billed_usage` on the exception path; a provider refusal before generation carries none and is
+  correctly billed as nothing. Tests: `test_provider_retry.py::test_f7_*` (6),
+  `test_observability.py::test_n6_*` (2).
+
+- 2026-09-09 (second) — **F7's live status, and what a failed provocation measured instead.**
+  The human pointed out that concurrency can provoke a vendor throttle on demand, which retired my
+  claim that this class was not live-testable. A gated probe now exists
+  (`test_live_schema_matrix.py::test_live_a_provoked_qwen_throttle_is_waited_out_not_fatal`,
+  `AUTO_RESEARCH_LIVE_THROTTLE_PROBE=1`, with concurrency / model / heavy as env knobs). Its proof
+  channel is exact rather than a proxy: `call_with_transient_retry` emits its cooldown warning
+  **only** on the branch taken after `is_transient_provider_error(exc, provider)` returns True, so
+  a captured warning naming a 400 `ServiceUnavailable` is the predicate classifying a real vendor
+  error, seen through the production path.
+  **It did not fire, twice, and the non-event is the measurement.** 20 light concurrent calls on
+  `qwen3.7-plus`: 20/20 in ~18 s, zero throttles (two runs). 48 **heavy** concurrent calls on
+  `qwen3.8-max` at `reasoning.effort: high`: **48/48 in 251 s, zero throttles.** That *confirms*
+  the slot-6 forensics rather than failing to reproduce them — that run died at 0.007% of
+  Alibaba's documented 15,000 RPM with a sibling succeeding on the same key 31 s later, i.e.
+  vendor-side **serving capacity**, not a quota. A rate limit would have refused 48 concurrent long
+  generations; capacity did not care, so load from our side cannot reach it.
+  **So F7 is verified deterministically against the exact recorded body and is NOT live-verified**,
+  and that is stated rather than papered over. The probe stays committed and gated, asserting the
+  property that matters (no call may die on a condition the vendor documents as retryable), so a
+  real occurrence is caught when it happens. Incidental gain worth keeping: this is the first
+  *sustained*-load figure for Alibaba — both earlier concurrency measurements carried the stated
+  limit "short calls, not sustained multi-hour load" — and it retires the worry that the sweep's
+  concurrency of 5 sat near a vendor ceiling.

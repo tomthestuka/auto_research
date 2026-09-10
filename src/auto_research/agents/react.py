@@ -14,7 +14,7 @@ import json
 import os
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -580,7 +580,7 @@ def _report_view(report: Any) -> tuple[str, list[FigureRef]]:
     if uncertainty:
         parts.append(f"uncertainty: {uncertainty}")
     status = getattr(report, "status", None)
-    if status and status != "ok":
+    if status and status != "succeeded":
         parts.append(f"status: {status}")
     images: list[FigureRef] = []
     figures = getattr(report, "figures", None) or []
@@ -591,6 +591,210 @@ def _report_view(report: Any) -> tuple[str, list[FigureRef]]:
             images.append(fig.model_copy(update={"caption": f"Figure {n} — {fig.caption}"}))
         parts.append("\n".join(manifest))
     return ("\n\n".join(parts) or "(empty report)"), images
+
+
+FILE_EDIT_TOOL = "file_edit"
+
+
+def file_edit_tool_def(path: Path) -> dict:
+    """Definition for ``file_edit`` — reactive editing of **one** file (F5e).
+
+    The path is baked into the description and the provider holds it, so the model never names a
+    file: the tool cannot reach anything else, which is what makes giving a formerly read-only
+    role a write capability bounded rather than open (F10 in miniature — a role writes to its own
+    work product and nowhere else).
+    """
+    return {
+        "name": FILE_EDIT_TOOL,
+        "description": (
+            f"Edit your report at {path.name}. Two modes: pass `content` to write the whole file, "
+            "or pass `old_text` and `new_text` to replace one exact, unique passage in place. "
+            "Prefer the targeted replacement once the document exists — it keeps every earlier "
+            "fix, where rewriting the whole file can silently undo one. Read the file back with "
+            "read_file to see your current draft. Free: editing costs no tool budget."
+        ),
+        "strict": True,
+        "input_schema": _strictify({
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": ["string", "null"],
+                    "description": "The complete new file content. Use for the first draft.",
+                },
+                "old_text": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "The exact passage to replace, copied from the current file. Must appear "
+                        "exactly once."
+                    ),
+                },
+                "new_text": {
+                    "type": ["string", "null"],
+                    "description": "What replaces `old_text`. Empty string deletes the passage.",
+                },
+            },
+            "required": ["content", "old_text", "new_text"],
+        }),
+    }
+
+
+async def execute_file_edit(
+    path: Path | None, arguments: Mapping[str, Any], guard: Any | None = None
+) -> ToolOutcome:
+    """Write or patch the one file this role owns (F5e), inside its writable scope (F10).
+
+    Two independent bounds, because either alone is weaker than it looks. The **tool** never
+    takes a path from the model, so there is nothing for a model to redirect; the **guard** then
+    checks the path the provider was configured with, so a mis-wired provider cannot hand a role
+    a write outside its own work folder either. The second is the one that survives a future
+    caller who does pass a path.
+    """
+    if path is None:
+        return ToolOutcome(text="file_edit is not available for this role.", is_error=True)
+    if guard is not None and getattr(guard, "active", False) and not guard.is_writable(path):
+        return ToolOutcome(
+            text=(f"file_edit: {path} is outside this role's writable scope — a role writes only "
+                  "within its own work folder."),
+            is_error=True,
+        )
+    content = arguments.get("content")
+    old_text = arguments.get("old_text")
+    new_text = arguments.get("new_text")
+
+    if content is not None and str(content).strip():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(content), encoding="utf-8")
+        return ToolOutcome(text=f"Wrote {len(str(content))} characters to {path.name}.")
+
+    if old_text is None or not str(old_text):
+        return ToolOutcome(
+            text="file_edit: pass either `content` (whole file) or `old_text` + `new_text`.",
+            is_error=True,
+        )
+    if not path.is_file():
+        return ToolOutcome(
+            text=f"file_edit: {path.name} does not exist yet — write it with `content` first.",
+            is_error=True,
+        )
+    current = path.read_text(encoding="utf-8")
+    hits = current.count(str(old_text))
+    if hits == 0:
+        return ToolOutcome(
+            text=("file_edit: `old_text` does not appear in the file. Read it back with "
+                  "read_file and copy the passage exactly."),
+            is_error=True,
+        )
+    if hits > 1:
+        return ToolOutcome(
+            text=(f"file_edit: `old_text` appears {hits} times — include enough surrounding "
+                  "text to make it unique."),
+            is_error=True,
+        )
+    path.write_text(current.replace(str(old_text), str(new_text or "")), encoding="utf-8")
+    return ToolOutcome(text=f"Replaced one passage in {path.name}.")
+
+
+TURN_END_TOOL = "turn_end"
+
+
+def turn_end_tool_def() -> dict:
+    """Definition for ``turn_end`` — the universal terminal, validated before it is accepted (F5c).
+
+    Every graph role that produces terminal material ends its turn by calling this. The harness
+    then checks the material and either accepts (the loop ends) or **rejects with the reason**,
+    which puts the model back in the loop with its remaining tools to fix what was named.
+
+    Why a tool and not the absence of tool calls: a tool call means the same thing on all six
+    vendors, and a finish-reason field does not — Z.AI reports a dropped inference as
+    `network_error`, which the ecosystem maps to `stop`. It is also the design a research harness
+    already ships (Inspect AI's `react()` runs "until the model calls a special `submit()` tool",
+    injects a continuation when the model stops calling tools, and validates the submission).
+    """
+    return {
+        "name": TURN_END_TOOL,
+        "description": (
+            "End your turn: you have finished the work and your material is complete. The harness "
+            "checks it before accepting — if anything required is missing or malformed you get the "
+            "specific reason back and stay in the loop with your tools, so fix what is named and "
+            "call this again. Write your material with the tools first; this call submits it, it "
+            "does not carry it. Free: calling it costs no tool budget."
+        ),
+        "strict": True,
+        "input_schema": _strictify({
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "One or two sentences on what you concluded and what a reader should do "
+                        "with it. Recorded on the run ledger beside the accepted material."
+                    ),
+                },
+            },
+            "required": ["summary"],
+        }),
+    }
+
+
+async def execute_turn_end(
+    validator: Callable[[], list[str]] | None, arguments: Mapping[str, Any]
+) -> ToolOutcome:
+    """Accept the turn, or reject it naming exactly what is missing (F5c).
+
+    ``validator`` returns the problems with the role's current material; empty means acceptable.
+    A rejection is an ``is_error`` outcome, which ``_react`` treats as a correction rather than a
+    finish, so the model keeps its tools and its context.
+
+    **Free by ruling** (2026-09-09): the *editing* burns tool budget, so the loop is bounded by
+    the work rather than by the validation. Residual, recorded rather than guarded: a model that
+    calls this repeatedly without editing anything spins for free, bounded only by
+    ``react_loop_absolute_cap``. The rejection always names a reason, which is what makes that
+    unlikely for a cooperating model.
+    """
+    problems = list(validator() if validator is not None else [])
+    if problems:
+        return ToolOutcome(
+            text=(
+                "Your turn cannot be ended yet:\n"
+                + "\n".join(f"  - {p}" for p in problems)
+                + "\nFix these with your tools, then call turn_end again."
+            ),
+            is_error=True,
+        )
+    summary = str(arguments.get("summary") or "").strip()
+    return ToolOutcome(text=f"Turn ended. {summary}".strip())
+
+
+def worker_report_problems(workspace: ReportWorkspace | None) -> list[str]:
+    """What is wrong with an analyst worker's material, for :func:`execute_turn_end`.
+
+    The worker's report is whatever ``edit_report`` persisted. Before F5, a loop that ended
+    without ever calling it got a **structured compose on the model's behalf** — the only path
+    that sent the model the runtime-owned ``figures``/``FigureRef`` tree, which
+    ``_sanitize_strict`` then promoted to *required*, which is how four invented
+    ``placeholder_*`` digests killed slot 5 one line before they would have been discarded.
+    There is no compose now: an unwritten report is a rejection with a reason.
+    """
+    if workspace is None:
+        return []
+    report = workspace.written_report
+    if report is None:
+        return [
+            "No report has been written. Call edit_report to write it — that call is the only "
+            "way your report is saved, and nothing is composed on your behalf."
+        ]
+    problems: list[str] = []
+    if not str(getattr(report, "summary", "") or "").strip():
+        problems.append("The report's summary is empty.")
+    if getattr(report, "status", None) is None:
+        problems.append("The report declares no status; state whether the work succeeded.")
+    uncited = sum(len(figs) for figs in (workspace.catalog or {}).values())
+    if uncited and not getattr(report, "figures", None):
+        problems.append(
+            f"{uncited} figure(s) are in your catalog and none is cited. Cite the ones your "
+            "prose refers to with edit_report's cited_figures, or say why none apply."
+        )
+    return problems
 
 
 def edit_report_tool_def() -> dict:
@@ -653,10 +857,12 @@ def edit_report_tool_def() -> dict:
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["ok", "failed", "needs_human"],
+                    "enum": ["succeeded", "failed"],
                     "description": (
-                        "'ok' when you completed the work; 'failed' / 'needs_human' are honest, "
-                        "penalty-free outcomes — never fabricate a result to force 'ok'."
+                        "Declare the outcome of YOUR work: 'succeeded' when you completed it, "
+                        "'failed' when you could not. An honest 'failed' is a correct, "
+                        "penalty-free answer — never fabricate a result to force 'succeeded'. Say "
+                        "in the summary what blocked you and what a person would need to do."
                     ),
                 },
                 "tool_request": {
@@ -710,7 +916,14 @@ def edit_report_tool_def() -> dict:
                     ],
                 },
             },
-            "required": ["summary"],
+            # `status` is REQUIRED, not defaulted (F9). The schema default is `failed`, on the
+            # principle that silence is never success — but a default only makes sense for a
+            # report the RUNTIME constructs. For a report the agent writes, leaving it optional
+            # would mark a genuinely successful analysis as failed for a missing field, which is
+            # the opposite of "the agent declares its own outcome". Caught by
+            # `test_monitor.py::test_run_research_returns_monitor_with_fake_dependencies`, whose
+            # fake omitted it and turned an accepted run into an honest failure.
+            "required": ["summary", "status"],
         },
     }
 
@@ -943,7 +1156,7 @@ async def execute_submit(session: Any) -> ToolOutcome:
     Returns a verdict the lead diagnoses: a gate failure (fix via drive_coder), a review rejection
     (drive_coder or respond_to_review), or a successful commit. Bounded by ``session.submit_cap``
     (each submit runs the gate twice + a co-lead review — expensive)."""
-    if getattr(session, "committed", False) and not _has_pending_changes(session):
+    if getattr(session, "last_commit_sha", None) is not None and not _has_pending_changes(session):
         # The tool already landed and nothing has changed since. Submitting again would scan an
         # empty changeset and then ask `approve_edit` to commit nothing, which exits non-zero and
         # raises out of this tool call ([F6]: `_react` does not catch tool exceptions). Observed
@@ -1147,7 +1360,19 @@ ADJUDICATE_STAGE = "adjudicate"
 #: stop is a correct outcome with no quality penalty, so it is never out of reach (§9.6).
 _STAGE_FORMS: dict[str, frozenset[str]] = {
     DECIDE_STAGE: frozenset({AUTHOR_CHAIN_TOOL, HOLD_AUTHORING_TOOL, TERMINAL_REPORT_TOOL}),
-    AUTHOR_STAGE: frozenset({TERMINAL_REPORT_TOOL}),
+    # `request_another_round` is open here too ([A20], 2026-09-09). It was not, and the
+    # consequence was a mislabelled run: attempt 6's lead, after its first commit, called
+    # `request_another_round` — "one rerun closes the largest part of the gap with properly
+    # provenanced artifacts" — was refused because the only form open at this stage was a
+    # terminal, and so filed `submit_terminal_report(status='needs_human')` for something that
+    # was not a human block at all. That run holds no `ask_human`/`HumanQuery` event. [A11]
+    # delivered the rerun anyway, so the outcome was right and only the record was wrong — and
+    # the record is what an offline scoring pass reads as an honest-stop row.
+    #
+    # Asking for a rerun after a commit is the *correct* request: a committed tool is evidence
+    # the current reports predate. Leaving the lead only a terminal made the sensible action
+    # inexpressible, which is the same defect shape as the launch-3 empty `tool_specs`.
+    AUTHOR_STAGE: frozenset({ANOTHER_ROUND_TOOL, TERMINAL_REPORT_TOOL}),
     ADJUDICATE_STAGE: frozenset(
         {ANOTHER_ROUND_TOOL, SUBMIT_ADJUDICATION_TOOL, TERMINAL_REPORT_TOOL}
     ),
@@ -1925,6 +2150,10 @@ class SandboxToolProvider:
         if self.report_workspace is not None:
             defs.append(edit_report_tool_def())
             defs.append(review_report_tool_def())
+            # The universal terminal (F5c). Declared with the report tools because those are what
+            # it validates: without it the loop ended on "no tool calls", and an unwritten report
+            # was composed on the model's behalf.
+            defs.append(turn_end_tool_def())
         return defs
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
@@ -1942,6 +2171,10 @@ class SandboxToolProvider:
             return await execute_edit_report(self.report_workspace, arguments)
         if name == REVIEW_REPORT_TOOL:
             return await execute_review_report(self.report_workspace, arguments)
+        if name == TURN_END_TOOL:
+            return await execute_turn_end(
+                lambda: worker_report_problems(self.report_workspace), arguments
+            )
         kind = self.registry.kind_for_function(name)
         args = dict(arguments)
         if kind == "mcp.builtin.bash_exec" and "cwd" not in args and self.cwd is not None:
@@ -2497,8 +2730,23 @@ class ReadOnlyToolProvider:
         human_handler: Any | None = None,
         asked_by: str = "agent",
         model: str = "",
+        editable_file: Path | None = None,
+        turn_end_validator: Callable[[], list[str]] | None = None,
     ) -> None:
         self.roots = [Path(r).resolve() for r in roots]
+        # F5e: the ONE file this role may write, and what must hold before its turn can end.
+        # Set only for the reviewer, on its own `report.tex`. `file_edit` never takes a path from
+        # the model, so the write surface is this file and nothing else — the bounded form of
+        # "no pure read-only roles: a role writes to its own work product only" (F10).
+        self.editable_file = Path(editable_file) if editable_file is not None else None
+        self.turn_end_validator = turn_end_validator
+        # F10: reads follow the shared allow-list; writes are scoped to this role's own work
+        # folder — the directory holding its editable file, and nothing when it has none. The
+        # guard is the second bound, independent of the tool never accepting a model-supplied
+        # path, so a mis-wired provider cannot widen the write surface either.
+        self._guard = PathGuard.from_config(
+            writable=[self.editable_file.parent] if self.editable_file is not None else [],
+        )
         self.retrieval = retrieval
         # V-4: the analyst lead's per-round report-authoring workspace (edit_report/review_report).
         # Set per adjudication by the lead (its per-worker figure catalog + subordinate reports);
@@ -2664,6 +2912,10 @@ class ReadOnlyToolProvider:
         if self.report_workspace is not None:
             definitions.append(edit_report_tool_def())
             definitions.append(review_report_tool_def())
+        if self.editable_file is not None:
+            definitions.append(file_edit_tool_def(self.editable_file))
+        if self.turn_end_validator is not None:
+            definitions.append(turn_end_tool_def())
         return definitions
 
     def _authoring_declared(self) -> bool:
@@ -2729,6 +2981,10 @@ class ReadOnlyToolProvider:
             return await execute_edit_report(self.report_workspace, arguments)
         if name == REVIEW_REPORT_TOOL:
             return await execute_review_report(self.report_workspace, arguments)
+        if name == FILE_EDIT_TOOL:
+            return await execute_file_edit(self.editable_file, arguments, self._guard)
+        if name == TURN_END_TOOL:
+            return await execute_turn_end(self.turn_end_validator, arguments)
         if name in ("read_file", "list_dir"):
             target = Path(str(arguments.get("path", "")))
             if not self._allowed(target):

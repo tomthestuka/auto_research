@@ -577,3 +577,231 @@ def test_live_schemaless_vendor_sends_its_schema_by_the_route_it_supports(
     assert vendor.schema_via_tool, (
         f"{provider_name} can be handed no schema by any route, so no role may emit one"
     )
+
+
+# ── F5a: the normalised stop classification, read live from each vendor ──────
+#
+# This is the one change in the 2026-09-09 batch that ONLY a live call can settle. Every mapping
+# in `models/types.py` was written from that vendor's own documentation, and a documentation page
+# says where a field is meant to live, never that this account, this endpoint and this SDK version
+# actually put it there. The whole point of `stop` is that the six vendors disagree — Anthropic has
+# no `tool_calls` value, Google's enum is 17 wide, and DeepSeek and Z.AI report *infrastructure
+# failures* in the terminal field — so a mapping that silently returns "unknown" would restore the
+# very defect F5b removed: a turn read as finished when it was not.
+
+
+def _stop_log(provider_name, model, case, response, **extra):
+    log = dev_log_path("stop-classes", _log_stem(provider_name, model, case), ".json")
+    log.write_text(json.dumps({
+        "provider": provider_name, "model": model, "case": case,
+        "stop": response.stop,
+        "content": (response.content or "")[:300],
+        "tool_calls": [c.name for c in response.tool_calls],
+        "output_tokens": response.usage.output_tokens,
+        **extra,
+    }, indent=2), encoding="utf-8")
+
+
+@pytest.mark.parametrize("provider_name,provider,model", PROVIDERS)
+def test_live_a_plain_answer_classifies_as_end_turn(provider_name, provider, model):
+    """A short, complete answer must classify as `end_turn` — not `unknown`.
+
+    `unknown` is the failure this cell exists to catch: it means the adapter did not find the
+    field, and `_continuation_for` then judges the turn on its content alone. That is a safe
+    fallback and a silent loss of the signal, which is exactly how a stop reason goes unnoticed.
+    """
+    load_dotenv()
+    _skip_without_key(provider)
+    response = asyncio.run(_handle(provider_name, provider, model).call(
+        [ModelMessage(role="user", content="Reply with exactly: DONE")],
+    ))
+    _stop_log(provider_name, model, "end_turn", response)
+    assert response.stop == "end_turn", (
+        f"{provider_name}/{model} classified a completed answer as {response.stop!r} — the "
+        "adapter did not find this vendor's finish field where its docs place it"
+    )
+
+
+@pytest.mark.parametrize("provider_name,provider,model", PROVIDERS)
+def test_live_a_tool_calling_turn_is_recognised_by_its_tool_calls(provider_name, provider, model):
+    """What the loop reads on a tool-calling turn is `tool_calls`, and `stop` is only consulted
+    when there are none — so THAT is the invariant this cell asserts, and the stop value is
+    recorded rather than asserted.
+
+    Measured 2026-09-09, and it corrected a wrong assertion of mine. Only Anthropic reports a
+    `tool_use` stop; every Responses-dialect vendor returns `status="completed"` -> `end_turn`
+    **with a tool call present** (openai, deepseek, zai, dashscope x2, all 5/5). That is exactly
+    what `stop_from_openai_responses` documents — *"There is no `tool_use` status: tool intent is
+    read off the output items"* — so my first version of this cell contradicted the adapter's own
+    stated contract, and it would have failed forever on five of seven vendors for no defect.
+    Harmless in production precisely because `_react` checks `response.tool_calls` first.
+
+    The tool is a **real production definition** (`turn_end_tool_def`), not a hand-written schema.
+    The hand-written one taught this lesson too: its `additionalProperties` reached Gemini as
+    `additional_properties` and hard-400'd, i.e. a defect of my fixture rather than of the code.
+    """
+    load_dotenv()
+    _skip_without_key(provider)
+    from auto_research.agents.react import TURN_END_TOOL, turn_end_tool_def
+
+    response = asyncio.run(_handle(provider_name, provider, model).call(
+        [ModelMessage(role="user", content=(
+            "You have finished your work. End your turn now by calling the "
+            f"`{TURN_END_TOOL}` tool with a one-sentence summary."))],
+        tools=[turn_end_tool_def()],
+    ))
+    _stop_log(provider_name, model, "tool_use", response)
+    if not response.tool_calls:
+        pytest.skip(
+            f"{provider_name}/{model} answered in prose instead of calling {TURN_END_TOOL} "
+            f"(stop={response.stop!r}) — recorded; the loop's continuation handles this"
+        )
+    assert any(c.name == TURN_END_TOOL for c in response.tool_calls), (
+        f"{provider_name}/{model} called {[c.name for c in response.tool_calls]}"
+    )
+    assert response.stop != "unknown", (
+        f"{provider_name}/{model} reported no usable finish field at all on a tool turn"
+    )
+
+# **The `truncated` class is deliberately NOT live-tested, and this is the reason rather than an
+# omission.** Forcing a truncation needs a per-call output cap, and `max_output_tokens` was
+# **removed from every optional path by human ruling** (2026-09-02): a cap buys no cost protection
+# because a vendor bills what it generated, and its only effect is on the call that hits it, where
+# the failure is total (measured: 8,000 choked a `deepseek-v4-pro` call to an empty 200 billed in
+# full, while uncapped used 19,772). `ModelHandle.call` therefore accepts no such argument — my
+# first version of this cell invented one and got a clean `TypeError` on all seven vendors, which
+# is the API telling the truth.
+#
+# So the mapping (`max_tokens`/`length`/`MAX_TOKENS`/`incomplete_details.reason` -> `truncated`)
+# stays **deterministic-only**, tested in `tests/test_turn_end.py` against each vendor's
+# documented value. Same category as F7's transient override, which would need a vendor outage on
+# demand. Stated here so a later reader does not mistake the gap for an untested mapping.
+
+
+# ── F7: a real vendor throttle, provoked ─────────────────────────────────────
+
+
+@pytest.mark.skipif(
+    os.getenv("AUTO_RESEARCH_LIVE_THROTTLE_PROBE") != "1",
+    reason="set AUTO_RESEARCH_LIVE_THROTTLE_PROBE=1 to deliberately provoke a vendor throttle",
+)
+def test_live_a_provoked_qwen_throttle_is_waited_out_not_fatal():
+    """F7, live: hammer Alibaba concurrently until it throttles, and prove we now recover.
+
+    I had recorded this class as not live-provable. It is — the human pointed out that
+    concurrency provokes it on demand, which is worth more than the reasoning it replaced.
+
+    What killed slot 6 (2026-09-08, $11.45, one HTTP attempt, zero retries) was Alibaba returning
+    **HTTP 400** with `code: "ServiceUnavailable"` and a message reading
+    `"<503> InternalError.Algo: ... [Too many requests ... throttled ... try again later.]"`.
+    `is_transient_provider_error` read `status_code` first, found the int 400, and never reached
+    the string-`code` fallback, so a condition the vendor's own reference documents at 500/429
+    with *"Retry first"* raised at once.
+
+    **The retry warning is the proof, and it is proof rather than a proxy**:
+    `call_with_transient_retry` emits it only on the branch it takes *after*
+    `is_transient_provider_error(exc, provider)` returns True. So a captured warning naming a 400
+    `ServiceUnavailable` is the predicate classifying the real error correctly, observed through
+    the production path rather than by hand-feeding a fixture to it.
+
+    Driven through `ModelHandle`, so the retry layer, the key pool and the media guard are all
+    in front of the adapter exactly as in a run. A throttle that never arrives skips: the vendor's
+    capacity is not ours to command, and manufacturing a pass would be worse than no measurement.
+    """
+    import logging
+
+    load_dotenv()
+    provider = DashscopeProvider()
+    _skip_without_key(provider)
+    # Load profile as knobs, because the condition is **serving capacity, not a rate limit** and
+    # the two need different load. Measured 2026-09-09: 20 light concurrent calls succeeded 20/20
+    # twice, ~18s, zero throttles — which agrees with the slot-6 forensics, where the failing run
+    # was at 0.007% of Alibaba's documented 15,000 RPM and a sibling succeeded on the same key
+    # 31 seconds later. A rate limit would have refused those 20; capacity did not care.
+    concurrency = int(os.getenv("AUTO_RESEARCH_THROTTLE_CONCURRENCY", "20"))
+    model = os.getenv("AUTO_RESEARCH_THROTTLE_MODEL", "qwen3.7-plus")
+    heavy = os.getenv("AUTO_RESEARCH_THROTTLE_HEAVY") == "1"
+    handle = _handle("dashscope", provider, model,
+                     reasoning_effort="high" if heavy else None)
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    retry_log = logging.getLogger("auto_research.models.retry")
+    capture = _Capture(level=logging.WARNING)
+    retry_log.addHandler(capture)
+    previous = retry_log.level
+    retry_log.setLevel(logging.WARNING)
+
+    light = "name one X-ray polarimetry mission. Answer in under 10 words."
+    # A heavy turn is what strains capacity: long generation at high reasoning effort, which is
+    # the shape the batch that hit slot 6 was running (five concurrent trials of long calls).
+    weighty = (
+        "Derive, from first principles and in full detail, how a gas pixel detector recovers the "
+        "Stokes parameters of an X-ray beam: photoelectron emission, track reconstruction, the "
+        "modulation factor, and how background dilutes the measured polarization degree. Show "
+        "the algebra step by step and discuss the systematic errors at each stage."
+    )
+
+    async def one(i: int):
+        return await handle.call(
+            [ModelMessage(role="user", content=f"Probe {i}: {weighty if heavy else light}")],
+        )
+
+    async def blast():
+        return await asyncio.gather(
+            *(one(i) for i in range(concurrency)), return_exceptions=True
+        )
+
+    started = time.perf_counter()
+    try:
+        results = asyncio.run(blast())
+    finally:
+        retry_log.removeHandler(capture)
+        retry_log.setLevel(previous)
+    elapsed_s = time.perf_counter() - started
+
+    failures = [r for r in results if isinstance(r, BaseException)]
+    warnings_seen = [r.getMessage() for r in records]
+    throttles = [
+        m for m in warnings_seen
+        if "transient provider error" in m
+        and ("ServiceUnavailable" in m or "throttl" in m.lower() or "capacity" in m.lower())
+    ]
+
+    log = dev_log_path(
+        "throttle-probe", f"qwen_{model}_c{concurrency}{'_heavy' if heavy else ''}", ".json"
+    )
+    log.write_text(json.dumps({
+        "concurrency": concurrency,
+        "model": model,
+        "heavy": heavy,
+        "elapsed_s": round(elapsed_s, 1),
+        "succeeded": len(results) - len(failures),
+        "failed": len(failures),
+        "failures": [f"{type(e).__name__}: {e}"[:400] for e in failures],
+        "retry_warnings": warnings_seen[:20],
+        "throttles_classified_transient": len(throttles),
+    }, indent=2), encoding="utf-8")
+
+    # Whatever else happened, a throttle must never have been fatal. This is the slot-6
+    # regression, stated as the property rather than as a count: no call may have died on a
+    # condition the vendor documents as retryable.
+    fatal_throttles = [
+        e for e in failures
+        if "ServiceUnavailable" in str(e) or "throttl" in str(e).lower()
+        or "system capacity" in str(e).lower()
+    ]
+    assert not fatal_throttles, (
+        f"a documented-transient throttle was fatal after F7: {fatal_throttles[:2]}"
+    )
+
+    if not throttles:
+        pytest.skip(
+            f"{concurrency} concurrent {'heavy' if heavy else 'light'} calls on {model} did not "
+            f"provoke a throttle ({len(failures)} other failure(s), "
+            f"{elapsed_s:.0f}s) — the vendor's capacity is not ours to command; recorded"
+        )

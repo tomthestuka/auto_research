@@ -308,7 +308,7 @@ def test_submit_terminal_report_stamps_the_status_the_lead_filed(tmp_path):
 def test_submit_terminal_report_requires_a_real_status(tmp_path):
     cycle = _cycle(ADJUDICATE_STAGE)
     ws = _workspace(tmp_path, AnalystReport(summary="s"))
-    for args in ({}, {"status": "ok"}, {"status": "nonsense"}):
+    for args in ({}, {"status": "succeeded"}, {"status": "nonsense"}):
         out = _run(
             ReadOnlyToolProvider(roots=[], cycle=cycle, report_workspace=ws).execute(
                 TERMINAL_REPORT_TOOL, args
@@ -593,3 +593,21 @@ def test_respond_to_review_also_anchors_the_drop():
     kept = _drop_coding_middle(messages, len(before))
     names = [c.name for m in kept for c in (getattr(m, "tool_calls", None) or ())]
     assert names == [RESPOND_TO_REVIEW_TOOL]  # the LAST submit-class call is the anchor
+
+
+def test_a20_request_another_round_is_open_at_the_author_stage():
+    """[A20]: after a commit the only open form was a terminal, so a lead that wanted a worker
+    rerun — the correct request, since a committed tool is evidence the current reports predate —
+    filed `submit_terminal_report(status='needs_human')` instead. Attempt 6 did exactly that and
+    its ledger holds no `ask_human`/`HumanQuery` event at all; [A11] delivered the rerun anyway,
+    so the outcome was right and only the record was wrong. The record is what an offline scoring
+    pass reads as an honest-stop row."""
+    from auto_research.agents.react import (
+        ANOTHER_ROUND_TOOL,
+        AUTHOR_STAGE,
+        TERMINAL_REPORT_TOOL,
+        _STAGE_FORMS,
+    )
+
+    assert ANOTHER_ROUND_TOOL in _STAGE_FORMS[AUTHOR_STAGE]
+    assert TERMINAL_REPORT_TOOL in _STAGE_FORMS[AUTHOR_STAGE], "the honest terminal stays open"

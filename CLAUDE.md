@@ -455,8 +455,9 @@ toolkit.**
    lead is a *group*: a **Claude science lead** (convergence, adjudication, library
    discipline) and a **GPT analyst co-lead whose Phase-2 job is tool-code review only**.
    Review is routed *from config* to the member whose **provider differs from the author's**
-   (`reviewer.provider ≠ author.provider`, [§6](#6-config-driven-model-registry)) — the
-   author is the Claude SDK, so the GPT co-lead reviews. It judges: does the code match the
+   (`reviewer.provider ≠ author.provider`, [§6](#6-config-driven-model-registry)) — the rule
+   reads whichever vendor the configured author names, so a DeepSeek author on the Codex
+   harness is reviewed by the GPT co-lead exactly as a Claude one is. It judges: does the code match the
    `ToolSpec`, are the Layer-B checks the right ones and strict enough, is there a subtle
    bug. Its **review-pass + the deterministic gate** authorize the commit.
 5. On gate-pass + co-lead review-pass, `approve_edit()` lands **one atomic commit per tool on
@@ -554,10 +555,16 @@ before reacting:
 - **environment / data / human fault** (missing file, broken dependency, contradictory
   request) → **raise to the human** ([§9.7](#97-raise-to-human--clarification-only-every-role)); **never fabricate.**
 
-`AnalystReport` gains a first-class `FAILED` / `NEEDS_HUMAN` terminal state that the lead
-and reviewer treat as a *correct* outcome with **no quality penalty** — otherwise the retry
-cap pressures the agent to invent something on the last attempt. "Real results or no
-results" is absolute.
+`AnalystReport.status` is a first-class, **agent-declared** terminal state — `succeeded` or
+`failed`, defaulting to `failed` — that the lead and reviewer treat as a *correct* outcome with
+**no quality penalty**; otherwise the retry cap pressures the agent to invent something on the
+last attempt. "Real results or no results" is absolute. The harness never infers the state: a
+report nobody wrote has not succeeded at anything, which is why the default is the honest one
+(F9, 2026-09-09; it previously defaulted to `ok`). `NEEDS_HUMAN` was retired from this schema —
+headless, `ask_human` is not in a graph role's tool list, so the state was unreachable by the
+route it names, and [A20] shows the label being filed for something that was not a human block.
+A role that needs a person says so in `summary`. (The lead's own `submit_terminal_report` keeps
+`failed`/`needs_human`: a cycle decision, not a worker's outcome.)
 
 **The reviewer is the sole I/O — an honest failure is adjudicated, not bypassed.** When an
 authoring attempt does not commit, the analyst lead files **one terminal report**
@@ -617,22 +624,29 @@ rule that *you, the coding agent, perform zero git*:
   passed **and** the provider-decorrelated GPT co-lead's review passed. **Commit ⇔ gate-pass
   ∧ co-lead review-pass.** A reject → no commit, feedback to the author.
 - The **coder never issues git** — it is the runtime's job, so `prompts/coder.md` tells it to leave
-  git to the runtime and `ask_lead` instead of working around it, and each harness adds what it can:
-  the Claude SDK author carries a Bash deny-rule (`disallowed_tools=["Bash(git:*)", "Bash(git)"]` on
-  its own options), while the Codex author runs under a sandbox in which `.git` is read-only even
-  inside a writable root, so committing is refused by the OS rather than by a rule. A deny-rule is
-  best-effort (prefix-matched; pipes/subshells can slip), so the gate-entry check and reset below
-  remain the robust backstops on either harness.
+  git to the runtime and `ask_lead` instead of working around it, and **the kernel enforces it on
+  both harnesses**: `jail.coder_policy` binds `.git` read-only inside every writable root, so a
+  write to it fails however it is spelled (a pipe, a subshell, `python -c subprocess`) while
+  `status`/`diff`/`log`/`show` keep working. Above that sit the harnesses' own best-effort rules —
+  the Claude SDK author's Bash deny-rule (`disallowed_tools=["Bash(git:*)", "Bash(git)"]`) and the
+  Codex sandbox's own read-only `.git` — which are prefix-matched and can slip, which is why the
+  gate-entry check and reset below remain the backstops on either harness. The runtime's own git is
+  outside the jail (`approve_edit`, the gate-entry reset, `collect_all_changes` all run in the
+  parent process), so making `.git` read-only for the author costs the runtime nothing.
 - As the **first action at the gate**, `_gated` compares HEAD to the per-attempt base ref; if the
   coder committed (slipped the deny-rule), the runtime does `git reset --mixed <base_ref>` — undoing
   the commit but **keeping the work in the working tree** — and emits a `coder.committed` event, so the
   gate then scans the recovered changes normally. The coder never touches git, its work is preserved,
   and the only real commit remains `approve_edit`'s (post gate+review), so `commit ⇔ gate ∧ review`
   holds. This is what makes the gate robust to commit state (vs. the old empty-changeset confusion).
-- A **non-committed terminal attempt auto-resets** the working tree back to the attempt's **base ref**
-  — HEAD recorded per-attempt at `propose_and_pr` entry — not just to `HEAD` (`git reset --hard
-  <base_ref>` + `git clean -fd`), after saving the discarded attempt's diff vs the base ref as a
-  `tool_author_failed_*.patch` under the run's `authoring/` dir. Resetting to the base ref (rather
+- **A terminal attempt auto-resets whatever work the tree still holds unbanked**, back to the attempt's
+  **base ref** — HEAD recorded per-attempt at `propose_and_pr` entry, and advanced by each
+  `approve_edit` commit — not just to `HEAD` (`git reset --hard <base_ref>` + `git clean -fd`), after
+  saving the discarded attempt's diff vs the base ref as a `tool_author_failed_*.patch` under the run's
+  `authoring/` dir. The guard is a **tree query** (`pending_changes()`), not the session's commit latch:
+  asking *"did this session ever commit?"* let a session that committed one tool and then kept working on
+  a rejected second one exit without resetting, leaving the rejected tool callable through
+  `registry.reload()`, which reads the tree (measured live 2026-09-08; corrected 2026-09-09). Resetting to the base ref (rather
   than `HEAD`) **drops any commit the coder lands itself** — a `reset --hard HEAD` would keep it —
   while preserving an earlier round's successful `approve_edit` commit in a multi-tool run. This keeps
   a rejected attempt's edits (and any illegitimate commit) from surfacing a phantom tool to re-running
@@ -881,10 +895,16 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   (`coder.ask_human.unattended` / `.error`) and in the message text, never in a type the author
   can branch on. A harness that let a tool return a typed failure would close that; none does.
 
-- **Coder git-ban is best-effort (deny-rule) on the Claude harness.** Its Bash deny-rule
-  (`disallowed_tools=["Bash(git:*)", "Bash(git)"]`, §9.9) blocks the obvious `git …`, but prefix
-  matching can be slipped (pipes, `$(…)`, env prefixes, `python -c subprocess`). The Codex harness
-  does not have this gap: `.git` is read-only inside a writable root under its sandbox. The robust catches are
+- **Coder git-ban: kernel-enforced since 2026-09-09; the deny-rule above it is still best-effort.**
+  `jail.coder_policy` binds `.git` read-only inside every writable root, so `add`/`commit`/`checkout`
+  fail with *"Unable to create '.git/index.lock': Read-only file system"* on both harnesses however
+  the command is spelled, while `status`/`diff`/`log`/`show` succeed. Measured, not assumed
+  (`tests/test_jail.py::test_a_jailed_process_can_read_git_history_and_cannot_write_it` runs a real
+  repository through a real `bwrap`). Residual: with `agent_os_jail` off there is no kernel layer,
+  and the Claude harness's Bash deny-rule (`disallowed_tools=["Bash(git:*)", "Bash(git)"]`, §9.9) is
+  prefix-matched and slippable (pipes, `$(…)`, env prefixes, `python -c subprocess`) — and it also
+  denies read-only inspection, which cost a live coder one turn reporting its own change set
+  (2026-09-09, seq 128). The robust catches are
   the **gate-entry auto-revert** (`_gated` does `reset --mixed <base_ref>` on a moved HEAD before
   scanning, so a slipped commit is normalized to uncommitted work, not a confusing reject) and the
   **base-ref failure reset** above (drops any commit on a failed attempt) — both regardless of how the
@@ -2119,3 +2139,174 @@ history. Token-level preservation of the second pass was checked mechanically, n
   `web_search`) — so the published authoring numbers stand. It is left untouched: routing a
   published instrument through the new factory is behaviour-preserving on this evidence but is the
   human's call, not a side effect of a test fix.
+
+- 2026-09-09 — **The 2026-09-08 demonstration batch, re-diagnosed from the ledgers and fixed.**
+  Five independent forensic reads of the five slot ledgers, each blind to the prior notes, then
+  every decisive claim re-derived against the source and the vendors' own docs. **Three of the
+  prior file's five attributions were wrong**, and the correction mattered: the batch's defining
+  finding is not plumbing in the contrast arm but one defect class that fired hardest in the
+  **anchor** arm with an Opus lead — **the gate, the registry and the commit disagree about what
+  "the code" is.** The gate and `ToolkitRegistry.reload` read the **working tree**; the commit
+  reads the **index**. `commit ⇔ gate ∧ review` held in git in all five runs; the invariant that
+  failed was never written down — *a tool a worker can call has been committed*. Slot 2's
+  reviewer-**accepted** report took two of its four figures from a plotter that was never
+  committed and was review-rejected three times; slot 3's equivalent produced a **scored**
+  quantity; slot 4 committed a tool importing a symbol defined only in an uncommitted file, so
+  that commit does not run on a clean checkout.
+  **F1** — `aclose`'s reset guard moves from the `committed` latch (set once, never cleared) to
+  `pending_changes()`, so a session that commits and keeps working resets the later, unbanked
+  work. `committed` was then a boolean shadow of `last_commit_sha` and was deleted; that deletion
+  **nearly reintroduced the [F6] run-killer**, because `execute_submit`'s [A17] guard read it as
+  `getattr(session, "committed", False)` — a string name no attribute grep sees, whose `False`
+  default silently meant "not committed" and led to `git commit` with nothing staged. Caught by
+  the existing test. **Lesson: grep the string literal as well as the attribute.**
+  **F2** — Layer A now names three jobs, and the third was previously **unfalsifiable**:
+  `structural.allowed_paths` applied `_TOOLKIT_PKG_RE` to a list `collect_targets` had already
+  filtered by it. New `collect_all_changes` (wide, unfiltered) backs `structural.changes_allowed`;
+  human ruling made it an explicit **allow-list** of `*_utils`, which also closes the hole a
+  protected deny-list would leave. `check_structural`'s new parameter **defaults to deriving the
+  changeset**, so no caller can reintroduce the defect. `gate_bench` 274 passed, no verdict moved
+  — but its `hole_structural_unfalsifiable` mutant was planted against exactly this hole and its
+  recorded verdict names the co-lead as the only catcher, so that row is annotated as pre-F2.
+  **F5** (absorbing the planned F4 and F6) — the terminal-compose architecture is gone.
+  `ModelResponse.stop` normalises each vendor's own documented field, because **Anthropic's
+  convention does not generalise**: DeepSeek reports an overloaded cluster as
+  `insufficient_system_resource` and Z.AI a dropped inference as `network_error`, both *in the
+  finish-reason field*, and the ecosystem maps the latter to `stop`. So the loop terminates on a
+  **tool** (`turn_end`, validated, rejecting with the reason) and uses `stop` only to choose what
+  to say to a silent turn. `_react`'s silent `break` becomes a bounded continuation — applied only
+  where a terminal tool exists, after a looser first rule caused four regressions. The worker's
+  fallback compose is **deleted**: it was the only path that sent a model the runtime-owned
+  `figures`/`FigureRef` tree, which `_sanitize_strict` promoted to *required*, which is how four
+  `placeholder_*` digests killed slot 5 one line before `model_copy` would have discarded them —
+  not fabrication under pressure (3 errors in 54 tool results, zero rejections, the real PNGs on
+  disk), the harness asked for it. Figures move out of tool-result messages into their own
+  following turn, the arrangement Anthropic names as the cause of the 2-3-token empty response
+  that killed slot 3. The reviewer authors `report.tex` by **editing** it, which also removes the
+  structured-output path `qwen3.8-max` — the contrast arm's reviewer — is recorded as failing.
+  **F9** — a failed link no longer ends the chain (it told the lead why instead, since burning
+  all 12 credits is the ruled-intended behaviour); `AnalystReport.status` is agent-declared
+  `succeeded`/`failed` defaulting to **failed**, because a report nobody wrote has not succeeded
+  and the harness must not infer success from silence. `needs_human` retired from that schema.
+  **F10** — `PathGuard` gains a separate writable set: reads stay broad (a role reads its own
+  logs), writes narrow to the role's own work folder. The jail half is deliberately **not** done
+  blind and is recorded as residual.
+  **F7** — Alibaba returns HTTP **400** for a condition its own reference documents at 500/429;
+  `is_transient_provider_error` read `status_code` first, so the string-`code` fallback was
+  unreachable and slot 6 died in one attempt. Per-vendor body overrides, consulted only on the
+  statuses a vendor is documented to mislabel, matched as vocabulary and never as a bare
+  three-digit substring. Anthropic's spend-cap 429 added — to `exhausted_codes`, because the first
+  attempt put it in the message markers where it was **inert**.
+  **F8** — the lead's prompt was 20k characters with **zero** sections and a longest line of
+  **2,144**, and the one-capability rule sat as that line's third sentence; two live runs violated
+  it. Lead 13 `##` + 2 `###`, worker 8 `##`, every prompt's longest line ≤159, no clause lost
+  (verified by a whitespace-normalised sentence diff against HEAD). The new guard's two halves are
+  held to different bars on purpose: the line bound applies to every prompt because that is the
+  defect with an incident behind it; sections only above 12k, because a lower threshold would be a
+  style rule invented to catch a well-wrapped 7.7k prompt.
+  Also **N1** (the Layer-B failure window kept the *tail*, which is the warnings summary — now
+  head+tail and config-driven; slot 2 lost 3h28m and $16.26 to a traceback it was never shown),
+  **N6** (an adapter raise after a billable response is now billed, via `billed_usage` on the
+  exception so the retry contract's exception *type* is preserved), **N11** (author credits are
+  per-analysis in a mutable holder, since the strategy is a frozen dataclass), **N4** and **N8**.
+  **F3 was WITHDRAWN** by human ruling after review of the actual text: the ten answer-key values
+  stay in the dispatched question, so the paper must state that "recovered N of 14" cannot alone
+  distinguish measurement from transcription — the coherent-PD-low trap, `paper_value_claimed` and
+  the four withheld quantities are what discriminate.
+  **Process incident, recorded because the remedy is a habit.** Removing the superseded
+  `compose_latex_report` I computed the span as "up to the next `async def`"; it was the last
+  method in its class, so the span also deleted `class LibrarianIOAgent`, its docstring, its
+  `role` and its **entire `__init__`**. My first repair, written from `DOCS.md`, restored the
+  class and its methods but invented a docstring and missed `role` and `__init__` — the tree
+  imported, so nothing told me, and I reported the damage as smaller than it was. Read-only git
+  access then restored it verbatim **and** caught a second loss no test would have: the retired
+  method's body carried [D6]'s mandated `amssymb` preamble (a missing package is a fatal compile
+  that once cost a whole PDF) and the references no-fabrication clause, both now carried on the
+  new payload. **A structural heuristic is not a boundary check, and reading my own diff is the
+  audit** — `git diff -U0 | grep -E "^-\s*(async def|def|class) "` found the deletion set in one
+  command. Plan and per-item detail in `tmp_fix_plan_20260909.md`.
+
+- 2026-09-09 (second, same day) — **The coding live test was measuring the wrong driver, and its
+  failure had the wrong cause written on it.** Two independent forensic reads of the run's ledger,
+  every decisive claim re-derived by hand.
+  **Root cause: the coder's credential ran out of credit and the harness delivered that to the lead
+  as a successful reply.** At 21:50:41 the Claude-SDK session went fatal (`is_error: true`), cost
+  frozen at `$5.088389` and never moving again; every later `drive_coder` returned the Claude Code
+  CLI's own hardcoded billing string, `"Credit balance is too low"`, with **`is_error: false`**.
+  `stop_reason: "stop_sequence"` and `num_turns: 1` on those turns are *constants of the CLI's
+  synthetic API-error message builder*, so the discarded `is_error` was the only detector.
+  `_drive_author` reads it into the monitor event and returns `"\n".join(chunks)` one line later
+  (`claude_sdk.py:338-372`); `CoderBackend.drive` is typed `-> str`, so no layer below has an error
+  channel, and `execute_drive_coder` takes the default `is_error=False`. The lead spent three drives
+  and 3 of the run's 9.5 minutes steering a corpse at **$0**, then gave up, and `_authoring_result`
+  recorded `"co-lead review unresolved: …"` — §9.6's honest failure with a **confidently
+  mis-attributed cause**. The co-lead's PA-periodicity rejection was itself real and good, and the
+  gate and review ran on a complete, current tree (reviewed snapshot and discarded patch
+  byte-identical, md5 `8623872f…`); it just was not what decided the outcome. Two asymmetries worth
+  keeping: `"credit balance"` is a first-class, key-retiring condition on the *chat* path
+  (`retry.py:76`) and had none on the author path; and the **Codex backend does not have this gap**
+  (`codex_sdk.py:519-533` emits `status`/`error` and injects `[harness error] the {provider} turn
+  failed: {error}`, with a comment naming exactly this mode), so `author_bench/trial.py`'s
+  `turns_failed`/`turns_rate_limited` counters — which read those fields — are structurally blind to
+  a Claude-harness failed turn.
+  **Second defect, same log: a Layer-B check can be inert and no layer says so.** At submit time the
+  suite was `19 passed, 1 skipped`, and the skipped one was the single check comparing the new code
+  against *independent existing toolkit code* — the one the lead had commissioned to replace a
+  self-referential test. It skipped because the brief's own validation ObsID has one
+  `pcube_timeseg` segment row and the coder's own guard needs ≥3. Layer B passes on
+  `rc == 0 ∧ ≥1 PASSED` (`gate.py:689-701`), so the gate recorded `passed: true`, `detail: ""`,
+  `failing_checks: []`. **Nothing bypassed the gate** — it truthfully reported that everything which
+  *ran* passed. What no layer reports is *which tests ran*, and that set is chosen at runtime by the
+  file under review. Recorded, not yet fixed.
+  **Human ruling: fix the measurement, not the production code.** A test exists to judge whether the
+  new production code is valid, so editing that code to make the test pass introduces unknowns
+  exactly where the batch needs certainty. Accordingly the dead-session channel, the reason
+  attribution, the `silent_turn` text and the discarded seed-drive summary are **recorded and
+  deferred**, and the gap is confined: block 0's coder is the Codex harness, which already has the
+  error channel. The one production change taken is the jail's, below.
+  **The test was rebuilt on the production seam.** `test_sequential_chain_authoring_end_to_end`
+  looped the chain itself and called `drive_authoring` per spec — a driver production no longer
+  uses — so three behaviours were unobservable: F9's chain continuation past a failed link, [A20]'s
+  stage machinery, and F5b's silent-turn classification (which short-circuits on
+  `if not terminal_tools`, and only `_drive_one_link` passes them). It is now
+  `test_lead_cycle_authors_a_chain_end_to_end`, driving `run_cycle` from two worker reports one of
+  which carries the `tool_request` — the lead files `author_chain` itself and `_author_chain` drives
+  the links. **This resolves the `_continuation_for` gap without touching production**: the gap only
+  exists on the path production abandoned. Its assertions are harness properties (a form is always
+  filed; every claimed commit is reachable in the repository with a manifest entry and a test file;
+  every planned link is attempted while credits remain; a failed coder turn never reaches the lead
+  as a success; a non-committed attempt leaves a clean tree), with model judgment recorded rather
+  than asserted — a co-lead rejection on a real science point is a correct outcome, and the old
+  "both tools commit" assertion made it a test failure. Layer-B skip counts are extracted from the
+  ledger and printed, so the exposure above is measured while it is unfixed.
+  **Every live test resolves its models through the configuration pointer** (human ruling; *"fake a
+  config if we want to test sth else"*). `tests/conftest.py` already applies `--seats` session-wide
+  to `AUTO_RESEARCH_CONFIG_DIR`, so a live test inherits it unless it builds a handle itself; four
+  still do (`test_live_tool_search`, `test_live_schema_matrix`, `test_live_form_shapes`,
+  `test_live_figure_vision`) and are named here rather than converted. The rebuilt test writes its
+  coder seat through `seats.seated(...)` and logs the seat it read back out of the written file, so
+  the run states what it measured; `AUTO_RESEARCH_CODER_HARNESS=codex|claude_sdk` selects the
+  backend, `codex` carrying `science_bench`'s own `CODER` seat whole so the test cannot drift from
+  the batch.
+  **Config: the shipped coder moved to `deepseek-v4-flash` on the Codex harness** (human edit,
+  polished here). It **would have failed at launch**: that pairing needs an explicit
+  `base_url: https://api.deepseek.com/` (`harness.py:133`), which is now present. Checked rather
+  than assumed: the pairing is live-probed and not in `UNVERIFIED_PAIRINGS`; litellm prices the
+  model at $0.44/$1.32 per M, so dropping `priceMTk` does not silently zero the coder's spend;
+  `DEEPSEEK_API_KEY` is the derived default so `key_env` is redundant. `parameters` is now absent,
+  so a non-batch run authors at the vendor's default reasoning effort — the batch pins effort in
+  `arms.py`. The stale "the coder is Claude" claims in §9.3 and `README.md` are corrected.
+  **Two tests hardcoded facts `config/models.yaml` owns**, and the config edit made them false:
+  `test_models.py`'s `_VALID_PROVIDERS = {"anthropic","google","openai"}` (a literal predating the
+  six-vendor expansion — now `set(get_args(ProviderName))`, the annotation the field itself carries)
+  and `test_env.py`'s fixed five-key `.env` fixture (the requirement is *derived* from
+  `models.yaml`, so a new vendor in any role failed a valid config — the fixture now writes the
+  three deliberate alias lines by hand and derives everything else). Same class as the config-flip
+  lesson: a valid configuration failing the check that exists to catch an invalid one.
+  **The jail change (the one production edit):** see `sandbox/DOCS.md` — `.git` is bound read-only
+  inside every writable root, so the coder's git ban is enforced by the kernel on both harnesses
+  while read-only inspection finally works. Suite **1909 passed / 187 skipped / 0 failed**. The
+  skip count moved 169 → 187 against the morning's baseline and the delta is **not** the config
+  change: every skip is an env-gated live test, and that baseline was measured in a shell where the
+  live flags were set, so ~18 live tests ran there instead of skipping. Checked rather than assumed,
+  because a config edit that silently quiets tests is the config-flip lesson's exact shape.

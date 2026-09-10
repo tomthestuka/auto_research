@@ -328,3 +328,60 @@ def test_a_litellm_entry_with_real_rates_still_wins_over_the_member_price(monkey
     rates = costs.token_rates_for(member)
     assert rates.source == "litellm"
     assert rates.input == pytest.approx(1e-6)
+
+
+def test_n6_an_adapter_raise_after_a_billable_response_is_still_billed():
+    """N6: usage was recorded only on the return path, so a turn our own extraction rejected was
+    silently free — slot 5's two failing structured attempts (~195k input tokens) appear neither
+    in its ledger nor in its reported $29.23. The vendor generated those tokens.
+
+    The exception TYPE must survive, because the role layer branches on it (`ValueError` is
+    retried, `RuntimeError` ends the call), so the usage rides as a `billed_usage` attribute.
+    """
+    from auto_research.models.types import ModelUsage
+    from auto_research.observability.costs import CostMeter
+    from auto_research.observability.tracing import traced_model_call
+
+    monitor = RunMonitor(chatter=10)
+    meter = install_cost_meter(run_id="r-n6", monitor=monitor)
+    monitor.cost_meter = meter
+
+    config = RoleModelConfig(name="m", provider="openai", model="gpt-5.5")
+
+    async def raising_call():
+        exc = ValueError("vendor requested tool calls instead of delivering the schema")
+        exc.billed_usage = ModelUsage(input_tokens=195_000, output_tokens=811)
+        raise exc
+
+    async def drive():
+        with pytest.raises(ValueError):          # the type is the retry contract
+            await traced_model_call(role="analyst_worker", config=config,
+                                    provider_call=raising_call)
+
+    asyncio.run(drive())
+
+    calls = [e for e in monitor.events if e.event == "cost.call"]
+    assert calls, "an adapter-raised turn must still produce a cost.call event"
+    assert calls[0].data["input_tokens"] == 195_000
+
+
+def test_n6_a_provider_refusal_carrying_no_usage_bills_nothing():
+    """A 4xx refused before generation is genuinely free — no `billed_usage`, no cost event."""
+    from auto_research.observability.costs import CostMeter
+    from auto_research.observability.tracing import traced_model_call
+
+    monitor = RunMonitor(chatter=10)
+    meter = install_cost_meter(run_id="r-n6b", monitor=monitor)
+    monitor.cost_meter = meter
+    config = RoleModelConfig(name="m", provider="openai", model="gpt-5.5")
+
+    async def refused():
+        raise RuntimeError("400 invalid request")
+
+    async def drive():
+        with pytest.raises(RuntimeError):
+            await traced_model_call(role="reviewer", config=config, provider_call=refused)
+
+    asyncio.run(drive())
+
+    assert not [e for e in monitor.events if e.event == "cost.call"]

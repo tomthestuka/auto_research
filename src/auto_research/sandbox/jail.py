@@ -541,6 +541,17 @@ def coder_policy(*, label: str, extra_rw: tuple[str, ...] = ()) -> JailPolicy:
         entry for entry in dict.fromkeys((*base.ro, *base.rw))
         if entry not in writable and str(Path(entry).resolve()) != temp_root
     )
+    # ``.git`` is read-only inside every writable root, which is what makes the coder's git ban
+    # (§9.9) enforced by the kernel rather than by a command-string rule. Reads keep working
+    # (`status`, `diff`, `log`, `show` all succeed) while `add`, `commit`, `checkout` and every
+    # other spelling — a pipe, a subshell, `python -c subprocess` — fail with
+    # "Unable to create '.git/index.lock': Read-only file system". `jail_argv` sorts binds
+    # outermost-first, so this lands on top of the writable root rather than under it. On a
+    # *linked* worktree ``.git`` is a pointer file, bound read-only here, and the gitdir it names
+    # lives under a repository the coder's writable set does not contain, so that shape is closed
+    # too. The runtime's own git is untouched: `approve_edit`, the gate-entry reset and
+    # `collect_all_changes` run in the parent process, outside the jail.
+    readonly = (*readonly, *(str(Path(entry) / ".git") for entry in writable))
     return JailPolicy(
         ro=readonly,
         rw=writable,

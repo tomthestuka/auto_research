@@ -24,6 +24,7 @@ from auto_research.models.types import (
     RoleModelConfig,
     ToolCall,
     ToolResultMessage,
+    stop_from_google,
 )
 from auto_research.schemas import DocumentRef, FigureRef
 
@@ -399,5 +400,6 @@ class GoogleProvider:
             tool_calls=tool_calls,
             provider_parts=provider_parts,
             usage=_gemini_usage(usage),
+            stop=stop_from_google(response),
             raw=response,
         )

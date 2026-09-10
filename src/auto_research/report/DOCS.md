@@ -102,3 +102,27 @@ The `compose_report` graph node (in `builder.py`) orchestrates these utilities:
   stated so the model extends the list when a symbol needs more. `amssymb.sty` was installed the whole
   time — this was never an environment gap. Tests: `tests/test_report.py::test_compile_errors_carry_the_offending_source_line`
   plus the no-context and no-leak cases.
+
+- 2026-09-09 — **F5e: the reviewer authors `report.tex` by editing it, not by recomposing it.**
+  `compose_latex_report` asked for a whole `LatexReport` through structured output on every
+  attempt and fed the previous attempt's compile errors back as prose, so each attempt produced a
+  fresh document — which is how [D7] happened (the retry saw `! Undefined control sequence.` with
+  no macro named and re-emitted the same document). It is replaced by
+  `ReviewerAgent.author_latex_report`, a real ReAct loop with `file_edit` on that one file plus a
+  validating `turn_end`; the validator is the door (figures resolve, links resolve, pdflatex
+  compiles) and a rejection names the errors and keeps the loop going. Two motives: an edit keeps
+  every fix that already landed, and nothing here declares an output schema —
+  `ResearchReport`/`LatexReport` are structured output, and the contrast arm's reviewer
+  (`qwen3.8-max`) is recorded as failing that path at every reasoning effort (2026-08-24:
+  unresolved `$ref` in `list[Model]` fields, so it invented a shape and returned HTTP 200).
+  `compose_machine_report` (the JSONL handle) is **untouched** — a machine-readable artifact is
+  where a schema belongs, and replacing it was not part of the ruling.
+  **Two fixes were nearly lost in the move and are carried explicitly, both of them past
+  run-killers no test covers:** [D1]'s `\href`-display sanitization lived in
+  `write_report_latex`, which a direct file write bypasses, so the validator re-applies it as
+  mechanical formatting before validating; and [D6]'s mandated preamble
+  (`graphicx, amsmath, amssymb, hyperref`) plus the references no-fabrication clause lived in the
+  retired method's `output_format_instructions`, and are restored on the new payload as
+  `format_requirements`. `\lesssim` without `amssymb` exhausted `report_retry_cap` on Q21 and the
+  run finished with a `report.tex` and no PDF; the changelog records that the prompt-side mandate
+  in `prompts/reviewer.md` was **not** sufficient on its own.

@@ -307,7 +307,7 @@ def test_structural_missing_test_fails(tmp_path):
     out = check_structural(repo, _spec(), targets)
     by = {c.name: c for c in out}
     assert not by["structural.test_present"].passed
-    assert by["structural.allowed_paths"].passed
+    assert by["structural.changes_allowed"].passed
     assert by["structural.tool_manifest_entry"].passed
 
 
@@ -698,3 +698,98 @@ def test_the_negation_rule_on_the_real_lines_from_a_live_authoring_attempt():
     assert hard == [] and any("negation" in c.detail for c in findings)
     hard2, _ = scan_python_source("skills/__init__.py", f"D = {manifest}\n")
     assert any("placeholder" in c.detail for c in hard2), [c.detail for c in hard2]
+
+
+# ── F2: changes_allowed is a real check, over the WIDE enumeration ───────────
+
+
+def test_f2_a_change_outside_a_utils_package_fails_changes_allowed(tmp_path):
+    """THE F2 REGRESSION. The old check filtered its input through the same pattern it then
+    tested, so it could not fail for any input.
+
+    Measured live 2026-09-08 (slot 4): 193 changed lines in `obsdb_catalog` were never scanned,
+    never tested, never shown to the reviewer, reported as "only allowed paths touched", and
+    unstageable — so the commit that landed imports `neutral.advance_many` from a file that was
+    never committed and does not run on a clean checkout. `gate_bench`'s own
+    `hole_structural_unfalsifiable` mutant was planted against this hole and reached the co-lead
+    as the only catcher.
+    """
+    from auto_research.sandbox.gate import check_structural, collect_all_changes, collect_targets
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)                                        # legitimate *_utils work
+    (repo / "obsdb_catalog").mkdir(parents=True, exist_ok=True)
+    (repo / "obsdb_catalog" / "neutral.py").write_text("def advance_many(*a):\n    return None\n")
+
+    changes = collect_all_changes(repo)
+    assert "obsdb_catalog/neutral.py" in changes, "the wide enumeration must see it at all"
+
+    out = {c.name: c for c in check_structural(repo, _spec(), collect_targets(repo), changes)}
+    check = out["structural.changes_allowed"]
+    assert not check.passed
+    assert "obsdb_catalog/neutral.py" in check.detail
+    assert "ask_lead" in check.detail, "the rejection must name the route, not just the rule"
+
+
+def test_f2_the_check_defaults_to_asking_the_tree(tmp_path):
+    """Called without an explicit changeset, `check_structural` derives the wide enumeration
+    itself — so no caller can reintroduce the defect by forgetting to pass it."""
+    from auto_research.sandbox.gate import check_structural, collect_targets
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    (repo / "stray_root_file.py").write_text("x = 1\n")
+
+    out = {c.name: c for c in check_structural(repo, _spec(), collect_targets(repo))}
+    assert not out["structural.changes_allowed"].passed
+    assert "stray_root_file.py" in out["structural.changes_allowed"].detail
+
+
+def test_f2_a_pure_utils_changeset_still_passes(tmp_path):
+    """The allow-list must not reject legitimate work: a changeset entirely under `*_utils`
+    passes, including new packages (§9.2 plans `heasarc_utils`, `lib_utils`)."""
+    from auto_research.sandbox.gate import check_structural, collect_all_changes, collect_targets
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    newpkg = repo / "heasarc_utils" / "lib"
+    newpkg.mkdir(parents=True)
+    (newpkg / "acquire.py").write_text("def acquire(o):\n    return o\n")
+
+    changes = collect_all_changes(repo)
+    out = {c.name: c for c in check_structural(repo, _spec(), collect_targets(repo), changes)}
+    assert out["structural.changes_allowed"].passed, changes
+
+
+def test_f2_ignored_files_are_not_changes(tmp_path):
+    """`git status` omits ignored paths, so build artifacts cannot fail the allow-list."""
+    from auto_research.sandbox.gate import collect_all_changes
+
+    repo = _make_repo(tmp_path)
+    (repo / ".gitignore").write_text("junk/\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "ignore junk")
+    (repo / "junk").mkdir()
+    (repo / "junk" / "a.txt").write_text("noise\n")
+
+    assert not [c for c in collect_all_changes(repo) if c.startswith("junk/")]
+
+
+def test_n1_layer_b_failure_keeps_far_more_than_the_old_2000_chars(tmp_path):
+    """N1: a chatty science suite's last 2,000 characters are entirely the warnings summary, so
+    the failing test's traceback was cut and the coder could not reproduce what it was never
+    shown (slot 2: 3 h 28 m, $16.26, two named quantities lost)."""
+    from auto_research.sandbox.gate import _layer_b_output_cap, _layer_b_verdict
+
+    assert _layer_b_output_cap() >= 100000
+    traceback = "E   assert 0.5 == 0.9   <- the line that matters\n"
+    noise = "".join(f"  warnings.warn('deprecated {i}')\n" for i in range(4000))
+    out = traceback + noise + "FAILED tests/test_t.py::test_x\n1 failed, 21 passed\n"
+    assert len(out) > 2000
+
+    passed, detail = _layer_b_verdict(1, {"tests/test_t.py::test_x": "FAILED"}, out)
+    assert not passed
+    # The traceback comes FIRST in pytest output and the warnings summary last, so a tail-only
+    # window keeps the useless end — the actual slot-2 failure. Both ends must survive.
+    assert "the line that matters" in detail, "the traceback must survive the window"
+    assert "1 failed, 21 passed" in detail, "the summary must survive too"
+    assert "elided" in detail, "and an over-cap output must say so rather than look complete"

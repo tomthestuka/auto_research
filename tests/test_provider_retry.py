@@ -179,3 +179,84 @@ def test_policy_falls_back_per_field_on_malformed_values(monkeypatch, tmp_path):
     )
     monkeypatch.setenv(config_paths.CONFIG_DIR_ENV, str(cfg.parent))
     assert env.provider_retry_policy() == ProviderRetryPolicy(8, 5.0, 600.0)
+
+
+# ── F7: a documented-transient condition wearing a non-transient status ──────
+
+
+class _BodyError(Exception):
+    """A vendor error with an HTTP status and a string error code, like the OpenAI SDK's."""
+
+    def __init__(self, message, *, status_code, code=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+
+
+_SLOT6 = (
+    "Error code: 400 - {'request_id': '8a67e9ac', 'code': 'ServiceUnavailable', "
+    "'message': '<503> InternalError.Algo: An error occurred in model serving, error message "
+    "is: [Too many requests. Your requests are being throttled due to system capacity limits. "
+    "Please try again later.]'}"
+)
+
+
+def test_f7_the_slot6_error_is_transient_for_dashscope():
+    """The exact body that killed slot 6 in one attempt: HTTP 400 carrying a documented-500
+    condition. Alibaba's error reference puts `InternalError.Algo` at 500 with "retry first",
+    and the whole `Throttling*` family at 429."""
+    exc = _BodyError(_SLOT6, status_code=400, code="ServiceUnavailable")
+    assert is_transient_provider_error(exc, "dashscope")
+
+
+def test_f7_the_same_error_stays_fatal_without_the_provider():
+    """Status-first remains the rule: the override is per-vendor and opt-in, so no other
+    provider's 400 becomes retryable by accident."""
+    exc = _BodyError(_SLOT6, status_code=400, code="ServiceUnavailable")
+    assert not is_transient_provider_error(exc)
+    assert not is_transient_provider_error(exc, "openai")
+    assert not is_transient_provider_error(exc, "anthropic")
+
+
+def test_f7_a_genuine_dashscope_400_stays_fatal():
+    """The same code family contains a permanent member — the vendor documents
+    `400-ServiceUnavailableError` as a malformed request — so the message decides, and a real
+    request-shape defect must still raise at once."""
+    exc = _BodyError(
+        "Error code: 400 - Role must be user or assistant and Content length must be "
+        "greater than 0.",
+        status_code=400, code="ServiceUnavailableError",
+    )
+    assert not is_transient_provider_error(exc, "dashscope")
+    assert not is_transient_provider_error(
+        _BodyError("Error code: 400 - invalid_request_error: unknown parameter 'foo'",
+                   status_code=400, code="invalid_request_error"),
+        "dashscope",
+    )
+
+
+def test_f7_a_bare_three_digit_number_in_output_is_not_a_marker():
+    """Markers are vocabulary, never a bare status substring: real scientific output is full of
+    three-digit runs (`0.36692140104299825` contains "429")."""
+    exc = _BodyError(
+        "Error code: 400 - fit failed: chi2=429.5, PD=0.36692140104299825 out of range",
+        status_code=400, code="invalid_request_error",
+    )
+    assert not is_transient_provider_error(exc, "dashscope")
+
+
+def test_f7_deepseek_insufficient_system_resource_is_transient():
+    """DeepSeek documents an overloaded cluster as `insufficient_system_resource`."""
+    exc = _BodyError("Error code: 400 - insufficient_system_resource", status_code=400)
+    assert is_transient_provider_error(exc, "deepseek")
+
+
+def test_f7_anthropic_spend_cap_429_is_treated_as_non_refilling():
+    """`enforced_spend_limit_reached` carries no retry-after and never clears, so it must not be
+    waited out as if it were a refilling rate limit."""
+    from auto_research.models.retry import is_exhausted_key_error
+
+    exc = _BodyError("Error code: 429 - enforced_spend_limit_reached", status_code=429,
+                     code="enforced_spend_limit_reached")
+    exc.type = "rate_limit_error"
+    assert is_exhausted_key_error(exc, "anthropic")

@@ -389,13 +389,8 @@ class FakeReviewerForReport:
     async def compose_machine_report(self, request, report, references, verdict, run_id):
         return _make_report(run_id=run_id)
 
-    async def compose_latex_report(self, request, report, staged, staged_papers, verdict, *, feedback=None):
-        self._attempt += 1
-        if self._attempt < self._latex_attempts:
-            # First attempts link a non-existent PDF to trip the resolve gate.
-            return r"\documentclass{article}\begin{document}\href{papers/missing.pdf}{papers/missing.pdf}\end{document}"
-        links = "".join(r"\href{" + rp + "}{" + rp + "}" for _, rp in staged_papers)
-        return r"\documentclass{article}\begin{document}Hello world." + links + r"\end{document}"
+    # `compose_latex_report` is deliberately absent: F5e retired it, and a fake that still
+    # offers it would let a test pass against an interface production does not call.
 
 
 def test_report_jsonl_only(tmp_path):
@@ -441,36 +436,57 @@ def test_report_formats_normalization():
         _normalize_report_formats(["pdf"], [])
 
 
-def test_error_feedback_loop(tmp_path):
-    """A dead reference link on attempt 1 is fed back and cleared on retry."""
-    reviewer = FakeReviewerForReport(latex_attempts=2)
-    analyst = FakeAnalystReport()
-    verdict = FakeVerdict()
+def test_a_dead_reference_link_is_a_validation_rejection_not_an_accepted_report(tmp_path):
+    """A dead reference link keeps the reviewer's turn open, with the error named.
+
+    Rewritten for F5e (2026-09-09). It used to drive `FakeReviewerForReport.compose_latex_report`
+    in a hand-rolled recompose loop — the control flow production had *then*. Production no longer
+    recomposes: the reviewer edits `report.tex` with `file_edit` and calls `turn_end`, which
+    accepts only once the validator passes. So the old test kept passing while exercising a
+    method the real `ReviewerAgent` no longer has, which is the "measures its own scaffolding"
+    shape. This drives the **real** validator and the **real** `turn_end` instead, with no fake
+    reviewer at all.
+    """
+    from auto_research.agents.react import execute_turn_end
+
     rdir = tmp_path / "report"
     rdir.mkdir()
     pdf = tmp_path / "cited.pdf"
     pdf.write_bytes(b"%PDF-1.5\nbody")
+    staged_papers = stage_papers([pdf], rdir)
+    staged = stage_figures([], rdir)
+    tex = rdir / "report.tex"
 
-    async def _run():
-        staged = stage_figures(analyst.figures, rdir)
-        staged_papers = stage_papers([pdf], rdir)
-        feedback = None
-        for _ in range(2):
-            latex = await reviewer.compose_latex_report(
-                None, analyst, staged, staged_papers, verdict, feedback=feedback
-            )
-            write_report_latex(latex, rdir / "report.tex")
-            errs = validate_latex_figures(latex, staged)
-            errs += validate_report_links(latex, rdir, staged_papers)
-            if not errs:
-                return latex, errs
-            feedback = errs
-        return latex, errs
+    def problems() -> list[str]:
+        """The same closure `graph.builder.compose_report_node` builds."""
+        if not tex.is_file():
+            return [f"{tex.name} has not been written yet — draft it with file_edit."]
+        latex = tex.read_text(encoding="utf-8")
+        errs = validate_latex_figures(latex, staged)
+        errs += validate_report_links(latex, rdir, staged_papers)
+        return errs
 
-    latex, errs = asyncio.run(_run())
-    assert errs == [], f"Expected clean after retry, got: {errs}"
-    assert "Hello world" in latex
-    assert "papers/cited.pdf" in latex
+    # Nothing written yet: turn_end refuses and says what to do.
+    out = asyncio.run(execute_turn_end(problems, {"summary": "done"}))
+    assert out.is_error and "file_edit" in out.text
+
+    # A dead link: refused, and the offending target is named.
+    tex.write_text(
+        r"\documentclass{article}\begin{document}"
+        r"\href{papers/missing.pdf}{papers/missing.pdf}\end{document}"
+    )
+    out = asyncio.run(execute_turn_end(problems, {"summary": "done"}))
+    assert out.is_error
+    assert "missing.pdf" in out.text
+
+    # Fixed in place — the shape `file_edit` produces — and the turn is accepted.
+    links = "".join(r"\href{" + rp + "}{" + rp + "}" for _, rp in staged_papers)
+    tex.write_text(
+        r"\documentclass{article}\begin{document}Hello world." + links + r"\end{document}"
+    )
+    assert problems() == []
+    out = asyncio.run(execute_turn_end(problems, {"summary": "report written"}))
+    assert not out.is_error
 
 
 def test_write_report_latex_sanitizes_href_display(tmp_path):

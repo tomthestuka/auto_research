@@ -63,7 +63,12 @@ def test_every_compose_site_was_found() -> None:
     lead's author-clarification reply and the co-lead's. Lower the number only when a compose is
     genuinely deleted, never to make this pass.
     """
-    assert len(COMPOSES) >= 4, f"expected the known compose sites, found {len(COMPOSES)}"
+    # Was >= 4. `compose_latex_report` was retired by F5e (2026-09-09): the reviewer now authors
+    # `report.tex` through `file_edit` + a validating `turn_end`, so there is no terminal compose
+    # on that path to declare tools for. The remaining three are still guarded, which is the
+    # property this file exists for — the floor moved because a site was deleted, never because a
+    # site stopped satisfying the rule.
+    assert len(COMPOSES) >= 3, f"expected the known compose sites, found {len(COMPOSES)}"
 
 
 def test_the_leads_cycle_runs_every_react_on_one_shared_provider() -> None:

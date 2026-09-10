@@ -320,7 +320,7 @@ def test_consensus_records_worker_and_lead_events() -> None:
 
     class Worker:
         async def analyze(self, task, *, peer_reports=()):
-            return AnalystReport(summary="worker report", findings=["f"])
+            return AnalystReport(summary="worker report", findings=["f"], status="succeeded")
 
     class Lead:
         """Files one more round, then adjudicates — so both lead events fire."""
@@ -340,7 +340,7 @@ def test_consensus_records_worker_and_lead_events() -> None:
                 )
             return LeadCycleOutcome(
                 filed=SUBMIT_ADJUDICATION_TOOL,
-                report=AnalystReport(summary="lead summary", findings=["final"]),
+                report=AnalystReport(summary="lead summary", findings=["final"], status="succeeded"),
             )
 
     report = asyncio.run(
@@ -410,7 +410,7 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path, mon
 
     class Consensus:
         async def run(self, workers, lead, task):
-            return AnalystReport(summary="fake analysis", findings=["ok"])
+            return AnalystReport(summary="fake analysis", findings=["ok"], status="succeeded")
 
     run = asyncio.run(
         run_research(

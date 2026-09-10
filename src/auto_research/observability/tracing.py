@@ -90,9 +90,29 @@ async def traced_model_call(
             _annotate_langsmith_usage(role, config, response)
             return response
 
-        response = await _call()
+        runner = _call
     else:
-        response = await provider_call()
+        runner = provider_call
+
+    try:
+        response = await runner()
+    except BaseException as exc:
+        # An adapter that raises AFTER a billable response still costs money (N6). The vendor
+        # generated those tokens; only our own extraction rejected the turn. Usage rides on the
+        # exception as `billed_usage` (see `_responses._raise_billed`), because the exception
+        # *type* is the role layer's retry contract and must not change. Measured live
+        # 2026-09-08: slot 5's two failing structured attempts (~195k input tokens) appear
+        # neither in its ledger nor in its reported $29.23.
+        #
+        # A genuine provider refusal (a 4xx before generation) carries no `billed_usage` and is
+        # correctly recorded as nothing — a request refused before any tokens is never billed.
+        usage = getattr(exc, "billed_usage", None)
+        if usage is not None:
+            meter = current_cost_meter()
+            if meter is not None:
+                await meter.record_call(role, config, usage)
+        raise
+
     meter = current_cost_meter()
     if meter is not None:
         await meter.record_call(role, config, response.usage)

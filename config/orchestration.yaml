@@ -21,7 +21,7 @@ react_loop_cap: 100            # budget-consuming tool iterations per agent loop
 react_loop_absolute_cap: 200   # hard ceiling incl. budget-free iterations (lead's §5.5 plan_and_debate rounds count only here)
 librarian_react_loop_cap: 1   # tighter — each librarian search re-sends the growing paper context
 status_react_loop_cap: 6      # /status reporter — tight; a human is waiting on a phone
-structured_retry_cap: 2       # off-schema retries for a structured _call before raising
+structured_retry_cap: 4       # off-schema retries for a structured _call before raising
 
 # ── Run ledger (monitor JSONL) field caps (characters; a longer field is trimmed with a
 #    "[+N chars]" marker so what was dropped stays countable) ──
@@ -31,6 +31,7 @@ structured_retry_cap: 2       # off-schema retries for a structured _call before
 ledger_arg_cap: 100000         # tool-call arguments recorded per event
 ledger_result_cap: 100000      # tool-result text recorded per event
 ledger_coder_text_cap: 100000  # coder prose / tool input / tool result (both author harnesses)
+gate_layer_b_output_cap: 100000  # pytest output kept on a Layer-B failure, so the traceback survives
 
 # ── Internet stability (transient LLM-provider failures: overloaded / rate-limit / 5xx / connection drops) ──
 provider_retry_max: 8                # retries per model call after the first failure; non-transient errors raise at once

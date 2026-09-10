@@ -726,11 +726,12 @@ the hook mapping a fake-model verdict — no live LLM).
   (one warm-session coder turn → response text; L0 self-correction inside), `run_gate_step()` →
   `GateReport` (applies the §9.9 commit-backstop, then the deterministic gate — mechanical, only
   *satisfiable*), `run_review_step(gate)` → `ToolReviewVerdict` (the provider-decorrelated
-  co-lead — *debatable*), `commit(message)` → sha (the only commit path; sets `committed` and
+  co-lead — *debatable*), `commit(message)` → sha (the only commit path; records `last_commit_sha` and
   advances the per-attempt base ref, in memory and on disk), `pending_changes()` → bool
   (whether the tree holds unlanded work — False right after a commit, True again on the next
   edit; `execute_submit` reads it so a no-op submit is answered, never executed),
-  `aclose()` (disconnect + §9.9 non-committed direct-branch tree reset). `propose_and_pr` drives
+  `aclose()` (disconnect + §9.9 direct-branch tree reset of any **unbanked** work, gated on
+  `pending_changes()` rather than on `committed` — see the 2026-09-09 F1 entry). `propose_and_pr` drives
   these in the auto-loop; the analyst lead's authoring ReAct tools drive the *same* primitives
   directly (so the lead diagnoses each verdict rather than the run terminating).
 - `build_authoring_session(tool_spec, *, lead, toolkit_root, worktree_base, colead=None,
@@ -810,8 +811,17 @@ the hook mapping a fake-model verdict — no live LLM).
   - `jail.policy_from_config(*, network, label)` → `JailPolicy` — `agent_fs_allow` split by
     `agent_fs_readonly` into writable and read-only roots.
   - `jail.coder_policy(*, label, extra_rw)` → `JailPolicy` — the author-harness policy. An author
-    writes to **two places only**: its working tree (`extra_rw`) and its own settings home;
-    everything else on the allow-list is read-only, and the temp root is **absent** entirely. That
+    writes to **two places only**: its working tree (`extra_rw`) and its own settings home — and
+    **not to `.git` inside either**, which is bound read-only on top of the writable root
+    (`jail_argv` applies binds outermost-first, so the nested rule wins). That is what makes the
+    coder's git ban (§9.9) a kernel rule on both harnesses rather than a prefix-matched Bash
+    deny-rule: `add`/`commit`/`checkout` fail with *"Read-only file system"* however they are
+    spelled, while `status`/`diff`/`log`/`show` still work, so the coder can report its own change
+    set. On a *linked* worktree `.git` is a pointer file, bound read-only here, and the gitdir it
+    names lives under a repository the author's writable set does not contain. The runtime's own
+    git is unaffected — `approve_edit`, the gate-entry reset and `collect_all_changes` all run in
+    the parent process, outside the jail. Everything else on the allow-list is read-only,
+    and the temp root is **absent** entirely. That
     tightening is what makes it safe for the Codex harness to stand its own sandbox down inside the
     jail: the surrendered `workspace-write` confined writes to the working tree, and so does this,
     while the observation database becomes read-only so no author can write a data file where a
@@ -1261,3 +1271,118 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   `workspace.round_report_path` names `<role>_round<n>` only (`model` accepted, unused; `_slug`
   deleted). Tests: `test_merge_flow.py::test_author_env_drops_host_tooling_variables`,
   `test_report_authoring.py::test_round_report_path_names_role_and_round_but_never_the_model`.
+
+- 2026-09-09 — **F1: "did this session commit?" is not "is the tree's work banked?"** `aclose`'s
+  failure-reset guard was `not self.committed`, a latch set by the first `commit()` and never
+  cleared, so a session that committed one tool and then kept working on a rejected second one
+  exited **without** resetting. The rejected `lib/` code, its `skills/` wrapper and its
+  `TOOL_MANIFEST` entry stayed in the tree, and because `ToolkitRegistry.reload` discovers tools
+  from the **tree** rather than from git, the rejected tool became callable: in the 2026-09-08
+  demonstration batch it produced two of the four figures in slot 2's reviewer-**accepted** report,
+  and the same shape produced a scored quantity in slot 3. `commit ⇔ gate ∧ review` held in git
+  throughout; the invariant that failed was the unstated one, *a tool a worker can call has been
+  committed*. Fix: the guard is now `pending_changes()`, which asks the tree directly (it is
+  already the question `execute_submit` asks, and a commit advances `_base_ref`, so a commit
+  followed by nothing resets nothing). `committed` keeps its original meaning as the durable
+  commit record — `_authoring_result` reads it to report `status="committed"`, so clearing it
+  would have made every successful commit report as a failed attempt. **Follow-on cleanup in the
+  same pass:** with the reset no longer reading it, the `committed` boolean became a shadow of
+  `last_commit_sha` (both set in `commit()`, neither ever cleared, one reader), so it is **deleted**
+  and `_authoring_result` reads `last_commit_sha is not None`. Two fields encoding one fact is how
+  the two meanings drifted apart to begin with. **The deletion nearly reintroduced a known
+  run-killer**, and only an existing test caught it: `react.execute_submit`'s [A17] no-op-submit
+  guard read the flag as `getattr(session, "committed", False)` — a string name an attribute grep
+  cannot see, with a default that failed *silently* into "not committed", so a submit after a
+  commit walked into `git commit` with nothing staged, the non-zero exit that raises out of a tool
+  call ([F6]). Now reads `last_commit_sha`. Lesson for any field removal here: grep the string
+  literal as well as the attribute, because `getattr(..., default)` converts a missing field into
+  a wrong answer instead of an error. Empty-diff closes stay
+  silent because `_save_diff_and_reset` already returns `None` when there is nothing to save.
+  Tests: `test_merge_flow.py::test_f1_work_after_a_commit_is_reset_on_close` (verified failing
+  against the old guard), `::test_f1_the_commit_record_survives_the_reset`,
+  `::test_f1_a_clean_close_writes_no_patch_artifact`; the existing
+  `::test_aclose_after_a_commit_leaves_the_commit_alone` keeps its assertions with its rationale
+  corrected.
+
+- 2026-09-09 — **F2: the gate's third job, `changes_allowed`.** Layer A now names three jobs — the
+  no-fabrication scan, the double pytest run, and **`changes_allowed`** — where the third used to be
+  `structural.allowed_paths`, a check that **could not fail for any input**: `collect_targets` drops
+  every path outside a `*_utils` package, and `check_structural` then computed `stray` by applying
+  the same pattern to that already-filtered list. Measured live 2026-09-08 (slot 4): 193 changed
+  lines in `obsdb_catalog` were never scanned, never tested, never in the reviewer's diff bundle,
+  reported as "only allowed paths touched", and unstageable by `approve_edit` — so the commit that
+  landed calls `neutral.advance_many`, defined only in the uncommitted file, and does not run on a
+  clean checkout. `gate_bench`'s `hole_structural_unfalsifiable` mutant was planted against this
+  hole and its recorded verdict names the co-lead as the only catcher.
+  New `collect_all_changes(worktree)` is the **wide** enumeration (every changed path, unfiltered);
+  `check_structural` gains an `all_changes` parameter that **defaults to deriving it**, so no caller
+  can reintroduce the defect by forgetting to pass it. Human ruling: an explicit **allow-list** of
+  `*_utils`, not a deny-list of protected packages — the naming convention is already enforced in
+  `prompts/coder.md` and §9.2, and an allow-list also closes the hole a deny-list would leave
+  (toolkit-root files and any future package not ending in `_utils` were silently dropped, the shape
+  whose cause went unidentified in slot 5). `run_gate` enumerates once, before Layer B executes, so
+  an artifact a tool's own test writes into the worktree cannot fail the check in the same run. The
+  rejection names the offending paths **and the route** (`ask_lead`), because banning the coder
+  without one recreates [C2]: in slot 4 the co-lead's own first rejection *demanded* the
+  `obsdb_catalog` change. `prompts/coder.md` states the boundary positively in both places it
+  matters — the catalog passage ("a library you call, and its own source stays as you found it")
+  and the diff-scope bullet. Tests: `test_gate.py::test_f2_*` (4; the two behavioural ones verified
+  failing against the vacuous check).
+
+- 2026-09-09 — **N1: the Layer-B failure window kept the wrong end of pytest's output.** It was a
+  hardcoded `out1[-2000:]`, and with a chatty science suite those 2,000 characters are *entirely*
+  the warnings summary plus the `short test summary info` line: measured live 2026-09-08 (slot 2),
+  119 warnings meant the failing test's **name** survived and every assertion and traceback was
+  cut. The coder ran the single test, the whole file, and the whole file twice more in fresh copies
+  — all green — and reported that it could not reproduce a failure it had never been shown. 3 h
+  28 m, $16.26, 43.7% of that run's wall clock, and two of the fourteen named quantities lost.
+  Two changes, and the second matters more than the first: the cap moves to
+  `orchestration.yaml: gate_layer_b_output_cap` (default 100000, read at call time so the value a
+  run used travels with it), and `_bounded_pytest_output` keeps the **head and the tail** rather
+  than the tail alone — pytest prints failure detail *before* the warnings summary, so a pure tail
+  window keeps the least useful end no matter how large the cap. Over the cap it keeps two thirds
+  from the front and one third from the back with an `[... N characters elided ...]` marker, so
+  nothing looks complete when it is not. Found because the first version of the test, written with
+  more noise than the cap, still failed: raising a tail window does not fix a tail window.
+  Tests: `test_gate.py::test_n1_layer_b_failure_keeps_far_more_than_the_old_2000_chars`.
+
+- 2026-09-09 — **F10: reads follow the allow-list, writes follow the role's own work folder.**
+  `PathGuard` made no read/write distinction, which was safe only while every graph role was
+  read-only. F5e gives the reviewer `file_edit` on its own `report.tex`, and once one formerly
+  read-only role becomes a writer, "read-only role" stops being the boundary and *its own work
+  product* becomes it. Human ruling: **the only writable folder for a role is its own work
+  folder.** `PathGuard` gains a separate `writable` set and `is_writable()`; empty means the role
+  writes nothing, which is the correct default for every role that needs no write, and an
+  unconfigured guard (no roots) is inactive for writes exactly as it is for reads. Reads stay
+  broad on purpose — a role must be able to read its own run logs (ruling 2026-09-03,
+  `runtime_dir` stays readable) — so this narrows writes only. `ReadOnlyToolProvider` derives its
+  writable set from the directory of its editable file, so the reviewer's scope is its report dir
+  and nothing else. Two independent bounds: `file_edit` never takes a path from the model, and the
+  guard then checks the path the provider was configured with, so a mis-wired provider cannot
+  widen the surface either. `jail.coder_policy` is the precedent the shape copies — an author
+  reads the allow-list and writes only its worktree and its own home.
+  **Residual, and deliberately not done blind:** the jail's `policy_from_config` still derives its
+  writable roots from `agent_fs_allow` minus `agent_fs_readonly` for the analyst REPL and the
+  gate's pytest, rather than from a per-role work folder. Narrowing those is a mount-plan change
+  to processes that run the science stack, and the standing lesson is that this allow-list "was
+  never exercised as a mount plan, so nobody had to know it was incomplete" — every PyXspec file
+  is a symlink four levels up, and the failure surfaced thirty suites deep instead of at launch.
+  That half needs a live probe under `agent_os_jail`, the same evidence bar §12 sets for turning
+  the flag on by default. The coder's policy is already correct and unchanged.
+  Tests: `test_fs_guard.py::test_f10_*` (5).
+
+- 2026-09-09 (second) — **The coder's git ban became a kernel rule.** `jail.coder_policy` now binds
+  `.git` read-only inside every writable root, so `add`/`commit`/`checkout` fail with *"Unable to
+  create '.git/index.lock': Read-only file system"* however the command is spelled, while
+  `status`/`diff`/`log`/`show` succeed. Until now the Claude harness had only its prefix-matched
+  Bash deny-rule (§9.9), which slips on a pipe or a subshell **and** denies read-only inspection —
+  a live coder lost a turn on 2026-09-09 trying to report its own change set
+  (`git status --short … ; git diff --stat …`, denied). `bwrap` cannot read a command's verbs, only
+  paths, so the enforceable form of "read-only git" is a read-only `.git`; `jail_argv` already
+  applies binds outermost-first, so the nested rule lands on top of the writable tree rather than
+  under it. Measured against a real repository through a real `bwrap` before it was written, and
+  again as a test. The runtime's own git is untouched — `approve_edit`, the gate-entry reset and
+  `collect_all_changes` run in the parent process, outside the jail — and on a *linked* worktree
+  the read-only `.git` pointer file names a gitdir the author's writable set does not contain.
+  Tests: `test_jail.py::test_the_coder_policy_binds_dot_git_read_only_inside_every_writable_root`,
+  `::test_a_jailed_process_can_read_git_history_and_cannot_write_it` (34 → 36).

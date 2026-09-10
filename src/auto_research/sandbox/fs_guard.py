@@ -51,20 +51,54 @@ def load_fs_allowlist(config: dict | None = None) -> list[Path]:
 class PathGuard:
     """Decide whether a filesystem path / shell command stays within the allow-list.
 
-    ``roots`` is the allow-list (resolved on construction). An **empty** ``roots`` means the
-    guard is **inactive** (everything allowed) so un-configured environments are unaffected.
+    ``roots`` is the **readable** allow-list (resolved on construction). An **empty** ``roots``
+    means the guard is **inactive** (everything allowed) so un-configured environments are
+    unaffected.
+
+    ``writable`` is the separate, narrower set a role may **write** to (F10, 2026-09-09). The
+    guard used to make no read/write distinction at all, which was fine only while every graph
+    role was read-only — F5e gives the reviewer `file_edit` on its own `report.tex`, and once one
+    formerly read-only role becomes a writer, "read-only role" stops being the boundary and *its
+    own work product* becomes it. Human ruling: **the only writable folder for a role is its own
+    work folder.** Empty ``writable`` means this guard grants no write at all, which is the right
+    default for every role that does not need one.
+
+    The model of the two sets is asymmetric on purpose, and `jail.coder_policy` is the worked
+    precedent: the author harness reads everything on the allow-list and writes only its worktree
+    and its own home. Reads stay broad because a role must be able to read its own run logs
+    (human ruling 2026-09-03, `runtime_dir` stays readable); writes are what F10 narrows.
     """
 
-    def __init__(self, roots) -> None:
+    def __init__(self, roots, writable=()) -> None:
         self.roots = [Path(r).resolve() for r in roots]
+        self.writable = [Path(w).resolve() for w in writable]
 
     @classmethod
-    def from_config(cls, config: dict | None = None) -> "PathGuard":
-        return cls(load_fs_allowlist(config))
+    def from_config(cls, config: dict | None = None, writable=()) -> "PathGuard":
+        return cls(load_fs_allowlist(config), writable=writable)
 
     @property
     def active(self) -> bool:
         return bool(self.roots)
+
+    def is_writable(self, path) -> bool:
+        """True if ``path`` may be **written** by this role.
+
+        Independent of :meth:`is_allowed`: a role reads its run directory and writes one folder
+        inside it. A role with no declared writable set can write nothing, and an inactive guard
+        (no roots at all, i.e. unconfigured) grants writes the same way it grants reads.
+        """
+        if not self.roots:
+            return True
+        if not self.writable:
+            return False
+        try:
+            p = Path(str(path)).expanduser().resolve()
+        except Exception:  # noqa: BLE001 — an unresolvable path is not writable
+            return False
+        if p.name in GOVERNANCE_BASENAMES:
+            return False
+        return any(p == root or root in p.parents for root in self.writable)
 
     def is_allowed(self, path) -> bool:
         """True if ``path`` is inside an allowed root and is not a governance file. When the

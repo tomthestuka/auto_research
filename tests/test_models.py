@@ -1,13 +1,14 @@
 """Deterministic tests for the step-2 model registry."""
 
 import asyncio
+from typing import get_args
 
 import pytest
 import yaml
 
 from auto_research.models import ModelHandle, ModelMessage, ModelResponse, ModelUsage, load_registry
 from auto_research.models.registry import REQUIRED_ROLES
-from auto_research.models.types import RoleModelConfig
+from auto_research.models.types import ProviderName, RoleModelConfig
 
 
 def _models_config(**role_overrides):
@@ -121,7 +122,10 @@ def test_registry_rejects_empty_group(tmp_path):
 
 
 # Capability contracts a valid config must uphold regardless of WHICH models back a role.
-_VALID_PROVIDERS = {"anthropic", "google", "openai"}
+# Derived from the annotation the field itself carries, never re-listed: a vendor added to
+# ``ProviderName`` is legal in a role the moment the adapter exists, and a literal here would
+# fail a valid config instead of the invalid one it is meant to catch.
+_VALID_PROVIDERS = set(get_args(ProviderName))
 _VISION_ROLES = {"reviewer", "analyst_lead", "analyst_worker"}  # must see figures (§6/§7)
 _DOCUMENT_ROLES = {"reviewer", "librarian_io"}  # ingest PDFs (open_paper / literature)
 

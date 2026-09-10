@@ -10,7 +10,41 @@ def test_runtime_prompt_loads(role: str) -> None:
     content = load_prompt(role)  # type: ignore[arg-type]
 
     assert content
-    assert "Responsibilities:" in content
+    # Every runtime prompt must state, up front, what the role is responsible for. Two accepted
+    # forms since F8 (2026-09-09) sectioned the longest prompts: the legacy bare
+    # `Responsibilities:` label, or a Markdown heading serving the same purpose. Asserting the
+    # bare literal alone made a *structural improvement* fail — `analyst_worker.md` and
+    # `analyst_lead.md` were 10k and 20k characters with zero headings and single lines of 1,319
+    # and 2,144 characters, which is how a rule ended up buried mid-paragraph and unread.
+    assert "Responsibilities:" in content or "\n## " in content, (
+        f"{role}: state the role's responsibilities as a labelled block or a `## ` section"
+    )
+
+
+@pytest.mark.parametrize("role", PROMPT_FILENAMES)
+def test_a_long_runtime_prompt_is_sectioned_and_line_bounded(role: str) -> None:
+    """A prompt long enough to need navigation must have it (F8).
+
+    Not cosmetic. `analyst_lead.md` carried "One link is one capability, one commit" as the third
+    sentence of its single longest line — 2,144 characters, sharing that paragraph with the
+    chain-planning procedure and the disposition decision — and two live runs violated the rule.
+    Modern attention does not rescue a wall of text; sectioning is what makes a rule findable.
+    """
+    content = load_prompt(role)  # type: ignore[arg-type]
+
+    # The LINE BOUND is the load-bearing half, and it is the one the evidence supports: the
+    # measured failure was a rule buried mid-paragraph in a 2,144-character line, not a prompt
+    # that was merely large. A model reads the whole thing linearly; what defeats it is a wall of
+    # text, so this applies to every prompt regardless of size.
+    longest = max((len(line) for line in content.splitlines()), default=0)
+    assert longest <= 600, f"{role}: longest line is {longest} chars — break it up"
+
+    # Sections are for navigation, so they are required only where there is enough to navigate.
+    # The threshold is deliberately high: `analyst_colead.md` is 7.7k of well-wrapped short lines
+    # and reads fine unsectioned, and inventing a lower bound to catch it would be a style rule
+    # with no incident behind it.
+    if len(content) >= 12000:
+        assert content.count("\n## ") >= 4, f"{role}: {len(content)} chars needs sections"
 
 
 @pytest.mark.parametrize("role", PROMPT_FILENAMES)

@@ -617,8 +617,14 @@ def test_reference_band_edges_are_half_open():
 
 
 def _hole_structural_unfalsifiable(pkg: Path) -> None:
-    """A file outside every ``*_utils`` package. The gate enumerates only files inside one,
-    so ``structural.allowed_paths`` cannot fail and the file is never scanned."""
+    """A file outside every ``*_utils`` package.
+
+    Planted against a hole that is now closed: ``collect_targets`` enumerates only files inside a
+    ``*_utils`` package, and the old ``structural.allowed_paths`` filtered its input through the
+    same pattern it tested, so it could not fail and the file was never scanned — the co-lead was
+    the only catcher. Since F2 (2026-09-09) ``structural.changes_allowed`` is computed over
+    ``collect_all_changes`` (the unfiltered changeset), so this family is expected to be caught
+    deterministically. Kept as the regression case for that check."""
     write(
         pkg.parent / "scratch" / "backfill.py",
         '"""Fill the empty bands of a product with fabricated values for now."""\n\n'

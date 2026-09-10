@@ -145,7 +145,7 @@ and the hardening pass re-runs the identical corpus so the difference is itself 
 | `hole_g6_manifest_import` | [G6] | A heavy import in the pure-data manifest: the gate string-matches the key and never imports the package. | Check confirmed blind; co-lead named `import xspec` and asked for an import test in a clean context. |
 | `hole_g7_review_truncation` | [G7] | An invented constant past the review bundle's 20,000-character per-file cap, so the co-lead is not shown it. | Probe verified real (constant at char 34,622 of 34,831, so it *was* elided) and the co-lead **still caught it**, quoting line numbers: it followed the truncation marker's `use read_file` and read the tail. Nothing forces that read, so [G7] stands on one trial. |
 | `hole_regression_blindness` | new | A shared helper is broken while only its caller's test file is in the changeset; Layer B runs only changeset tests, so the helper's own test never runs. | Scope confirmed blind; co-lead named the silent truncation of `"8.4"` and asked for the coercion test to be pulled into scope. |
-| `hole_structural_unfalsifiable` | new | A fabricating module outside every `*_utils` package. `collect_targets` enumerates only files inside one, so `structural.allowed_paths` cannot fail; the file is also never staged, so the check is unfalsifiable rather than unsafe. | Check confirmed unfalsifiable (gate reported a clean scan) and the co-lead read the worktree and named `scratch/backfill.py`. |
+| `hole_structural_unfalsifiable` | new | A fabricating module outside every `*_utils` package. `collect_targets` enumerated only files inside one, so `structural.allowed_paths` could not fail; the file was also never staged, so the check was unfalsifiable rather than unsafe. **Closed 2026-09-09 (F2)** — now caught by `structural.changes_allowed`. | Verdict as recorded, **before F2**: check confirmed unfalsifiable (gate reported a clean scan) and the co-lead read the worktree and named `scratch/backfill.py`. A re-run is expected to move this row from a co-lead catch to a deterministic one. |
 
 **The probes measure a blind *check*, not a stack miss.** All six holes are real, and none produced an
 end-to-end miss: in every case the co-lead caught the defect. Four of them (`g4`, `g6`,
@@ -499,7 +499,10 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   measurement showed the first choice inert: an inclusive energy-band edge changes no rate (the IXPE
   EBOUNDS grid aligns exactly with the 2/4/8 keV band edges), so the off-by-one archetype moved to the
   lag-bin edges. `hole_structural_unfalsifiable` records a hole found while building:
-  `structural.allowed_paths` filters its input through the same pattern it tests, so it cannot fail.
+  `structural.allowed_paths` filtered its input through the same pattern it tested, so it could not
+  fail. **Closed 2026-09-09 (F2):** the check is now `structural.changes_allowed`, computed over
+  `collect_all_changes` (the unfiltered changeset), so this family is caught deterministically. The
+  recorded verdict below predates that fix and attributes the catch to the co-lead.
   **Baseline (2026-08-17):** 41 entries, **41/41 as predicted, $4.52 and 34.7 min**, all **37 planted
   defects stopped** (scan 6, structural 2, determinism 1, tool-local tests 7, co-lead 21, commit sweep
   1; **none reached a commit**), **4/4 controls approved by the co-lead**. Records under

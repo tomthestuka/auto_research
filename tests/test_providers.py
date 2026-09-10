@@ -557,15 +557,29 @@ def _tool_turn_with_figure(fig):
     )
 
 
-def test_anthropic_tool_result_figure_inline(tmp_path):
-    """A tool's figure renders as an image block in the SAME user turn as its tool_result."""
+def test_anthropic_tool_result_figure_rides_in_its_own_following_turn(tmp_path):
+    """A tool's figure renders in its OWN user turn, immediately after the tool_result turn.
+
+    It used to ride in the same message. That is legal ("any text must come AFTER all tool
+    results") and it is also the arrangement Anthropic names as the cause of an accidental empty
+    response: *"Never add text blocks immediately after tool results"* — and `_figure_blocks`
+    emits a caption (a text block) before the image. Slot 3's lead had figures on its turns and
+    returned `output_tokens: 2`, which the loop read as a finished turn and the run died (F5f).
+
+    Everything else is preserved: the figure still replays adjacent to the result that produced
+    it, still caches with the growing prefix, and still carries real bytes.
+    """
     from auto_research.models.providers.anthropic import _to_anthropic_messages
 
     fig = _figure(tmp_path)
     _, msgs = _to_anthropic_messages([_tool_turn_with_figure(fig)])
-    content = msgs[0]["content"]
-    assert content[0]["type"] == "tool_result"  # tool_result stays first
-    images = [b for b in content if b.get("type") == "image"]
+
+    # The tool-result turn carries ONLY tool_result blocks — nothing after them.
+    assert {b["type"] for b in msgs[0]["content"]} == {"tool_result"}
+    # The figure is the next turn, still a user turn, still adjacent.
+    assert len(msgs) == 2
+    assert msgs[1]["role"] == "user"
+    images = [b for b in msgs[1]["content"] if b.get("type") == "image"]
     assert len(images) == 1
     assert images[0]["source"]["media_type"] == "image/png"
     assert base64.b64decode(images[0]["source"]["data"]) == _PNG_BYTES  # real bytes loaded

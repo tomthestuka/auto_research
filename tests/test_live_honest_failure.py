@@ -76,12 +76,12 @@ def _worker_reports() -> list[AnalystReport]:
             summary="Computed the whole-observation polarization but cannot segment it in time.",
             findings=["Whole-observation PD ~ 4% at PA ~ 45 deg (2-8 keV)."],
             tool_request=request,
-            status="ok",
+            status="succeeded",
         ),
         AnalystReport(
             summary="Agree the time-segmented capability is missing from the toolkit.",
             findings=["No per-segment polarization-cube tool exists in the IXPE toolkit."],
-            status="ok",
+            status="succeeded",
         ),
     ]
 
@@ -229,7 +229,7 @@ def test_live_lead_finalizes_failed_authoring(tmp_path):
     # Structural contract only (LLM content is logged, not asserted, per the testing rules).
     assert outcome.filed in (TERMINAL_REPORT_TOOL, SUBMIT_ADJUDICATION_TOOL)
     assert isinstance(report, AnalystReport)
-    assert report.status in ("ok", "failed", "needs_human")
+    assert report.status in ("succeeded", "failed")  # F9: agent-declared, two values
     assert report.summary.strip()
     assert report.tool_request is None  # a terminal report does not re-request the tool
 

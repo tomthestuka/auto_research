@@ -93,7 +93,7 @@ class AuthoringWorker:
             summary=f"{self.name} call {self.calls}",
             findings=[f"{self.name} f{self.calls}"],
             tool_request=_tool_request() if needs_tool else None,
-            status="ok",
+            status="succeeded",
         )
 
 
@@ -604,3 +604,101 @@ def test_terminal_with_nothing_committed_still_ends_the_analysis():
     assert registry.reloads == 0
     assert final.status == "failed"
     assert lead.finalized == 1
+
+
+def test_n11_author_credits_are_per_analysis_and_never_refilled_by_a_send_back():
+    """N11: `tool_author_cap` is documented as a per-analysis ceiling, but the budget was a local
+    initialised inside `run()`, and `run()` is re-entered on every reviewer send-back — so a
+    send-back silently refilled it and the real ceiling was `max_iterations x tool_author_cap`.
+    Observed in slot 2's ledger as `author_budget: 11 -> 10 -> 10` across cycles that spent 1, 1
+    and 2 credits."""
+    from auto_research.consensus.strategy import DebateToConverge
+
+    strategy = DebateToConverge(tool_author_cap=3, toolkit_root=Path("/tmp"))
+
+    # Entry 1 of the analysis: the full cap is available.
+    assert strategy.tool_author_cap - strategy._credits.spent == 3
+
+    # Two credits spent inside that entry.
+    strategy._credits.spent += 2
+
+    # Entry 2 — what a reviewer send-back causes. One credit left, not three.
+    assert max(0, strategy.tool_author_cap - strategy._credits.spent) == 1
+
+    strategy._credits.spent += 1
+    assert max(0, strategy.tool_author_cap - strategy._credits.spent) == 0
+
+
+def test_n11_the_credit_holder_is_mutable_under_a_frozen_strategy():
+    """The strategy is a frozen dataclass, so the count lives in a mutable holder. A plain int
+    field would raise `FrozenInstanceError` at the first spend (caught during F1-F9 work)."""
+    from auto_research.consensus.strategy import DebateToConverge
+
+    a, b = DebateToConverge(), DebateToConverge()
+    a._credits.spent += 1
+    assert a._credits.spent == 1
+    assert b._credits.spent == 0, "the holder must not be shared between instances"
+
+
+# ── F9: the chain outlives one failed link; status is agent-declared ─────────
+
+
+def test_f9_a_failed_link_does_not_end_the_chain_and_the_lead_is_told_why():
+    """It used to `break`, so one failure ended the chain with the credits that would have paid
+    for a retry still unspent — slot 3 spent 2h43m and ~$18 on six cycles refused before a coder
+    session opened, slot 4 queued ~8 more. Human ruling: the LEAD owns the stop decision, and
+    spending the budget discovering a capability cannot be built is an honest answer.
+
+    So the loop continues AND the lead is told, in its own conversation, before the next brief —
+    that is what makes "the lead decides" real rather than nominal.
+    """
+    import inspect
+
+    from auto_research.agents.roles import AnalystLeadAgent
+
+    src = inspect.getsource(AnalystLeadAgent._author_chain)
+    assert "break  # a dependency-satisfied prefix" not in src
+    assert "did not commit" in src, "the lead must be told which link failed and why"
+    assert "hold_authoring" in src, "and told how to stop the chain if it should"
+
+
+def test_f9_the_worker_note_carries_the_cause_but_not_the_remediation():
+    """N8, inside F9's scope: the raw unclean-branch text carries a §9.9 citation, an internal
+    repo path and two destructive git commands, and it reached slot 4's worker prompt three
+    times — in a role whose own prompt forbids it from touching git."""
+    from auto_research.consensus.strategy import _worker_safe_reason
+
+    raw = (
+        "authoring branch was not clean at attempt start: research_toolkit (/x/tk) has "
+        "uncommitted changes on 'ai'.\n"
+        "Uncommitted paths:\n  obsdb_catalog/neutral.py\n"
+        "Review and clean before the next run, or re-run with resume=True to auto-heal:\n"
+        "  git -C /x/tk status\n"
+        "  git -C /x/tk restore . && git -C /x/tk clean -fd   # discard, if appropriate"
+    )
+    out = _worker_safe_reason(raw)
+    assert "was not clean at attempt start" in out, "the cause is what an analyst acts on"
+    assert "obsdb_catalog/neutral.py" in out, "and the offending path is legitimate detail"
+    assert "git " not in out and "restore ." not in out, "no shell remediation reaches a worker"
+
+
+def test_f9_the_unclean_error_names_the_dirty_paths(tmp_path):
+    """N4: the message used to print remediation and no paths, which is why slot 5's dirtying
+    file is permanently undetermined — its clone was swept at teardown."""
+    import subprocess
+
+    from auto_research.sandbox.merge_flow import ToolkitBranchUnclean, check_toolkit_branch_clean
+
+    repo = tmp_path / "tk"
+    (repo / "obsdb_catalog").mkdir(parents=True)
+    for args in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    (repo / "README.md").write_text("base\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "ai"], check=True, capture_output=True)
+    (repo / "obsdb_catalog" / "neutral.py").write_text("def advance_many(): ...\n")
+
+    with pytest.raises(ToolkitBranchUnclean) as exc:
+        check_toolkit_branch_clean(repo, "ai")
+    assert "obsdb_catalog/neutral.py" in str(exc.value)

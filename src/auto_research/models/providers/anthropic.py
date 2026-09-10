@@ -24,6 +24,7 @@ from auto_research.models.types import (
     RoleModelConfig,
     ToolCall,
     ToolResultMessage,
+    stop_from_anthropic,
 )
 from auto_research.schemas import DocumentRef, FigureRef
 
@@ -301,6 +302,7 @@ class AnthropicProvider:
             parsed=parsed,
             tool_calls=tool_calls,
             usage=_anthropic_usage(usage),
+            stop=stop_from_anthropic(response),
             context_edits=_context_edits(response),
             provider_parts=provider_parts,
             raw=response,
@@ -447,13 +449,29 @@ def _to_anthropic_messages(
                 }
                 for part in message.results
             ]
-            # A tool's figures live inline at this turn: caption+image blocks appended after
-            # the tool_result blocks in the SAME user message (Anthropic allows mixed content
-            # there), so they replay in place every round and cache with the growing prefix.
+            provider_messages.append({"role": "user", "content": content})
+            # A tool's figures live inline at this turn, but in their OWN following user message —
+            # never appended after the tool_result blocks in the same one (F5f).
+            #
+            # Mixed content there is legal ("any text must come AFTER all tool results"), and that
+            # is what this used to do. But the stop-reasons page names exactly that arrangement as
+            # the cause of an accidental empty turn: *"Sometimes Claude returns an empty response
+            # (exactly 2-3 tokens with no content) with `stop_reason: "end_turn"` ... particularly
+            # after tool results"*, with the prevention *"Never add text blocks immediately after
+            # tool results"* (platform.claude.com/docs/en/build-with-claude/handling-stop-reasons).
+            # `_figure_blocks` renders a caption — a text block — then the image, so every
+            # figure-bearing tool result was producing that shape. Slot 3's lead had figures on
+            # its turns and returned `output_tokens: 2`, killing the run.
+            #
+            # A separate user message keeps every other property: the figures still replay in
+            # place every round, still cache with the growing prefix, and still sit adjacent to
+            # the result that produced them.
+            figure_content: list[dict] = []
             for part in message.results:
                 for figure in part.figures:
-                    content.extend(_figure_blocks(figure, plan))
-            provider_messages.append({"role": "user", "content": content})
+                    figure_content.extend(_figure_blocks(figure, plan))
+            if figure_content:
+                provider_messages.append({"role": "user", "content": figure_content})
         elif message.role == "system":
             system_texts.append(message.content)
         else:

@@ -305,9 +305,11 @@ def build_graph(
         reviewer + compose prompts, not in suppressing the report.
         """
         report = state.get("report")
-        status = getattr(report, "status", "ok") if report is not None else "ok"
+        # An absent report is not a success (F9): the harness never infers a terminal state, and
+        # `AnalystReport.status` now defaults to `failed` for the same reason.
+        status = getattr(report, "status", "failed") if report is not None else "failed"
         verdict = _latest_verdict(state)
-        if status in ("failed", "needs_human"):
+        if status != "succeeded":
             await _record(
                 monitor,
                 "run.honest_failure",
@@ -350,34 +352,56 @@ def build_graph(
         if "tex" in _report_formats:
             staged = stage_figures(analyst_report.figures if analyst_report else [], rdir)
             staged_papers = stage_papers(cited, rdir)
-            feedback: list[str] | None = None
-            latex_path: Path | None = None
             pdf_path: Path | None = None
 
-            for attempt in range(max(1, report_retry_cap)):
-                latex = await reviewer.compose_latex_report(  # type: ignore[attr-defined]
-                    state["request"], analyst_report, staged, staged_papers, verdict,
-                    feedback=feedback,
-                )
-                latex_path = write_report_latex(latex, rdir / "report.tex")
-                # A dead reference link is a hard reject, fed back like a compile error.
+            latex_path = rdir / "report.tex"
+            attempts: list[int] = []
+
+            def _latex_problems() -> list[str]:
+                """The reviewer's ``turn_end`` door: figures resolve, links resolve, it compiles.
+
+                F5e: this used to be a recompose loop — the reviewer produced a whole
+                ``LatexReport`` through structured output on each attempt and the previous
+                attempt's errors came back as prose, so every attempt discarded the last one's
+                fixes ([D7]: the retry re-emitted the same document). Now the reviewer edits the
+                file and this is what stands between the draft and acceptance.
+                """
+                attempts.append(1)
+                if not latex_path.is_file():
+                    return [f"{latex_path.name} has not been written yet — draft it with file_edit."]
+                # [D1] survives the move to file editing. `write_report_latex` wraps every
+                # `\href` DISPLAY argument in `\nolinkurl`, and without it a single `_` in a
+                # staged filename broke the compile of every citing PDF. The reviewer now writes
+                # the file itself, so that normalization is re-applied here rather than lost:
+                # it is mechanical formatting, not authorship, so it is applied silently instead
+                # of being charged to the model as a problem to fix.
+                write_report_latex(latex_path.read_text(encoding="utf-8"), latex_path)
+                latex = latex_path.read_text(encoding="utf-8")
                 errs = validate_latex_figures(latex, staged)
                 errs += validate_report_links(latex, rdir, staged_papers)
-                ok, cerrs = compile_latex(rdir)
-                errs = errs + cerrs
-                await _record(
-                    monitor,
-                    "reviewer.compose_report.compile",
-                    level=4,
-                    summary=f"LaTeX compile attempt {attempt + 1}: {'OK' if not errs else f'{len(errs)} error(s)'}",
-                    actor="reviewer",
-                    data={"attempt": attempt + 1, "errors": errs},
-                )
-                if not errs:
-                    pdf_candidates = list(rdir.glob("*.pdf"))
-                    pdf_path = pdf_candidates[0] if pdf_candidates else None
-                    break
-                feedback = errs
+                _ok, cerrs = compile_latex(rdir)
+                return errs + cerrs
+
+            await reviewer.author_latex_report(  # type: ignore[attr-defined]
+                state["request"], analyst_report, staged, staged_papers, verdict,
+                tex_path=latex_path, validator=_latex_problems,
+                roots=[rdir], cap=max(1, report_retry_cap) * 4,
+            )
+            errs = _latex_problems()
+            await _record(
+                monitor,
+                "reviewer.compose_report.compile",
+                level=4,
+                summary=(
+                    f"LaTeX authored over {len(attempts)} validation(s): "
+                    + ("OK" if not errs else f"{len(errs)} residual error(s)")
+                ),
+                actor="reviewer",
+                data={"validations": len(attempts), "errors": errs},
+            )
+            if not errs:
+                pdf_candidates = list(rdir.glob("*.pdf"))
+                pdf_path = pdf_candidates[0] if pdf_candidates else None
 
             if errs:
                 await _record(

@@ -233,3 +233,44 @@ def test_by_default_the_session_overrides_nothing(_seat_overrides):
         pytest.skip("session was launched with --seats, so the override is expected")
     assert config_dir() == repo_config_dir()
     assert Path(os.environ.get(CONFIG_DIR_ENV, repo_config_dir())) == repo_config_dir()
+
+
+@pytest.mark.parametrize("choice", ["codex", "claude_sdk", ""])
+def test_the_live_coding_tests_coder_seat_builds_for_every_harness(monkeypatch, choice):
+    """The seat a paid live test opens with is constructed for free, here.
+
+    A live test dies at construction just as easily as it dies at a model call, and the env flag in
+    front of it means it gets far fewer chances to be caught than an ordinary source branch (the
+    2026-08-20 lesson). Measured: the first launch of the rebuilt chain test spent nothing and
+    failed on ``FrozenInstanceError`` assigning to ``SeatOverride.harness`` — a frozen dataclass,
+    the same trap as N11 — which this would have caught with no run at all.
+    """
+    from auto_research.sandbox.coder.harness import HARNESS_ENDPOINTS
+    from tests.test_live_loader_authoring import CODER_HARNESS_ENV, _coder_seat
+
+    if choice:
+        monkeypatch.setenv(CODER_HARNESS_ENV, choice)
+    else:
+        monkeypatch.delenv(CODER_HARNESS_ENV, raising=False)
+
+    override = _coder_seat()
+    assert override.provider and override.model
+    assert (override.provider, override.harness) in HARNESS_ENDPOINTS, (
+        f"{override.provider}/{override.harness} is not a legal author pairing"
+    )
+    if choice:
+        assert override.harness == choice
+    # And the registry resolves what it writes — the seat is a written file, not an intention.
+    with seated(coder=override):
+        member = load_registry().resolve("coder").handles[0].config
+        assert (member.provider, member.harness) == (override.provider, override.harness)
+
+
+def test_an_unknown_coder_harness_is_refused_rather_than_silently_defaulted(monkeypatch):
+    """A typo must not quietly author on whichever backend the configuration happens to name — the
+    run would then report a harness it did not use."""
+    from tests.test_live_loader_authoring import CODER_HARNESS_ENV, _coder_seat
+
+    monkeypatch.setenv(CODER_HARNESS_ENV, "claude-sdk")
+    with pytest.raises(ValueError, match="claude-sdk"):
+        _coder_seat()

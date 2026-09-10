@@ -7,8 +7,9 @@ machine-readable report handle (JSONL) and a human one (compilable LaTeX/PDF).
 
 The system also **extends its own analysis reach**: when a task needs a capability its
 domain tool library (`research_toolkit`, a separate repo) lacks, the analyst team
-authors the tool itself — through a deterministic mergeability gate (tests run twice, a
-no-fabrication scan, provenance hashes) plus a provider-decorrelated code review, landing
+authors the tool itself — through a deterministic mergeability gate (three Layer-A jobs: the
+tests run twice, a no-fabrication scan, and an allow-list check that every changed path sits
+under a `*_utils` package) plus a provider-decorrelated code review, landing
 one atomic commit per tool on a working branch. The design goal is **verifiability, not
 trust**: every authored tool ships a human-runnable interface and tests a human can
 rerun, honest failure is a first-class outcome, and nothing reaches the toolkit's trusted
@@ -174,8 +175,11 @@ a longer field keeps a `[+N chars]` marker so what was dropped stays countable. 
 `/status` reporter can pull into its own context is capped separately and independently. On an accepted verdict,
 `runs/{run_id}/reviewer/report/` holds `report.jsonl` (machine handle for upstream
 planning teams), `report.tex` + symlinked `figures/` and `papers/` (human LaTeX project;
-the References section is `\href` links into `papers/`, gate-checked to resolve to real
-PDFs), and `report.pdf` (compiled by `pdflatex` when available).
+the References section is `\href` links into `papers/`, checked to resolve to real PDFs), and
+`report.pdf` (compiled by `pdflatex` when available). The reviewer **edits** that `.tex` with a
+file tool and ends its turn by calling `turn_end`, which accepts only once every figure and link
+resolves and the document compiles — so a fix it already made is never lost to a regeneration,
+and no report is composed on a model's behalf.
 
 ---
 
@@ -419,9 +423,9 @@ analyst worker group = Sonnet 4.6 and GPT-5.5 medium effort; librarian I/O group
 Sonnet 4.6, GPT-5.5 medium effort, and Gemini 3.5 Flash thinking. Phase 2 adds `coder`
 (the tool author) and `analyst_colead` (GPT-5.5 xhigh) so tool authoring and review are
 provider-decorrelated. The `coder` member names **both a model and the author harness that drives
-it** (`harness: claude_sdk | codex`): the default is Claude Sonnet through the Claude Agent SDK,
-and the Codex app-server is the second harness, which also reaches DeepSeek, Z.AI GLM and Alibaba
-Model Studio models through the endpoints those vendors document. Legal harness/provider pairings
+it** (`harness: claude_sdk | codex`): the shipped default is DeepSeek through the Codex
+app-server, and the Claude Agent SDK is the second harness; Codex also reaches Z.AI GLM and
+Alibaba Model Studio models through the endpoints those vendors document. Legal harness/provider pairings
 are checked at launch. There is no LLM librarian-searcher role; local
 retrieval is pure Python.
 

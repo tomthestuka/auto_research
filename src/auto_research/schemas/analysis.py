@@ -41,13 +41,28 @@ class AnalystReport(FiguredReport):
             "misbehaves; otherwise omit. The analyst lead finalises the tool brief from this."
         ),
     )
-    status: Literal["ok", "failed", "needs_human"] = Field(
-        default="ok",
+    status: Literal["succeeded", "failed"] = Field(
+        default="failed",
         description=(
-            "'ok' when you completed the work; 'failed' / 'needs_human' are honest, penalty-free "
-            "outcomes — never fabricate a result to force 'ok'."
+            "Declare the outcome of YOUR work: 'succeeded' when you completed it, 'failed' when "
+            "you could not. An honest 'failed' is a correct, penalty-free answer — never "
+            "fabricate a result to force 'succeeded'. Say in the summary what blocked you and "
+            "what a person would need to do about it."
         ),
     )
+    """The terminal state, **declared by the agent** (F9, 2026-09-09).
+
+    Two values, and the default is ``failed``: a report nobody filled in has not succeeded at
+    anything, and the harness must never infer success from silence. Before F9 the values were
+    ``ok``/``failed``/``needs_human`` with ``ok`` as the default, so an unwritten report defaulted
+    to claiming completion.
+
+    ``needs_human`` is gone. It was the third value and it did not earn its place: headless — the
+    condition every benchmark batch has run under — `ask_human` is not even in a graph role's tool
+    list, so the state was unreachable by the route it names, while [A20] shows the *label* being
+    filed for a reason that was not a human block at all (the lead wanted a worker rerun, the only
+    open form was a terminal, and the run recorded a human-request that never happened). A role
+    that genuinely needs a person says so in ``summary``, which is where a reader looks anyway."""
 
 
 class AnalysisTask(MessageModel):

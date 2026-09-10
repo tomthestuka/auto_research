@@ -61,22 +61,16 @@ roles:
           reasoning:
             effort: medium
   # Phase 2 tool-authoring roles (CLAUDE.md §6/§9.3).
-  # coder: the Sonnet-tier Claude author the analyst lead spawns (Claude Agent SDK).
-  # analyst_colead: the provider-decorrelated tool reviewer. MUST stay non-Anthropic
-  #   because the coder is Claude — two independent checks, not one provider checking its
-  #   own family. Backed by GPT-5.5 reasoning xhigh (cheapest eligible, capable enough).
+  # coder: the author the analyst lead spawns; the member names both model and harness.
+  # analyst_colead: the provider-decorrelated tool reviewer. MUST differ from the coder's
+  #   provider — two independent checks, not one provider checking its own family.
   coder:
     members: # exactly 1 — one author harness drives one model
-      - name: claude_sonnet_5
-        harness: claude_sdk       # author process; legal harness/provider pairs: sandbox/coder/harness.py
-        provider: anthropic
-        model: claude-sonnet-5
-        vision: true
-        priceMTk:
-          input: 2.0
-          output: 10.0
-        parameters:
-          max_tokens: 16384
+      - name: deepseek-v4-flash
+        harness: codex       # author process; legal harness/provider pairs: sandbox/coder/harness.py
+        provider: deepseek
+        model: deepseek-v4-flash
+        base_url: https://api.deepseek.com/   # required: the endpoint deepseek documents for codex
   analyst_colead:
     members:
       - name: gpt_5_6

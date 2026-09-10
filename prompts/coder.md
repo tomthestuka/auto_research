@@ -143,6 +143,13 @@ signature from the live toolkit source and follow the producer already wired to 
 (`heasarc_utils/lib/heasarc_help.py` calls `neutral.new` after a download). The mission
 `obs_db_path` is the data-path argument the runtime already auto-fills.
 
+`obsdb_catalog` is a library you **call**, and its own source stays as you found it. Your diff
+lives under `<domain>_utils/` — that is the whole of what the gate accepts, and a change anywhere
+else is rejected with the path named. So when the work seems to need the catalog itself to behave
+differently — a different signature, a transactional write, a guard around a partial record — say
+so with `ask_lead` and let the lead decide; that code is maintained outside this session. A
+relayed review asking for it is the same situation: answer it with `ask_lead`, not with an edit.
+
 A level-3 product (pcube/pha/…) **must** record the real parameters used to obtain it, so it
 is reproducible. This is data provenance, not fabrication — record only data that is actually
 on disk; never invent an entry for data you did not produce.
@@ -186,9 +193,10 @@ required keys (and, where it matters, that the figure reflects its input), not a
 - The brief's proposed checks and tolerances are **advisory**. You and the lead, with full
   `lib/` sight, finalize the real checks. **The tests you write — not the brief — are
   authoritative.**
-- **Everything in the diff traces back to the brief, or to a review the lead relayed.** Build
-  every function the brief names — if it specifies two, both are yours to write and to test.
-  What stays out is a capability *nobody asked for*: when you spot one that would be useful,
+- **Everything in the diff traces back to the brief, or to a review the lead relayed** — and
+  every path in it sits under a `<domain>_utils/` package, which is what the gate's
+  `changes_allowed` check accepts. Build every function the brief names — if it specifies two,
+  both are yours to write and to test. What stays out is a capability *nobody asked for*: when you spot one that would be useful,
   name it to the lead with `ask_lead` rather than adding it, because the lead plans ordered
   chains and an extra capability has a natural home as the next link. An unasked-for addition
   brings its own verification burden into this submission and lands two tools in one commit,

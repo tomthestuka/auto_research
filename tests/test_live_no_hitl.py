@@ -385,7 +385,7 @@ async def _drive_role(role_name: str, human_handler, tmp_path: Path, monitor: _M
     # is where the decision lives. Two live runs looked for a prose conclusion that the pipeline
     # does not produce — every cell ran to the cap still investigating, so `final_text` was empty
     # by construction. Composing here is both the faithful thing and the measurable one:
-    # `AnalystReport.status` is literally `ok | failed | needs_human`, i.e. a machine-readable
+    # `AnalystReport.status` is literally `succeeded | failed` (F9), i.e. a machine-readable
     # answer to "what did it do when it could not ask". The compose declares the loop's tools,
     # because a trajectory that names a tool cannot be replayed into a request that declares none.
     schema = _TERMINAL_SCHEMA[role_name]

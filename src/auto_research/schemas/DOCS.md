@@ -263,3 +263,32 @@ carried by **reference** (`FigureRef`), never embedded
   validator is kept as an assertion on our own construction, where the state it rejects is
   unreachable. New `tests/test_schema_descriptions.py` (19) makes the rule permanent, exempting by
   name only runtime-resolved models (`FigureRef`) and auto-set bookkeeping.
+
+- 2026-09-09 — **F9: the chain outlives one failed link, and terminal status is agent-declared.**
+  Two shapes of one defect. *(1)* `_author_chain` ended on the first non-committed link
+  (`if result.status != "committed": break`), on the sound reasoning that a chain is ordered so
+  later links depend on the committed prefix — and that made a single failure end the whole chain
+  with the credits that would have paid for a retry still unspent. Slot 3 (2026-09-08) spent
+  2h43m and ~$18 on six cycles refused before a coder session even opened; slot 4 queued ~8 more.
+  Human ruling: the **lead** owns the stop decision, and spending the authoring budget
+  discovering a capability cannot be built is an honest answer — burning all 12 credits is
+  intended. The loop now continues and appends a user turn naming the failed link, its reason,
+  and how to stop the chain (`hold_authoring` or a terminal), because "the lead decides" is only
+  real over a reason the lead can read. *(2)* `AnalystReport.status` is
+  `Literal["succeeded", "failed"]`, **declared by the agent**, defaulting to **`failed`** — a
+  report nobody filled in has not succeeded at anything, and the harness must never infer success
+  from silence (it previously defaulted to `ok`). `needs_human` is retired: headless, the
+  condition every benchmark batch runs under, `ask_human` is not in a graph role's tool list, so
+  the state was unreachable by the route it names, while [A20] shows the label being filed for
+  something that was not a human block at all. **In scope by ruling, because a permanent cause now
+  costs the whole budget and the lead can only avoid that over a legible reason:** N4 — the
+  unclean-branch error names the offending paths (with `-uall`, since plain `--porcelain`
+  collapses a new directory to its own name and slot 5's dirtying file is *permanently
+  undetermined* for want of exactly this); and N8 — `_worker_safe_reason` strips operator
+  remediation from the note reaching the analysts, which previously carried a §9.9 citation, an
+  internal repo path and two destructive git commands into slot 4's worker prompt three times, in
+  a role whose own prompt forbids it from touching git.
+  **Not changed, and flagged:** the lead's `submit_terminal_report` still takes
+  `failed`/`needs_human`. That is a different field (a cycle decision, not a worker's outcome) and
+  the ruling named `AnalystReport`; retiring it there would move the frozen [A20] Tier-0 scoring
+  rule, which is an instrument decision.

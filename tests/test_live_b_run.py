@@ -123,7 +123,7 @@ def _qu_lag_request():
             "- Slice widths are signal-driven (target per-slice MDP99), not blind exposure division; "
             "observations that cannot supply enough signal-dominated slices are flagged and excluded "
             "from the population tests, never forced.\n"
-            "- An honest failed/needs_human outcome (missing data, or a capability that cannot be "
+            "- An honest failed outcome (missing data, or a capability that cannot be "
             "made available) is an acceptable, correct result — never fabricate a lag, a "
             "significance, or a correlation. If the environment is broken, abort and report.\n"
         ),

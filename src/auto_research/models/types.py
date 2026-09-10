@@ -121,6 +121,129 @@ class ToolResultMessage(BaseModel):
     results: list[ToolResultPart] = Field(default_factory=list)
 
 
+StopClass = Literal[
+    "end_turn",      # the model finished naturally — the only clean end
+    "tool_use",      # it wants a tool run (Anthropic `tool_use`, everyone else `tool_calls`)
+    "truncated",     # the output budget or the context window ran out mid-answer
+    "refusal",       # a safety classifier declined; arrives as a normal 200, not an error
+    "paused",        # a server-tool loop hit its iteration limit and wants continuing
+    "transient",     # an infrastructure failure the vendor reported IN the finish-reason field
+    "malformed",     # the vendor rejected its own tool call (Google MALFORMED_FUNCTION_CALL etc.)
+    "unknown",       # nothing usable reported; treated like a silent turn
+]
+"""How a turn ended, normalised. Read per vendor from that vendor's own documented field.
+
+The six vendors do not agree, which is why this exists rather than a shared field read:
+
+| vendor | field | notes |
+|---|---|---|
+| Anthropic | `stop_reason` | `end_turn`/`max_tokens`/`stop_sequence`/`tool_use`/`pause_turn`/`refusal` — the only vendor that also **prescribes** branching on it |
+| OpenAI | `status` + `incomplete_details.reason` | `incomplete` + `max_output_tokens`/`content_filter`; there is no `tool_use` value, tool intent is read off the output items |
+| Google | `finishReason` | 17 values, including `MALFORMED_FUNCTION_CALL` and `UNEXPECTED_TOOL_CALL` that nobody else has |
+| DeepSeek | `finish_reason` | adds **`insufficient_system_resource`** — a transient, in the terminal field |
+| Z.AI | `finish_reason` | adds **`network_error`** and `sensitive`; the ecosystem maps `network_error` to `stop`, so a dropped inference reads as success |
+| Alibaba | `finish_reason` | `stop`/`length`/`tool_calls` |
+
+Sources: platform.claude.com/docs/en/build-with-claude/handling-stop-reasons;
+ai.google.dev/api/generate-content#FinishReason; api-docs.deepseek.com/api/create-chat-completion;
+docs.z.ai/api-reference/api-code; alibabacloud.com/help/en/model-studio/qwen-api-via-openai-responses.
+"""
+
+
+_OPENAI_INCOMPLETE_STOPS: dict[str, StopClass] = {
+    "max_output_tokens": "truncated",
+    "content_filter": "refusal",
+}
+
+_ANTHROPIC_STOPS: dict[str, StopClass] = {
+    "end_turn": "end_turn",
+    "tool_use": "tool_use",
+    "stop_sequence": "end_turn",
+    "max_tokens": "truncated",
+    "refusal": "refusal",
+    "pause_turn": "paused",
+    "model_context_window_exceeded": "truncated",
+}
+
+#: Every OpenAI-dialect vendor's `finish_reason`, plus the two that put an infrastructure failure
+#: in it. `network_error` is Z.AI's and is deliberately classed `transient`, NOT `end_turn`, even
+#: though the wider ecosystem maps it to `stop`.
+_CHAT_FINISH_STOPS: dict[str, StopClass] = {
+    "stop": "end_turn",
+    "tool_calls": "tool_use",
+    "function_call": "tool_use",
+    "length": "truncated",
+    "content_filter": "refusal",
+    "sensitive": "refusal",
+    "insufficient_system_resource": "transient",
+    "network_error": "transient",
+}
+
+_GOOGLE_STOPS: dict[str, StopClass] = {
+    "STOP": "end_turn",
+    "MAX_TOKENS": "truncated",
+    "SAFETY": "refusal",
+    "RECITATION": "refusal",
+    "BLOCKLIST": "refusal",
+    "PROHIBITED_CONTENT": "refusal",
+    "SPII": "refusal",
+    "IMAGE_SAFETY": "refusal",
+    "LANGUAGE": "refusal",
+    "MALFORMED_FUNCTION_CALL": "malformed",
+    "UNEXPECTED_TOOL_CALL": "malformed",
+    "OTHER": "unknown",
+    "FINISH_REASON_UNSPECIFIED": "unknown",
+}
+
+
+def stop_from_anthropic(raw: Any) -> StopClass:
+    """Anthropic's ``Message.stop_reason`` → :data:`StopClass`.
+
+    The only vendor that also prescribes the loop rule: *"Check this field to decide whether to
+    use the response as-is, continue the conversation, retry, or fall back to another model."*
+    (platform.claude.com/docs/en/build-with-claude/handling-stop-reasons)
+    """
+    return _ANTHROPIC_STOPS.get(str(getattr(raw, "stop_reason", "") or ""), "unknown")
+
+
+def stop_from_openai_responses(raw: Any) -> StopClass:
+    """OpenAI Responses ``status`` + ``incomplete_details.reason`` → :data:`StopClass`.
+
+    There is no `tool_use` status: tool intent is read off the output items, so a turn carrying
+    tool calls is classified by the caller, not here. `status="completed"` is the clean end.
+    """
+    status = str(getattr(raw, "status", "") or "")
+    if status == "incomplete":
+        details = getattr(raw, "incomplete_details", None)
+        reason = str(getattr(details, "reason", "") or "")
+        return _OPENAI_INCOMPLETE_STOPS.get(reason, "truncated")
+    if status in {"failed", "cancelled"}:
+        return "transient"
+    if status == "completed":
+        return "end_turn"
+    return "unknown"
+
+
+def stop_from_chat_finish_reason(reason: Any) -> StopClass:
+    """A `finish_reason` from any OpenAI-dialect vendor → :data:`StopClass`.
+
+    Covers DeepSeek's `insufficient_system_resource` and Z.AI's `network_error`, both of which
+    are **infrastructure failures reported in the terminal field**. Classifying either as
+    `end_turn` is what makes a dropped inference look like a finished answer.
+    """
+    return _CHAT_FINISH_STOPS.get(str(reason or "").strip().lower(), "unknown")
+
+
+def stop_from_google(raw: Any) -> StopClass:
+    """Google's candidate ``finishReason`` → :data:`StopClass` (17 documented values)."""
+    candidates = getattr(raw, "candidates", None) or []
+    if not candidates:
+        return "unknown"
+    reason = getattr(candidates[0], "finish_reason", None)
+    name = getattr(reason, "name", None) or getattr(reason, "value", None) or reason
+    return _GOOGLE_STOPS.get(str(name or "").strip().upper(), "unknown")
+
+
 class ModelResponse(BaseModel):
     """One **provider-authored assistant turn** — the neutral analogue of Anthropic
     ``Message.content``, OpenAI ``response.output`` and Google ``Content.parts``.
@@ -170,6 +293,22 @@ class ModelResponse(BaseModel):
     Order is preserved for the same reason. How these sit relative to the *interpreted* parts is a
     per-provider rule and belongs to the adapter — for Anthropic it does not arise, because the
     adapter echoes the whole array rather than reassembling it."""
+    stop: StopClass = "unknown"
+    """Why the provider stopped generating, normalised across the six vendors (F5a).
+
+    **Not** a terminator. The ReAct loop ends on a role's terminal tool, because a tool call means
+    the same thing on every vendor while this field does not: DeepSeek reports an overloaded
+    cluster as `insufficient_system_resource` and Z.AI reports a dropped inference as
+    `network_error`, both **in the finish-reason field**, and the ecosystem maps the latter to
+    `stop` — so on GLM a transient failure reads as a clean turn end. This field's job is to
+    decide *what to say next* when a turn arrives with neither a terminal tool nor a tool call.
+
+    Before F5a nothing read a stop reason at all: `_react` broke on `not tool_calls`, collapsing
+    five outcomes into "done". Slot 3's lead returned `output_tokens: 2` with no content after
+    nine consecutive tool-result turns — Anthropic documents exactly that as *"an empty response
+    (exactly 2-3 tokens with no content) with `stop_reason: "end_turn"` ... particularly after
+    tool results"* — and the run died because the loop read it as a finished turn.
+    """
     usage: ModelUsage = Field(default_factory=ModelUsage)
     context_edits: list[dict[str, Any]] = Field(default_factory=list)
     """Provider-native context-management edits applied to THIS call (Anthropic context

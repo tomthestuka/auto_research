@@ -342,6 +342,7 @@ def test_the_worker_seat_drives_a_tool_loop_and_sees_a_figure(tmp_path):
     tool search, so its whole catalogue is resident, which is a stated difference from the
     incumbent pair rather than a defect.
     """
+    from auto_research.agents.react import EDIT_REPORT_TOOL, TURN_END_TOOL
     from auto_research.agents.roles import AnalystWorkerAgent
     from auto_research.env import toolkit_root as configured_toolkit_root
     from auto_research.graph.runtime import attach_worker_runtime
@@ -403,7 +404,7 @@ def test_the_worker_seat_drives_a_tool_loop_and_sees_a_figure(tmp_path):
         peer = AnalystReport(
             summary="A previous round produced this diagnostic plot for the same source.",
             figures=list(figures),
-            status="ok",
+            status="succeeded",
         )
         try:
             report = asyncio.run(worker.analyze(task, peer_reports=[peer]))
@@ -434,5 +435,154 @@ def test_the_worker_seat_drives_a_tool_loop_and_sees_a_figure(tmp_path):
     assert any(request["images"] for request in recording.requests), (
         "no request carried the peer figure, so this seat would judge plots blind"
     )
-    assert report.status in ("ok", "failed", "needs_human")
+    assert report.status in ("succeeded", "failed")  # F9: agent-declared, two values
     assert report.summary.strip(), "the worker produced no report body"
+
+    # ── F5c/F5d/F9, added 2026-09-09 ────────────────────────────────────────
+    #
+    # `turn_end` must be OFFERED (F5c): it is how a worker's loop ends now, and a loop with no
+    # terminal tool has no way to finish except by falling silent.
+    assert TURN_END_TOOL in recording.requests[0]["tools"], (
+        f"turn_end was not declared to the worker; it had {recording.requests[0]['tools']}"
+    )
+    assert EDIT_REPORT_TOOL in recording.requests[0]["tools"]
+
+    # **NO REQUEST CARRIED AN OUTPUT SCHEMA** — this is the F5d assertion, and it is the precise
+    # one. The deleted fallback compose was a structured call, so a schema on any request means
+    # the harness composed a report on the model's behalf. That path was the only one that sent a
+    # worker the runtime-owned `figures`/`FigureRef` tree, which `_sanitize_strict` promoted to
+    # *required*, which is how four invented `placeholder_*` digests killed slot 5 one line before
+    # they would have been discarded. If it is gone, no request has a schema.
+    schemas = [r["schema"] for r in recording.requests if r["schema"]]
+    assert not schemas, f"a report was composed on the model's behalf via schema(s) {schemas}"
+
+    # Whether this seat actually ends on the terminal is model behaviour, so it is RECORDED and
+    # only its consequence is asserted: a report exists iff the model wrote one with edit_report,
+    # because nothing writes one for it. A worker that never wrote one gets the honest `failed`.
+    _record("worker_turn_end", {
+        "member": worker_seat.model,
+        "turn_end_declared": TURN_END_TOOL in recording.requests[0]["tools"],
+        "status": report.status,
+        "summary_chars": len(report.summary or ""),
+        "figures_cited": len(report.figures or []),
+        "requests": len(recording.requests),
+    })
+    if report.status == "failed" and not (report.figures or []):
+        # Permitted and informative: the seat did not complete the work, which under F9 is a
+        # correct outcome it declares for itself rather than one the harness infers.
+        assert report.summary.strip(), "an honest failure must still say what blocked it"
+
+
+def test_the_reviewer_seat_authors_a_compiling_tex_by_editing_it(tmp_path):
+    """F5e: the reviewer drafts `report.tex` with `file_edit` and ends on a validating `turn_end`.
+
+    This replaced a recompose loop that asked for a whole `LatexReport` through structured output
+    on every attempt and fed the previous attempt's compile errors back as prose. Two reasons it
+    needs a live cell rather than a deterministic one:
+
+    1. **Model behaviour.** Whether a seat can draft valid LaTeX *by editing a file* — rather than
+       by emitting a document in one shot — is unmeasured, and it is the reviewer's whole job now.
+    2. **The contrast arm's reviewer is the model recorded as failing the path this removes.**
+       `ResearchReport`/`LatexReport` failed on `qwen3.8-max` at every reasoning effort
+       (2026-08-24: unresolved `$ref` in `list[Model]` fields, so it invented a shape and returned
+       HTTP 200). If the editing path works on that seat, the change earns its place on evidence.
+
+    The validator here is the same closure `graph.builder.compose_report_node` builds, and the
+    provider is built by `readonly_tools_for` — production's own wiring, so a pass means the
+    reviewer's real surface worked, not a look-alike's.
+    """
+    from auto_research.agents.react import FILE_EDIT_TOOL, TURN_END_TOOL
+    from auto_research.agents.roles import ReviewerAgent
+    from auto_research.env import toolkit_root as configured_toolkit_root
+    from auto_research.graph.runtime import readonly_roots_for
+    from auto_research.models import load_registry
+    from auto_research.report import (
+        stage_figures,
+        stage_papers,
+        validate_latex_figures,
+        validate_report_links,
+    )
+    from auto_research.schemas import AnalystReport, ResearchRequest, ReviewVerdict
+
+    _, reviewer_seat, _ = _demo_seats()
+    figures = _figures(limit=1)
+
+    rdir = tmp_path / "report"
+    rdir.mkdir()
+    pdf = tmp_path / "cited.pdf"
+    pdf.write_bytes(b"%PDF-1.5\nbody")
+    staged = stage_figures(list(figures), rdir)
+    staged_papers = stage_papers([pdf], rdir)
+    tex = rdir / "report.tex"
+
+    validations: list[list[str]] = []
+
+    def problems() -> list[str]:
+        """Byte-for-byte the check `compose_report_node` installs, minus the pdflatex call.
+
+        `compile_latex` is dropped ON PURPOSE and the omission is stated: pdflatex is absent on
+        some hosts, and a probe that skips there would measure the host rather than the seat. The
+        two reference gates are the ones a model can actually get wrong.
+        """
+        if not tex.is_file():
+            errs = [f"{tex.name} has not been written yet — draft it with file_edit."]
+        else:
+            latex = tex.read_text(encoding="utf-8")
+            errs = validate_latex_figures(latex, staged)
+            errs += validate_report_links(latex, rdir, staged_papers)
+        validations.append(list(errs))
+        return errs
+
+    with seated(reviewer=from_seat(reviewer_seat)):
+        handle = load_registry().resolve("reviewer").handles[0]
+        assert handle.config.model == reviewer_seat.model
+        recording = _Recording(handle)
+        reviewer = ReviewerAgent(model=recording)
+        toolkit_root = configured_toolkit_root()
+        report = AnalystReport(
+            summary="Cyg X-1 2-8 keV polarization measured from the May 2022 IXPE observation.",
+            findings=["PD = 3.41 +/- 0.14 percent", "PA = -20.3 +/- 1.2 deg"],
+            figures=list(figures),
+            status="succeeded",
+        )
+        asyncio.run(reviewer.author_latex_report(
+            ResearchRequest(question="Reproduce the Cyg X-1 May-2022 IXPE polarization."),
+            report, staged, staged_papers,
+            ReviewVerdict(accepted=True, rationale="Values are consistent with the archive."),
+            tex_path=tex,
+            validator=problems,
+            roots=[rdir, *readonly_roots_for("seat-probe", toolkit_root)[1:]],
+            cap=8,
+        ))
+
+    _record("reviewer_tex", {
+        "member": reviewer_seat.model,
+        "requests": recording.requests,
+        "validations": validations,
+        "tex_chars": len(tex.read_text(encoding="utf-8")) if tex.is_file() else 0,
+        "tex_head": (tex.read_text(encoding="utf-8")[:400] if tex.is_file() else ""),
+    })
+
+    # The tools must have been offered: this seat cannot do the job without them.
+    assert recording.requests, "the reviewer was never called"
+    declared = recording.requests[0]["tools"]
+    assert FILE_EDIT_TOOL in declared, f"file_edit was not declared; got {declared}"
+    assert TURN_END_TOOL in declared, f"turn_end was not declared; got {declared}"
+
+    # No output schema anywhere: F5e's point is that this path no longer composes a document
+    # through structured output, which is the path this very seat is recorded as failing.
+    schemas = [r["schema"] for r in recording.requests if r["schema"]]
+    assert not schemas, f"the reviewer still composed through a schema: {schemas}"
+
+    # Per-actor capability: it wrote the file, and the harness validated what it wrote.
+    assert tex.is_file(), "the reviewer never wrote report.tex"
+    assert validations, "turn_end was never reached, so nothing was validated"
+    body = tex.read_text(encoding="utf-8")
+    assert "\\documentclass" in body, "what was written is not a LaTeX document"
+    # Model quality is recorded, not asserted: whether it cleared every reference gate is the
+    # measurement. A residual error is a real result for a weaker seat, not a broken harness.
+    if validations[-1]:
+        pytest.skip(
+            f"{reviewer_seat.model} left {len(validations[-1])} validation error(s) after "
+            f"{len(validations)} attempt(s): {validations[-1][:2]} — recorded"
+        )

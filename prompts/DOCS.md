@@ -207,3 +207,27 @@ Compacted 2026-09-01: entries through 2026-07-29 folded into themed ranges (deta
   companion test asserting the guard actually reaches all four roles rather than silently
   skipping. Tests: `tests/test_prompts.py` 15 → 20 (+3 skips).
 
+- 2026-09-09 — **F8: the long prompts are sectioned and line-bounded; F5/F9 content folded in.**
+  Measured before touching anything: `coder.md` and `analyst_lead.md` were the same length
+  (22.5k / 20.0k) but one had 13 sections and no line over 159 characters while the other had
+  **zero sections** and a longest line of **2,144**. `analyst_worker.md` was the second offender
+  (zero sections, 1,319) and is the prompt whose report contract failed in slots 4 and 5. The
+  one-capability rule sat as the *third sentence* of the lead's single longest line, sharing that
+  paragraph with the chain-planning procedure and the disposition decision, and two live runs
+  violated it. Now: lead 13 `##` + 2 `###` (the one-capability rule and the data/plots rule each
+  got their own subsection — the point of the exercise), worker 8 `##`, every prompt's longest
+  line ≤ 159. **Content changes F5/F9 require:** both prompts describe ending a turn with
+  `turn_end` and what a validation rejection means (recoverable, with the reason, tools retained),
+  and the report status is the agent-declared `succeeded`/`failed` with `failed` as the default.
+  **Verified no clause was lost**, which is the real risk in restructuring accumulated rulings: a
+  whitespace-normalised sentence-level diff against HEAD reports zero missing sentences for
+  `reviewer.md` and `librarian_io.md`, and for the lead and worker only the `Responsibilities:`
+  label (replaced by `## Your job`), the retired `ok`/`needs_human` vocabulary, and sentences I
+  deliberately extended.
+  `tests/test_prompts.py` gains `test_a_long_runtime_prompt_is_sectioned_and_line_bounded`. Its
+  two halves have different warrants and are held to different bars on purpose: the **line bound
+  applies to every prompt**, because a wall of text is the defect with an incident behind it and a
+  model reads linearly; **sections are required only above 12k**, because `analyst_colead.md` is
+  7.7k of well-wrapped short lines that reads fine unsectioned and a lower threshold would be a
+  style rule invented to catch it. The existing `Responsibilities:` assertion now also accepts a
+  `## ` heading — asserting one legacy literal made a structural *improvement* fail.

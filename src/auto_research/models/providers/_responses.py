@@ -54,6 +54,7 @@ from auto_research.models.types import (
     RoleModelConfig,
     ToolCall,
     ToolResultMessage,
+    stop_from_openai_responses,
 )
 from auto_research.schemas import DocumentRef, FigureRef
 
@@ -211,6 +212,21 @@ def _item_to_dict(item: Any) -> dict[str, Any]:
     if isinstance(item, dict):
         return dict(item)
     return {"type": getattr(item, "type", None)}
+
+
+def _raise_billed(exc: Exception, response: Any) -> None:
+    """Raise ``exc``, carrying the usage of the response that was already billed (N6).
+
+    Every raise below fires **after** a successful HTTP response, so the vendor has generated —
+    and charged for — those tokens. `traced_model_call` records usage only on the return path, so
+    an adapter-raised turn was silently free: slot 5's two failing attempts (~195k input tokens)
+    appear neither in its ledger nor in its reported $29.23.
+
+    The exception **type is preserved**, because the role layer branches on it (`ValueError` is
+    retried, `RuntimeError` ends the call). The usage rides as an attribute instead.
+    """
+    exc.billed_usage = _responses_usage(getattr(response, "usage", None))  # type: ignore[attr-defined]
+    raise exc
 
 
 def _tool_choice_value(tool_choice: str) -> str:
@@ -678,25 +694,25 @@ class ResponsesProvider:
                 # 2026-08-27; see `zai.py`). It previously fell into the RuntimeError below, whose
                 # non-retryability then ended 14 of 116 reviews in the gate_bench swap.
                 names = ", ".join(call.name for call in tool_calls)
-                raise ValueError(
+                _raise_billed(ValueError(
                     f"{vendor.name!r} requested tool calls ({names}) instead of delivering "
                     f"{schema.__name__} through `{_EMIT_TOOL}`; the turn is unfinished and will "
                     "be retried."
-                )
+                ), response)
             if emitted is None:
                 # No answer and nothing pending: the vendor declined outright. Not a shape problem
                 # a reworded retry can fix, so it stays non-retryable and loud.
-                raise RuntimeError(
+                _raise_billed(RuntimeError(
                     f"{vendor.name!r} was asked for {schema.__name__} through a "
                     f"`{_EMIT_TOOL}` call and returned neither that call nor any tool call, so "
                     "there is no structured answer to parse and nothing in progress."
-                )
+                ), response)
             if tool_calls:
                 names = ", ".join(call.name for call in tool_calls)
-                raise ValueError(
+                _raise_billed(ValueError(
                     f"{vendor.name!r} returned a structured answer while also requesting "
                     f"tool calls ({names}); the answer is premature and will be retried."
-                )
+                ), response)
             parsed = emitted
         else:
             parsed = loads_first_json_object(text)
@@ -717,11 +733,11 @@ class ResponsesProvider:
                 # `finish_reason` alongside a bounded retry rather than to retry blind.
                 status = getattr(response, "status", None)
                 incomplete = getattr(response, "incomplete_details", None)
-                raise ValueError(
+                _raise_billed(ValueError(
                     f"{vendor.name!r} returned no parseable {schema.__name__} from native "
                     f"`text.format` (status={status!r}, incomplete_details={incomplete!r}, "
                     f"output_chars={len(text)}); retrying."
-                )
+                ), response)
         return _response(
             content=text,
             parsed=parsed,
@@ -1104,6 +1120,7 @@ def _response(
         parsed=parsed,
         tool_calls=tool_calls or [],
         usage=_responses_usage(getattr(raw, "usage", None)),
+        stop=stop_from_openai_responses(raw),
         provider_parts=provider_parts or [],
         raw=raw,
     )

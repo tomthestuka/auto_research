@@ -310,10 +310,19 @@ def test_analyst_report_strict_schema_has_no_open_maps():
     assert not offenders, "open maps in AnalystReport strict schema:\n" + "\n".join(offenders)
 
 
-def test_analyst_report_status_defaults_ok_and_accepts_terminal_states():
-    assert AnalystReport(summary="done").status == "ok"
+def test_analyst_report_status_is_agent_declared_and_defaults_to_failed():
     assert AnalystReport(summary="gave up honestly", status="failed").status == "failed"
-    assert AnalystReport(summary="blocked", status="needs_human").status == "needs_human"
+    assert AnalystReport(summary="did the work", status="succeeded").status == "succeeded"
+    # F9 (2026-09-09): two values, agent-declared, defaulting to `failed`. `needs_human` was
+    # retired — headless (the condition every benchmark batch runs under) `ask_human` is not in a
+    # graph role's tool list, so the state was unreachable by the route it names, while [A20]
+    # shows the label being filed for something that was not a human block at all.
+    assert AnalystReport(summary="blocked", status="failed").status == "failed"
+    assert AnalystReport(summary="unset").status == "failed", "silence is never success"
+    with pytest.raises(ValidationError):
+        AnalystReport(summary="blocked", status="needs_human")
+    with pytest.raises(ValidationError):
+        AnalystReport(summary="done", status="ok")
     with pytest.raises(ValidationError):
         AnalystReport(summary="x", status="vibes")
 

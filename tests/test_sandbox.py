@@ -340,7 +340,13 @@ class TestSandboxToolProvider:
 
 
 def _script_model():
-    """A model that emits one tool call, then stops, then returns a report."""
+    """A model that runs a tool, writes its report with `edit_report`, then ends on `turn_end`.
+
+    This is the production shape since F5 (2026-09-09). It used to stop calling tools and let the
+    harness compose an `AnalystReport` on its behalf — the path that killed slot 5, because it was
+    the only one that sent the model the runtime-owned `figures` tree. There is no compose now, so
+    a worker that never writes a report has not produced one.
+    """
     from types import SimpleNamespace
 
     from auto_research.models.types import ModelResponse, ToolCall
@@ -352,16 +358,22 @@ def _script_model():
 
         async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
                        images=(), documents=(), cache_prefix=False):
-            if schema is not None:  # terminal structured report
-                return ModelResponse(parsed={
-                    "summary": "did the fit", "findings": ["chi2/dof=1.0"],
-                    "figures": [], "uncertainty": None,
-                })
             self.tool_iterations += 1
             if self.tool_iterations == 1:
-                return ModelResponse(content="loading",
+                return ModelResponse(content="loading", stop="tool_use",
                                      tool_calls=[ToolCall(id="c1", name="tk_load", arguments={})])
-            return ModelResponse(tool_calls=[])  # no more calls → loop ends
+            if self.tool_iterations == 2:
+                return ModelResponse(content="writing it up", stop="tool_use", tool_calls=[
+                    ToolCall(id="c2", name="edit_report", arguments={
+                        "summary": "did the fit",
+                        "findings": ["chi2/dof=1.0"],
+                        "status": "succeeded",
+                        "cited_figures": [{"source": "self", "index": 1}],
+                    }),
+                ])
+            return ModelResponse(content="done", stop="tool_use", tool_calls=[
+                ToolCall(id="c3", name="turn_end", arguments={"summary": "fit reported"}),
+            ])
 
     return _ScriptModel()
 
@@ -369,7 +381,7 @@ def _script_model():
 class TestWorkerReactLoop:
     """AnalystWorkerAgent.analyze() runs the inner ReAct loop, then reports."""
 
-    def test_loop_runs_tools_then_grounds_report(self) -> None:
+    def test_loop_runs_tools_then_grounds_report(self, tmp_path) -> None:
         from datetime import UTC, datetime
 
         from auto_research.agents.roles import AnalystWorkerAgent
@@ -389,19 +401,28 @@ class TestWorkerReactLoop:
             registry=reg,
             monitor=monitor,
         )
+        # A report workspace is what `edit_report` writes into, and production always wires one
+        # (`graph/runtime.py` sets `worker.report_dir` for every worker).
+        w.report_dir = tmp_path / "worker0"
         report = asyncio.run(w.analyze(AnalysisTask(question="q")))
         assert sb.tool_calls  # a tool actually ran inside the loop
         assert report.summary == "did the fit"
         assert [str(f.path) for f in report.figures] == ["/tmp/fit.png"]  # real figure attached
         assert w.last_tool_results and w.last_tool_results[0].exit_code == 0
-        events = {event.event: event for event in monitor.events}
-        # Input/output are now separate events: `tool_call` (logged before the call runs,
-        # carrying the args) and `tool_result` (logged on return, carrying the text). They
-        # share a `tool_call_id`, so a hung call is a `tool_call` with no matching result.
-        assert "analyst_worker.analyze.tool_call" in events
-        assert "analyst_worker.analyze.tool_result" in events
-        tc_data = events["analyst_worker.analyze.tool_call"].data
-        tr_data = events["analyst_worker.analyze.tool_result"].data
+        # Input/output are separate events: `tool_call` (logged before the call runs, carrying
+        # the args) and `tool_result` (logged on return, carrying the text). They share a
+        # `tool_call_id`, so a hung call is a `tool_call` with no matching result.
+        #
+        # Selected by TOOL, not by "the last one of that name": the loop now ends on `turn_end`,
+        # so several tools report results in one round and the last `tool_result` is the
+        # terminal's. Keying a dict on the event name silently read whichever came last.
+        calls = [e for e in monitor.events if e.event == "analyst_worker.analyze.tool_call"]
+        results = [e for e in monitor.events if e.event == "analyst_worker.analyze.tool_result"]
+        assert calls and results
+        tc_data = next(e.data for e in calls if e.data.get("tool") == "tk_load")
+        tr_data = next(
+            e.data for e in results if e.data["tool_call_id"] == tc_data["tool_call_id"]
+        )
         assert tr_data["model"] == "fake-tool-model"
         assert tr_data["figure_count"] == 1
         # The call ARGS live on the input event; the returned text on the output event

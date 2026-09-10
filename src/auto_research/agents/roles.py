@@ -14,6 +14,7 @@ from pydantic import BaseModel, ValidationError
 from auto_research.config_paths import orchestration_yaml
 from auto_research.agents.prompts import PromptRole, load_prompt
 from auto_research.agents.react import (
+    TURN_END_TOOL,
     ADJUDICATE_STAGE,
     AUTHOR_CHAIN_TOOL,
     AUTHOR_STAGE,
@@ -346,7 +347,7 @@ class AgentRole:
 
         Before this existed the convention was carried entirely by prose — ``submit_for_review``'s
         description tells the model *"this is the ONLY way to finish"* — and enforced afterwards by
-        Python inspecting side effects (``session.committed``, ``workspace.written_report``). A
+        Python inspecting side effects (``session.last_commit_sha``, ``workspace.written_report``). A
         model that simply kept calling tools ran to its cap, and a model that stopped without
         filing looked identical to one that had. Naming the terminal tools makes the loop's own
         exit condition match the contract the descriptions state.
@@ -374,6 +375,7 @@ class AgentRole:
         absolute_ceiling = max(budget_cap, absolute_cap) if absolute_cap is not None else budget_cap
         budget_used = 0
         iteration = 0
+        silent_turns = 0  # consecutive tool-call-free turns nudged through (F5b)
         while budget_used < budget_cap and iteration < absolute_ceiling:
             # Cooperative HITL steer (§12): before the next model turn, inject any human steer for
             # this role. A no-op when run_control is unset. A steer rides as a user turn (the
@@ -399,7 +401,46 @@ class AgentRole:
             self.last_response = response
             await self._record_context_edit(response, action)
             if not response.tool_calls:
-                break
+                # A turn with no tool calls is FIVE different outcomes, and breaking here
+                # collapsed them into "the model is done" (F5b). Slot 3's lead returned
+                # `output_tokens: 2` with no content after nine consecutive tool-result turns and
+                # the run died, because the loop read a documented provider quirk as a finished
+                # turn: Anthropic states *"Sometimes Claude returns an empty response (exactly 2-3
+                # tokens with no content) with `stop_reason: "end_turn"` ... particularly after
+                # tool results"*, with the prevention *"don't retry empty responses without
+                # modification — add a continuation prompt in a NEW user message"*
+                # (platform.claude.com/docs/en/build-with-claude/handling-stop-reasons).
+                #
+                # `response.stop` classifies it from that vendor's own field (F5a). The class
+                # decides what we SAY next; it never decides that the loop is over — that is the
+                # terminal tool's job, because a tool call means the same thing on all six vendors
+                # while these fields do not (Z.AI reports a dropped inference as `network_error`,
+                # which the ecosystem maps to `stop`).
+                nudge = _continuation_for(response, terminal_tools)
+                await self._record(
+                    f"{self.role}.{action}.silent_turn", level=4,
+                    summary=(
+                        f"{self.role} returned no tool calls (stop={response.stop}); "
+                        + ("continuing" if nudge else "ending the loop")
+                    ),
+                    data={
+                        "stop": response.stop,
+                        "output_tokens": response.usage.output_tokens,
+                        "content_chars": len(response.content or ""),
+                        "iteration": iteration,
+                        "continued": bool(nudge),
+                    },
+                )
+                if nudge is None or silent_turns >= _SILENT_TURN_CAP:
+                    break
+                silent_turns += 1
+                # The whole turn is replayed, then the nudge as its own NEW user message — never
+                # appended to a tool-result turn, which is the arrangement Anthropic names as the
+                # cause of the empty response in the first place.
+                messages.append(response)
+                messages.append(ModelMessage(role="user", content=nudge))
+                continue
+            silent_turns = 0
             # The turn we replay IS the turn we received: `ModelResponse` is the neutral
             # assistant turn, so it goes back on the conversation whole rather than being
             # re-typed field by field. That copy used to live here, and it lost a part every
@@ -683,7 +724,7 @@ class ReviewerAgent(AgentRole):
             }
         )
 
-    async def compose_latex_report(
+    async def author_latex_report(
         self,
         request: ResearchRequest,
         report: AnalystReport,
@@ -691,63 +732,94 @@ class ReviewerAgent(AgentRole):
         staged_papers: "list[tuple]",
         verdict: ReviewVerdict,
         *,
-        feedback: list[str] | None = None,
-    ) -> str:
-        """Compose a LaTeX research report (human handle).
+        tex_path: Path,
+        validator,
+        roots: "Sequence[Path]",
+        cap: int,
+    ) -> Path:
+        """Author the LaTeX report by **editing the file**, ending on a validated ``turn_end``.
 
-        Returns the raw LaTeX string. ``staged_figures`` is a list of
-        (FigureRef, relpath) pairs used verbatim in \\includegraphics{}.
-        ``staged_papers`` is a list of (path, relpath) pairs for the cited PDFs; the
-        References section is a list of \\href links to those relpaths (no BibTeX).
-        ``feedback`` carries compile/link errors from the prior attempt for
-        self-correction.
+        Replaces the recompose loop (F5e). That loop asked for a whole `LatexReport` through
+        structured output on every attempt, fed the previous attempt's compile errors back as
+        prose, and got a fresh document each time — which is how [D7] happened: the retry saw
+        `! Undefined control sequence.` with no macro named and re-emitted the same document.
+        Two problems the file-editing shape removes:
+
+        1. **A regeneration can silently undo an earlier fix.** Editing keeps every fix that
+           already landed, and `file_edit`'s targeted mode makes that the cheap path.
+        2. **`LatexReport` is structured output, and the contrast arm's reviewer cannot reliably
+           produce it.** `ResearchReport`/`AuthoringDecision` failed on `qwen3.8-max` at every
+           reasoning effort (2026-08-24: unresolved `$ref` in `list[Model]` fields, so the model
+           invented a shape and returned HTTP 200). Nothing here declares an output schema.
+
+        The validator is the door: figures resolve, links resolve, and pdflatex compiles. A
+        failing `turn_end` returns the specific errors and the loop continues with the tools.
         """
-        from auto_research.schemas.report import LatexReport
+        from auto_research.agents.react import TURN_END_TOOL, FILE_EDIT_TOOL, ReadOnlyToolProvider
 
         fig_descriptions = [
             {"relpath": relpath, "caption": figref.caption, "sha256": figref.sha256}
             for figref, relpath in staged_figures
         ]
-        paper_links = [relpath for _, relpath in staged_papers]
         payload = {
-            "output_format": "tex",
-            "output_format_instructions": (
-                "You are composing a LaTeX research report. Provide the complete LaTeX "
-                "document as the 'latex' field, written as ordinary LaTeX source "
-                "(e.g. \\section{}, \\includegraphics{}). Do NOT add any JSON or backslash "
-                "escaping — the response encoding is handled for you, so a single backslash "
-                "is a single backslash. "
-                "Load graphicx, amsmath, amssymb and hyperref in the preamble, plus any "
-                "further package a symbol you use requires — amssymb carries the relation "
-                "symbols science prose reaches for (\\lesssim, \\gtrsim, \\simeq), and a "
-                "symbol whose package is absent is a fatal compile error that costs the "
-                "whole PDF. Use \\includegraphics{<relpath>} "
-                "verbatim for each figure relpath supplied below. "
-                "Cite papers in prose in the body. The References section is a list of "
-                "hyperlinks to the local PDFs you used: for each supplied paper relpath emit "
-                "\\href{<relpath>}{<relpath>} using the relpath verbatim. Use ONLY the supplied "
-                "paper relpaths; add no \\cite, no \\begin{thebibliography}, and no invented "
-                "author/title text."
+            "task": (
+                "Write the LaTeX research report for this run, then end your turn. Draft it with "
+                f"`{FILE_EDIT_TOOL}`, read it back with `read_file`, and call `{TURN_END_TOOL}` "
+                "when it is complete — the harness then checks that every figure and link "
+                "resolves and that the document compiles, and tells you precisely what to fix if "
+                "it does not."
             ),
+            # Carried over verbatim in substance from the retired `compose_latex_report`. Both
+            # clauses are fixes for real run-killers and neither is optional:
+            #
+            # [D6] the preamble list. `\lesssim` with no `amssymb` is a fatal compile error, and
+            # it exhausted `report_retry_cap` on Q21 (2026-08-10) — the run finished with a
+            # `report.tex` and no `report.pdf`. `prompts/reviewer.md` mandates the same list; the
+            # changelog records that BOTH were needed, so this is not redundant.
+            #
+            # The references clause is a no-fabrication guard: the References section is
+            # hyperlinks to the local PDFs actually used, never invented author/title text.
+            "format_requirements": (
+                "Write ordinary LaTeX source. Load graphicx, amsmath, amssymb and hyperref in the "
+                "preamble, plus any further package a symbol you use requires — amssymb carries "
+                "the relation symbols science prose reaches for (\\lesssim, \\gtrsim, \\simeq), "
+                "and a symbol whose package is absent is a fatal compile error that costs the "
+                "whole PDF. Use \\includegraphics{<relpath>} verbatim for each figure relpath "
+                "supplied below. Cite papers in prose in the body. The References section is a "
+                "list of hyperlinks to the local PDFs you used: for each supplied paper relpath "
+                "emit \\href{<relpath>}{<relpath>} using the relpath verbatim. Use ONLY the "
+                "supplied paper relpaths; add no \\cite, no \\begin{thebibliography}, and no "
+                "invented author/title text."
+            ),
+            "output_path": tex_path.name,
             "request": request.model_dump(mode="json"),
-            "analysis_report": report.model_dump(mode="json"),
+            "analysis_report": report.model_dump(mode="json") if report else None,
             "verdict_rationale": verdict.rationale,
             "figures": fig_descriptions,
-            "paper_links": paper_links,
+            "paper_links": [relpath for _, relpath in staged_papers],
         }
-        if feedback:
-            payload["feedback"] = (
-                "The previous attempt had these errors — fix them exactly:\n"
-                + "\n".join(f"  - {e}" for e in feedback)
-            )
-        result: LatexReport = await self._call(
-            payload,
-            LatexReport,
-            images=report.figures,
-            action="compose_latex_report",
+        provider = ReadOnlyToolProvider(
+            roots=list(roots),
+            include_text_search=False,
+            editable_file=tex_path,
+            turn_end_validator=validator,
         )
-        return result.latex
-
+        seed = [
+            ModelMessage(role="system", content=self.prompt),
+            ModelMessage(role="user", content=_payload_text(payload)),
+        ]
+        await self._react(
+            seed_messages=seed,
+            tools=provider,
+            action="author_latex_report",
+            cap=cap,
+            images=report.figures if report else (),
+            # Both are free: the drafting is the work, and the validation must not compete with
+            # it for budget (F5c/D3).
+            free_tools=frozenset({FILE_EDIT_TOOL, TURN_END_TOOL}),
+            terminal_tools=frozenset({TURN_END_TOOL}),
+        )
+        return tex_path
 
 class LibrarianIOAgent(AgentRole):
     """Librarian I/O role: compose search strategies, query external sources, and abstract papers."""
@@ -1129,7 +1201,10 @@ class AnalystWorkerAgent(AgentRole):
             action="analyze",
             cap=_react_loop_cap(),
             images=peer_figures,
-            free_tools=frozenset({EDIT_REPORT_TOOL, REVIEW_REPORT_TOOL}),
+            # turn_end is free too, by ruling: the editing burns budget, so the loop is bounded
+            # by the work rather than by the validation (F5c/D3).
+            free_tools=frozenset({EDIT_REPORT_TOOL, REVIEW_REPORT_TOOL, TURN_END_TOOL}),
+            terminal_tools=frozenset({TURN_END_TOOL}),
             absolute_cap=_react_loop_absolute_cap(),
         )
         self.last_tool_results = provider.results
@@ -1137,17 +1212,40 @@ class AnalystWorkerAgent(AgentRole):
             _append_tool_results_to_memory(self.memory_path, provider.results)
 
         # V-4: the report is what the worker persisted via edit_report this round (figures cited by
-        # index from its catalog, resolved by the runtime). Safety net: a loop that ended without an
-        # edit_report call gets one terminal structured compose, with its catalog figures attached.
+        # index from its catalog, resolved by the runtime).
+        #
+        # There is NO fallback compose (F5d). It used to compose an `AnalystReport` on the model's
+        # behalf whenever the loop ended without an `edit_report` call, and that path was the only
+        # one that sent the model the runtime-owned `figures`/`FigureRef` tree — `edit_report`'s
+        # own schema has no `figures` property, because the runtime resolves figures from
+        # citations. `_sanitize_strict` then promoted that optional, runtime-owned field to
+        # *required*, two instructions told the model to fill every required field, and the field's
+        # own description said "Resolved by the runtime from cited_figures; leave it alone". Slot 5
+        # (2026-09-08) filled it with `placeholder_timeseries`/`_stokes`/`_chi2`/`_sf` and the run
+        # died on `model_validate` — one line before `model_copy` would have replaced all four with
+        # the real catalog. Not fabrication under pressure: 3 errors in 54 tool results, zero
+        # rejections that round, the four real PNGs on disk, correct citations for two prior rounds,
+        # and the inventions self-labelled. The harness asked for it.
+        #
+        # The loop now ends on `turn_end`, whose validator refuses to accept an unwritten report
+        # and names why, so the model writes it with the tool that exists for that. This also
+        # matches what the lead has always done: "A report it wrote but never filed is real
+        # evidence it produced, so it is used rather than discarded; nothing is composed on its
+        # behalf."
         report = workspace.written_report if workspace is not None else None
         if report is None:
-            report = await self._call_over_messages(
-                messages, AnalystReport, action="analyze", tools=provider,
+            report = AnalystReport(
+                summary=(
+                    "This worker's loop ended without a saved report. No report was composed on "
+                    "its behalf — the material a model did not write is not evidence."
+                ),
+                status="failed",
             )
-            if self._figure_catalog["self"]:
-                report = report.model_copy(
-                    update={"figures": _dedup_figures(self._figure_catalog["self"]), "cited_figures": []}
-                )
+            await self._record(
+                "analyst_worker.analyze.no_report", level=3,
+                summary="worker ended its loop with no report written; recorded as failed",
+                data={"iterations": len(messages)},
+            )
         self._last_report = report
         return report
 
@@ -1287,12 +1385,12 @@ def _drop_coding_middle(messages: list, mark: int) -> list:
 def _authoring_result(session: Any, spec: Any) -> MergeFlowResult:
     """The terminal ``MergeFlowResult`` for one authoring attempt, read off its session.
 
-    ``committed`` is the only success, and it is set by ``approve_edit`` inside
+    A recorded ``last_commit_sha`` is the only success, and it is set by ``approve_edit`` inside
     ``submit_for_review`` on gate-pass ∧ review-pass — so this reads a fact, never a claim
     (§9.9: commit ⇔ gate ∧ review, and code issues the git).
     """
     spec_id = getattr(session.tool_spec, "id", None) or spec.proposed_tool_name
-    if session.committed:
+    if session.last_commit_sha is not None:
         return MergeFlowResult(
             tool_spec_id=spec_id, status="committed", branch=session.branch,
             commit_sha=session.last_commit_sha, gate_report=session.last_gate,
@@ -1697,7 +1795,25 @@ class AnalystLeadAgent(AgentRole):
                 return messages
             messages = _drop_coding_middle(messages, mark)
             if result.status != "committed":
-                break  # a dependency-satisfied prefix is what committed; stop here
+                # A non-committed link does NOT end the chain (F9). It used to `break`, on the
+                # reasoning that a chain is ordered so the committed prefix is what later links
+                # depend on. True, and it made a single failure end the whole chain with the
+                # credits that would have paid for a retry still unspent: slot 3 (2026-09-08)
+                # spent 2h43m and ~$18 on six cycles refused before a coder session even opened,
+                # and slot 4 queued ~8 more of the same. Human ruling: the LEAD owns the stop
+                # decision, and spending the whole authoring budget discovering a capability
+                # cannot be built is an honest answer.
+                #
+                # So the loop continues, and the lead is told — in its own conversation, before
+                # the next brief — what failed and why. That is what makes "the lead decides"
+                # real: it can file `hold_authoring` or a terminal on the next turn, and it can
+                # only do that over a reason it can read.
+                messages.append(ModelMessage(role="user", content=(
+                    f"Link '{spec.proposed_tool_name}' did not commit: {result.reason}\n"
+                    "The chain continues to the next link. If a later link depends on what this "
+                    "one would have built, or the reason above will recur, stop the chain by "
+                    "filing hold_authoring or a terminal report instead of authoring into it."
+                )))
         return messages
 
     async def _drive_one_link(
@@ -2040,18 +2156,6 @@ def _model_label(model: CallableModel) -> str | None:
     return None
 
 
-def _dedup_figures(figures: Sequence[FigureRef]) -> list[FigureRef]:
-    """Deduplicate figures by path, preserving first-seen order."""
-    seen: set[str] = set()
-    out: list[FigureRef] = []
-    for figure in figures:
-        key = str(figure.path)
-        if key not in seen:
-            seen.add(key)
-            out.append(figure)
-    return out
-
-
 def _dedup_results(results: Sequence[SearchResult]) -> list[SearchResult]:
     """Deduplicate search results by URL (falling back to title), first-seen order."""
     seen: set[str] = set()
@@ -2062,6 +2166,60 @@ def _dedup_results(results: Sequence[SearchResult]) -> list[SearchResult]:
             seen.add(key)
             out.append(result)
     return out
+
+
+#: How many consecutive silent turns one loop will nudge through before giving up. Small on
+#: purpose: a continuation is for a model that stopped by accident, and a model that keeps
+#: returning nothing is not going to start. The loop's own budget still bounds everything else.
+_SILENT_TURN_CAP = 2
+
+
+def _continuation_for(response, terminal_tools: frozenset[str]) -> str | None:
+    """What to say to a turn that carried no tool calls, or ``None`` to end the loop (F5b).
+
+    Keyed on the normalised stop class, so each case gets the reply its vendor documents:
+
+    - ``end_turn`` (and ``unknown``, judged identically) with (almost) nothing generated is the
+      documented empty response. It is nudged, because the model did not mean to stop; a turn
+      carrying a real answer is a genuine finish and ends the loop.
+    - ``truncated`` ran out of output budget mid-answer, so it is told to finish more compactly
+      rather than being read as done.
+    - ``paused`` is a server-tool loop at its iteration limit, which the provider documents as
+      "send the assistant content back to continue".
+    - ``malformed`` is the vendor rejecting its own tool call; re-issuing it is the fix.
+    - ``refusal`` and ``transient`` are **not** nudged: a refusal needs a different member and a
+      transient needs the retry layer, and repeating the request achieves neither.
+    """
+    # No terminal tool means there is no other way for this loop to finish, so the absence of
+    # tool calls IS its completion signal and nudging would be a change with nothing to gain.
+    # Every role F5 is about (worker, lead, reviewer) declares one.
+    if not terminal_tools:
+        return None
+    stop = getattr(response, "stop", "unknown")
+    if stop in {"refusal", "transient"}:
+        return None
+    finish = f"Call `{sorted(terminal_tools)[0]}` when your work is complete."
+    if stop == "truncated":
+        return (
+            "Your previous turn was cut off before it finished (the output budget ran out). "
+            f"Continue from where it stopped, more compactly. {finish}"
+        )
+    if stop == "malformed":
+        return (
+            "Your previous turn contained a tool call the provider could not parse. Re-issue it "
+            f"with arguments matching the tool's schema. {finish}"
+        )
+    if stop == "paused":
+        return f"Continue from where you paused. {finish}"
+    # `end_turn` and `unknown` are judged the same way, on the turn itself rather than on the
+    # label: the reason to continue is that the turn looks accidental — no tool call and nothing
+    # produced. A turn carrying a real answer answered, whether or not the vendor said so.
+    if len((response.content or "").strip()) > 40:
+        return None
+    return (
+        "Your previous turn was empty — no tool call and no answer. Proceed with the next step "
+        f"using your best judgement. {finish}"
+    )
 
 
 @lru_cache(maxsize=1)
@@ -2134,7 +2292,11 @@ def _orchestration_config() -> dict:
 def _structured_retry_cap() -> int:
     """Max attempts for a structured ``_call`` before raising (orchestration.yaml).
 
-    Key: ``structured_retry_cap``. Defaults to 2. Mirrors ``tool_retry_cap`` for
+    Key: ``structured_retry_cap``. Defaults to 2 in code, **4 in config since F5g**: one
+    adapter-shape failure used to leave a single attempt for any genuine schema error. Slot 5 hit
+    exactly that — attempt 1 was consumed by the dashscope `tool_choice` inversion raising on a
+    working tool call, so the placeholder-digest error had one attempt and the run died. Mirrors
+    ``tool_retry_cap`` for
     the tool-call loop — a small bound so a transient off-schema result doesn't
     end a run, while cap exhaustion still fails loudly.
     """

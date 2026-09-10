@@ -213,7 +213,7 @@ def test_live_role_wrappers_on_research_jobs(tmp_path, monkeypatch):
                         "model": "sqlite",
                         "input_tokens": 0,
                         "output_tokens": 0,
-                        "status": "ok" if hits else "failed",
+                        "status": "succeeded" if hits else "failed",
                         "output": [hit.model_dump(mode="json") for hit in hits],
                         "error": None if hits else "no local hit for 'spectural fit'",
                     },

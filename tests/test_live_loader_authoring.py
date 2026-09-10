@@ -6,8 +6,9 @@ Activate with:
 Poses a missing-capability request — a joint multi-instrument spectral *loader*,
 ``load_epoch_spectra`` — to the analyst lead against a **throwaway, empty from-scratch toolkit**
 scaffolded in a temp dir on a fresh ``ai`` branch (never the live ``toolkit_root``). The lead must
-author it through the whole A1 flow: ``decide_authoring`` -> ``drive_authoring`` (Sonnet coder ->
-deterministic gate -> provider-decorrelated GPT co-lead review -> atomic commit), with NO
+author it through the whole A1 flow: one ``run_cycle`` in which it files ``author_chain`` and
+``_author_chain`` drives each link (coder -> deterministic gate -> provider-decorrelated co-lead
+review -> atomic commit), with NO
 ``load_data`` source, signature, or mechanics leaked — only the capability + requirements.
 
 This is observational/live (CLAUDE.md §10): it drives the real Opus lead, the real Sonnet coder
@@ -28,17 +29,19 @@ science env (HEASoft/XSPEC) for the gate's Layer-B tests and live LLM credential
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 import yaml
 
-from auto_research.agents.react import ReadOnlyToolProvider
+from auto_research.graph.runtime import readonly_tools_for
 from auto_research.agents.roles import AnalystLeadAgent
 from auto_research.monitor import RunMonitor
 from auto_research.sandbox.workspace import create_run_workspace, run_dir
@@ -48,7 +51,8 @@ from auto_research.schemas import (
     HumanResponse,
     MergeFlowResult,
 )
-from auto_research.schemas.toolspec import AnalystToolRequest, ToolSpec, ValidationDataset
+from auto_research.schemas.toolspec import AnalystToolRequest, ValidationDataset
+from tests.seats import SeatOverride, from_seat, repo_config_dir, seat, seated
 
 pytestmark = pytest.mark.skipif(
     os.getenv("AUTO_RESEARCH_LIVE_LOADER_AUTHORING_TESTS") != "1",
@@ -192,10 +196,12 @@ async def _run_authoring(fake_tk: Path, ts: str):
     create_run_workspace(run_id, ["analyst_lead"])
 
     lead = AnalystLeadAgent(monitor=monitor)
-    lead.tools = ReadOnlyToolProvider(
-        roots=[run_dir(run_id), fake_tk], include_data_catalog=True,
-        include_plan_and_debate=True, include_text_search=False,
-        human_handler=handler, asked_by="analyst_lead", model="",
+    # Production's own factory, not a look-alike (the 2026-09-08 seams lesson): getting one of
+    # these flags wrong does not fail, it silently measures a role the pipeline does not have.
+    # `readonly_tools_for` derives `include_plan_and_debate` from the handler, so passing the
+    # handler is what opens the design channel — the same derivation `run_research` uses.
+    lead.tools = readonly_tools_for(
+        "analyst_lead", roots=[run_dir(run_id), fake_tk], human_handler=handler,
     )
 
     request = AnalystToolRequest(
@@ -214,7 +220,7 @@ async def _run_authoring(fake_tk: Path, ts: str):
     report = AnalystReport(
         summary="Cannot start the joint fit: no tool loads an epoch's multi-instrument spectra.",
         findings=["No loader exists for joint IXPE+NICER+NuSTAR spectra; analysis is blocked."],
-        tool_request=request, status="needs_human",
+        tool_request=request, status="failed",
     )
 
     await monitor.record("run", "run.start", level=1, summary="loader authoring live test",
@@ -290,10 +296,10 @@ def test_loader_authoring_end_to_end(tmp_path):
         assert tests, "no Layer-B test file committed beside the tool"
 
 
-# ── A8: chain-planning (decide_authoring only — cheap, no coder/gate/science env) ────────────
+# ── A8: chain-planning (the planning stage only — cheap, no coder/gate/science env) ──────────
 # A multi-step prescription that genuinely needs several tools the empty toolkit lacks. The
 # capability text lives here (never in a runtime prompt — no eval leak). This drives ONLY the real
-# lead's decide_authoring to validate it plans an ORDERED CHAIN of ≥2 tool_specs up front — the
+# lead's planning stage to validate it plans an ORDERED CHAIN of ≥2 tool_specs up front — the
 # core A8 behavior — without the expensive Sonnet-coder / gate / GPT-review path.
 _CHAIN_SCIENCE_CONTEXT = (
     "A broadband polarization-vs-hardness survey of a black-hole X-ray binary cannot begin: the "
@@ -357,10 +363,8 @@ def test_chain_planning_returns_ordered_chain(tmp_path, monkeypatch):
         )
 
     lead = AnalystLeadAgent(monitor=monitor)
-    lead.tools = ReadOnlyToolProvider(
-        roots=[run_dir(run_id), fake_tk], include_data_catalog=True,
-        include_plan_and_debate=True, include_text_search=False,
-        human_handler=neutral_handler, asked_by="analyst_lead", model="",
+    lead.tools = readonly_tools_for(
+        "analyst_lead", roots=[run_dir(run_id), fake_tk], human_handler=neutral_handler,
     )
     request = AnalystToolRequest(
         request_kind="new_capability",
@@ -373,7 +377,7 @@ def test_chain_planning_returns_ordered_chain(tmp_path, monkeypatch):
     report = AnalystReport(
         summary="Survey blocked: no broadband PCUBE reduction (and no downstream HR/stats/plot tools).",
         findings=["The broadband PD-hardness survey pipeline has no tools for any of its steps."],
-        tool_request=request, status="needs_human",
+        tool_request=request, status="failed",
     )
 
     async def _fake_link(self, messages, provider, spec, **kwargs):
@@ -418,21 +422,35 @@ def test_chain_planning_returns_ordered_chain(tmp_path, monkeypatch):
     )
 
 
-# ── A8: sequential authoring EXECUTION (real coder → gate → review → commit, TWICE) ──────────
-# Unlike the planning-only test above, this drives the actual authoring harness on TWO dependent
-# tools back-to-back — exactly what DebateToConverge._maybe_author_and_resume does — to prove the
-# harness can run sequential sessions bug-free: after tool 1 commits, tool 2's session starts and
-# **sees tool 1's committed code**. Tool 2's Layer-B test IMPORTS tool 1's just-committed module, so
-# tool 2 committing is itself the proof of sequential visibility. Runs against a COPY of the real
-# research_toolkit under /tmp (inside the coder's fs-jail), never the live toolkit_root.
+# ── A8: chain authoring EXECUTION, through the lead's own cycle ──────────────────────────────
+# This drives the **production** seam: `AnalystLeadAgent.run_cycle`, the one loop a real analysis
+# runs, in which the lead reads the workers' reports, files `author_chain` itself, and `_author_chain`
+# drives each link. The earlier version of this test looped the links itself and called
+# `drive_authoring` per spec — a driver production no longer uses — so three behaviours could not be
+# observed at all: a failed link continuing the chain (F9), the stage machinery that decides which
+# form is open ([A20]), and the silent-turn classification on the loop that carries `terminal_tools`.
+# Measuring the wrong driver is the 2026-09-08 seams lesson at a second address.
 #
-# Human channel OFF (unattended): human_handler=None (no plan_and_debate / ask_human tools) plus an
-# explicit unattended instruction in each brief — the lead proceeds on its own without debate.
+# Runs against a COPY of the real research_toolkit under /tmp (inside the coder's fs-jail), never the
+# live `toolkit_root`, and **through the configuration pointer**: the coder seat is written into a
+# faked configuration directory and resolved by the ordinary registry, so the run states what it
+# measured instead of inheriting it.
+#
+# Human channel OFF (unattended): `human_handler=None`, so `readonly_tools_for` withholds the design
+# channel — the derivation production makes, not a flag set by hand here.
 _UNATTENDED = (
     "UNATTENDED SESSION — no human is available. Do not use plan_and_debate or ask_human, and "
     "ignore any instruction to debate the design with a human; proceed with this brief as-is and "
     "author the tool directly. An honest failure is acceptable; never fabricate a result."
 )
+
+#: Which author harness this run measures. Absent, the configured coder is used unchanged — still
+#: through the pointer, so the written `models.yaml` records the seat either way.
+CODER_HARNESS_ENV = "AUTO_RESEARCH_CODER_HARNESS"
+
+#: Authoring credits for the cycle. Two links plus one, so a rejected link can be re-attempted and
+#: F9's continue-the-chain behaviour is reachable rather than cut off by the budget.
+_AUTHOR_BUDGET = 3
 
 
 def _toolkit_root_from_config() -> Path:
@@ -455,135 +473,314 @@ def _copy_real_toolkit(tmp_path: Path) -> Path:
     _git(dst, "config", "user.name", "auto_research")
     _git(dst, "config", "user.email", "auto-research@localhost")
     _git(dst, "add", "-A")
-    _git(dst, "commit", "-q", "-m", "seed copy of research_toolkit for sequential-authoring live test")
+    _git(dst, "commit", "-q", "-m", "seed copy of research_toolkit for chain-authoring live test")
     return dst
 
 
-def _seq_tool_1() -> ToolSpec:
-    return ToolSpec(
+def _coder_seat() -> SeatOverride:
+    """The coder seat to write into the faked configuration.
+
+    ``AUTO_RESEARCH_CODER_HARNESS=codex`` measures the campaign's own author (the seat
+    ``science_bench`` pins, carried whole so the test cannot drift from the batch);
+    ``claude_sdk`` measures the other backend. Absent, the repository's configured coder is
+    re-declared unchanged — the point being that the configuration is *written*, so the log says
+    which author produced the result.
+    """
+    choice = os.getenv(CODER_HARNESS_ENV, "").strip().lower()
+    if choice == "codex":
+        from benchmarks.science_bench import arms
+
+        # `replace`, not attribute assignment: SeatOverride is a frozen dataclass.
+        return replace(
+            from_seat(arms.CODER),
+            harness=arms.CODER_HARNESS,
+            key_env=arms.CODER_KEY_ENV,
+            base_url=arms.CODER_BASE_URL,
+        )
+    if choice == "claude_sdk":
+        return seat(
+            "anthropic", "claude-sonnet-5",
+            harness="claude_sdk", vision=False, documents=False,
+        )
+    if choice:
+        raise ValueError(f"{CODER_HARNESS_ENV} takes 'codex' or 'claude_sdk', got {choice!r}")
+    configured = (
+        yaml.safe_load((repo_config_dir() / "models.yaml").read_text())["roles"]["coder"]["members"][0]
+    )
+    return SeatOverride(
+        provider=configured["provider"],
+        model=configured["model"],
+        vision=bool(configured.get("vision", False)),
+        documents=bool(configured.get("documents", False)),
+        parameters=dict(configured.get("parameters") or {}),
+        priceMTk=dict(configured.get("priceMTk") or {}),
+        harness=configured.get("harness"),
+        base_url=configured.get("base_url"),
+        key_env=configured.get("key_env"),
+    )
+
+
+def _worker_tool_request() -> AnalystToolRequest:
+    """The missing capability a worker raises. Two dependent pieces, stated as capability and
+    numeric contract only — the decomposition into chain links is the lead's call (§9.3), which is
+    exactly what this test leaves to it."""
+    return AnalystToolRequest(
         request_kind="new_capability",
         science_context=(
-            "A small pure-numpy building block is missing: the toolkit has no standalone weighted-mean "
-            "+ constancy statistic over a list of measurements with 1-sigma errors. " + _UNATTENDED
+            "Summarising per-segment measurements needs two things the toolkit does not have: a "
+            "standalone weighted-mean-plus-constancy statistic over values with 1-sigma errors, and "
+            "a table step that applies it to several labelled measurement sets and reports a reduced "
+            "chi-squared per set. The second depends on the first and must reuse it rather than "
+            "recompute the statistic. " + _UNATTENDED
         ),
         expected_behavior=(
-            "Add a pure-numpy human-half module xspec_utils/lib/seq_weighted_mean.py (imports numpy "
-            "ONLY — no xspec, no ixpeobssim, no matplotlib) exposing "
-            "weighted_mean(values, errors) -> dict. Given two equal-length sequences (values and "
-            "their 1-sigma errors): w_i = 1/err_i**2; weighted_mean = sum(w*v)/sum(w); "
-            "weighted_mean_err = sqrt(1/sum(w)); chi2 = sum((v - weighted_mean)**2 / err**2); "
-            "dof = len(values) - 1. Return a dict with exactly these float/int keys: "
-            "'weighted_mean', 'weighted_mean_err', 'chi2', 'dof'. Raise ValueError on empty input, on "
-            "a length mismatch, or if any error <= 0. Surface it as skills TOOL_MANIFEST key "
-            "'seq_weighted_mean' (module 'xspec_utils.lib.seq_weighted_mean', fn 'weighted_mean'). "
-            "Add xspec_utils/tests/test_seq_weighted_mean.py with: (1) a known-input->known-output "
-            "check — values=[1.0,2.0,3.0], errors=[1.0,1.0,1.0] gives weighted_mean 2.0, chi2 2.0, "
-            "dof 2 (assert within 1e-9); (2) a call-twice reproducibility check (identical dict); "
-            "(3) a ValueError check for a non-positive error."
+            "A pure-numpy human-half entry point weighted_mean(values, errors) -> dict (imports numpy "
+            "ONLY — no xspec, no ixpeobssim, no matplotlib), where w_i = 1/err_i**2; "
+            "weighted_mean = sum(w*v)/sum(w); weighted_mean_err = sqrt(1/sum(w)); "
+            "chi2 = sum((v - weighted_mean)**2 / err**2); dof = len(values) - 1; returning exactly the "
+            "float/int keys 'weighted_mean', 'weighted_mean_err', 'chi2', 'dof', and raising ValueError "
+            "on empty input, on a length mismatch, or if any error <= 0. On top of it, "
+            "summarize(datasets) -> list[dict] over a list of {'label': str, 'values': [...], "
+            "'errors': [...]}, returning {'label', 'weighted_mean', 'weighted_mean_err', 'chi2', 'dof', "
+            "'reduced_chi2'} per input row in input order, with reduced_chi2 = chi2/dof when dof > 0 "
+            "else float('nan'), computed by CALLING the weighted-mean entry point rather than "
+            "reimplementing it. Both belong in xspec_utils and both need a Layer-B test file; the "
+            "second one's test must assert its 'weighted_mean' agrees with the first's on the same "
+            "input, which is what makes the reuse checkable. Known-input check for the first: "
+            "values=[1.0,2.0,3.0], errors=[1.0,1.0,1.0] gives weighted_mean 2.0, chi2 2.0, dof 2 "
+            "(within 1e-9)."
         ),
         proposed_tool_name="seq_weighted_mean",
-        target_domain="xspec_utils",
-        disposition="extend_existing",
         validation_data=[ValidationDataset(mission="IXPE", obsid="01002901")],
         notes=_UNATTENDED,
     )
 
 
-def _seq_tool_2() -> ToolSpec:
-    return ToolSpec(
-        request_kind="new_capability",
-        science_context=(
-            "Downstream of seq_weighted_mean, the toolkit has no way to summarise several labelled "
-            "measurement sets into one table of weighted means and reduced chi-squared. This tool "
-            "MUST reuse the just-added seq_weighted_mean (do not recompute the statistic). " + _UNATTENDED
+def _reports_with_request() -> list[AnalystReport]:
+    """Two worker reports, one carrying the tool request. ``authoring_possible`` is derived from a
+    report carrying one (`roles.run_cycle`), so this is what opens the authoring stage."""
+    return [
+        AnalystReport(
+            summary=(
+                "Computed the per-segment values and their 1-sigma errors, then stopped: combining "
+                "them needs a weighted mean with a constancy statistic, and no toolkit tool exposes "
+                "one. Reporting the segments rather than an average computed by hand."
+            ),
+            findings=[
+                "the per-segment measurements and their errors are in hand",
+                "no toolkit tool combines them with a constancy statistic",
+            ],
+            uncertainty="the combined value and its reduced chi-squared are not available",
+            status="failed",
+            tool_request=_worker_tool_request(),
         ),
-        expected_behavior=(
-            "Add xspec_utils/lib/seq_weighted_mean_table.py (pure python + numpy; no xspec/matplotlib) "
-            "that IMPORTS the already-committed helper: `from xspec_utils.lib.seq_weighted_mean import "
-            "weighted_mean`. Expose summarize(datasets) -> list[dict], where datasets is a list of "
-            "{'label': str, 'values': [...], 'errors': [...]}. For each dataset call weighted_mean(...) "
-            "and return {'label', 'weighted_mean', 'weighted_mean_err', 'chi2', 'dof', 'reduced_chi2'} "
-            "where reduced_chi2 = chi2/dof when dof > 0 else float('nan'). Preserve input order. Surface "
-            "it as skills TOOL_MANIFEST key 'seq_weighted_mean_table' (module "
-            "'xspec_utils.lib.seq_weighted_mean_table', fn 'summarize'). Add "
-            "xspec_utils/tests/test_seq_weighted_mean_table.py that: imports summarize, runs it on two "
-            "labelled datasets, asserts each row's reduced_chi2 == that row's chi2/dof, asserts the "
-            "'weighted_mean' matches xspec_utils.lib.seq_weighted_mean.weighted_mean on the same input "
-            "(so the tool genuinely reuses the committed helper), and includes a call-twice "
-            "reproducibility check. Do NOT reimplement the weighted mean."
+        AnalystReport(
+            summary=(
+                "Agrees the per-segment values are sound and that the combination step is missing. "
+                "A table over several labelled sets is what the analysis actually needs."
+            ),
+            findings=["the segment-level results are reproducible"],
+            status="succeeded",
         ),
-        proposed_tool_name="seq_weighted_mean_table",
-        target_domain="xspec_utils",
-        disposition="extend_existing",
-        validation_data=[ValidationDataset(mission="IXPE", obsid="01002901")],
-        notes=_UNATTENDED,
-    )
+    ]
 
 
-def test_sequential_chain_authoring_end_to_end(tmp_path):
-    """Drive the real authoring harness on TWO dependent tools sequentially (as
-    ``_maybe_author_and_resume`` does) and verify it runs bug-free: both commit, as two distinct
-    commits on ``ai``, and tool 2 — whose Layer-B test imports tool 1's just-committed module — only
-    commits if its session saw tool 1's commit. Human channel OFF (unattended)."""
+def _ledger(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _failed_coder_turns(events: list[dict]) -> list[dict]:
+    """Coder turns the harness recorded as failed, on either backend's vocabulary."""
+    failed = []
+    for event in events:
+        if event.get("event") != "coder.turn_end":
+            continue
+        data = event.get("data") or {}
+        status = str(data.get("status") or "")
+        if data.get("is_error") or "fail" in status.lower() or "abort" in status.lower():
+            failed.append(event)
+    return failed
+
+
+def _drive_coder_results(events: list[dict]) -> list[dict]:
+    return [
+        event for event in events
+        if event.get("event", "").endswith(".tool_result")
+        and (event.get("data") or {}).get("tool") == "drive_coder"
+    ]
+
+
+def _layer_b_skips(events: list[dict]) -> list[tuple[int, str]]:
+    """Every ``N skipped`` pytest summary the coder saw, with its sequence number.
+
+    Recorded, never asserted. Layer B passes on ``rc == 0`` and at least one PASSED, so a test that
+    skips at runtime — a data guard the coder wrote itself — leaves the gate truthfully reporting
+    that everything which ran, passed, while the check the brief commissioned never executed. The
+    live run of 2026-09-09 committed nothing on exactly this shape and the skip appears in no gate
+    field, so the count is written down here until the gate reports it.
+    """
+    found = []
+    for event in events:
+        text = str((event.get("data") or {}).get("text") or "")
+        for line in text.splitlines():
+            if "skipped" in line and ("passed" in line or "failed" in line):
+                found.append((int(event.get("sequence", 0)), line.strip()))
+    return found
+
+
+def test_lead_cycle_authors_a_chain_end_to_end(tmp_path):
+    """One real lead cycle, from two worker reports to a filed form, with the authoring chain driven
+    by production's own `_author_chain`.
+
+    What is asserted is what the **harness** must do regardless of how well any model performs: the
+    cycle ends on a filed form rather than a silent stop; every commit it claims is reachable in the
+    repository and carries a manifest entry plus a test file; every planned link is attempted, so a
+    rejected link does not end the chain (F9); a failed coder turn is never delivered to the lead as
+    a successful reply; and the tree is left clean when nothing was banked (F1). Model *judgment* —
+    whether a co-lead approves a given tool — is recorded, never asserted (a rejection on a real
+    science point is a correct outcome, not a test failure).
+    """
     from dotenv import load_dotenv
 
     load_dotenv()  # surface live LLM credentials (never read .env; just load it)
     tk = _copy_real_toolkit(tmp_path)
     ts = datetime.now().strftime("%Y%m%dT%H%M%S")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    jsonl = LOG_DIR / f"seq_authoring_{ts}_monitor.jsonl"
+    jsonl = LOG_DIR / f"chain_cycle_{ts}_monitor.jsonl"
     monitor = RunMonitor(chatter=5, jsonl_path=jsonl, stream=sys.stdout)
-    run_id = f"seqtest_{ts}"
+    run_id = f"chaintest_{ts}"
     create_run_workspace(run_id, ["analyst_lead"])
+    reports = _reports_with_request()
 
-    lead = AnalystLeadAgent(monitor=monitor)
-    lead.tools = ReadOnlyToolProvider(
-        roots=[run_dir(run_id), tk], include_data_catalog=True,
-        include_plan_and_debate=False,  # unattended: no human debate channel
-        include_text_search=False, human_handler=None, asked_by="analyst_lead", model="",
-    )
-    specs = [_seq_tool_1(), _seq_tool_2()]
-
-    async def _drive():
+    async def _drive(config_dir: Path):
+        lead = AnalystLeadAgent(monitor=monitor)
+        lead.tools = readonly_tools_for("analyst_lead", roots=[run_dir(run_id), tk])
         await monitor.record(
-            "run", "run.start", level=1, summary="sequential authoring live test",
-            data={"toolkit_root": str(tk)},
+            "run", "run.start", level=1, summary="lead-cycle chain authoring live test",
+            data={
+                "toolkit_root": str(tk),
+                # The configuration this run resolved, not the one it meant to: the seat is read
+                # back out of the written file.
+                "coder": yaml.safe_load(
+                    (config_dir / "models.yaml").read_text()
+                )["roles"]["coder"]["members"][0],
+            },
         )
-        results = []
-        for i, spec in enumerate(specs, 1):
-            r = await lead.drive_authoring(
-                spec, toolkit_root=tk, worktree_base=run_dir(run_id) / "authoring",
-                direct_branch="ai", colead=None, human_handler=None,
-            )
-            await monitor.record(
-                "analyst", "analyst.tool.authored", level=1,
-                summary=f"tool {i}/{len(specs)} {r.status}: {spec.proposed_tool_name}",
-                data={"result": r},
-            )
-            results.append(r)
-            if r.status != "committed":
-                break  # chain stops on a non-commit (downstream depends on it)
+        outcome = await lead.run_cycle(
+            AnalysisTask(
+                question=(
+                    "Combine the per-segment measurements into one value per labelled set, with a "
+                    "statistic that says whether each set is consistent with being constant."
+                ),
+                instructions=_UNATTENDED,
+            ),
+            reports,
+            sources=["worker_0", "worker_1"],
+            rounds_left=0,
+            author_budget=_AUTHOR_BUDGET,
+            toolkit_root=tk,
+            worktree_base=run_dir(run_id) / "authoring",
+            direct_branch="ai",
+            colead=None,
+            human_handler=None,
+        )
+        await monitor.record(
+            "analyst", "analyst.lead.cycle", level=1,
+            summary=f"Lead filed {outcome.filed or 'nothing'}",
+            data={
+                "filed": outcome.filed,
+                "committed": outcome.committed,
+                "author_budget": outcome.author_budget,
+                "authored": [r.model_dump(mode="json") for r in outcome.authored],
+            },
+        )
         monitor.write_markdown(jsonl.with_suffix(".md"))
-        return results
+        return outcome
 
-    results = asyncio.run(_drive())
+    # Every live test resolves its models through the configuration pointer, so a seat is a written
+    # file the registry reads rather than a handle built beside the pipeline.
+    with seated(coder=_coder_seat()) as config_dir:
+        outcome = asyncio.run(_drive(config_dir))
 
-    statuses = [(r.status, r.reason) for r in results]
-    print(f"\n=== SEQUENTIAL AUTHORING === {statuses}")
-    assert len(results) == 2 and all(r.status == "committed" for r in results), (
-        f"sequential authoring did not complete both tools bug-free: {statuses}"
+    events = _ledger(jsonl)
+    planned = list(outcome.decision.tool_specs) if outcome.decision is not None else []
+    attempted = list(outcome.authored)
+    statuses = [(r.tool_spec_id, r.status, r.reason) for r in attempted]
+    skips = _layer_b_skips(events)
+    print(
+        f"\n=== LEAD-CYCLE CHAIN AUTHORING ===\n"
+        f"filed={outcome.filed} committed={outcome.committed} "
+        f"budget_left={outcome.author_budget}\n"
+        f"planned={[s.proposed_tool_name for s in planned]}\n"
+        f"attempted={statuses}\n"
+        f"layer_b_skips={skips}"
     )
-    shas = [r.commit_sha for r in results]
-    assert shas[0] and shas[1] and shas[0] != shas[1], f"expected two distinct commits, got {shas}"
 
-    log = subprocess.run(
-        ["git", "-C", str(tk), "log", "--oneline", "ai"],
+    # 1. The cycle ends by filing a form. A cycle that stops without one is the failure the caller
+    #    treats as such (`LeadCycleOutcome.filed is None`), and it is the state that leaves no
+    #    record of why the lead stopped.
+    assert outcome.filed is not None, "the lead ended its cycle without filing any form"
+
+    # 2. A failed coder turn is never handed to the lead as a successful reply. The Codex backend
+    #    injects the vendor's own message into the returned text; a backend that does not is what
+    #    let a lead spend three drives steering a dead session on 2026-09-09.
+    failed_turns = _failed_coder_turns(events)
+    if failed_turns:
+        flagged = [
+            result for result in _drive_coder_results(events)
+            if (result.get("data") or {}).get("is_error")
+            or "[harness error]" in str((result.get("data") or {}).get("text") or "")
+        ]
+        assert flagged, (
+            f"{len(failed_turns)} coder turn(s) failed and not one reached the lead as an error "
+            f"or carried a harness-error marker: "
+            f"{[e.get('sequence') for e in failed_turns]}"
+        )
+
+    # 3. Every planned link is attempted: a link the co-lead rejects tells the lead why and the
+    #    chain continues (F9), rather than the chain ending on the first non-commit. Credits are the
+    #    only thing that may cut it short, so the exhausted case is excluded rather than assumed away.
+    if planned and outcome.author_budget > 0:
+        assert len(attempted) == len(planned), (
+            f"the chain stopped early with credits left: planned {len(planned)}, "
+            f"attempted {len(attempted)}, budget {outcome.author_budget}"
+        )
+
+    # 4. Every commit the run claims is in the repository, and carries what makes a tool callable.
+    reachable = subprocess.run(
+        ["git", "-C", str(tk), "rev-list", "--all"],
         check=True, capture_output=True, text=True,
-    ).stdout.splitlines()
-    assert len(log) >= 3, f"expected seed + two authored commits, got: {log}"
+    ).stdout.split()
     manifest = (tk / "xspec_utils" / "skills" / "__init__.py").read_text()
-    assert "seq_weighted_mean" in manifest and "seq_weighted_mean_table" in manifest, manifest
-    # tool 2's committed test imports tool 1's module → its passing under the gate proves tool 1
-    # was already committed and visible when tool 2's session ran (the sequential guarantee).
-    tests = list((tk / "xspec_utils" / "tests").glob("test_seq_weighted_mean*.py"))
-    assert len(tests) >= 2, f"expected both tools' Layer-B tests committed, got {tests}"
+    for result in attempted:
+        if result.status != "committed":
+            continue
+        assert result.commit_sha, f"a committed link carries no SHA: {result}"
+        assert any(sha.startswith(result.commit_sha) or result.commit_sha.startswith(sha)
+                   for sha in reachable), (
+            f"commit {result.commit_sha} is recorded but unreachable in the repository"
+        )
+    committed_names = [
+        s.proposed_tool_name for s, r in zip(planned, attempted) if r.status == "committed"
+    ]
+    for name in committed_names:
+        assert name in manifest, f"{name} committed without a TOOL_MANIFEST entry"
+        assert list((tk / "xspec_utils" / "tests").glob(f"test_{name}*.py")), (
+            f"{name} committed without a Layer-B test file"
+        )
+
+    # 5. Nothing banked ⇒ the tree is clean: the failed attempt's edits were reset to the base ref
+    #    (F1), so a rejected tool cannot surface to a re-running worker through `registry.reload()`.
+    if not committed_names:
+        dirty = subprocess.run(
+            ["git", "-C", str(tk), "status", "--porcelain", "-uall"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        assert not dirty, f"a non-committed attempt left the tree dirty:\n{dirty}"
+
+    # 6. The sequential guarantee, when the lead did plan and land both: the second tool's test
+    #    imports the first's module, so its passing under the gate proves the first was committed and
+    #    visible when the second link ran.
+    if len(committed_names) >= 2:
+        shas = [r.commit_sha for r in attempted if r.status == "committed"]
+        assert len(set(shas)) == len(shas), f"expected distinct commits per tool, got {shas}"

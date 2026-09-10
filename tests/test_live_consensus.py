@@ -117,7 +117,7 @@ def _event(event: str, agent, *, output=None):
         "model_member": handle.config.name,
         "provider": handle.config.provider,
         "model": handle.config.model,
-        "status": "ok" if response else "not_called",
+        "status": "succeeded" if response else "not_called",
         "input_tokens": usage.input_tokens if usage else 0,
         "output_tokens": usage.output_tokens if usage else 0,
         "output": output,
