@@ -44,7 +44,8 @@ import yaml
 from auto_research.graph.runtime import readonly_tools_for
 from auto_research.agents.roles import AnalystLeadAgent
 from auto_research.monitor import RunMonitor
-from auto_research.sandbox.workspace import create_run_workspace, run_dir
+from auto_research.observability.costs import install_cost_meter
+from auto_research.sandbox.workspace import agent_dir, create_run_workspace, run_dir
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -653,8 +654,22 @@ def test_lead_cycle_authors_a_chain_end_to_end(tmp_path):
     reports = _reports_with_request()
 
     async def _drive(config_dir: Path):
+        # Spend is a ContextVar meter installed inside the task, exactly as `run_research` does
+        # (`graph/runtime.py`). Without it the coder's tokens reach no ledger and the run reports
+        # no cost at all — measured on 2026-09-09, where `cost_usd_total` was null on all 1,164
+        # events.
+        install_cost_meter(run_id=run_id, monitor=monitor)
         lead = AnalystLeadAgent(monitor=monitor)
         lead.tools = readonly_tools_for("analyst_lead", roots=[run_dir(run_id), tk])
+        # The two lines production sets right after building the lead (`runtime.py:570-572`).
+        # Omitting them is not cosmetic: with no `report_dir` there is no report workspace, so
+        # `edit_report` is never declared, so `submit_terminal_report` refuses with "there is no
+        # report to file yet" — and at the author stage that is one of only two open forms. On
+        # 2026-09-09 the lead spent 13 turns and 5 rejected filings looking for an exit that this
+        # test had removed, then left on a silent turn. §9.6's honest stop is only reachable if
+        # the role is wired the way the run path wires it.
+        lead.agent_key = "analyst_lead"
+        lead.report_dir = agent_dir(run_id, "analyst_lead")
         await monitor.record(
             "run", "run.start", level=1, summary="lead-cycle chain authoring live test",
             data={
@@ -701,6 +716,19 @@ def test_lead_cycle_authors_a_chain_end_to_end(tmp_path):
     # file the registry reads rather than a handle built beside the pipeline.
     with seated(coder=_coder_seat()) as config_dir:
         outcome = asyncio.run(_drive(config_dir))
+
+    # Bundle the authored branch next to the ledger before anything else. pytest keeps only the
+    # three newest numbered tmpdirs and the gate's own Layer-B pytest runs in that same base dir,
+    # so the first pytest on this host after the run deletes the repository this test authored —
+    # while `commit()` has already discarded the submission snapshots (`merge_flow.commit`).
+    # Measured 2026-09-09: the repo vanished ~3 minutes after the run, mid-audit, and a fully
+    # successful authoring run left no recoverable copy of what it wrote.
+    bundle = LOG_DIR / f"chain_cycle_{ts}_ai.bundle"
+    subprocess.run(
+        ["git", "-C", str(tk), "bundle", "create", str(bundle), "ai"],
+        check=False, capture_output=True, text=True,
+    )
+    print(f"authored branch bundled to {bundle} (git clone {bundle} -b ai)")
 
     events = _ledger(jsonl)
     planned = list(outcome.decision.tool_specs) if outcome.decision is not None else []
@@ -765,8 +793,22 @@ def test_lead_cycle_authors_a_chain_end_to_end(tmp_path):
     ]
     for name in committed_names:
         assert name in manifest, f"{name} committed without a TOOL_MANIFEST entry"
-        assert list((tk / "xspec_utils" / "tests").glob(f"test_{name}*.py")), (
-            f"{name} committed without a Layer-B test file"
+    for result in attempted:
+        if result.status != "committed":
+            continue
+        # Read the commit's own file list rather than guessing a filename from the tool name: a
+        # test file is named after the *module* it exercises (`wstats.py` ->
+        # `test_wstats_weighted_mean.py`), which §9.2 never tied to the manifest key. Deriving the
+        # check from the artifact is also what the gate's `structural.test_present` does.
+        touched = subprocess.run(
+            ["git", "-C", str(tk), "show", "--pretty=", "--name-only", result.commit_sha],
+            check=True, capture_output=True, text=True,
+        ).stdout.split()
+        assert any("/tests/" in path and path.endswith(".py") for path in touched), (
+            f"{result.tool_spec_id} committed without a Layer-B test file: {touched}"
+        )
+        assert any(path.endswith("skills/__init__.py") for path in touched), (
+            f"{result.tool_spec_id} committed without touching the manifest: {touched}"
         )
 
     # 5. Nothing banked ⇒ the tree is clean: the failed attempt's edits were reset to the base ref
