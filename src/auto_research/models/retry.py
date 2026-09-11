@@ -73,7 +73,19 @@ _ANTHROPIC_RULES = _KeyErrorRules(
     # and never clears on its own, so classifying it as a refilling rate limit waits forever.
     # Found while auditing F7; the first attempt at it was the inert version.
     exhausted_codes=frozenset({"enforced_spend_limit_reached"}),
-    exhausted_message_markers=("credit balance",),
+    # Markers are matched against `str(exc).lower()`, so every entry here is lowercase — an
+    # entry carrying the vendor's own capitalisation can never match, which is the same
+    # inert-rule trap the spend-cap code above was moved out of.
+    #
+    # "workspace api usage limits" is the spend cap's **400** face, and it is a third distinct
+    # non-refilling shape rather than a variant of the two already covered. Measured 2026-09-11,
+    # verbatim: `400 invalid_request_error` — "You have reached your specified workspace API
+    # usage limits. You will regain access on 2026-10-01 at 00:00 UTC." It carries `.code: None`
+    # and `.type: invalid_request_error`, so all three structured arms miss it and only a marker
+    # can catch it; and it is *exhausting*, not refilling, because the message names a date weeks
+    # out. It killed two trials of one batch at $80.24 and $73.61, each with four tools already
+    # committed, while a funded key in a different workspace sat unused.
+    exhausted_message_markers=("credit balance", "workspace api usage limits"),
 )
 
 # OpenAI (developers.openai.com/api/docs/guides/error-codes): **every** one of these is a 429,

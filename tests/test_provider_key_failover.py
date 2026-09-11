@@ -91,6 +91,23 @@ def _credit_balance() -> _ProviderError:
     )
 
 
+def _workspace_usage_limit() -> _ProviderError:
+    """The spend cap's **400** face, recorded verbatim from a live failure on 2026-09-11.
+
+    Its three structured fields are indistinguishable from an ordinary bad request — status 400,
+    `type: invalid_request_error`, no `code` — so only the message separates it. It killed two
+    trials of one batch at $80.24 and $73.61, each with four tools already committed, while a
+    funded key in a different workspace went untouched.
+    """
+    return _ProviderError(
+        "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "
+        "'message': 'You have reached your specified workspace API usage limits. You will "
+        "regain access on 2026-10-01 at 00:00 UTC.'}}",
+        status_code=400,
+        type_="invalid_request_error",
+    )
+
+
 def _overloaded() -> _ProviderError:
     return _ProviderError("overloaded", status_code=529, type_="overloaded_error")
 
@@ -157,6 +174,38 @@ def test_a_spent_balance_retires_that_key_but_a_rate_limit_does_not(monkeypatch)
     _set_keys(monkeypatch, PRIMARY, FALLBACK)  # fresh pool
     make_rotator(ANTHROPIC)(False)  # left the primary on a rate limit
     assert make_rotator(ANTHROPIC)() == "primary"  # still eligible — that quota refills
+
+
+def test_a_workspace_usage_limit_rotates_and_retires_like_a_spent_balance():
+    """Anthropic's spend cap has three faces and only the message tells this one apart.
+
+    `billing_error` (type) and `enforced_spend_limit_reached` (429 code) were already wired.
+    This is the 400 `invalid_request_error` form: `.code` is None and `.type` is the same one an
+    ordinary malformed request carries, so all three structured arms of the predicate miss it and
+    a message marker is the only thing that can catch it. Before this it rotated nowhere and
+    killed the run.
+    """
+
+    exc = _workspace_usage_limit()
+    assert is_key_scoped_provider_error(exc, ANTHROPIC), "must rotate to the other workspace's key"
+    assert is_exhausted_key_error(exc, ANTHROPIC), (
+        "the message names a date weeks out, so this quota does not refill and the key must be "
+        "retired rather than rotated back onto"
+    )
+    # It is emphatically not the cooldown class: waiting cannot clear a monthly cap.
+    assert not is_transient_provider_error(exc, ANTHROPIC)
+
+
+def test_every_anthropic_message_marker_is_lowercase():
+    """Markers are matched against `str(exc).lower()`, so a capitalised entry is dead on arrival.
+
+    The vendor writes "workspace API usage limits"; storing it that way would read as a fix and
+    never fire — the same inert-rule shape that sent the spend-cap 429 to `exhausted_codes`.
+    """
+    from auto_research.models.retry import _ANTHROPIC_RULES
+
+    for marker in _ANTHROPIC_RULES.exhausted_message_markers:
+        assert marker == marker.lower(), marker
 
 
 def test_a_dead_primary_does_not_turn_a_fallback_rate_limit_into_a_fatal_error(monkeypatch):

@@ -1007,3 +1007,30 @@ Compacted 2026-09-01: entries through 2026-08-28 folded into themed ranges (deta
   left alone as out of scope, recorded so it is not trusted blindly. Delivery was also confirmed
   directly while diagnosing it: the same conversation reports **1,982** input tokens with the
   figures nested against 1,506 for the two figures alone.
+
+- 2026-09-11 — **Anthropic's spend cap has a third face, and it cost two live trials.** A batch lost
+  slots 2 and 3 at **$80.24** and **$73.61**, each with four tools already committed, to
+  `400 invalid_request_error` — *"You have reached your specified workspace API usage limits. You
+  will regain access on 2026-10-01 at 00:00 UTC."* **Key rotation never fired**, and the reason is
+  that all three structured arms of `is_key_scoped_provider_error` miss it: the status is **400**
+  (not the 429 in `key_scoped_statuses`), `.type` is `invalid_request_error` (not `billing_error`),
+  and `.code` is **None** (so `enforced_spend_limit_reached` cannot match). Only a message marker
+  could catch it, and the tuple held exactly one entry, `"credit balance"` — written for the
+  *other* 400. Added `"workspace api usage limits"` to `exhausted_message_markers`.
+  **It belongs in the *exhausted* tuple, not merely the key-scoped one**, because the message names
+  a return date weeks out: the key is retired for the process, so rotation cannot come back to it at
+  the fallback's next routine 429 and turn a one-minute wait into a dead run (the Q21 shape). Human
+  confirmation that the two keys sit in **different workspaces** is what makes rotation the right
+  answer here rather than a cosmetic one.
+  Three notes worth keeping. **Markers are matched against `str(exc).lower()`**, so a marker
+  carrying the vendor's own capitalisation can never fire — the same inert-rule trap that moved the
+  spend-cap 429 out of the markers and into `exhausted_codes`; a new test asserts every Anthropic
+  marker is lowercase. **A source edit does not reach a running process**: the three trials in
+  flight had imported `retry.py` at launch, so the fix could not save them and only a newly started
+  run is protected — the reason the recovery was a fresh relaunch rather than a resume.
+  **And the first reconstruction of the exception was unfaithful**: it passed only `"Error code:
+  400"` as the message where the SDK embeds the whole body, which made even the known-good
+  credit-balance case return `False` and would have sent the diagnosis after a second, non-existent
+  bug. The run's own recorded string settled it; the test now uses that verbatim format.
+  `tests/test_provider_key_failover.py` 54 (+2, +1 factory), verified to fail against the unfixed
+  rule before being kept; suite 1421 → 1423.
