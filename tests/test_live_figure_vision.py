@@ -578,3 +578,202 @@ def test_live_qwen_receives_a_paper_as_text_and_figures(tmp_path):
     assert sum(c in colors for c in ("red", "green", "blue", "orange")) >= 3, (
         f"figure colours not recovered, so the crops did not land: {vision.first_figure_colors!r}"
     )
+
+
+# ── the pending server-tool + figures shape (A1) ──────────────────────────────────────
+
+
+def test_live_pending_server_tool_with_figures_that_used_to_400(tmp_path, monkeypatch):
+    """The exact shape that killed a run at $42.11 with 4 tools already committed.
+
+    A worker called Anthropic's server-side tool search AND a client tool in one turn. That
+    arrival is documented and normal — *"Claude calls a server tool and one of your client tools
+    in the same group of parallel tool calls: the API returns without running the server tool so
+    that you can run the client tools first"* — and the continuation has two extra rules:
+    *"that message must contain nothing except the `tool_result` blocks, and the request must keep
+    the same `tools` array"*. F5f rendered the tool's figures into a SEPARATE following user
+    message, which is *"anything after the `tool_result` blocks"*, so the run died on
+
+        400 `tool_search_tool_bm25` tool use with id `srvtoolu_01PCDhG72zkmP2EY5L4D1nmX` was
+        found without a corresponding `tool_search_tool_bm25_tool_result` block
+
+    The adapter now nests the figures inside the `tool_result`'s own content, so the message holds
+    nothing else. Deterministic coverage of the shape is `tests/test_providers.py`; only a live
+    round trip proves the request the adapter now builds is one Anthropic actually accepts.
+
+    Driven through the real registry manifest and `ModelHandle` (not `provider.call`), so tool
+    search, the media guard, key rotation and retry are all in the path — the 2026-08-06 altitude
+    lesson.
+    """
+    from PIL import Image
+
+    from auto_research.env import ToolSearchConfig, toolkit_root
+    from auto_research.models.providers.anthropic import AnthropicProvider
+    from auto_research.models.types import ModelHandle, RoleModelConfig
+    from auto_research.sandbox.registry import ToolkitRegistry
+
+    load_dotenv()
+    monkeypatch.setattr(
+        "auto_research.models.providers.anthropic.tool_search_config",
+        lambda: ToolSearchConfig(
+            enabled=True,
+            anthropic_tool="tool_search_tool_bm25_20251119",
+            openai_tool="tool_search",
+        ),
+    )
+
+    # The real manifest, deferred, so a BM25 `server_tool_use` is genuinely emitted — plus one
+    # resident client tool for the model to call in the same turn. Its result is what carries the
+    # figures, which is the half F5f mis-placed.
+    registry = ToolkitRegistry(toolkit_root())
+    registry.load()
+    tools = [{**d, "defer_loading": True} for d in registry.tool_definitions()]
+    tools.append(
+        {
+            "name": "attach_figures",
+            "description": (
+                "Attach the run's diagnostic figures so they can be inspected. Takes no "
+                "arguments and returns the figures as images."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
+        }
+    )
+
+    # Each panel is a flat fill in an unmistakable colour, and the caption NEVER names it — the
+    # same discriminator `_CAPTION` uses above. Asking the model to read the colours back is what
+    # proves the pixels arrived; a model handed only captions cannot guess "red" and "green".
+    _COLOURS = (("red", (220, 30, 30)), ("green", (30, 160, 60)))
+    figures = []
+    for index, (_name, rgb) in enumerate(_COLOURS):
+        path = tmp_path / f"panel_{index}.png"
+        Image.new("RGB", (900, 600), rgb).save(path, format="PNG")
+        figures.append(
+            FigureRef(
+                path=path,
+                caption=f"PA/PD diagnostic panel {index + 1}",
+                mime_type="image/png",
+                produced_by="attach_figures",
+                created_at=datetime.now(),
+                sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+        )
+
+    handle = ModelHandle(
+        role="live_probe",
+        config=RoleModelConfig(
+            name="worker",
+            provider="anthropic",
+            model="claude-sonnet-5",
+            vision=True,
+            parameters={"max_tokens": 2048},
+        ),
+        provider=AnthropicProvider(),
+    )
+    convo = [
+        ModelMessage(role="system", content="You are an X-ray polarization analyst. Use tools."),
+        ModelMessage(
+            role="user",
+            content=(
+                "Two things, in this one turn, as parallel tool calls: (1) search your tool "
+                "catalog for the tool that measures energy-resolved IXPE polarization, and "
+                "(2) call attach_figures so I can see the diagnostics. Do both now. Then, once "
+                "you have the figures, reply in plain text naming the fill colour of each panel "
+                "in order, and call no further tools."
+            ),
+        ),
+    ]
+
+    first = asyncio.run(handle.call(convo, tools=tools, cache_prefix=True))
+
+    # The precondition: a server_tool_use whose id has no matching result block in the same turn.
+    # "There is no other marker. Detect the state by looking for a `server_tool_use` block whose
+    # `id` has no matching result block."
+    parts = list(first.provider_parts or [])
+    pending = [
+        block.get("id")
+        for block in parts
+        if isinstance(block, dict) and block.get("type") == "server_tool_use"
+        and not any(
+            isinstance(other, dict) and other.get("tool_use_id") == block.get("id")
+            for other in parts
+        )
+    ]
+    client_calls = [call for call in first.tool_calls if call.name == "attach_figures"]
+
+    log = dev_log_path("media-placement", "live_pending_server_tool", ".json")
+    log.write_text(
+        json.dumps(
+            {
+                "block_types": [b.get("type") for b in parts if isinstance(b, dict)],
+                "pending_server_tool_ids": pending,
+                "client_tool_calls": [c.name for c in first.tool_calls],
+                "stop": getattr(first.stop, "value", str(first.stop)),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"[live] turn 1 blocks={[b.get('type') for b in parts if isinstance(b, dict)]}")
+
+    if not (pending and client_calls):
+        pytest.skip(
+            "the model did not co-emit a pending server-tool call and a client tool call in one "
+            f"turn, so the shape under test was not produced (blocks: "
+            f"{[b.get('type') for b in parts if isinstance(b, dict)]}, "
+            f"calls: {[c.name for c in first.tool_calls]}); see {log}"
+        )
+
+    # The continuation: the client tool's result, carrying figures. Under the old adapter the
+    # figures became a second user message and this request 400'd naming `pending[0]`.
+    convo.append(first)
+    convo.append(
+        ToolResultMessage(
+            results=[
+                ToolResultPart(
+                    tool_call_id=client_calls[0].id,
+                    name="attach_figures",
+                    content=f"{len(figures)} figure(s) attached",
+                    figures=figures,
+                )
+            ]
+        )
+    )
+
+    second = asyncio.run(handle.call(convo, tools=tools, cache_prefix=True))
+
+    # Acceptance is the headline — the old shape raised a 400 right here — but acceptance alone
+    # proves nothing about DELIVERY: a request whose images silently went missing returns 200 just
+    # the same. So the evidence is the model's own answer. The colours exist only in the pixels;
+    # the captions say "PA/PD diagnostic panel N" and name no colour, so a model that received
+    # only captions cannot produce them.
+    #
+    # This replaces a token-count assertion, which was the wrong instrument twice over: it is
+    # indirect, and getting it right needs all THREE input classes summed — `input_tokens` is net
+    # of cache and on a cold `cache_prefix` request the whole payload bills as
+    # `cache_write_tokens` (measured on this very request: 2 uncached + 0 cache-read + ~1,980
+    # cache-write). Reading the answer needs no such arithmetic.
+    usage = second.usage
+    reply = (second.content or "").lower()
+    print(
+        f"[live] continuation accepted with {len(pending)} pending server-tool call(s) and "
+        f"{len(figures)} nested figures; {usage.input_tokens:,} uncached + "
+        f"{usage.cache_read_tokens:,} cache-read + {usage.cache_write_tokens:,} cache-write "
+        f"input tokens\n[live] reply: {(second.content or '')[:300]!r}"
+    )
+    log.write_text(
+        json.dumps(
+            {
+                "turn1_block_types": [b.get("type") for b in parts if isinstance(b, dict)],
+                "pending_server_tool_ids": pending,
+                "reply": second.content,
+                "usage": usage.model_dump(),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    missing = [name for name, _rgb in _COLOURS if name not in reply]
+    assert not missing, (
+        f"the model did not name {missing} — the nested figures did not reach it, so the request "
+        f"was accepted without the pixels being delivered. Reply: {second.content!r}"
+    )

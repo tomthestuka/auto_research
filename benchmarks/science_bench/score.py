@@ -26,12 +26,19 @@ than after seeing a number:
   reported as a fraction is recorded as ``unit_mismatch`` and counted out of the recovery score
   separately, because the two failures have different causes and different remedies.
 
-**The four band values in the key are approximate** and say so: they are the values run
-``bf1e39e0`` read off the reference's supplementary table and the campaign published in
-``main.tex``. Attempt 6's own report quotes different band values for the same bands, so at least
-one tree read that table differently. The key is authoritative for scoring because it is frozen
-and published; the disagreement is recorded per trial as ``paper_value_claimed`` and reported, not
-adjudicated here.
+**Every key value is a verbatim table read (corrected 2026-09-10).** The four band PDs had carried
+2.8/3.3/4.4/7.1 +/- 0.4/0.4/0.4/1.0, which match no row of the reference's Table S2; they are what
+run ``bf1e39e0`` supplied to ``compare_to_benchmark``, and the +/- 0.4 they share with the 11-bin
+linear-fit rows points at a figure read. Table S2's ``PD - sum`` row gives 3.5/3.5/4.7/5.8 +/-
+0.3/0.3/0.3/0.8, and that row is the comparator **by the key's own construction**: its broadband
+entries are already that row's 2.0-8.0 cell (4.0 +/- 0.2) and the XSPEC row's (3.9 +/- 0.2). So
+``approximate`` is now false on all fourteen and ``within_tolerance_exact`` equals
+``within_tolerance`` for this key. The flag and the column stay because they are per-quantity
+properties a later key may need, not because this one uses them. A tree quoting a different paper
+value is still recorded per trial as ``paper_value_claimed`` and reported, not adjudicated here.
+
+The correction **strengthens** the trap rather than softening it: all four band deltas stay
+negative and grow in magnitude, so the PD deficit is coherent across bands as well as broadband.
 
 **What this module refuses to decide.** Whether a report *states* the coherent offset as
 systematic is a judgment, and Tier 2 is deferred. :func:`trap_language` therefore returns the

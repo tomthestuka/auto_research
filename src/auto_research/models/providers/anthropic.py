@@ -24,6 +24,7 @@ from auto_research.models.types import (
     RoleModelConfig,
     ToolCall,
     ToolResultMessage,
+    ToolResultPart,
     stop_from_anthropic,
 )
 from auto_research.schemas import DocumentRef, FigureRef
@@ -391,6 +392,70 @@ def _figure_blocks(figure: FigureRef, plan: MediaPlan | None = None) -> list[dic
     ]
 
 
+def _tool_result_block(part: ToolResultPart, plan: MediaPlan | None) -> dict:
+    """One ``tool_result`` block, with that part's figures NESTED inside its ``content``.
+
+    ``content`` takes either a string or a list of nested blocks: *"a list of nested content
+    blocks ... These content blocks can use the `text`, `image`, `document`, or `search_result`
+    types"*, with a worked *"Example of tool result with images"* that is exactly a `text` block
+    followed by an `image` block
+    (platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls). A caption and its
+    pixels belong there rather than in a message of their own.
+
+    **Three documented rules bind here, and only nesting satisfies all three.** The first two
+    constrain the MESSAGE top level — what may sit as a *sibling* of a ``tool_result`` block — and
+    the third is about composing image content. Nesting moves the caption from sibling position to
+    inside the result, so it answers all three at once instead of trading one against another.
+
+    1. *"Adding text blocks immediately after `tool_result`"* teaches Claude to end its turn and
+       produces an *"empty response (exactly 2-3 tokens with no content) with
+       `stop_reason: "end_turn"` ... particularly after tool results"*
+       (.../build-with-claude/handling-stop-reasons). Legal, but it killed a run's slot 3.
+    2. When the same assistant turn also called a server tool whose result has not arrived,
+       *"that message must contain nothing except the `tool_result` blocks"*, and *"Adding
+       anything after the `tool_result` blocks in that user message, such as text, ends the
+       assistant turn; for a server tool Claude called directly, the request then fails with a
+       400"* (same page). Not legal.
+    3. For several images, *"introduce each one with a short text label (`Image 1:`, `Image 2:`,
+       and so on) so you can refer to them by name"* (.../build-with-claude/vision).
+
+    F5f (2026-09-09) answered rule 1 by moving the figures into a following user message, which is
+    still "anything after the tool_result blocks" and so broke rule 2. Measured: a worker called
+    tool search and ``review_report`` in one turn, the result carried 4 figures, and the run died
+    on ``tool_search_tool_bm25 tool use with id srvtoolu_01PCDhG72zkmP2EY5L4D1nmX was found
+    without a corresponding tool_search_tool_bm25_tool_result block`` after 3h34m and $42.11 with
+    4 tools already committed.
+
+    **Volume is unchanged by this.** Nesting is limit-neutral: *"All `image` blocks in the request
+    count toward this threshold, including images from earlier conversation turns that you resend
+    and images nested inside `tool_result` content"*. Captions are text blocks, and no limit counts
+    those, so interleaving one per image (rule 3) is free.
+
+    It also fixes a shape no model ever asked for: a figure the media guard **withholds** used to
+    degrade to a bare caption block immediately after the results, i.e. rule 1's forbidden
+    arrangement reached by our own guard rather than by a tool.
+    """
+    block: dict = {
+        "type": "tool_result",
+        "tool_use_id": part.tool_call_id,
+        "is_error": part.is_error,
+    }
+    figure_blocks: list[dict] = []
+    for figure in part.figures:
+        figure_blocks.extend(_figure_blocks(figure, plan))
+    if not figure_blocks:
+        # No figures: the bare string this adapter has always sent, byte-identical, so the common
+        # path's cached prefix is untouched.
+        block["content"] = part.content
+        return block
+    nested: list[dict] = []
+    if part.content:
+        nested.append({"type": "text", "text": part.content})
+    nested.extend(figure_blocks)
+    block["content"] = nested
+    return block
+
+
 def _assistant_blocks(turn: ModelResponse) -> list[dict]:
     """Rebuild one assistant turn's content blocks.
 
@@ -440,38 +505,12 @@ def _to_anthropic_messages(
             blocks = _assistant_blocks(message)
             provider_messages.append({"role": "assistant", "content": blocks})
         elif isinstance(message, ToolResultMessage):
-            content: list[dict] = [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": part.tool_call_id,
-                    "content": part.content,
-                    "is_error": part.is_error,
-                }
-                for part in message.results
-            ]
+            # ONE user message holding nothing but tool_result blocks, each carrying its own
+            # figures nested inside its content (:func:`_tool_result_block`). Anything beside
+            # those blocks — a text block here, or a whole following message — ends the assistant
+            # turn, and 400s when the turn also has an unresolved server-tool call.
+            content: list[dict] = [_tool_result_block(part, plan) for part in message.results]
             provider_messages.append({"role": "user", "content": content})
-            # A tool's figures live inline at this turn, but in their OWN following user message —
-            # never appended after the tool_result blocks in the same one (F5f).
-            #
-            # Mixed content there is legal ("any text must come AFTER all tool results"), and that
-            # is what this used to do. But the stop-reasons page names exactly that arrangement as
-            # the cause of an accidental empty turn: *"Sometimes Claude returns an empty response
-            # (exactly 2-3 tokens with no content) with `stop_reason: "end_turn"` ... particularly
-            # after tool results"*, with the prevention *"Never add text blocks immediately after
-            # tool results"* (platform.claude.com/docs/en/build-with-claude/handling-stop-reasons).
-            # `_figure_blocks` renders a caption — a text block — then the image, so every
-            # figure-bearing tool result was producing that shape. Slot 3's lead had figures on
-            # its turns and returned `output_tokens: 2`, killing the run.
-            #
-            # A separate user message keeps every other property: the figures still replay in
-            # place every round, still cache with the growing prefix, and still sit adjacent to
-            # the result that produced them.
-            figure_content: list[dict] = []
-            for part in message.results:
-                for figure in part.figures:
-                    figure_content.extend(_figure_blocks(figure, plan))
-            if figure_content:
-                provider_messages.append({"role": "user", "content": figure_content})
         elif message.role == "system":
             system_texts.append(message.content)
         else:
@@ -489,7 +528,14 @@ def _system_param(system: str | None, cache_prefix: bool) -> Any:
 
 
 def _mark_last_block_cacheable(provider_messages: list[dict]) -> None:
-    """Mark the current Anthropic conversation tail as a prompt-cache breakpoint."""
+    """Mark the current Anthropic conversation tail as a prompt-cache breakpoint.
+
+    When the tail is a tool-result turn the breakpoint now lands on a ``tool_result`` block, where
+    it used to land on an ``image`` block of the following figure message (:func:
+    `_tool_result_block`). ``cache_control`` is a field of ``ToolResultBlockParam`` in
+    anthropic 0.104.1, so this is type-legal — but it is **SDK evidence only**: Anthropic's prose
+    documents ``cache_control`` on a tool_result nowhere, so do not upgrade this note to a citation.
+    """
     if not provider_messages:
         return
     content = provider_messages[-1].get("content")

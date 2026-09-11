@@ -2,12 +2,12 @@
   "question": "cygx1_reproduce_krawczynski2022_polarization",
   "reference": "Krawczynski et al. 2022, Science 378, 650",
   "source_artifact": "papers/FANGZ/data_benchmark_compare_krawczynski2022.csv",
-  "source_sha256": "5b83a0ec9c76a2604d1e917f4ac82ca50f4fd9321df5fe957f6528614472cf19",
+  "source_sha256": "5e404ec50051d708dbf508cd5611c235995f70def541dda915a31b8d75d2d9ba",
   "source_provenance": "compare_to_benchmark provenance: {\"created_at\": \"2026-07-10T14:22:33Z\", \"produced_by\": \"xspec_utils.lib.benchmark_compare.compare_to_benchmark\", \"sigma_flag\": 3.0}",
   "published_as": "papers/FANGZ/main.tex table t:cygx1",
   "sigma_flag": 3.0,
   "useful_threshold_k": 10,
-  "frozen": "2026-09-08",
+  "frozen": "2026-09-10",
   "quantities": {
     "May_PD_2-8keV_PCUBE": {
       "unit": "percent",
@@ -121,47 +121,47 @@
     },
     "May_PD_2-3keV": {
       "unit": "percent",
-      "paper_value": 2.8,
-      "paper_error": 0.4,
-      "paper_source": "Krawczynski+2022 Table S2 band 2-3 keV (approx)",
-      "approximate": true,
+      "paper_value": 3.5,
+      "paper_error": 0.3,
+      "paper_source": "Krawczynski+2022 Table S2 band 2.0-3.0 keV (PD - sum)",
+      "approximate": false,
       "periodic_deg": null,
       "reference_value": 2.584,
       "reference_error": 0.246,
-      "reference_z": 0.459974
+      "reference_z": 2.361044
     },
     "May_PD_3-4keV": {
       "unit": "percent",
-      "paper_value": 3.3,
-      "paper_error": 0.4,
-      "paper_source": "Krawczynski+2022 Table S2 band 3-4 keV (approx)",
-      "approximate": true,
+      "paper_value": 3.5,
+      "paper_error": 0.3,
+      "paper_source": "Krawczynski+2022 Table S2 band 3.0-4.0 keV (PD - sum)",
+      "approximate": false,
       "periodic_deg": null,
       "reference_value": 2.873,
       "reference_error": 0.241,
-      "reference_z": 0.914364
+      "reference_z": 1.629363
     },
     "May_PD_4-6keV": {
       "unit": "percent",
-      "paper_value": 4.4,
-      "paper_error": 0.4,
-      "paper_source": "Krawczynski+2022 Table S2 band 4-6 keV (approx)",
-      "approximate": true,
+      "paper_value": 4.7,
+      "paper_error": 0.3,
+      "paper_source": "Krawczynski+2022 Table S2 band 4.0-6.0 keV (PD - sum)",
+      "approximate": false,
       "periodic_deg": null,
       "reference_value": 3.755,
       "reference_error": 0.279,
-      "reference_z": 1.322563
+      "reference_z": 2.306656
     },
     "May_PD_6-8keV": {
       "unit": "percent",
-      "paper_value": 7.1,
-      "paper_error": 1.0,
-      "paper_source": "Krawczynski+2022 Table S2 band 6-8 keV (approx)",
-      "approximate": true,
+      "paper_value": 5.8,
+      "paper_error": 0.8,
+      "paper_source": "Krawczynski+2022 Table S2 band 6.0-8.0 keV (PD - sum)",
+      "approximate": false,
       "periodic_deg": null,
       "reference_value": 4.986,
       "reference_error": 0.638,
-      "reference_z": 1.782178
+      "reference_z": 0.795503
     }
   }
 }

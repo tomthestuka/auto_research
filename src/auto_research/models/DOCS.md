@@ -53,10 +53,20 @@ providers by editing YAML alone
   figures** (a peer's plot, a worker's figures the reviewer must see) have no tool-turn
   in this conversation, so they ride the call-time `images=` channel, appended at the end.
   (2) **A tool's own figures** (`ToolResultPart.figures`, set by the ReAct loop) render
-  **inline at their tool-result turn** — Anthropic in the same user turn as the
-  `tool_result`, OpenAI/Google as a user turn immediately after — so they replay in place
-  every round and fall inside the cached prefix as the loop grows (the model keeps *seeing*
-  its plots, and the terminal report call that replays the trajectory does too).
+  **inline at their tool-result turn**, so they replay in place every round and fall inside the
+  cached prefix as the loop grows (the model keeps *seeing* its plots, and the terminal report
+  call that replays the trajectory does too). **The exact shape is per-vendor and is a declared
+  decision, not a shared default** — see the table below; the neutral `ToolResultPart` carries
+  references and imposes no arrangement.
+
+  | Vendor | A tool's figures go | Why, from that vendor's own reference |
+  |---|---|---|
+  | Anthropic | **nested inside `tool_result.content`** | `content` takes "a list of nested content blocks … `text`, `image`, `document`, or `search_result`", with a worked *"tool result with images"* example. **Required**, not merely allowed: when the same assistant turn has an unresolved `server_tool_use`, "that message must contain nothing except the `tool_result` blocks", and "Adding anything after the `tool_result` blocks in that user message, such as text, ends the assistant turn … the request then fails with a 400". A following message is still "anything after" — that cost a run $42.11 on 2026-09-10. Nesting also keeps the separate rule that a text block *beside* the results invites the 2-3-token empty turn. Limit-neutral: "All `image` blocks in the request count toward this threshold, including … images nested inside `tool_result` content" |
+  | OpenAI | a `user` item after the `function_call_output` | `output` **may** be an array ("For functions that return images or files, you can pass an array of image or file objects instead of a string"), but OpenAI publishes no counterpart to the "only `tool_result` blocks" rule, its input is a flat item list rather than paired messages, and no failure has been observed on the current shape (548 requests in one measured leg, one carrying 18 image blocks). Left as-is deliberately; 8-20 parts in one output is undocumented and has no published example |
+  | Alibaba | a `user` item after the `function_call_output` | `function_call_output.output` is typed "(string, required)" with no array variant, and image parts are legal only inside a `user` item. Bundling would violate a published type. Its one ordering rule — a `function_call_output` "must immediately follow its corresponding function_call message" — is why the image item comes strictly after, never between |
+  | Z.AI | a `user` item after the `function_call_output` | Publishes no Responses item-level reference at all; its only documented tool-result schema (Chat Completions `tool` role) is string-only. Silence is not permission |
+  | DeepSeek | withheld (`images_accepted=False`) | Its reference *does* document the array form for `deepseek-flash`, but this adapter sends no images, so the branch is unreachable |
+  | Google | a `user` `Content` after the `functionResponse` | Its nesting is a different mechanism — `FunctionResponse.parts[].inline_data`, "available for Gemini 3 series models", and `FunctionResponsePart` has no text variant so a caption cannot travel with the image. Out of every figure-receiving seat anyway ([I8]) |
 - **Provider-native context editing (Anthropic, beta — the context-pressure valve for long
   loops).** On the `cache_prefix` paths (the ReAct tool loop and the terminal report call),
   when `context_mgmt_enabled` (`orchestration.yaml`, read via `env.context_editing_config`),
@@ -342,9 +352,10 @@ turns on one distinction:
   is_error: bool = False, figures: list[FigureRef] = [])` — one tool result fed back
   to the model. Carries both ``tool_call_id`` (Anthropic/OpenAI) and ``name`` (Google)
   so every adapter can build its native shape. ``figures`` are the figures the tool
-  produced; each adapter renders them as an image turn inline at this tool-result turn
-  (so they persist in history and cache), distinct from the call-time ``images=`` channel
-  used for cross-agent figures.
+  produced, carried as lightweight references at their own turn (so they persist in history
+  and cache), distinct from the call-time ``images=`` channel used for cross-agent figures.
+  **The wire shape is each adapter's declared decision, not a contract of this type** — see
+  the per-vendor table above.
 - `ToolResultMessage(role="tool", results: list[ToolResultPart])` — the neutral tool-result
   turn (ours). `ConversationMessage = ModelMessage | ModelResponse | ToolResultMessage`;
   `call(messages=…)` accepts the union.
@@ -925,3 +936,74 @@ Compacted 2026-09-01: entries through 2026-08-28 folded into themed ranges (deta
   *sustained*-load figure for Alibaba — both earlier concurrency measurements carried the stated
   limit "short calls, not sustained multi-hour load" — and it retires the worry that the sweep's
   concurrency of 5 sat near a vendor ceiling.
+
+- 2026-09-10 — **A1: a tool's figures nest inside their `tool_result` on Anthropic.** A run died
+  after 3h34m and $42.11, with 4 tools committed and a finished worker report in hand, on
+  `400 … tool_search_tool_bm25 tool use with id srvtoolu_01PCDhG72zkmP2EY5L4D1nmX was found
+  without a corresponding tool_search_tool_bm25_tool_result block`. A 400 is outside the transient
+  class, so one attempt, no retry, and the exception killed the whole run rather than the worker.
+  **Verified against the artifact, not inferred from the message:** `prompts.jsonl` line 279 holds
+  assistant turn 12 with that exact `server_tool_use` id unpaired beside `tool_use review_report`,
+  and message 13 is that tool's result carrying 4 figures. Rate in the leg: **1 of 6**
+  server-tool-bearing turns, the only one whose result carried figures.
+  **Three documented rules bind, all at the message top level, and only nesting satisfies all
+  three** — which is what F5f got wrong by answering one of them in isolation. (1) A text block
+  *beside* the results invites the 2-3-token empty turn that killed slot 3. (2) With an unresolved
+  server-tool call, "that message must contain nothing except the `tool_result` blocks", and
+  "Adding anything after the `tool_result` blocks in that user message, such as text, ends the
+  assistant turn" — a following message is still "anything after", which is exactly what F5f
+  emitted. (3) For several images, label each one. Nesting moves the caption from sibling position
+  to *inside* the result, so (1) and (2) hold and (3) applies where it belongs.
+  New `anthropic._tool_result_block`; the no-figure path stays a **bare string**, byte-identical,
+  so the common cached prefix is untouched. It also fixes a shape no model asked for: a figure the
+  media guard **withholds** used to degrade to a bare caption block right after the results, i.e.
+  rule (1)'s forbidden arrangement produced by our own guard.
+  **Scope is one adapter, decided per vendor from each vendor's own reference** (table above), and
+  the deciding facts were two: only Anthropic and OpenAI set `supports_tool_search=True`, so the
+  pending-server-tool hazard can only arise on those two; and Alibaba types its tool output as a
+  required string, so its separate-item shape is a contract rather than a workaround. OpenAI is
+  deliberately left alone — its array form is real ("For functions that return images or files,
+  you can pass an array of image or file objects instead of a string") but it publishes no
+  counterpart to the "only `tool_result` blocks" rule, no worked example, and one measured leg
+  pushed 548 requests through the current shape including one carrying **18 image blocks** with no
+  failure. **No `_responses.py` or `openai.py` change.**
+  **Volume was measured and ruled out of scope.** `review_report` returns the entire citable
+  catalogue on every call, budget-free, and each result replays inline forever: one result carried
+  **8 images**, and a single request reached **18 image blocks** (two short of the >20 threshold
+  that killed run `8c75990e` at 21). Nesting is limit-neutral — "All `image` blocks in the request
+  count toward this threshold, including … images nested inside `tool_result` content" — so this
+  change neither creates nor worsens it; recorded as the first §13 loose end instead.
+  Also corrected: `ToolResultPart.figures`' docstring asserted "an image turn adjacent to this
+  tool-result turn", stating one adapter's rendering choice as though the neutral layer required
+  it — which is how an adapter-local decision came to look like a design invariant.
+  `_mark_last_block_cacheable` now puts the breakpoint on a `tool_result` block; that is
+  type-legal in anthropic 0.104.1 (`cache_control` is a field of `ToolResultBlockParam`) but
+  **SDK evidence only**, documented in no prose, and noted as such rather than cited.
+  **The full suite is what caught the second pinned test** (`test_turn_end.py`'s F5f test), which
+  the three obvious suites did not touch; and the media-guard test failed in the predictable
+  direction — its walker read only top-level blocks, so nested images read as "the guard dropped
+  everything", now fixed with a depth-aware helper. Suite 1419 → 1421 passed, 188 skipped.
+  Regression direction verified before trusting it: the old shape leaves a trailing `user` message
+  (would 400) and the new one leaves nothing, both carrying the pixels.
+  **LIVE-VERIFIED 2026-09-10**
+  (`tests/test_live_figure_vision.py::test_live_pending_server_tool_with_figures_that_used_to_400`),
+  through the real manifest and `ModelHandle`: turn 1 came back
+  `['thinking', 'server_tool_use', 'tool_use']` — the documented pending state beside a client
+  call, i.e. the precondition itself rather than a simulation of it — and the figure-bearing
+  continuation was accepted. The cell skips rather than passes if the model declines to co-emit,
+  so it cannot pass without producing the shape.
+  **The assertion reads the model's answer rather than counting tokens** (the human's call, and
+  the better instrument). Each panel is a flat fill in an unmistakable colour and its caption
+  names no colour, so a model handed only captions cannot produce them; the reply named both, and
+  incidentally proved the pending search resolved on that request — *"The tool search found the
+  relevant tool: research_toolkit_xspec_utils_ixpe_pcube"*. One request, three properties: the
+  shape is accepted, the pixels were delivered, and the server tool resolved.
+  The token-count version it replaced was indirect **and** easy to get wrong, which is worth
+  recording on its own: "total input" needs all THREE classes summed, because `input_tokens` is
+  net of cache and on a *cold* `cache_prefix` request the entire payload bills as
+  `cache_write_tokens` — measured on this request as 2 uncached + 0 cache-read + ~11,491
+  cache-write. Summing only `input + cache_read` reads that as **2** and cannot tell a delivered
+  request from an empty one. `tests/test_live_tool_search._sent` carries exactly that omission;
+  left alone as out of scope, recorded so it is not trusted blindly. Delivery was also confirmed
+  directly while diagnosing it: the same conversation reports **1,982** input tokens with the
+  figures nested against 1,506 for the two figures alone.

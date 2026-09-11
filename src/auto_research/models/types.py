@@ -105,11 +105,20 @@ class ToolResultPart(BaseModel):
     content: str = ""
     is_error: bool = False
     figures: list[FigureRef] = Field(default_factory=list)
-    """Figures the tool produced, carried so the adapter renders them inline in
-    history — an image turn adjacent to this tool-result turn — instead of via the
+    """Figures the tool produced, carried at their own turn rather than through the
     call-time ``images=`` side-channel. Living at their turn, they slide into the
     stable cached prefix as the ReAct conversation grows, and every later turn (and
-    the terminal report call that replays the trajectory) keeps seeing them."""
+    the terminal report call that replays the trajectory) keeps seeing them.
+
+    **The wire shape is each adapter's decision, not a contract of this layer.** These
+    are lightweight references — no pixels — and nothing here says whether an adapter
+    nests them inside the tool result or emits them as a following turn. The two are
+    not interchangeable and the right answer differs per vendor: Anthropic nests,
+    because a turn with an unresolved server-tool call rejects anything beside the
+    ``tool_result`` blocks; Alibaba cannot, because it types its tool output as a
+    required string. This docstring used to assert "an image turn adjacent to this
+    tool-result turn", which read as a design invariant when it was one adapter's
+    rendering choice."""
 
 
 class ToolResultMessage(BaseModel):

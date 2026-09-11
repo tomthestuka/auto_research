@@ -225,11 +225,20 @@ def test_a_complete_worker_report_has_no_problems():
 # ── F5f: figures never follow tool_result blocks in the same message ─────────
 
 
-def test_figures_ride_in_their_own_user_message_not_after_tool_results(tmp_path):
-    """Anthropic's prevention for the accidental empty turn is *"Never add text blocks
-    immediately after tool results"*, and `_figure_blocks` renders a caption (a text block) then
-    the image — so a figure-bearing tool result was producing exactly the shape that made slot
-    3's lead return 2 tokens and kill the run."""
+def test_figures_nest_inside_the_tool_result_not_after_it(tmp_path):
+    """A caption must not sit *beside* the tool results, in this message or a following one.
+
+    Anthropic's prevention for the accidental empty turn is *"Adding text blocks immediately
+    after `tool_result`"*, and `_figure_blocks` renders a caption (a text block) then the image —
+    so a figure-bearing tool result was producing exactly the shape that made slot 3's lead
+    return 2 tokens and kill the run (F5f's motivation, still pinned here).
+
+    F5f answered it with a following user message, which satisfies this rule and breaks another:
+    when the same assistant turn has an unresolved server-tool call, *"that message must contain
+    nothing except the `tool_result` blocks"*, and a second message is still "anything after".
+    That cost a run $42.11. Nesting the caption inside the result satisfies both, so this test now
+    pins the nested shape — the hazard it was written for is unchanged, and no sibling text block
+    is produced in either message position."""
     from auto_research.models.providers.anthropic import _to_anthropic_messages
     from auto_research.models.types import ToolResultMessage, ToolResultPart
     from auto_research.schemas import FigureRef
@@ -251,13 +260,13 @@ def test_figures_ride_in_their_own_user_message_not_after_tool_results(tmp_path)
 
     _system, msgs = _to_anthropic_messages([turn], plan=None)
 
-    # The tool-result message carries ONLY tool_result blocks.
-    result_msg = msgs[0]
-    assert {b["type"] for b in result_msg["content"]} == {"tool_result"}
-    # The figure rides in its own following user message.
-    assert len(msgs) == 2
-    assert msgs[1]["role"] == "user"
-    assert {b["type"] for b in msgs[1]["content"]} == {"text", "image"}
+    # The tool-result message carries ONLY tool_result blocks, and nothing follows it.
+    assert len(msgs) == 1
+    assert {b["type"] for b in msgs[0]["content"]} == {"tool_result"}
+    # The caption and the image are the result's own content, not siblings of it.
+    nested = msgs[0]["content"][0]["content"]
+    assert [b["type"] for b in nested] == ["text", "text", "image"]
+    assert nested[0]["text"] == "wrote 1 figure"
 
 
 def test_a_tool_result_with_no_figures_adds_no_extra_message():

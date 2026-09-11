@@ -127,11 +127,16 @@ def appendix_table_markdown(scores: list[TrialScore], key: dict[str, Any] | None
             + " |"
         )
     rows.append("")
-    rows.append(
-        "$^{a}$ Key value read off the reference's supplementary table by run `bf1e39e0` and "
-        "published in `main.tex`; marked because at least one later tree read that table "
-        "differently. `!` marks a unit mismatch, which is scored apart from a wrong value."
-    )
+    notes = []
+    if any(q.get("approximate") for q in answer_key["quantities"].values()):
+        # Emitted only when the key marks something, so the note can never describe a mark the
+        # table does not carry. Every value of the 2026-09-10 key is a verbatim table read.
+        notes.append(
+            "$^{a}$ Key value is approximate: read off a figure rather than quoted from the "
+            "reference's tables."
+        )
+    notes.append("`!` marks a unit mismatch, which is scored apart from a wrong value.")
+    rows.append(" ".join(notes))
     return "\n".join(rows)
 
 

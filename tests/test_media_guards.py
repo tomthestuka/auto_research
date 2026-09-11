@@ -94,6 +94,32 @@ def _turn_with(figures: list[FigureRef]) -> ToolResultMessage:
     )
 
 
+def _anthropic_image_blocks(messages: list[dict]) -> list[dict]:
+    """Every ``image`` block in an outgoing Anthropic request, at any depth.
+
+    A tool's figures ride NESTED inside their ``tool_result``'s ``content`` list, so a walker that
+    reads only a message's top-level blocks finds none of them — and an assertion written on that
+    walker reports a working guard as having dropped everything.
+    """
+    found: list[dict] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "image":
+                found.append(block)
+            elif block.get("type") == "tool_result" and isinstance(block.get("content"), list):
+                found.extend(
+                    nested
+                    for nested in block["content"]
+                    if isinstance(nested, dict) and nested.get("type") == "image"
+                )
+    return found
+
+
 def _dimensions(data: bytes) -> tuple[int, int]:
     from PIL import Image
 
@@ -285,12 +311,7 @@ def test_anthropic_adapter_resizes_a_many_image_request(tmp_path, monkeypatch):
 
     asyncio.run(AnthropicProvider().call(convo, cfg))
 
-    blocks = [
-        block
-        for message in _CaptureAnthropic.store["request"]["messages"]
-        for block in (message["content"] if isinstance(message["content"], list) else [])
-        if isinstance(block, dict) and block.get("type") == "image"
-    ]
+    blocks = _anthropic_image_blocks(_CaptureAnthropic.store["request"]["messages"])
     assert len(blocks) == 21
     for block in blocks:
         data = base64.b64decode(block["source"]["data"])

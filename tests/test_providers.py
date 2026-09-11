@@ -557,32 +557,175 @@ def _tool_turn_with_figure(fig):
     )
 
 
-def test_anthropic_tool_result_figure_rides_in_its_own_following_turn(tmp_path):
-    """A tool's figure renders in its OWN user turn, immediately after the tool_result turn.
+def test_anthropic_tool_result_figures_nest_and_nothing_sits_beside_them(tmp_path):
+    """A tool's figures ride NESTED inside their own ``tool_result``'s content, and nowhere else.
 
-    It used to ride in the same message. That is legal ("any text must come AFTER all tool
-    results") and it is also the arrangement Anthropic names as the cause of an accidental empty
-    response: *"Never add text blocks immediately after tool results"* — and `_figure_blocks`
-    emits a caption (a text block) before the image. Slot 3's lead had figures on its turns and
-    returned `output_tokens: 2`, which the loop read as a finished turn and the run died (F5f).
+    The property the $42 400 turns on is the second assertion: the user message holds exactly one
+    kind of block. Anthropic — *"that message must contain nothing except the `tool_result`
+    blocks"*, and *"Adding anything after the `tool_result` blocks in that user message, such as
+    text, ends the assistant turn; for a server tool Claude called directly, the request then
+    fails with a 400"*. F5f put the figures in a following user message, which is still "anything
+    after", and a worker died on `tool_search_tool_bm25 tool use with id srvtoolu_01PCDh… was
+    found without a corresponding tool_search_tool_bm25_tool_result block`.
 
-    Everything else is preserved: the figure still replays adjacent to the result that produced
-    it, still caches with the growing prefix, and still carries real bytes.
+    Nesting also keeps the rule F5f existed for — no text block sits *after* the results at
+    message level, so the 2-3-token empty turn is still avoided.
     """
     from auto_research.models.providers.anthropic import _to_anthropic_messages
 
     fig = _figure(tmp_path)
     _, msgs = _to_anthropic_messages([_tool_turn_with_figure(fig)])
 
-    # The tool-result turn carries ONLY tool_result blocks — nothing after them.
+    assert len(msgs) == 1, "a following message is 'anything after the tool_result blocks'"
+    assert msgs[0]["role"] == "user"
     assert {b["type"] for b in msgs[0]["content"]} == {"tool_result"}
-    # The figure is the next turn, still a user turn, still adjacent.
-    assert len(msgs) == 2
-    assert msgs[1]["role"] == "user"
-    images = [b for b in msgs[1]["content"] if b.get("type") == "image"]
-    assert len(images) == 1
-    assert images[0]["source"]["media_type"] == "image/png"
-    assert base64.b64decode(images[0]["source"]["data"]) == _PNG_BYTES  # real bytes loaded
+
+    nested = msgs[0]["content"][0]["content"]
+    assert [b["type"] for b in nested] == ["text", "text", "image"]
+    assert nested[0]["text"] == "wrote plot"  # the tool's own output is the first block
+    assert nested[-1]["source"]["media_type"] == "image/png"
+    assert base64.b64decode(nested[-1]["source"]["data"]) == _PNG_BYTES  # real bytes loaded
+
+
+def test_anthropic_tool_result_without_figures_is_unchanged(tmp_path):
+    """The no-figure path is byte-identical to before nesting, so the cached prefix is untouched.
+
+    This is most of the traffic, and a gratuitous reshape would break every cached prefix for a
+    case that has no figures to place.
+    """
+    from auto_research.models.providers.anthropic import _to_anthropic_messages
+    from auto_research.models.types import ToolResultMessage, ToolResultPart
+
+    turn = ToolResultMessage(
+        results=[ToolResultPart(tool_call_id="c1", name="read_file", content="15 degrees")]
+    )
+    _, msgs = _to_anthropic_messages([turn])
+    assert msgs == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "c1",
+                    "is_error": False,
+                    "content": "15 degrees",
+                }
+            ],
+        }
+    ]
+
+
+def test_anthropic_a_withheld_figure_keeps_its_caption_nested(tmp_path):
+    """A figure the media guard drops degrades to a NESTED caption, never a sibling text block.
+
+    Before nesting this was the one forbidden arrangement our own guard could produce with no
+    model involved: a bare caption block immediately after the tool results.
+    """
+    from auto_research.models.providers._media import MediaPlan, Resolved
+    from auto_research.models.providers.anthropic import _to_anthropic_messages
+
+    fig = _figure(tmp_path)
+    plan = MediaPlan(
+        {id(fig): Resolved(data=None, mime=fig.mime_type, note="withheld: over the per-image cap")}
+    )
+    _, msgs = _to_anthropic_messages([_tool_turn_with_figure(fig)], plan)
+
+    assert len(msgs) == 1
+    assert {b["type"] for b in msgs[0]["content"]} == {"tool_result"}
+    nested = msgs[0]["content"][0]["content"]
+    assert [b["type"] for b in nested] == ["text", "text"]
+    assert "withheld" in nested[-1]["text"]
+
+
+def test_anthropic_a_pending_server_tool_turn_with_figures_leaves_nothing_after_the_results(
+    tmp_path,
+):
+    """The full killed trajectory: a pending server-tool call, a client call, figures on the result.
+
+    This is the request shape of the 400, reproduced as the whole conversation rather than as a
+    lone tool-result turn — the assistant turn carries a `server_tool_use` with no matching result
+    block (the documented "not finished yet" state) beside a client `tool_use`. Under F5f the
+    figures became a following user message, which is *"anything after the `tool_result` blocks"*,
+    and the request failed naming the unresolved server tool. The invariant to hold forever:
+    **nothing follows the tool-result message, and it holds nothing but tool_result blocks.**
+    """
+    from auto_research.models.providers.anthropic import _to_anthropic_messages
+    from auto_research.models.types import (
+        ModelResponse,
+        ToolCall,
+        ToolResultMessage,
+        ToolResultPart,
+    )
+
+    fig = _figure(tmp_path)
+    pending = ModelResponse(
+        content="",
+        tool_calls=[ToolCall(id="toolu_client", name="plot", arguments={})],
+        # `provider_parts` is echoed verbatim by `_assistant_blocks`, so this is the array
+        # Anthropic itself emitted in that shape.
+        provider_parts=[
+            {"type": "thinking", "thinking": "...", "signature": "sig"},
+            {
+                "type": "server_tool_use",
+                "id": "srvtoolu_PENDING",
+                "name": "tool_search_tool_bm25",
+                "input": {"query": "ixpe polarization"},
+            },
+            {"type": "tool_use", "id": "toolu_client", "name": "plot", "input": {}},
+        ],
+    )
+    convo = [
+        ModelMessage(role="user", content="measure and plot"),
+        pending,
+        ToolResultMessage(
+            results=[
+                ToolResultPart(
+                    tool_call_id="toolu_client", name="plot", content="wrote plot", figures=[fig]
+                )
+            ]
+        ),
+    ]
+    _, msgs = _to_anthropic_messages(convo)
+
+    # The server_tool_use is replayed unpaired, exactly as received — we never invent a result
+    # for a `srvtoolu_` id ("Don't return a `tool_result` for the `srvtoolu_...` ID").
+    assistant = msgs[1]["content"]
+    assert [b["type"] for b in assistant] == ["thinking", "server_tool_use", "tool_use"]
+    assert not any(b.get("tool_use_id") == "srvtoolu_PENDING" for m in msgs
+                   for b in (m["content"] if isinstance(m["content"], list) else []))
+
+    # The continuation is the LAST message, holds only tool_result blocks, and the pixels are
+    # inside it. Any of those three failing is the 400.
+    assert len(msgs) == 3, f"nothing may follow the tool-result message, got {len(msgs)}"
+    assert {b["type"] for b in msgs[2]["content"]} == {"tool_result"}
+    nested = msgs[2]["content"][0]["content"]
+    assert sum(1 for b in nested if b["type"] == "image") == 1
+
+
+def test_anthropic_interleaves_a_caption_before_each_of_several_figures(tmp_path):
+    """Several figures alternate caption, image, caption, image — Anthropic's own labelling rule.
+
+    *"When sending several images, introduce each one with a short text label (`Image 1:`,
+    `Image 2:`, and so on) so you can refer to them by name"*. Only `image` blocks count toward
+    the >20-image threshold, so the labels are free.
+    """
+    from auto_research.models.providers.anthropic import _to_anthropic_messages
+    from auto_research.models.types import ToolResultMessage, ToolResultPart
+
+    figs = []
+    for i in range(3):
+        sub = tmp_path / f"sub{i}"
+        sub.mkdir()
+        figs.append(_figure(sub))
+    turn = ToolResultMessage(
+        results=[ToolResultPart(tool_call_id="c1", name="plot", content="3 panels", figures=figs)]
+    )
+    _, msgs = _to_anthropic_messages([turn])
+
+    nested = msgs[0]["content"][0]["content"]
+    assert [b["type"] for b in nested] == [
+        "text", "text", "image", "text", "image", "text", "image"
+    ]
 
 
 def test_anthropic_images_kwarg_loads_bytes(monkeypatch, tmp_path):

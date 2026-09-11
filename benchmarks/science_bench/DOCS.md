@@ -735,3 +735,39 @@ Nothing depends on this package.
   tools, saw its peer's figure, and flagged both the synthetic and the GPG-locked ObsIDs as
   unusable. Also added: a preflight check that the frozen answer key sits outside every read root
   and allow-listed root, verified in both directions.
+
+- **2026-09-10 — the answer key's four withheld band PDs were wrong, and the correction sharpens
+  the trap.** The key gave `May_PD_{2-3,3-4,4-6,6-8}keV` as 2.8/3.3/4.4/7.1 +/- 0.4/0.4/0.4/1.0.
+  Read off the reference PDF on disk (`pdftotext -layout`, p. 48), Krawczynski et al. 2022
+  Table S2 prints:
+
+      PD - sum [%]          3.5 +/- 0.3   3.5 +/- 0.3   4.7 +/- 0.3   5.8 +/- 0.8   4.0 +/- 0.2
+      PD - sum (XSPEC) [%]  3.7 +/- 0.3   3.6 +/- 0.3   4.7 +/- 0.3   5.6 +/- 0.8   3.9 +/- 0.2
+
+  The key's numbers match no row. **Which row is the comparator needed no judgement, because the
+  key already answers it:** its own broadband entries are that table's 2.0-8.0 cells —
+  `May_PD_2-8keV_PCUBE` is `PD - sum`'s 4.0 +/- 0.2 and `May_XSPEC_PD_polconst` is the XSPEC row's
+  3.9 +/- 0.2, both exact. So the four bands are `PD - sum`'s band cells. The old values are most
+  likely a figure read: their shared +/- 0.4 matches the 11-bin linear-fit rows, not any table row.
+  Corrected in all three artifacts (human ruling): the provenance-headed CSV under `papers/FANGZ/`,
+  this key (re-frozen, `source_sha256` re-hashed, `frozen: 2026-09-10`), and `main.tex`'s
+  `t:cygx1` with a caption note recording the correction and leaving the pipeline column untouched.
+  `approximate` is now **false on all fourteen**, so `within_tolerance_exact == within_tolerance`
+  for this key; the flag and the column stay as per-quantity properties a later key may need, and
+  `appendix_table_markdown` now emits the `$^{a}$` note only when the key actually marks something
+  (a note describing an absent mark is worse than no note).
+  **What moves, stated rather than buried.** No recovery count changes: all four rows are inside
+  3 sigma against either set, so attempt 6 stays 14/14 with `useful` true and the trap reproduced.
+  Aggregates do move — attempt 6 goes mean |z| 1.00 -> **1.178** and PD mean signed z
+  -1.39 -> **-1.672**, and its exact count 10/10 -> 14/14. Re-scoring is `$0` and deterministic
+  (`--score DIR`), so any published batch can be regenerated.
+  **A claim in the working notes was wrong and is corrected here:** they said the corrected rows
+  score +2.36/+1.63/+2.31/+0.80, so three would flip positive. Those are magnitudes; every delta is
+  negative (2.584<3.5, 2.873<3.5, 3.755<4.7, 4.986<5.8). The correction therefore makes the PD
+  deficit **more** coherent — negative in all four bands and broadband, at larger magnitude —
+  rather than introducing band-level scatter. `main.tex`'s prose was corrected with it: it claimed
+  "every PD value lies 1.3--2.3 sigma below", which was false under *both* keys (June PD is
+  0.25 sigma and the PD(E) slope 0.24 sigma), and now reads "all ten PD quantities lie below the
+  published value, by 0.2--2.4 sigma and by 1.6 sigma on average".
+  The free oracle did its job: `test_signed_z_matches_the_pipelines_own_comparison_tool` failed the
+  moment the CSV and the key disagreed, which is how a half-applied correction was caught.

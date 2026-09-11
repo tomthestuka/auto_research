@@ -42,12 +42,20 @@ def test_the_key_holds_exactly_the_fourteen_prescribed_labels(key):
     assert len(key["quantities"]) == 14
     assert key["useful_threshold_k"] == 10
     assert key["sigma_flag"] == 3.0
-    # Four band values are approximate and must stay marked: they are what one run read off the
-    # reference's supplementary table, and a later tree read it differently.
-    approximate = [n for n, q in key["quantities"].items() if q["approximate"]]
-    assert sorted(approximate) == [
-        "May_PD_2-3keV", "May_PD_3-4keV", "May_PD_4-6keV", "May_PD_6-8keV",
-    ]
+    # Corrected 2026-09-10: every value is a verbatim Table S2 read, so nothing is marked
+    # approximate. The four band PDs had carried a figure read (2.8/3.3/4.4/7.1 +/- 0.4) matching
+    # no row of that table; `PD - sum` is the comparator the key's own broadband entries already
+    # come from (its 2.0-8.0 cell is 4.0 +/- 0.2, which is `May_PD_2-8keV_PCUBE`).
+    assert [n for n, q in key["quantities"].items() if q["approximate"]] == []
+    for label, expected in (
+        ("May_PD_2-3keV", (3.5, 0.3)),
+        ("May_PD_3-4keV", (3.5, 0.3)),
+        ("May_PD_4-6keV", (4.7, 0.3)),
+        ("May_PD_6-8keV", (5.8, 0.8)),
+    ):
+        quantity = key["quantities"][label]
+        assert (quantity["paper_value"], quantity["paper_error"]) == expected, label
+        assert "PD - sum" in quantity["paper_source"], label
 
 
 def test_the_key_matches_the_request_the_batch_dispatches(key):
@@ -241,7 +249,9 @@ def test_attempt_sixes_report_scores_as_a_full_recovery_with_the_trap(tmp_path, 
     assert scored.terminal == "accepted"
     assert scored.quantities_reported == 14
     assert scored.within_tolerance == 14
-    assert scored.within_tolerance_exact == 10
+    # All fourteen key values are verbatim table reads since 2026-09-10, so the exact subset is
+    # all of them. It was 10 while the four band PDs carried a figure read.
+    assert scored.within_tolerance_exact == 14
     assert scored.useful
     # The trap: every PD low, every PA at zero. This is the pattern, not a scalar.
     assert scored.pd_mean_signed_z is not None and scored.pd_mean_signed_z < -1.0
@@ -355,14 +365,29 @@ def test_the_tree_table_has_one_row_per_tree_and_states_n():
     assert "| b | 1 |" in table
 
 
-def test_the_appendix_table_lists_every_quantity_and_marks_the_approximate_ones(tmp_path, key):
+def test_the_appendix_table_marks_only_what_the_key_marks(tmp_path, key):
+    """The mark and its note appear together, or neither appears.
+
+    A note describing a mark the table does not carry is worse than no note: it tells a reader
+    four values are approximate when the key says none are.
+    """
+    import json as _json
+
     report = tmp_path / "report.tex"
     report.write_text(ATTEMPT6.read_text(encoding="utf-8"), encoding="utf-8")
     scored = score_mod.score_trial(_record(), report=report, key=key)
+
     table = report_mod.appendix_table_markdown([scored], key)
     for label in key["quantities"]:
         assert label in table
-    assert "$^{a}$" in table, "approximate key values must be marked"
+    # The shipped key marks nothing (2026-09-10 correction).
+    assert "$^{a}$" not in table
+
+    marked = _json.loads(_json.dumps(key))
+    marked["quantities"]["May_PD_6-8keV"]["approximate"] = True
+    table = report_mod.appendix_table_markdown([scored], marked)
+    assert "May_PD_6-8keV$^{a}$" in table
+    assert "$^{a}$ Key value is approximate" in table
 
 
 def test_the_report_refuses_to_imply_an_estimate():

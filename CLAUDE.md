@@ -801,6 +801,19 @@ A **living registry** of code that is intentionally incomplete, deprecated, or b
 gaps stay visible rather than getting rediscovered the hard way. Distinct from §12 (planned-but-
 unbuilt *features*): these exist in the tree **today**. Append as new ones land; delete when closed.
 
+- **`review_report` returns the whole citable catalogue, every call, by value.**
+  `execute_review_report` attaches every figure the agent may cite (`_catalog_menu` over the
+  accumulated per-source catalog), it is budget-free (`free_tools`), and each result then replays
+  inline on every later turn of that conversation. Measured on batch `20260910T022054Z`: one
+  result carried **8 images**; a single request reached **18 image blocks** (slot 4's lead), two
+  short of Anthropic's 20-block threshold where the per-image dimension cap tightens to 2000 px —
+  the boundary that killed run `8c75990e` at 21 blocks and $116.10. It scales with the *run*, not
+  the call. Worst on OpenAI, which has no context-editing valve, so nothing clears old tool
+  results there. Nothing bounds the image *count*: `max_images=100` and the byte budget evict
+  oldest-first only when bytes bite, so the guard degrades quality as the count grows rather than
+  capping it. Human ruling 2026-09-10: **leave it**. Citation is by `[source:index]` handle read
+  from the *text* menu, so the pixels serve judgement only — a `show`-on-demand argument would
+  bound it without touching addressing, if it is ever taken up.
 - **`retrieval.vector_search` / `vector_search_paths`** — `NotImplementedError` Phase-2 stub
   (ChromaDB RAG backend deferred — §12).
 - **Librarian IO search-iteration / `evaluate_search_results()`** — Phase-1 stubs; the latter
@@ -1086,6 +1099,35 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   `qwen3_8_max` co-lead cited the file verbatim in two catches (08-27 swapclean). Records hold no
   tool trajectories, so silent use by other legs cannot be excluded. **Open: re-run the swapfix
   legs, or exclude the 20 entries with the reason stated.**
+- **`/steer` injects a user turn after tool results — the same defect class as A1, unfixed.**
+  `_react` drains a human steer into a `ModelMessage(role="user", …)` at the top of every
+  iteration, including the one immediately after a tool result. On Anthropic, if that tool result
+  answered a turn carrying an unresolved `server_tool_use`, the steer is "anything after the
+  `tool_result` blocks" and produces the identical 400. The comment at `roles.py:382` asserts the
+  opposite — *"the images= path already appends user turns after tool results, so this is safe"* —
+  which is the same reasoning that produced F5f. **Unreachable in an unattended batch**: `/steer`
+  needs an always-listening connector (Telegram/Slack) and a batch runs `human_channel=none`. A
+  fix needs the loop to hold a steer for one turn when the preceding assistant turn has an
+  unresolved server-tool call, which is a provider-specific fact reaching a provider-neutral loop.
+- **The DeepSeek adapter's stated reason for withholding images is stale.** Its module docstring
+  says "The Responses endpoint is text-only. Its API reference lists `deepseek-v4-flash` as the
+  only accepted model and states that image/file inputs are replaced with placeholder text."
+  Read 2026-09-10, the current reference says the opposite: `output` is "either a plain string or a
+  list of `input_text` / `input_image` content parts", "`deepseek-flash` processes `input_image`
+  parts as real images", and images are accepted "in `user` / `developer` message items and in the
+  output of `function_call_output` / `custom_tool_call_output` items", with `system`/`assistant`
+  returning 400. `images_accepted=False` may stand on the §6 policy ground (and on the operational
+  one: DeepSeek holds only the coder and co-lead seats, neither of which is sent figures), but the
+  *justification* is now wrong — the same shape as the 2026-08-25 correction, where the exclusion
+  was right and its reason was not.
+- **`deepseek-v4-flash` is a retired model name.** DeepSeek's pricing page, read 2026-09-10: "The
+  legacy names `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are still accepted, but the
+  corresponding models **have been retired**, their requests are served by the DeepSeek-V4.1-Flash
+  model and billed at the Flash price." That name is the pinned coder in `benchmarks/science_bench/
+  arms.CODER` and in `config/models.yaml`, so the coder seat's model changed under a stable alias
+  at some point relative to the published batches. Separately and later: "From 12:00 Beijing Time
+  on September 14, 2026 … requests to `deepseek-v4-pro` will all be routed to V4.1 Flash" — no
+  config or arm names `deepseek-v4-pro`, so that one cannot reach us.
 
 ## Changelog
 
@@ -2310,3 +2352,63 @@ history. Token-level preservation of the second pass was checked mechanically, n
   change: every skip is an env-gated live test, and that baseline was measured in a shell where the
   live flags were set, so ~18 live tests ran there instead of skipping. Checked rather than assumed,
   because a config edit that silently quiets tests is the config-flip lesson's exact shape.
+
+- 2026-09-10 — **A tool's figures nest inside their `tool_result` (Anthropic), and the answer key's
+  four withheld band values were wrong.** Two separate units of work, kept separate.
+  **A1.** A run died after 3h34m and $42.11, 4 tools committed and a finished worker report in
+  hand, on `400 … tool_search_tool_bm25 tool use with id srvtoolu_01PCDhG72zkmP2EY5L4D1nmX was
+  found without a corresponding tool_search_tool_bm25_tool_result block`. Outside the transient
+  class, so one attempt, no retry, and it killed the run rather than the worker. Verified against
+  the artifact: `prompts.jsonl` line 279 holds that exact id unpaired beside `tool_use
+  review_report`, with 4 figures on the result; **1 of 6** server-tool-bearing turns in the leg.
+  **Three documented rules bind, all at the message top level, and F5f answered one in isolation:**
+  a text block *beside* the results invites the 2-3-token empty turn (which killed slot 3); with an
+  unresolved server-tool call *"that message must contain nothing except the `tool_result`
+  blocks"*, and a following message is still *"anything after"*; and several images want a label
+  each. Nesting the caption inside the result satisfies all three. New
+  `anthropic._tool_result_block`; the **no-figure path stays a bare string**, byte-identical, so
+  the common cached prefix is untouched. It also fixes a shape no model asked for — a figure the
+  guard *withholds* used to degrade to a bare caption right after the results.
+  **Scope was decided per vendor from each vendor's own reference, and two facts settled it**:
+  only Anthropic and OpenAI set `supports_tool_search=True`, so the pending-server-tool hazard can
+  only arise there; and Alibaba types `function_call_output.output` as a required string, so its
+  separate-item shape is a contract, not a workaround. **OpenAI is deliberately unchanged** — its
+  array form is real but it publishes no counterpart rule, no worked example, and one measured leg
+  pushed 548 requests through the current shape (one carrying **18 image blocks**) without a
+  failure. No `_responses.py`/`openai.py` change. Google excluded (human ruling; also [I8], and its
+  nesting is a different, Gemini-3-only mechanism that cannot carry a caption). Per-vendor table
+  with citations in `models/DOCS.md`.
+  **LIVE-VERIFIED**: turn 1 returned `['thinking', 'server_tool_use', 'tool_use']` — the
+  precondition itself — and the figure-bearing continuation was accepted. The assertion **reads the
+  model's answer** (each panel a flat fill in a colour its caption never names) rather than
+  counting tokens, on the human's call; the reply named both colours and showed the pending search
+  resolving. One request, three properties. Two process notes: the token-count version it replaced
+  needed all *three* input classes summed (a cold `cache_prefix` request bills the whole payload as
+  `cache_write_tokens` — 2 uncached against ~11,491 cache-write here), and
+  `test_live_tool_search._sent` still carries that omission; and **the full suite is what caught a
+  second test pinning the old shape** (`test_turn_end.py`), which the three obvious suites did not
+  touch. Suite 1419 → 1421 non-live, 430 benchmark, all green.
+  **A5.** The key's `May_PD_{2-3,3-4,4-6,6-8}keV` were 2.8/3.3/4.4/7.1 +/- 0.4/0.4/0.4/1.0, which
+  match no row of Krawczynski et al. 2022 Table S2 (read off the PDF on disk: `PD - sum` gives
+  3.5/3.5/4.7/5.8 +/- 0.3/0.3/0.3/0.8). **Which row is the comparator needed no judgement, because
+  the key already answers it** — its own broadband entries are that table's 2.0-8.0 cells, exactly
+  (4.0 +/- 0.2 from `PD - sum`, 3.9 +/- 0.2 from the XSPEC row). The old values are most likely a
+  figure read: their shared +/- 0.4 matches the 11-bin linear-fit rows and no table row. Corrected
+  in all three artifacts per human ruling — the CSV, the key (re-frozen, re-hashed,
+  `approximate: false` on all fourteen), and `main.tex`'s `t:cygx1` with a caption note; the
+  pipeline column is untouched and the paper builds at 18 pages with **zero** overfull boxes.
+  No recovery count moves (attempt 6 stays 14/14, `useful`, trap reproduced); aggregates do —
+  mean |z| 1.00 → **1.178**, PD mean signed z -1.39 → **-1.672**, exact 10/10 → 14/14.
+  **A working-note claim was wrong and is corrected**: it said three rows would flip to positive z;
+  those were magnitudes, every delta is negative, so the correction makes the PD deficit *more*
+  coherent, not less. `main.tex`'s prose said "every PD value lies 1.3--2.3 sigma below", false
+  under *both* keys (June PD 0.25 sigma, the PD(E) slope 0.24 sigma), now "all ten PD quantities
+  lie below the published value, by 0.2--2.4 sigma and by 1.6 sigma on average".
+  **The half-applied state was caught by the free oracle**, not by inspection:
+  `test_signed_z_matches_the_pipelines_own_comparison_tool` failed the moment the CSV and the key
+  disagreed — `papers/` is gitignored, so a repo reset reverted the tracked key and left the
+  untracked paper corrected.
+  **Process, recorded because it was a real failure of mine:** the first attempt at this work
+  landed edits across eleven files without an agreed plan, on the strength of answers to scoping
+  questions. Answers to scoping questions are inputs to a plan, not consent to one (§3, first hard
+  rule). The work was reset and redone from an approved plan.
