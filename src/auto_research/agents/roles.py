@@ -15,15 +15,14 @@ from auto_research.config_paths import orchestration_yaml
 from auto_research.agents.prompts import PromptRole, load_prompt
 from auto_research.agents.react import (
     TURN_END_TOOL,
-    ADJUDICATE_STAGE,
     AUTHOR_CHAIN_TOOL,
-    AUTHOR_STAGE,
-    DECIDE_STAGE,
     DRIVE_CODER_TOOL,
     EDIT_REPORT_TOOL,
-    HOLD_AUTHORING_TOOL,
-    LEAD_CYCLE_TERMINALS,
     LEAD_FORM_TOOLS,
+    LEAD_REPORT_FIELDS,
+    LEAD_STATUS_VALUES,
+    WORKER_REPORT_FIELDS,
+    WORKER_STATUS_VALUES,
     LeadCycle,
     LeadCycleOutcome,
     MonitorToolProvider,
@@ -32,6 +31,7 @@ from auto_research.agents.react import (
     RESPOND_TO_REVIEW_TOOL,
     ReadOnlyToolProvider,
     ReportWorkspace,
+    lead_turn_problems,
     SUBMIT_TOOL,
     SandboxToolProvider,
     SourceToolProvider,
@@ -315,6 +315,7 @@ class AgentRole:
         cap: int,
         images: Sequence[FigureRef] = (),
         on_result=None,
+        share_messages: bool = False,
         free_tools: frozenset[str] = frozenset(),
         absolute_cap: int | None = None,
         terminal_tools: frozenset[str] = frozenset(),
@@ -363,7 +364,11 @@ class AgentRole:
         stable system+tools prefix cached so only the growing tail is re-sent.
         ``on_result(call, outcome)`` is an optional async hook (monitor/memory).
         """
-        messages: list = list(seed_messages)
+        # Normally a copy: a caller's seed is its own. `share_messages` hands the loop the
+        # caller's actual list instead, which is what lets the lead's chain driver drop a finished
+        # link's coding transcript from the LIVE trajectory (A7). The alternative was a nested
+        # per-link loop, and that is the topology whose only exits were whole-cycle terminals.
+        messages: list = seed_messages if share_messages else list(seed_messages)
         figures: list[FigureRef] = []
         documents: list[DocumentRef] = []
         seen_docs: set[str] = set()
@@ -376,20 +381,59 @@ class AgentRole:
         budget_used = 0
         iteration = 0
         silent_turns = 0  # consecutive tool-call-free turns nudged through (F5b)
+        # Injected turns waiting for a legal boundary (A2). Anything the harness wants to say to
+        # the model mid-loop lands here first — a human steer, and from B onward a background
+        # coder event — rather than being appended wherever the code happened to be.
+        injections: list[tuple[str, str]] = []  # (kind, text)
         while budget_used < budget_cap and iteration < absolute_ceiling:
-            # Cooperative HITL steer (§12): before the next model turn, inject any human steer for
-            # this role. A no-op when run_control is unset. A steer rides as a user turn (the
-            # images= path already appends user turns after tool results, so this is safe).
-            # A /stop is NOT read here: it cancels the run task outright (see
-            # ``RunControl.interrupt``), so there is nothing for this loop to notice.
+            # Cooperative HITL steer (§12): before the next model turn, collect any human steer
+            # for this role. A no-op when run_control is unset. A /stop is NOT read here: it
+            # cancels the run task outright (see ``RunControl.interrupt``), so there is nothing
+            # for this loop to notice.
             if self.run_control is not None:
                 for steer in self.run_control.drain_steer(self.agent_key):
-                    messages.append(ModelMessage(role="user", content=f"[Human steer] {steer}"))
+                    injections.append(("steer", f"[Human steer] {steer}"))
+            # B4: the coder runs beside this loop, so when it stops the lead is TOLD rather than
+            # having to poll. Same queue and the same hold rule as a human steer — a pushed event
+            # is exactly what made the A2 race reachable, so it goes through the same gate.
+            coder_note = _coder_event(tools)
+            if coder_note is not None:
+                injections.append(("coder_event", coder_note))
+            # The coder's own questions, collected at the same boundary and under the same hold
+            # rule. `ask_lead` parks them and returns "delivered." at once; this is where they
+            # enter the lead's conversation — the one that wrote the brief being asked about.
+            for question in _coder_questions(tools):
+                injections.append(("coder_question", question))
+            # ONE drain, here, and only at a legal boundary. An injected user turn is legal after
+            # a COMPLETE assistant turn; it is not legal after one that left a provider-executed
+            # tool call unresolved, where Anthropic documents that the following message "must
+            # contain nothing except the `tool_result` blocks" and that anything after them ends
+            # the turn — the 400 that killed run 8c75990e at $42.11 with 4 tools committed.
+            #
+            # So when the turn we are answering has an unresolved server tool, everything queued
+            # is HELD for one iteration. Nothing is dropped; delivery moves to the next boundary,
+            # which the resolving turn provides. The previous code appended in two places (here,
+            # and again mid-batch right after the tool results), neither of which checked.
+            held = _last_turn_has_unresolved_server_tool(messages)
+            if injections and not held:
+                for kind, text in injections:
+                    messages.append(ModelMessage(role="user", content=text))
                     await self._record(
-                        f"{self.role}.{action}.steer", level=3,
-                        summary=f"{self.role} received a human steer",
-                        data={"message": _cap_text(steer, _event_arg_cap())},
+                        f"{self.role}.{action}.{kind}", level=3,
+                        summary=f"{self.role} received a human steer"
+                        if kind == "steer" else f"{self.role} was told: {text[:60]}",
+                        data={"message": _cap_text(text, _event_arg_cap())},
                     )
+                injections.clear()
+            elif injections:
+                await self._record(
+                    f"{self.role}.{action}.injection_held", level=4,
+                    summary=(
+                        f"{self.role} held {len(injections)} injected turn(s) — the previous "
+                        "turn has an unresolved server-tool call"
+                    ),
+                    data={"held": len(injections), "kinds": sorted({k for k, _ in injections})},
+                )
             response = await self.model.call(
                 messages,
                 tools=tools.tool_definitions(),
@@ -438,6 +482,28 @@ class AgentRole:
                 # appended to a tool-result turn, which is the arrangement Anthropic names as the
                 # cause of the empty response in the first place.
                 messages.append(response)
+                if response.has_unresolved_server_tool:
+                    # The one case where the nudge itself is the hazard (A2). `paused` is the
+                    # provider's server-side tool loop hitting its iteration limit, and the turn
+                    # it returns may carry a server call with no result — the documented
+                    # continuation is "send the assistant content back to continue", as-is. A user
+                    # message appended here is "a block added after the results", which ends the
+                    # turn and strands the call. So: replay the turn and say nothing.
+                    #
+                    # Measured dead at the time of writing — 184 silent turns across 221 runs,
+                    # `stop == "end_turn"` on every one, zero `paused` ever — and guarded anyway,
+                    # because the state becomes reachable the day any hosted vendor tool is
+                    # declared, and these are the lines that would have to change.
+                    await self._record(
+                        f"{self.role}.{action}.paused_resend", level=4,
+                        summary=(
+                            f"{self.role} paused mid-server-tool; re-sending the turn as-is "
+                            "with no continuation message"
+                        ),
+                        data={"stop": response.stop, "iteration": iteration},
+                    )
+                    iteration += 1
+                    continue
                 messages.append(ModelMessage(role="user", content=nudge))
                 continue
             silent_turns = 0
@@ -526,16 +592,13 @@ class AgentRole:
                 if self.run_control is not None:
                     batch_steers.extend(self.run_control.drain_steer(self.agent_key))
             messages.append(ToolResultMessage(results=result_parts))
-            for steer in batch_steers:
-                # Ordered after the tool results (assistant → tool results → user), so the turn
-                # sequence stays valid for every provider.
-                messages.append(ModelMessage(role="user", content=f"[Human steer] {steer}"))
-                await self._record(
-                    f"{self.role}.{action}.steer",
-                    level=3,
-                    summary=f"{self.role} received a human steer (mid-batch)",
-                    data={"message": _cap_text(steer, _event_arg_cap())},
-                )
+            # Queued rather than appended here (A2). This drain used to write a user turn
+            # immediately after the tool results it had just built, which is the one position the
+            # provider forbids when the assistant turn being answered left a server tool
+            # unresolved. It now joins the single top-of-iteration drain, which runs after the
+            # hold check — and by then this batch's results are complete, so an injected turn can
+            # never split a `tool_use` from its `tool_result`.
+            injections.extend(("steer", f"[Human steer] {steer}") for steer in batch_steers)
             # Budget accounting: an iteration consumes budget unless EVERY tool it called is
             # free (e.g. plan_and_debate). Free-only iterations advance `iteration` (so the
             # absolute backstop still bounds them) but not `budget_used`.
@@ -663,10 +726,26 @@ class ReviewerAgent(AgentRole):
             ModelMessage(role="system", content=self.prompt),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
-        messages, _, docs = await self._react(
-            seed_messages=seed, tools=self.tools, action="review",
-            cap=_react_loop_cap(), images=images,
-        )
+        # A9: the investigation ends on an explicit signal, not on silence. Without a terminal
+        # tool `_continuation_for` returns None immediately, so an EMPTY or TRUNCATED reviewer
+        # turn reads as "finished investigating" — the F5 defect class that killed slot 3, and
+        # measured here: 17 of the 184 silent turns across 221 runs are this loop ending that way.
+        #
+        # The validator has nothing to check, and says so rather than pretending: the reviewer's
+        # material is the verdict composed AFTER this loop, so there is no artifact to validate
+        # yet. What `turn_end` buys is the classification — a turn that stopped by accident is
+        # continued, a turn that meant to stop says so.
+        previous_validator = getattr(self.tools, "turn_end_validator", None)
+        self.tools.turn_end_validator = lambda: []
+        try:
+            messages, _, docs = await self._react(
+                seed_messages=seed, tools=self.tools, action="review",
+                cap=_react_loop_cap(), images=images,
+                free_tools=frozenset({TURN_END_TOOL}),
+                terminal_tools=frozenset({TURN_END_TOOL}),
+            )
+        finally:
+            self.tools.turn_end_validator = previous_validator
         return await self._call_over_messages(
             messages, ReviewVerdict, action="review", images=images, documents=docs,
             tools=self.tools,
@@ -1249,11 +1328,24 @@ class AnalystWorkerAgent(AgentRole):
         self._last_report = report
         return report
 
+    #: Which report fields this role may write, and which statuses it may declare (A3). One report
+    #: class serves the worker and the lead; the SURFACE is what keeps them apart, so it is named
+    #: on the role rather than defaulted in the shared builder below.
+    report_fields: tuple[str, ...] = WORKER_REPORT_FIELDS
+    report_status_values: tuple[str, ...] = WORKER_STATUS_VALUES
+
     def _make_report_workspace(self) -> ReportWorkspace | None:
         """Build this round's report workspace (V-4), or None when no report dir is wired.
 
         The report dir is the agent's working folder (``report_dir``, else ``memory_path.parent``);
         the per-round JSONL path is derived from role + model + the monotonic debate round.
+
+        The surface comes from the ROLE (``report_fields`` / ``report_status_values``). It used to
+        default to the worker's here for every caller, which silently denied the lead the decision
+        fields its whole contract rests on — found live by a lead that said so in its own report:
+        *"the schema I am given has no rework field, so the decision is carried in prose."* A
+        decision carried in prose is a decision the harness cannot act on, which is the exact
+        failure class A3 exists to remove.
         """
         report_dir = self.report_dir or (
             self.memory_path.parent if self.memory_path is not None else None
@@ -1271,6 +1363,8 @@ class AnalystWorkerAgent(AgentRole):
             catalog=self._figure_catalog,
             own_source="self",
             prior_report=self._last_report,
+            prose_fields=self.report_fields,
+            status_values=self.report_status_values,
         )
 
 
@@ -1289,17 +1383,23 @@ _CYCLE_FREE_TOOLS: frozenset[str] = frozenset(
 
 
 def _cycle_instruction(cycle: LeadCycle, reports: Sequence[Any], rounds_left: int) -> str:
-    """The one instruction that opens the cycle: what to settle, and which form settles it.
+    """The one instruction that opens the cycle: what the turn is for, and how it ends.
 
-    Per-form detail lives in the form descriptions the model reads beside the schema, so this
-    stays short — it names the stage the cycle opens at and the forms that leave it.
+    Short on purpose — each tool's own description says what it needs, which is the channel a
+    Pydantic ``#`` comment never reached and whose absence killed a launch at $19.43.
     """
     lines = [
-        "This is your turn on the analysts' work. You investigate as long as you need "
-        "(read_file, list_dir, web_search, data_catalog) and end the turn by FILING A FORM — "
-        "the form you pick is your decision, and its own description says what it needs.",
+        "This is your turn on the analysts' work. Investigate as long as you need (read_file, "
+        "list_dir, web_search, data_catalog), then write YOUR REPORT with edit_report — your "
+        "report is your decision — check it with review_report, and end the turn with turn_end. "
+        "The harness checks the report before accepting and tells you exactly what is missing, "
+        "so a rejection is a fix, not a failure.",
+        "Set rework=true in the report to send the analysts back for one more round, saying why "
+        f"(rationale) and what to look at (what_to_probe) — {rounds_left} round(s) still "
+        "allowed. Leave rework=false and the report IS the analysis result: summary, findings "
+        "and a declared status.",
     ]
-    if cycle.stage == DECIDE_STAGE:
+    if cycle.authoring_enabled:
         raised = [
             r.tool_request.proposed_tool_name
             for r in reports
@@ -1307,39 +1407,19 @@ def _cycle_instruction(cycle: LeadCycle, reports: Sequence[Any], rounds_left: in
         ]
         lines.append(
             "A worker reports the toolkit lacks capability the analysis needs "
-            f"({', '.join(raised) or 'see the reports'}). Settle that first: read the target "
-            "lib/ source, then file author_chain with the ordered chain to write, or "
-            "hold_authoring when the request resolves without new code. Judging the analysts "
-            "comes after."
-        )
-    else:
-        lines.append(
-            "Judge the analysts' work: write your report with edit_report (citing figures by "
-            "their [source:index] handle), check it with review_report, and file it with "
-            "submit_adjudication — or send the analysts back with request_another_round "
-            f"({rounds_left} round(s) still allowed)."
+            f"({', '.join(raised) or 'see the reports'}). Read the target lib/ source first, "
+            "then brief the ordered chain with author_chain — one link is one capability is one "
+            "commit. Briefing does not end your turn: the first coding session opens, you steer "
+            "it with drive_coder and submit_for_review, and when a link finishes the next one "
+            "opens automatically. A link that cannot be made mergeable simply ends and the chain "
+            "moves on; you decide when to stop and write your report."
         )
     lines.append(
-        "submit_terminal_report is open at every stage: an honest stop is a correct outcome "
-        "with no quality penalty. Report real results, or report none — never fabricate a "
-        "result to fill a gap."
+        "An honest stop is a correct outcome with no quality penalty: report real results, or "
+        "report none — never fabricate a result to fill a gap."
     )
     return " ".join(lines)
 
-
-def _stage_note(what_happened: str, cycle: LeadCycle) -> str:
-    """A harness-voiced user turn marking a stage boundary, with the next step named.
-
-    Written in the harness's own voice (a ``user`` turn) rather than as an assistant turn: a
-    synthesized assistant turn would put words in the model's mouth in the durable record, which
-    is the shape rejected on 2026-09-01.
-    """
-    return (
-        f"[{what_happened}] Judge the analysts' work now: write your report with edit_report "
-        "(citing figures by their [source:index] handle), check it with review_report, and file "
-        "it with submit_adjudication — or send the analysts back with request_another_round while "
-        f"the cap allows ({cycle.rounds_left} round(s) left). submit_terminal_report stays open."
-    )
 
 
 def _drop_coding_middle(messages: list, mark: int) -> list:
@@ -1408,10 +1488,182 @@ def _authoring_result(session: Any, spec: Any) -> MergeFlowResult:
     )
 
 
+class _ChainDriver:
+    """Owns the authoring chain's sessions for one cycle, advancing on a tool result (A7).
+
+    The lead's loop never ends to move between links. When a link finishes — committed, or its CI
+    budget spent — the handler calls :meth:`advance`, which closes that session, drops its coding
+    transcript, and opens the next link's session, returning the sentence the lead reads next.
+
+    Every session lifecycle and every git operation lives here, in Python, exactly as before
+    (§9.9): the model asks for the next link, it never builds one. ``drive_authoring`` is
+    untouched and still owns its own single session — it backs the paper's published authoring
+    measurements, so its path stays byte-identical.
+    """
+
+    def __init__(
+        self,
+        *,
+        lead: "AnalystLeadAgent",
+        provider: Any,
+        cycle: LeadCycle,
+        outcome: LeadCycleOutcome,
+        messages: list,
+        toolkit_root: Path | None,
+        worktree_base: Path | None,
+        direct_branch: str | None,
+        colead: Any | None,
+        human_handler: Any | None,
+        coder: Any | None,
+        allow_correlated_review: bool,
+    ) -> None:
+        self.lead = lead
+        self.provider = provider
+        self.cycle = cycle
+        self.outcome = outcome
+        self.messages = messages
+        self.toolkit_root = toolkit_root
+        self.worktree_base = worktree_base
+        self.direct_branch = direct_branch
+        self.colead = colead
+        self.human_handler = human_handler
+        self.coder = coder
+        self.allow_correlated_review = allow_correlated_review
+        self.index = 0            # links opened so far
+        self.session: Any = None  # the live one, if any
+        self.spec: Any = None
+        self.mark = 0             # where the current link's coding transcript starts
+
+    async def advance(self) -> str:
+        """Close the current link and open the next; return what to tell the lead."""
+        await self._close_current()
+        specs = list(self.cycle.brief.tool_specs) if self.cycle.brief is not None else []
+        if self.index >= len(specs):
+            return (
+                "The chain is finished — every link you briefed has been attempted. Write your "
+                "report with edit_report and call turn_end. You may also brief a new chain with "
+                "author_chain if the analysis still needs a capability and credits remain "
+                f"({self.outcome.author_budget} left)."
+            )
+        if self.outcome.author_budget <= 0:
+            return (
+                "No author credits remain, so no further link can be opened. Write your report "
+                "with edit_report — say what capability is still missing — and call turn_end. An "
+                "honest stop is a correct outcome with no quality penalty (§9.6)."
+            )
+        spec = specs[self.index]
+        self.index += 1
+        self.outcome.author_budget -= 1
+        try:
+            await self._open(spec)
+        except Exception as exc:  # noqa: BLE001 — an unopenable link is a result, not a crash
+            # A dirty authoring branch is the known case (ToolkitBranchUnclean); anything else
+            # that stops a session from opening is treated the same way, because an F6-class
+            # crash here would kill a run that still has a report to write.
+            await self.lead._record(
+                "analyst.tool.branch_unclean", level=2,
+                summary=f"Could not open a coding session ({spec.proposed_tool_name})",
+                data={"error": repr(exc)},
+            )
+            result = MergeFlowResult(
+                tool_spec_id=getattr(spec, "id", None) or spec.proposed_tool_name,
+                status="failed",
+                reason=f"the coding session could not be opened: {exc}",
+            )
+            self.outcome.authored.append(result)
+            await self.lead._record(
+                "analyst.tool.authored", level=5,
+                summary=f"Tool authoring failed: {spec.proposed_tool_name}",
+                data={"result": result.model_dump(mode="json")},
+            )
+            return await self.advance()
+        return (
+            f"Coding session {self.index} of {len(specs)} is open on "
+            f"'{spec.proposed_tool_name}'. The coder has your brief and is working on it now — "
+            "you keep your turn. Call check_coder for its narration when you want it; meanwhile "
+            "read the library it is extending, or plan the next link. Steer it with drive_coder "
+            "and finish it with submit_for_review, which waits for the coder to stop. If it "
+            "cannot be made mergeable, let its submissions run out and the next link opens "
+            "automatically — an honest failure is correct."
+        )
+
+    async def _open(self, spec: Any) -> None:
+        from auto_research.sandbox.merge_flow import build_authoring_session
+
+        session = build_authoring_session(
+            spec,
+            lead=self.lead,
+            toolkit_root=self.toolkit_root,
+            worktree_base=self.worktree_base or self.toolkit_root,
+            colead=self.colead,
+            human_handler=self.human_handler,
+            coder=self.coder,
+            allow_correlated_review=self.allow_correlated_review,
+            direct_branch=self.direct_branch,
+            monitor=self.lead.monitor,
+        )
+        await session.connect()
+        if self.lead.run_control is not None:
+            self.lead.run_control.authoring_session = session
+        self.provider.authoring_session = session
+        self.session, self.spec = session, spec
+        self.cycle.session_open = True
+        self.mark = len(self.messages)
+        # The brief goes to the coder in the BACKGROUND, so filing `author_chain` returns at once
+        # and the lead keeps its turn — which is what §9.3 promises and what this line used to
+        # break. Measured 2026-09-12: a blocking seed held the lead still for 263 s, and because
+        # no background task existed `check_coder` reported "you have not sent the coder anything
+        # yet" to a lead whose coder had just worked for four minutes — advice that would have had
+        # it re-send the whole brief. The first turn's narration was discarded here too, so the
+        # lead re-read five files by hand to learn what its own coder had already told it.
+        # A session predating B (a benchmark's, a test double's) has no `start_drive`; it keeps
+        # the blocking call, as `execute_drive_coder` does for the same reason.
+        if hasattr(session, "start_drive"):
+            session.start_drive(session.initial_message)
+        else:
+            await session.drive(session.initial_message)
+
+    async def _close_current(self) -> None:
+        """Record the finished link's result, drop its coding middle, release the session."""
+        if self.session is None:
+            return
+        session, spec = self.session, self.spec
+        self.session = self.spec = None
+        self.cycle.session_open = False
+        result = _authoring_result(session, spec)
+        self.outcome.authored.append(result)
+        if result.status == "committed":
+            self.outcome.committed += 1
+            # Only a committed link's transcript goes (B6): a rejection or a spent budget has to
+            # stay legible, since it is what the lead's next brief has to be written against.
+            self.messages[:] = _drop_coding_middle(self.messages, self.mark)
+        await self.lead._record(
+            "analyst.tool.authored", level=5,
+            summary=f"Tool authoring {result.status}: {spec.proposed_tool_name}",
+            data={"result": result.model_dump(mode="json")},
+        )
+        self.provider.authoring_session = None
+        if (
+            self.lead.run_control is not None
+            and self.lead.run_control.authoring_session is session
+        ):
+            self.lead.run_control.authoring_session = None
+        await session.aclose()
+
+    async def close(self) -> None:
+        """Release whatever is still open when the cycle ends, however it ended."""
+        await self._close_current()
+
+
 class AnalystLeadAgent(AgentRole):
     """Analyst lead role: adjudicate worker reports into one report."""
 
     role = "analyst_lead"
+    # A3: the lead's report carries its decision, so its surface adds `rework`/`rationale`/
+    # `what_to_probe` and the `needs_human` status, and drops `tool_request` (it authors rather
+    # than asks). Declared here because the shared workspace builder reads it off the role.
+    report_fields = LEAD_REPORT_FIELDS
+    report_status_values = LEAD_STATUS_VALUES
 
     def __init__(
         self,
@@ -1466,43 +1718,14 @@ class AnalystLeadAgent(AgentRole):
             own_source="self",
             source_reports=source_reports,
             prior_report=self._last_report,
+            # A3 — and the reason this is spelled out on BOTH builders: the lead overrides the
+            # base one, so setting the surface only there left the lead with the worker's fields
+            # and no way to express its own decision. A live lead found it and said so in its own
+            # report: "the schema I am given has no rework field, so the decision is carried in
+            # prose." Read off the role, so the two builders cannot disagree.
+            prose_fields=self.report_fields,
+            status_values=self.report_status_values,
         )
-
-    async def clarify_for_author(self, message: str, *, kind: str = "clarify_code") -> str:
-        """Answer a tool author's clarification message (the lead↔author channel, §9.3).
-
-        The Sonnet author calls this via the ``ask_lead`` in-process tool when it hits a
-        code/convention/which-``lib/``-function question, sending a single Markdown ``message``.
-        When a read-only ToolProvider is attached (with ``web_search``), the lead may consult
-        authoritative documentation before answering rather than guessing.
-        """
-
-        payload = {
-            "request": "A tool author is asking you a clarification question while writing toolkit code.",
-            "kind": kind,
-            "message": message,
-            "answer_semantics": (
-                "Answer concisely and concretely. If you are unsure of an expert science "
-                "point, consult authoritative documentation (web_search) before answering; "
-                "do not give a confident wrong answer."
-            ),
-        }
-        if self.tools is None:
-            reply = await self._call(payload, _ClarifyReply, action="clarify_for_author")
-            return reply.answer
-
-        seed = [
-            ModelMessage(role="system", content=self.prompt),
-            ModelMessage(role="user", content=_payload_text(payload)),
-        ]
-        messages, _, _ = await self._react(
-            seed_messages=seed, tools=self.tools, action="clarify_for_author",
-            cap=_react_loop_cap(),
-        )
-        reply = await self._call_over_messages(
-            messages, _ClarifyReply, action="clarify_for_author", tools=self.tools,
-        )
-        return reply.answer
 
     # ------------------------------------------------------------------
     # The cycle: ONE ReAct loop, ONE conversation, decisions filed as forms (§9.3).
@@ -1552,38 +1775,37 @@ class AnalystLeadAgent(AgentRole):
         coder: Any | None = None,
         allow_correlated_review: bool = False,
     ) -> LeadCycleOutcome:
-        """Run one analysis cycle as a single ReAct loop over a single conversation.
+        """Run one analysis cycle as ONE ReAct loop over one conversation (A7).
 
-        This is the lead's whole turn. Where the role used to be six separate conversations —
-        each re-seeded, each ending in a structured compose — it is now one loop in which the
-        lead states every decision by **filing a form**: ``author_chain`` or ``hold_authoring``
-        while a worker's tool request is open, then ``request_another_round`` or
-        ``submit_adjudication``, with ``submit_terminal_report`` reachable throughout. Which form
-        it picks *is* the decision, so the branch it takes and the fields it must fill arrive
-        together, each carrying its own description.
+        This is the lead's whole turn, and it has no stages. The lead investigates, briefs a coder
+        chain if the analysts hit a missing capability, drives and submits each link, writes its
+        report, and ends by calling ``turn_end`` — all in a single loop over a single
+        conversation. **Its report is its decision**, the same contract an analyst already writes:
+        ``rework`` sends the analysts back, otherwise the report is the analysis result.
 
-        The topology is what fixes a real failure. Filing "author" with an empty chain used to be
-        schema-valid output that a validator then killed the run over ($19.43, 2026-09-01), and
-        the only rule saying otherwise lived where the model could not read it. ``author_chain``
-        now requires at least one link in its own schema, so that state cannot be expressed.
+        What this replaced, and why. The lead used to state decisions by *filing a form*, and a
+        filed form ended the round. While authoring, the only two forms it could file were both
+        whole-cycle terminals — so "this link is dead, try the next" was inexpressible, and a lead
+        that ran a link's CI budget out had no action that meant anything else. Slot 1 of the
+        2026-09-11 batch ended a whole analysis with **11 of 12 author credits unspent**; slot 2,
+        from the identical position, spent a debate round and a full worker rerun to say the same
+        thing. One missing action, two different scars. The chain now advances on a *tool result*
+        (``LeadCycle.advance_chain``), so a dead link is a sentence in the conversation rather than
+        the end of the turn.
 
-        **Python still owns the counting.** ``rounds_left`` bounds the debate, ``author_budget``
-        bounds authoring attempts, the session lifecycle and every git operation stay here
-        (§9.9), and the caller reloads the registry and reruns the workers. The loop chooses
-        *what* to do; this method decides *how many times*.
+        **Python still owns the counting.** ``rounds_left`` bounds the debate and is enforced at
+        ``turn_end``; ``author_budget`` bounds authoring attempts; every session lifecycle and
+        every git operation stay here (§9.9); the caller reloads the registry and reruns the
+        workers. The loop chooses *what* to do; this decides *how many times*.
 
-        **The coding middle is dropped at its own boundary.** After each chain link the
-        ``drive_coder`` transcript between the filed brief and the ``submit_for_review`` result is
-        removed from the conversation — whole turns only, no orphaned ``tool_use``, and nothing
-        synthesized: what survives is the lead's own filed form and its own submit call with the
-        real commit SHA on the result. Safe here specifically because the lead's tools are all
-        resident (``ReadOnlyToolProvider`` sets ``defer_loading`` on nothing), so no dropped turn
-        can de-activate a discovered tool (§13 watch item (a)).
+        **The coding middle is dropped at its own boundary**, per link, keeping the brief and the
+        submit result with its real commit SHA — whole turns only, nothing synthesized. Safe here
+        because the lead's tools are all resident (``ReadOnlyToolProvider`` defers none), so no
+        dropped turn can de-activate a discovered tool (§13 watch item (a)).
 
-        Returns a :class:`LeadCycleOutcome`; ``filed=None`` means the lead never filed a form,
-        which the caller treats as the failure it is.
+        Returns a :class:`LeadCycleOutcome`. ``report=None`` means the lead never wrote one, which
+        the caller treats as the failure it is — nothing is composed on its behalf ([F6]).
         """
-
         self._round += 1
         source_keys, source_reports, all_figures = self._accumulate_figures(reports, sources)
         workspace = self._make_report_workspace(source_reports)
@@ -1592,11 +1814,13 @@ class AnalystLeadAgent(AgentRole):
             and author_budget > 0
             and any(r.tool_request is not None for r in reports)
         )
-        cycle = LeadCycle(
-            stage=DECIDE_STAGE if authoring_possible else ADJUDICATE_STAGE,
-            authoring_enabled=authoring_possible,
-            rounds_left=rounds_left,
-        )
+        cycle = LeadCycle(authoring_enabled=authoring_possible, rounds_left=rounds_left)
+        outcome = LeadCycleOutcome(filed=None, author_budget=author_budget)
+        if self.tools is None:
+            # No tool surface: nothing to investigate with and no way to write a report. The
+            # honest answer is the failure, not a composed report ([F6]).
+            return outcome
+
         payload = {
             "task": task.model_dump(mode="json"),
             "worker_reports": [report.model_dump(mode="json") for report in reports],
@@ -1604,276 +1828,59 @@ class AnalystLeadAgent(AgentRole):
             "available_toolkits": list(self.available_toolkits),
             "your_turn": _cycle_instruction(cycle, reports, rounds_left),
         }
-        outcome = LeadCycleOutcome(filed=None, author_budget=author_budget)
-        if self.tools is None:
-            # No tool surface: there is no form to file and nothing to investigate with. The
-            # honest answer is the failure, not a composed report — a runtime-synthesized report
-            # sits closer to fabrication than the absence it papers over ([F6]).
-            return outcome
-
+        messages: list = [
+            ModelMessage(role="system", content=self.prompt),
+            ModelMessage(role="user", content=_payload_text(payload)),
+        ]
         provider = self.tools
         previous_ws = getattr(provider, "report_workspace", None)
         previous_cycle = getattr(provider, "cycle", None)
+        previous_validator = getattr(provider, "turn_end_validator", None)
         provider.report_workspace = workspace
         provider.cycle = cycle
-        try:
-            messages: list = [
-                ModelMessage(role="system", content=self.prompt),
-                ModelMessage(role="user", content=_payload_text(payload)),
-            ]
-            first = True
-            while True:
-                # The budgets each stage had before the cycle existed, kept: the deciding and
-                # judging stages get `react_loop_cap` paid iterations under the absolute ceiling
-                # (what `decide_authoring` had), while a coding link gets the absolute cap as its
-                # own ceiling (what `drive_authoring` had, so inspecting a diff never starves it).
-                # The cycle re-enters per stage, so a stage cannot spend another stage's budget.
-                messages, _, _ = await self._react(
-                    seed_messages=messages,
-                    tools=provider,
-                    action="run_cycle",
-                    cap=_react_loop_cap(),
-                    images=all_figures if first else (),
-                    free_tools=_CYCLE_FREE_TOOLS,
-                    absolute_cap=_react_loop_absolute_cap(),
-                    terminal_tools=LEAD_FORM_TOOLS,
-                )
-                first = False
-                filed = cycle.filed
-                if filed is None:
-                    # Budget spent, or the model stopped without filing. A report it wrote but
-                    # never filed is real evidence it produced, so it is used rather than
-                    # discarded; nothing is composed on its behalf.
-                    outcome.report = _written_report(workspace)
-                    break
-                if filed in LEAD_CYCLE_TERMINALS:
-                    outcome.filed = filed
-                    outcome.report = cycle.report
-                    outcome.verdict = cycle.verdict
-                    break
-                # The authoring branch: act on the filed decision, then re-enter the same
-                # conversation for the judging stage.
-                outcome.decision = cycle.decision
-                cycle.filed = None
-                if filed == HOLD_AUTHORING_TOOL:
-                    cycle.stage = ADJUDICATE_STAGE
-                    messages.append(
-                        ModelMessage(
-                            role="user",
-                            content=_stage_note(
-                                "No tool is authored for this request. Judge the analysts' work "
-                                "now.",
-                                cycle,
-                            ),
-                        )
-                    )
-                    continue
-                messages = await self._author_chain(
-                    messages,
-                    provider,
-                    cycle,
-                    outcome,
-                    toolkit_root=toolkit_root,
-                    worktree_base=worktree_base,
-                    direct_branch=direct_branch,
-                    colead=colead,
-                    human_handler=human_handler,
-                    coder=coder,
-                    allow_correlated_review=allow_correlated_review,
-                )
-                if cycle.filed in LEAD_CYCLE_TERMINALS:
-                    # The lead stopped honestly mid-chain (§9.6) — a correct outcome.
-                    outcome.filed = cycle.filed
-                    outcome.report = cycle.report
-                    break
-                # The chain is authored, so the cycle ends here: a committed tool is evidence the
-                # current reports predate, and the caller reruns the workers on it ONCE before the
-                # lead judges a fresh set in a fresh cycle (A8). Authoring inside one cycle,
-                # judging in the next — the boundary is new external evidence, not a token count.
-                outcome.filed = AUTHOR_CHAIN_TOOL
-                break
-        finally:
-            provider.report_workspace = previous_ws
-            provider.cycle = previous_cycle
+        provider.turn_end_validator = lambda: lead_turn_problems(cycle, workspace)
 
-        if outcome.report is not None:
-            self._last_report = outcome.report
-        return outcome
-
-    async def _author_chain(
-        self,
-        messages: list,
-        provider: Any,
-        cycle: LeadCycle,
-        outcome: LeadCycleOutcome,
-        *,
-        toolkit_root: Path | None,
-        worktree_base: Path | None,
-        direct_branch: str | None,
-        colead: Any | None,
-        human_handler: Any | None,
-        coder: Any | None,
-        allow_correlated_review: bool,
-    ) -> list:
-        """Author the filed chain link by link, over the lead's own conversation (A8).
-
-        Each link gets its own ``AuthoringSession``, swapped onto the shared provider so the
-        declared tool set never changes; authoring stops at the first non-commit, so whatever
-        committed is a complete, dependency-satisfied prefix. Every git operation is issued by
-        ``build_authoring_session`` / ``approve_edit``, never by the model (§9.9).
-
-        The cycle ends when this returns (the caller reruns the workers on what committed), so
-        only the per-link notes are ever read by the model — a note appended on the way out would
-        be written into a conversation nobody sees again. Returns the conversation with each
-        finished link's coding middle dropped.
-        """
-        from auto_research.sandbox.merge_flow import ToolkitBranchUnclean
-
-        specs = list(outcome.decision.tool_specs) if outcome.decision is not None else []
-        for position, spec in enumerate(specs, 1):
-            if outcome.author_budget <= 0:
-                break  # credits spent — the caller reruns the workers on whatever committed
-            outcome.author_budget -= 1
-            cycle.stage = AUTHOR_STAGE
-            messages.append(
-                ModelMessage(
-                    role="user",
-                    content=(
-                        f"Coding session {position} of {len(specs)} is open on "
-                        f"'{spec.proposed_tool_name}'. The coder has your brief and has produced a "
-                        "first attempt. Inspect it with read_file, steer it with drive_coder, and "
-                        "finish it with submit_for_review. submit_terminal_report stays open if "
-                        "this genuinely cannot be made mergeable — an honest stop is correct."
-                    ),
-                )
-            )
-            mark = len(messages)
-            try:
-                result = await self._drive_one_link(
-                    messages,
-                    provider,
-                    spec,
-                    toolkit_root=toolkit_root,
-                    worktree_base=worktree_base,
-                    direct_branch=direct_branch,
-                    colead=colead,
-                    human_handler=human_handler,
-                    coder=coder,
-                    allow_correlated_review=allow_correlated_review,
-                )
-            except ToolkitBranchUnclean as exc:
-                # The authoring branch was dirty when this link began — a tree dirtied mid-run
-                # (across-a-death is repaired by the resume-time heal). Degrade to an honest
-                # failed result rather than crashing the run (an F6-class run-killer); the lead
-                # reports it and the reviewer adjudicates downstream (A11).
-                await self._record(
-                    "analyst.tool.branch_unclean",
-                    level=2,
-                    summary=(
-                        f"Authoring branch unclean — link stopped ({spec.proposed_tool_name})"
-                    ),
-                    data={"error": repr(exc)},
-                )
-                result = MergeFlowResult(
-                    tool_spec_id=getattr(spec, "id", None) or spec.proposed_tool_name,
-                    status="failed",
-                    reason=f"authoring branch was not clean at attempt start: {exc}",
-                )
-            outcome.authored.append(result)
-            if result.status == "committed":
-                outcome.committed += 1
-            await self._record(
-                "analyst.tool.authored",
-                level=5,
-                summary=f"Tool authoring {result.status}: {spec.proposed_tool_name}",
-                data={"result": result.model_dump(mode="json")},
-            )
-            if cycle.filed in LEAD_CYCLE_TERMINALS:
-                # An honest terminal filed mid-session (§9.6). Its own turn lives inside the span
-                # the drop would remove, and the cycle ends here anyway — so the conversation is
-                # returned whole rather than cut.
-                return messages
-            messages = _drop_coding_middle(messages, mark)
-            if result.status != "committed":
-                # A non-committed link does NOT end the chain (F9). It used to `break`, on the
-                # reasoning that a chain is ordered so the committed prefix is what later links
-                # depend on. True, and it made a single failure end the whole chain with the
-                # credits that would have paid for a retry still unspent: slot 3 (2026-09-08)
-                # spent 2h43m and ~$18 on six cycles refused before a coder session even opened,
-                # and slot 4 queued ~8 more of the same. Human ruling: the LEAD owns the stop
-                # decision, and spending the whole authoring budget discovering a capability
-                # cannot be built is an honest answer.
-                #
-                # So the loop continues, and the lead is told — in its own conversation, before
-                # the next brief — what failed and why. That is what makes "the lead decides"
-                # real: it can file `hold_authoring` or a terminal on the next turn, and it can
-                # only do that over a reason it can read.
-                messages.append(ModelMessage(role="user", content=(
-                    f"Link '{spec.proposed_tool_name}' did not commit: {result.reason}\n"
-                    "The chain continues to the next link. If a later link depends on what this "
-                    "one would have built, or the reason above will recur, stop the chain by "
-                    "filing hold_authoring or a terminal report instead of authoring into it."
-                )))
-        return messages
-
-    async def _drive_one_link(
-        self,
-        messages: list,
-        provider: Any,
-        spec: ToolSpec,
-        *,
-        toolkit_root: Path | None,
-        worktree_base: Path | None,
-        direct_branch: str | None,
-        colead: Any | None,
-        human_handler: Any | None,
-        coder: Any | None,
-        allow_correlated_review: bool,
-    ) -> MergeFlowResult:
-        """Own one link's session lifecycle and run the lead's loop over it, in-conversation.
-
-        The same lifecycle :meth:`drive_authoring` owns for a standalone attempt — build,
-        connect, publish for interrupt cleanup, seed the coder, drive, read the terminal result,
-        ``aclose`` — with the loop running over ``messages`` (the cycle's one conversation) and
-        the session swapped onto the shared ``provider`` rather than a fresh one.
-        """
-        from auto_research.sandbox.merge_flow import build_authoring_session
-
-        session = build_authoring_session(
-            spec,
+        driver = _ChainDriver(
             lead=self,
+            provider=provider,
+            cycle=cycle,
+            outcome=outcome,
+            messages=messages,
             toolkit_root=toolkit_root,
-            worktree_base=worktree_base or toolkit_root,
+            worktree_base=worktree_base,
+            direct_branch=direct_branch,
             colead=colead,
             human_handler=human_handler,
             coder=coder,
             allow_correlated_review=allow_correlated_review,
-            direct_branch=direct_branch,
-            monitor=self.monitor,
         )
-        await session.connect()
-        if self.run_control is not None:
-            self.run_control.authoring_session = session
-        previous_session = getattr(provider, "authoring_session", None)
-        provider.authoring_session = session
+        cycle.advance_chain = driver.advance
+
         try:
-            await session.drive(session.initial_message)
-            new_messages, _, _ = await self._react(
+            await self._react(
                 seed_messages=messages,
+                share_messages=True,
                 tools=provider,
-                action="drive_authoring",
-                cap=_react_loop_absolute_cap(),
+                action="run_cycle",
+                cap=_react_loop_cap(),
+                images=all_figures,
                 free_tools=_CYCLE_FREE_TOOLS,
                 absolute_cap=_react_loop_absolute_cap(),
-                terminal_tools=LEAD_FORM_TOOLS,
+                terminal_tools=frozenset({TURN_END_TOOL}),
             )
-            messages[:] = new_messages
-            return _authoring_result(session, spec)
         finally:
-            provider.authoring_session = previous_session
-            if self.run_control is not None and self.run_control.authoring_session is session:
-                self.run_control.authoring_session = None
-            await session.aclose()
+            await driver.close()
+            provider.report_workspace = previous_ws
+            provider.cycle = previous_cycle
+            provider.turn_end_validator = previous_validator
+
+        report = _written_report(workspace)
+        outcome.report = report
+        outcome.filed = TURN_END_TOOL if report is not None else None
+        outcome.decision = cycle.brief
+        if report is not None:
+            self._last_report = report
+        return outcome
 
     async def drive_authoring(
         self,
@@ -2132,16 +2139,6 @@ class AnalystColeadAgent(AgentRole):
         )
 
 
-class _ClarifyReply(BaseModel):
-    """Minimal structured reply for ``AnalystLeadAgent.clarify_for_author``.
-
-    A lightweight internal helper, not a broad protocol message; the §9.7
-    ``HumanQuery``/``HumanResponse`` schema is formalised in Phase 2 step 5.
-    """
-
-    answer: str
-
-
 def _select_model(group: ModelGroupHandle, model_name: str | None) -> ModelHandle:
     if model_name is not None:
         return group.member(model_name)
@@ -2172,6 +2169,66 @@ def _dedup_results(results: Sequence[SearchResult]) -> list[SearchResult]:
 #: purpose: a continuation is for a model that stopped by accident, and a model that keeps
 #: returning nothing is not going to start. The loop's own budget still bounds everything else.
 _SILENT_TURN_CAP = 2
+
+
+def _coder_event(tools: Any) -> str | None:
+    """A one-line notice that the background coder stopped, or ``None`` while it works (B4).
+
+    Read from the provider's live session rather than pushed by it, because the loop is the only
+    place that knows when a turn boundary is safe. The narration itself is left for ``check_coder``
+    — a notice is a nudge to look, not the looking — which also keeps a long coder transcript out
+    of the injected turn.
+    """
+    session = getattr(tools, "authoring_session", None)
+    if session is None or getattr(session, "drive_status", None) != "stopped":
+        return None
+    if getattr(session, "_drive_result", None) is None and getattr(session, "_drive_error", None) is None:
+        return None  # already reported; nothing new to say
+    name = getattr(getattr(session, "tool_spec", None), "proposed_tool_name", "the tool")
+    failed = getattr(session, "_drive_error", None) is not None
+    if failed:
+        return (
+            f"[coder] the session on '{name}' FAILED and is not usable. Call check_coder for the "
+            "fault. Do not keep steering it."
+        )
+    return (
+        f"[coder] the coder working on '{name}' has stopped. Call check_coder to read what it "
+        "did, then inspect the tree or submit_for_review."
+    )
+
+
+def _coder_questions(tools: Any) -> list[str]:
+    """Questions the coder asked, collected once, for injection at a safe boundary.
+
+    Pulled by the loop rather than pushed by the session, for the reason `_coder_event` is: only
+    the loop knows when an injected user turn is legal, and one appended after a turn that left a
+    server-tool call unresolved is the 400 that killed a run at $42.11 (A2).
+    """
+    session = getattr(tools, "authoring_session", None)
+    if session is None or not hasattr(session, "take_questions"):
+        return []
+    return [
+        f"[coder asks] {question}\n\nAnswer it with drive_coder — that reaches the coder inside "
+        "the turn it is still running, so it does not have to stop and wait."
+        for question in session.take_questions()
+    ]
+
+
+def _last_turn_has_unresolved_server_tool(messages: list) -> bool:
+    """Is the most recent provider-authored turn mid-server-tool? (A2)
+
+    Scans backwards for the last :class:`ModelResponse` — our own ``ModelMessage`` and
+    ``ToolResultMessage`` turns sit between it and here — and reads the flag its adapter
+    normalised. The provider-specific fact stays in the provider; this only asks.
+
+    ``False`` when no provider turn exists yet (the first iteration, where the conversation is
+    still the seed) and for any turn an adapter did not capture, which is the honest answer for a
+    turn nobody received.
+    """
+    for message in reversed(messages):
+        if isinstance(message, ModelResponse):
+            return bool(getattr(message, "has_unresolved_server_tool", False))
+    return False
 
 
 def _continuation_for(response, terminal_tools: frozenset[str]) -> str | None:

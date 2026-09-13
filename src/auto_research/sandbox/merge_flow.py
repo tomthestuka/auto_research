@@ -24,11 +24,13 @@ co-lead's ``commit_summary``. The runtime never touches master; a human merges o
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import subprocess
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -319,18 +321,36 @@ _emit = emit
 # ----------------------------------------------------------------------------
 
 
-def _make_ask_lead_handler(lead: Any, *, monitor: Any | None = None) -> Callable[..., Awaitable[str]]:
+def _make_ask_lead_handler(
+    session_ref: Callable[[], Any], *, monitor: Any | None = None
+) -> Callable[..., Awaitable[str]]:
+    """`ask_lead`: park the question for the lead and return at once.
+
+    **Non-blocking by design.** It used to call ``lead.clarify_for_author``, which opened a
+    SECOND ReAct conversation on the lead — running concurrently with the lead's own turn, on the
+    same shared tool provider, with none of the context of the brief it was answering about.
+    Measured live 2026-09-12: 100 clarification tool calls interleaved with 76 cycle tool calls,
+    an answer 326 s later, and a coder that had timed out and moved on. Worse, that second loop
+    held the coder-control tools, so it spent 85 calls polling the very coder that was blocked
+    waiting for it — a circular wait.
+
+    Now nobody waits on anybody. The question is parked; the lead's own loop collects it at its
+    next safe injection point and answers with ``drive_coder``, which steers the turn the coder is
+    still running. The coder is free to keep working, or to stop and wait — both are fine, since
+    the answer arrives inside its turn either way.
+    """
+
     async def handler(message: str, *, kind: str = "clarify_code") -> str:
-        answer = lead.clarify_for_author(message, kind=kind)
-        if inspect.isawaitable(answer):
-            answer = await answer
-        answer = str(answer)
+        session = session_ref()
+        if session is None:
+            return "The lead is not reachable from this session."
+        session.park_question(message)
         await _emit(
             monitor, "coder.ask_lead", level=4,
             summary=f"coder asked the lead: {_cap_text(message, 80)}",
-            data={"kind": kind, "message": _cap_text(message), "answer": _cap_text(answer)},
+            data={"kind": kind, "message": _cap_text(message)},
         )
-        return answer
+        return "delivered."
 
     return handler
 
@@ -912,6 +932,11 @@ class AuthoringSession:
         self.worktree = worktree
         self.branch = branch
         self._closed = False  # aclose() is idempotent — the interrupt path may beat the finally
+        # The second screen (B1): the coder's in-flight instruction, if any, and what it left.
+        self._drive_task: asyncio.Task | None = None
+        self._drive_status = "idle"
+        self._drive_result: str | None = None
+        self._drive_error: str | None = None
         # Lead-driven loop state (§9.3 B-topology): the most recent gate/review/commit, so a
         # caller (the lead's drive_authoring loop) can build the terminal MergeFlowResult from
         # session state; submit_cap bounds the expensive submit_for_review calls.
@@ -938,6 +963,9 @@ class AuthoringSession:
         self._direct_branch = direct_branch
         self._toolkit_root = toolkit_root
         self._worktree_base = worktree_base
+        # Questions the coder asked, waiting for the lead's loop to collect them at a boundary
+        # it knows is safe. See `park_question`.
+        self._pending_questions: list[str] = []
         self._monitor = monitor
         self._coder_model = coder_model  # attributes the SDK session's own spend on the cost meter
         # A prior interrupted attempt's latest submission, already applied to the working tree
@@ -978,8 +1006,125 @@ class AuthoringSession:
 
         Which author harness answers is the backend's business (``coder.backend``); this flow is
         defined over the working tree, so the gate, the review and the commit are identical
-        whichever one it is."""
+        whichever one it is.
+
+        **Blocking.** :meth:`start_drive` is the non-blocking form the lead uses (B1) — this one
+        remains because ``drive_authoring`` and the seed call still want to wait.
+        """
         return await self._backend.drive(message)
+
+    # ── the second screen: the coder runs BESIDE the lead (B1) ────────────────
+    #
+    # `drive` blocks for as long as the coder works, which for a real link is minutes. The lead
+    # spent that time doing nothing, and the loop it was in could not be re-entered. `start_drive`
+    # hands the instruction over and returns at once; the lead keeps investigating, and asks
+    # `status` when it wants to know. `submit_for_review` stays BLOCKING by ruling — the gate runs
+    # pytest twice through a blocking `subprocess.run`, and the CI framing says you wait for the
+    # ticket.
+
+    async def send(self, message: str) -> str:
+        """Say one thing to the coder, whatever state it is in — the ONE lead->coder path.
+
+        Picks the primitive from the coder's state rather than making the lead pick: a turn in
+        flight is *steered*, an idle coder is given a new turn. Before this, the only path was
+        "start a turn", so a lead with something to say to a working coder was refused with
+        "the coder is already working on an instruction" — including when the thing it had to say
+        was the answer to the coder's own question, which is the state that refusal would have
+        cleared (measured live 2026-09-12, twice in one run).
+
+        Returns a short word for what happened, which is what the tool reports back.
+        """
+        if self.drive_status == "working":
+            steered = await self._backend.steer(message)
+            if steered:
+                return "steered"
+            # The turn ended between the check and the steer. Falling through to a new turn is
+            # right: the message still needs delivering and the coder is now idle.
+        self.start_drive(message)
+        return "started"
+
+    def park_question(self, message: str) -> None:
+        """Hold the coder's question until the lead's loop collects it at a safe boundary.
+
+        Parked rather than pushed for the reason the whole A2 fix exists: only the loop knows
+        when an injected user turn is legal, and an injection appended after a turn that left a
+        server-tool call unresolved is a 400 that kills the run. Same seam and same hold rule as
+        the background-coder notice.
+        """
+        self._pending_questions.append(message)
+
+    def take_questions(self) -> list[str]:
+        """Collect the parked questions, once."""
+        pending, self._pending_questions = self._pending_questions, []
+        return pending
+
+    def start_drive(self, message: str) -> None:
+        """Send one instruction and return immediately; the coder answers in the background.
+
+        One drive at a time: a second instruction while the coder is working would interleave two
+        conversations on one warm session, which no harness defines. The caller is told rather
+        than silently queued.
+        """
+        if self._drive_task is not None and not self._drive_task.done():
+            raise RuntimeError("the coder is already working on an instruction")
+        self._drive_status = "working"
+        self._drive_task = asyncio.create_task(self._drive_in_background(message))
+
+    async def _drive_in_background(self, message: str) -> str:
+        """The background half of :meth:`start_drive`.
+
+        Cost attribution needs nothing special: the meter is a ``ContextVar`` and a task created
+        here inherits the context that created it, so the coder's spend lands in the run total
+        exactly as it did when the drive blocked (B7).
+        """
+        try:
+            text = await self._backend.drive(message)
+        except asyncio.CancelledError:
+            self._drive_status = "cancelled"
+            raise
+        except Exception as exc:  # noqa: BLE001 — a dead coder is a result, not a crash
+            # Never let a backend failure escape into the event loop as an unretrieved exception:
+            # the lead has to be TOLD the coder died. A Claude-harness session whose credential
+            # ran out returned its billing text with `is_error` discarded on 2026-09-09, and the
+            # lead spent three drives steering a corpse at $0.
+            self._drive_status = "stopped"
+            self._drive_error = repr(exc)
+            self._drive_result = f"[harness error] the coder turn failed: {exc}"
+            return self._drive_result
+        self._drive_status = "stopped"
+        self._drive_result = text
+        return text
+
+    @property
+    def drive_status(self) -> str:
+        """``idle`` | ``working`` | ``stopped`` | ``cancelled`` — what the coder is doing now."""
+        if self._drive_task is None:
+            return "idle"
+        if not self._drive_task.done():
+            return "working"
+        return self._drive_status
+
+    def take_drive_result(self) -> tuple[str | None, str | None]:
+        """The finished drive's ``(text, error)``, consumed once so it is reported once."""
+        text, error = self._drive_result, self._drive_error
+        self._drive_result = self._drive_error = None
+        return text, error
+
+    async def _cancel_drive(self) -> None:
+        """Cancel the background drive and AWAIT it, before anything else tears down.
+
+        Ordering is the point (B2). `aclose` disconnects the backend and may reset the worktree;
+        a drive still in flight would be writing into that tree while it is being repaired, and
+        `RunControl.interrupt` cancels only the registered run task — an unowned task created
+        here is not in that set. So it is cancelled and awaited first, explicitly.
+        """
+        task = self._drive_task
+        self._drive_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task
 
     def pending_changes(self) -> bool:
         """Whether the tree holds work this attempt has not yet landed.
@@ -1157,6 +1302,9 @@ class AuthoringSession:
         if self._closed:
             return
         self._closed = True
+        # B2: the background drive dies before the backend goes away and before the tree is
+        # touched, so a coder cannot be writing into a worktree that is being reset under it.
+        await self._cancel_drive()
         await self._backend.disconnect()
         if self._direct_branch is not None and self.pending_changes():
             await _reset_direct_tree(
@@ -1330,7 +1478,11 @@ def build_authoring_session(
 
     structure_context = _build_structure_context(worktree)
     system_prompt = load_prompt("coder")
-    ask_lead = _make_ask_lead_handler(lead, monitor=monitor)
+    # The handler is built before the session it parks questions on, so it reaches it late. A
+    # one-slot holder rather than a forward reference: the backend captures the handler at
+    # construction and must not capture a session that does not exist yet.
+    session_slot: list[Any] = [None]
+    ask_lead = _make_ask_lead_handler(lambda: session_slot[0], monitor=monitor)
     ask_human = _make_ask_human_handler(human_handler, model=coder_model, monitor=monitor)
     backend = _build_backend(
         member=coder,
@@ -1344,13 +1496,15 @@ def build_authoring_session(
         monitor=monitor,
         sdk_client_factory=sdk_client_factory,
     )
-    return AuthoringSession(
+    session = AuthoringSession(
         tool_spec=tool_spec, backend=backend, worktree=worktree, branch=branch, base_ref=base_ref,
         structure_context=structure_context, run_gate=run_gate, run_review=run_review,
         approve_edit=approve_edit, direct_branch=direct_branch, toolkit_root=toolkit_root,
         worktree_base=worktree_base, submit_cap=submit_cap, debate_cap=debate_cap, monitor=monitor,
         coder_model=coder_model, restored_submission=restored_submission,
     )
+    session_slot[0] = session
+    return session
 
 
 async def propose_and_pr(

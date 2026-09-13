@@ -238,12 +238,24 @@ def a20_relabelled_cycles(record: dict[str, Any]) -> int:
     ``(form filed, tools that cycle committed)`` exists. The earlier draft of this keyed on the
     trial record's ``measured.needs_human``, which is derived from *worker* statuses and was
     ``False`` for attempt 6 — so the rule would have been inert on the very run it was written for.
+
+    **A3 (2026-09-12) removed the cause, not the rule.** The author stage's missing action was the
+    whole defect, and the lead now stays in one loop: a finished link advances the chain on a tool
+    result, so "I want a rerun" no longer has to be spelled as a terminal. Cycles recorded after
+    that carry the decision on the report (``status`` beside ``rework``) instead of in a filed
+    form's name. Both shapes are read here, because the published batches are the older one and a
+    reader that only understands the new shape would silently score them as clean.
     """
     cycles = record.get("lead_cycles") or []
     return sum(
         1
         for cycle in cycles
-        if cycle.get("filed") == "submit_terminal_report" and int(cycle.get("committed") or 0) >= 1
+        if int(cycle.get("committed") or 0) >= 1
+        and (
+            cycle.get("filed") == "submit_terminal_report"          # pre-A3 ledgers
+            or (cycle.get("status") in ("failed", "needs_human")    # A3 onward
+                and not cycle.get("rework"))
+        )
     )
 
 

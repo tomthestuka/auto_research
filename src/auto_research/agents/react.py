@@ -468,6 +468,29 @@ EDIT_REPORT_TOOL = "edit_report"
 REVIEW_REPORT_TOOL = "review_report"
 
 
+#: Which report fields each role's ``edit_report`` declares (A3).
+#:
+#: One report class serves both roles, and the SURFACE is what keeps them apart: a worker is never
+#: offered the lead's decision fields, and the lead is never offered ``tool_request`` (it authors
+#: instead of asking). The alternative — a subclass per role — would have widened ``status`` in a
+#: subtype, so anything typed as the worker's report could receive a value the worker may not file.
+#:
+#: Every name here must be a real field on the report model, and every field's prose is read from
+#: that model's own ``Field(description=...)``; ``test_report_authoring.py`` pins both, so the two
+#: roles' view of one object cannot drift the way it did before the forms carried descriptions.
+WORKER_REPORT_FIELDS: tuple[str, ...] = (
+    "summary", "findings", "uncertainty", "status", "tool_request",
+)
+LEAD_REPORT_FIELDS: tuple[str, ...] = (
+    "summary", "findings", "uncertainty", "status", "rework", "rationale", "what_to_probe",
+)
+
+#: The ``status`` values each surface offers. ``needs_human`` is a cycle decision the lead may
+#: file and a worker may not (F9): a worker that needs a person says so in ``summary``.
+WORKER_STATUS_VALUES: tuple[str, ...] = ("succeeded", "failed")
+LEAD_STATUS_VALUES: tuple[str, ...] = ("succeeded", "failed", "needs_human")
+
+
 @dataclass
 class ReportWorkspace:
     """Per-round report-authoring state wired onto a provider for edit_report/review_report.
@@ -490,9 +513,12 @@ class ReportWorkspace:
     source_reports: dict[str, Any] = field(default_factory=dict)
     prior_report: Any | None = None
     written_report: Any | None = None
-    # Fields carried through edit_report from the tool args onto the report model (report-shape
-    # specific; AnalystReport today). cited_figures/figures are handled separately (FiguredReport).
-    prose_fields: tuple[str, ...] = ("summary", "findings", "uncertainty", "status", "tool_request")
+    # Fields carried through edit_report from the tool args onto the report model, and the
+    # `status` values this role may file: together they ARE the role's report surface (A3).
+    # `edit_report_tool_def` is handed the same pair, so what the model is offered and what the
+    # handler copies cannot drift. cited_figures/figures are handled separately (FiguredReport).
+    prose_fields: tuple[str, ...] = WORKER_REPORT_FIELDS
+    status_values: tuple[str, ...] = WORKER_STATUS_VALUES
 
 
 # Matches a numbered figure reference in prose — "Figure 1", "Fig. 2", "Fig 3", "figs 4" —
@@ -797,14 +823,104 @@ def worker_report_problems(workspace: ReportWorkspace | None) -> list[str]:
     return problems
 
 
-def edit_report_tool_def() -> dict:
+def _written_report(workspace: "ReportWorkspace | None") -> Any | None:
+    """The report ``edit_report`` persisted for this round, or ``None`` if none was written.
+
+    The single reader of a workspace's result, so "did this role produce a report" has one
+    answer everywhere. ``None`` is the honest failure the caller acts on: nothing is composed
+    on a model's behalf ([F6]).
+    """
+    return getattr(workspace, "written_report", None) if workspace is not None else None
+
+
+def lead_turn_problems(cycle: "LeadCycle | None", workspace: "ReportWorkspace | None") -> list[str]:
+    """What is wrong with the analyst lead's turn, for :func:`execute_turn_end` (A6).
+
+    The lead's report **is** its decision, so completeness is checked here rather than by a schema:
+    ``edit_report`` stays permissive so a partial write mid-turn is legal, and this is the door.
+    Each problem is returned as a sentence the model can act on, because a rejection puts it back
+    in the loop with its tools rather than ending anything.
+
+    What it refuses, and why each one is here:
+
+    * **No report.** Nothing is composed on the lead's behalf. The one path that ever did sent the
+      model the runtime-owned ``figures`` tree, which strict mode promoted to *required*, which is
+      how four invented digests killed a slot one line before they would have been discarded.
+    * **``rework`` with no probe**, or with no rounds left. The probe reaches every worker verbatim
+      as their next instruction, so "go again" with nothing to go on is not a decision; and the cap
+      is Python's, named here rather than discovered by the model.
+    * **A conclusion with no findings.** ``rework=False`` means this report IS the analysis result.
+    * **A cited figure whose file is gone.** Resolution already checks the catalog handle; this
+      stats the path, because a report whose figure cannot be opened is not a deliverable and the
+      reviewer would be the one to discover it.
+    * **A coding session still open.** Walking away from a running coder leaves the tree mid-edit
+      and the outcome unrecorded; finishing or abandoning it is a decision the lead has to make.
+    """
+    problems: list[str] = []
+    report = getattr(workspace, "written_report", None) if workspace is not None else None
+    if workspace is not None and report is None:
+        return [
+            "No report has been written. Call edit_report to write it — that call is the only way "
+            "your report is saved, and nothing is composed on your behalf."
+        ]
+    if report is not None:
+        if getattr(report, "rework", False):
+            if not str(getattr(report, "what_to_probe", "") or "").strip():
+                problems.append(
+                    "Your report asks for another round but what_to_probe is empty. That text is "
+                    "handed to every worker verbatim as their next instruction, so it has to say "
+                    "what to do."
+                )
+            if not str(getattr(report, "rationale", "") or "").strip():
+                problems.append(
+                    "Your report asks for another round but rationale is empty. Say what evidence "
+                    "gap or disagreement one more pass would close."
+                )
+            if cycle is not None and cycle.rounds_left <= 0:
+                problems.append(
+                    "No debate rounds remain, so another round cannot be granted. Conclude on the "
+                    "evidence you have (rework=false) — an honest 'this is not settled' is a "
+                    "correct outcome."
+                )
+        else:
+            if not str(getattr(report, "summary", "") or "").strip():
+                problems.append("The report's summary is empty.")
+            if not (getattr(report, "findings", None) or []):
+                problems.append(
+                    "Your report concludes the analysis but lists no findings. State what the "
+                    "work established, or set rework=true if it did not establish anything yet."
+                )
+        for index, figure in enumerate(getattr(report, "figures", None) or [], 1):
+            path = Path(str(getattr(figure, "path", "")))
+            if not path.is_file():
+                problems.append(
+                    f"Figure {index} ({figure.caption}) points at {path}, which is not a file "
+                    "on disk. Re-cite it from your catalog with review_report, or drop it."
+                )
+    if cycle is not None and cycle.session_open:
+        problems.append(
+            "A coding session is still open. Finish it with submit_for_review, or let its budget "
+            "run out, before ending your turn — do not leave a coder running."
+        )
+    return problems
+
+
+def edit_report_tool_def(
+    prose_fields: tuple[str, ...] = WORKER_REPORT_FIELDS,
+    status_values: tuple[str, ...] = WORKER_STATUS_VALUES,
+) -> dict:
     """Definition for ``edit_report`` — the disciplined write path for an ``AnalystReport``.
 
     The agent supplies the whole report each call (a call overwrites the last), citing figures by
     their ``[source:index]`` catalog handle in ``cited_figures``; the runtime resolves and places
     exactly those, in order, and the agent refers to the k-th as "Figure k" in its prose.
+
+    ``prose_fields`` selects which of the report's fields this role may write, and must match the
+    workspace's own ``prose_fields`` — the handler copies exactly those from the arguments, so a
+    property declared here and absent there is a field the model can fill and the runtime drops.
+    ``cited_figures`` is always declared: it is how figures are placed, for every role.
     """
-    return {
+    declared = {
         "name": EDIT_REPORT_TOOL,
         "description": (
             "Write (or rewrite) your report — this is the ONLY way it is saved; you never write "
@@ -915,17 +1031,66 @@ def edit_report_tool_def() -> dict:
                         "validation_data",
                     ],
                 },
+                # `status` is REQUIRED, not defaulted (F9). The schema default is `failed`, on the
+                # principle that silence is never success — but a default only makes sense for a
+                # report the RUNTIME constructs. For a report the agent writes, leaving it
+                # optional would mark a genuinely successful analysis as failed for a missing
+                # field, the opposite of "the agent declares its own outcome". Caught by
+                # `test_monitor.py::test_run_research_returns_monitor_with_fake_dependencies`,
+                # whose fake omitted it and turned an accepted run into an honest failure.
+                #
+                # The three below are the LEAD's surface only (A3); a worker's call never
+                # declares them, so `WORKER_REPORT_FIELDS` filters them straight back out.
+                "rework": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true to send the analysts back for one more round instead of "
+                        "concluding. When true, say why in rationale and what to look at in "
+                        "what_to_probe; when false, this report is the analysis result and needs "
+                        "summary, findings and status."
+                    ),
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": (
+                        "Why another round is warranted — the evidence gap or disagreement that "
+                        "one more pass would close. Required when rework is true."
+                    ),
+                },
+                "what_to_probe": {
+                    "type": "string",
+                    "description": (
+                        "What the analysts should do next, in their own terms. This text reaches "
+                        "every worker verbatim as their next instruction. Required when rework "
+                        "is true."
+                    ),
+                },
             },
-            # `status` is REQUIRED, not defaulted (F9). The schema default is `failed`, on the
-            # principle that silence is never success — but a default only makes sense for a
-            # report the RUNTIME constructs. For a report the agent writes, leaving it optional
-            # would mark a genuinely successful analysis as failed for a missing field, which is
-            # the opposite of "the agent declares its own outcome". Caught by
-            # `test_monitor.py::test_run_research_returns_monitor_with_fake_dependencies`, whose
-            # fake omitted it and turned an accepted run into an honest failure.
+            # `summary` and `status` are always required: a report with neither is not a report,
+            # and leaving `status` optional marked a genuinely successful analysis as failed for a
+            # missing field. The rework-conditional requirements are deliberately NOT expressed
+            # here — the schema stays permissive so a partial write mid-turn is legal, and
+            # completeness is `turn_end`'s job (A3/A6). Conditional required-fields is also not
+            # portable across the six vendors.
             "required": ["summary", "status"],
         },
     }
+    properties = declared["input_schema"]["properties"]
+    keep = set(prose_fields) | {"cited_figures"}
+    unknown = keep - set(properties) - {"cited_figures"}
+    if unknown:  # pragma: no cover — a typo in a surface constant, caught at import by the tests
+        raise ValueError(f"edit_report has no property for {sorted(unknown)}")
+    declared["input_schema"]["properties"] = {
+        name: spec for name, spec in properties.items() if name in keep
+    }
+    if "status" in properties and "status" in keep:
+        declared["input_schema"]["properties"]["status"] = {
+            **properties["status"], "enum": list(status_values),
+        }
+    declared["input_schema"]["required"] = [
+        name for name in ("summary", "status") if name in keep
+    ]
+    return declared
 
 
 def review_report_tool_def() -> dict:
@@ -1134,28 +1299,133 @@ def submit_tool_def() -> dict:
     }
 
 
+CHECK_CODER_TOOL = "check_coder"
+
+
 async def execute_drive_coder(session: Any, arguments: Mapping[str, Any]) -> ToolOutcome:
-    """Drive one coder turn over the live ``AuthoringSession`` (B-topology: lead steers, the
-    coder executes). Returns the coder's narration for the lead to inspect."""
+    """Say one thing to the coder and **return at once** — the single lead->coder path (B3).
+
+    The coder works beside the lead rather than under it. A real link's turn takes minutes, and
+    the lead used to spend all of them blocked inside this call — unable to read the diff it had
+    just asked for, or to think about the next link. It now gets the instruction acknowledged and
+    keeps its turn; `check_coder` says what happened, and `submit_for_review` stays **blocking**
+    by ruling (the gate runs pytest twice through a blocking `subprocess.run`, and the CI framing
+    says you wait for the ticket).
+
+    **It reaches a working coder too**, which is what makes the lead<->coder channel symmetric.
+    The session picks the primitive: a turn in flight is steered (Codex `turn_steer`, or a second
+    `query()` on the Claude SDK's live client), an idle coder is given a new turn. Before that,
+    the only primitive was "start a turn" and a lead with something to say to a working coder was
+    refused — including when what it had to say was the ANSWER to that coder's own question, the
+    state the refusal was reporting. Measured live 2026-09-12, twice in one run.
+
+    A session that predates B — a benchmark's, or a test double's — has no `send`, so this falls
+    back to the blocking call. `drive_authoring` is deliberately on that path: it backs the
+    paper's published authoring measurements and must stay byte-identical.
+    """
     instructions = str(arguments.get("instructions") or "").strip()
     if not instructions:
         return ToolOutcome(
             text="drive_coder needs 'instructions': what the coder should do next.", is_error=True
         )
-    response = await session.drive(instructions)
+    if not hasattr(session, "send"):
+        response = await session.drive(instructions)
+        return ToolOutcome(
+            text=(response or "").strip()
+            or "(coder produced no narration; inspect the worktree with read_file, or "
+            "submit_for_review to run the gate.)"
+        )
+    outcome = await session.send(instructions)
+    if outcome == "steered":
+        return ToolOutcome(
+            text=(
+                "Delivered to the coder inside the turn it is running; it sees this without "
+                "stopping. You keep your turn — call check_coder for its narration when it ends."
+            )
+        )
     return ToolOutcome(
-        text=(response or "").strip()
-        or "(coder produced no narration; inspect the worktree with read_file, or submit_for_review "
-        "to run the gate.)"
+        text=(
+            "Sent to the coder; it is working now and you keep your turn. Do something useful "
+            "while it does — read the diff it produced last time, plan the next link, or check "
+            "the data catalog — then call check_coder for its narration. Do not wait idly."
+        )
     )
 
 
-async def execute_submit(session: Any) -> ToolOutcome:
+def check_coder_tool_def() -> dict:
+    """Definition for ``check_coder`` — what the coder is doing, and what it last said (B3)."""
+    return {
+        "name": CHECK_CODER_TOOL,
+        "description": (
+            "Check on the coder you sent an instruction to: whether it is still working, and its "
+            "narration once it has stopped. Free: calling it costs no tool budget. If it is still "
+            "working, do something else and check again rather than calling this repeatedly."
+        ),
+        "strict": True,
+        "input_schema": _strictify({"type": "object", "properties": {}, "required": []}),
+    }
+
+
+async def execute_check_coder(session: Any) -> ToolOutcome:
+    """Report the background drive's state, consuming a finished result exactly once."""
+    status = getattr(session, "drive_status", None)
+    if status is None:
+        return ToolOutcome(
+            text="This coder session does not run in the background; drive_coder returns its "
+            "narration directly.",
+            is_error=True,
+        )
+    if status == "idle":
+        return ToolOutcome(
+            text="You have not sent the coder anything yet. Use drive_coder with what it should do."
+        )
+    if status == "working":
+        return ToolOutcome(
+            text="The coder is still working. Do something else and check again — reading its "
+            "last diff or planning the next link is a better use of the wait than another check."
+        )
+    text, error = session.take_drive_result()
+    if error is not None:
+        # The coder DIED and the lead is told so. On 2026-09-09 a Claude-harness session whose
+        # credential ran out returned the CLI's own billing string with `is_error` discarded, and
+        # the lead spent three drives steering a corpse at $0 before giving up — then recorded the
+        # failure with a confidently wrong cause.
+        return ToolOutcome(
+            text=(
+                f"The coder session FAILED and is not usable: {error}\n"
+                "This is a harness or credential fault, not something to steer around. Do not "
+                "keep sending it instructions — write your report and say what happened."
+            ),
+            is_error=True,
+        )
+    return ToolOutcome(
+        text=(text or "").strip()
+        or "(the coder stopped without narration; inspect the worktree with read_file, or "
+        "submit_for_review to run the gate.)"
+    )
+
+
+async def execute_submit(session: Any, cycle: "LeadCycle | None" = None) -> ToolOutcome:
     """Run the gate, then (gate-pass) the co-lead review, over the session's current tree; commit
     on gate-pass ∧ review-pass (§9.9 commit ⇔ gate ∧ review — the lead never self-approves).
     Returns a verdict the lead diagnoses: a gate failure (fix via drive_coder), a review rejection
     (drive_coder or respond_to_review), or a successful commit. Bounded by ``session.submit_cap``
     (each submit runs the gate twice + a co-lead review — expensive)."""
+    if getattr(session, "drive_status", None) == "working":
+        # The gate reads the WORKING TREE, so submitting while the coder is mid-write would run
+        # pytest twice and a paid co-lead review over a half-written tool and reject it for a
+        # defect nobody wrote. Nothing guarded this before 2026-09-12 because the seed drive was
+        # blocking: a coder could not be working while the lead acted. Backgrounding that drive
+        # (so the lead keeps its turn) is what makes the race reachable, so the guard lands with
+        # it. Budget-free — a refusal is not a submission.
+        return ToolOutcome(
+            text=(
+                "The coder is still working, and the gate reads the working tree — submitting now "
+                "would judge a half-written tool. Call check_coder to see where it got to, then "
+                "submit once it has stopped."
+            ),
+            is_error=True,
+        )
     if getattr(session, "last_commit_sha", None) is not None and not _has_pending_changes(session):
         # The tool already landed and nothing has changed since. Submitting again would scan an
         # empty changeset and then ask `approve_edit` to commit nothing, which exits non-zero and
@@ -1173,12 +1443,18 @@ async def execute_submit(session: Any) -> ToolOutcome:
             )
         )
     if session.submits_used >= session.submit_cap:
+        # The CI budget for THIS tool is spent. Before A7 this was where a chain died: the only
+        # other actions open were whole-cycle terminals, so a lead holding 11 unspent author
+        # credits ended the entire analysis (slot 1, 2026-09-11), and a lead in the identical
+        # position paid a debate round and a full worker rerun to say the same thing (slot 2).
+        # Now the link closes, the next one opens, and the lead is still in its turn.
         return ToolOutcome(
             text=(
-                f"You have used all {session.submit_cap} review submissions for this tool. Make a "
-                "final call: if your last submit committed, you are done; otherwise this authoring "
-                "attempt ends without a mergeable tool — an honest failure is an acceptable, "
-                "correct outcome (do not fabricate to force a pass)."
+                f"CI BUDGET SPENT — all {session.submit_cap} review submissions for "
+                f"{session.tool_spec.proposed_tool_name} are used and it did not commit. This "
+                "attempt is over; reconsider the plan and the wiring rather than resubmitting. "
+                "An honest failure is an acceptable, correct outcome — never fabricate to force "
+                "a pass." + await _advance(cycle)
             )
         )
     session.submits_used += 1
@@ -1212,9 +1488,23 @@ async def execute_submit(session: Any) -> ToolOutcome:
     return ToolOutcome(
         text=(
             f"COMMITTED {session.tool_spec.proposed_tool_name} → {sha[:10]}. Gate passed and the "
-            "co-lead approved — the tool is on the authoring branch. Authoring for this tool is done."
+            "co-lead approved — the tool is on the authoring branch. Authoring for this tool is "
+            "done." + await _advance(cycle)
         )
     )
+
+
+async def _advance(cycle: "LeadCycle | None") -> str:
+    """Close this link and open the next, as a line appended to the tool result.
+
+    The chain advances on a *tool result* rather than by ending the round, which is the whole of
+    A7: the lead reads "that one is done, here is the next" in the same conversation and keeps
+    working. Returns "" when there is no cycle (``drive_authoring``'s standalone path, which owns
+    its own single session and must be left byte-identical — it backs published measurements).
+    """
+    if cycle is None or cycle.advance_chain is None:
+        return ""
+    return "\n\n" + await cycle.advance_chain()
 
 
 def _has_pending_changes(session: Any) -> bool:
@@ -1327,93 +1617,72 @@ async def execute_respond_to_review(session: Any, arguments: Mapping[str, Any]) 
 # ----------------------------------------------------------------------------
 
 AUTHOR_CHAIN_TOOL = "author_chain"
-HOLD_AUTHORING_TOOL = "hold_authoring"
-ANOTHER_ROUND_TOOL = "request_another_round"
-SUBMIT_ADJUDICATION_TOOL = "submit_adjudication"
-TERMINAL_REPORT_TOOL = "submit_terminal_report"
 
-#: Every form. A successful call ends the lead's ``_react`` call (passed as ``terminal_tools``):
-#: the form is filed, Python acts on it, and the loop is re-entered over the SAME conversation
-#: for whatever stage follows.
-LEAD_FORM_TOOLS: frozenset[str] = frozenset(
-    {
-        AUTHOR_CHAIN_TOOL,
-        HOLD_AUTHORING_TOOL,
-        ANOTHER_ROUND_TOOL,
-        SUBMIT_ADJUDICATION_TOOL,
-        TERMINAL_REPORT_TOOL,
-    }
-)
-
-#: The forms that end the whole cycle — nothing follows them in this analysis pass.
-LEAD_CYCLE_TERMINALS: frozenset[str] = frozenset(
-    {ANOTHER_ROUND_TOOL, SUBMIT_ADJUDICATION_TOOL, TERMINAL_REPORT_TOOL}
-)
-
-# The three stages of one cycle. `decide` is entered only when a worker raised a tool request
-# and authoring credits remain; `author` while a coding session is open; `adjudicate` otherwise.
-DECIDE_STAGE = "decide"
-AUTHOR_STAGE = "author"
-ADJUDICATE_STAGE = "adjudicate"
-
-#: Which forms each stage accepts. ``submit_terminal_report`` appears in all three: an honest
-#: stop is a correct outcome with no quality penalty, so it is never out of reach (§9.6).
-_STAGE_FORMS: dict[str, frozenset[str]] = {
-    DECIDE_STAGE: frozenset({AUTHOR_CHAIN_TOOL, HOLD_AUTHORING_TOOL, TERMINAL_REPORT_TOOL}),
-    # `request_another_round` is open here too ([A20], 2026-09-09). It was not, and the
-    # consequence was a mislabelled run: attempt 6's lead, after its first commit, called
-    # `request_another_round` — "one rerun closes the largest part of the gap with properly
-    # provenanced artifacts" — was refused because the only form open at this stage was a
-    # terminal, and so filed `submit_terminal_report(status='needs_human')` for something that
-    # was not a human block at all. That run holds no `ask_human`/`HumanQuery` event. [A11]
-    # delivered the rerun anyway, so the outcome was right and only the record was wrong — and
-    # the record is what an offline scoring pass reads as an honest-stop row.
-    #
-    # Asking for a rerun after a commit is the *correct* request: a committed tool is evidence
-    # the current reports predate. Leaving the lead only a terminal made the sensible action
-    # inexpressible, which is the same defect shape as the launch-3 empty `tool_specs`.
-    AUTHOR_STAGE: frozenset({ANOTHER_ROUND_TOOL, TERMINAL_REPORT_TOOL}),
-    ADJUDICATE_STAGE: frozenset(
-        {ANOTHER_ROUND_TOOL, SUBMIT_ADJUDICATION_TOOL, TERMINAL_REPORT_TOOL}
-    ),
-}
+#: The lead's only form. It is a **brief**, not a decision: a task handed to a coding subagent,
+#: the way a ``ToolSpec`` always was. Filing it does not end anything — the loop continues, and
+#: the lead ends its turn with ``turn_end`` once its report is written (A4/A7).
+#:
+#: What used to live here: ``hold_authoring``, ``request_another_round``, ``submit_adjudication``
+#: and ``submit_terminal_report``, plus a three-stage desk deciding which were callable when. All
+#: five are gone. The report carries the decision now, which is the same contract an analyst
+#: already writes — and two of the four handlers validated nothing anyway, copying an
+#: already-validated report onto the cycle and differing from each other by one field the report
+#: itself carries.
+#:
+#: The defect that forced this: a decision tool ended the round the instant it was accepted, and
+#: while authoring the only two the lead could call were both whole-cycle terminals. So "this
+#: link is dead, try the next" was inexpressible. Slot 1 of the 2026-09-11 batch ended a whole
+#: analysis with 11 of 12 author credits unspent; slot 2, from the identical position, paid a
+#: debate round and a full worker rerun to say the same thing. Same missing action, twice.
+LEAD_FORM_TOOLS: frozenset[str] = frozenset({AUTHOR_CHAIN_TOOL})
 
 
 @dataclass
 class LeadCycle:
-    """One analysis cycle's form desk, wired onto the lead's provider for the whole cycle.
+    """One analysis cycle's state, wired onto the lead's provider for the whole cycle.
 
-    ``stage`` is what the handlers enforce; ``run_cycle`` advances it as Python does the work a
-    filed form authorises (author the chain, rerun the workers). ``authoring_enabled`` is fixed
-    at construction — it decides whether the authoring branch is DECLARED at all, so the
-    declared tool set stays constant while the live ``authoring_session`` is swapped per chain
-    link. ``rounds_left`` is the debate rounds the cap still allows, so ``request_another_round``
-    can be refused by the handler with the cap named: Python owns the caps, the loop owns the
-    choice.
+    **No stage.** One cycle is one ReAct loop, and the loop ends on ``turn_end`` when the lead's
+    report is complete (A4). The stage desk it replaced was a second mechanism saying what the
+    report already says, and its author stage had no instruction text of its own.
 
-    The filed results are read by ``run_cycle`` after the loop stops: ``decision`` from the
-    authoring branch, ``verdict`` from ``request_another_round``, ``report`` from either
-    terminal, and ``filed`` naming the form that ended the loop.
+    ``authoring_enabled`` is fixed at construction — it decides whether the authoring branch is
+    DECLARED at all, so the declared tool set stays constant while the live ``authoring_session``
+    is swapped per chain link. A declared set that shrinks mid-conversation is the "Tool reference
+    not found" run-killer (2026-07-29). ``rounds_left`` is the debate rounds the cap still allows,
+    checked at ``turn_end`` so a report asking for rework with no rounds left is refused with the
+    cap named: Python owns the caps, the loop owns the choice.
+
+    ``brief`` is whatever ``author_chain`` last wrote, read by ``run_cycle`` after the loop stops.
     """
 
-    stage: str = ADJUDICATE_STAGE
     authoring_enabled: bool = False
     rounds_left: int = 0
-    decision: AuthoringDecision | None = None
-    verdict: ReviewVerdict | None = None
-    report: Any | None = None
-    filed: str | None = None
+    brief: AuthoringDecision | None = None
+
+    #: Opens the next unfinished link's coding session and returns what to tell the lead, or a
+    #: note saying the chain is finished. Supplied by ``run_cycle``, which owns every session and
+    #: every git operation (§9.9); the handlers only ask for the next one.
+    #:
+    #: This callback is what lets ONE ReAct loop span a whole chain. Before A7 each link ran its
+    #: own nested loop with the decision tools as terminals, so the only actions open while
+    #: authoring both ended the cycle — and "this link is dead, try the next" could not be said.
+    advance_chain: Any | None = None
+
+    #: True while a coding session is open, so ``turn_end`` can refuse a turn that walks away from
+    #: a running coder rather than finishing or abandoning it deliberately.
+    session_open: bool = False
 @dataclass
 class LeadCycleOutcome:
     """What one turn of the lead's cycle loop concluded (``AnalystLeadAgent.run_cycle``).
 
-    ``filed`` is the form that ended the cycle — ``submit_adjudication`` (the report stands),
-    ``submit_terminal_report`` (an honest stop, §9.6), or ``request_another_round`` (the analysts
-    revise) — and ``None`` when the lead never filed one, which is the failure the caller treats
-    as such. ``report``/``verdict`` carry whichever the filed form produced. ``decision``,
-    ``authored``, ``committed`` and the remaining ``author_budget`` record what the authoring
-    branch did, so the caller can reload discovery, restart the sandboxes and rerun the workers
-    (A8/A11) without asking the model anything.
+    ``report`` is the decision (A3): the lead writes it with ``edit_report`` and ends its turn on
+    ``turn_end``, and its ``rework`` flag says whether the analysts go again. ``None`` means the
+    lead never wrote one, which is the failure the caller treats as such — nothing is composed on
+    its behalf ([F6]). ``filed`` records how the turn ended, for the ledger.
+
+    ``decision`` (the brief it wrote, if any), ``authored``, ``committed`` and the remaining
+    ``author_budget`` record what the chain did, so the caller can reload discovery, restart the
+    sandboxes and rerun the workers (A8/A11) without asking the model anything.
     """
 
     filed: str | None
@@ -1426,17 +1695,17 @@ class LeadCycleOutcome:
 
     @property
     def authored_chain(self) -> bool:
-        """The cycle ended by authoring a chain, so the workers rerun before the lead judges.
+        """Whether this cycle briefed a chain at all.
 
-        A committed tool is new evidence the reports predate, so [A8]'s rerun-once happens between
-        cycles rather than inside one: the lead judges a fresh set of reports in a fresh cycle.
+        A committed tool is new evidence the current reports predate, so [A8]'s rerun-once happens
+        between cycles: the caller reruns the workers and the lead judges a fresh set next cycle.
         """
-        return self.filed == AUTHOR_CHAIN_TOOL
+        return self.decision is not None
 
     @property
     def wants_another_round(self) -> bool:
-        """The lead sent the analysts back for one more debate round."""
-        return self.filed == ANOTHER_ROUND_TOOL
+        """The lead's report asks for one more debate round."""
+        return bool(getattr(self.report, "rework", False))
 
 
 def _nullable(schema: dict) -> dict:
@@ -1638,7 +1907,7 @@ def author_chain_tool_def() -> dict:
             "so each link's target_domain and disposition reflect what is already there. The links "
             "are authored back-to-back, each coder seeing the previous link's committed code; you "
             "then steer each one with drive_coder and finish it with submit_for_review. File "
-            "hold_authoring instead when the request resolves without new code."
+            "If the request resolves without new code, write your report and end your turn."
         ),
         "strict": True,
         "input_schema": _strictify({
@@ -1672,145 +1941,14 @@ def author_chain_tool_def() -> dict:
     }
 
 
-def hold_authoring_tool_def() -> dict:
-    """Definition for ``hold_authoring`` — the no-code branch of the authoring decision."""
-    return {
-        "name": HOLD_AUTHORING_TOOL,
-        "description": (
-            "Record that no tool is authored now, and move on to judging the analysts' work. File "
-            "this when the request resolves without new code: a worker mis-called a tool that "
-            "already exists, the capability is already exposed under another name, or the gap is "
-            "real and lies outside what this analysis needs. Say which of those it is, and what "
-            "the workers should do with the tools they already have — the analysts read your "
-            "reason. This is a correct outcome carrying no obligation to author."
-        ),
-        "strict": True,
-        "input_schema": _strictify({
-            "type": "object",
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "description": (
-                        "Why no code is needed, and what the workers should do instead — concrete "
-                        "enough to act on (name the tool that already covers it, where it lives, "
-                        "and how to call it)."
-                    ),
-                },
-            },
-            "required": ["reason"],
-        }),
-    }
-
-
-def request_another_round_tool_def() -> dict:
-    """Definition for ``request_another_round`` — the not-converged branch (a ``ReviewVerdict``)."""
-    return {
-        "name": ANOTHER_ROUND_TOOL,
-        "description": (
-            "Send the analysts back for one more debate round: their reports disagree or leave a "
-            "gap another round would close. Say where they diverge, and exactly what to probe — "
-            "your dispatch text reaches every worker verbatim as their next instruction, so name "
-            "the measurement, the data and the check. Available while the round cap still allows a "
-            "round; once it does not, adjudicate on the evidence you have with submit_adjudication."
-        ),
-        "strict": True,
-        "input_schema": _strictify({
-            "type": "object",
-            "properties": {
-                "rationale": {
-                    "type": "string",
-                    "description": (
-                        "Where the reports diverge or fall short, grounded in what they actually "
-                        "say."
-                    ),
-                },
-                "what_to_probe": {
-                    "type": "string",
-                    "description": (
-                        "The next round's instruction, handed to every worker verbatim: the "
-                        "measurement to make, on which data, and the check that settles it."
-                    ),
-                },
-            },
-            "required": ["rationale", "what_to_probe"],
-        }),
-    }
-
-
-def submit_adjudication_tool_def() -> dict:
-    """Definition for ``submit_adjudication`` — file the written report as the final one."""
-    return {
-        "name": SUBMIT_ADJUDICATION_TOOL,
-        "description": (
-            "File the report you wrote with edit_report as the final adjudicated analysis, and end "
-            "your turn. Write it with edit_report first — citing each figure by its [source:index] "
-            "handle, in the order you want them shown — and check the placement with "
-            "review_report; this call files exactly what edit_report last saved. Filing is the "
-            "only way your report leaves this loop. Takes no arguments."
-        ),
-        "strict": True,
-        "input_schema": _strictify({"type": "object", "properties": {}}),
-    }
-
-
-def submit_terminal_report_tool_def() -> dict:
-    """Definition for ``submit_terminal_report`` — the honest stop, first-class (§9.6)."""
-    return {
-        "name": TERMINAL_REPORT_TOOL,
-        "description": (
-            "File your report as an honest terminal outcome: the analysis stops here because a "
-            "capability it needs is unavailable under the current construction, or because it is "
-            "blocked on something only a person can settle. Write the report with edit_report "
-            "first — what was attempted, what is unavailable and why, and whichever partial "
-            "findings genuinely hold — then file it here with the status that applies. This is a "
-            "correct outcome carrying no quality penalty; the reviewer reads it and decides what "
-            "happens next. Report real results, or report none: never fabricate a result to cover "
-            "the gap."
-        ),
-        "strict": True,
-        "input_schema": _strictify({
-            "type": "object",
-            "properties": {
-                "status": {
-                    "type": "string",
-                    "enum": ["failed", "needs_human"],
-                    "description": (
-                        "'failed' when the missing capability blocks the request; 'needs_human' "
-                        "when a person must settle something before the work can continue."
-                    ),
-                },
-            },
-            "required": ["status"],
-        }),
-    }
-
-
-def _out_of_stage(cycle: LeadCycle, name: str) -> ToolOutcome | None:
-    """``is_error`` naming the stage and the forms open now, or ``None`` when ``name`` is in stage.
-
-    Returned as a tool error so the loop continues (``_react`` treats an ``is_error`` terminal as
-    a correction, not a finish) — which is what lets the stage check live here rather than in the
-    declared tool set.
-    """
-    allowed = _STAGE_FORMS.get(cycle.stage, frozenset())
-    if name in allowed:
-        return None
-    open_now = ", ".join(sorted(allowed)) or "none"
-    return ToolOutcome(
-        text=(
-            f"{name} belongs to a different stage of this cycle. You are at the '{cycle.stage}' "
-            f"stage; the forms open now are: {open_now}."
-        ),
-        is_error=True,
-    )
-
-
 async def execute_author_chain(cycle: LeadCycle, arguments: Mapping[str, Any]) -> ToolOutcome:
-    """File the ordered chain. Each link is validated into a real :class:`ToolSpec`, so a
-    malformed brief comes back as a correction the lead can fix in-loop ([F11])."""
-    blocked = _out_of_stage(cycle, AUTHOR_CHAIN_TOOL)
-    if blocked is not None:
-        return blocked
+    """Write the brief. Each link is validated into a real :class:`ToolSpec`, so a malformed
+    brief comes back as a correction the lead can fix in-loop ([F11]).
+
+    This does **not** end the turn (A4/A7). Writing a brief is an action inside the cycle, like
+    writing the report: the lead can write one, watch it fail, and write another without the
+    round unwinding under it.
+    """
     # `first_link` is a required property and `additional_links` the optional tail, so the chain
     # is assembled here rather than sent as one array whose emptiness no provider checks. The
     # guard below is the backstop for a vendor enforcing neither `required` nor anything else.
@@ -1821,8 +1959,8 @@ async def execute_author_chain(cycle: LeadCycle, arguments: Mapping[str, Any]) -
         return ToolOutcome(
             text=(
                 "author_chain needs 'first_link': the brief for the first tool to author (and "
-                "'additional_links' for the rest of the chain, in dependency order). File "
-                "hold_authoring when the request resolves without new code."
+                "'additional_links' for the rest of the chain, in dependency order). If the "
+                "request resolves without new code, write your report and end your turn instead."
             ),
             is_error=True,
         )
@@ -1846,157 +1984,20 @@ async def execute_author_chain(cycle: LeadCycle, arguments: Mapping[str, Any]) -
             + "\n".join(f"- {p}" for p in problems),
             is_error=True,
         )
-    cycle.decision = AuthoringDecision(
+    cycle.brief = AuthoringDecision(
         should_author=True,
         tool_specs=specs,
         rationale=str(arguments.get("rationale") or "").strip(),
     )
-    cycle.filed = AUTHOR_CHAIN_TOOL
     names = ", ".join(spec.proposed_tool_name for spec in specs)
+    opened = ""
+    if cycle.advance_chain is not None:
+        opened = "\n\n" + await cycle.advance_chain()
     return ToolOutcome(
         text=(
-            f"FILED author_chain — {len(specs)} link(s), in order: {names}. Opening the coding "
-            "session on the first link: steer it with drive_coder and finish it with "
-            "submit_for_review."
-        )
-    )
-
-
-async def execute_hold_authoring(cycle: LeadCycle, arguments: Mapping[str, Any]) -> ToolOutcome:
-    """File the no-code branch of the authoring decision."""
-    blocked = _out_of_stage(cycle, HOLD_AUTHORING_TOOL)
-    if blocked is not None:
-        return blocked
-    reason = str(arguments.get("reason") or "").strip()
-    if not reason:
-        return ToolOutcome(
-            text=(
-                "hold_authoring needs 'reason': why no code is needed, and what the workers "
-                "should do instead."
-            ),
-            is_error=True,
-        )
-    cycle.decision = AuthoringDecision(should_author=False, tool_specs=[], rationale=reason)
-    cycle.filed = HOLD_AUTHORING_TOOL
-    return ToolOutcome(
-        text=(
-            "FILED hold_authoring — no tool is authored for this request. Judging the analysts' "
-            "work now: send them back with request_another_round, or write your report with "
-            "edit_report and file it with submit_adjudication."
-        )
-    )
-
-
-async def execute_request_another_round(
-    cycle: LeadCycle, arguments: Mapping[str, Any]
-) -> ToolOutcome:
-    """File the not-converged branch as a :class:`ReviewVerdict`. Refused once the round cap is
-    reached — the cap is Python's, so the handler names it rather than letting the loop try."""
-    blocked = _out_of_stage(cycle, ANOTHER_ROUND_TOOL)
-    if blocked is not None:
-        return blocked
-    if cycle.rounds_left <= 0:
-        return ToolOutcome(
-            text=(
-                "The debate round cap is reached, so no further round runs. Adjudicate on the "
-                "evidence you have: write the report with edit_report (stating the residual "
-                "disagreement in its uncertainty) and file it with submit_adjudication."
-            ),
-            is_error=True,
-        )
-    rationale = str(arguments.get("rationale") or "").strip()
-    probe = str(arguments.get("what_to_probe") or "").strip()
-    missing = [
-        name
-        for name, value in (("rationale", rationale), ("what_to_probe", probe))
-        if not value
-    ]
-    if missing:
-        return ToolOutcome(
-            text=(
-                f"request_another_round needs {' and '.join(missing)}: where the reports diverge, "
-                "and the instruction handed to every worker verbatim."
-            ),
-            is_error=True,
-        )
-    cycle.verdict = ReviewVerdict(
-        accepted=False,
-        rationale=rationale,
-        needs_analysis_rework=True,
-        follow_up=probe,
-    )
-    cycle.filed = ANOTHER_ROUND_TOOL
-    return ToolOutcome(
-        text=(
-            "FILED request_another_round — the analysts run one more round on your instruction, "
-            f"then you see their revised reports ({cycle.rounds_left - 1} round(s) left after this "
-            "one)."
-        )
-    )
-
-
-def _written_report(workspace: Any | None) -> Any | None:
-    """The report ``edit_report`` last saved, or ``None`` when nothing has been written."""
-    return getattr(workspace, "written_report", None) if workspace is not None else None
-
-
-async def execute_submit_adjudication(cycle: LeadCycle, workspace: Any | None) -> ToolOutcome:
-    """File the written report as the cycle's final adjudicated report."""
-    blocked = _out_of_stage(cycle, SUBMIT_ADJUDICATION_TOOL)
-    if blocked is not None:
-        return blocked
-    report = _written_report(workspace)
-    if report is None:
-        return ToolOutcome(
-            text=(
-                "There is no report to file yet — write it with edit_report first (citing each "
-                "figure by its [source:index] handle), then file it here."
-            ),
-            is_error=True,
-        )
-    cycle.report = report
-    cycle.filed = SUBMIT_ADJUDICATION_TOOL
-    count = len(getattr(report, "figures", None) or [])
-    return ToolOutcome(
-        text=(
-            f"FILED submit_adjudication — your report is the final analysis for this cycle "
-            f"({count} figure(s) placed). The reviewer reads it next."
-        )
-    )
-
-
-async def execute_submit_terminal_report(
-    cycle: LeadCycle, workspace: Any | None, arguments: Mapping[str, Any]
-) -> ToolOutcome:
-    """File the written report as an honest terminal outcome (§9.6), with the status the lead set."""
-    blocked = _out_of_stage(cycle, TERMINAL_REPORT_TOOL)
-    if blocked is not None:  # pragma: no cover — reachable from every stage by design
-        return blocked
-    status = str(arguments.get("status") or "").strip()
-    if status not in ("failed", "needs_human"):
-        return ToolOutcome(
-            text=(
-                "submit_terminal_report needs 'status': 'failed' when the missing capability "
-                "blocks the request, or 'needs_human' when a person must settle something first."
-            ),
-            is_error=True,
-        )
-    report = _written_report(workspace)
-    if report is None:
-        return ToolOutcome(
-            text=(
-                "There is no report to file yet — write it with edit_report first, documenting "
-                "what was attempted, what is unavailable and why, and whichever partial findings "
-                "genuinely hold. Then file it here."
-            ),
-            is_error=True,
-        )
-    cycle.report = report.model_copy(update={"status": status})
-    cycle.filed = TERMINAL_REPORT_TOOL
-    return ToolOutcome(
-        text=(
-            f"FILED submit_terminal_report (status '{status}') — an honest terminal outcome, "
-            "recorded with no quality penalty. The reviewer reads it and decides what happens next."
+            f"Brief accepted — {len(specs)} link(s), in order: {names}. Your turn continues; "
+            "when the chain is done, or you decide it is not worth continuing, write your report "
+            "and call turn_end." + opened
         )
     )
 
@@ -2148,7 +2149,11 @@ class SandboxToolProvider:
             defs.append(web_search_tool_def())
             defs.append(web_fetch_tool_def())
         if self.report_workspace is not None:
-            defs.append(edit_report_tool_def())
+            defs.append(
+                edit_report_tool_def(
+                    self.report_workspace.prose_fields, self.report_workspace.status_values
+                )
+            )
             defs.append(review_report_tool_def())
             # The universal terminal (F5c). Declared with the report tools because those are what
             # it validates: without it the loop ended on "no tool calls", and an unwritten report
@@ -2900,17 +2905,20 @@ class ReadOnlyToolProvider:
                 definitions.append(plan_and_debate_tool_def())
         if self.authoring_session is not None or self._authoring_declared():
             definitions.append(drive_coder_tool_def())
+            definitions.append(check_coder_tool_def())
             definitions.append(submit_tool_def())
             definitions.append(respond_to_review_tool_def())
-        if self.cycle is not None:
-            if self.cycle.authoring_enabled:
-                definitions.append(author_chain_tool_def())
-                definitions.append(hold_authoring_tool_def())
-            definitions.append(request_another_round_tool_def())
-            definitions.append(submit_adjudication_tool_def())
-            definitions.append(submit_terminal_report_tool_def())
+        if self.cycle is not None and self.cycle.authoring_enabled:
+            # Gated on the CYCLE's flag, never on a live session: the session is swapped per chain
+            # link, and a declared set that shrinks mid-conversation is the "Tool reference not
+            # found" run-killer (2026-07-29).
+            definitions.append(author_chain_tool_def())
         if self.report_workspace is not None:
-            definitions.append(edit_report_tool_def())
+            definitions.append(
+                edit_report_tool_def(
+                    self.report_workspace.prose_fields, self.report_workspace.status_values
+                )
+            )
             definitions.append(review_report_tool_def())
         if self.editable_file is not None:
             definitions.append(file_edit_tool_def(self.editable_file))
@@ -2957,26 +2965,18 @@ class ReadOnlyToolProvider:
             return await execute_plan_and_debate(
                 self.human_handler, self.asked_by, arguments, model=self.model
             )
-        if name in (DRIVE_CODER_TOOL, SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL):
+        if name in (DRIVE_CODER_TOOL, CHECK_CODER_TOOL, SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL):
             if self.authoring_session is None:
                 return ToolOutcome(text=self._no_session_text(), is_error=True)
             if name == DRIVE_CODER_TOOL:
                 return await execute_drive_coder(self.authoring_session, arguments)
+            if name == CHECK_CODER_TOOL:
+                return await execute_check_coder(self.authoring_session)
             if name == SUBMIT_TOOL:
-                return await execute_submit(self.authoring_session)
+                return await execute_submit(self.authoring_session, self.cycle)
             return await execute_respond_to_review(self.authoring_session, arguments)
         if name == AUTHOR_CHAIN_TOOL and self.cycle is not None:
             return await execute_author_chain(self.cycle, arguments)
-        if name == HOLD_AUTHORING_TOOL and self.cycle is not None:
-            return await execute_hold_authoring(self.cycle, arguments)
-        if name == ANOTHER_ROUND_TOOL and self.cycle is not None:
-            return await execute_request_another_round(self.cycle, arguments)
-        if name == SUBMIT_ADJUDICATION_TOOL and self.cycle is not None:
-            return await execute_submit_adjudication(self.cycle, self.report_workspace)
-        if name == TERMINAL_REPORT_TOOL and self.cycle is not None:
-            return await execute_submit_terminal_report(
-                self.cycle, self.report_workspace, arguments
-            )
         if name == EDIT_REPORT_TOOL:
             return await execute_edit_report(self.report_workspace, arguments)
         if name == REVIEW_REPORT_TOOL:

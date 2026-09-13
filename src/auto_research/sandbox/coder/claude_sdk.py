@@ -386,14 +386,49 @@ class ClaudeSdkBackend:
         self._client = client
         self._monitor = monitor
         self._coder_model = coder_model
+        self._in_turn = False
 
     async def connect(self) -> None:
         await self._client.connect()
 
     async def drive(self, message: str) -> str:
-        return await _drive_author(
-            self._client, message, monitor=self._monitor, coder_model=self._coder_model
+        self._in_turn = True
+        try:
+            return await _drive_author(
+                self._client, message, monitor=self._monitor, coder_model=self._coder_model
+            )
+        finally:
+            self._in_turn = False
+
+    async def steer(self, message: str) -> bool:
+        """Say something to the author mid-turn; False when no turn is in flight.
+
+        The SDK publishes no `turn_steer`, but its streaming client does not need one: `query()`
+        returns immediately and the message joins the response already being drained by
+        `receive_response()`. That is the same shape Codex names explicitly, hand-rolled on the
+        primitive this SDK does give us.
+
+        Guarded on a turn actually running, because off a live turn `query()` would open a *new*
+        one behind the drive loop's back — two conversations interleaved on one warm session,
+        which is the state `start_drive` exists to prevent.
+        """
+        if not self._in_turn:
+            return False
+        try:
+            await self._client.query(message)
+        except Exception as exc:  # noqa: BLE001 — a lost race is a normal outcome, not a fault
+            await emit(
+                self._monitor, "coder.steer.refused", level=4,
+                summary="the coder turn ended before the steer landed",
+                data={"error": cap_text(str(exc), 300), "harness": self.harness},
+            )
+            return False
+        await emit(
+            self._monitor, "coder.steer", level=5,
+            summary=f"steered the coder mid-turn: {cap_text(message, 60)}",
+            data={"text": cap_text(message), "harness": self.harness},
         )
+        return True
 
     async def disconnect(self) -> None:
         await self._client.disconnect()

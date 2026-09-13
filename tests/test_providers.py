@@ -964,3 +964,280 @@ def test_openai_input_allowlist_covers_types_no_hand_list_had():
                                                          "created_by": "assistant"})
     assert "created_by" not in _as_input_item(item)
     assert _input_fields("a_type_openai_has_not_shipped_yet") == frozenset()
+
+
+# ================================================================ A1: has_unresolved_server_tool
+#
+# The property that lets `_react` hold an injected turn rather than splice it into a conversation
+# that is mid-server-tool. Anthropic is the only vendor where the state is both documented and
+# measured, so its cells carry the real turns; Google's cells exist because its own SDK
+# contradicts its own docs about whether the state can arise at all.
+
+
+def _anth_unresolved(*blocks) -> bool:
+    from auto_research.models.providers.anthropic import _has_unresolved_server_tool
+
+    return _has_unresolved_server_tool(list(blocks))
+
+
+# --- the real turns, verbatim ---------------------------------------------------------------
+#
+# Frozen out of logs/dev/science-bench/20260910T022054Z/slot-01/prompts.jsonl rather than written
+# for the test (the ledger-replay discipline). Line 279 message 12 is the turn that killed run
+# 8c75990e: `400 ... tool_search_tool_bm25 tool use with id srvtoolu_01PCDhG72zkmP2EY5L4D1nmX was
+# found without a corresponding tool_search_tool_bm25_tool_result block`, after a user turn was
+# appended following its tool results. Line 40 message 2 is the resolved shape from the same run.
+
+_REAL_UNRESOLVED_TURN = [
+    {"type": "thinking", "thinking": "", "signature": "<elided>"},
+    {
+        "type": "server_tool_use",
+        "id": "srvtoolu_01PCDhG72zkmP2EY5L4D1nmX",
+        "name": "tool_search_tool_bm25",
+        "caller": None,
+        "input": {"query": "plot energy-resolved polarization degree angle PD(E) PA(E) figure"},
+    },
+    {
+        "type": "tool_use",
+        "id": "toolu_01AnT188qU4FY2rnaWLtEv6G",
+        "name": "review_report",
+        "caller": {"type": "direct"},
+        "input": {},
+    },
+]
+
+_REAL_RESOLVED_TURN = [
+    {"type": "thinking", "thinking": "", "signature": "<elided>"},
+    {"type": "text", "text": "Let me search."},
+    {
+        "type": "server_tool_use",
+        "id": "srvtoolu_01Ejn48oGJcmKyGLqV1Bcam2",
+        "name": "tool_search_tool_bm25",
+        "caller": None,
+        "input": {"query": "fix BACKSCAL header FITS keyword edit"},
+    },
+    {
+        "type": "tool_search_tool_result",
+        "tool_use_id": "srvtoolu_01Ejn48oGJcmKyGLqV1Bcam2",
+        "content": {"type": "tool_search_tool_search_result", "tool_references": []},
+    },
+    {"type": "tool_use", "id": "toolu_x", "name": "read_file", "input": {}},
+]
+
+
+def test_the_real_turn_that_killed_a_run_reads_unresolved():
+    """The regression cell. `stop` is asserted alongside so nobody later derives one from the
+    other: this turn's stop_reason is `tool_use`, exactly like the resolved one below."""
+    assert _anth_unresolved(*_REAL_UNRESOLVED_TURN) is True
+
+
+def test_the_real_resolved_turn_from_the_same_run_reads_resolved():
+    assert _anth_unresolved(*_REAL_RESOLVED_TURN) is False
+
+
+def test_stop_cannot_stand_in_for_the_property():
+    """Measured 47/47 and 155/155: Anthropic returns the same finish reason on both shapes, so
+    the two normalizers must stay independent fields."""
+    both = (_REAL_UNRESOLVED_TURN, _REAL_RESOLVED_TURN)
+    assert len({_anth_unresolved(*t) for t in both}) == 2  # the property separates them
+    # ...and the finish reason does not: both turns arrived as `tool_use`.
+
+
+# --- structural cells -------------------------------------------------------------------------
+
+
+def test_an_ordinary_turn_has_no_pending_server_tool():
+    assert _anth_unresolved() is False
+    assert _anth_unresolved({"type": "text", "text": "hi"}) is False
+    assert _anth_unresolved({"type": "tool_use", "id": "toolu_1", "name": "read_file"}) is False
+
+
+def test_partial_resolution_is_unresolved():
+    """`any`, not `all` — the vendor says to check EACH block's id for a matching result."""
+    assert _anth_unresolved(
+        {"type": "server_tool_use", "id": "s1"},
+        {"type": "server_tool_use", "id": "s2"},
+        {"type": "tool_search_tool_result", "tool_use_id": "s1"},
+    ) is True
+
+
+def test_pairing_is_by_id_not_by_position():
+    """One measured turn holds seven server calls in interleaved groups, so a result does not
+    have to follow its own call."""
+    assert _anth_unresolved(
+        {"type": "server_tool_use", "id": "s1"},
+        {"type": "server_tool_use", "id": "s2"},
+        {"type": "tool_search_tool_result", "tool_use_id": "s2"},
+        {"type": "tool_search_tool_result", "tool_use_id": "s1"},
+    ) is False
+
+
+def test_there_is_no_allowlist_of_result_block_types():
+    """The result type is per-tool and the set grows. This fails the moment someone adds one."""
+    assert _anth_unresolved(
+        {"type": "server_tool_use", "id": "s1"},
+        {"type": "advisor_tool_result", "tool_use_id": "s1"},
+    ) is False
+
+
+def test_a_client_tool_named_like_a_server_tool_is_not_one():
+    """Our own client tools are literally named `web_search` and `web_fetch`. A name-based
+    predicate would fire on them; a type-based one cannot."""
+    assert _anth_unresolved(
+        {"type": "tool_use", "id": "toolu_1", "name": "web_search", "input": {}},
+        {"type": "tool_use", "id": "toolu_2", "name": "web_fetch", "input": {}},
+    ) is False
+
+
+def test_a_continuation_turn_carrying_only_the_result_is_resolved():
+    """When a pair legitimately spans two responses the call block is not repeated, so the second
+    turn holds a result answering nobody in it. Scanning calls (not results) gets this right."""
+    assert _anth_unresolved(
+        {"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_earlier"},
+        {"type": "text", "text": "here is what I found"},
+    ) is False
+
+
+def test_the_mcp_connectors_call_behaves_the_same_way():
+    assert _anth_unresolved({"type": "mcp_tool_use", "id": "m1"}) is True
+    assert _anth_unresolved(
+        {"type": "mcp_tool_use", "id": "m1"}, {"type": "mcp_tool_result", "tool_use_id": "m1"}
+    ) is False
+
+
+def test_an_unidentifiable_server_call_fails_closed():
+    """`_block_to_dict`'s last-resort branch keeps only `type`. A wrong hold costs one iteration;
+    the other error cost a run."""
+    assert _anth_unresolved({"type": "server_tool_use"}) is True
+    assert _anth_unresolved({"type": "server_tool_use", "id": None}) is True
+
+
+# --- Google ------------------------------------------------------------------------------------
+
+
+def _goog_unresolved(*parts) -> bool:
+    from auto_research.models.providers.google import _has_unresolved_server_tool
+
+    return _has_unresolved_server_tool(list(parts))
+
+
+def _gpart(**fields):
+    """A Gemini `Part` stand-in: a struct whose unset fields are None, like the real one."""
+    base = dict(
+        text=None, thought=None, thought_signature=None, function_call=None,
+        function_response=None, tool_call=None, tool_response=None,
+        executable_code=None, code_execution_result=None,
+    )
+    base.update(fields)
+    return SimpleNamespace(**base)
+
+
+def test_google_ordinary_turns_have_no_pending_server_tool():
+    assert _goog_unresolved() is False
+    assert _goog_unresolved(_gpart(text="hi")) is False
+    assert _goog_unresolved(
+        _gpart(function_call=SimpleNamespace(id="f1", name="read_file", args={}))
+    ) is False
+
+
+def test_google_hosted_pair_in_one_turn_is_resolved():
+    """The documented shape, copied from the tool-combination page's own JSON example."""
+    assert _goog_unresolved(
+        _gpart(tool_call=SimpleNamespace(id="a7b3k9p2", tool_type="GOOGLE_SEARCH_WEB", args={})),
+        _gpart(tool_response=SimpleNamespace(id="a7b3k9p2", tool_type="GOOGLE_SEARCH_WEB",
+                                             response={})),
+    ) is False
+
+
+def test_google_hosted_call_without_its_response_is_unresolved():
+    assert _goog_unresolved(
+        _gpart(tool_call=SimpleNamespace(id="a7b3k9p2", tool_type="GOOGLE_SEARCH_WEB", args={}))
+    ) is True
+
+
+def test_google_parallel_hosted_calls_pair_by_id():
+    assert _goog_unresolved(
+        _gpart(tool_call=SimpleNamespace(id="a", tool_type="GOOGLE_SEARCH_WEB", args={})),
+        _gpart(tool_call=SimpleNamespace(id="b", tool_type="URL_CONTEXT", args={})),
+        _gpart(tool_response=SimpleNamespace(id="a", tool_type="GOOGLE_SEARCH_WEB", response={})),
+    ) is True
+    assert _goog_unresolved(
+        _gpart(tool_call=SimpleNamespace(id="a", tool_type="GOOGLE_SEARCH_WEB", args={})),
+        _gpart(tool_response=SimpleNamespace(id="b", tool_type="GOOGLE_SEARCH_WEB", response={})),
+    ) is True
+
+
+def test_google_code_execution_falls_back_to_counting():
+    """`ExecutableCode.id` is optional and documented as unsupported on Vertex, so an id-set
+    difference over two Nones would read as resolved. A failed execution still yields a result."""
+    code = SimpleNamespace(code="print(1)", language="PYTHON", id=None)
+    assert _goog_unresolved(_gpart(executable_code=code)) is True
+    assert _goog_unresolved(
+        _gpart(executable_code=code),
+        _gpart(code_execution_result=SimpleNamespace(outcome="OUTCOME_FAILED", output="", id=None)),
+    ) is False
+
+
+def test_google_two_id_less_code_blocks_and_one_result_is_unresolved():
+    """THE discriminating cell for the counting arm.
+
+    With `ExecutableCode.id` absent (the documented Vertex shape), an id-set difference sees
+    `{None}` on both sides and calls this resolved. Counting gets it right. This is why the code
+    arm counts while the hosted arm pairs by id — the two halves need opposite treatment.
+    """
+    code = SimpleNamespace(code="print(1)", language="PYTHON", id=None)
+    result = SimpleNamespace(outcome="OUTCOME_OK", output="1", id=None)
+    assert _goog_unresolved(
+        _gpart(executable_code=code), _gpart(executable_code=code),
+        _gpart(code_execution_result=result),
+    ) is True
+    assert _goog_unresolved(
+        _gpart(executable_code=code), _gpart(executable_code=code),
+        _gpart(code_execution_result=result), _gpart(code_execution_result=result),
+    ) is False
+
+
+def test_google_scopes_to_the_first_candidate_like_every_other_reader():
+    """`_response_parts` and `stop_from_google` both read candidates[0]; this must not widen."""
+    from auto_research.models.providers.google import _response_parts
+
+    unresolved_part = _gpart(
+        tool_call=SimpleNamespace(id="x", tool_type="GOOGLE_SEARCH_WEB", args={})
+    )
+    response = SimpleNamespace(candidates=[
+        SimpleNamespace(content=SimpleNamespace(parts=[_gpart(text="clean")])),
+        SimpleNamespace(content=SimpleNamespace(parts=[unresolved_part])),
+    ])
+    assert _goog_unresolved(*_response_parts(response)) is False
+
+
+def test_google_hosted_part_census_catches_an_sdk_that_grows_one():
+    """The tripwire that earns its keep.
+
+    Production is a guaranteed False here — the adapter declares only function tools and never
+    sets the flag that makes server-side invocations visible — so asserting the constant cannot
+    fail for the reason we care about. Instead: pin the `Part` fields we have classified. A
+    google-genai upgrade that adds a new one fails this and forces a human to classify it.
+    """
+    from google.genai import types as gtypes
+
+    hosted = {"tool_call", "tool_response", "executable_code", "code_execution_result"}
+    known_non_hosted = {
+        "text", "thought", "thought_signature", "function_call", "function_response",
+        "inline_data", "file_data", "video_metadata", "media_resolution", "part_metadata",
+    }
+    unclassified = set(gtypes.Part.model_fields) - hosted - known_non_hosted
+    assert not unclassified, (
+        f"google-genai grew Part field(s) {sorted(unclassified)} — classify each as hosted "
+        "(and add it to _has_unresolved_server_tool) or non-hosted before shipping."
+    )
+
+
+def test_google_tool_type_census():
+    """A new hosted tool type means re-reading the vendor's pairing rule for it."""
+    from google.genai import types as gtypes
+
+    assert [e.value for e in gtypes.ToolType] == [
+        "TOOL_TYPE_UNSPECIFIED", "GOOGLE_SEARCH_WEB", "GOOGLE_SEARCH_IMAGE",
+        "URL_CONTEXT", "GOOGLE_MAPS", "FILE_SEARCH",
+    ]

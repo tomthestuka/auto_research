@@ -452,6 +452,7 @@ harness is the backend's business.
 class CoderBackend(Protocol):        # coder/backend.py
     async def connect(self) -> None            # bring the author process up
     async def drive(self, message: str) -> str # one turn; streams to the ledger, books its spend
+    async def steer(self, message: str) -> bool# say something mid-turn; False if none in flight
     async def disconnect(self) -> None         # take it down (finally + interrupt cleanup)
 ```
 
@@ -462,7 +463,7 @@ in what mechanism they offer for each.
 | wire | `claude_sdk.ClaudeSdkBackend` | `codex_sdk.CodexBackend` |
 |---|---|---|
 | process | the `claude` CLI via `ClaudeSDKClient` | `codex app-server` via `openai_codex.CodexClient` |
-| auth | the env rebuild drops `ANTHROPIC_API_KEY`, so it uses stored subscription credentials; `_with_live_anthropic_key` stamps a rotated key | the vendor key named by the member's `key_env`, in the child's environment |
+| auth | the env rebuild drops `ANTHROPIC_API_KEY`, so it uses stored subscription credentials; `_with_live_anthropic_key` stamps a rotated key | the vendor key named by the member's `key_env`, **defaulting to the provider's standard variable** when the member names none, in the child's environment |
 | role prompt | `prompts/coder.md` as `system_prompt` (replaces) | the same text as `developerInstructions` (layers over Codex's own tool instructions) |
 | tool surface | an explicit `allowed_tools` list | Codex's fixed built-ins plus `tools.web_search` |
 | write jail | a `PreToolUse` hook consulting `PathGuard` | `sandbox="workspace-write"` + `writableRoots` = the same allow-list, enforced by the OS (Landlock) |
@@ -471,6 +472,33 @@ in what mechanism they offer for each.
 | escalation | an in-process SDK MCP server | an in-process Streamable-HTTP MCP endpoint (`escalation_server.py`), registered as a **process-level** `--config` override and gated by an *elicitation* the client answers with `{"action": "accept"}` |
 | cost | a session-cumulative dollar figure, differenced per turn | real token counts per model call (`thread/tokenUsage/updated`), priced by `CostMeter.record_call` like any chat role |
 | turn status | inferred | `turn/completed` carries a status and an error |
+| stop reach | the SDK's own async client, so a cancel unwinds it | a **daemon thread this backend owns** polls notifications, and a cancelled turn is left *registered* so the client's close-time wake can reach it (below) |
+
+**How a `/stop` reaches a Codex turn.** The notification stream is a blocking call, and a cancel
+cannot reach a thread blocked in `queue.Queue.get()` by any mechanism — `Future.cancel()` returns
+False for running work, `shutdown(cancel_futures=True)` is documented not to touch it, and
+`PyThreadState_SetAsyncExc` reports success while the thread stays parked forever (async exceptions
+are checked at bytecode boundaries and a blocked lock executes none). The escape is the vendor's
+own: `_MessageRouter.fail_all` pushes an exception into every **registered** turn queue when the
+client closes, which `CodexClient.close()` triggers. Two things make that reachable here.
+
+- `drive` leaves the turn **registered** when it is cancelled. Deregistering is right on every
+  other path and was wrong on this one: `fail_all` finds waiters by walking its `turn_id -> queue`
+  dict, and `unregister_turn` pops us out of exactly that lookup — so the wake `aclose`'s later
+  `disconnect()` fires had nobody left to deliver to.
+- `_drain_turn` polls on a **daemon thread the backend creates**, not the default executor. The
+  executor's workers are non-daemon and `concurrent.futures.thread._python_exit` joins every one of
+  them with no timeout and no daemon check (bpo-39812), after `asyncio.run` has already spent
+  `THREAD_JOIN_TIMEOUT` (300 s) on `shutdown_default_executor` — so one stranded poll used to turn
+  a clean stop into an unbounded hang. The poller stops itself on a terminal notification, so
+  nothing outlives a turn that ends normally.
+
+Measured 2026-09-12: the B8 live drill cancelled the run, repaired the tree to the attempt's base
+ref and leaked no coder process, and *then* the process never exited. Pinned by
+`tests/test_coder_backends.py::test_a_cancelled_codex_turn_stays_registered_so_the_close_time_wake_lands`
+and `::test_the_codex_poller_is_daemonised_and_ends_with_a_turn_that_completes`, each verified to
+fail against its own mutation — the second one wedging the pytest process itself, which is the
+production symptom in miniature.
 
 Both stream the same `coder.*` events (`coder.session_start`, `coder.text`, `coder.tool_use`,
 `coder.tool_result`, `coder.turn_end`), which is what makes two harnesses comparable inside one
@@ -1386,3 +1414,98 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   the read-only `.git` pointer file names a gitdir the author's writable set does not contain.
   Tests: `test_jail.py::test_the_coder_policy_binds_dot_git_read_only_inside_every_writable_root`,
   `::test_a_jailed_process_can_read_git_history_and_cannot_write_it` (34 → 36).
+
+- 2026-09-12 — **B1/B2: the coder runs beside the lead.** `AuthoringSession.start_drive` hands the
+  coder one instruction and returns at once; `drive_status` and `take_drive_result` report what it
+  is doing and what it left. `drive` (blocking) stays, because the seed call and `drive_authoring`
+  still want to wait — and `drive_authoring` backs the paper's published authoring measurements,
+  so its path is byte-identical.
+  **Why:** a real link's turn takes minutes and the lead spent every one of them blocked inside
+  `drive_coder`, unable to read the diff it had just asked for or think about the next link.
+  `submit_for_review` stays **blocking** by ruling: the gate runs pytest twice through a blocking
+  `subprocess.run`, and the CI framing says you wait for the ticket.
+  **A failed drive is a result, not an escaped exception.** A backend that dies sets
+  `_drive_error` and returns a `[harness error]` line, so the lead is TOLD. On 2026-09-09 a
+  Claude-harness session whose credential ran out returned the CLI's own billing string with
+  `is_error` discarded; the lead spent three drives steering a corpse at $0 and then recorded the
+  failure with a confidently wrong cause.
+  **One conversation per warm session:** a second `start_drive` while one is in flight raises
+  rather than queueing — interleaving two conversations on one session is undefined on every
+  harness, and the caller is told instead of being silently serialised.
+  **B2 — `aclose` cancels and AWAITS the drive before `disconnect`, and the ordering is the
+  property.** `aclose` disconnects the backend and may reset the worktree to the per-attempt base
+  ref; a drive still in flight would be writing into that tree while it is repaired. And
+  `RunControl.interrupt` cancels only the *registered run task*, so a task created inside the
+  session is not in that set and would otherwise outlive the cleanup. Asserted on the recorded
+  lifecycle order (`drive:cancelled` before `disconnect`), not on a sleep.
+  **B7 — cost attribution needed nothing.** The meter is a `ContextVar` and a task created by
+  `start_drive` inherits the creating context, so coder spend lands in the run total exactly as it
+  did when the drive blocked. Pinned by a test that reads a marker variable from inside the
+  background drive rather than asserting the mechanism in prose.
+
+- 2026-09-12 (second) — **A `/stop` during a Codex turn no longer hangs the process.** The B8 live
+  drill passed every assertion it makes — run cancelled, tree repaired to the attempt's base ref,
+  no leaked coder — and then the process sat until a `timeout` killed it. Root cause was ours and
+  it was ordering, not a missing capability: `CodexBackend.drive`'s `finally` called
+  `unregister_turn_notifications`, an `await` in a `finally` **does** run on the cancelled path,
+  and the vendor's only close-time wake (`_MessageRouter.fail_all`) finds blocked waiters by
+  walking the `turn_id -> queue` dict that call had just popped us out of. Two changes, both in
+  `codex_sdk.py`: `drive` skips the deregistration **only** when cancelled, so `disconnect()`'s
+  `close()` can still reach the poller (measured: `asyncio.run` returned in 1.02 s, exit 0); and
+  the poll moved off the default executor onto a **daemon thread the backend owns** in the new
+  `_drain_turn`, because `_python_exit` joins every executor worker with no timeout and no daemon
+  check (bpo-39812) — so a poll nothing ever wakes is abandoned at exit instead of hanging it. The
+  poller stops itself on a terminal notification, `_TERMINAL_TURN_METHODS` being read both there
+  and by `_record_notification` so the two cannot disagree about what ends a turn, and the
+  cross-thread handoff treats a closed loop as its exit signal rather than printing a teardown
+  traceback. New cells in `tests/test_coder_backends.py` (49 -> 51), each verified against its own
+  mutation; the daemon one strands a non-daemon poller and wedges pytest itself, which is the
+  production symptom in miniature. The same defect class remains open at `hitl/cli.py:40`
+  (CLAUDE.md §13), where there is no router to stay registered in.
+
+- 2026-09-12 (third) — **A coder member that named no `key_env` launched with no credential at
+  all.** `config/models.yaml` dropped the field on 2026-09-09 on the stated grounds that
+  `DEEPSEEK_API_KEY` is the derived default — true of the launch check (`env.py:
+  _PROVIDER_KEY_ALIASES`), false of this backend, where `key_env` gates three separate things: the
+  child's environment overlay, the API-key login (`_login`), and the `env_key` handed to Codex in
+  the provider config. All three were skipped, so preflight passed on the very variable the author
+  could not see and every Codex turn returned `401 Unauthorized: Authentication Fails (governor)`
+  — against a key measured good the same day (`/models` 200, balance $64.60, `POST /responses` 200
+  on both `deepseek-flash` and `deepseek-v4-flash` when sent by hand). Found by the B8 stop drill,
+  whose coder had written nothing in three consecutive runs; the run that named the cause was the
+  first one carrying a monitor ledger and a `coder.*` digest, the two runs before it having
+  recorded "the coder wrote nothing" with no evidence of what it did instead.
+  `CodexBackend.__init__` now takes `member.key_env or env_var_names(member.provider)[0]`, which is
+  the shape the chat path already uses (`_responses.py` falls back to its vendor's `key_env`) — the
+  two agree rather than a new rule being invented. An explicitly named plan-specific variable still
+  wins. Published benchmark batches are unaffected: `science_bench/arms.py` pins
+  `CODER_KEY_ENV = "DEEPSEEK_API_KEY"` explicitly. `tests/test_coder_backends.py` 51 -> 54, the two
+  new behavioural cells verified against the unfixed code and the third a static guard that
+  whatever the config names as coder resolves *some* key variable.
+
+- 2026-09-12 (fourth) — **The lead<->coder channel is symmetric; `ask_lead` stopped blocking.**
+  `ask_lead` used to call `lead.clarify_for_author`, which opened a **second ReAct conversation**
+  on the lead — running concurrently with the lead's own turn, sharing its tool provider, and
+  holding the coder-control tools. Measured live 2026-09-12: 100 clarification tool calls
+  interleaved with 76 cycle tool calls, **85 of them `check_coder`** polling the very coder that
+  was blocked waiting for the answer being composed; the answer landed **326 s** after the
+  question, by which time the coder had timed out and recorded the wrong cause ("unattended" —
+  the lead was attending, slowly). A circular wait, in a loop with none of the brief's context.
+  Both directions now use the mechanism each side already had. **Coder -> lead:** `ask_lead`
+  parks the question on the session and returns `"delivered."`; the lead's own `_react` collects
+  it beside `_coder_event`, at the same boundary and under the same A2 hold rule, and it arrives
+  as a `[coder asks]` user turn in the conversation that wrote the brief. **Lead -> coder:**
+  `CoderBackend` gains `steer(message) -> bool` and `AuthoringSession.send` picks the primitive
+  from the coder's state — a turn in flight is steered, an idle coder is given a new turn — so
+  `drive_coder` is the single lead->coder path and the lead never meets "the coder is already
+  working on an instruction" again. That refusal fired twice in the live run *while the lead held
+  the answer that would have cleared it*. Codex publishes `turn_steer(thread_id,
+  expected_turn_id, …)`, pinned to the turn in flight so a steer racing its end is refused rather
+  than misdelivered; the Claude SDK has no such call and needs none, since a second `query()`
+  joins the response its streaming client is already draining (guarded on a turn actually running,
+  or it would open a second conversation behind the drive loop's back). Deleted:
+  `clarify_for_author`, `_ClarifyReply`, and that schema's row in the live matrix, which had been
+  measuring a shape nothing composes. Prompts updated on both sides — the coder is told the reply
+  arrives mid-turn and that going idle until it does is fine; the lead is told `[coder asks]`
+  messages are answered with `drive_coder`. `tests/test_coder_backends.py` 54 -> 59,
+  `tests/test_lead_forms.py` 36 -> 39.

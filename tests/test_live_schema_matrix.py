@@ -24,7 +24,6 @@ import pytest
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
-from auto_research.agents.roles import _ClarifyReply
 from auto_research.models.providers.anthropic import AnthropicProvider
 from auto_research.models.providers.dashscope import DashscopeProvider
 from auto_research.models.providers.deepseek import DeepSeekProvider
@@ -62,14 +61,19 @@ pytestmark = pytest.mark.skipif(
 # the strictest shape this project sends a provider (a required list of nested objects, each with
 # its own nested list), and that shape now travels as `author_chain`'s tool `input_schema`. The
 # input-schema side is measured separately, on all five vendors, by
-# `tests/test_live_form_shapes.py`; this row keeps the output-schema side from silently
+# `tests/test_live_lead_providers.py` (formerly test_live_form_shapes); this row keeps the output-schema side from silently
 # regressing while the model class still exists.
+#
+# `_ClarifyReply` was removed from this list on 2026-09-12 with the class it named: the lead no
+# longer answers its coder in a second conversation composed into a schema. `ask_lead` parks the
+# question, the lead's own loop collects it at a safe injection point, and the answer goes back
+# through `drive_coder` as a mid-turn steer. Nothing composes that shape any more, so measuring
+# it on six vendors measured nothing.
 SCHEMAS = [
     ("ReviewVerdict", ReviewVerdict),          # COMPOSE (reviewer.review)
     ("AnalystReport", AnalystReport),          # COMPOSE (analyze / lead report terminals)
     ("AuthoringDecision", AuthoringDecision),  # shape-only: the nested chain, no longer composed
     ("ToolReviewVerdict", ToolReviewVerdict),  # COMPOSE (colead.review_tool)
-    ("_ClarifyReply", _ClarifyReply),          # COMPOSE (lead.clarify_for_author)
     ("SearchRequest", SearchRequest),
     ("MemoryRecord", MemoryRecord),
     ("ResearchReport", ResearchReport),

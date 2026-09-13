@@ -133,34 +133,58 @@ listed in the lead's authoring-loop `free_tools` (slice 3), bounded by `submit_c
 `react_loop_absolute_cap`. They drive the **same** `AuthoringSession` primitives `propose_and_pr`
 drives in its auto-loop — the difference is *who* diagnoses each verdict (the lead, vs. the coder).
 
-**The lead's cycle forms (`LeadCycle`, §9.3).** The lead states every decision by *filing a form*
-rather than by composing a structured answer. When a `LeadCycle` is wired onto its provider, five
-forms are declared — `author_chain`, `hold_authoring`, `request_another_round`,
-`submit_adjudication`, `submit_terminal_report` (`LEAD_FORM_TOOLS`) — each passed to `_react` as a
-`terminal_tool`, so a successful call ends that loop with the filed arguments readable from
-`last_filed_form`. Three properties are the point:
+**The lead's cycle (`LeadCycle`, §9.3).** The lead's turn is **one ReAct loop with no stages**,
+ending on `turn_end`, and **its report is its decision** — the same contract an analyst already
+writes. It has exactly one form left: `author_chain` (`LEAD_FORM_TOOLS`), which is a *brief* handed
+to a coding subagent, not a decision, and which does **not** end the turn.
 
-- **The impossible state is inexpressible.** `author_chain`'s `input_schema` requires
-  `tool_specs` with `minItems: 1`. Filing "author, with nothing to author" was schema-VALID
-  structured output that a Pydantic validator then killed a live run over ($19.43, 2026-09-01);
-  it cannot be expressed now. Same move as the gate deriving its target packages from the diff
-  rather than from an advisory field ([A12]).
-- **Every question carries its own description.** Each form field's prose is read from the
-  Pydantic `Field(description=...)` of the model it validates back into (`_field_desc`), so the
-  worker's view and the lead's view of one object cannot drift, and no field is filled blind —
-  a `#` comment never reaches JSON Schema, which is the defect behind that run.
-- **Declarations are constant; the handler enforces the stage.** `_authoring_declared()` gates the
-  three authoring tools on `cycle.authoring_enabled` rather than on a live `authoring_session`, so
-  swapping the session per chain link never changes the declared set. `_out_of_stage` returns an
-  `is_error` naming the stage and the forms open now; `submit_terminal_report` is in every stage
-  (§9.6: an honest stop is never out of reach).
+*What this replaced, and why.* The lead used to state each decision by filing one of five forms,
+and a filed form was a `terminal_tool`. While authoring, the only two forms it could file were both
+whole-cycle terminals — so "this link is dead, try the next" was inexpressible. Slot 1 of the
+2026-09-11 batch ended a whole analysis with **11 of 12 author credits unspent**; slot 2, from the
+identical position, spent a debate round and a full worker rerun to say the same thing. Two of the
+four retired handlers validated nothing anyway: they copied an already-validated report onto the
+cycle and differed from each other by one field the report itself carries.
 
-Handlers validate arguments back into the existing models — `AuthoringDecision`, `ReviewVerdict`,
-and (for both report terminals) whatever `edit_report` last wrote — so every downstream consumer
-is untouched. A malformed chain link comes back as a correction naming the field ([F11]), never a
-crash. `LeadCycleOutcome` is what `run_cycle` returns: the filed form, its product, and the
-authoring bookkeeping (`decision`, `authored`, `committed`, remaining `author_budget`) the caller
-needs to reload discovery and rerun the workers.
+Four properties carry the design:
+
+- **The impossible state is inexpressible.** `author_chain` takes the first link as a **required
+  property** (`first_link` + an optional `additional_links` tail). Cardinality keywords are
+  enforced on no path — a live lead filed an empty `minItems: 1` array straight through
+  (2026-09-02) — while `required` is enforced under strict mode and degrades correctly elsewhere.
+  The handler still checks: belt and suspenders.
+- **Every question carries its own description.** Each field's prose is read from the Pydantic
+  `Field(description=...)` of the model it validates back into, so the worker's view and the
+  lead's view of one object cannot drift, and no field is filled blind — a `#` comment never
+  reaches JSON Schema, which is the defect behind the $19.43 run.
+- **Declarations never shrink.** `_authoring_declared()` gates the authoring tools on
+  `cycle.authoring_enabled` rather than on a live `authoring_session`, so swapping the session per
+  chain link never changes the declared set (the 2026-07-29 `Tool reference … not found`
+  run-killer).
+- **The chain advances on a tool result.** `LeadCycle.advance_chain` — supplied by `run_cycle`,
+  which owns every session and every git operation (§9.9) — closes the finished link and opens the
+  next, returning the sentence the lead reads. That is what lets ONE loop span a whole chain: a
+  dead link is a sentence in the conversation rather than the end of the turn.
+
+**`turn_end` is the door (`lead_turn_problems`).** `edit_report` stays permissive so a partial
+write mid-turn is legal; completeness is checked once, here, and a rejection is an `is_error` that
+puts the model back in its loop with its tools. It refuses: no report written; `rework` without a
+probe or a rationale, or with no rounds left (the cap named); a conclusion with no findings; a
+cited figure whose file is not on disk; and a coding session still open. Conditional
+required-fields is deliberately *not* expressed in the schema — it is not portable across the six
+vendors, and a schema that refuses a legal intermediate state fights the write-freely contract.
+
+**One report class, two surfaces.** `AnalystReport` carries the lead's `rework` / `rationale` /
+`what_to_probe` alongside the worker's `tool_request`, and `ReportWorkspace.prose_fields` +
+`status_values` decide which a role is offered — the worker's surface omits the decision fields and
+`needs_human`, the lead's omits `tool_request`. The alternative, a subclass per role, would have
+widened `status` in a subtype so anything typed as the worker's report could receive a value the
+worker may not file.
+
+`LeadCycleOutcome` is what `run_cycle` returns: the report (the decision), plus the authoring
+bookkeeping (`decision` = the brief written, `authored`, `committed`, remaining `author_budget`)
+the caller needs to reload discovery and rerun the workers. `report=None` means the lead never
+wrote one, which the caller treats as the failure it is — nothing is composed on its behalf ([F6]).
 
 When a `RunMonitor` is injected, role wrappers record high-chatter input,
 parsed output, raw model content, attachment counts, and errors. These records
@@ -255,32 +279,34 @@ Role wrappers:
 - `AnalystLeadAgent.run_cycle(task, reports, *, sources=None, rounds_left=0, author_budget=0,
   toolkit_root=None, worktree_base=None, direct_branch=None, colead=None, human_handler=None,
   coder=None, allow_correlated_review=False) -> LeadCycleOutcome` — **the lead's whole turn**, one
-  ReAct loop over one conversation. It investigates, then ends by **filing a form** (§9.3):
-  `author_chain` / `hold_authoring` while a worker's `tool_request` is open and credits remain,
-  then `request_another_round`, `submit_adjudication` or `submit_terminal_report`. The form it
-  picks *is* the decision, and each form's fields carry their own descriptions — the channel a
-  Pydantic `#` comment never reached. Replaces the four separate conversations
-  `adjudicate`/`judge_convergence`/`decide_authoring`/`finalize_authoring_outcome` were, and with
-  them the terminal composes: this conversation declares no output schema at all.
-  - **Stages.** `decide` (only when a request is open, credits remain and a toolkit is wired) →
-    `author` (one open coding session) → `adjudicate`. Every form is **declared for the whole
-    cycle** and the *handler* enforces the stage, because a declared set that shrinks mid-
-    conversation is the 2026-07-29 `Tool reference … not found` run-killer; an out-of-stage call
-    returns `is_error`, which `_react` treats as a correction rather than a finish.
-  - **Authoring ends the cycle.** `author_chain` authors the whole ordered chain link by link
-    (`_author_chain` → `_drive_one_link`, each link its own `AuthoringSession` swapped onto the
-    shared provider) and then returns with `filed="author_chain"`, so the caller reruns the
-    workers on what committed before the lead judges reports that predate it (A8).
-  - **The coding middle is dropped** between links (`_drop_coding_middle`): the filed brief and
-    the `submit_for_review` call with its real result survive; the `drive_coder` transcript goes.
+  ReAct loop over one conversation, **with no stages**, ending on `turn_end`. It investigates,
+  optionally briefs a coding chain, drives and submits each link, writes its report, and ends.
+  **The report is the decision** (A3): `rework=true` sends the analysts back, `rework=false` makes
+  it the analysis result. This conversation declares no output schema at all.
+  - **`author_chain` is a brief, not a terminal.** Filing it writes `cycle.brief` and opens the
+    first link's session; the turn continues. Before A7 every action open while authoring ended
+    the whole cycle, which is how slot 1 finished an analysis with 11 of 12 author credits
+    unspent.
+  - **The chain advances on a tool result.** `_ChainDriver.advance` (wired to
+    `LeadCycle.advance_chain`) closes the finished link — committed, or its review submissions
+    spent — records its `MergeFlowResult`, and opens the next, returning the sentence the lead
+    reads. When the chain runs out it says so and points at `edit_report` + `turn_end`. Every
+    session lifecycle and every git operation stays in Python (§9.9); the model asks for the next
+    link, it never builds one.
+  - **`turn_end` validates** through `lead_turn_problems` (above): no report, `rework` without a
+    probe/rationale or with no rounds left, a conclusion with no findings, a cited figure whose
+    file is missing, a coder still running. A refusal is a correction, not a finish.
+  - **The coding middle is dropped** per committed link (`_drop_coding_middle`): the brief and the
+    `submit_for_review` call with its real result survive; the `drive_coder` transcript goes. A
+    rejection or a spent budget stays legible — it is what the next brief must be written against.
   - **Figures.** Accumulates each worker's cited figures into a per-worker catalog source (keyed by
     `sources[i]`, append-only across rounds/iterations) and attaches them to the cycle's first
     call; the report is written through `edit_report` citing `{worker, index}`. The lead — not the
     consensus — owns the report's figures (V-4).
-  - **No tool surface ⇒ no report.** `self.tools is None` returns `filed=None, report=None` rather
-    than composing a stand-in ([F6]: a runtime-authored report sits closer to fabrication than the
-    absence it hides). A loop that wrote a report but never filed it has that report used — real
-    evidence it produced — while a loop that wrote nothing returns nothing.
+  - **No tool surface ⇒ no report.** `self.tools is None` returns `report=None` rather than
+    composing a stand-in ([F6]). A loop that wrote a report but ran out of budget before
+    `turn_end` has that report used — real evidence it produced — while one that wrote nothing
+    returns nothing.
 - `AnalystLeadAgent.clarify_for_author(message, *, kind) -> str` — answers a
   tool author's `ask_lead` clarification (the lead↔author channel, §9.3), sent as a single
   Markdown `message`; consults
@@ -290,14 +316,14 @@ Role wrappers:
   MergeFlowResult` — **one** tool through authoring on its own conversation: build + connect an
   `AuthoringSession`, seed the coder, run the lead's loop over `drive_coder` /
   `submit_for_review` / `respond_to_review`, read the terminal result, `aclose`. `run_cycle`'s
-  `_drive_one_link` is the same lifecycle over the *cycle's* conversation; this standalone entry
+  `_ChainDriver` is the same lifecycle over the *cycle's* conversation; this standalone entry
   remains because `benchmarks/author_bench` measures exactly it (its published K=10 batches
   priced this call), so the instrument is unchanged by the cycle refactor.
-- The honest terminal after a non-committed attempt is no longer a separate method: authoring and
-  judging are stages of one cycle, so the lead meets the failure as a task note and files
-  `submit_terminal_report` (§9.6) — documenting the unavailable capability and any partial
-  findings that hold, never fabricating, never re-requesting the tool. The report flows to the
-  reviewer (sole I/O).
+- The honest terminal after a non-committed attempt is no longer a separate method, and since A7
+  it is no longer a separate *form* either: the lead reads the failure in its own conversation and
+  writes it into its report (`rework=false`, `status=failed` or `needs_human`) — documenting the
+  unavailable capability and any partial findings that hold, never fabricating, never re-requesting
+  the tool. The report flows to the reviewer (sole I/O), §9.6.
 - `AnalystColeadAgent.review_tool(tool_spec, *, diff, gate, tools=None) -> ToolReviewVerdict`
   — the Phase-2 step-4 provider-decorrelated **code review** (§9.3). Payload carries the
   `ToolSpec` brief, the authored `diff` bundle, and the (already-passed) `GateReport`
@@ -363,8 +389,8 @@ Role wrappers:
   report folder; `_figure_catalog` is the per-worker figure catalog (append-only across rounds +
   iterations). Methods: `run_cycle(...)` (the whole turn — one loop, one conversation, ends on a
   filed form), `drive_authoring(...)` (one standalone authoring attempt, `author_bench`'s
-  instrument), `clarify_for_author()`. Internals: `_accumulate_figures()`, `_author_chain()`,
-  `_drive_one_link()`, `_make_report_workspace()`.
+  instrument), `clarify_for_author()`. Internals: `_accumulate_figures()`,
+  `_make_report_workspace()`; the chain's sessions are owned by the module-level `_ChainDriver`.
 - `AnalystColeadAgent` — Phase-2 provider-decorrelated co-lead reviewer wrapper.
   Method: `review_tool(tool_spec, *, diff, gate, tools=None) -> ToolReviewVerdict`.
 
@@ -565,3 +591,110 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   cut at. Also observed working: the budget split (`react_loop_cap` per cycle stage, the absolute
   cap per link, `submit_for_review` exempt via `_CYCLE_FREE_TOOLS` — recorded as `free=True` with
   the budget not advancing) and the pre-gate submission snapshot firing on every submit.
+
+- 2026-09-12 — **A1–A11: the lead's turn became one loop with no stages, and its report became its
+  decision.** Deleted: `hold_authoring`, `request_another_round`, `submit_adjudication`,
+  `submit_terminal_report` and their handlers; the three stage constants, `_STAGE_FORMS`,
+  `_out_of_stage`, `LEAD_CYCLE_TERMINALS`, `LeadCycle.stage`/`.filed`, `_stage_note`,
+  `_author_chain` and `_drive_one_link`. `LEAD_FORM_TOOLS` is now `{author_chain}` alone, and a
+  brief no longer ends anything. **Why:** a filed form was a `terminal_tool`, and while authoring
+  the only two the lead could file were both whole-cycle terminals — so "this link is dead, try
+  the next" was inexpressible. Slot 1 of the 2026-09-11 batch ended a whole analysis with 11 of 12
+  author credits unspent; slot 2, from the identical position, paid a debate round and a full
+  worker rerun for the same thing. Two of the four retired handlers validated nothing anyway.
+  **Now:** `run_cycle` is one `_react` with `terminal_tools={turn_end}`; `_ChainDriver.advance`
+  (wired to `LeadCycle.advance_chain`) closes a finished link and opens the next **on a tool
+  result**, so the chain advances inside the turn; `execute_submit`'s cap refusal became the
+  CI-budget ticket that triggers it; `lead_turn_problems` validates the report at `turn_end` (no
+  report · rework without probe/rationale · rework with no rounds left, cap named · a conclusion
+  with no findings · **a cited figure whose file is not on disk** · a coder still running).
+  `_react` gained `share_messages`, which is what lets the driver drop a committed link's coding
+  transcript from the live trajectory instead of running a nested per-link loop.
+  **One report class, two surfaces:** `AnalystReport` gained `rework`/`rationale`/`what_to_probe`
+  and `status` regained `needs_human`; `ReportWorkspace` gained `status_values`, and
+  `edit_report_tool_def(prose_fields, status_values)` filters what each role is offered — the
+  worker's surface omits the decision fields and `needs_human`, the lead's omits `tool_request`.
+  The schema stays permissive and `turn_end` is strict, deliberately: conditional required-fields
+  is not portable across the six vendors, and a schema refusing a legal partial write fights the
+  write-freely contract. The subclass alternative was rejected because it widens `status` in a
+  subtype. **Reviewer:** `review`'s loop gained `terminal_tools={turn_end}` — without one,
+  `_continuation_for` returns `None` immediately, so an empty or truncated reviewer turn read as
+  "finished investigating" (17 of the 184 silent turns measured across 221 runs are this loop).
+  **A2:** one injection drain at the top of the iteration, **held** for a turn when the preceding
+  provider turn has an unresolved server-tool call (`_last_turn_has_unresolved_server_tool`); the
+  mid-batch drain is deleted; and the silent-turn nudge appends **nothing** on a paused turn that
+  is mid-server-tool — the vendor documents re-sending as-is, and a message appended there strands
+  the call. Measured dead first: 184 silent turns across 221 runs, `stop == "end_turn"` on every
+  one, zero `paused` ever. Suite: `test_lead_forms.py` largely rewritten (29), new A2 cells in
+  `test_run_control.py` (17), `test_react_tools.py` 46 → 47.
+  **Process note:** the first attempt at the `run_cycle` replacement matched `self._round += 1` by
+  content and deleted `class AnalystLeadAgent` along with it — the 2026-09-09 incident verbatim, a
+  structural heuristic standing in for a boundary check. Restored from a scratch copy and redone
+  with the span asserted to contain exactly three method definitions and no `class` statement
+  before any line was removed.
+
+- 2026-09-12 (second) — **B3-B6: the second screen.** `drive_coder` hands the instruction over and
+  returns at once (falling back to the blocking call for a session without `start_drive`, which is
+  `drive_authoring`'s path and every test double's); new `check_coder` reports `working` /
+  narration / a typed failure, consuming a finished result exactly once so it is reported once.
+  **B4 — a stopped coder reaches the lead as its own user turn**, through **A2's queue and A2's
+  hold rule**. That is the dependency the build order records: a pushed event is precisely what
+  makes the injection race reachable, so it goes through the same gate rather than a second,
+  unguarded path. The notice names the link and points at `check_coder`; the narration itself
+  stays out of the injected turn, because a notice is a nudge to look, not the looking.
+  **B6 — `_drop_coding_middle` fires on a COMMITTED link only.** A rejection or a spent CI budget
+  is what the lead's next brief has to be written against, so dropping it would delete the reason
+  the link died. Before this the drop ran for committed and failed links alike.
+
+- 2026-09-12 (third) — **`tests/test_live_form_shapes.py` is now `tests/test_live_lead_providers.py`**
+  and covers three cells per vendor rather than one. The name went with the forms: it began as a
+  single-call check that each vendor could fill `author_chain`'s nested argument, and the question
+  worth asking per vendor grew with the refactor. Cell 1 is that original schema check (fixed for
+  `cycle.brief`); cell 2 drives a **whole real `run_cycle`** per vendor — seeded worker reports
+  with a `tool_request` and figures, the real read-only tool loop, a briefed chain with stubbed
+  coding sessions, ending on a validated `turn_end`, and re-checking the conditional requirements
+  from OUTSIDE the validator (the only way to catch a validator that passed wrongly); cell 3 hands
+  each vendor back its **own** history and asks for one more turn, the class that produced three
+  run-killers in one week — with the history driven live rather than hand-built, because an
+  invented `provider_parts` array tests my idea of the vendor's shape rather than the vendor's.
+  **Tool search is not applicable to the lead and the file says so**: `ReadOnlyToolProvider` defers
+  nothing, so the provider-side search step never runs for this role. Measured the expensive way —
+  the injection-race probe was written against the lead first and recorded six turns with no
+  server-tool block at all. The role that defers is the worker.
+
+- 2026-09-12 (second) — **The lead keeps its turn when it briefs a chain, and `check_coder`
+  reaches a handler.** Two defects from the A-series refactor, both found by reading one live
+  trace rather than by a test. **(1)** `check_coder` was declared, defined, given an executor and
+  given a dispatch branch — and its name was missing from the outer membership test guarding the
+  authoring block, so that branch was unreachable and the call returned `unknown tool:
+  check_coder`. Measured live: the lead filed `author_chain`, called `check_coder` to poll its
+  coder, and was told the tool does not exist. Guarded now over the *declared* set
+  (`test_every_declared_authoring_tool_is_actually_ROUTED`), so a tool added to the lead's surface
+  without wiring fails a test rather than a model call. **(2)** `_ChainDriver._open` sent the brief
+  with the **blocking** `drive`, holding the lead still for the coder's entire first turn — 263 s
+  measured — against a contract (§9.3) that says the turn continues. Two consequences observed in
+  the same run: no background task existed, so `check_coder` (once routable) would answer *"you
+  have not sent the coder anything yet"* to a lead whose coder had just worked for four minutes,
+  advice that would have had it re-send the whole brief; and the first turn's narration was
+  discarded here, so the lead re-read five files by hand to learn what its own coder had already
+  told it. `_open` now uses `start_drive` when the session has it, keeping the blocking call for a
+  session that predates the seam (a benchmark's, a test double's) exactly as `execute_drive_coder`
+  does. The link-opened message stops claiming a first attempt exists and points at `check_coder`.
+  **`execute_submit` gained the guard that blocking call had been providing by accident**: the
+  gate reads the working tree, so a submit while the coder is mid-write would run pytest twice and
+  a paid co-lead review over a half-written tool and reject it for a defect nobody wrote. That race
+  was unreachable while the lead could not act during the coder's turn; the guard lands with the
+  change that makes it reachable. Budget-free, since a refusal is not a submission.
+  Human ruling on the blocking itself: not alarming in isolation — the lead has little to do —
+  *"except it wanted to do some read-only 'good measure'"*, which is precisely the pass both
+  defects were blocking. `tests/test_lead_forms.py` 32 -> 36, the three new behavioural cells each
+  verified against the unfixed code.
+
+- 2026-09-12 (third) — **`clarify_for_author` is gone; the coder's question enters the lead's own
+  loop.** It opened a second ReAct conversation concurrently with the lead's turn, on the shared
+  provider, with the full coder-control surface — measured live spending 85 `check_coder` calls
+  polling the coder that was blocked waiting for it, and answering 326 s late into a conversation
+  the coder had abandoned. Replaced by `_coder_questions(tools)`, a pull at the same boundary as
+  `_coder_event` under the same A2 hold rule, injecting a `[coder asks]` user turn; the lead
+  answers with `drive_coder`, which now steers a turn already in flight. `_ClarifyReply` deleted
+  with it. See `sandbox/DOCS.md` for the channel as a whole.

@@ -6,8 +6,7 @@ from pathlib import Path
 import pytest
 
 from auto_research.agents.react import (
-    ANOTHER_ROUND_TOOL,
-    SUBMIT_ADJUDICATION_TOOL,
+    TURN_END_TOOL,
     LeadCycleOutcome,
 )
 from auto_research.consensus import DebateToConverge
@@ -54,13 +53,15 @@ class FakeLead:
         self.judged_rounds.append(self.cycles)
         self.rounds_left_seen.append(rounds_left)
         if self.cycles < self.converge_on and rounds_left > 0:
+            # A3: the report IS the decision — `rework` asks for another round, and the
+            # probe reaches every worker verbatim.
             return LeadCycleOutcome(
-                filed=ANOTHER_ROUND_TOOL,
-                verdict=ReviewVerdict(
-                    accepted=False,
+                filed=TURN_END_TOOL,
+                report=AnalystReport(
+                    summary=f"round {self.cycles}: not settled",
+                    rework=True,
                     rationale=f"round {self.cycles}",
-                    needs_analysis_rework=True,
-                    follow_up="refit the segment",
+                    what_to_probe="refit the segment",
                 ),
                 author_budget=author_budget,
             )
@@ -73,7 +74,7 @@ class FakeLead:
         )
         self.final_reports.append(report)
         return LeadCycleOutcome(
-            filed=SUBMIT_ADJUDICATION_TOOL, report=report, author_budget=author_budget
+            filed=TURN_END_TOOL, report=report, author_budget=author_budget
         )
 
 

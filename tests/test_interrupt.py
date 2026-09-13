@@ -16,6 +16,7 @@ No LLM, no git, no subprocesses: the pieces are fakes that record what was calle
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -342,3 +343,127 @@ def test_detached_reconstruct_raises_interruption_not_run_died(tmp_path):
     with pytest.raises(UserInterruptionError) as caught:
         reconstruct_run("q", tmp_path, "run-a")
     assert "monitor.jsonl" in str(caught.value)
+
+
+# ══════════════════════════════════════ B8: /stop while the coder is mid-drive
+#
+# B made the coder run BESIDE the lead, which put a new writer on the toolkit that the interrupt
+# path did not previously have to think about. The cleanup's own docstring states the invariant it
+# turns on — *"nothing may be able to write to the toolkit when the toolkit is repaired"* — and a
+# background drive is exactly a thing that can write while the reset runs.
+#
+# `RunControl.interrupt` cancels only the REGISTERED RUN TASK, and a task created inside the
+# session is not in that set, so nothing else would stop it. These drive the **production**
+# `_interrupt_cleanup` over a **real** `AuthoringSession` whose backend is a stub, with a drive
+# genuinely in flight. What stays live-only is the real-process half: an actual coder subprocess
+# and an actual git worktree.
+
+
+class _WritingBackend:
+    """A backend whose drive keeps 'writing to the toolkit' until something cancels it."""
+
+    def __init__(self, log: _Recorder) -> None:
+        self._log = log
+        self.writes = 0
+
+    async def connect(self) -> None:
+        self._log.events.append("connect")
+
+    async def drive(self, message: str) -> str:
+        self._log.events.append("drive:start")
+        try:
+            while True:                       # the coder, working
+                await asyncio.sleep(0.01)
+                self.writes += 1
+        except asyncio.CancelledError:
+            self._log.events.append("drive:cancelled")
+            raise
+
+    async def disconnect(self) -> None:
+        self._log.events.append("disconnect")
+
+
+def _live_session(log: _Recorder):
+    """A real AuthoringSession — real `start_drive`, real `aclose` — over a stub backend."""
+    from auto_research.sandbox.merge_flow import AuthoringSession
+
+    session = object.__new__(AuthoringSession)
+    session._backend = _WritingBackend(log)
+    session._closed = False
+    session._drive_task = None
+    session._drive_status = "idle"
+    session._drive_result = None
+    session._drive_error = None
+    session._direct_branch = "ai"
+    session._monitor = None
+    session._toolkit_root = None
+    session._worktree_base = None
+    session._base_ref = "abc1234"
+    session.tool_spec = SimpleNamespace(proposed_tool_name="ixpe_pcube_bands")
+
+    # The reset is the "repair" step; record it rather than touching a real repository.
+    def _pending() -> bool:
+        return True
+
+    session.pending_changes = _pending
+    return session
+
+
+def test_stop_mid_drive_kills_the_coder_before_the_toolkit_is_repaired(monkeypatch):
+    """B8, the invariant the whole three-phase order exists for.
+
+    A drive is in flight when the human stops the run. The coder task must be cancelled before the
+    branch reset runs — a reset that races a live writer is undone by that writer a moment later,
+    which is the dirty-tree state the next launch's preflight then blocks on.
+
+    Verified to discriminate against two separate mutations before being kept: disconnecting
+    before cancelling, and cancelling **without awaiting**. The second is the subtle one, and this
+    catches it because `drive:cancelled` is logged by the drive itself — a cancel that is issued
+    but never awaited never reaches that line before the reset runs. A third cell that counted the
+    coder's writes during the repair was written and then deleted: it failed neither mutation, and
+    its timing depended on when the loop happened to schedule the cancelled task.
+    """
+    log = _Recorder()
+
+    async def _fake_reset(*args, **kwargs):
+        log.events.append("tree_reset")
+
+    monkeypatch.setattr("auto_research.sandbox.merge_flow._reset_direct_tree", _fake_reset)
+
+    async def scenario():
+        session = _live_session(log)
+        session.start_drive("write the wrapper")
+        await asyncio.sleep(0.05)                      # the coder is genuinely working
+        assert session.drive_status == "working"
+        _, coro = _cleanup(log, session=session)
+        await coro
+
+    asyncio.run(scenario())
+
+    assert "drive:start" in log.events, "the drive never started; the test proves nothing"
+    for earlier, later in (("drive:cancelled", "disconnect"), ("drive:cancelled", "tree_reset")):
+        assert log.events.index(earlier) < log.events.index(later), (
+            f"{earlier} did not precede {later}: {log.events}"
+        )
+    # And the kill phase still comes first, as it did before B.
+    assert log.events.index("kill:w0") < log.events.index("tree_reset")
+
+
+def test_stop_with_no_drive_in_flight_is_unchanged():
+    """The guard is narrow: an interrupt with an idle coder behaves exactly as it did before B."""
+    log = _Recorder()
+
+    async def scenario():
+        session = _live_session(log)
+        _, coro = _cleanup(log, session=session)
+        await coro
+
+    with pytest.MonkeyPatch.context() as mp:
+        async def _fake_reset(*args, **kwargs):
+            log.events.append("tree_reset")
+
+        mp.setattr("auto_research.sandbox.merge_flow._reset_direct_tree", _fake_reset)
+        asyncio.run(scenario())
+
+    assert "drive:cancelled" not in log.events
+    assert log.events.index("disconnect") < log.events.index("tree_reset")

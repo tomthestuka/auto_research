@@ -45,6 +45,24 @@ DASHSCOPE_VENDOR = ResponsesVendor(
     # object field), while `items: {$ref}` is the reverse, 0/5 as sent and 5/5 resolved.
     resolve_refs_in=frozenset({"items"}),
     supports_tool_search=False,
+    # The one vendor here with REAL provider-executed types. .../model-studio/
+    # qwen-api-via-openai-responses (read 2026-09-11) enumerates the emitted `output[].type` set as
+    # message / reasoning / function_call plus these seven, each triggered by declaring its tool
+    # caller-side. Every one folds its result INTO the call item (`action.sources`, `output`,
+    # `outputs[].logs`, `queries`), so an unresolved one can only show as a non-terminal `status`
+    # (`in_progress` / `searching` are documented values). Unreachable today — the adapter declares
+    # only function tools — and declared anyway so the census test has a documented set to hold us
+    # to. Three of these are absent from openai's own input union, so they would otherwise ride
+    # through `_as_input_item` unclassified and read `False` in silence.
+    server_tool_item_types=frozenset({
+        "web_search_call",
+        "web_extractor_call",
+        "code_interpreter_call",
+        "web_search_image_call",
+        "image_search_call",
+        "file_search_call",
+        "mcp_call",
+    }),
     # Read off .../model-studio/qwen-api-via-openai-responses (2026-09-03), which rules the native
     # path out twice over. The `input_file` part takes `file_url` -- "The public URL of the file.
     # Required when `type` is `input_file`" -- and accepts neither inline base64 `file_data` (the

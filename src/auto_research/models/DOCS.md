@@ -1034,3 +1034,46 @@ Compacted 2026-09-01: entries through 2026-08-28 folded into themed ranges (deta
   bug. The run's own recorded string settled it; the test now uses that verbatim format.
   `tests/test_provider_key_failover.py` 54 (+2, +1 factory), verified to fail against the unfixed
   rule before being kept; suite 1421 → 1423.
+
+- 2026-09-12 — **A1: `ModelResponse.has_unresolved_server_tool`, normalised per adapter.** The
+  provider-neutral answer to "is this turn mid-server-tool", so `_react` can hold an injected user
+  turn rather than splice it into a conversation the API says is closed to it. Investigated per
+  adapter family against each vendor's own documentation before any code was written, and
+  cross-checked against the verbatim prompt dumps on disk.
+  **Server tools come in four shapes, not one.** *Anthropic* — a separate result block, id-paired,
+  and the only place the state is both documented and measured (3 of 121 distinct assistant turns
+  in one batch). *OpenAI* — a separate result item, tool search only, and only in **client**
+  execution mode, which we never use; hosted mode always returns the pair together. *Google* —
+  separate id-paired parts (`tool_call`/`tool_response`, `executable_code`/`code_execution_result`),
+  unreachable while the adapter declares no hosted tool and never sets
+  `include_server_side_tool_invocations`. *Alibaba* — the result is folded **into** the call item
+  across seven documented hosted tools, so "unresolved" can only mean a non-terminal `status`.
+  DeepSeek documents every built-in type as *Ignored*; Z.AI publishes no contract for `/responses`
+  at all, so its empty set rests on **undocumented**, not documented-absent, grounds — recorded in
+  its module because it changes what a later reader may conclude.
+  **Five rules, each with a failure behind it.** Pair by id, never by position — one measured
+  Anthropic turn holds **seven** server calls in interleaved groups. Never match by tool name —
+  our own *client* tools are named `web_search`/`web_fetch`, colliding with Anthropic's server
+  tools of the same names (134 declarations each in one dump). Never key on OpenAI's `call_id` —
+  hosted mode sets it `null` on both items and `_as_input_item` drops `None`, so id-pairing reads
+  `True` on every real discovery turn. Read `status` where the result is folded in. **Fail
+  closed**: a missing id, an absent status, or an undeclared vendor reads unresolved — a wrong
+  hold costs one iteration, the other error cost a run ($42.11, 4 committed tools, 2026-09-10).
+  **`stop` is not a proxy**, measured: Anthropic returns the same finish reason on resolved and
+  unresolved turns alike, 47/47 and 155/155. The two normalizers stay independent fields.
+  **Guard tests assert the SET, not the constant.** Four of six vendors are a constant `False`,
+  and a test asserting a constant cannot fail for the reason we care about. Instead: census
+  Google's `Part` fields and `ToolType` enum, and each Responses vendor's declared
+  `server_tool_item_types`. Three of Alibaba's seven types are absent from openai's own input
+  union, so an unclassified hosted item would otherwise ride through capture and read `False` in
+  silence.
+  **Recorded, not fixed** (human rulings): Google's response walk appends each non-text,
+  non-function-call part **twice** (`google.py` line 367 unconditional + the `else` branch),
+  measured 7 real parts captured as 12 and replayed verbatim — introduced 2026-08-05, i.e. after
+  the [I8] measurement, and left alone because Google holds no active seat. And OpenAI documents
+  an assistant message's `phase` as preserve-and-resend while our replay rebuilds the text rather
+  than echoing the item — observed by reading the code, never probed, and deliberately untouched.
+  Corrected in place: `deepseek.py` claimed the vendor supports a hosted `web_search`; its own
+  compatibility table (read 2026-09-11) lists every built-in type as *Ignored*. Moot either way —
+  web search reaches every role as our own Tavily **function** tool — but the comment read as
+  evidence of a capability the vendor disclaims.

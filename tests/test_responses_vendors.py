@@ -881,3 +881,161 @@ def test_native_schema_emptiness_is_retryable_and_names_the_status(monkeypatch):
     assert "status=" in message and "incomplete_details=" in message
     assert "output_chars=0" in message
     assert "retrying" in message
+
+
+# ----------------------------------------------- A1: has_unresolved_server_tool (server tools)
+
+
+def _hosted_response(*items):
+    """A fake Responses object whose `output` is the given items."""
+    return SimpleNamespace(
+        output=list(items), output_text="", usage=SimpleNamespace(input_tokens=1, output_tokens=1)
+    )
+
+
+def _item(itype, **fields):
+    return SimpleNamespace(type=itype, **fields)
+
+
+def _unresolved(adapter: type[ResponsesProvider], *items) -> bool:
+    from auto_research.models.providers._responses import _has_unresolved_server_tool
+
+    return _has_unresolved_server_tool(_hosted_response(*items), adapter.vendor)
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS, ids=lambda a: a.vendor.name)
+def test_a_turn_with_no_server_tools_is_resolved(adapter):
+    """The overwhelming majority of real turns: reasoning + function calls, nothing hosted."""
+    assert not _unresolved(
+        adapter,
+        _item("reasoning", id="rs_1"),
+        _item("function_call", call_id="c1", name="read_file", arguments="{}"),
+    )
+    assert not _unresolved(adapter)
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS, ids=lambda a: a.vendor.name)
+def test_a_pending_client_function_call_is_not_a_server_tool(adapter):
+    """`function_call` is OUR pending work, not the provider's — the loop answers it next turn."""
+    assert not _unresolved(adapter, _item("function_call", call_id="c1", status="in_progress"))
+
+
+def test_the_real_hosted_discovery_pair_is_resolved():
+    """The shape 27 of 27 real discovery pairs take, frozen from the production dumps:
+    `execution="server"` and `call_id=None` on BOTH items.
+
+    This cell does NOT discriminate count-pairing from id-pairing — with `call_id` null on both
+    sides an id-matching predicate also answers False here, by accident. The discrimination lives
+    in `test_two_hosted_calls_and_one_output_is_unresolved` below; this one just pins the common
+    case against the real bytes.
+    """
+    call = _item("tool_search_call", id="tsc_1", call_id=None, execution="server",
+                 status="completed", arguments={"paths": ["a", "b"]})
+    out = _item("tool_search_output", id="tso_1", call_id=None, execution="server",
+                status="completed", tools=[{"name": "a"}])
+    assert not _unresolved(OpenAIProvider, _item("reasoning", id="rs_1"), call, out)
+
+
+def test_a_tool_search_call_with_no_output_is_unresolved():
+    """Client execution mode: the model emits the call and stops there."""
+    call = _item("tool_search_call", id="tsc_1", call_id="tsc_call_1", execution="client",
+                 status="completed")
+    assert _unresolved(OpenAIProvider, _item("reasoning", id="rs_1"), call)
+
+
+def test_two_hosted_calls_and_one_output_is_unresolved():
+    """THE discriminating cell for count-over-id pairing.
+
+    Hosted mode sets `call_id` to null on every item, so an id-set predicate sees `{None}` on both
+    sides, computes an empty difference, and calls this resolved — wrong, and silently so. Counting
+    gets it right. Verified against a naive id-set implementation before this was kept: it answers
+    False here and True is correct.
+    """
+    call = lambda: _item("tool_search_call", id="t", call_id=None, status="completed")
+    out = _item("tool_search_output", id="o", call_id=None, status="completed")
+    assert _unresolved(OpenAIProvider, call(), call(), out) is True
+    assert _unresolved(OpenAIProvider, call(), call(), out, out) is False
+
+
+@pytest.mark.parametrize("status", ["in_progress", "searching", None])
+def test_an_inline_hosted_tool_that_has_not_finished_is_unresolved(status):
+    """Alibaba folds the result into the call item, so only `status` can say it is pending —
+    and an ABSENT status reads pending too, which is the fail-closed direction."""
+    fields = {"id": "ws_1", "action": {}}
+    if status is not None:
+        fields["status"] = status
+    assert _unresolved(DashscopeProvider, _item("web_search_call", **fields))
+
+
+def test_a_completed_inline_hosted_tool_is_resolved():
+    assert not _unresolved(
+        DashscopeProvider,
+        _item("web_search_call", id="ws_1", status="completed", action={"sources": []}),
+    )
+    assert not _unresolved(
+        DashscopeProvider, _item("mcp_call", id="m1", status="completed", output="{}")
+    )
+
+
+def test_a_vendor_that_declares_no_hosted_types_is_always_resolved():
+    """Pins that DeepSeek/Z.AI's constant is a DECLARATION, not an accident of the shared walker:
+    the same item that fires for Alibaba must not fire for them."""
+    pending = _item("web_search_call", id="ws_1", status="in_progress")
+    assert _unresolved(DashscopeProvider, pending)
+    assert not _unresolved(DeepSeekProvider, pending)
+    assert not _unresolved(ZaiProvider, pending)
+
+
+def test_the_property_reaches_the_model_response():
+    """Not just the helper: the value has to survive the adapter's own construction path."""
+    from auto_research.models.providers import _responses as R
+
+    response = _hosted_response(
+        _item("tool_search_call", id="t1", call_id=None, status="completed")
+    )
+    built = R._response(raw=response, vendor=OpenAIProvider.vendor)
+    assert built.has_unresolved_server_tool is True
+    assert R._response(raw=response, vendor=DeepSeekProvider.vendor).has_unresolved_server_tool is False
+    # No vendor (a hand-built or synthesized turn) is honestly "nothing captured".
+    assert R._response(raw=response).has_unresolved_server_tool is False
+
+
+# --- the census tripwires: assert the SET, not the constant -------------------------------
+
+
+def test_every_vendors_hosted_set_is_documented_or_deliberately_empty():
+    """A vendor added later inherits the fail-safe default rather than a silent empty set.
+
+    Four of these are a constant False, and a test asserting a constant cannot fail for the
+    reason we care about — that a vendor ships a hosted item type we do not classify. This
+    asserts the declared SET instead, so a change to it is a deliberate edit with a citation.
+    """
+    from auto_research.models.providers._responses import _OPENAI_SERVER_TOOL_ITEMS
+
+    declared = {v.name: v.server_tool_item_types for v in responses_vendors()}
+    assert declared["openai"] == _OPENAI_SERVER_TOOL_ITEMS
+    assert declared["deepseek"] == frozenset()
+    assert declared["zai"] == frozenset()
+    assert declared["dashscope"] == frozenset({
+        "web_search_call", "web_extractor_call", "code_interpreter_call",
+        "web_search_image_call", "image_search_call", "file_search_call", "mcp_call",
+    })
+    # The default is the fail-safe one: a new vendor that declares nothing is assumed capable.
+    assert ResponsesVendor(
+        name="openai", limits=OpenAIProvider.vendor.limits
+    ).server_tool_item_types == _OPENAI_SERVER_TOOL_ITEMS
+
+
+def test_a_hosted_item_type_we_do_not_classify_is_visible_rather_than_silent():
+    """Three of Alibaba's documented types are absent from openai's own input union, so an
+    unclassified hosted item rides through capture verbatim. This is the tripwire: the carried
+    part keeps its `type`, so a census over captured turns can name it."""
+    from auto_research.models.providers._responses import _as_input_item
+
+    item = _item("web_extractor_call", id="we_1", status="in_progress", output="")
+    carried = _as_input_item(item)
+    assert carried.get("type") == "web_extractor_call"
+    # Declared by Alibaba, so it is classified there and fires; unknown to OpenAI's set, so it
+    # does not — which is exactly the silence the census test above exists to break.
+    assert _unresolved(DashscopeProvider, item)
+    assert not _unresolved(OpenAIProvider, item)

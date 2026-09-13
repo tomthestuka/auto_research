@@ -292,3 +292,26 @@ carried by **reference** (`FigureRef`), never embedded
   `failed`/`needs_human`. That is a different field (a cycle decision, not a worker's outcome) and
   the ruling named `AnalystReport`; retiring it there would move the frozen [A20] Tier-0 scoring
   rule, which is an instrument decision.
+
+- 2026-09-12 — **A3: one report class, two role surfaces.** `AnalystReport` gained `rework`
+  (send the analysts back), `rationale` (why) and `what_to_probe` (handed to every worker
+  verbatim), and `status` regained `needs_human` beside `succeeded`/`failed`. The lead's decision
+  now rides on its report rather than on a filed form, which is the same contract an analyst
+  already writes.
+  **The third status value is barred by the SURFACE, not by the type.** F9 removed it from this
+  schema because a worker could reach it and did — filed for something that was not a human block
+  at all ([A20]) — and headless the route it names does not exist. That reasoning is unchanged;
+  what moved is where it is enforced. The lead's terminal is a cycle decision rather than a
+  worker's outcome and legitimately carries the value, so `edit_report` declares only the values
+  a role may file (`react.WORKER_STATUS_VALUES` / `LEAD_STATUS_VALUES`) and a worker's declaration
+  does not include it. Belt and suspenders: the surface makes it ungeneratable, the handler
+  validates anyway.
+  **A subclass was rejected.** `LeadReport(AnalystReport)` would have widened a `Literal` in a
+  subtype, so anything typed as the worker's report could receive a value the worker may not file
+  — and the analysis result returned all the way to the reviewer *is* that type.
+  **The conditional requirements are not in the schema.** `rework=true` needs a probe and a
+  rationale; `rework=false` needs findings. Neither is expressed here: the schema stays permissive
+  so a partial `edit_report` mid-turn is legal, and completeness is checked once at `turn_end`
+  (`react.lead_turn_problems`). Conditional required-fields is also not portable across the six
+  vendors. Guarded by `test_schemas.py::test_needs_human_is_barred_by_the_workers_surface_not_by_
+  the_type` and `::test_every_declared_report_property_is_a_real_field_on_the_model`.

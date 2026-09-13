@@ -50,6 +50,58 @@ def _block_to_dict(block: Any) -> dict[str, Any]:
     return {"type": getattr(block, "type", None)}
 
 
+#: Block types that represent a **provider-executed** call and can be left pending.
+#: `server_tool_use` covers every Anthropic server tool (web search, web fetch, code execution and
+#: its bash/editor sub-tools, advisor, tool search); `mcp_tool_use` is the MCP connector's
+#: equivalent, which the vendor documents as behaving identically. `mcp_tool_use` is unreachable
+#: today (we never send `mcp_servers`) and is listed anyway: it is one entry, and the docs bind it.
+_PENDING_CALL_TYPES = frozenset({"server_tool_use", "mcp_tool_use"})
+
+
+def _has_unresolved_server_tool(provider_parts: list[dict[str, Any]]) -> bool:
+    """Does this turn hold a server-tool call with no result block? (A1)
+
+    Anthropic documents both the state and how to detect it: *"There is no other marker. Detect
+    the state by looking for a `server_tool_use` block whose `id` has no matching result block in
+    the response. An `mcp_tool_use` block from the MCP connector behaves the same way."*
+    (platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools, repeated on
+    .../build-with-claude/handling-stop-reasons).
+
+    Three choices, each avoiding a way of getting this wrong:
+
+    * **Pair by `tool_use_id`, never by position.** One measured turn holds seven server calls in
+      interleaved groups — the server-side loop runs several rounds inside one assistant turn —
+      so "the result follows its call" is false in real traffic.
+    * **No allowlist of result-block types.** The result type is per-tool and the set grows
+      (`web_search_tool_result`, `web_fetch_tool_result`, `code_execution_tool_result`,
+      `bash_code_execution_tool_result`, `text_editor_code_execution_tool_result`,
+      `tool_search_tool_result`, `advisor_tool_result`, `mcp_tool_result`). Matching structurally
+      on *any* block carrying `tool_use_id` is safe because only `tool_use`/`server_tool_use`
+      carry `id` and only result blocks carry `tool_use_id`.
+    * **Match on block `type`, never on tool name.** Our own *client* tools are named
+      `web_search` and `web_fetch`, colliding with Anthropic's server tools of the same names.
+
+    Scope is one assistant turn. When a pair legitimately spans two responses the vendor does not
+    repeat the call block in the second, so a lone result block answers nobody in that turn and
+    correctly reads `False` — this scans calls, not results.
+
+    **Fails closed**: a pending-call block whose `id` is missing or not a string reads `True`.
+    `_block_to_dict`'s last-resort branch drops `id`, and a wrong hold costs one iteration where
+    the opposite error cost a run.
+    """
+    resolved = {
+        block["tool_use_id"]
+        for block in provider_parts
+        if isinstance(block, dict) and isinstance(block.get("tool_use_id"), str)
+    }
+    return any(
+        block.get("type") in _PENDING_CALL_TYPES
+        and not (isinstance(block.get("id"), str) and block["id"] in resolved)
+        for block in provider_parts
+        if isinstance(block, dict)
+    )
+
+
 # Anthropic's documented media limits (platform.claude.com/docs/en/build-with-claude/vision,
 # "Request limits"; .../pdf-support). Enforced per request by `_media.plan_for_call`, the only
 # place that sees every image in the conversation at once.
@@ -304,6 +356,7 @@ class AnthropicProvider:
             tool_calls=tool_calls,
             usage=_anthropic_usage(usage),
             stop=stop_from_anthropic(response),
+            has_unresolved_server_tool=_has_unresolved_server_tool(provider_parts),
             context_edits=_context_edits(response),
             provider_parts=provider_parts,
             raw=response,

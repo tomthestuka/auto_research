@@ -137,6 +137,62 @@ def _part_to_dict(part: Any) -> dict[str, Any]:
         return {}
 
 
+def _has_unresolved_server_tool(parts: list) -> bool:
+    """Does this turn hold a server-executed call with no result part? (A1)
+
+    Gemini's hosted tools (Google Search, Maps, URL context, File Search, code execution) run on
+    Google's servers, and the vendor documents the whole round trip as landing in one response:
+    *"For built-in tools … the entire process happens within one API call"* and *"In a single
+    response, the API returns the `toolCall` and `toolResponse` parts for the built-in tool call.
+    For the function (custom tool) call, the API returns the `functionCall` call part, to which
+    the user provides the `functionResponse` part in the next turn"*
+    (ai.google.dev/gemini-api/docs/tools, .../generate-content/tool-combination). Corroborating:
+    `FinishReason` carries no pause value, so there is no Gemini analogue of the state a
+    suspendable hosted-tool loop would have to report.
+
+    **So why a predicate rather than `False`?** Because the vendor contradicts itself. The SDK's
+    `Part.tool_response` field says *"populated by the client with the results of executing the
+    corresponding ToolCall"* — which would make an unpaired `tool_call` a legitimate state —
+    while `ToolResponse`'s own docstring says *"The client is NOT expected to execute this
+    ToolCall"* and the public doc says both arrive together. No page resolves it, and a constant
+    would be betting on one of two contradicting vendor statements.
+
+    It cannot fire today regardless, and that is locked twice over: the adapter builds `tools`
+    only from `types.Tool(function_declarations=...)`, and never sets
+    `ToolConfig.include_server_side_tool_invocations`, which is what makes these parts visible at
+    all. The census tests in `test_providers.py` are what would catch that changing.
+
+    Two arms, because the two pairs identify themselves differently:
+
+    * **Hosted tools pair by id** (`ToolCall.id` — *"The server returns the tool response with the
+      matching `id`"*), and parallel hosted calls are supported, so counting would be wrong.
+    * **Code execution falls back to counting**, because `ExecutableCode.id` is optional and
+      documented as *"not supported in Vertex AI"* — an id-set difference over two `None`s would
+      silently read as resolved.
+
+    Reads the live parts rather than the captured dicts: the parts are the provider's own objects,
+    and `provider_parts` is a serialized view whose length this function must not depend on.
+    Scoped to `candidates[0]`, matching `_response_parts` and `stop_from_google`.
+    """
+    hosted_calls: set = set()
+    hosted_results: set = set()
+    code_calls = 0
+    code_results = 0
+    for part in parts:
+        call = getattr(part, "tool_call", None)
+        if call is not None:
+            hosted_calls.add(getattr(call, "id", None))
+        result = getattr(part, "tool_response", None)
+        if result is not None:
+            hosted_results.add(getattr(result, "id", None))
+        if getattr(part, "executable_code", None) is not None:
+            code_calls += 1
+        if getattr(part, "code_execution_result", None) is not None:
+            code_results += 1
+    # An id-less hosted call never matches, so it reads unresolved — fail closed.
+    return bool(hosted_calls - hosted_results) or code_calls > code_results
+
+
 def _part_from_dict(data: Mapping[str, Any], types: Any) -> Any | None:
     """Rebuild a carried ``Part`` from its dict form; ``None`` when it cannot be rebuilt.
 
@@ -363,7 +419,8 @@ class GoogleProvider:
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         provider_parts: list[dict[str, Any]] = []
-        for part in _response_parts(response):
+        response_parts = _response_parts(response)
+        for part in response_parts:
             provider_parts.append(_part_to_dict(part))
             call = getattr(part, "function_call", None)
             if call is not None:
@@ -401,5 +458,6 @@ class GoogleProvider:
             provider_parts=provider_parts,
             usage=_gemini_usage(usage),
             stop=stop_from_google(response),
+            has_unresolved_server_tool=_has_unresolved_server_tool(response_parts),
             raw=response,
         )

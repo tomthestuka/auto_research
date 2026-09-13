@@ -311,18 +311,24 @@ def summarise_ledger(path: Path) -> dict[str, Any]:
             if status:
                 worker_statuses.append(str(status))
         elif event.endswith(".tool_call") and data.get("tool") in _LEAD_FORMS:
-            # The form's own arguments carry the terminal status the lead chose.
+            # Pre-A3 ledgers only: the retired decision tools carried the terminal status in
+            # their own arguments, so a batch recorded before 2026-09-12 is still readable.
             try:
                 arguments = json.loads(data.get("args") or "{}")
             except (TypeError, json.JSONDecodeError):
                 arguments = {}
             pending_form_status = arguments.get("status")
         elif event == "analyst.lead.cycle":
+            # A3: the report IS the decision, so the cycle event carries `rework` and `status`
+            # directly and there is nothing to scrape. The `pending_form_status` fallback keeps
+            # an older ledger readable — a reader pointed at a field that moved looks exactly
+            # like a run where nothing happened.
             lead_cycles.append(
                 {
                     "filed": data.get("filed") or data.get("form"),
                     "committed": int(data.get("committed") or 0),
-                    "status": pending_form_status,
+                    "rework": bool(data.get("rework")),
+                    "status": data.get("status") or pending_form_status,
                 }
             )
             pending_form_status = None

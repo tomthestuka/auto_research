@@ -313,18 +313,78 @@ def test_analyst_report_strict_schema_has_no_open_maps():
 def test_analyst_report_status_is_agent_declared_and_defaults_to_failed():
     assert AnalystReport(summary="gave up honestly", status="failed").status == "failed"
     assert AnalystReport(summary="did the work", status="succeeded").status == "succeeded"
-    # F9 (2026-09-09): two values, agent-declared, defaulting to `failed`. `needs_human` was
-    # retired — headless (the condition every benchmark batch runs under) `ask_human` is not in a
-    # graph role's tool list, so the state was unreachable by the route it names, while [A20]
-    # shows the label being filed for something that was not a human block at all.
+    # F9 (2026-09-09): agent-declared, defaulting to `failed` — silence is never success.
     assert AnalystReport(summary="blocked", status="failed").status == "failed"
     assert AnalystReport(summary="unset").status == "failed", "silence is never success"
-    with pytest.raises(ValidationError):
-        AnalystReport(summary="blocked", status="needs_human")
     with pytest.raises(ValidationError):
         AnalystReport(summary="done", status="ok")
     with pytest.raises(ValidationError):
         AnalystReport(summary="x", status="vibes")
+
+
+def test_needs_human_is_barred_by_the_workers_surface_not_by_the_type():
+    """A3: one report class serves both roles, so the TYPE admits the lead's third status value.
+
+    F9 removed `needs_human` from this schema because a worker could reach it and did — filed for
+    something that was not a human block at all ([A20]) — and headless the route it names does not
+    exist. That reasoning is unchanged; what changed is where it is enforced. The lead's terminal
+    is a cycle decision rather than a worker's outcome and legitimately carries the value, so the
+    bar moved from the type to the surface: `edit_report` declares only the values that role may
+    file, and a worker's declaration does not include this one.
+
+    This is the belt-and-suspenders shape used elsewhere (`author_chain`'s required first link):
+    the surface makes it ungeneratable, and the handler validates anyway.
+    """
+    from auto_research.agents.react import (
+        LEAD_REPORT_FIELDS,
+        LEAD_STATUS_VALUES,
+        WORKER_REPORT_FIELDS,
+        WORKER_STATUS_VALUES,
+        edit_report_tool_def,
+    )
+
+    assert AnalystReport(summary="lead stopped", status="needs_human").status == "needs_human"
+
+    worker = edit_report_tool_def(WORKER_REPORT_FIELDS, WORKER_STATUS_VALUES)
+    lead = edit_report_tool_def(LEAD_REPORT_FIELDS, LEAD_STATUS_VALUES)
+    assert worker["input_schema"]["properties"]["status"]["enum"] == ["succeeded", "failed"]
+    assert lead["input_schema"]["properties"]["status"]["enum"] == [
+        "succeeded", "failed", "needs_human",
+    ]
+    # ...and the two surfaces are disjoint where they must be: a worker is never offered the
+    # lead's decision fields, and the lead is never offered the worker's request-a-tool field.
+    worker_props = set(worker["input_schema"]["properties"])
+    lead_props = set(lead["input_schema"]["properties"])
+    assert {"rework", "rationale", "what_to_probe"}.isdisjoint(worker_props)
+    assert "tool_request" not in lead_props
+
+
+def test_every_declared_report_property_is_a_real_field_on_the_model():
+    """The anti-drift check. `edit_report`'s schema is hand-written prose, so a property that
+    no longer matches a model field is a field the model can fill and the runtime silently drops —
+    which is how the lead once received a chain schema with no field descriptions at all."""
+    from auto_research.agents.react import (
+        LEAD_REPORT_FIELDS,
+        LEAD_STATUS_VALUES,
+        WORKER_REPORT_FIELDS,
+        WORKER_STATUS_VALUES,
+        edit_report_tool_def,
+    )
+
+    model_fields = set(AnalystReport.model_fields)
+    for fields, statuses in (
+        (WORKER_REPORT_FIELDS, WORKER_STATUS_VALUES),
+        (LEAD_REPORT_FIELDS, LEAD_STATUS_VALUES),
+    ):
+        declared = set(edit_report_tool_def(fields, statuses)["input_schema"]["properties"])
+        assert declared <= model_fields, f"declared but not on the model: {declared - model_fields}"
+        # Every field the surface names is declared, and nothing else but the figure handle.
+        assert declared == set(fields) | {"cited_figures"}
+    # The status enums are exactly the model's own Literal, split by role.
+    from typing import get_args
+    literal = set(get_args(AnalystReport.model_fields["status"].annotation))
+    assert set(LEAD_STATUS_VALUES) == literal
+    assert set(WORKER_STATUS_VALUES) < literal
 
 
 def test_tool_spec_fix_existing_round_trips():

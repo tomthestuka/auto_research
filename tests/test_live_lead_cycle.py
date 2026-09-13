@@ -50,6 +50,7 @@ from typing import Any
 import pytest
 from dotenv import load_dotenv
 
+from tests.chain_stub import stub_chain_driver
 from tests.dev_logs import dev_log_path
 
 pytestmark = pytest.mark.skipif(
@@ -149,27 +150,6 @@ def _lead(folder: Path, *, figures: list | None = None):
     return lead, handle, toolkit_root
 
 
-def _stub_coding(monkeypatch, sha: str = "0123456789ab") -> list:
-    """Stub the coding session: the loop above it is what is under test, not the coder."""
-    from auto_research.agents.roles import AnalystLeadAgent
-    from auto_research.schemas import MergeFlowResult
-
-    driven: list = []
-
-    async def _fake_link(self, messages, provider, spec, **kwargs):
-        driven.append(spec)
-        return MergeFlowResult(
-            tool_spec_id=spec.id,
-            status="committed",
-            branch="ai",
-            commit_sha=sha,
-            reason="stubbed coding session (the loop above it is under test)",
-        )
-
-    monkeypatch.setattr(AnalystLeadAgent, "_drive_one_link", _fake_link)
-    return driven
-
-
 def _record(cell: str, lead, handle, outcome, extra: dict | None = None) -> None:
     """Persist the cell for hand reading — quality is judged from the artifact, never asserted."""
     path = dev_log_path("lead-cycle", cell, ".json")
@@ -201,24 +181,24 @@ def _assert_tool_set_never_shrank(handle) -> None:
         assert not missing, f"the declared tool set lost {sorted(missing)} mid-conversation"
 
 
-# ── cell 1: the authoring stage — the regression cell ────────────────────────
+# ── cell 1: a cycle with a tool request open — the regression cell ───────────
 
 
-def test_live_lead_cycle_authoring_stage_files_a_usable_form(tmp_path, monkeypatch):
+def test_live_lead_cycle_with_a_tool_request_open_reaches_a_usable_decision(tmp_path, monkeypatch):
     """The case that killed launch 3, driven end to end.
 
-    Either form is a legal answer here — ``author_chain`` (the capability needs writing) or
-    ``hold_authoring`` (the request resolves without new code). What must not happen is what did:
-    a decision the harness cannot act on. So the assertions are that a form was filed at all, and
-    that if it was the chain, every link carries the two fields the lead owns and appeared in no
-    channel before (``target_domain``, ``disposition``).
+    Two answers are legal here — brief a chain (the capability needs writing), or brief none and
+    conclude (the request resolves without new code). What must not happen is what did: a decision
+    the harness cannot act on. So the assertions are that a report was written at all, and that if
+    a chain was briefed, every link carries the two fields the lead owns and appeared in no channel
+    before (``target_domain``, ``disposition``).
     """
-    from auto_research.agents.react import AUTHOR_CHAIN_TOOL, HOLD_AUTHORING_TOOL
+    from auto_research.agents.react import TURN_END_TOOL
     from auto_research.schemas import AnalysisTask, ToolSpec
 
     reports = _reports()
     lead, handle, toolkit_root = _lead(tmp_path)
-    driven = _stub_coding(monkeypatch)
+    driven = stub_chain_driver(monkeypatch)
     task = AnalysisTask(
         question=(
             "Reproduce the standard IXPE polarimetry result for Cyg X-1 from the local "
@@ -241,32 +221,27 @@ def test_live_lead_cycle_authoring_stage_files_a_usable_form(tmp_path, monkeypat
     )
     _record("authoring_stage", lead, handle, outcome, {"links_driven": len(driven)})
 
-    assert outcome.filed is not None, "the lead ended its cycle without filing any form"
+    assert outcome.filed == TURN_END_TOOL, "the lead ended its cycle without a validated turn_end"
+    assert outcome.report is not None, "the report IS the decision; there is none"
     _assert_tool_set_never_shrank(handle)
-    if outcome.filed == AUTHOR_CHAIN_TOOL:
-        assert outcome.decision is not None and outcome.decision.should_author is True
-        assert outcome.decision.tool_specs, "author_chain filed with an empty chain — the old bug"
+    if outcome.decision is not None:
+        assert outcome.decision.should_author is True
+        assert outcome.decision.tool_specs, "a chain was briefed with no links — the old bug"
         for spec in outcome.decision.tool_specs:
             assert isinstance(spec, ToolSpec)
             assert spec.target_domain and spec.disposition
             assert spec.validation_data
+        # A7: every briefed link is attempted while credits remain — a dead link no longer ends
+        # the chain, and nothing ends the turn but turn_end.
         assert len(driven) == len(outcome.decision.tool_specs) or outcome.author_budget == 0
-    else:
-        assert outcome.filed in (HOLD_AUTHORING_TOOL, "submit_terminal_report")
-        assert outcome.decision is None or not outcome.decision.should_author
 
 
 # ── cell 2: the judging stage, with rounds available ─────────────────────────
 
 
-def test_live_lead_cycle_judging_stage_files_a_report_or_another_round(tmp_path):
-    """Authoring off: the lead judges, writes its report through ``edit_report`` and files it —
-    or sends the analysts back. Both are legal; a cycle that files nothing is not."""
-    from auto_research.agents.react import (
-        ANOTHER_ROUND_TOOL,
-        SUBMIT_ADJUDICATION_TOOL,
-        TERMINAL_REPORT_TOOL,
-    )
+def test_live_lead_cycle_judging_reaches_a_report_or_asks_for_another_round(tmp_path):
+    """Authoring off: the lead judges and writes its report through ``edit_report``, either
+    concluding or setting ``rework``. Both are legal; a cycle that writes nothing is not."""
     from auto_research.schemas import AnalysisTask
 
     figures = _real_figures()
@@ -284,17 +259,13 @@ def test_live_lead_cycle_judging_stage_files_a_report_or_another_round(tmp_path)
     )
     _record("judging_stage", lead, handle, outcome, {"catalog_figures": len(figures)})
 
-    assert outcome.filed in (
-        ANOTHER_ROUND_TOOL,
-        SUBMIT_ADJUDICATION_TOOL,
-        TERMINAL_REPORT_TOOL,
-    ), f"filed {outcome.filed!r}"
+    assert outcome.report is not None, "the report IS the decision; there is none"
     _assert_tool_set_never_shrank(handle)
-    if outcome.filed == ANOTHER_ROUND_TOOL:
-        assert outcome.verdict is not None and outcome.verdict.accepted is False
-        assert outcome.verdict.follow_up, "the dispatch text is handed to the workers verbatim"
+    if outcome.report.rework:
+        assert outcome.report.what_to_probe, "the probe is handed to the workers verbatim"
+        assert outcome.report.rationale, "and it has to say what gap one more pass would close"
     else:
-        assert outcome.report is not None and outcome.report.summary
+        assert outcome.report.summary and outcome.report.findings
 
     # The attachments rode the request: the lead's own catalog figures are on the first call, and
     # the guard below this boundary accepted them (an over-limit image is resized, never dropped
@@ -307,9 +278,9 @@ def test_live_lead_cycle_judging_stage_files_a_report_or_another_round(tmp_path)
 
 
 def test_live_lead_cycle_with_no_rounds_left_reaches_a_report(tmp_path):
-    """``rounds_left=0``: the handler refuses another round with the cap named, so the only way
-    out is a report. This is the cap living in Python while the choice lives in the loop."""
-    from auto_research.agents.react import SUBMIT_ADJUDICATION_TOOL, TERMINAL_REPORT_TOOL
+    """``rounds_left=0``: `turn_end` refuses a report asking for another round, naming the cap, so
+    the only accepted turn concludes. The cap lives in Python; the choice lives in the loop."""
+    from auto_research.agents.react import TURN_END_TOOL
     from auto_research.schemas import AnalysisTask
 
     lead, handle, _ = _lead(tmp_path, figures=_real_figures(limit=1))
@@ -326,8 +297,9 @@ def test_live_lead_cycle_with_no_rounds_left_reaches_a_report(tmp_path):
     )
     _record("no_rounds_left", lead, handle, outcome)
 
-    assert outcome.filed in (SUBMIT_ADJUDICATION_TOOL, TERMINAL_REPORT_TOOL), (
-        f"filed {outcome.filed!r} with no rounds left"
-    )
+    assert outcome.filed == TURN_END_TOOL, f"filed {outcome.filed!r} with no rounds left"
     assert outcome.report is not None
+    # The cap is Python's: `turn_end` refuses a rework report with no rounds left, naming the cap,
+    # so the only accepted turn is one that concludes.
+    assert outcome.report.rework is False, "rework was accepted with no rounds left"
     _assert_tool_set_never_shrank(handle)

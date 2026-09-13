@@ -183,14 +183,36 @@ def test_channels_default_to_shared_response_timeout(monkeypatch):
 
 
 def test_cli_stdin_handler_times_out(monkeypatch):
+    """A prompt nobody answers times out — and leaves nothing that can hold the process open.
+
+    The stimulus is a genuinely blocked `input()`, not a stubbed coroutine: the defect this
+    guards was never in the timeout (which always fired) but in what survived it. A reader on the
+    default executor is non-daemon and is joined at interpreter exit with no timeout
+    (bpo-39812), so the run ended and the process did not (measured 2026-09-12).
+    """
+    import builtins
+    import threading
+
     monkeypatch.setattr("auto_research.hitl.cli.response_timeout_s", lambda: 0.05)
+    release = threading.Event()
+    monkeypatch.setattr(builtins, "input", lambda *a, **k: (release.wait(30), "late")[1])
 
-    async def _never():
-        await asyncio.sleep(10)
-
-    monkeypatch.setattr(asyncio, "to_thread", lambda *a, **k: _never())
+    before = {t.ident for t in threading.enumerate() if t.name == "hitl-stdin"}
     with pytest.raises(asyncio.TimeoutError):
         asyncio.run(cli_stdin_handler(_query()))
+
+    stranded = [t for t in threading.enumerate() if t.name == "hitl-stdin" and t.ident not in before]
+    assert stranded, "the read did not run on its own named thread"
+    assert all(t.daemon for t in stranded), (
+        "the stdin read is on a non-daemon thread; an unanswered prompt would hang the process at "
+        "exit even though the timeout returned on time"
+    )
+    # A human typing after the timeout must land on a no-op, not an InvalidStateError on the
+    # future `wait_for` already cancelled.
+    release.set()
+    for thread in stranded:
+        thread.join(timeout=5.0)
+        assert not thread.is_alive()
 
 
 # ── resolve_handler auto-detect ──────────────────────────────────────────────

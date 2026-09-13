@@ -1379,3 +1379,58 @@ def test_the_leak_scanner_still_sees_a_real_path_leak():
         ],
     }
     assert cli._leaks_in(cli._scannable_text(record)), "a genuine path leak must still fire"
+
+
+# ── A3: the cycle event carries the decision, and both ledger shapes are read ──
+
+
+def test_a20_reads_the_pre_a3_ledger_shape():
+    """The published batches recorded the decision as a filed form's name. A reader that only
+    understood the new shape would score them as clean, which is the silent direction."""
+    from benchmarks.science_bench.score import a20_relabelled_cycles
+
+    record = {"lead_cycles": [
+        {"filed": "submit_terminal_report", "committed": 2, "status": "needs_human"},
+        {"filed": "submit_terminal_report", "committed": 0, "status": "failed"},
+        {"filed": "submit_adjudication", "committed": 1, "status": None},
+    ]}
+    assert a20_relabelled_cycles(record) == 1
+
+
+def test_a20_reads_the_a3_ledger_shape():
+    """After A3 a cycle ends on turn_end and the report carries the decision, so the pair the
+    rule turns on is (status, committed) rather than (form name, committed)."""
+    from benchmarks.science_bench.score import a20_relabelled_cycles
+
+    record = {"lead_cycles": [
+        # committed, then stopped honestly — the shape [A20] relabels
+        {"filed": "turn_end", "committed": 2, "status": "needs_human", "rework": False},
+        # committed, and asked for a rerun: not a terminal at all
+        {"filed": "turn_end", "committed": 1, "status": "failed", "rework": True},
+        # an honest stop with nothing committed stays a failure row
+        {"filed": "turn_end", "committed": 0, "status": "failed", "rework": False},
+        # a clean conclusion
+        {"filed": "turn_end", "committed": 1, "status": "succeeded", "rework": False},
+    ]}
+    assert a20_relabelled_cycles(record) == 1
+
+
+def test_the_cycle_summary_carries_rework_and_status(tmp_path):
+    """The reader's half: `summarise_ledger` must surface what the event now records. A field
+    that moved and a reader that did not is the 2026-09-08 defect, three times over."""
+    import json
+
+    from benchmarks.science_bench.trial import summarise_ledger
+
+    ledger = tmp_path / "monitor.jsonl"
+    ledger.write_text(
+        json.dumps({
+            "event": "analyst.lead.cycle",
+            "data": {"filed": "turn_end", "committed": 3, "rework": True, "status": "failed"},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    cycles = summarise_ledger(ledger)["lead_cycles"]
+    assert cycles == [
+        {"filed": "turn_end", "committed": 3, "rework": True, "status": "failed"}
+    ]

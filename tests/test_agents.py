@@ -157,16 +157,16 @@ def test_analyst_worker_agent_exposes_toolkit_as_available_context_only():
 
 
 def test_analyst_lead_agent_adjudicates_reports(tmp_path):
-    """The lead's cycle: it writes its report with edit_report and files it — no compose.
+    """The lead's cycle: it writes its report with edit_report and ends its turn — no compose.
 
-    The synthesis used to be a structured compose over one payload. It is now a form the lead
-    fills inside its loop, so what this checks is unchanged in intent — the worker reports reach
-    it, and the report it wrote is what comes back — while the mechanism is the disciplined write
-    path (edit_report) plus the terminal form.
+    The synthesis used to be a structured compose over one payload, then a form filed inside the
+    loop. It is now the report itself (A3): the lead writes it and calls `turn_end`, which the
+    harness validates. What this checks is unchanged in intent — the worker reports reach it, and
+    the report it wrote is what comes back.
     """
     from auto_research.agents.react import (
         EDIT_REPORT_TOOL,
-        SUBMIT_ADJUDICATION_TOOL,
+        TURN_END_TOOL,
         ReadOnlyToolProvider,
     )
 
@@ -182,8 +182,12 @@ def test_analyst_lead_agent_adjudicates_reports(tmp_path):
             self.messages = list(messages)
             self.turn += 1
             script = [
-                (EDIT_REPORT_TOOL, {"summary": "Final synthesis.", "findings": ["Workers agree."]}),
-                (SUBMIT_ADJUDICATION_TOOL, {}),
+                (EDIT_REPORT_TOOL, {
+                    "summary": "Final synthesis.",
+                    "findings": ["Workers agree."],
+                    "status": "succeeded",
+                }),
+                (TURN_END_TOOL, {"summary": "done"}),
             ]
             if self.turn > len(script):
                 return ModelResponse(content="done")
@@ -200,7 +204,7 @@ def test_analyst_lead_agent_adjudicates_reports(tmp_path):
 
     outcome = asyncio.run(agent.run_cycle(AnalysisTask(question="Synthesize."), [report]))
 
-    assert outcome.filed == SUBMIT_ADJUDICATION_TOOL
+    assert outcome.filed == TURN_END_TOOL
     assert outcome.report.findings == ["Workers agree."]
     payload = _user_payload(fake)
     assert payload["worker_reports"][0]["summary"] == "Worker result."

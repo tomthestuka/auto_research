@@ -1064,3 +1064,388 @@ def test_the_temp_root_is_not_readable_by_an_author():
     temp_root = str(Path(tempfile.gettempdir()).resolve())
     assert temp_root not in policy.ro
     assert temp_root not in policy.rw
+
+
+# --------------------------------------------------------- /stop during a Codex turn (B8 sequel)
+#
+# A real `/stop` mid-authoring cancelled the run, repaired the tree and leaked no coder — and then
+# the process never exited (measured 2026-09-12, exit 124 after the drill's own assertions all
+# passed). The cause is not that a cancel fails to reach a blocked thread (nothing can do that);
+# it is that our own teardown closed the one door through which the vendor delivers its wake.
+# These two cells pin the two halves of the fix against a router modelled on the SDK's.
+
+
+class _FakeRouter:
+    """The vendor's `_MessageRouter`, reduced to the three behaviours that matter here.
+
+    A queue is looked up **once** and then blocked on, so a later `unregister` orphans a waiter
+    that still holds the queue object — and `fail_all`, the only close-time wake, finds waiters by
+    walking the dict. That is the whole mechanism, and it is why a popped entry is unreachable.
+    """
+
+    def __init__(self) -> None:
+        import queue
+        import threading
+
+        self._queue_cls = queue.Queue
+        self._lock = threading.Lock()
+        self._turns: dict[str, object] = {}
+
+    def register(self, turn_id: str) -> None:
+        with self._lock:
+            self._turns[turn_id] = self._queue_cls()
+
+    def unregister(self, turn_id: str) -> None:
+        with self._lock:
+            self._turns.pop(turn_id, None)
+
+    def registered(self, turn_id: str) -> bool:
+        with self._lock:
+            return turn_id in self._turns
+
+    def next_notification(self, turn_id: str):
+        with self._lock:
+            turn_queue = self._turns.get(turn_id)
+        if turn_queue is None:
+            raise RuntimeError(f"turn {turn_id!r} is not registered for streaming")
+        item = turn_queue.get()
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    def push(self, turn_id: str, note) -> None:
+        with self._lock:
+            turn_queue = self._turns.get(turn_id)
+        if turn_queue is not None:
+            turn_queue.put(note)
+
+    def fail_all(self, exc: BaseException) -> None:
+        with self._lock:
+            pending = list(self._turns.values())
+        for turn_queue in pending:
+            turn_queue.put(exc)
+
+
+class _FakeCodexClient:
+    def __init__(self, router: _FakeRouter) -> None:
+        self._router = router
+        self.closed = False
+
+    def turn_start(self, thread_id, message):
+        return _Payload(turn=_Payload(id="turn_abc"))
+
+    def register_turn_notifications(self, turn_id):
+        self._router.register(turn_id)
+
+    def unregister_turn_notifications(self, turn_id):
+        self._router.unregister(turn_id)
+
+    def next_turn_notification(self, turn_id):
+        return self._router.next_notification(turn_id)
+
+    def close(self):
+        self.closed = True
+        self._router.fail_all(RuntimeError("TransportClosedError"))
+
+
+def _pollers(exclude: frozenset = frozenset()) -> list:
+    """Poller threads, optionally excluding ones that were already running.
+
+    A cell that deliberately strands a poller would otherwise hand its orphan to the next cell,
+    which then fails for a reason that has nothing to do with what it asserts — observed while
+    verifying these two against their mutations.
+    """
+    import threading
+
+    return [
+        t for t in threading.enumerate()
+        if t.name.startswith("codex-poll-") and t.ident not in exclude
+    ]
+
+
+def _wired_codex(router: _FakeRouter) -> CodexBackend:
+    backend = _codex(_AllowAll())
+    backend._client = _FakeCodexClient(router)
+    backend._thread_id = "thread_1"
+    return backend
+
+
+async def _await_poller(router: _FakeRouter, exclude: frozenset) -> list:
+    for _ in range(500):
+        pollers = _pollers(exclude)
+        if pollers and router.registered("turn_abc"):
+            return pollers
+        await asyncio.sleep(0.01)
+    raise AssertionError("no poller thread ever started")
+
+
+def test_a_cancelled_codex_turn_stays_registered_so_the_close_time_wake_lands():
+    """(a) The turn is NOT deregistered on the cancelled path.
+
+    `drive`'s `finally` used to run on the cancelled path too, popping our queue from the router
+    before `disconnect()` closed the client — so `fail_all` walked an empty dict and the poller
+    was never told. Here the close happens after the cancel, exactly as `aclose` orders it, and
+    the thread must actually die.
+    """
+    router = _FakeRouter()
+    backend = _wired_codex(router)
+    client = backend._client
+    before = frozenset(t.ident for t in _pollers())
+    seen: dict = {}
+
+    async def run() -> None:
+        task = asyncio.create_task(backend.drive("go"))
+        seen["pollers"] = await _await_poller(router, before)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # THE PROPERTY: still in the dict `fail_all` walks.
+        assert router.registered("turn_abc"), (
+            "the cancelled turn was deregistered, so the client's close-time wake has no way to "
+            "reach the blocked poller"
+        )
+        await asyncio.to_thread(client.close)
+
+    asyncio.run(run())
+    for thread in seen["pollers"]:
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "the poller never woke, so the process would hang at exit"
+
+
+def test_the_codex_poller_is_daemonised_and_ends_with_a_turn_that_completes():
+    """(b) The poll runs on a daemon thread we own, and a normal turn still deregisters.
+
+    Daemon is what bounds the damage when no wake ever arrives: `asyncio.run` warns after
+    `THREAD_JOIN_TIMEOUT` and then `_python_exit` joins every *executor* worker with no timeout
+    and no daemon check (bpo-39812), which is why the default executor cannot be used here.
+    """
+    router = _FakeRouter()
+    backend = _wired_codex(router)
+    before = frozenset(t.ident for t in _pollers())
+    seen: dict = {}
+
+    async def run() -> None:
+        task = asyncio.create_task(backend.drive("go"))
+        seen["pollers"] = await _await_poller(router, before)
+        assert all(t.daemon for t in seen["pollers"]), (
+            "the notification poll is on a non-daemon thread; a stranded one blocks exit forever"
+        )
+        router.push("turn_abc", _Note("item/completed", _Payload(item=_Payload(
+            type="agentMessage", text="done thinking",
+        ))))
+        router.push("turn_abc", _Note("turn/completed", _Payload(turn=_Payload(
+            status="completed", error=None,
+        ))))
+        assert await task == "done thinking"
+
+    asyncio.run(run())
+    for thread in seen["pollers"]:
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "the poller outlived the turn it was started for"
+    assert not router.registered("turn_abc"), (
+        "a turn that ends normally must still be deregistered — (a) narrows the skip to the "
+        "cancelled path only"
+    )
+
+
+# ------------------------------------------------- the coder's credential (the 2026-09-12 401)
+
+
+class _RecordingCodexClient:
+    """Enough of `CodexClient` to see what `_build_client` decided, and nothing more."""
+
+    def __init__(self, config, approval_handler) -> None:
+        self.config = config
+        self.logins: list[str] = []
+
+    def start(self):
+        return None
+
+    def initialize(self):
+        return None
+
+    def account_login_start(self, params):
+        self.logins.append(params.root.api_key)
+        return _Payload(login_id="l1")
+
+    def account_login_complete(self, *a, **k):
+        return None
+
+    def account_login_cancel(self, *a, **k):
+        return None
+
+
+def _login_probe(monkeypatch, member) -> _RecordingCodexClient:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-live")
+    captured: dict = {}
+
+    def _factory(config, approval_handler):
+        captured["client"] = _RecordingCodexClient(config, approval_handler)
+        return captured["client"]
+
+    backend = CodexBackend(
+        member=member,
+        worktree=Path("/tmp/wt"),
+        system_prompt="p",
+        guard=_AllowAll(),
+        client_factory=_factory,
+    )
+    backend._build_client()
+    return captured["client"]
+
+
+def test_a_coder_member_with_no_key_env_still_authenticates(monkeypatch):
+    """The shipped config named no `key_env`, and the author launched with no credential at all.
+
+    `key_env` gates three separate things — the child's environment overlay, the API-key login,
+    and the `env_key` handed to Codex — so an absent field silently produced an unauthenticated
+    author while the launch check passed on the very variable it derived and this class did not.
+    Measured 2026-09-12: every Codex turn returned `401 Unauthorized: Authentication Fails
+    (governor)` against a key that answers `/responses` with 200 when sent by hand.
+    """
+    member = _member(
+        harness="codex", provider="deepseek", model="deepseek-v4-flash",
+        base_url="https://api.deepseek.com/",
+    )
+    assert member.key_env is None, "the fixture must reproduce the shipped config's shape"
+
+    client = _login_probe(monkeypatch, member)
+
+    assert client.config.env.get("DEEPSEEK_API_KEY") == "sk-deepseek-live", (
+        "the vendor key never reached the author's environment"
+    )
+    assert client.logins == ["sk-deepseek-live"], (
+        "no API-key login was performed, so the author starts with no credential"
+    )
+
+
+def test_an_explicit_key_env_still_wins_over_the_provider_default(monkeypatch):
+    """A member may name a plan-specific variable, and the derived default must not shadow it."""
+    monkeypatch.setenv("DEEPSEEK_CODING_PLAN_KEY", "sk-mr-plan")
+    member = _member(
+        harness="codex", provider="deepseek", model="deepseek-v4-flash",
+        base_url="https://api.deepseek.com/", key_env="DEEPSEEK_CODING_PLAN_KEY",
+    )
+    client = _login_probe(monkeypatch, member)
+    assert client.config.env.get("DEEPSEEK_CODING_PLAN_KEY") == "sk-mr-plan"
+    assert client.logins == ["sk-mr-plan"]
+
+
+def test_the_shipped_coder_member_resolves_a_key_variable():
+    """Whatever `config/models.yaml` names as the coder, it must resolve to a key variable.
+
+    A static guard rather than a live call: the defect was a *configuration* that looked complete
+    and produced no credential, which is invisible until a real turn fails inside a subprocess.
+    """
+    from auto_research.sandbox.coder.harness import coder_member
+
+    member = coder_member()
+    backend = CodexBackend(
+        member=member, worktree=Path("/tmp/wt"), system_prompt="p", guard=_AllowAll(),
+    )
+    assert backend._key_env, f"the coder member {member.name!r} resolves no key variable"
+
+
+# ------------------------------- the symmetric lead<->coder channel (2026-09-12) --------------
+
+
+class _SteerableCodexClient(_FakeCodexClient):
+    def __init__(self, router: _FakeRouter) -> None:
+        super().__init__(router)
+        self.steers: list[tuple[str, str, str]] = []
+        self.refuse = False
+
+    def turn_steer(self, thread_id, turn_id, message):
+        if self.refuse:
+            raise RuntimeError("turn is no longer active")
+        self.steers.append((thread_id, turn_id, message))
+
+
+def test_codex_steer_reaches_the_turn_in_flight():
+    """The lead can say something to a coder that is still working — pinned to its turn id.
+
+    Without it, the only lead->coder primitive was "start a turn", which no harness allows while
+    one is in flight; a lead holding the ANSWER to the coder's own question was refused by the
+    state its answer would have cleared (measured live 2026-09-12, twice in one run).
+    """
+    router = _FakeRouter()
+    backend = _codex(_AllowAll())
+    backend._client = _SteerableCodexClient(router)
+    backend._thread_id = "thread_1"
+    client = backend._client
+
+    async def run() -> None:
+        task = asyncio.create_task(backend.drive("go"))
+        for _ in range(500):
+            if backend._turn_id is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert await backend.steer("use PI, not ENERGY") is True
+        router.push("turn_abc", _Note("turn/completed", _Payload(turn=_Payload(
+            status="completed", error=None))))
+        await task
+
+    asyncio.run(run())
+    assert client.steers == [("thread_1", "turn_abc", "use PI, not ENERGY")]
+
+
+def test_codex_steer_off_a_live_turn_is_refused_rather_than_misdelivered():
+    """No turn in flight → False, so the caller starts one instead of steering into the void."""
+    backend = _codex(_AllowAll())
+    backend._client = _SteerableCodexClient(_FakeRouter())
+    backend._thread_id = "thread_1"
+    assert asyncio.run(backend.steer("late")) is False
+
+
+def test_codex_steer_that_loses_the_race_reports_false():
+    """`turn_steer` carries the turn id it expects, so a steer racing the turn's end is refused
+    by the server rather than landing in whatever comes next."""
+    router = _FakeRouter()
+    backend = _codex(_AllowAll())
+    backend._client = _SteerableCodexClient(router)
+    backend._thread_id = "thread_1"
+    backend._client.refuse = True
+
+    async def run() -> None:
+        task = asyncio.create_task(backend.drive("go"))
+        for _ in range(500):
+            if backend._turn_id is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert await backend.steer("too late") is False
+        router.push("turn_abc", _Note("turn/completed", _Payload(turn=_Payload(
+            status="completed", error=None))))
+        await task
+
+    asyncio.run(run())
+
+
+def test_claude_steer_uses_a_second_query_on_the_live_client():
+    """The SDK publishes no turn_steer; its streaming client does not need one."""
+    from auto_research.sandbox.coder.claude_sdk import ClaudeSdkBackend
+
+    class _Client:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        async def query(self, message):
+            self.queries.append(message)
+
+    client = _Client()
+    backend = ClaudeSdkBackend(client=client)
+    assert asyncio.run(backend.steer("mid-turn")) is False, "no turn in flight → refuse"
+    backend._in_turn = True
+    assert asyncio.run(backend.steer("mid-turn")) is True
+    assert client.queries == ["mid-turn"]
+
+
+def test_both_backends_satisfy_the_extended_interface():
+    """`steer` is part of the protocol, so a harness cannot be half-wired for the channel."""
+    for backend in (
+        _codex(_AllowAll()),
+        __import__(
+            "auto_research.sandbox.coder.claude_sdk", fromlist=["ClaudeSdkBackend"]
+        ).ClaudeSdkBackend(client=object()),
+    ):
+        assert isinstance(backend, CoderBackend)
+        assert callable(backend.steer)

@@ -181,14 +181,20 @@ def test_drive_author_streams_sdk_blocks_to_monitor():
     assert all(e["team"] == "tooling" for e in mon.events)
 
 
-def test_ask_lead_handler_records_to_monitor():
-    """Fix #2 (b): escalations are logged with question + answer."""
+def test_ask_lead_handler_records_the_question_to_monitor():
+    """Escalations are logged when asked. The ANSWER is no longer part of this event.
+
+    It cannot be: the handler returns before the lead has seen the question. The reply is a
+    `drive_coder` steer later in the lead's own turn, and the ledger records it there.
+    """
     mon = _RecordingMonitor()
-    handler = _make_ask_lead_handler(_FakeLead(), monitor=mon)
+    handler = _make_ask_lead_handler(lambda: _QuestionParkingSession(), monitor=mon)
     asyncio.run(handler("which lib fn?"))
     ev = mon.of("coder.ask_lead")
     assert ev and ev[0]["data"]["message"] == "which lib fn?"
-    assert "lead-answer" in ev[0]["data"]["answer"]
+    assert "answer" not in ev[0]["data"], (
+        "the event claims an answer the lead has not given yet"
+    )
 
 
 def test_propose_and_pr_emits_authoring_milestones(tmp_path):
@@ -329,12 +335,34 @@ def test_review_cap_exhaustion_returns_failed(tmp_path):
     assert result.review is not None and result.review.approved is False
 
 
-def test_ask_lead_handler_routes_to_lead():
-    lead = _FakeLead()
-    handler = _make_ask_lead_handler(lead)
+class _QuestionParkingSession:
+    def __init__(self) -> None:
+        self.parked: list[str] = []
+
+    def park_question(self, message: str) -> None:
+        self.parked.append(message)
+
+
+def test_ask_lead_parks_the_question_and_returns_at_once():
+    """`ask_lead` is NON-BLOCKING: it parks and returns, it does not answer.
+
+    It used to call `lead.clarify_for_author`, opening a second ReAct conversation on the lead
+    concurrently with the lead's own turn. Measured live 2026-09-12: that loop held the
+    coder-control tools and spent 85 calls polling the very coder blocked waiting for it, and its
+    answer landed 326 s later, after the coder had timed out. Nobody waits on anybody now — the
+    lead's own loop collects the question at its next safe injection point.
+    """
+    session = _QuestionParkingSession()
+    handler = _make_ask_lead_handler(lambda: session)
     answer = asyncio.run(handler("which lib fn?"))
-    assert answer == "lead-answer:which lib fn?"
-    assert lead.messages == ["which lib fn?"]
+    assert answer == "delivered."
+    assert session.parked == ["which lib fn?"]
+
+
+def test_ask_lead_without_a_session_says_so_rather_than_dropping_the_question():
+    handler = _make_ask_lead_handler(lambda: None)
+    answer = asyncio.run(handler("which lib fn?"))
+    assert "not reachable" in answer
 
 
 def test_ask_human_handler_routes_to_injected_handler():
@@ -1156,3 +1184,167 @@ def test_author_env_drops_host_tooling_variables(monkeypatch):
     assert env["HEADAS"] == "/opt/heasoft" and env["HOME"] == "/home/x"
     assert env["ANTHROPIC_API_KEY"] == "sk-test"
     assert env["PATH"].startswith("/envs/astropy/bin:") and env["PYTHONPATH"].startswith("/tk")
+
+
+# ══════════════════════════════════════════════ B1/B2: the coder runs beside the lead
+
+
+class _SlowBackend:
+    """A backend whose drive takes as long as we tell it to, and records its lifecycle order."""
+
+    def __init__(self, events: list, *, delay: float = 0.05, fail: bool = False):
+        self.events = events
+        self.delay = delay
+        self.fail = fail
+        self.driven: list[str] = []
+
+    async def connect(self):
+        self.events.append("connect")
+
+    async def drive(self, message: str) -> str:
+        self.driven.append(message)
+        self.events.append("drive:start")
+        try:
+            await asyncio.sleep(self.delay)
+        except asyncio.CancelledError:
+            self.events.append("drive:cancelled")
+            raise
+        if self.fail:
+            raise RuntimeError("Credit balance is too low")
+        self.events.append("drive:end")
+        return f"coder says: {message}"
+
+    async def disconnect(self):
+        self.events.append("disconnect")
+
+
+def _bg_session(events, **kw):
+    """An AuthoringSession with everything but the backend stubbed out."""
+    from auto_research.sandbox.merge_flow import AuthoringSession
+
+    session = object.__new__(AuthoringSession)
+    session._backend = _SlowBackend(events, **kw)
+    session._closed = False
+    session._drive_task = None
+    session._drive_status = "idle"
+    session._drive_result = None
+    session._drive_error = None
+    session._direct_branch = None
+    session._monitor = None
+    return session
+
+
+def test_start_drive_returns_before_the_coder_finishes():
+    """B1's whole point: the lead keeps its turn while the coder works."""
+    events: list = []
+
+    async def scenario():
+        session = _bg_session(events, delay=0.2)
+        session.start_drive("write the wrapper")
+        # We are back immediately, and the coder has not finished.
+        assert session.drive_status == "working"
+        assert "drive:end" not in events
+        await asyncio.sleep(0.35)
+        assert session.drive_status == "stopped"
+        text, error = session.take_drive_result()
+        assert error is None and "write the wrapper" in text
+        # Consumed once, so it is reported once.
+        assert session.take_drive_result() == (None, None)
+
+    asyncio.run(scenario())
+
+
+def test_a_second_instruction_while_the_coder_works_is_refused_not_queued():
+    """One conversation per warm session: interleaving two is undefined on every harness."""
+
+    async def scenario():
+        session = _bg_session([], delay=0.2)
+        session.start_drive("first")
+        with pytest.raises(RuntimeError, match="already working"):
+            session.start_drive("second")
+        await asyncio.sleep(0.3)
+
+    asyncio.run(scenario())
+
+
+def test_a_coder_that_dies_is_reported_as_an_error_not_as_narration():
+    """The 2026-09-09 defect: a Claude-harness session whose credential ran out returned the
+    CLI's own billing string with `is_error` discarded, and the lead spent three drives steering
+    a corpse at $0 — then recorded the failure with a confidently wrong cause."""
+
+    async def scenario():
+        session = _bg_session([], delay=0.01, fail=True)
+        session.start_drive("go")
+        await asyncio.sleep(0.1)
+        assert session.drive_status == "stopped"
+        text, error = session.take_drive_result()
+        assert error and "Credit balance" in error
+        assert "harness error" in text
+
+    asyncio.run(scenario())
+
+
+def test_aclose_cancels_the_drive_before_it_disconnects():
+    """B2 — the ordering IS the property.
+
+    `aclose` disconnects the backend and may reset the worktree; a drive still in flight would be
+    writing into that tree while it is repaired. `RunControl.interrupt` cancels only the
+    registered run task, and a task created inside the session is not in that set — so it is
+    cancelled and awaited here, explicitly, first.
+    """
+    events: list = []
+
+    async def scenario():
+        session = _bg_session(events, delay=5.0)
+        session.start_drive("a long one")
+        await asyncio.sleep(0.05)          # let the drive actually start
+        await session.aclose()
+
+    asyncio.run(scenario())
+    assert "drive:start" in events
+    assert events.index("drive:cancelled") < events.index("disconnect"), (
+        f"the backend was disconnected while a drive was still in flight: {events}"
+    )
+    assert "drive:end" not in events, "the drive ran to completion despite being cancelled"
+
+
+def test_aclose_is_still_idempotent_with_a_background_drive():
+    """The interrupt path closes the session from shielded cleanup and the `finally` may still
+    run afterwards; a second close must be a no-op, not a second cancel."""
+    events: list = []
+
+    async def scenario():
+        session = _bg_session(events, delay=5.0)
+        session.start_drive("x")
+        await asyncio.sleep(0.05)
+        await session.aclose()
+        await session.aclose()
+
+    asyncio.run(scenario())
+    assert events.count("disconnect") == 1
+
+
+def test_the_background_drive_inherits_the_cost_meter_context():
+    """B7: the meter is a ContextVar, and a task created by `start_drive` inherits the context
+    that created it — so the coder's spend lands in the run total exactly as when it blocked."""
+    import contextvars
+
+    marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="unset")
+    seen: list[str] = []
+
+    async def scenario():
+        marker.set("run-42")
+        session = _bg_session([], delay=0.01)
+
+        original = session._backend.drive
+
+        async def observing(message):
+            seen.append(marker.get())
+            return await original(message)
+
+        session._backend.drive = observing
+        session.start_drive("go")
+        await asyncio.sleep(0.1)
+
+    asyncio.run(scenario())
+    assert seen == ["run-42"], "the background drive ran outside the caller's context"

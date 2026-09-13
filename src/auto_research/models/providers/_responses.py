@@ -63,6 +63,35 @@ _DISCOVERY_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 """Tool-search items: the reason any of this exists. A tool discovered once stays callable only
 while these survive replay."""
 
+#: Provider-executed item types whose RESULT arrives as a SEPARATE output item, mapped to that
+#: result's type. Tool search is the only one in this dialect, and only in *client* execution
+#: mode: hosted mode returns both items in the same response
+#: (developers.openai.com/api/docs/guides/tools-tool-search — *"the response includes two
+#: additional output items … `tool_search_call` … `tool_search_output`"*, and in hosted mode
+#: *"`execution` is set to `server` and `call_id` is set to `null`"*).
+_PAIRED_SERVER_TOOL_ITEMS: dict[str, str] = {"tool_search_call": "tool_search_output"}
+
+#: Provider-executed item types that carry their own result INLINE on the call item
+#: (`action`/`results`/`outputs`/`result`/`output`), so the only way one is unresolved is a
+#: non-terminal `status`. `mcp_list_tools` is deliberately absent: it declares no `status` field
+#: at all and carries its `tools` inline, so it is a listing rather than a call that can pend, and
+#: including it would make the fail-closed absent-status rule fire on every one.
+_INLINE_SERVER_TOOL_ITEMS = frozenset({
+    "web_search_call",
+    "file_search_call",
+    "code_interpreter_call",
+    "image_generation_call",
+    "mcp_call",
+})
+
+#: The OpenAI hosted set, and the default for any vendor that declares nothing (see
+#: ``ResponsesVendor.server_tool_item_types``).
+_OPENAI_SERVER_TOOL_ITEMS = frozenset(_PAIRED_SERVER_TOOL_ITEMS) | _INLINE_SERVER_TOOL_ITEMS
+
+#: Item statuses that mean the provider is finished with that item. Anything else — including an
+#: ABSENT status on a type that declares one — reads pending, which is the fail-closed direction.
+_TERMINAL_ITEM_STATUSES = frozenset({"completed", "failed", "incomplete"})
+
 _UNCARRIED_ITEM_TYPES = frozenset({"function_call", "message"})
 """The only response items we do NOT carry, because we already replay them from our own state:
 ``function_call`` is rebuilt from :class:`ToolCall` (with the provider's record merged back in)
@@ -316,6 +345,19 @@ class ResponsesVendor:
 
     supports_tool_search: bool = True
     """Whether the vendor runs the server-side tool-search tool that ``defer_loading`` needs."""
+
+    server_tool_item_types: frozenset[str] = _OPENAI_SERVER_TOOL_ITEMS
+    """Output-item types this vendor emits for a **provider-executed** tool (A1).
+
+    Defaults to OpenAI's set like every other flag here, which is also the fail-safe direction: a
+    vendor we have not read defaults to "can produce the hazard", where a wrong hold costs one
+    iteration and the opposite error cost a run. A vendor empties it only with a citation.
+
+    Declared, not detected, because detection is impossible from our side: three of Alibaba's
+    documented hosted types are absent from openai's own input union, so they ride through
+    ``_as_input_item`` unfiltered and would read as ordinary unknown items. The census test in
+    ``test_responses_vendors.py`` is what turns "a vendor shipped a type we do not classify" from
+    silence into a failure."""
 
     accepts_inline_documents: bool = True
     """Whether this vendor takes a document as an ``input_file`` part carrying inline base64
@@ -744,6 +786,7 @@ class ResponsesProvider:
             tool_calls=tool_calls,
             provider_parts=provider_parts,
             raw=response,
+            vendor=vendor,
         )
 
 
@@ -1112,8 +1155,48 @@ def _sanitize_strict(
             _sanitize_strict(item, formats)
 
 
+def _has_unresolved_server_tool(raw: Any, vendor: "ResponsesVendor") -> bool:
+    """Does this turn hold a provider-executed call with no result? (A1)
+
+    Two arms, because this dialect has two hosted-tool shapes:
+
+    * **Separate result item** — only ``tool_search_call``/``tool_search_output``, and only in
+      *client* execution mode. **Paired by count and order, never by id**: hosted mode sets
+      ``call_id`` to ``null`` on *both* items and ``_as_input_item`` drops ``None`` values, so an
+      id-matching predicate finds no pairs and would read ``True`` on every real discovery turn —
+      measured across 27 distinct pairs in the production dumps, all of them hosted.
+    * **Result folded into the call item** — everything else in ``_INLINE_SERVER_TOOL_ITEMS``, plus
+      Alibaba's seven documented types. There is no sibling to look for, so "unresolved" can only
+      mean a non-terminal ``status``.
+
+    Reads ``raw.output`` rather than ``provider_parts``: the raw items still carry ``call_id`` and
+    every field the vendor sent, and the property is about the turn we *received* rather than
+    about the projection we chose to keep.
+
+    Returns ``False`` for a vendor that declares no hosted types — which is DeepSeek (built-ins
+    documented *Ignored*) and Z.AI (nothing published for this endpoint at all).
+    """
+    if not vendor.server_tool_item_types:
+        return False
+    output = getattr(raw, "output", None) or []
+    pending = 0
+    for item in output:
+        itype = getattr(item, "type", None)
+        if itype not in vendor.server_tool_item_types:
+            continue
+        status = getattr(item, "status", None)
+        if status not in _TERMINAL_ITEM_STATUSES:
+            return True
+        if itype in _PAIRED_SERVER_TOOL_ITEMS:
+            pending += 1
+    for item in output:
+        if getattr(item, "type", None) in _PAIRED_SERVER_TOOL_ITEMS.values():
+            pending -= 1
+    return pending > 0
+
+
 def _response(
-    *, content="", parsed=None, tool_calls=None, provider_parts=None, raw=None
+    *, content="", parsed=None, tool_calls=None, provider_parts=None, raw=None, vendor=None
 ) -> ModelResponse:
     return ModelResponse(
         content=content or "",
@@ -1121,6 +1204,9 @@ def _response(
         tool_calls=tool_calls or [],
         usage=_responses_usage(getattr(raw, "usage", None)),
         stop=stop_from_openai_responses(raw),
+        has_unresolved_server_tool=(
+            _has_unresolved_server_tool(raw, vendor) if vendor is not None else False
+        ),
         provider_parts=provider_parts or [],
         raw=raw,
     )

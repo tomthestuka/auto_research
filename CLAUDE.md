@@ -247,6 +247,16 @@ Representative messages: `ResearchRequest`, `SearchRequest` / `SearchResult`,
 `HumanQuery` / `HumanResponse` ([§9](#9-phase-2--tool-authoring-the-active-phase)). Keep
 the set minimal; refine signatures in the module's `DOCS.md`.
 
+**One report class serves both analyst roles, and the TOOL SURFACE keeps them apart** (2026-09-12).
+`AnalystReport` carries the lead's decision fields (`rework`, `rationale`, `what_to_probe`)
+alongside the worker's `tool_request`, and `edit_report` declares only what a given role may write
+— the worker's surface omits the decision fields and the `needs_human` status, the lead's omits
+`tool_request`. A subclass per role was rejected because it would widen a `Literal` in a subtype,
+and the analysis result returned all the way to the reviewer *is* that type. The conditional
+requirements (`rework=true` needs a probe; `rework=false` needs findings) live in the `turn_end`
+validator, not in the schema: the schema stays permissive so a partial write mid-turn is legal,
+and conditional required-fields is not portable across the six vendors.
+
 **Figures — by reference, never by value.** Figures are critical to review, but live
 image objects must never live inside messages (they break JSON serialization and bloat
 logs, LangSmith traces, and SQLite). Pattern:
@@ -414,28 +424,41 @@ toolkit.**
    Sonnet ([§6](#6-config-driven-model-registry)), the architectural "edit existing vs author
    new" decision stays with the more-capable proposer (the lead, who reads the full `lib/`
    source), and the Sonnet author executes it.
-2. The **analyst lead runs one ReAct loop per analysis cycle and states every decision by
-   filing a form** (`run_cycle`; `author_chain` / `hold_authoring`, then
-   `request_another_round` / `submit_adjudication` / `submit_terminal_report`). The branch it
-   picks *is* the decision, so the branch and the fields it must fill arrive together, each
-   question carrying its own description — the channel a Pydantic `#` comment never reached.
-   `author_chain` asks for at least one link **in its own schema** (`minItems: 1`) **and its handler
-   refuses a chain without one**, which is the layer that actually holds. Measured 2026-09-02: the
-   Opus lead filed `author_chain` carrying only `rationale`, `tool_specs` absent — a provider does
-   not enforce `minItems` on a tool `input_schema` the way it constrains structured output, so
-   "author, with nothing to author" is **expressible and rejected**, not inexpressible. The
-   rejection is an `is_error` result naming the missing field, which `_react` treats as a
-   correction; that lead recovered on its next turn and filed a real 4-link chain. (A run died on
-   this state going *unrejected*, 2026-09-01 — the schema is the belt, the handler the suspenders.) Every form is declared for the whole cycle and the *handler*
-   enforces the stage, because a declared tool set that shrinks mid-conversation is a documented
-   run-killer; the caps stay in Python (`debate_max_rounds`, `tool_author_cap`), so the loop
-   chooses *what* and the harness decides *how many times*. Filing the chain then **spawns a
-   Sonnet-tier coding sub-agent** (the **author**) per link, the lead staying in an
-   **interactive channel** with it during authoring — to clarify science/code as it goes (this
+2. The **analyst lead runs one ReAct loop per analysis cycle, with NO stages, and its REPORT is
+   its decision** (`run_cycle`, ending on `turn_end`) — the same contract the analysts already
+   write. `rework=true` sends the analysts back with a probe (`rationale` + `what_to_probe`);
+   `rework=false` makes the report the analysis result. One form survives, `author_chain`, and it
+   is a **brief handed to a subagent, not a decision**: filing it opens the first coding session
+   and the turn continues. A finished link — committed, or its review submissions spent —
+   **advances the chain on a tool result**, so the next session opens underneath the lead and a
+   dead link is a sentence in the conversation rather than the end of the turn. Every question
+   carries its own description, the channel a Pydantic `#` comment never reached.
+   `author_chain` asks for its first link as a **required property** and its handler refuses a
+   chain without one — the schema is the belt, the handler the suspenders (a run died on that
+   state going *unrejected*, 2026-09-01; measured 2026-09-02, a provider does not enforce
+   `minItems` on a tool `input_schema` the way it constrains structured output, which is why the
+   rule is a required property rather than a cardinality keyword).
+   Completeness is checked once, at `turn_end` (`lead_turn_problems`): no report written, rework
+   with no probe or no rounds left (the cap named), a conclusion with no findings, **a cited
+   figure whose file is not on disk**, or a coder still running — each an `is_error` that puts the
+   lead back in its loop, never an ending.
+   **What this replaced, and why (2026-09-12).** A filed form was a `terminal_tool`, and while
+   authoring the only two the lead could file were both whole-cycle terminals — so "this link is
+   dead, try the next" was inexpressible. Slot 1 of the 2026-09-11 batch ended a whole analysis
+   with **11 of 12 author credits unspent**; slot 2, from the identical position, spent a debate
+   round and a full worker rerun to say the same thing. One missing action, two different scars.
+   Two of the four retired handlers validated nothing anyway: they copied an already-validated
+   report onto the cycle and differed by one field the report itself carries.
+   The declared tool set never shrinks — it is gated on the cycle, not on a live session, because
+   a set that shrinks mid-conversation is a documented run-killer — and the caps stay in Python
+   (`debate_max_rounds`, `tool_author_cap`), so the loop chooses *what* and the harness decides
+   *how many times*. Briefing the chain **spawns a Sonnet-tier coding sub-agent** (the **author**)
+   per link, the lead staying in an **interactive channel** with it during authoring — to clarify science/code as it goes (this
    lead↔author loop is built in step 2 of [§9.10](#910-build-order-phase-2)). Between links the
-   coding transcript is dropped at its own boundary, keeping only the lead's filed brief and its
-   own submit call with the real commit SHA on the result: both turns it produced or received,
-   nothing synthesized in their place.
+   coding transcript is dropped at its own boundary — for a **committed** link only, since a
+   rejection or a spent budget is what the next brief must be written against — keeping the lead's
+   brief and its own submit call with the real commit SHA on the result: both turns it produced or
+   received, nothing synthesized in their place.
    The author writes both halves + tests in an **isolated git worktree/branch** on
    `research_toolkit`, using `xspec_utils` as the template, and — reading the **full `lib/`
    source**, not just the minimal `skills/` stubs — either **edits existing files to build on
@@ -814,6 +837,136 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   capping it. Human ruling 2026-09-10: **leave it**. Citation is by `[source:index]` handle read
   from the *text* menu, so the pixels serve judgement only — a `show`-on-demand argument would
   bound it without touching addressing, if it is ever taken up.
+- **B8 — `/stop` mid-drive: the ordering is pinned deterministically; the real-process half is
+  still unrun.** B put a new writer on the toolkit (the background coder drive), which is exactly
+  what the interrupt path's three-phase order exists to exclude — *"nothing may be able to write to
+  the toolkit when the toolkit is repaired"* — and `RunControl.interrupt` cancels only the
+  registered run task, so a session-owned task is not in that set.
+  `tests/test_interrupt.py::test_stop_mid_drive_kills_the_coder_before_the_toolkit_is_repaired`
+  drives the **production** `_interrupt_cleanup` over a **real** `AuthoringSession` with a drive
+  genuinely in flight, and was verified to fail against two mutations (disconnect-before-cancel,
+  and cancel-without-await — the second is the subtle one). A third cell counting the coder's
+  writes during the repair was written and **deleted**: it failed neither mutation and its timing
+  depended on when the loop scheduled the cancelled task.
+  **NOT LIVE TESTED:** the part that is not Python objects — a real coder *subprocess* (cancelling
+  an asyncio task does not by itself stop a child process writing) and a real `git reset --hard`
+  that can be raced, locked, or slow on NFS (which is why the cleanup bounds it at 30 s).
+  `tests/test_live_stop_mid_drive.py` is written and env-gated
+  (`AUTO_RESEARCH_LIVE_STOP_MID_DRIVE=1`), to the human's spec (2026-09-12): start a real lead
+  round through the injectable seams, seed it with worker reports carrying a real `tool_request`
+  so the lead briefs a chain, let a real coder spawn and work **~5 minutes**
+  (`AUTO_RESEARCH_STOP_AFTER_S`), then send the stop down the production path
+  (`RunControl.interrupt` → the run task → the shielded cleanup) and assess the tree. It asserts
+  the coder genuinely spawned AND dirtied the tree before the stop (otherwise the repair had
+  nothing to race and the drill measured nothing), then a clean worktree at the attempt's base ref
+  and no surviving coder process. Throwaway clone, so a failed cleanup damages nothing; one
+  partial coder session, nothing gated or committed.
+  **First run on the pinned toolkit (2026-09-12, `5accf33`): every assertion passed** — coder
+  spawned, drive `working` at the stop, run cancelled, HEAD back at the base ref, clean worktree,
+  no leaked pid — **and the process then hung**, which is the entry below. Two drill defects were
+  found and fixed by that run: it timed the stop on wall-clock (the cycle finished at 172 s before
+  a 300 s stop, so `interrupt()` had nothing to cancel — now it triggers on tree-dirty ∧
+  drive-working with a grace, and *skips* rather than fails when the cycle finishes first), and it
+  passed `worktree_base=clone` where production passes `run_dir/authoring`, so the session's own
+  `current_base_ref`/`submissions/` landed inside the tree under test and satisfied the
+  "the coder had written something" precondition on **our** files while the coder had in fact
+  written nothing. Both corrected; the drill needs re-running to prove the exit.
+- **A `/stop` during a Codex coder turn hung the process — FIXED 2026-09-12 at the coder backend;
+  the same class stays OPEN at `hitl/cli.py`.** Observed live 2026-09-12 (the B8 drill passed
+  every assertion — run cancelled, tree repaired to base ref, no leaked coder — and then the
+  process did not exit); root-caused the same day by source reading plus nine live experiments on
+  this host (py3.13.13, `openai-codex` 0.147.0).
+  **A cancel cannot reach into `await asyncio.to_thread(fn)`, by any mechanism.** `Future.cancel()`
+  returns False for running work and `shutdown(cancel_futures=True)` is documented not to touch it;
+  `signal.pthread_kill` cannot reach another Python thread (and PEP 475 retries interrupted
+  syscalls); and `PyThreadState_SetAsyncExc` — measured — returns `1` ("modified 1 thread state")
+  against a thread blocked in `queue.Queue.get()` and the thread **stays blocked forever**, because
+  async exceptions are only checked at bytecode boundaries and a parked lock executes none. Inert
+  while reporting success is the worst failure mode, so it is not an option even as a hack.
+  **But that does not matter here, because the vendor ships a wake path.**
+  `_message_router.fail_all(exc)` ("Wake every blocked waiter when the reader thread exits") pushes
+  an exception into every registered turn queue, and `CodexClient.close()` triggers it — measured:
+  `close()` from another thread unblocked a pending `next_turn_notification` in **0.01 s** with
+  `TransportClosedError`.
+  **The bug is our ordering.** `CodexBackend.drive`'s `finally` calls
+  `unregister_turn_notifications(turn_id)`, which pops that queue from the router's dict — and an
+  `await` in a `finally` **does** run on the cancelled path (measured). `AuthoringSession.aclose`
+  then runs `_cancel_drive()` **before** `disconnect()`, so by the time `close()` fires, `fail_all`
+  iterates `_turn_notifications.values()` and the orphaned poller's queue is no longer in it. The
+  wake is never delivered and the poller is stranded on a **non-daemon default-executor** thread.
+  **The hang is 300 s bounded, then unbounded**: `asyncio.run` calls
+  `shutdown_default_executor(THREAD_JOIN_TIMEOUT=300)`, warns, returns — then
+  `concurrent.futures.thread._python_exit` joins every registered worker with **no timeout and no
+  daemon check** (bpo-39812). Measured: forcing executor threads to `daemon=True` does **not**
+  help; only a thread we create ourselves with `daemon=True` escapes.
+  **Second live instance of the same class:** `hitl/cli.py:40`,
+  `asyncio.wait_for(asyncio.to_thread(input), timeout=…)` — measured to time out correctly and
+  then hang at exit with `input()` orphaned, so any HITL query that times out on the CLI channel
+  wedges shutdown.
+  **Applied (human ruling 2026-09-12: both).** (a) `drive` skips the deregistration **only** on
+  the cancelled path, so `disconnect()`'s `close()` still finds our queue in the dict `fail_all`
+  walks. (b) the poll moved off the default executor into `_drain_turn`, on a **daemon thread the
+  backend owns**, bridged by `loop.call_soon_threadsafe`; the poller stops itself on a terminal
+  notification, so nothing outlives a normal turn. They are not alternatives — (a) restores the
+  wake, (b) removes the need for one, and (a) alone would still depend on `disconnect()` running,
+  which it does not on an outer cancel or if the 30 s reset step expires. Pinned by two cells in
+  `tests/test_coder_backends.py`, each verified against its own mutation; the daemon one strands a
+  non-daemon poller and wedges pytest itself. **NOT YET RE-DRILLED LIVE:** the fix is
+  deterministic-only until `tests/test_live_stop_mid_drive.py` runs again and the process exits 0.
+  **(c) `hitl/cli.py` — FIXED the same day, and it could not take remedy (a):** there is no
+  router, no queue and no `fail_all`, so a blocked `input()` has no doorway at all (closing stdin
+  from another thread does not reliably wake a reader and risks the fd being reused, `dup2` does
+  not touch a reader already inside `read()`, and PEP 475 retries a signalled syscall). Its two
+  options were a daemon thread, or `loop.connect_read_pipe` on fd 0 — properly async, `wait_for`
+  then cancels natively, but it sets `O_NONBLOCK` on an open file description shared with the
+  parent shell and so must be restored at teardown. **Human ruling: the daemon thread.** New
+  `hitl/cli._read_stdin_line`; a late answer settles a no-op rather than raising on the future
+  `wait_for` already cancelled. `test_cli_stdin_handler_times_out` was rewritten onto a genuinely
+  blocked `input()` (the defect was never in the timeout but in what survived it) and fails against
+  a `daemon=False` mutation.
+- **Report fields are checked for emptiness, not for content — OPEN, needs a ruling. Confirmed
+  independently by an attacking agent, and it is wider than the probe.** `lead_turn_problems`
+  tests `.strip()` truthiness, so any field that is *present* passes however little it carries.
+  Measured twice on 2026-09-12: a lead filled `what_to_probe` with the literal token
+  `</antml_placeholder>\n` (that text is handed to **every worker verbatim** as their next
+  instruction, so the round would have been dispatched with nothing to do); and a second lead
+  reported the general case in its own words — *"Probe 5: meaningless placeholder content
+  ('Placeholder' summary, 'x' finding) → accepted by edit_report with no semantic check; turn_end
+  only flags truly-empty fields, not low-content placeholders."* So it covers `summary` and
+  `findings` too, not only the probe.
+  **Likelihood, stated honestly:** the literal-markup case needed an explicit instruction to
+  misbehave and is unlikely unprompted. The realistic cousin is a lead with nothing specific to
+  say writing `TBD`, `N/A`, or a restatement of another field — plausible, and equally invisible.
+  **Severity is low either way**: the probe is an *addition* to a task the workers already hold,
+  so the cost is a wasted round rather than a wrong answer. Recorded rather than fixed because the
+  remedy is a policy call: the cheap principled version reuses `code_gate.yaml`'s existing banned
+  vocabulary (`placeholder`, `for now`) against these fields, plus a markup-only test; anything
+  broader is a quality bar the validator has no business setting.
+- **Gemini response parts are captured twice, in production, today.** `google.py` appends each
+  part at the top of its walk (line 367) and again in the `else` branch (line 383), so anything
+  that is neither a `function_call` nor a non-thought text part lands in `provider_parts` twice —
+  **measured 7 real SDK parts captured as 12** — and that array is replayed verbatim. Introduced
+  `504f319` (2026-08-05), i.e. **after** the 2026-07-13 [I8] measurement, so it is not that
+  error's cause. Live in the librarian seat (duplicated thought parts on every Gemini turn) and
+  would corrupt hosted-tool replay the day anyone enables grounding. Human ruling 2026-09-12:
+  Google is not an active seat — record it, do not fix it. One-line class of fix plus a
+  `len(captured) == len(received)` regression test.
+- **OpenAI's assistant-message `phase` does not survive our replay.** The vendor documents it
+  (`commentary` | `final_answer`) as *"preserve and resend phase on all assistant messages —
+  dropping it can degrade performance"* for gpt-5.3-codex and beyond; `_UNCARRIED_ITEM_TYPES`
+  excludes `message` items on the stated grounds that the text is replayed from
+  `ModelResponse.content`, and `_to_responses_input`'s `ModelResponse` branch emits the carried
+  parts and the function calls but no text item. Derived by reading the code 2026-09-12, **not
+  measured**, and deliberately not probed. Human ruling: *"we don't change openai. it works now,
+  and it'll remain this way."* Recorded as an accepted gap, which is what this registry is for.
+- **The paused-turn continuation guard protects code that has never run.** `_react` appends
+  nothing and re-sends as-is when a silent turn is `paused` **and** carries an unresolved
+  server-tool call — the vendor documents re-sending the response untouched, and a message
+  appended there strands the call. Measured dead before it was written: 344 ledger files /
+  240,984 events / 221 runs hold 184 `silent_turn` events and `stop == "end_turn"` on **all
+  184**, zero `paused` ever. It becomes reachable the day any hosted vendor tool is declared
+  (web search reaches every role as our own Tavily *function* tool, so none is today). Kept
+  rather than deferred because those are the exact lines A2 was already editing.
 - **`retrieval.vector_search` / `vector_search_paths`** — `NotImplementedError` Phase-2 stub
   (ChromaDB RAG backend deferred — §12).
 - **Librarian IO search-iteration / `evaluate_search_results()`** — Phase-1 stubs; the latter
@@ -2412,3 +2565,169 @@ history. Token-level preservation of the second pass was checked mechanically, n
   landed edits across eleven files without an agreed plan, on the strength of answers to scoping
   questions. Answers to scoping questions are inputs to a plan, not consent to one (§3, first hard
   rule). The work was reset and redone from an approved plan.
+
+- 2026-09-12 — **The lead's turn became one loop with no stages, and its report became its
+  decision (A1–A11).** Driven by the 2026-09-11 demonstration batch, where the same missing action
+  left two different scars: **slot 1** ended a whole analysis with **11 of 12 author credits
+  unspent** after five submissions on one link, and **slot 2**, from the identical position, paid
+  a debate round and a full worker rerun to say "try something else" — then went on to commit six
+  tools and finish accepted at $121.16 (slot 3: seven tools, $94.77). Not a credit bug; both caps
+  behaved exactly as coded. A filed form was a `terminal_tool`, and while authoring the only two
+  the lead could file were both whole-cycle terminals.
+  **Deleted:** `hold_authoring`, `request_another_round`, `submit_adjudication`,
+  `submit_terminal_report` and their handlers; `DECIDE_STAGE`/`AUTHOR_STAGE`/`ADJUDICATE_STAGE`,
+  `_STAGE_FORMS`, `_out_of_stage`, `LEAD_CYCLE_TERMINALS`, `LeadCycle.stage`/`.filed`,
+  `_stage_note`, `_author_chain`, `_drive_one_link`. Two of those four handlers validated nothing
+  — they copied an already-validated report onto the cycle and differed by one field the report
+  carries. **Now:** `run_cycle` is one `_react` with `terminal_tools={turn_end}`;
+  `_ChainDriver.advance` closes a finished link and opens the next **on a tool result**, so the
+  chain advances inside the turn and `execute_submit`'s cap refusal became a CI-budget ticket that
+  triggers it; `lead_turn_problems` validates the report at `turn_end`, including **stat-ing every
+  cited figure's path**. `_react` gained `share_messages` so the driver can drop a committed link's
+  coding transcript from the live trajectory rather than running a nested per-link loop.
+  **One report class, two surfaces** (§7): `AnalystReport` gained `rework`/`rationale`/
+  `what_to_probe` and `status` regained `needs_human`, with `edit_report` declaring only what each
+  role may file. A subclass was rejected (it widens a `Literal` in a subtype, and that type is the
+  analysis result the reviewer receives). The schema stays permissive and `turn_end` is strict.
+  **Ruling 18 — the two terminal branches stay separate, and the probe merges.** A commit reruns
+  the workers *fresh* on an author credit and reloads the registry; rework sends them back to
+  *revise* on a debate round. Collapsing them would either let a three-link chain exhaust the
+  three-round debate cap or make rework unbounded. What merged: one report can now carry both, and
+  on `committed ≥ 1 ∧ rework` the probe rides along beside the authored-tool note, still charged
+  to an author credit.
+  **A1 — `ModelResponse.has_unresolved_server_tool`, investigated per vendor before it was
+  written.** Four Opus agents read each vendor's own documentation and cross-checked the verbatim
+  prompt dumps. Server tools come in **four shapes**: a separate id-paired result block
+  (Anthropic — the only place the state is both documented and measured, 3 of 121 distinct turns);
+  a separate result item in *client* execution mode only (OpenAI); separate id-paired parts behind
+  two locks (Google); and a result folded **into** the call item across seven documented hosted
+  tools (Alibaba). DeepSeek documents every built-in as *Ignored*; Z.AI publishes no `/responses`
+  contract at all, so its empty set rests on **undocumented**, not documented-absent, grounds.
+  Five rules, each with a failure behind it: pair by id never by position (one measured turn holds
+  **seven** interleaved server calls); never match by tool name (our own *client* tools are named
+  `web_search`/`web_fetch`); **never key on OpenAI's `call_id`** (hosted mode nulls it on both
+  items and our capture drops `None`, so id-pairing reads `True` on every real discovery turn);
+  read `status` where the result is folded in; **fail closed**. And the negative result that
+  matters: **`stop` is not a proxy** — Anthropic returns the same finish reason on resolved and
+  unresolved turns alike, 47/47 and 155/155. Guard tests assert the **set**, not the constant,
+  because four of six vendors are a constant `False` and a test asserting a constant cannot fail
+  for the reason we care about.
+  **A2 — the injection race, closed.** One drain at the top of the iteration, **held** a turn when
+  the preceding provider turn has an unresolved server-tool call; the mid-batch drain deleted. This
+  is the §13 `/steer` defect, and the shape that killed a run at $42.11 with four tools already
+  committed. Plus a **third** injection site the plan had not named: the silent-turn nudge fires on
+  `paused`, which is exactly the state the vendor documents as possibly holding an unpaired call
+  and whose documented continuation is to re-send as-is — so it now appends nothing. Measured dead
+  first (184 silent turns across 221 runs, `end_turn` on every one, zero `paused`); human ruling:
+  *"it's literally dead code, but we prevent it from breaking."*
+  **Recorded, not fixed** (human rulings, §13): the Gemini duplicate-parts defect (7 captured as
+  12, live today in the librarian seat) and OpenAI's dropped `phase`. Corrected in place: the
+  DeepSeek comment claiming a hosted `web_search` the vendor's own table lists as *Ignored* — moot
+  either way, since web search reaches every role as our Tavily *function* tool, but the comment
+  read as evidence of a capability the vendor disclaims.
+  Suite **1452 passed / 188 skipped / 0 failed**, benchmarks 496 untouched and green.
+  **Process incident, the same one as 2026-09-09 and worth the second entry.** Replacing
+  `run_cycle` I matched its body by content (`self._round += 1`), hit the *worker's* occurrence
+  first, and deleted `class AnalystLeadAgent` entire. A structural heuristic is not a boundary
+  check — twice now. Restored from a scratch copy and redone with the span asserted to contain
+  exactly three method definitions and no `class` statement **before any line was removed**. The
+  assertion is three lines and would have prevented both incidents.
+
+- 2026-09-12 (third, same day) — **The `/stop` that cleaned up perfectly and then never exited.**
+  The B8 live drill ran on the pinned toolkit (`5accf33`) and passed every assertion it makes —
+  real coder spawned, drive `working` when the stop landed, run cancelled, HEAD back at the
+  attempt's base ref, clean worktree, no leaked coder process — and the process then sat until
+  `timeout` killed it 29 minutes later. **The cleanup was never the problem; the shutdown was.**
+  Root cause is ours and it is two lines of ordering. A cancel cannot reach a thread blocked in
+  `queue.Queue.get()` by any mechanism (measured nine ways; `PyThreadState_SetAsyncExc` is the
+  worst of them, returning `1` while the thread stays parked forever — inert while reporting
+  success). But the vendor ships a wake: `_MessageRouter.fail_all` pushes an exception into every
+  **registered** turn queue when the client closes. `CodexBackend.drive`'s `finally` called
+  `unregister_turn_notifications`, an `await` in a `finally` does run on the cancelled path, and
+  `fail_all` finds waiters by walking the very dict that call pops us out of — so `aclose`'s later
+  `disconnect()` fired a wake with nobody left to receive it, stranding the poll on a **non-daemon
+  default-executor** thread that `_python_exit` then joins with no timeout (bpo-39812).
+  **Both remedies applied on the human's ruling, because they fix different things:** `drive` now
+  skips the deregistration **only** when cancelled (restores the wake), and the poll moved into
+  `_drain_turn` on a **daemon thread the backend owns** (removes the need for one — a poll nothing
+  ever wakes is abandoned at exit rather than joined). The poller stops itself on a terminal
+  notification so nothing outlives a normal turn, `_TERMINAL_TURN_METHODS` is read both there and
+  by `_record_notification` so the two cannot disagree about what ends a turn, and a closed loop is
+  the handoff's exit signal rather than a teardown traceback. `tests/test_coder_backends.py`
+  49 → 51, each cell verified against its own mutation — and the daemon mutation **reproduced the
+  production symptom in miniature**, stranding a non-daemon poller that wedged the pytest process
+  until SIGKILL. **The drill also found two defects in itself**, both now fixed and both of the
+  house type where the code that *reads* a result is wrong rather than the code under test: it
+  timed the stop on wall-clock (a first run's cycle finished at 172 s, so `interrupt()` cancelled
+  nothing and the ordinary close cleaned the tree — a false negative its own precondition caught),
+  and it passed `worktree_base=clone` where production passes `run_dir/authoring`, so the session's
+  `current_base_ref`/`submissions/` landed **inside the tree under test** and the assertion "the
+  coder had written something, so the repair had something to race" passed on *our* bookkeeping
+  while the coder had written nothing. **Open:** the fix is deterministic-only until the drill runs
+  again and the process exits 0.
+  **The same defect class was fixed beside it at `hitl/cli.py`**, where remedy (a) is unavailable
+  — no router, no queue, no `fail_all`, so a blocked `input()` has no doorway at all. On the
+  human's ruling it took the daemon thread rather than `loop.connect_read_pipe` (which would cancel
+  natively but sets `O_NONBLOCK` on a file description shared with the parent shell). Its timeout
+  test moved onto a genuinely blocked `input()`, because the defect was never in the timeout —
+  which always fired — but in what survived it. `tests/test_hitl.py` 47, mutation-verified.
+
+- 2026-09-12 (fourth, same day) — **The shipped coder had no credential, and three drill runs
+  could not say so.** The B8 stop drill kept failing its precondition — the coder had written
+  nothing to the tree — with a record that could not distinguish an author that never started work
+  from one whose first turn died. The monitor was in memory and written nowhere, which is the
+  2026-09-01 probe-helper lesson at a new address: **the reader was the defective part**, not the
+  code under test. Wiring a ledger and a `coder.*` digest into the drill named the cause on the
+  first run: `401 Unauthorized: Authentication Fails (governor)` from
+  `https://api.deepseek.com/responses`, on every turn. **The key was good** — measured the same
+  day, `/models` 200, balance $64.60, and `POST /responses` 200 on both `deepseek-flash` and the
+  legacy `deepseek-v4-flash` when sent by hand. **The defect was ours and it was a false
+  changelog claim.** `config/models.yaml` dropped `key_env` from the coder member on 2026-09-09
+  saying `DEEPSEEK_API_KEY` "is the derived default so `key_env` is redundant" — true of the launch
+  check, which derives it from the provider (`env.py: _PROVIDER_KEY_ALIASES`, whose own comment
+  says a member "needs no `key_env` at all"), and false of `CodexBackend`, where that one field
+  gates the child's environment overlay, the API-key login **and** the `env_key` handed to Codex.
+  So preflight passed on exactly the variable the author could not see, and the author launched
+  unauthenticated — the silent direction. Fixed at the backend on the human's ruling (option ii,
+  over the one-line config restore): `member.key_env or env_var_names(member.provider)[0]`, which
+  is the shape the chat path already uses, so the two agree rather than a third derivation being
+  invented; an explicitly named plan-specific variable still wins. **Published batches are
+  unaffected** — `science_bench/arms.py` pins `CODER_KEY_ENV` explicitly, which is why every
+  authoring run in the record authenticated while the shipped default did not.
+  `tests/test_coder_backends.py` 51 -> 54: two behavioural cells verified against the unfixed code,
+  plus a static guard that whatever the config names as coder resolves *some* key variable.
+  The drill also gained an early exit when the drive has ended with a clean tree, rather than
+  sitting out the full `AUTO_RESEARCH_STOP_AFTER_S` measuring nothing (both earlier runs did).
+  **The theme, for the third time in two days:** a check and the code it is supposed to cover
+  derived the same fact differently, and the disagreement was invisible because the check passed.
+
+- 2026-09-12 (fifth, same day) — **The stop drill passed, and the trace it produced found two
+  refactor defects no test had.** The B8 live drill finally got its shot on an authenticated
+  coder: the coder ran 96 shell commands over four minutes, modified four files and created a
+  test, the stop landed on that dirty tree, and the repair returned the toolkit to the attempt's
+  base ref with no leaked process and a clean exit. **B8's live half is closed** — with one
+  property still unproven and now understood (below).
+  Reading the lead's own tool trace out of the drill's new ledger showed two things. **`check_coder`
+  was declared and unroutable**: the constant, the definition, the executor and an inner dispatch
+  branch all existed, and the name was missing from the outer membership test that guards the
+  authoring block, so the branch was dead code and the lead — polling the coder it had just
+  briefed — was told `unknown tool: check_coder`. **And `author_chain` blocked for the coder's
+  entire first turn**, 263 s measured, because `_ChainDriver._open` sent the brief with the
+  blocking `drive`. §9.3 says the turn continues; it did not. The two compounded: the lead could
+  not poll because the tool was dead, and there was nothing to poll because no background task
+  existed. That is also why this drill had never caught a coder *mid-write* in four runs — its
+  detector is `tree dirty ∧ drive working`, and `drive_status` can never read `working` while the
+  seed is blocking. So what is proven is a stop landing on a tree full of real coder work; the
+  narrower "cancel a child process while it is actively writing" is still open, and is now
+  reachable for the first time.
+  Human ruling: wire the button; the idling itself is *"not that alarming, it basically has nothing
+  to do, except it wanted to do some read-only 'good measure'"* — and on being shown that the wired
+  button would then **lie** (`drive_status` is `idle` after a blocking seed, so `check_coder` answers
+  "you have not sent the coder anything yet" and advises re-sending the brief), ruled to background
+  the seed. Both applied, plus the guard the blocking call had been providing by accident:
+  `execute_submit` now refuses while the coder is working, since the gate reads the working tree and
+  would otherwise run pytest twice and a paid co-lead review over a half-written tool.
+  **The reusable part is the same lesson three times in one day:** a fact derived in two places
+  (the key variable), a tool declared in one place and routed in another, a contract stated in
+  §9.3 and implemented otherwise — each invisible because the *other* half passed. All three are
+  now single-sourced or guarded over the declared set rather than a written-out list.

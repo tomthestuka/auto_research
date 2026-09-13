@@ -84,6 +84,15 @@ ZAI_VENDOR = ResponsesVendor(
     # position itself and needs no help. `resolve_refs_in` stays empty by default.
     # No server-side tool-search tool is documented, so every tool is declared resident.
     supports_tool_search=False,
+    # Empty on WEAKER grounds than DeepSeek's, and the difference is worth keeping: this vendor
+    # publishes no contract for `/responses` at all. The endpoint appears only in its Codex
+    # integration guide (docs.z.ai/devpack/tool/codex) and is absent from its OpenAPI spec, its
+    # API reference index and its coding-plan protocol list. Its hosted tools (web_search,
+    # retrieval, mcp) are documented on *chat completions* only, where each folds its result into
+    # the same response. So this is "the vendor publishes nothing and we declare no built-in
+    # tool", NOT "the vendor documents that it emits none" — and this vendor has twice been
+    # measured accepting a documented parameter and ignoring it.
+    server_tool_item_types=frozenset(),
 )
 
 

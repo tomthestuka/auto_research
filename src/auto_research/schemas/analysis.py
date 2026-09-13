@@ -41,7 +41,31 @@ class AnalystReport(FiguredReport):
             "misbehaves; otherwise omit. The analyst lead finalises the tool brief from this."
         ),
     )
-    status: Literal["succeeded", "failed"] = Field(
+    rework: bool = Field(
+        default=False,
+        description=(
+            "Set true to send the analysts back for one more round instead of concluding. "
+            "When true, say why in rationale and what to look at in what_to_probe; when false, "
+            "this report is the analysis result and needs summary, findings and status."
+        ),
+    )
+    """Lead-only. The analysis lead's decision rides on its report rather than on a separate
+    form: the report IS the decision, exactly as it is for an analyst (A3)."""
+    rationale: str | None = Field(
+        default=None,
+        description=(
+            "Why another round is warranted — the evidence gap or disagreement that one more "
+            "pass would close. Required when rework is true."
+        ),
+    )
+    what_to_probe: str | None = Field(
+        default=None,
+        description=(
+            "What the analysts should do next, in their own terms. This text reaches every "
+            "worker verbatim as their next instruction. Required when rework is true."
+        ),
+    )
+    status: Literal["succeeded", "failed", "needs_human"] = Field(
         default="failed",
         description=(
             "Declare the outcome of YOUR work: 'succeeded' when you completed it, 'failed' when "
@@ -57,12 +81,19 @@ class AnalystReport(FiguredReport):
     ``ok``/``failed``/``needs_human`` with ``ok`` as the default, so an unwritten report defaulted
     to claiming completion.
 
-    ``needs_human`` is gone. It was the third value and it did not earn its place: headless — the
-    condition every benchmark batch has run under — `ask_human` is not even in a graph role's tool
+    ``needs_human`` is **not offered to a worker**, and that is enforced by the tool surface rather
+    than by the type (A3). It was removed from this schema entirely in F9 because headless —
+    the condition every benchmark batch has run under — `ask_human` is not in a graph role's tool
     list, so the state was unreachable by the route it names, while [A20] shows the *label* being
     filed for a reason that was not a human block at all (the lead wanted a worker rerun, the only
-    open form was a terminal, and the run recorded a human-request that never happened). A role
-    that genuinely needs a person says so in ``summary``, which is where a reader looks anyway."""
+    open form was a terminal, and the run recorded a human-request that never happened). A worker
+    that genuinely needs a person says so in ``summary``, which is where a reader looks anyway.
+
+    It returns here for the **lead**, whose terminal is a cycle decision rather than a worker's
+    outcome, and whose report the reviewer reads as such. One class serves both roles and
+    ``edit_report`` declares only the values that role may file, so a worker still cannot express
+    it — the same belt-and-suspenders shape as ``author_chain``'s required first link: the surface
+    makes it ungeneratable, and the handler validates anyway."""
 
 
 class AnalysisTask(MessageModel):

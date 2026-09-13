@@ -25,29 +25,23 @@ from pathlib import Path
 import pytest
 
 from auto_research.agents.react import (
-    ANOTHER_ROUND_TOOL,
     AUTHOR_CHAIN_TOOL,
-    HOLD_AUTHORING_TOOL,
     LEAD_FORM_TOOLS,
-    SUBMIT_ADJUDICATION_TOOL,
-    TERMINAL_REPORT_TOOL,
+    TURN_END_TOOL,
     author_chain_tool_def,
-    hold_authoring_tool_def,
-    request_another_round_tool_def,
-    submit_adjudication_tool_def,
-    submit_terminal_report_tool_def,
+    turn_end_tool_def,
 )
 from auto_research.models.types import CHAT_PROVIDERS
 
 LIVE_MATRIX = Path(__file__).parent / "test_live_schema_matrix.py"
-LIVE_FORMS = Path(__file__).parent / "test_live_form_shapes.py"
+LIVE_FORMS = Path(__file__).parent / "test_live_lead_providers.py"
 
+# The lead's remaining form, plus the universal terminal every graph role now ends on. The four
+# decision tools this table used to carry are gone with the stage machinery (A4/A5): the report
+# is the decision, so there is one brief and one terminal to keep strict-safe.
 FORM_DEFS = {
     AUTHOR_CHAIN_TOOL: author_chain_tool_def,
-    HOLD_AUTHORING_TOOL: hold_authoring_tool_def,
-    ANOTHER_ROUND_TOOL: request_another_round_tool_def,
-    SUBMIT_ADJUDICATION_TOOL: submit_adjudication_tool_def,
-    TERMINAL_REPORT_TOOL: submit_terminal_report_tool_def,
+    TURN_END_TOOL: turn_end_tool_def,
 }
 
 # Keywords strict mode compiles into a grammar, per each provider's own published subset.

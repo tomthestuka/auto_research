@@ -318,6 +318,41 @@ class ModelResponse(BaseModel):
     (exactly 2-3 tokens with no content) with `stop_reason: "end_turn"` ... particularly after
     tool results"* — and the run died because the loop read it as a finished turn.
     """
+    has_unresolved_server_tool: bool = False
+    """This turn holds a **provider-executed** tool call whose result did not arrive with it, so
+    the conversation is mid-server-tool and the API constrains what may follow (A1).
+
+    Normalised per adapter from that vendor's own item types, because the shape differs four ways
+    and only the first can strand a call:
+
+    - **Anthropic** — a separate result block, paired by id. `server_tool_use` / `mcp_tool_use`
+      against any block carrying a matching `tool_use_id`. Documented, and measured: 3 of 121
+      distinct assistant turns in one batch.
+    - **OpenAI** — a separate result item, tool search only, and only in *client* execution mode.
+      Hosted mode always returns the pair together.
+    - **Google** — separate id-paired parts (`tool_call`/`tool_response`,
+      `executable_code`/`code_execution_result`), unreachable while no hosted tool is declared.
+    - **Alibaba** — the result is folded **into** the call item, so "unresolved" can only mean a
+      non-terminal `status`. DeepSeek and Z.AI emit no hosted items at all.
+
+    Three rules, each with a failure behind it. **Pair by id, never by position** — one measured
+    Anthropic turn holds seven server calls in interleaved groups. **Never match by tool name** —
+    our own *client* tools are named `web_search` and `web_fetch`, colliding with Anthropic's
+    server tools of the same names. **Never key on OpenAI's `call_id`** — hosted mode sets it
+    `null` on both items and `_as_input_item` drops `None` values, so id-pairing would read `True`
+    on every real discovery turn.
+
+    **Fail closed**: an unidentifiable server call reads `True`. A wrong hold costs one iteration;
+    the wrong answer the other way cost a run ($42.11, 4 committed tools, 2026-09-10).
+
+    **Independent of `stop`, deliberately.** Anthropic returns the same finish reason on resolved
+    and unresolved turns alike (measured 47/47 and 155/155), so neither field can be derived from
+    the other. `paused` is the case where they interact: the vendor documents that turn as
+    *possibly* carrying an unpaired call, and its continuation as re-sending the response as-is.
+
+    Default `False` so a synthesized turn (a test fake, a hand-built `ModelResponse`) reads as
+    "no server tools", which is the honest answer for a turn no adapter captured."""
+
     usage: ModelUsage = Field(default_factory=ModelUsage)
     context_edits: list[dict[str, Any]] = Field(default_factory=list)
     """Provider-native context-management edits applied to THIS call (Anthropic context

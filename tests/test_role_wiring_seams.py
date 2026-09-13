@@ -157,3 +157,43 @@ def test_an_unknown_role_is_refused_rather_than_given_a_default_loop():
 
     with pytest.raises(ValueError):
         readonly_tools_for("analyst_worker", roots=[REPO])
+
+
+# ---------------------------------------------------------------- the lead's own wiring (2026-09-12)
+
+
+def test_the_lead_has_a_wiring_seam_and_run_research_uses_it():
+    """`attach_lead_runtime` must exist and be the run path's own wiring, like the worker seam.
+
+    The lead's identity, report folder, monitor, stop channel and tools were spread across ~40
+    lines of `run_request` while the workers had a seam of their own, so a live drill driving a
+    real lead restated all of it by hand — the shape that made a seat probe drive a worker with
+    no sandbox and produce an unattributable failure (2026-09-08).
+    """
+    tree = _tree(RUNTIME)
+    defined = {
+        node.name for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert "attach_lead_runtime" in defined, "the lead has no wiring seam in runtime.py"
+    owners = _enclosing_functions(tree)
+    callers = {owners.get(line) for _, line in _calls_to(tree, ("attach_lead_runtime",))}
+    assert "run_research" in callers, (
+        f"attach_lead_runtime is not called by run_research (callers: {callers or 'none'}) — a "
+        "seam the run path does not use describes a role production no longer builds"
+    )
+
+
+def test_the_stop_drill_wires_its_lead_through_the_seam():
+    """The live drill must not restate the lead's wiring; it must ask for production's."""
+    drill = Path(__file__).with_name("test_live_stop_mid_drive.py")
+    tree = _tree(drill)
+    called = {name for name, _ in _calls_to(tree, ("attach_lead_runtime", "readonly_tools_for"))}
+    assert "attach_lead_runtime" in called, "the drill hand-rolls the lead's wiring"
+
+    # The tell-tale of a hand-rolled equivalent is assigning the attributes the seam owns.
+    source = drill.read_text(encoding="utf-8")
+    for restated in ("lead.agent_key =", "lead.report_dir =", "lead.tools =", "lead.monitor ="):
+        assert restated not in source, (
+            f"the drill sets {restated.strip()} itself instead of letting the seam do it"
+        )

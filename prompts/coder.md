@@ -308,7 +308,13 @@ hardens into code is the expensive failure. So, before guessing, escalate — ch
    threads and calibration memos over blog posts. Resolve conventions (response formats,
    parameter definitions, reduction steps) from primary sources.
 2. **Ask the analyst lead** (`ask_lead`) — for code/convention questions and "extend which
-   `lib/` function?" The lead has read the full `lib/`.
+   `lib/` function?" The lead has read the full `lib/` and wrote your brief.
+   `ask_lead` answers `delivered.` straight away: it hands your question to the lead and returns,
+   rather than holding you while the lead thinks. **The lead's reply arrives later, inside this
+   same turn, as a message from the user** — so keep reading it as you work. Either carry on with
+   the parts of the brief the question does not block, or say what you are waiting for and stop;
+   both are fine, and the reply reaches you either way. Ask one clear question at a time, and say
+   in it what you will do if no answer comes, so the lead can correct that rather than restate it.
 3. **Ask the human** (`ask_human`, when it is offered) — for genuine expert-science unknowns
    the lead may also know nothing about. This reaches a real person; the lead is not your only
    oracle. Ask early and specifically. On an unattended run this tool returns an error saying

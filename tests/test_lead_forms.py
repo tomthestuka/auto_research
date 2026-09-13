@@ -1,48 +1,51 @@
-"""Deterministic tests for the analyst lead's cycle forms (§9.3, the forms refactor step 3).
+"""Deterministic tests for the analyst lead's cycle (§9.3; the A-series topology refactor).
 
-The lead states each decision by *filing a form* instead of composing a structured answer, and
-these tests pin the properties that make that safe:
+The lead's turn is **one ReAct loop with no stages**, ending on ``turn_end``, and **its report is
+its decision** — the same contract an analyst already writes. These tests pin the properties that
+make that safe:
 
 - **The impossible state is inexpressible.** ``author_chain`` requires at least one link in its
-  own schema, so "author, with nothing to author" — the shape that killed a run on 2026-09-01
-  with ``should_author=true`` and an empty chain — cannot be filed at all.
+  own schema, so "author, with nothing to author" — the shape that killed a run on 2026-09-01 —
+  cannot be filed at all.
 - **Every question carries a description.** A field explained only by a Pydantic ``#`` comment is
   a field the model fills blind; that was the defect behind the same run.
-- **The declared tool set never shrinks.** The stage is enforced by the *handler*, so an
-  out-of-stage call comes back as a correction to act on and the loop continues — a declared set
-  that shrinks mid-conversation is the "Tool reference not found" run-killer (2026-07-29).
-- **Caps stay in Python.** ``request_another_round`` is refused with the cap named once the round
-  budget is spent.
+- **The declared tool set never shrinks.** Sessions are swapped per chain link and the declared
+  set does not move — a set that shrinks mid-conversation is the "Tool reference not found"
+  run-killer (2026-07-29).
+- **A dead link does not end the turn.** The chain advances on a *tool result*, which is the whole
+  of A7: slot 1 of the 2026-09-11 batch ended a whole analysis with 11 of 12 author credits
+  unspent because every action open to it while authoring was a whole-cycle terminal.
+- **Caps stay in Python**, and are enforced at ``turn_end`` with the cap named.
+
+What is gone with the forms: ``hold_authoring``, ``request_another_round``, ``submit_adjudication``
+and ``submit_terminal_report``, and the three-stage desk that decided which were callable when.
+Their tests went with them; what they asserted is now asserted against the report and the
+``turn_end`` validator below.
 """
 
 import asyncio
+import types
 from pathlib import Path
 
 import pytest
 
 from auto_research.agents.react import (
-    ADJUDICATE_STAGE,
-    ANOTHER_ROUND_TOOL,
     AUTHOR_CHAIN_TOOL,
-    AUTHOR_STAGE,
-    DECIDE_STAGE,
+    CHECK_CODER_TOOL,
     DRIVE_CODER_TOOL,
-    HOLD_AUTHORING_TOOL,
-    LEAD_CYCLE_TERMINALS,
+    EDIT_REPORT_TOOL,
     LEAD_FORM_TOOLS,
+    LEAD_REPORT_FIELDS,
+    LEAD_STATUS_VALUES,
     RESPOND_TO_REVIEW_TOOL,
-    SUBMIT_ADJUDICATION_TOOL,
     SUBMIT_TOOL,
-    TERMINAL_REPORT_TOOL,
+    TURN_END_TOOL,
     LeadCycle,
     ReadOnlyToolProvider,
     ReportWorkspace,
-    ToolOutcome,
     author_chain_tool_def,
-    hold_authoring_tool_def,
-    request_another_round_tool_def,
-    submit_adjudication_tool_def,
-    submit_terminal_report_tool_def,
+    edit_report_tool_def,
+    lead_turn_problems,
 )
 from auto_research.agents.roles import AnalystLeadAgent, _drop_coding_middle
 from auto_research.models import (
@@ -55,13 +58,7 @@ from auto_research.models import (
 from auto_research.schemas import AnalystReport
 
 
-FORM_DEFS = (
-    author_chain_tool_def,
-    hold_authoring_tool_def,
-    request_another_round_tool_def,
-    submit_adjudication_tool_def,
-    submit_terminal_report_tool_def,
-)
+FORM_DEFS = (author_chain_tool_def,)
 
 GOOD_LINK = {
     "science_context": "Time-resolved polarization of Cyg X-1 in the hard state.",
@@ -73,8 +70,8 @@ GOOD_LINK = {
 }
 
 
-def _cycle(stage=DECIDE_STAGE, *, authoring=True, rounds_left=2) -> LeadCycle:
-    return LeadCycle(stage=stage, authoring_enabled=authoring, rounds_left=rounds_left)
+def _cycle(*, authoring=True, rounds_left=2) -> LeadCycle:
+    return LeadCycle(authoring_enabled=authoring, rounds_left=rounds_left)
 
 
 def _run(coro):
@@ -90,12 +87,11 @@ def _workspace(tmp_path: Path, report: AnalystReport | None) -> ReportWorkspace:
         report_path=tmp_path / "r.jsonl",
         report_model=AnalystReport,
         catalog={},
+        prose_fields=LEAD_REPORT_FIELDS,
+        status_values=LEAD_STATUS_VALUES,
     )
     ws.written_report = report
     return ws
-
-
-# ── the impossible state is inexpressible ────────────────────────────────────
 
 
 def test_author_chain_expresses_at_least_one_link_as_a_REQUIRED_PROPERTY():
@@ -121,18 +117,6 @@ def test_author_chain_expresses_at_least_one_link_as_a_REQUIRED_PROPERTY():
     assert schema["additionalProperties"] is False
 
 
-def test_author_chain_handler_refuses_an_empty_chain_and_names_the_other_branch():
-    """The backstop for a vendor that enforces neither ``required`` nor anything else — which is
-    every vendor until strict mode is on for every seat. It also points at the form that fits."""
-    cycle = _cycle()
-    out = _run(
-        ReadOnlyToolProvider(roots=[], cycle=cycle).execute(AUTHOR_CHAIN_TOOL, {})
-    )
-    assert out.is_error
-    assert HOLD_AUTHORING_TOOL in out.text
-    assert cycle.filed is None and cycle.decision is None
-
-
 def test_author_chain_files_the_ordered_chain_as_an_authoring_decision():
     cycle = _cycle()
     second = {**GOOD_LINK, "proposed_tool_name": "ixpe_pcube_timeseg_plot"}
@@ -143,14 +127,13 @@ def test_author_chain_files_the_ordered_chain_as_an_authoring_decision():
         )
     )
     assert not out.is_error
-    assert cycle.filed == AUTHOR_CHAIN_TOOL
-    assert cycle.decision is not None
-    assert cycle.decision.should_author is True
-    assert [s.proposed_tool_name for s in cycle.decision.tool_specs] == [
+    assert cycle.brief is not None
+    assert cycle.brief.should_author is True
+    assert [s.proposed_tool_name for s in cycle.brief.tool_specs] == [
         "ixpe_pcube_timeseg",
         "ixpe_pcube_timeseg_plot",
     ]
-    assert cycle.decision.rationale == "read lib/ first"
+    assert cycle.brief.rationale == "read lib/ first"
 
 
 def test_a_malformed_link_comes_back_as_a_correction_naming_the_field():
@@ -164,172 +147,7 @@ def test_a_malformed_link_comes_back_as_a_correction_naming_the_field():
     )
     assert out.is_error
     assert "additional_links[0]" in out.text and "target_domain" in out.text
-    assert cycle.filed is None and cycle.decision is None
-
-
-def test_hold_authoring_files_the_no_code_branch():
-    cycle = _cycle()
-    out = _run(
-        ReadOnlyToolProvider(roots=[], cycle=cycle).execute(
-            HOLD_AUTHORING_TOOL, {"reason": "load_data already exposes this"}
-        )
-    )
-    assert not out.is_error
-    assert cycle.filed == HOLD_AUTHORING_TOOL
-    assert cycle.decision.should_author is False
-    assert cycle.decision.tool_specs == []
-    assert "load_data" in cycle.decision.rationale
-
-
-def test_hold_authoring_needs_a_reason():
-    cycle = _cycle()
-    out = _run(ReadOnlyToolProvider(roots=[], cycle=cycle).execute(HOLD_AUTHORING_TOOL, {}))
-    assert out.is_error and cycle.filed is None
-
-
-# ── the stage lives in the handler, not in the declared set ──────────────────
-
-
-@pytest.mark.parametrize(
-    "stage,form",
-    [
-        (ADJUDICATE_STAGE, AUTHOR_CHAIN_TOOL),
-        (ADJUDICATE_STAGE, HOLD_AUTHORING_TOOL),
-        (DECIDE_STAGE, ANOTHER_ROUND_TOOL),
-        (DECIDE_STAGE, SUBMIT_ADJUDICATION_TOOL),
-        (AUTHOR_STAGE, AUTHOR_CHAIN_TOOL),
-        (AUTHOR_STAGE, SUBMIT_ADJUDICATION_TOOL),
-    ],
-)
-def test_an_out_of_stage_form_is_a_correction_naming_the_stage_and_what_is_open(stage, form):
-    cycle = _cycle(stage)
-    out = _run(ReadOnlyToolProvider(roots=[], cycle=cycle).execute(form, {}))
-    assert out.is_error
-    assert stage in out.text
-    assert cycle.filed is None
-
-
-def test_the_honest_terminal_is_reachable_from_every_stage(tmp_path):
-    """§9.6: an honest stop is a correct outcome, so no stage puts it out of reach."""
-    for stage in (DECIDE_STAGE, AUTHOR_STAGE, ADJUDICATE_STAGE):
-        cycle = _cycle(stage)
-        ws = _workspace(tmp_path, AnalystReport(summary="what is unavailable and why"))
-        out = _run(
-            ReadOnlyToolProvider(roots=[], cycle=cycle, report_workspace=ws).execute(
-                TERMINAL_REPORT_TOOL, {"status": "failed"}
-            )
-        )
-        assert not out.is_error, stage
-        assert cycle.filed == TERMINAL_REPORT_TOOL
-
-
-# ── caps stay in Python ──────────────────────────────────────────────────────
-
-
-def test_request_another_round_files_a_review_verdict_that_dispatches():
-    cycle = _cycle(ADJUDICATE_STAGE)
-    out = _run(
-        ReadOnlyToolProvider(roots=[], cycle=cycle).execute(
-            ANOTHER_ROUND_TOOL,
-            {"rationale": "they disagree on the PD", "what_to_probe": "refit segment 3"},
-        )
-    )
-    assert not out.is_error
-    assert cycle.filed == ANOTHER_ROUND_TOOL
-    assert cycle.verdict.accepted is False
-    assert cycle.verdict.needs_analysis_rework is True
-    assert cycle.verdict.follow_up == "refit segment 3"
-
-
-def test_request_another_round_is_refused_once_the_round_cap_is_spent():
-    """The cap is Python's; the handler names it rather than letting the loop try."""
-    cycle = _cycle(ADJUDICATE_STAGE, rounds_left=0)
-    out = _run(
-        ReadOnlyToolProvider(roots=[], cycle=cycle).execute(
-            ANOTHER_ROUND_TOOL, {"rationale": "r", "what_to_probe": "p"}
-        )
-    )
-    assert out.is_error
-    assert SUBMIT_ADJUDICATION_TOOL in out.text
-    assert cycle.filed is None
-
-
-def test_request_another_round_needs_both_fields():
-    cycle = _cycle(ADJUDICATE_STAGE)
-    out = _run(
-        ReadOnlyToolProvider(roots=[], cycle=cycle).execute(
-            ANOTHER_ROUND_TOOL, {"rationale": "r"}
-        )
-    )
-    assert out.is_error and "what_to_probe" in out.text and cycle.filed is None
-
-
-# ── the report terminals file what edit_report wrote ─────────────────────────
-
-
-def test_submit_adjudication_files_the_written_report(tmp_path):
-    cycle = _cycle(ADJUDICATE_STAGE)
-    report = AnalystReport(summary="adjudicated", findings=["a"])
-    ws = _workspace(tmp_path, report)
-    out = _run(
-        ReadOnlyToolProvider(roots=[], cycle=cycle, report_workspace=ws).execute(
-            SUBMIT_ADJUDICATION_TOOL, {}
-        )
-    )
-    assert not out.is_error
-    assert cycle.filed == SUBMIT_ADJUDICATION_TOOL
-    assert cycle.report is report
-
-
-def test_a_report_terminal_with_nothing_written_points_at_edit_report(tmp_path):
-    """No compose safety net any more: the disciplined write path is the only path."""
-    for form, args in ((SUBMIT_ADJUDICATION_TOOL, {}), (TERMINAL_REPORT_TOOL, {"status": "failed"})):
-        cycle = _cycle(ADJUDICATE_STAGE)
-        ws = _workspace(tmp_path, None)
-        out = _run(
-            ReadOnlyToolProvider(roots=[], cycle=cycle, report_workspace=ws).execute(form, args)
-        )
-        assert out.is_error and "edit_report" in out.text
-        assert cycle.filed is None
-
-
-def test_submit_terminal_report_stamps_the_status_the_lead_filed(tmp_path):
-    cycle = _cycle(ADJUDICATE_STAGE)
-    ws = _workspace(tmp_path, AnalystReport(summary="blocked on a calibration question"))
-    out = _run(
-        ReadOnlyToolProvider(roots=[], cycle=cycle, report_workspace=ws).execute(
-            TERMINAL_REPORT_TOOL, {"status": "needs_human"}
-        )
-    )
-    assert not out.is_error
-    assert cycle.report.status == "needs_human"
-
-
-def test_submit_terminal_report_requires_a_real_status(tmp_path):
-    cycle = _cycle(ADJUDICATE_STAGE)
-    ws = _workspace(tmp_path, AnalystReport(summary="s"))
-    for args in ({}, {"status": "succeeded"}, {"status": "nonsense"}):
-        out = _run(
-            ReadOnlyToolProvider(roots=[], cycle=cycle, report_workspace=ws).execute(
-                TERMINAL_REPORT_TOOL, args
-            )
-        )
-        assert out.is_error and cycle.filed is None
-
-
-# ── declarations: constant for the cycle, and monotonic across session swaps ──
-
-
-def test_the_forms_are_declared_for_the_whole_cycle():
-    declared = _names(ReadOnlyToolProvider(roots=[], cycle=_cycle()))
-    assert LEAD_FORM_TOOLS <= set(declared)
-
-
-def test_a_run_without_authoring_declares_only_the_judging_forms():
-    declared = set(_names(ReadOnlyToolProvider(roots=[], cycle=_cycle(authoring=False))))
-    assert AUTHOR_CHAIN_TOOL not in declared and HOLD_AUTHORING_TOOL not in declared
-    assert {ANOTHER_ROUND_TOOL, SUBMIT_ADJUDICATION_TOOL, TERMINAL_REPORT_TOOL} <= declared
-    assert DRIVE_CODER_TOOL not in declared
+    assert cycle.brief is None
 
 
 def test_the_drive_tools_are_declared_before_any_session_exists():
@@ -365,15 +183,6 @@ def test_no_cycle_means_no_forms(tmp_path):
     assert not (LEAD_FORM_TOOLS & declared)
 
 
-def test_form_names_and_terminals_match_what_is_declared():
-    assert {f()["name"] for f in FORM_DEFS} == set(LEAD_FORM_TOOLS)
-    assert LEAD_CYCLE_TERMINALS <= LEAD_FORM_TOOLS
-    assert AUTHOR_CHAIN_TOOL not in LEAD_CYCLE_TERMINALS  # the chain opens a stage, not the end
-
-
-# ── every question carries a description (the defect that started this) ──────
-
-
 def _described(schema: dict, trail: str) -> list[str]:
     """Field paths under ``schema`` whose description is missing or empty."""
     missing: list[str] = []
@@ -387,16 +196,6 @@ def _described(schema: dict, trail: str) -> list[str]:
         if isinstance(items, dict):
             missing.extend(_described(items, f"{where}[]"))
     return missing
-
-
-@pytest.mark.parametrize("factory", FORM_DEFS, ids=lambda f: f()["name"])
-def test_every_form_field_carries_a_description(factory):
-    """A field explained only in a Pydantic ``#`` comment is a field filled blind — the defect
-    that killed a run on 2026-09-01. The prose comes from the schema's own ``Field(description=)``,
-    so the worker's view and the lead's view of one object cannot drift."""
-    definition = factory()
-    assert definition["description"].strip()
-    assert _described(definition["input_schema"], definition["name"]) == []
 
 
 def test_the_chain_link_schema_asks_for_every_lead_owned_field():
@@ -421,9 +220,6 @@ def test_the_chain_link_schema_asks_for_every_lead_owned_field():
     for optional in ("observed_issue", "replication_tolerance", "notes"):
         branches = link["properties"][optional]["anyOf"]
         assert {"type": "null"} in branches, optional
-
-
-# ── the loop contract: a rejected form is a correction, a filed one is the end ──
 
 
 class _FormsProvider:
@@ -467,47 +263,11 @@ def _drive(cycle, script, **kwargs):
             tools=_FormsProvider(cycle),
             action="run_cycle",
             cap=8,
-            terminal_tools=LEAD_FORM_TOOLS,
+            terminal_tools=frozenset({TURN_END_TOOL}),
             **kwargs,
         )
     )
     return lead, model, messages
-
-
-def test_an_out_of_stage_form_does_not_end_the_loop():
-    """The stage check can only live in the handler because an ``is_error`` terminal continues."""
-    cycle = _cycle(DECIDE_STAGE)
-    lead, model, _ = _drive(
-        cycle,
-        [
-            (SUBMIT_ADJUDICATION_TOOL, {}),  # out of stage → correction
-            (AUTHOR_CHAIN_TOOL, {"first_link": GOOD_LINK}),  # in stage → files, ends
-            (HOLD_AUTHORING_TOOL, {"reason": "never reached"}),
-        ],
-    )
-    assert model.calls == 2
-    assert lead.last_filed_form[0] == AUTHOR_CHAIN_TOOL
-    assert cycle.filed == AUTHOR_CHAIN_TOOL
-
-
-def test_filing_a_form_ends_the_loop_with_its_result_appended():
-    """The loop stops AFTER the result turn, so every ``tool_use`` keeps its ``tool_result``."""
-    cycle = _cycle(DECIDE_STAGE)
-    _, model, messages = _drive(cycle, [(HOLD_AUTHORING_TOOL, {"reason": "already exposed"})])
-    assert model.calls == 1
-    tool_results = [m for m in messages if type(m).__name__ == "ToolResultMessage"]
-    assert len(tool_results) == 1
-
-
-def test_a_loop_that_never_files_leaves_no_form():
-    """Budget spent with nothing filed is the failure the caller has to treat as one."""
-    cycle = _cycle(DECIDE_STAGE)
-    lead, _, _ = _drive(cycle, [])
-    assert lead.last_filed_form is None
-    assert cycle.filed is None
-
-
-# ── step 6: the coding middle is dropped at its own boundary ─────────────────
 
 
 def _assistant(*names):
@@ -595,19 +355,530 @@ def test_respond_to_review_also_anchors_the_drop():
     assert names == [RESPOND_TO_REVIEW_TOOL]  # the LAST submit-class call is the anchor
 
 
-def test_a20_request_another_round_is_open_at_the_author_stage():
-    """[A20]: after a commit the only open form was a terminal, so a lead that wanted a worker
-    rerun — the correct request, since a committed tool is evidence the current reports predate —
-    filed `submit_terminal_report(status='needs_human')` instead. Attempt 6 did exactly that and
-    its ledger holds no `ask_human`/`HumanQuery` event at all; [A11] delivered the rerun anyway,
-    so the outcome was right and only the record was wrong. The record is what an offline scoring
-    pass reads as an honest-stop row."""
-    from auto_research.agents.react import (
-        ANOTHER_ROUND_TOOL,
-        AUTHOR_STAGE,
-        TERMINAL_REPORT_TOOL,
-        _STAGE_FORMS,
+# ── author_chain is a BRIEF, not a decision: it does not end anything ─────────
+
+
+def test_author_chain_handler_refuses_an_empty_chain_and_says_what_to_do_instead():
+    """The backstop for a vendor that enforces neither ``required`` nor anything else. It no
+    longer points at a sibling form, because there is none — it points at the report."""
+    cycle = _cycle()
+    out = _run(ReadOnlyToolProvider(roots=[], cycle=cycle).execute(AUTHOR_CHAIN_TOOL, {}))
+    assert out.is_error
+    assert "report" in out.text and "end your turn" in out.text
+    assert cycle.brief is None
+
+
+def test_author_chain_is_the_only_form_and_it_is_not_a_terminal():
+    """A7's core claim, as a property of the declared set: the lead has exactly one form left,
+    and the loop's terminal is `turn_end` — so filing a brief cannot end the turn."""
+    assert LEAD_FORM_TOOLS == frozenset({AUTHOR_CHAIN_TOOL})
+    assert TURN_END_TOOL not in LEAD_FORM_TOOLS
+    declared = set(_names(ReadOnlyToolProvider(roots=[], cycle=_cycle())))
+    assert AUTHOR_CHAIN_TOOL in declared
+
+
+def test_a_run_without_authoring_declares_no_form_at_all():
+    declared = set(_names(ReadOnlyToolProvider(roots=[], cycle=_cycle(authoring=False))))
+    assert AUTHOR_CHAIN_TOOL not in declared
+    assert DRIVE_CODER_TOOL not in declared
+
+
+def test_briefing_a_chain_does_not_end_the_loop():
+    """THE regression for slot 1. Before A7 a filed form was a terminal, so briefing a chain —
+    or anything else the lead could say while authoring — ended the round. It must not."""
+    cycle = _cycle()
+    lead, model, _ = _drive(
+        cycle,
+        [
+            (AUTHOR_CHAIN_TOOL, {"first_link": GOOD_LINK}),
+            (AUTHOR_CHAIN_TOOL, {"first_link": GOOD_LINK}),  # a revised brief, same turn
+            (TURN_END_TOOL, {"summary": "done"}),
+        ],
+    )
+    assert model.calls == 3, "the loop ended on a brief instead of continuing"
+    assert lead.last_filed_form[0] == TURN_END_TOOL
+
+
+def test_the_chain_advances_on_a_tool_result_rather_than_by_ending_the_round():
+    """The mechanism A7 replaced the nested per-link loop with: a finished link reports itself
+    and the next one opens, inside the same conversation."""
+    cycle = _cycle()
+    opened: list[str] = []
+
+    async def _advance():
+        opened.append(f"link {len(opened) + 1}")
+        return f"Coding session {len(opened)} is open."
+
+    cycle.advance_chain = _advance
+    out = _run(
+        ReadOnlyToolProvider(roots=[], cycle=cycle).execute(
+            AUTHOR_CHAIN_TOOL, {"first_link": GOOD_LINK}
+        )
+    )
+    assert not out.is_error
+    assert opened == ["link 1"], "briefing did not open the first session"
+    assert "Coding session 1 is open." in out.text
+
+
+# ── turn_end: the report is the decision, and completeness is checked here ────
+
+
+def test_turn_end_refuses_a_turn_with_no_report(tmp_path):
+    problems = lead_turn_problems(_cycle(), _workspace(tmp_path, None))
+    assert problems and "edit_report" in problems[0]
+    assert "nothing is composed on your behalf" in problems[0]
+
+
+def test_turn_end_refuses_rework_without_a_probe(tmp_path):
+    report = AnalystReport(summary="not settled", rework=True, rationale="disagreement stands")
+    problems = lead_turn_problems(_cycle(), _workspace(tmp_path, report))
+    assert any("what_to_probe" in p for p in problems)
+    assert any("verbatim" in p for p in problems), "say why the field matters"
+
+
+def test_turn_end_refuses_rework_without_a_rationale(tmp_path):
+    report = AnalystReport(summary="not settled", rework=True, what_to_probe="refit DU3")
+    problems = lead_turn_problems(_cycle(), _workspace(tmp_path, report))
+    assert any("rationale" in p for p in problems)
+
+
+def test_turn_end_refuses_rework_once_the_round_cap_is_spent(tmp_path):
+    """Caps stay in Python and are named when they bind — the loop chooses what, the harness
+    decides how many times."""
+    report = AnalystReport(
+        summary="not settled", rework=True, rationale="r", what_to_probe="refit DU3"
+    )
+    problems = lead_turn_problems(_cycle(rounds_left=0), _workspace(tmp_path, report))
+    assert any("No debate rounds remain" in p for p in problems)
+    assert any("rework=false" in p for p in problems), "name the way out, not just the refusal"
+    # ...and with a round left, the same report is accepted.
+    assert lead_turn_problems(_cycle(rounds_left=1), _workspace(tmp_path, report)) == []
+
+
+def test_turn_end_refuses_a_conclusion_with_no_findings(tmp_path):
+    """rework=False means this report IS the analysis result."""
+    report = AnalystReport(summary="all done", status="succeeded")
+    problems = lead_turn_problems(_cycle(), _workspace(tmp_path, report))
+    assert any("no findings" in p for p in problems)
+
+
+def test_turn_end_accepts_an_honest_failure_with_no_penalty(tmp_path):
+    """§9.6: a report that says the work could not be done is a CORRECT outcome, and the lead's
+    surface — unlike a worker's — may say a person is needed."""
+    for status in ("failed", "needs_human"):
+        report = AnalystReport(
+            summary="the capability could not be built", findings=["what blocked it"],
+            status=status,
+        )
+        assert lead_turn_problems(_cycle(), _workspace(tmp_path, report)) == []
+
+
+def test_turn_end_stats_every_cited_figures_path(tmp_path):
+    """Citation resolution checks the catalog handle; this checks the FILE. A report whose
+    figure cannot be opened is not a deliverable, and the reviewer would be the one to find out."""
+    from datetime import datetime
+
+    from auto_research.schemas import FigureRef
+
+    real = tmp_path / "fig.png"
+    real.write_bytes(b"\x89PNG")
+    gone = tmp_path / "missing.png"
+
+    def _ref(path):
+        return FigureRef(
+            path=path, caption=f"{path.name} caption", mime_type="image/png",
+            produced_by="tool", created_at=datetime.now().astimezone(), sha256="0" * 64,
+        )
+
+    ok = AnalystReport(summary="s", findings=["f"], figures=[_ref(real)])
+    assert lead_turn_problems(_cycle(), _workspace(tmp_path, ok)) == []
+
+    broken = AnalystReport(summary="s", findings=["f"], figures=[_ref(real), _ref(gone)])
+    problems = lead_turn_problems(_cycle(), _workspace(tmp_path, broken))
+    assert len(problems) == 1
+    assert "Figure 2" in problems[0] and str(gone) in problems[0]
+
+
+def test_turn_end_refuses_to_walk_away_from_a_running_coder(tmp_path):
+    cycle = _cycle()
+    cycle.session_open = True
+    report = AnalystReport(summary="s", findings=["f"])
+    problems = lead_turn_problems(cycle, _workspace(tmp_path, report))
+    assert any("coding session is still open" in p for p in problems)
+
+
+def test_a_turn_end_refusal_keeps_the_lead_in_its_loop(tmp_path):
+    """A rejection is a correction, not a finish: the model gets its tools and its context back.
+    Without this the validator would be a way to kill a turn rather than to fix one."""
+    from auto_research.agents.react import execute_turn_end
+
+    problems = ["The report's summary is empty."]
+    out = _run(execute_turn_end(lambda: problems, {"summary": "done"}))
+    assert out.is_error
+    assert "summary is empty" in out.text and "turn_end again" in out.text
+
+
+# ── the report surface is the lead's, and differs from a worker's ────────────
+
+
+def test_the_leads_report_surface_carries_its_decision_fields():
+    declared = edit_report_tool_def(LEAD_REPORT_FIELDS, LEAD_STATUS_VALUES)["input_schema"]
+    assert {"rework", "rationale", "what_to_probe"} <= set(declared["properties"])
+    assert "tool_request" not in declared["properties"], "the lead authors, it does not ask"
+    assert declared["properties"]["status"]["enum"] == list(LEAD_STATUS_VALUES)
+
+
+def test_the_lead_provider_declares_its_own_surface(tmp_path):
+    """The workspace carries the surface and the declaration reads it, so what the model is
+    offered and what the handler copies cannot drift."""
+    provider = ReadOnlyToolProvider(roots=[tmp_path], cycle=_cycle())
+    provider.report_workspace = _workspace(tmp_path, None)
+    declared = next(
+        d for d in provider.tool_definitions() if d["name"] == EDIT_REPORT_TOOL
+    )
+    assert set(declared["input_schema"]["properties"]) == set(LEAD_REPORT_FIELDS) | {
+        "cited_figures"
+    }
+
+
+# ── B6: the coding middle is dropped on a COMMITTED link only ────────────────
+
+
+def _driver_with(monkeypatch, statuses):
+    """A `_ChainDriver` whose links finish with the given statuses, over a live message list."""
+    import asyncio
+
+    from auto_research.agents.react import LeadCycle, LeadCycleOutcome
+    from auto_research.agents.roles import _ChainDriver
+    from auto_research.schemas import AuthoringDecision, MergeFlowResult
+
+    specs = [
+        {**GOOD_LINK, "proposed_tool_name": f"tool_{i}"} for i in range(len(statuses))
+    ]
+    from auto_research.schemas import ToolSpec
+
+    parsed = [ToolSpec.model_validate(spec) for spec in specs]
+    cycle = LeadCycle(authoring_enabled=True, rounds_left=1)
+    cycle.brief = AuthoringDecision(should_author=True, tool_specs=parsed, rationale="r")
+    outcome = LeadCycleOutcome(filed=None, author_budget=len(statuses) + 2)
+    messages: list = [ModelMessage(role="user", content="seed")]
+
+    class _Lead:
+        monitor = None
+        run_control = None
+
+        async def _record(self, *a, **k):
+            return None
+
+    driver = _ChainDriver(
+        lead=_Lead(), provider=type("P", (), {"authoring_session": None})(), cycle=cycle,
+        outcome=outcome, messages=messages, toolkit_root=None, worktree_base=None,
+        direct_branch=None, colead=None, human_handler=None, coder=None,
+        allow_correlated_review=False,
+    )
+    order = iter(statuses)
+
+    async def _open(spec):
+        driver.session = object()
+        driver.spec = spec
+        cycle.session_open = True
+        # The coding transcript this link produces, appended after the mark the driver recorded.
+        messages.extend([_assistant(DRIVE_CODER_TOOL), _results(DRIVE_CODER_TOOL)])
+        messages.extend([_assistant(SUBMIT_TOOL), _results(SUBMIT_TOOL)])
+
+    async def _close():
+        if driver.session is None:
+            return
+        spec, driver.session, driver.spec = driver.spec, None, None
+        cycle.session_open = False
+        status = next(order)
+        outcome.authored.append(
+            MergeFlowResult(tool_spec_id=spec.id, status=status, reason="stub")
+        )
+        if status == "committed":
+            outcome.committed += 1
+            driver.messages[:] = _drop_coding_middle(driver.messages, driver.mark)
+
+    driver._open = _open
+    driver._close_current = _close
+    return driver, messages, asyncio
+
+
+def test_a_committed_links_coding_middle_is_dropped(monkeypatch):
+    driver, messages, aio = _driver_with(monkeypatch, ["committed"])
+    aio.run(driver.advance())          # opens link 1, writing its transcript
+    aio.run(driver.advance())          # closes it (committed) → drop
+    names = [c.name for m in messages for c in (getattr(m, "tool_calls", None) or ())]
+    assert SUBMIT_TOOL in names, "the submit anchor must survive — it carries the real SHA"
+    assert DRIVE_CODER_TOOL not in names, "a committed link's transcript should be gone"
+
+
+def test_a_rejected_links_coding_middle_stays_legible(monkeypatch):
+    """B6. A rejection or a spent budget is what the lead's NEXT brief has to be written against,
+    so dropping it would delete the reason the link died. Before this, the drop ran for committed
+    and failed links alike."""
+    driver, messages, aio = _driver_with(monkeypatch, ["failed"])
+    aio.run(driver.advance())
+    aio.run(driver.advance())
+    names = [c.name for m in messages for c in (getattr(m, "tool_calls", None) or ())]
+    assert DRIVE_CODER_TOOL in names, (
+        "a failed link's transcript was dropped — the lead cannot write a better brief against a "
+        "reason it can no longer read"
     )
 
-    assert ANOTHER_ROUND_TOOL in _STAGE_FORMS[AUTHOR_STAGE]
-    assert TERMINAL_REPORT_TOOL in _STAGE_FORMS[AUTHOR_STAGE], "the honest terminal stays open"
+
+def test_the_lead_is_actually_OFFERED_its_decision_fields(tmp_path):
+    """The defect a live lead found, pinned so a model never has to find it again.
+
+    `_make_report_workspace` is shared by the worker and the lead and defaulted to the worker's
+    surface for both, so `edit_report` never declared `rework`/`rationale`/`what_to_probe` to the
+    lead. The live cell caught it because the lead SAID so in its own report — *"the schema I am
+    given has no rework field, so the decision is carried in prose"* — and a decision carried in
+    prose is one the harness cannot act on, which is the exact failure A3 exists to remove.
+
+    Asserted through the real construction path rather than on the constants: the constants were
+    right the whole time, and nothing read them. And the lead OVERRIDES the base builder, which is
+    why the first fix — applied only to the shared one — did not reach it; both now read the
+    surface off the role, so they cannot disagree.
+    """
+    from auto_research.agents.roles import AnalystLeadAgent, AnalystWorkerAgent
+
+    lead = AnalystLeadAgent(model=object(), prompt="p")
+    lead.report_dir = tmp_path
+    workspace = lead._make_report_workspace({})
+    assert workspace is not None
+    declared = edit_report_tool_def(workspace.prose_fields, workspace.status_values)
+    properties = set(declared["input_schema"]["properties"])
+    assert {"rework", "rationale", "what_to_probe"} <= properties, (
+        "the lead was not offered the fields its decision rides on"
+    )
+    assert "tool_request" not in properties, "the lead authors; it does not ask for tools"
+    assert declared["input_schema"]["properties"]["status"]["enum"] == list(LEAD_STATUS_VALUES)
+
+    # ...and the worker's surface is unchanged by the same helper.
+    worker = AnalystWorkerAgent(model=object(), prompt="p")
+    worker.report_dir = tmp_path
+    worker_ws = worker._make_report_workspace()
+    worker_props = set(
+        edit_report_tool_def(worker_ws.prose_fields, worker_ws.status_values)
+        ["input_schema"]["properties"]
+    )
+    assert {"rework", "rationale", "what_to_probe"}.isdisjoint(worker_props)
+    assert "tool_request" in worker_props
+
+
+def test_every_declared_authoring_tool_is_actually_ROUTED():
+    """A tool the lead is offered must reach a handler — `check_coder` did not.
+
+    It was declared, defined, given an executor and given an inner dispatch branch, and every one
+    of those passed review; what was missing was its name in the outer membership test that guards
+    the authoring block, so the inner branch was unreachable and the call fell through to
+    `unknown tool: check_coder`. Measured live 2026-09-12: the lead filed `author_chain`, called
+    `check_coder` to poll its coder, and was told the tool does not exist.
+
+    Asserted over the DECLARED set rather than a written-out list, so a tool added to the surface
+    without being wired fails here instead of in front of a model.
+    """
+    cycle = _cycle()
+    provider = ReadOnlyToolProvider(roots=[], cycle=cycle)
+    authoring = {DRIVE_CODER_TOOL, CHECK_CODER_TOOL, SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL}
+    declared = set(_names(provider)) & authoring
+    assert declared == authoring, f"an authoring tool is not declared at all: {authoring - declared}"
+
+    # With no session open every one of them must answer with the author_chain pointer. That text
+    # is only reachable from inside the block, so "not unknown tool" is exactly the property.
+    for name in sorted(declared):
+        out = _run(provider.execute(name, {"instructions": "x"}))
+        assert out.is_error, f"{name} should refuse without a session"
+        assert "unknown tool" not in out.text, (
+            f"{name} is declared to the model but reaches no handler: {out.text!r}"
+        )
+        assert AUTHOR_CHAIN_TOOL in out.text, f"{name} gave the wrong no-session guidance"
+
+
+# ------------------------------------------------ the seed drive runs BESIDE the lead (2026-09-12)
+
+
+class _SeedSession:
+    """An AuthoringSession double with the background drive seam the real one has."""
+
+    initial_message = "here is your brief"
+
+    def __init__(self) -> None:
+        self.started: list[str] = []
+        self.blocking: list[str] = []
+        self.drive_status = "idle"
+
+    def start_drive(self, message: str) -> None:
+        self.started.append(message)
+        self.drive_status = "working"
+
+    async def drive(self, message: str) -> str:
+        self.blocking.append(message)
+        return "narration"
+
+    async def connect(self) -> None:
+        return None
+
+
+def _seed_driver(session, monkeypatch):
+    from auto_research.agents import roles
+
+    monkeypatch.setattr(roles, "build_authoring_session", lambda *a, **k: session, raising=False)
+    monkeypatch.setattr(
+        "auto_research.sandbox.merge_flow.build_authoring_session",
+        lambda *a, **k: session,
+    )
+    cycle = _cycle()
+    driver = roles._ChainDriver.__new__(roles._ChainDriver)
+    driver.cycle = cycle
+    driver.messages = []
+    driver.provider = ReadOnlyToolProvider(roots=[], cycle=cycle)
+    driver.lead = types.SimpleNamespace(monitor=None, run_control=None)
+    driver.toolkit_root = driver.worktree_base = Path("/tmp/tk")
+    driver.colead = driver.human_handler = driver.coder = None
+    driver.allow_correlated_review = False
+    driver.direct_branch = "ai"
+    driver.session = driver.spec = None
+    return driver
+
+
+def test_opening_a_link_sends_the_brief_in_the_background(monkeypatch):
+    """Filing `author_chain` must hand over the brief and RETURN, not wait out the coder's turn.
+
+    Measured live 2026-09-12 on the blocking version: the lead froze for 263 s inside
+    `author_chain`, its coder's whole first turn. Two consequences, both observed in that run —
+    `check_coder` reported "you have not sent the coder anything yet" (no background task existed
+    to report on), advice that would have had the lead re-send the entire brief; and the first
+    turn's narration was discarded, so the lead re-read five files by hand to learn what its own
+    coder had already told it.
+    """
+    session = _SeedSession()
+    driver = _seed_driver(session, monkeypatch)
+    _run(driver._open(types.SimpleNamespace(proposed_tool_name="t")))
+
+    assert session.started == ["here is your brief"], "the brief was not sent in the background"
+    assert session.blocking == [], "the lead blocked on the coder's first turn"
+    assert session.drive_status == "working", (
+        "check_coder would report 'you have not sent the coder anything yet' to a lead whose "
+        "coder is working"
+    )
+
+
+def test_a_session_with_no_background_seam_still_gets_its_brief(monkeypatch):
+    """A benchmark's session or a test double predates the seam and keeps the blocking call."""
+    class _Old:
+        initial_message = "here is your brief"
+
+        def __init__(self) -> None:
+            self.blocking: list[str] = []
+
+        async def drive(self, message: str) -> str:
+            self.blocking.append(message)
+            return "narration"
+
+        async def connect(self) -> None:
+            return None
+
+    session = _Old()
+    assert not hasattr(session, "start_drive"), "the double must lack the seam it is testing"
+    driver = _seed_driver(session, monkeypatch)
+    _run(driver._open(types.SimpleNamespace(proposed_tool_name="t")))
+    assert session.blocking == ["here is your brief"]
+
+
+def test_submitting_while_the_coder_is_still_writing_is_refused():
+    """The gate reads the working tree, so a mid-write submit judges a half-written tool.
+
+    Unreachable before the seed drive was backgrounded — a coder could not be working while the
+    lead acted — so the guard lands with the change that makes the race possible.
+    """
+    from auto_research.agents.react import execute_submit
+
+    session = types.SimpleNamespace(drive_status="working")
+    out = _run(execute_submit(session, None))
+    assert out.is_error
+    assert "still working" in out.text and CHECK_CODER_TOOL in out.text
+
+
+# ---------------------------- the coder's question reaches the lead's OWN loop (2026-09-12) ----
+
+
+class _AskingSession:
+    """A session double with the question park and the one send path."""
+
+    initial_message = "brief"
+
+    def __init__(self, status: str = "working") -> None:
+        self.drive_status = status
+        self.questions: list[str] = []
+        self.sent: list[str] = []
+        self.steered: list[str] = []
+        self.started: list[str] = []
+
+    def park_question(self, message: str) -> None:
+        self.questions.append(message)
+
+    def take_questions(self) -> list[str]:
+        pending, self.questions = self.questions, []
+        return pending
+
+    async def send(self, message: str) -> str:
+        self.sent.append(message)
+        if self.drive_status == "working":
+            self.steered.append(message)
+            return "steered"
+        self.started.append(message)
+        return "started"
+
+
+def test_a_parked_question_is_collected_once_for_injection():
+    """The loop PULLS the question at a boundary it knows is safe; the session never pushes.
+
+    Same seam and same hold rule as the background-coder notice, for the reason A2 exists: an
+    injected user turn appended after an assistant turn that left a server-tool call unresolved
+    is the 400 that killed a run at $42.11 with four tools committed.
+    """
+    from auto_research.agents.roles import _coder_questions
+
+    cycle = _cycle()
+    provider = ReadOnlyToolProvider(roots=[], cycle=cycle)
+    session = _AskingSession()
+    provider.authoring_session = session
+    session.park_question("ENERGY or PI?")
+
+    first = _coder_questions(provider)
+    assert len(first) == 1 and "ENERGY or PI?" in first[0]
+    assert CHECK_CODER_TOOL not in first[0], "the lead is pointed at the reply path, not at polling"
+    assert DRIVE_CODER_TOOL in first[0], "the lead must be told how to answer"
+    assert _coder_questions(provider) == [], "a collected question must not be re-injected"
+
+
+def test_a_session_with_no_question_park_is_simply_quiet():
+    """A benchmark's session or an older double predates the channel and must not crash the loop."""
+    from auto_research.agents.roles import _coder_questions
+
+    cycle = _cycle()
+    provider = ReadOnlyToolProvider(roots=[], cycle=cycle)
+    provider.authoring_session = object()
+    assert _coder_questions(provider) == []
+
+
+def test_drive_coder_steers_a_working_coder_instead_of_being_refused():
+    """ONE lead->coder path. A working coder is steered; an idle one is given a new turn.
+
+    The old path could only start a turn, so a lead with something to say to a working coder was
+    told "the coder is already working on an instruction" — the refusal it hit twice in the live
+    run of 2026-09-12 while holding the answer to that coder's own question.
+    """
+    from auto_research.agents.react import execute_drive_coder
+
+    working = _AskingSession(status="working")
+    out = _run(execute_drive_coder(working, {"instructions": "use PI"}))
+    assert not out.is_error
+    assert working.steered == ["use PI"]
+    assert "inside the turn it is running" in out.text
+
+    idle = _AskingSession(status="idle")
+    out = _run(execute_drive_coder(idle, {"instructions": "next link"}))
+    assert not out.is_error and idle.started == ["next link"]

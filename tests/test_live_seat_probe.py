@@ -42,6 +42,7 @@ import pytest
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
+from tests.chain_stub import stub_chain_driver
 from tests.dev_logs import dev_log_path
 from tests.seats import from_seat, seated
 
@@ -226,7 +227,7 @@ def test_the_lead_seat_sustains_a_real_cycle_and_files_a_form(tmp_path, monkeypa
     what is exercised is the loop this seat will actually run. The coding session is stubbed: a
     real chain link costs $27-45 and the loop above it is what is under test.
     """
-    from auto_research.agents.react import AUTHOR_CHAIN_TOOL, HOLD_AUTHORING_TOOL
+    from auto_research.agents.react import AUTHOR_CHAIN_TOOL, TURN_END_TOOL
     from auto_research.agents.roles import AnalystLeadAgent
     from auto_research.env import toolkit_root as configured_toolkit_root
     from auto_research.graph.runtime import readonly_roots_for, readonly_tools_for
@@ -241,19 +242,7 @@ def test_the_lead_seat_sustains_a_real_cycle_and_files_a_form(tmp_path, monkeypa
         for row in json.loads(fixture.read_text(encoding="utf-8"))["reports"]
     ]
 
-    driven: list = []
-
-    async def _fake_link(self, messages, provider, spec, **kwargs):
-        driven.append(spec)
-        return MergeFlowResult(
-            tool_spec_id=spec.id,
-            status="committed",
-            branch="ai",
-            commit_sha="0123456789ab",
-            reason="stubbed coding session (the loop above it is under test)",
-        )
-
-    monkeypatch.setattr(AnalystLeadAgent, "_drive_one_link", _fake_link)
+    driven = stub_chain_driver(monkeypatch)
 
     lead_seat, _, _ = _demo_seats()
     figures = _figures()
@@ -312,9 +301,7 @@ def test_the_lead_seat_sustains_a_real_cycle_and_files_a_form(tmp_path, monkeypa
         "the lead ended its cycle without filing any form — this seat cannot drive the loop"
     )
     assert outcome.filed in (
-        AUTHOR_CHAIN_TOOL,
-        HOLD_AUTHORING_TOOL,
-        "submit_terminal_report",
+        TURN_END_TOOL,
         "request_another_round",
         "submit_adjudication",
     )

@@ -243,3 +243,61 @@ def test_the_ledger_consumers_read_the_cap_at_call_time(monkeypatch) -> None:
     assert coder_events.coder_text_cap() == 5
     # cap_text with no explicit limit follows the config, and states what it dropped.
     assert coder_events.cap_text("abcdefghij") == "abcde… [+5 chars]"
+
+
+def test_every_provider_resolves_the_same_key_variable_everywhere():
+    """The launch check and the key pool derive a provider's key variable from ONE function.
+
+    They used to derive it twice — a hand-written table here, a format rule in `models.keys` —
+    agreeing for five of six providers, so nothing ever failed while they drifted. The cost landed
+    on a third reader: `CodexBackend` derived *nothing*, so a coder member carrying no `key_env`
+    launched with no credential while this module required, and found, the very variable the
+    author never received (2026-09-12, every Codex turn `401 Unauthorized`).
+    """
+    from typing import get_args
+
+    from auto_research.env import provider_key_aliases
+    from auto_research.models.keys import env_var_names
+    from auto_research.models.types import ProviderName
+
+    for provider in get_args(ProviderName):
+        aliases = provider_key_aliases(provider)
+        assert aliases, f"{provider} resolves no key variable at all"
+        assert aliases[0] == env_var_names(provider)[0], (
+            f"{provider}: the launch check wants {aliases[0]} while the key pool uses "
+            f"{env_var_names(provider)[0]} — one of them will authenticate on a variable the "
+            "other never set"
+        )
+
+
+def test_an_unrecognised_provider_conjures_no_key_requirement():
+    """Roles' YAML is read raw, so a name no adapter implements must not invent a requirement."""
+    from auto_research.env import provider_key_aliases
+
+    assert provider_key_aliases("nonesuch") == ()
+    assert provider_key_aliases("") == ()
+
+
+def test_the_coder_harness_derives_the_same_variable_as_the_launch_check():
+    """The third reader, which is the one that was silently wrong."""
+    from pathlib import Path
+
+    from auto_research.env import provider_key_aliases
+    from auto_research.models.types import RoleModelConfig
+    from auto_research.sandbox.coder.codex_sdk import CodexBackend
+
+    class _AllowAll:
+        def is_allowed(self, path: str) -> bool:
+            return True
+
+        def forbidden_in_command(self, command: str):
+            return None
+
+    member = RoleModelConfig(
+        name="m", provider="deepseek", model="deepseek-v4-flash",
+        harness="codex", base_url="https://api.deepseek.com/",
+    )
+    backend = CodexBackend(
+        member=member, worktree=Path("/tmp/wt"), system_prompt="p", guard=_AllowAll(),
+    )
+    assert backend._key_env == provider_key_aliases("deepseek")[0]

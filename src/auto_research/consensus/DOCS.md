@@ -246,3 +246,24 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   `failed`/`needs_human`. That is a different field (a cycle decision, not a worker's outcome) and
   the ruling named `AnalystReport`; retiring it there would move the frozen [A20] Tier-0 scoring
   rule, which is an instrument decision.
+
+- 2026-09-12 — **A8: the strategy branches on the report, and a probe can ride along with a
+  commit.** `run` no longer reads `outcome.filed` to learn what the lead decided: the lead's
+  report carries `rework`, and `LeadCycleOutcome.wants_another_round` / `.authored_chain` are
+  derived from the report and the brief rather than from a filed form's name. The
+  `analyst.lead.cycle` event now records `rework` and `status` directly, which is what an offline
+  scoring pass reads (`benchmarks/science_bench` no longer scrapes a decision tool's arguments).
+  **Ruling 18 — the two terminal branches stay separate, and the probe merges.** Asked whether
+  `committed >= 1` and `report.rework` could be one branch, since the lead re-dispatches either
+  way: no. They are two dispatches against two budgets. A commit reruns the workers **fresh** (no
+  prior report, no peers — the old report predates the capability, A8's stated reason), appends
+  the authored-tool provenance note, charges an **author credit**, and reloads the registry and
+  restarts the sandboxes; rework sends each worker back to **revise** with peers in view, appends
+  the probe, charges a **debate round**, and touches no infrastructure. Collapsing them would
+  either let a three-link chain exhaust the three-round debate cap or make rework unbounded.
+  What *did* merge: the two states were previously mutually exclusive by control flow (the
+  authoring branch `continue`s before `wants_another_round` is read), and one report can now carry
+  both — so on `committed >= 1 ∧ rework`, `_augment_with_probe` runs **beside** the authored-tool
+  notes and the rerun is still charged to an author credit, never to a debate round. Strictly more
+  expressive than before: *"the tool now exists, and here is what to point it at."*
+  `_augment_with_probe` reads either shape (`follow_up` on a verdict, `what_to_probe` on a report).

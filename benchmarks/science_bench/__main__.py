@@ -56,9 +56,9 @@ GIGABYTES_PER_TRIAL = 12
 
 
 def _provider_key(provider: str) -> tuple[str, ...]:
-    from auto_research.env import _PROVIDER_KEY_ALIASES
+    from auto_research.env import provider_key_aliases
 
-    return _PROVIDER_KEY_ALIASES.get(provider, ())
+    return provider_key_aliases(provider)
 
 
 def preflight(slots: list[RunSlot], *, workspace: Path) -> list[str]:

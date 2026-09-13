@@ -188,11 +188,16 @@ class DebateToConverge:
             )
             self._credits.spent += max(0, author_budget - outcome.author_budget)
             author_budget = outcome.author_budget
+            report = outcome.report
             await _record(
                 self.monitor,
                 "analyst.lead.cycle",
                 level=6,
-                summary=f"Lead filed {outcome.filed or 'nothing'}",
+                summary=(
+                    f"Lead ended its cycle ({outcome.filed or 'nothing filed'}); "
+                    f"rework={bool(getattr(report, 'rework', False))}, "
+                    f"committed={outcome.committed}"
+                ),
                 actor="analyst_lead",
                 data={
                     "filed": outcome.filed,
@@ -200,7 +205,10 @@ class DebateToConverge:
                     "committed": outcome.committed,
                     "author_budget": author_budget,
                     "decision": outcome.decision,
-                    "verdict": outcome.verdict,
+                    # The report IS the decision (A3), so the scoring pass reads these two rather
+                    # than scraping a decision tool's arguments (A11 in the build order).
+                    "rework": bool(getattr(report, "rework", False)),
+                    "status": getattr(report, "status", None),
                 },
             )
 
@@ -227,20 +235,23 @@ class DebateToConverge:
                     level=7,
                     summary=f"Lead sent the analysts back for round {debate_round + 1}",
                     actor="analyst_lead",
-                    data={"round_index": debate_round, "verdict": outcome.verdict},
+                    data={
+                        "round_index": debate_round,
+                        "what_to_probe": getattr(outcome.report, "what_to_probe", None),
+                    },
                 )
-                task = _augment_with_probe(task, outcome.verdict)
+                task = _augment_with_probe(task, outcome.report)
                 reports = await self._revision_round(workers, task, reports, debate_round)
                 task = self._augment_with_peer_tools(workers, task)
                 continue
 
             if outcome.report is None:
-                # No form filed and no report written: there is genuinely nothing the lead
-                # produced. Composing one here would put a runtime-authored report into the
-                # record, which sits closer to fabrication than the failure it hides ([F6]).
+                # Nothing the lead produced: no report written, and none composed on its behalf.
+                # Composing one here would put a runtime-authored report into the record, which
+                # sits closer to fabrication than the failure it hides ([F6]).
                 raise RuntimeError(
-                    "the analyst lead ended its cycle without filing a report "
-                    f"(filed={outcome.filed!r}); no report was written to stand in for it"
+                    "the analyst lead ended its cycle without writing a report "
+                    f"(filed={outcome.filed!r}); nothing was written to stand in for it"
                 )
             await _record(
                 self.monitor,
@@ -277,6 +288,13 @@ class DebateToConverge:
                 task = _augment_with_authored_tool(task, spec, result)
             else:
                 task = _augment_with_failed_tool(task, spec, result)
+        # The two outcomes are separate branches on two budgets, but one report can carry both —
+        # and when it does, the probe rides along here rather than being lost (ruling 18). The
+        # rerun is still charged to an AUTHOR CREDIT, never to a debate round: charging a round
+        # would let a three-link chain exhaust the debate cap, and charging nothing would make
+        # rework unbounded. "The tool now exists, and here is what to point it at."
+        if getattr(outcome.report, "rework", False):
+            task = _augment_with_probe(task, outcome.report)
         if outcome.committed >= 1:
             if self.registry is not None and hasattr(self.registry, "reload"):
                 self.registry.reload()
@@ -442,7 +460,12 @@ def _augment_with_probe(task: AnalysisTask, verdict: Any) -> AnalysisTask:
     tool description and unimplemented in code is worse than one never stated. Returns the task
     unchanged when the verdict carries no dispatch text.
     """
-    probe = (getattr(verdict, "follow_up", None) or "").strip()
+    # Reads either shape: a ``ReviewVerdict`` (``follow_up``) or the lead's own report
+    # (``what_to_probe``). Both are "the dispatch text handed to every worker verbatim", and the
+    # report became the second source when the lead's decision moved onto it (A3).
+    probe = (
+        getattr(verdict, "follow_up", None) or getattr(verdict, "what_to_probe", None) or ""
+    ).strip()
     if not probe:
         return task
     rationale = (getattr(verdict, "rationale", None) or "").strip()

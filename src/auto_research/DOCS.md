@@ -59,7 +59,9 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - `auto_research.env.check_required_env()` loads the repo-root `.env` with
   `override=False` and validates required keys before SDK clients are constructed. The source keys
   (ADS, Tavily) are fixed; the **model keys are derived from `config/models.yaml`** — a provider a
-  role names implies its SDK's variable (`_PROVIDER_KEY_ALIASES`), and a member naming `key_env`
+  role names implies its SDK's variable (`provider_key_aliases`, which derives the standard name
+  from `models.keys.env_var_names` so the launch check, the key pool and the author harnesses
+  cannot disagree), and a member naming `key_env`
   requires exactly that variable, which is how the coder harnesses' vendor keys become a launch
   requirement. A run therefore requires the vendors it actually calls and no others, and the
   failure names the member that wanted each missing key. An unreadable config falls back to the
@@ -268,3 +270,15 @@ Compacted 2026-09-01: entries through 2026-08-19 folded into themed ranges (deta
   the write cap and the context an agent can pull are independent. Tests: `tests/test_env.py`
   8 → 15.
 
+
+- 2026-09-12 — **One deriver for a provider's key variable.** `env.py` held a hand-written
+  provider -> variable table while `models.keys.env_var_names` derived the same names from a
+  format rule; they agreed for five of six providers, so nothing failed while they were two. The
+  cost landed on a third reader — `CodexBackend` derived nothing at all, so a coder member with no
+  `key_env` launched unauthenticated while this module required and found the very variable the
+  author never received. New public `env.provider_key_aliases(provider)` derives the standard name
+  from `env_var_names` and keeps only what cannot be derived (Google's `GEMINI_API_KEY`
+  alternate); an unrecognised provider still yields nothing, since the roles' YAML is read raw
+  here. `benchmarks/science_bench/__main__` stops reaching into the private table. Guarded by
+  `tests/test_env.py::test_every_provider_resolves_the_same_key_variable_everywhere` and a sibling
+  asserting the coder harness agrees — both verified against an injected drift.

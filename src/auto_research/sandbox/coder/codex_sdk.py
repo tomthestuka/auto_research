@@ -37,12 +37,18 @@ import os
 from pathlib import Path
 from typing import Any
 
-from auto_research.models.keys import resolve_key
+from auto_research.models.keys import env_var_names, resolve_key
 from auto_research.sandbox.coder.events import cap_text, emit
 
 
 # Item types whose completion is worth one ledger line, mapped to how they are summarised.
 _TOOL_ITEM_TYPES = {"commandExecution", "fileChange", "mcpToolCall", "webSearch"}
+
+# The notification methods that end a turn. Read in two places on purpose: the poller thread stops
+# itself on one (so no thread outlives the turn it was started for) and `_record_notification`
+# reports the same fact to the drive loop. One set, so the two can never disagree about what
+# "the turn is over" means.
+_TERMINAL_TURN_METHODS = frozenset({"turn/completed", "turn/failed", "turn/aborted"})
 
 
 def _plain_path(value: Any) -> str:
@@ -148,7 +154,16 @@ class CodexBackend:
         self._escalation_url = escalation_url
         self._escalation_token_env = escalation_token_env
         self._base_url = member.base_url
-        self._key_env = member.key_env
+        # A member that names no variable authenticates from its provider's standard one. The
+        # launch check has always derived it that way (`env.provider_key_aliases`), and this
+        # class did not: `key_env` gates the child's environment overlay, the API-key login and
+        # the `env_key` we hand Codex, so an absent field silently launched an author with no
+        # credential at all while preflight passed on the very variable it could not see. Measured
+        # 2026-09-12 — every Codex turn returned `401 Unauthorized: Authentication Fails
+        # (governor)` against a key that answers `/responses` with 200 when sent by hand. The chat
+        # path already reads this way (`_responses.py` falls back to its vendor's `key_env`), so
+        # this makes the two agree rather than inventing a rule.
+        self._key_env = member.key_env or env_var_names(member.provider)[0]
         self._env = env
         self._writable_roots = writable_roots or [str(worktree)]
         self._monitor = monitor
@@ -156,6 +171,10 @@ class CodexBackend:
         self._client_factory = client_factory
         self._client: Any | None = None
         self._thread_id: str | None = None
+        # The turn currently in flight, or None between turns. `turn_steer` is pinned to it, so
+        # this is the one piece of per-turn state the lead's side needs to reach into a running
+        # turn; kept here rather than as a local in `drive` for exactly that reason.
+        self._turn_id: str | None = None
 
     # ---------------------------------------------------------------- vendor key
     def _live_vendor_key(self) -> tuple[str, str]:
@@ -471,7 +490,18 @@ class CodexBackend:
     # ---------------------------------------------------------------- one turn
 
     async def drive(self, message: str) -> str:
-        """Send one instruction, stream its items to the ledger, and return the final answer."""
+        """Send one instruction, stream its items to the ledger, and return the final answer.
+
+        A ``/stop`` lands here as a cancellation, and two properties keep it from wedging the
+        process (both measured 2026-09-12; see ``sandbox/DOCS.md``). The notification poll runs on
+        a **daemon thread this method owns** rather than on the default executor, because a
+        cancel cannot reach a thread blocked in ``queue.Queue.get()`` by any mechanism and the
+        executor's non-daemon workers are joined at interpreter exit with no timeout
+        (bpo-39812) — so a stranded poll used to hang shutdown forever. And the turn is left
+        **registered** on the cancelled path: the vendor wakes blocked waiters by walking its own
+        ``turn_id -> queue`` dict when the client closes, so deregistering first removes us from
+        the very lookup that would have told us to stop.
+        """
         import asyncio
 
         if self._client is None or self._thread_id is None:
@@ -479,16 +509,100 @@ class CodexBackend:
         started = await asyncio.to_thread(self._client.turn_start, self._thread_id, message)
         turn_id = started.turn.id
         await asyncio.to_thread(self._client.register_turn_notifications, turn_id)
+        self._turn_id = turn_id
         texts: list[str] = []
+        cancelled = False
         try:
-            while True:
-                note = await asyncio.to_thread(self._client.next_turn_notification, turn_id)
-                done = await self._record_notification(note, texts)
-                if done:
-                    break
+            await self._drain_turn(turn_id, texts)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
-            await asyncio.to_thread(self._client.unregister_turn_notifications, turn_id)
+            self._turn_id = None
+            if not cancelled:
+                await asyncio.to_thread(self._client.unregister_turn_notifications, turn_id)
         return "\n".join(texts)
+
+    async def steer(self, message: str) -> bool:
+        """Append one message to the turn already running; False when there is none.
+
+        `turn_steer` carries the turn id it expects, so a steer racing the end of a turn is
+        refused by the server rather than landing in whatever comes next — the atomic-checkpoint
+        rule the harness ecosystem converged on. A refusal is reported as "no turn in flight",
+        which is what the caller needs to know: say it with `drive_coder` instead.
+        """
+        import asyncio
+
+        client, thread_id, turn_id = self._client, self._thread_id, self._turn_id
+        if client is None or thread_id is None or turn_id is None:
+            return False
+        try:
+            await asyncio.to_thread(client.turn_steer, thread_id, turn_id, message)
+        except Exception as exc:  # noqa: BLE001 — a lost race is a normal outcome, not a fault
+            await emit(
+                self._monitor, "coder.steer.refused", level=4,
+                summary="the coder turn ended before the steer landed",
+                data={"error": cap_text(str(exc), 300), "harness": self.harness},
+            )
+            return False
+        await emit(
+            self._monitor, "coder.steer", level=5,
+            summary=f"steered the coder mid-turn: {cap_text(message, 60)}",
+            data={"text": cap_text(message), "harness": self.harness},
+        )
+        return True
+
+    async def _drain_turn(self, turn_id: str, texts: list[str]) -> None:
+        """Record this turn's notifications, polling them on a daemon thread we own.
+
+        The thread stops itself on a terminal notification, so nothing outlives a turn that ends
+        normally. On a cancelled turn it stays blocked — which is safe precisely because it is
+        daemonised: the interpreter abandons it at exit instead of joining it, and the client's
+        own close-time wake reaches it anyway while ``drive`` leaves the turn registered.
+        """
+        import asyncio
+        import threading
+
+        loop = asyncio.get_running_loop()
+        notes: asyncio.Queue[Any] = asyncio.Queue()
+
+        def _hand_over(value: Any) -> bool:
+            """Pass one item to the awaiting task; False once the loop is gone.
+
+            A cancelled turn leaves this thread blocked until the client's close-time wake
+            arrives, by which point the loop it was serving may already be closed. That wake is
+            the thread's exit signal, not an error, so a closed loop ends the poll quietly rather
+            than printing a teardown traceback nobody can act on.
+            """
+            try:
+                loop.call_soon_threadsafe(notes.put_nowait, value)
+            except RuntimeError:
+                return False
+            return True
+
+        def _poll() -> None:
+            client = self._client
+            while True:
+                try:
+                    note = client.next_turn_notification(turn_id)
+                except BaseException as exc:  # noqa: BLE001 — re-raised in the awaiting task
+                    _hand_over(exc)
+                    return
+                if not _hand_over(note):
+                    return
+                if getattr(note, "method", "") in _TERMINAL_TURN_METHODS:
+                    return
+
+        threading.Thread(
+            target=_poll, name=f"codex-poll-{turn_id}", daemon=True,
+        ).start()
+
+        while True:
+            note = await notes.get()
+            if isinstance(note, BaseException):
+                raise note
+            if await self._record_notification(note, texts):
+                return
 
     async def _record_notification(self, note: Any, texts: list[str]) -> bool:
         """Mirror one notification into the run ledger; return True on turn completion."""
@@ -530,8 +644,7 @@ class CodexBackend:
                 # message is what makes an unprovisioned account or a bad model id legible
                 # instead of looking like a silent author.
                 texts.append(f"[harness error] the {self._provider} turn failed: {error}")
-            return True
-        return method in {"turn/failed", "turn/aborted"}
+        return method in _TERMINAL_TURN_METHODS
 
     async def _record_tool_item(self, root: Any, kind: str) -> None:
         data: dict[str, Any] = {"tool": kind}

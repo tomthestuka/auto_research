@@ -14,8 +14,7 @@ from auto_research.consensus import DebateToConverge
 from auto_research.graph.runtime import run_research
 from auto_research.monitor import MonitorEvent, RunMonitor, build_run_summary, render_run_summary
 from auto_research.agents.react import (
-    ANOTHER_ROUND_TOOL,
-    SUBMIT_ADJUDICATION_TOOL,
+    TURN_END_TOOL,
     LeadCycleOutcome,
 )
 from auto_research.schemas import (
@@ -332,14 +331,14 @@ def test_consensus_records_worker_and_lead_events() -> None:
             self.cycles += 1
             if self.cycles == 1 and rounds_left > 0:
                 return LeadCycleOutcome(
-                    filed=ANOTHER_ROUND_TOOL,
-                    verdict=ReviewVerdict(
-                        accepted=False, rationale="not yet", needs_analysis_rework=True,
-                        follow_up="probe further",
+                    filed=TURN_END_TOOL,
+                    report=AnalystReport(
+                        summary="not settled yet", rework=True, rationale="not yet",
+                        what_to_probe="probe further",
                     ),
                 )
             return LeadCycleOutcome(
-                filed=SUBMIT_ADJUDICATION_TOOL,
+                filed=TURN_END_TOOL,
                 report=AnalystReport(summary="lead summary", findings=["final"], status="succeeded"),
             )
 

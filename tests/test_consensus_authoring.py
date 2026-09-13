@@ -8,13 +8,12 @@ inside the strategy, so patching the module attribute intercepts the call).
 import asyncio
 from pathlib import Path
 
+from types import SimpleNamespace
+
 import pytest
 
 from auto_research.agents.react import (
-    ANOTHER_ROUND_TOOL,
-    AUTHOR_CHAIN_TOOL,
-    SUBMIT_ADJUDICATION_TOOL,
-    TERMINAL_REPORT_TOOL,
+    TURN_END_TOOL,
     LeadCycleOutcome,
 )
 from auto_research.consensus import DebateToConverge
@@ -185,7 +184,11 @@ class AuthoringLead:
             self.decided += 1
             specs = [_toolspec(f"pcube_tool_{i}") for i in range(self.chain_len)]
             outcome = LeadCycleOutcome(
-                filed=AUTHOR_CHAIN_TOOL,
+                filed=TURN_END_TOOL,
+                # A3/A7: the cycle ends on turn_end with a report; `decision` records the brief
+                # it wrote, and `authored_chain` is now derived from that rather than from a
+                # filed form's name.
+                report=AnalystReport(summary="chain briefed", findings=["authored"]),
                 decision=AuthoringDecision(
                     should_author=True, tool_specs=specs, rationale="fake decision"
                 ),
@@ -216,7 +219,7 @@ class AuthoringLead:
             # round. Judging never happens, so `judged` stays empty.
             self.finalized += 1
             return LeadCycleOutcome(
-                filed=TERMINAL_REPORT_TOOL,
+                filed=TURN_END_TOOL,
                 report=AnalystReport(
                     summary="authoring impossible under current construction",
                     findings=["honest failure"],
@@ -227,17 +230,17 @@ class AuthoringLead:
         self.judged.append(len(self.judged) + 1)
         if len(self.judged) < self.converge_on and rounds_left > 0:
             return LeadCycleOutcome(
-                filed=ANOTHER_ROUND_TOOL,
-                verdict=ReviewVerdict(
-                    accepted=False,
+                filed=TURN_END_TOOL,
+                report=AnalystReport(
+                    summary="not settled",
+                    rework=True,
                     rationale="r",
-                    needs_analysis_rework=True,
-                    follow_up="probe further",
+                    what_to_probe="probe further",
                 ),
                 author_budget=author_budget,
             )
         return LeadCycleOutcome(
-            filed=SUBMIT_ADJUDICATION_TOOL,
+            filed=TURN_END_TOOL,
             report=AnalystReport(summary="final", findings=["done"]),
             author_budget=author_budget,
         )
@@ -538,8 +541,12 @@ class TerminalMidChainLead(AuthoringLead):
 
     async def run_cycle(self, task, reports, **kwargs):
         outcome = await super().run_cycle(task, reports, **kwargs)
-        if outcome.filed == AUTHOR_CHAIN_TOOL and outcome.committed >= 1:
-            outcome.filed = TERMINAL_REPORT_TOOL
+        if outcome.decision is not None and outcome.committed >= 1:
+            # The A16 shape, re-expressed: a cycle that committed and then ended honestly. Under
+            # A3 that is a report with status="failed", not a distinct terminal form.
+            outcome.report = AnalystReport(
+                summary="stopped after committing", findings=["partial"], status="failed"
+            )
             outcome.report = AnalystReport(
                 summary="the chain stopped short; reporting honestly",
                 findings=["two tools landed, the third could not be made mergeable"],
@@ -651,15 +658,67 @@ def test_f9_a_failed_link_does_not_end_the_chain_and_the_lead_is_told_why():
 
     So the loop continues AND the lead is told, in its own conversation, before the next brief —
     that is what makes "the lead decides" real rather than nominal.
+
+    A7 strengthened this rather than replacing it. The chain no longer runs as a Python loop over
+    nested ReAct calls; it advances on a tool result, so a failed link is a sentence the lead
+    reads mid-turn and the next session opens underneath it. Asserted on the behaviour of the
+    driver rather than on the source text of a method that no longer exists.
     """
-    import inspect
+    import asyncio
 
-    from auto_research.agents.roles import AnalystLeadAgent
+    from auto_research.agents.react import LeadCycle, LeadCycleOutcome
+    from auto_research.agents.roles import _ChainDriver
+    from auto_research.schemas import AuthoringDecision
 
-    src = inspect.getsource(AnalystLeadAgent._author_chain)
-    assert "break  # a dependency-satisfied prefix" not in src
-    assert "did not commit" in src, "the lead must be told which link failed and why"
-    assert "hold_authoring" in src, "and told how to stop the chain if it should"
+    specs = [_toolspec("link_one"), _toolspec("link_two")]
+    cycle = LeadCycle(authoring_enabled=True, rounds_left=1)
+    cycle.brief = AuthoringDecision(should_author=True, tool_specs=specs, rationale="r")
+    outcome = LeadCycleOutcome(filed=None, author_budget=4)
+
+    opened: list[str] = []
+
+    class _Lead:
+        monitor = None
+        run_control = None
+
+        async def _record(self, *a, **k):
+            return None
+
+    driver = _ChainDriver(
+        lead=_Lead(), provider=SimpleNamespace(authoring_session=None), cycle=cycle,
+        outcome=outcome, messages=[], toolkit_root=None, worktree_base=None,
+        direct_branch=None, colead=None, human_handler=None, coder=None,
+        allow_correlated_review=False,
+    )
+
+    async def _open(spec):
+        opened.append(spec.proposed_tool_name)
+        driver.session = SimpleNamespace(proposed=spec.proposed_tool_name)
+        driver.spec = spec
+        cycle.session_open = True
+
+    async def _close():
+        if driver.session is None:
+            return
+        spec, driver.session, driver.spec = driver.spec, None, None
+        cycle.session_open = False
+        outcome.authored.append(
+            MergeFlowResult(tool_spec_id=spec.id, status="failed", reason="co-lead rejected")
+        )
+
+    driver._open = _open
+    driver._close_current = _close
+
+    first = asyncio.run(driver.advance())
+    assert opened == ["link_one"] and "link_one" in first
+    # The first link dies. The chain does NOT end: the next one opens, in the same turn.
+    second = asyncio.run(driver.advance())
+    assert opened == ["link_one", "link_two"], "a failed link ended the chain"
+    assert "link_two" in second
+    assert len(outcome.authored) == 1 and outcome.authored[0].status == "failed"
+    # And when the chain runs out, the lead is told to write its report rather than being cut off.
+    done = asyncio.run(driver.advance())
+    assert "turn_end" in done and "report" in done
 
 
 def test_f9_the_worker_note_carries_the_cause_but_not_the_remediation():

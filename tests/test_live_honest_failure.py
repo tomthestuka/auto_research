@@ -169,15 +169,14 @@ def test_live_lead_finalizes_failed_authoring(tmp_path):
     """The honest terminal, filed rather than composed.
 
     ``finalize_authoring_outcome`` was a separate conversation the strategy called after a failed
-    attempt. There is no such call any more: authoring and judging are stages of one cycle, so
-    the lead meets the failure as a note on its task and ends by filing ``submit_terminal_report``
-    (or ``submit_adjudication`` when partial results still answer the request). Same §9.6 property
+    attempt. There is no such call any more, and since A7 no separate *form* either: the lead
+    meets the failure inside its own loop and writes it into its report — ``rework=false`` with a
+    declared ``status`` — ending on ``turn_end``. Same §9.6 property
     — an honest failure is a correct outcome — reached through the form the lead files itself.
     """
     from auto_research.agents.react import (
         ReadOnlyToolProvider,
-        SUBMIT_ADJUDICATION_TOOL,
-        TERMINAL_REPORT_TOOL,
+        TURN_END_TOOL,
     )
 
     load_dotenv()
@@ -227,7 +226,9 @@ def test_live_lead_finalizes_failed_authoring(tmp_path):
     print(f"\n[lead.run_cycle] filed={outcome.filed} → {log_path}")
 
     # Structural contract only (LLM content is logged, not asserted, per the testing rules).
-    assert outcome.filed in (TERMINAL_REPORT_TOOL, SUBMIT_ADJUDICATION_TOOL)
+    assert outcome.filed == TURN_END_TOOL
+    assert outcome.report is not None, "the lead must write a report, not merely stop"
+    assert outcome.report.rework is False, "an honest terminal concludes; it does not re-dispatch"
     assert isinstance(report, AnalystReport)
     assert report.status in ("succeeded", "failed")  # F9: agent-declared, two values
     assert report.summary.strip()

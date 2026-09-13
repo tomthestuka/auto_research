@@ -659,15 +659,48 @@ def test_submit_gate_and_review_pass_commits():
     assert sess.committed_with == "add my_tool"  # commit ⇔ gate ∧ review, no self-approval
 
 
-def test_submit_cap_exhaustion_returns_terminal_message():
+def test_submit_cap_exhaustion_ends_the_link_not_the_turn():
+    """A7: the CI budget for ONE tool is spent, and that is where a chain used to die.
+
+    Slot 1 of the 2026-09-11 batch hit exactly this and ended the whole analysis with 11 of 12
+    author credits unspent, because every other action open to it while authoring was a
+    whole-cycle terminal. The ticket now says the attempt is over, names what to reconsider, and
+    the chain advances underneath it.
+    """
     sess = _FakeSession(
         gate=_gate(True), review=_review(False, issues=["x"]), submit_cap=1
     )
     out1 = asyncio.run(execute_submit(sess))
     assert "REVIEW REJECTED" in out1.text and sess.submits_used == 1
     out2 = asyncio.run(execute_submit(sess))
-    assert "used all 1 review submissions" in out2.text
+    assert "CI BUDGET SPENT" in out2.text
+    assert "reconsider the plan" in out2.text, "say what to do, not only that it stopped"
+    assert "honest failure" in out2.text
     assert sess.submits_used == 1  # the cap is not exceeded
+
+
+def test_a_finished_link_advances_the_chain_on_its_own_result():
+    """Committed or budget-spent, the next link opens and the lead reads it in the same turn."""
+    from auto_research.agents.react import LeadCycle
+
+    for review, expect in ((_review(True, commit_summary="s"), "COMMITTED"),
+                           (_review(False, issues=["x"]), "CI BUDGET SPENT")):
+        opened: list[int] = []
+
+        async def _advance():
+            opened.append(len(opened) + 1)
+            return "Coding session 2 of 2 is open on 'next_tool'."
+
+        cycle = LeadCycle(authoring_enabled=True)
+        cycle.advance_chain = _advance
+        sess = _FakeSession(gate=_gate(True), review=review, submit_cap=1)
+        if expect == "CI BUDGET SPENT":
+            asyncio.run(execute_submit(sess, cycle))  # spend the cap
+            opened.clear()
+        out = asyncio.run(execute_submit(sess, cycle))
+        assert expect in out.text
+        assert opened == [1], f"{expect} did not advance the chain"
+        assert "next_tool" in out.text
 
 
 # --- respond_to_review (A1 slice 4): the lead↔co-lead debate ---

@@ -32,18 +32,38 @@ _REQUIRED: tuple[tuple[str, ...], ...] = (
     ("TAVILY_API_KEY",),
 )
 
-# The variable each provider's own SDK reads, used when a member does not name one explicitly.
-# A member's `key_env` always wins, which is how a harness can point at a plan-specific endpoint
-# with a differently-named variable. The vendor entries carry each vendor's documented name, so a
-# future chat member for one of them needs no `key_env` at all.
-_PROVIDER_KEY_ALIASES: dict[str, tuple[str, ...]] = {
-    "anthropic": ("ANTHROPIC_API_KEY",),
-    "openai": ("OPENAI_API_KEY",),
-    "google": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
-    "deepseek": ("DEEPSEEK_API_KEY",),
-    "zai": ("ZAI_API_KEY",),
-    "dashscope": ("DASHSCOPE_API_KEY",),
+# Additional spellings a vendor also accepts, beyond its standard `<PROVIDER>_API_KEY`. Only what
+# cannot be derived lives here — see `provider_key_aliases`.
+_PROVIDER_EXTRA_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "google": ("GEMINI_API_KEY",),
 }
+
+
+def provider_key_aliases(provider: str) -> tuple[str, ...]:
+    """The env variables that satisfy ``provider``, its standard name first.
+
+    Used when a member does not name a `key_env` explicitly. A member's own `key_env` always
+    wins, which is how a harness points at a plan-specific endpoint with a differently-named
+    variable.
+
+    The standard name is **derived by the same function the key pool and the author harnesses
+    use** (`models.keys.env_var_names`), not restated in a table here. A table that merely repeats
+    a format rule is a place for two readers to disagree, and on 2026-09-12 they did: this module
+    derived `DEEPSEEK_API_KEY` for a coder member carrying no `key_env`, while `CodexBackend`
+    derived nothing — so the launch check passed on exactly the variable the author never
+    received, and every Codex turn 401'd. One deriver, so that cannot recur.
+
+    An unrecognised provider string yields nothing, as before: the roles' YAML is read raw here,
+    so a name no adapter implements must not conjure a requirement out of a format rule.
+    """
+    from typing import get_args
+
+    from auto_research.models.keys import env_var_names
+    from auto_research.models.types import ProviderName
+
+    if provider not in get_args(ProviderName):
+        return ()
+    return (env_var_names(provider)[0], *_PROVIDER_EXTRA_KEY_ALIASES.get(provider, ()))
 
 # Kept so a config that cannot be read still demands the historical set rather than nothing.
 _FALLBACK_MODEL_KEYS: tuple[tuple[str, ...], ...] = (
@@ -88,7 +108,7 @@ def _model_key_groups() -> tuple[tuple[tuple[str, ...], ...], dict[tuple[str, ..
             aliases = (
                 (str(explicit),)
                 if explicit
-                else _PROVIDER_KEY_ALIASES.get(str(member.get("provider") or ""), ())
+                else provider_key_aliases(str(member.get("provider") or ""))
             )
             if not aliases:
                 continue

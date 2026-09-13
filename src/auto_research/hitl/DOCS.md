@@ -69,6 +69,12 @@ directly) so the preflight can import it without pulling the graph/LLM stack.
   Markdown `message` to stderr with `rich` (a titled rule + `rich.markdown.Markdown`; degrades to
   plain text on a non-tty), then reads stdin off-thread. Waits at most `response_timeout_s()` then
   raises `TimeoutError` — an attended terminal no longer hangs the run forever.
+  The read runs on a **daemon thread** (`_read_stdin_line`), not on `asyncio.to_thread`'s default
+  executor: nothing can interrupt a thread parked in a read on stdin, and the executor's workers
+  are non-daemon and joined at interpreter exit with no timeout (bpo-39812), so a timed-out prompt
+  used to return on schedule and still wedge the **process**. A daemon thread is abandoned
+  instead, and an answer typed after the timeout settles a no-op rather than raising on the
+  cancelled future.
 - `SlackHandler(*, app=None, socket_handler=None, channel=None, timeout_s=None)` — Socket
   Mode; posts to `SLACK_HUMAN_CHANNEL`, awaits a threaded reply via a Future resolved by
   `on_message`. The query's Markdown `message` is rendered as one or more `markdown` blocks
@@ -131,6 +137,8 @@ protocol, §7).
   only costs one cheap cold prefix re-prefill on resume).
 - `make_human_channel_check(handler, *, timeout_s=None)` — preflight ping check factory.
 - `cli_stdin_handler(query)` — attended-terminal handler.
+- `_read_stdin_line() -> str` — one line of stdin, read on a daemon thread so an
+  unanswered prompt cannot hold the process open past the timeout.
 - `SlackHandler` / `TelegramHandler` / `WhatsAppHandler` — connector classes (see contracts above).
 
 ## Changelog
@@ -196,3 +204,17 @@ Compacted 2026-09-01: entries through 2026-07-31 folded into themed ranges (deta
   errors are already retried at the model layer; and a run whose provider is down cannot advance, so a
   second, lesser view of the same log would report on a stalled run as if it were fine. Tests:
   `tests/test_hitl_commands.py`, `tests/test_hitl.py`, `tests/test_run_control.py`.
+
+- 2026-09-12 — **A timed-out CLI prompt no longer hangs the process.** `cli_stdin_handler` read
+  stdin through `asyncio.to_thread`, so `wait_for` returned on schedule while `input()` stayed
+  blocked on a **non-daemon** executor worker that `_python_exit` then joins with no timeout and
+  no daemon check (bpo-39812) — the same defect class as the Codex coder's notification poll, found
+  beside it. Remedy (a) from that investigation is unavailable here: there is no router, no queue
+  and no `fail_all`, so a blocked `input()` has no doorway at all (closing the descriptor from
+  another thread is not guaranteed to wake the reader and risks the number being reused, `dup2`
+  does not touch a reader already inside `read()`, and PEP 475 retries a signalled syscall). Human
+  ruling: the daemon thread. New `_read_stdin_line`; a late answer settles a no-op rather than
+  raising `InvalidStateError` on the future `wait_for` already cancelled.
+  `test_cli_stdin_handler_times_out` was rewritten onto the real seam — a genuinely blocked
+  `input()` instead of a stubbed coroutine, since the defect was never in the timeout but in what
+  survived it — and verified to fail against a `daemon=False` mutation.

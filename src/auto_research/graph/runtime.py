@@ -248,6 +248,54 @@ class SandboxSettings:
         )
 
 
+def attach_lead_runtime(
+    lead: Any,
+    *,
+    run_id: str,
+    toolkit_root: Path,
+    run_monitor: Any | None = None,
+    run_control: RunControl | None = None,
+    retrieval: Any | None = None,
+    web_source: Any | None = None,
+    human_handler: Any | None = None,
+) -> None:
+    """Give the lead the identity, report folder, monitor, stop channel and tools production gives it.
+
+    The analyst lead's wiring was spread across ~40 lines of ``run_request`` while the workers'
+    had a seam of their own (:func:`attach_worker_runtime`, 2026-09-08), so anything driving a
+    real lead outside the graph — a live drill, a probe — restated it by hand and measured its own
+    scaffolding rather than production's. That is the defect that made a seat probe drive a worker
+    with no sandbox: *a test below the layer the defects live in measures the test.*
+
+    Deliberately mirrors ``run_request``'s order and its best-effort posture, including leaving a
+    pre-wired ``tools`` alone, so routing the run path through this is behaviour-preserving.
+    """
+    try:
+        lead.agent_key = "analyst_lead"
+        lead.report_dir = agent_dir(run_id, "analyst_lead")
+    except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it
+        pass
+    if run_monitor is not None:
+        _attach_monitor(lead, run_monitor)
+    if run_control is not None:
+        try:
+            lead.run_control = run_control
+        except Exception:  # noqa: BLE001
+            pass
+    if getattr(lead, "tools", None) is None:
+        try:
+            lead.tools = readonly_tools_for(
+                "analyst_lead",
+                roots=readonly_roots_for(run_id, toolkit_root),
+                retrieval=retrieval,
+                web_source=web_source,
+                human_handler=human_handler,
+                model=_model_label(getattr(lead, "model", None)) or "",
+            )
+        except Exception:  # noqa: BLE001 — tools are optional; never block the run
+            pass
+
+
 def attach_worker_runtime(
     workers: Sequence[WorkerLike],
     *,
@@ -551,7 +599,7 @@ async def run_research(
     # calls. Read-only/path-confined, no shell: the runtime never writes the toolkit (§2)
     # and this matches the §12 "read-only file-tree exploration" posture.
     readonly_roots = readonly_roots_for(run_id, toolkit_root)
-    for target, role in ((reviewer, "reviewer"), (lead, "analyst_lead")):
+    for target, role in ((reviewer, "reviewer"),):
         if getattr(target, "tools", None) is not None:
             continue  # a caller pre-wired its own
         try:
@@ -566,24 +614,28 @@ async def run_research(
         except Exception:  # noqa: BLE001 - tools are optional; never block the run
             pass
 
-    # V-4: give the lead a stable key + report folder for its per-round adjudicated report JSONLs.
-    try:
-        lead.agent_key = "analyst_lead"
-        lead.report_dir = agent_dir(run_id, "analyst_lead")
-    except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it
-        pass
+    # V-4: a stable key + report folder for the lead's per-round adjudicated report JSONLs, its
+    # monitor, its stop channel and its read-only tools — all through the one seam, so a live
+    # drill driving a real lead outside the graph gets exactly this and cannot drift from it.
+    attach_lead_runtime(
+        lead,
+        run_id=run_id,
+        toolkit_root=toolkit_root,
+        run_monitor=run_monitor,
+        run_control=run_control,
+        retrieval=retrieval,
+        web_source=web_source,
+        human_handler=human_handler,
+    )
 
     _attach_monitor(reviewer, run_monitor)
     _attach_monitor(io_agent, run_monitor)
-    _attach_monitor(lead, run_monitor)
     for worker in workers:
         _attach_monitor(worker, run_monitor)
 
     # HITL /steer, /stop: give every role a stable steer key (workers/lead already keyed above)
     # and the shared RunControl its ReAct loop consults. Best-effort so duck-typed fakes are fine.
-    for target, key in (
-        (reviewer, "reviewer"), (io_agent, "librarian_io"), (lead, "analyst_lead")
-    ):
+    for target, key in ((reviewer, "reviewer"), (io_agent, "librarian_io")):
         try:
             if getattr(target, "agent_key", None) is None:
                 target.agent_key = key

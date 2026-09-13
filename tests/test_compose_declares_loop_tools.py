@@ -38,11 +38,16 @@ def _compose_sites() -> list[tuple[str, int, str | None, str | None]]:
     out: list[tuple[str, int, str | None, str | None]] = []
     for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
         react_tools: str | None = None
-        for node in ast.walk(fn):
-            if not isinstance(node, ast.Call):
-                continue
-            target = node.func
-            attr = getattr(target, "attr", None)
+        # SOURCE order, not walk order. `ast.walk` is breadth-first, so a `_react` nested one
+        # level deeper than its compose (inside a `try:`, say) is visited AFTER it and the
+        # pairing silently reads `None` — which is what this guard reports as a missing loop.
+        # "Nearest preceding" is what the docstring promises, so sort by position and mean it.
+        calls = sorted(
+            (n for n in ast.walk(fn) if isinstance(n, ast.Call)),
+            key=lambda n: (n.lineno, n.col_offset),
+        )
+        for node in calls:
+            attr = getattr(node.func, "attr", None)
             if attr == "_react":
                 react_tools = _kwarg_source(node, "tools")
             elif attr == "_call_over_messages":
@@ -56,19 +61,21 @@ COMPOSES = _compose_sites()
 def test_every_compose_site_was_found() -> None:
     """A refactor that renames the compose helper must not silently empty this file.
 
-    Four, down from seven: the analyst lead's five actions became branches of one ReAct loop that
+    Two, down from seven: the analyst lead's five actions became branches of one ReAct loop that
     ends by filing a form, so its four composes (adjudicate, judge_convergence, decide_authoring,
     finalize_authoring_outcome) no longer exist — a conversation with no output schema cannot
-    replay a trajectory under the wrong one. What remains are the reviewer's, the worker's, the
-    lead's author-clarification reply and the co-lead's. Lower the number only when a compose is
-    genuinely deleted, never to make this pass.
+    replay a trajectory under the wrong one. What remains are the reviewer's and the co-lead's.
+    Lower the number only when a compose is genuinely deleted, never to make this pass.
     """
     # Was >= 4. `compose_latex_report` was retired by F5e (2026-09-09): the reviewer now authors
     # `report.tex` through `file_edit` + a validating `turn_end`, so there is no terminal compose
     # on that path to declare tools for. The remaining three are still guarded, which is the
     # property this file exists for — the floor moved because a site was deleted, never because a
     # site stopped satisfying the rule.
-    assert len(COMPOSES) >= 3, f"expected the known compose sites, found {len(COMPOSES)}"
+    # Was >= 3. The lead's author-clarification compose went with `clarify_for_author` on
+    # 2026-09-12: the coder's question now enters the lead's OWN loop as an injected turn and is
+    # answered with `drive_coder`, so there is no second conversation to compose a reply out of.
+    assert len(COMPOSES) >= 2, f"expected the known compose sites, found {len(COMPOSES)}"
 
 
 def test_the_leads_cycle_runs_every_react_on_one_shared_provider() -> None:

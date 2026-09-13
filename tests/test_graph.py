@@ -12,7 +12,7 @@ from langgraph.graph import END
 from auto_research.graph import build_graph
 from auto_research.graph.builder import _resolve_cited_paths
 from auto_research.retrieval import RetrievalBackend
-from auto_research.agents.react import SUBMIT_ADJUDICATION_TOOL, LeadCycleOutcome
+from auto_research.agents.react import TURN_END_TOOL, LeadCycleOutcome
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -122,7 +122,7 @@ class FakeLead:
     async def run_cycle(self, task, reports, *, sources=None, **kwargs):
         self.adjudications += 1
         return LeadCycleOutcome(
-            filed=SUBMIT_ADJUDICATION_TOOL,
+            filed=TURN_END_TOOL,
             report=AnalystReport(summary=f"final {self.adjudications}", findings=["final"]),
         )
 

@@ -67,10 +67,20 @@ DEEPSEEK_VENDOR = ResponsesVendor(
     # The vendor documents `anyOf` and `$ref` as supported and says nothing about the
     # combination, so this is measured, not read.
     resolve_refs_in=frozenset({"anyOf"}),
-    # "tools: Partially supported" — "function / web_search supported; other types ignored". The
-    # server-side tool-search tool is one of the ignored types, so deferred loading would leave
-    # the model unable to resolve a deferred reference. Every tool is therefore declared resident.
+    # "tools: Partially supported", and the Responses compatibility table (api-docs.deepseek.com/
+    # guides/responses_api/, read 2026-09-11) lists "web_search / file_search / code_interpreter /
+    # computer_use / mcp / other built-in tools | Ignored" — every built-in type, not just some.
+    # `tools[].type` accepts `function` alone. The server-side tool-search tool is one of the
+    # ignored types, so deferred loading would leave the model unable to resolve a deferred
+    # reference. Every tool is therefore declared resident.
+    #
+    # (An earlier version of this comment read "function / web_search supported", which said the
+    # vendor runs a hosted web search. It does not, and it never mattered either way: web search
+    # reaches every role as our own Tavily *function* tool. Corrected 2026-09-12.)
     supports_tool_search=False,
+    # Nothing provider-executed can appear in a captured turn, so the A1 predicate is a constant
+    # `False` here — declared rather than assumed, and pinned by the census test.
+    server_tool_item_types=frozenset(),
 )
 
 

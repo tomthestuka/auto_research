@@ -46,6 +46,7 @@ from auto_research.agents.roles import AnalystLeadAgent
 from auto_research.monitor import RunMonitor
 from auto_research.observability.costs import install_cost_meter
 from auto_research.sandbox.workspace import agent_dir, create_run_workspace, run_dir
+from tests.chain_stub import stub_chain_driver
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -381,13 +382,7 @@ def test_chain_planning_returns_ordered_chain(tmp_path, monkeypatch):
         tool_request=request, status="failed",
     )
 
-    async def _fake_link(self, messages, provider, spec, **kwargs):
-        return MergeFlowResult(
-            tool_spec_id=spec.id, status="committed", branch="ai", commit_sha="0" * 12,
-            reason="stubbed coding session (this test measures the plan, not the coder)",
-        )
-
-    monkeypatch.setattr(AnalystLeadAgent, "_drive_one_link", _fake_link)
+    driven = stub_chain_driver(monkeypatch)
 
     async def _plan():
         await monitor.record("run", "run.start", level=1, summary="A8 chain-planning live test")
