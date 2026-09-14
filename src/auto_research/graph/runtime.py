@@ -35,7 +35,13 @@ from auto_research.sandbox.persistent import PersistentSandbox
 from auto_research.sandbox.registry import ToolkitRegistry
 from auto_research.agents.react import ReadOnlyToolProvider
 from auto_research.agents.roles import _model_label
-from auto_research.sandbox.workspace import agent_dir, create_run_workspace, memory_path, run_dir
+from auto_research.sandbox.workspace import (
+    agent_dir,
+    create_run_workspace,
+    ledger_dir,
+    memory_path,
+    run_dir,
+)
 from auto_research.schemas import ResearchRequest, ReviewVerdict
 from auto_research.storage import Storage
 
@@ -773,7 +779,10 @@ async def run_research(
         "max_iterations": max_iterations,
     }
     config = {"configurable": {"thread_id": run_id}}
-    async with open_checkpointer(checkpoint_path(run_dir(run_id))) as saver:
+    # The checkpoint is the run's serialized state, not its workspace — it moves with the
+    # ledger, out of the agents' reach. It is the heaviest single self-read available: the whole
+    # graph state, including every message, in one file.
+    async with open_checkpointer(checkpoint_path(ledger_dir(run_id))) as saver:
         graph = build_graph(
             reviewer=reviewer,
             io_agent=io_agent,

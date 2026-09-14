@@ -13,7 +13,7 @@ from auto_research.graph import run_research
 from auto_research.graph.detached import jsonable
 from auto_research.monitor import RunMonitor, default_monitor_jsonl_path, validate_chatter
 from auto_research.run_control import UserInterruptionError
-from auto_research.sandbox.workspace import run_dir
+from auto_research.sandbox.workspace import resolve_record, run_dir
 from auto_research.schemas import ResearchRequest
 
 
@@ -119,7 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.monitor_jsonl:
         jsonl_path = args.monitor_jsonl
     elif args.run_id:
-        jsonl_path = run_dir(args.run_id) / "monitor.jsonl"
+        jsonl_path = resolve_record(args.run_id, "monitor.jsonl")
     else:
         jsonl_path = default_monitor_jsonl_path("cli_run")
     md_path = args.monitor_md or jsonl_path.with_suffix(".md")

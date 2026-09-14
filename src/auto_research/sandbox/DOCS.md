@@ -1509,3 +1509,47 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   arrives mid-turn and that going idle until it does is fine; the lead is told `[coder asks]`
   messages are answered with `drive_coder`. `tests/test_coder_backends.py` 54 -> 59,
   `tests/test_lead_forms.py` 36 -> 39.
+
+- 2026-09-14 — **A run's record moved out of its workspace, which closes self-reads in both
+  enforcement layers at once.** `workspace.ledger_dir(run_id)` (`<runtime_dir>/ledgers/<run_id>/`)
+  now holds `monitor.jsonl`, `monitor.md`, `backend.log` and `checkpoint.sqlite`; `run_dir`
+  keeps only what the agents produce — figures, reports, scratch, the authoring worktree — and
+  `agent_fs_allow` narrows from `runtime_dir` to `runtime_dir/runs`. One list change, two
+  layers: `PathGuard` for the chat roles and the bwrap mount plan for the coder, whose implicit
+  subprocess reads a named-path rule cannot see.
+  **Measured cause.** A reviewer read 191 KB of this run's own ledger (`limit: 60` → 60,289
+  chars, `limit: 115` → 130,954 — the limit is lines and a ledger line is a large JSON object)
+  into the trajectory whose structured compose then failed four times and killed the run
+  (2026-09-14, $3.51); a coder grepped the run record 31 times in one session. An archive sweep
+  found the pattern confined to those two seats: no worker, lead or co-lead has ever done it.
+  **Documented elsewhere, and worse.** openai/codex#27131 (open) reports a conversation reaching
+  **1,239,690 tokens** after Codex read its own rollouts — once deliberately, once through a
+  `rg -g '*.json*'` that matched `.jsonl`, a single call reporting 23,563,888 tokens — described
+  by its reporter as *"a self-amplifying token growth loop"*. codex#40493 names the class
+  **self-state reads** and measures 61% of a context window. The trigger in every case is a
+  *meta* question, because that is when the run's own record is the most relevant document
+  available.
+  **Why relocation rather than a denial rule.** Six surveyed CLIs all keep transcripts outside
+  the working tree, and none relies on path policy instead — Claude Code documents that reading
+  a transcript *"isn't blocked"* and that its outside-cwd prompt does not fire in `-p` or
+  background runs; Goose ships a tool for reading past sessions; OpenHands V1's system prompt
+  points the agent at its own conversation directory and leaked a key that way. The only hard
+  boundaries found anywhere are a mount layout or a remote service.
+  **Supervision is deliberately untouched.** `/status` reads the ledger through
+  `MonitorToolProvider`, built with the path and exposing no tool that takes one. That is the
+  established supervisory pattern (the closest published analogue is an MCP server with three
+  read-only tools over the same kind of file) and ours is stricter, having no arbitrary-read
+  primitive. Closing the channel entirely is its own failure: claude-code#83074 records an agent
+  with no way to check its own history inventing a fictional session and building real
+  constraints around it.
+  **Compatibility.** `workspace.resolve_record(run_id, name)` prefers the legacy in-workspace
+  path when it exists, so every archived batch — including the ones behind published numbers —
+  still scores; `benchmarks/science_bench/trial.record_path` is the same resolver for the
+  benchmark readers. This reverses the 2026-09-03 ruling that `runtime_dir` stays on the
+  allow-list because agents may read their own logs; the evidence since is one run killed and
+  24% of another's budget.
+  New guards in `tests/test_fs_guard.py`: the record is denied and the workspace allowed on the
+  **live** config; the two directories provably do not nest (nested, narrowing the allow-list
+  would be inert); and a legacy record still resolves. Mutation-verified by putting `ledger_dir`
+  back inside `run_dir`. Suite 1514 passed.
+

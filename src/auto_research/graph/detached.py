@@ -43,6 +43,19 @@ _PID_FILE = "backend.pid"
 _RESULT_FILE = "result.json"
 _MONITOR_JSONL = "monitor.jsonl"
 _BACKEND_LOG = "backend.log"
+
+
+def _record(run_directory: Path, name: str) -> Path:
+    """Where one of this run's RECORD files lives (`workspace.ledger_dir`, or the legacy path).
+
+    `run_dir(run_id)` ends in the run id, so the directory names its own run and no extra
+    argument has to be threaded through the module. Opening for append through the same
+    resolver is deliberate: a run that started under the old layout keeps appending where its
+    earlier lines already are.
+    """
+    from auto_research.sandbox.workspace import resolve_record
+
+    return resolve_record(run_directory.name, name)
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -144,8 +157,8 @@ def _partial(run_directory: Path) -> tuple[str, Path | None]:
     The end-of-run digest leads it: a run that was hard-killed never recorded a ``run.summary``
     event, so it is derived here from the JSONL — a died run still reports what it spent and how
     far it got, on the same block a finished run ends with."""
-    jsonl = run_directory / _MONITOR_JSONL
-    log = run_directory / _BACKEND_LOG
+    jsonl = _record(run_directory, _MONITOR_JSONL)
+    log = _record(run_directory, _BACKEND_LOG)
     log_path = log if log.exists() else None
     if jsonl.exists():
         try:
@@ -169,13 +182,13 @@ def reconstruct_run(request: ResearchRequest | str, run_directory: Path, run_id:
         raise UserInterruptionError(
             result.get("error") or "the run was interrupted",
             artifacts={"run_dir": str(run_directory),
-                       "ledger": str(run_directory / _MONITOR_JSONL)},
+                       "ledger": str(_record(run_directory, _MONITOR_JSONL))},
         )
     if result.get("status") != "done" or not result.get("verdict"):
         partial, log = _partial(run_directory)
         raise RunDied(run_id, result.get("error") or "pipeline reported failure",
                       log_path=log, partial=partial)
-    jsonl = run_directory / _MONITOR_JSONL
+    jsonl = _record(run_directory, _MONITOR_JSONL)
     monitor = RunMonitor.from_jsonl(jsonl) if jsonl.exists() else RunMonitor(chatter=10)
     report_jsonl = result.get("report_jsonl")
     research_report = None
@@ -272,7 +285,9 @@ def _default_launcher(
         argv += ["--max-iterations", str(max_iterations)]
     if resume:
         argv += ["--resume"]
-    pid = _spawn_orphaned(argv, run_directory / _BACKEND_LOG)
+    backend_log = _record(run_directory, _BACKEND_LOG)
+    backend_log.parent.mkdir(parents=True, exist_ok=True)
+    pid = _spawn_orphaned(argv, backend_log)
     (run_directory / _PID_FILE).write_text(
         json.dumps({"pid": pid, "create_time": _proc_create_time(pid)}),
         encoding="utf-8",

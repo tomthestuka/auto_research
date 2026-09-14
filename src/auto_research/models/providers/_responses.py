@@ -287,6 +287,11 @@ _STRICT_SCHEMA_FORMATS = frozenset({
 _CONSERVATIVE_SCHEMA_FORMATS = frozenset({"email", "hostname", "ipv4", "ipv6", "uuid"})
 
 
+#: How much of an unusable emit-arguments string reaches the error message. Enough to see
+#: whether it is truncated JSON, prose, or empty, without pasting a 16 kB payload into a
+#: ledger event that is replayed on every later turn.
+_RAW_ARGUMENTS_CAP = 2000
+
 _EMIT_TOOL = "emit_structured_response"
 """Name of the synthetic tool that carries a structured answer on a ``schema_via_tool`` vendor.
 
@@ -685,21 +690,33 @@ class ResponsesProvider:
         # declaring both can come back either way.
         text = getattr(response, "output_text", "") or ""
         emitted: dict[str, Any] | None = None
+        emitted_raw: str | None = None
+        emitted_fault: str | None = None
         tool_calls: list[ToolCall] = []
         provider_parts: list[dict[str, Any]] = []
         for item in getattr(response, "output", []) or []:
             itype = getattr(item, "type", None)
             if itype == "function_call":
+                raw_arguments = getattr(item, "arguments", None)
                 try:
-                    args = json.loads(item.arguments) if item.arguments else {}
-                except (json.JSONDecodeError, TypeError):
+                    args = json.loads(raw_arguments) if raw_arguments else {}
+                    arg_fault: str | None = None
+                except (json.JSONDecodeError, TypeError) as exc:
+                    # Kept, not swallowed. A parse failure and a genuinely empty call used to
+                    # collapse to the same `{}` here, with the raw string dropped — so a live
+                    # run that died four times on an empty structured answer could not be
+                    # diagnosed at all, and a probe of 12 draws could not reproduce it
+                    # (2026-09-14, reviewer/qwen3.8-max). The fault travels to the emit branch
+                    # below, which is the only place that knows whether it mattered.
                     args = {}
+                    arg_fault = f"{type(exc).__name__}: {exc}"
                 if emit_tool is not None and getattr(item, "name", "") == _EMIT_TOOL:
                     # The structured answer, arriving as arguments. It is consumed here and
                     # deliberately NOT appended to `tool_calls`: the ReAct loop would otherwise
                     # try to execute a tool that does not exist, and replay would emit a
                     # `function_call` with no matching output.
                     emitted = _normalise_null_strings(args, emit_tool["parameters"])
+                    emitted_raw, emitted_fault = raw_arguments, arg_fault
                     continue
                 tool_calls.append(
                     ToolCall(
@@ -754,6 +771,26 @@ class ResponsesProvider:
                 _raise_billed(ValueError(
                     f"{vendor.name!r} returned a structured answer while also requesting "
                     f"tool calls ({names}); the answer is premature and will be retried."
+                ), response)
+            if not emitted:
+                # The emit call arrived carrying nothing usable. This used to pass `{}` down to
+                # the role layer, where Pydantic rejected it with `input_value={}` and no trace
+                # of what the vendor actually sent — the shape that killed a run on 2026-09-14
+                # and that 12 live draws then could not reproduce. Retryable (ValueError), the
+                # same class as the native branch's unparseable answer, and reported the same
+                # way: status and `incomplete_details` distinguish truncation from a refusal,
+                # and the raw argument string distinguishes malformed JSON from an empty call.
+                status = getattr(response, "status", None)
+                incomplete = getattr(response, "incomplete_details", None)
+                raw = emitted_raw if emitted_raw is not None else ""
+                shown = raw[:_RAW_ARGUMENTS_CAP]
+                if len(raw) > _RAW_ARGUMENTS_CAP:
+                    shown += f"… [+{len(raw) - _RAW_ARGUMENTS_CAP} chars]"
+                _raise_billed(ValueError(
+                    f"{vendor.name!r} delivered an empty {schema.__name__} through "
+                    f"`{_EMIT_TOOL}` (status={status!r}, incomplete_details={incomplete!r}, "
+                    f"raw_argument_chars={len(raw)}, json_fault={emitted_fault!r}); "
+                    f"retrying. Raw arguments: {shown!r}"
                 ), response)
             parsed = emitted
         else:

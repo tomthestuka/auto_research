@@ -97,6 +97,19 @@ class TrialConfig:
 # ── Stamps ──────────────────────────────────────────────────────────────────
 
 
+def record_path(run_directory: Path, name: str) -> Path:
+    """One of a run's record files, tolerating the pre-2026-09-14 layout.
+
+    The ledger, `backend.log` and the checkpoint moved out of the run workspace so the agents
+    cannot read them; every batch already on disk keeps them inside it, and scoring reads those
+    archives long after the run. `run_dir(run_id)` ends in the run id, so the directory names
+    its own run.
+    """
+    from auto_research.sandbox.workspace import resolve_record
+
+    return resolve_record(run_directory.name, name)
+
+
 def _git(repo: Path, *args: str) -> str:
     out = subprocess.run(
         ["git", *args], cwd=str(repo), capture_output=True, text=True, check=True
@@ -177,7 +190,7 @@ def launch(
         child_env[PROMPT_DUMP_ENV] = str(prompt_dump)
     pid = _spawn_orphaned(
         build_argv(environment.run_id, chatter),
-        run_directory / "backend.log",
+        record_path(run_directory, "backend.log"),
         env=child_env,
     )
     (run_directory / "backend.pid").write_text(
@@ -458,7 +471,7 @@ async def run_trial(slot: RunSlot, cfg: TrialConfig) -> dict[str, Any]:
         status = await wait_for(environment.run_dir, poll_seconds=cfg.poll_seconds)
 
         result = read_result(environment.run_dir)
-        ledger = summarise_ledger(environment.run_dir / "monitor.jsonl")
+        ledger = summarise_ledger(record_path(environment.run_dir, "monitor.jsonl"))
         # `done` is the marker's presence, not its contents: the run writes one for a crash and for
         # a human stop too, and those say so in their own status.
         record["infrastructure"] = result.get("status", "died") if status == "done" else "died"

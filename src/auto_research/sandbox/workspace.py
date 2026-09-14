@@ -8,7 +8,52 @@ from auto_research.env import runtime_data_dir
 
 
 def run_dir(run_id: str) -> Path:
+    """The run's WORKSPACE: what the agents produce, and the only part they may read.
+
+    Figures, reports, per-worker scratch and the authoring worktree. On the filesystem
+    allow-list, because an agent that cannot read back the figure it just wrote cannot cite it.
+    """
     return runtime_data_dir() / "runs" / run_id
+
+
+def ledger_dir(run_id: str) -> Path:
+    """The run's RECORD: what the harness writes *about* the run, deliberately out of reach.
+
+    Holds ``monitor.jsonl``, ``monitor.md``, ``backend.log`` and ``checkpoint.sqlite`` — the
+    event ledger, its rendering, the backend's stdout and the serialized graph state. Kept out
+    of :func:`run_dir` so that narrowing the allow-list to ``runs/`` removes them from BOTH
+    enforcement layers at once: `PathGuard` for the chat roles, and the bwrap mount plan for the
+    coder's subprocess, whose implicit reads a path rule cannot see.
+
+    **Why this is separated at all.** A reviewer read 191 KB of this run's own ledger into the
+    trajectory that then failed its compose (2026-09-14), and a coder grepped the run record 31
+    times in one session. The same class is well documented elsewhere: openai/codex#27131 (a
+    conversation reaching 1,239,690 tokens after reading its own rollouts, including an
+    accidental `*.json*` glob that matched `.jsonl`), and codex#40493, which names it
+    "self-state reads" and measures it consuming 61% of a context window.
+
+    Supervision is unaffected and is the point: `/status` reads this through
+    ``MonitorToolProvider``, which is constructed with the path and exposes no tool that takes
+    one — a narrow structured channel rather than filesystem reach. Denying self-knowledge
+    entirely is its own failure mode (claude-code#83074: an agent with no way to check its own
+    history invented a fictional session and built real constraints around it), so the record
+    stays readable through that channel, and only the unstructured path closes.
+    """
+    return runtime_data_dir() / "ledgers" / run_id
+
+
+def resolve_record(run_id: str, name: str) -> Path:
+    """Where a record file lives, tolerating the pre-2026-09-14 layout.
+
+    New runs write under :func:`ledger_dir`. Every batch already on disk — including the ones
+    behind published numbers — has these files inside ``run_dir``, and offline scoring reads
+    them long after the run. So a reader resolves to the legacy path when that is the one that
+    exists, and to the new path otherwise (which is also the path a fresh run will create).
+    """
+    legacy = run_dir(run_id) / name
+    if legacy.exists():
+        return legacy
+    return ledger_dir(run_id) / name
 
 
 def agent_dir(run_id: str, agent_key: str) -> Path:

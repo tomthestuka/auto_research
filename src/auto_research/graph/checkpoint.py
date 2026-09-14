@@ -42,6 +42,7 @@ def check_checkpointer_available() -> None:
 
 def checkpoint_path(run_directory: Path) -> Path:
     """The run's checkpoint DB path — a sibling of ``backend.pid`` / ``monitor.jsonl``."""
+    run_directory.mkdir(parents=True, exist_ok=True)
     return run_directory / "checkpoint.sqlite"
 
 

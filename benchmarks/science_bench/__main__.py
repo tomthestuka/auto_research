@@ -561,7 +561,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  covered  {actor:<44} {count:>5} call(s)")
         record = next((r for r in trial.load_records(Path(args.scan)) if r.get("slot") == 1), {})
         if record.get("run_dir"):
-            ledger = Path(record["run_dir"]) / "monitor.jsonl"
+            ledger = trial.record_path(Path(record["run_dir"]), "monitor.jsonl")
             findings += scan_ledger_paths(ledger)
             findings += scan_actor_reads(ledger)
         for finding in findings:

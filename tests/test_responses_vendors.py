@@ -1039,3 +1039,112 @@ def test_a_hosted_item_type_we_do_not_classify_is_visible_rather_than_silent():
     # does not — which is exactly the silence the census test above exists to break.
     assert _unresolved(DashscopeProvider, item)
     assert not _unresolved(OpenAIProvider, item)
+
+
+# ── the emit call that carries nothing: what the record must say ─────────────
+#
+# On 2026-09-14 a live reviewer (`qwen3.8-max`) died four times on
+# `2 validation errors for ReviewVerdict … input_value={}`, and the run ended. A 12-draw probe
+# on a 99.7%-faithful reconstruction could not reproduce it, and the archive refuted the obvious
+# size explanation (the same seat succeeded at 186k and 433k input tokens). The reason it stayed
+# unexplained is in these lines: the adapter swallowed the raw `arguments` string, so truncated
+# JSON and an empty call were the same value by the time anything could look.
+
+
+def _emitting(arguments, *, status="completed", incomplete=None):
+    """A fake vendor whose emit call carries exactly `arguments`."""
+
+    class _R:
+        last = None
+
+        async def create(self, **kw):
+            _R.last = kw
+            item = SimpleNamespace(
+                type="function_call", name="emit_structured_response",
+                arguments=arguments, call_id="emit1",
+            )
+            return SimpleNamespace(
+                output=[item], output_text="", status=status,
+                incomplete_details=incomplete,
+                usage=SimpleNamespace(input_tokens=107622, output_tokens=4497),
+            )
+
+    class _C:
+        def __init__(self, *a, **k):
+            self.responses = _R()
+
+    return _C
+
+
+@pytest.mark.parametrize(
+    "arguments,expect",
+    [
+        ('{"rationale": "x"', "JSONDecodeError"),   # truncated mid-object
+        ("", None),                                  # the call carried nothing at all
+        ("{}", None),                                # a syntactically fine, empty answer
+        ("not json at all", "JSONDecodeError"),
+    ],
+    ids=["truncated", "empty-string", "empty-object", "prose"],
+)
+def test_an_empty_emit_answer_reports_what_the_vendor_actually_sent(
+    monkeypatch, arguments, expect
+):
+    """The four shapes are distinguishable in the message, which is the whole point.
+
+    Before this, all four produced `parsed={}` and an identical downstream Pydantic error.
+    """
+    monkeypatch.setattr("openai.AsyncOpenAI", _emitting(arguments))
+    provider = DashscopeProvider()
+    with pytest.raises(ValueError) as caught:
+        asyncio.run(provider.call(_messages(), _cfg(DashscopeProvider), schema=_Verdict))
+    message = str(caught.value)
+    assert "_Verdict" in message and "emit_structured_response" in message
+    assert f"raw_argument_chars={len(arguments)}" in message
+    assert "status='completed'" in message
+    if expect is None:
+        assert "json_fault=None" in message
+    else:
+        assert expect in message
+    if arguments:
+        assert repr(arguments)[1:-1] in message or arguments[:50] in message
+
+
+def test_the_empty_emit_answer_stays_retryable(monkeypatch):
+    """A ValueError, so the role layer's bounded structured retry gets it — the same class as
+    the native branch's unparseable answer. A RuntimeError here would end the call outright."""
+    monkeypatch.setattr("openai.AsyncOpenAI", _emitting("{}"))
+    provider = DashscopeProvider()
+    with pytest.raises(ValueError) as caught:
+        asyncio.run(provider.call(_messages(), _cfg(DashscopeProvider), schema=_Verdict))
+    assert not isinstance(caught.value, RuntimeError)
+
+
+def test_a_huge_unusable_argument_string_is_capped_in_the_message(monkeypatch):
+    """The failing production attempts billed ~4,500 output tokens, so the raw string can be
+    large; it rides a ledger event that replays on every later turn, hence the cap."""
+    from auto_research.models.providers._responses import _RAW_ARGUMENTS_CAP
+
+    huge = '{"rationale": "' + "x" * 20000
+    monkeypatch.setattr("openai.AsyncOpenAI", _emitting(huge))
+    with pytest.raises(ValueError) as caught:
+        asyncio.run(
+            DashscopeProvider().call(_messages(), _cfg(DashscopeProvider), schema=_Verdict)
+        )
+    message = str(caught.value)
+    assert f"raw_argument_chars={len(huge)}" in message
+    assert f"[+{len(huge) - _RAW_ARGUMENTS_CAP} chars]" in message
+    assert len(message) < _RAW_ARGUMENTS_CAP + 2000
+
+
+def test_a_populated_emit_answer_is_untouched(monkeypatch):
+    """The common path stays exactly as it was — this adds a branch, it does not gate the good
+    case behind a new check."""
+    monkeypatch.setattr(
+        "openai.AsyncOpenAI",
+        _emitting(json.dumps({"accepted": True, "rationale": "sound"})),
+    )
+    response = asyncio.run(
+        DashscopeProvider().call(_messages(), _cfg(DashscopeProvider), schema=_Verdict)
+    )
+    assert response.parsed == {"accepted": True, "rationale": "sound"}
+

@@ -66,6 +66,67 @@ def test_real_config_denies_auto_research_allows_toolkit():
         assert g.is_allowed(Path(toolkit_root) / "xspec_utils" / "lib" / "red_ixpe.py")
 
 
+# ── the run's own record is out of reach, in both layers ─────────────────────
+#
+# A reviewer read 191 KB of its own ledger into the trajectory that then failed its compose
+# (2026-09-14); a coder grepped the run record 31 times in one session. The same class is
+# documented in openai/codex#27131, where reading its own rollouts — once deliberately, once
+# through a `*.json*` glob that matched `.jsonl` — carried a conversation to 1,239,690 tokens.
+# The fix is structural: the record lives outside the allow-listed subtree, so neither the
+# named-path guard nor the jail's mount plan has to carry a denial rule for it.
+
+
+def test_the_run_record_is_outside_the_allowlist_and_the_workspace_is_inside():
+    """The whole point of splitting `ledger_dir` from `run_dir`, asserted on the live config.
+
+    Both halves matter. If the workspace were denied too, an agent could not read back the
+    figure it just wrote; if the record were allowed, a `grep -r` over the run directory finds
+    the ledger, which is exactly how this started.
+    """
+    from auto_research.sandbox.workspace import ledger_dir, run_dir
+
+    roots = load_fs_allowlist()
+    if not roots:
+        pytest.skip("agent_fs_allow not configured")
+    g = PathGuard(roots)
+    run_id = "0123456789abcdef0123456789abcdef"
+
+    for name in ("monitor.jsonl", "monitor.md", "backend.log", "checkpoint.sqlite"):
+        assert not g.is_allowed(ledger_dir(run_id) / name), (
+            f"{name} is reachable — the run's own record must not be readable by its agents"
+        )
+    assert not g.is_allowed(ledger_dir(run_id))
+
+    # What the agents legitimately produce stays reachable.
+    assert g.is_allowed(run_dir(run_id) / "analyst_worker_0" / "figures" / "pd_vs_e.png")
+    assert g.is_allowed(run_dir(run_id) / "reviewer" / "report" / "report.tex")
+
+
+def test_the_two_directories_do_not_nest():
+    """`ledger_dir` must be a SIBLING of `run_dir`, not a child of it. Nested, narrowing the
+    allow-list to the workspace would re-admit the record and this fix would be inert."""
+    from auto_research.sandbox.workspace import ledger_dir, run_dir
+
+    run, ledger = run_dir("abc"), ledger_dir("abc")
+    assert not ledger.is_relative_to(run) and not run.is_relative_to(ledger)
+
+
+def test_a_record_written_under_the_old_layout_is_still_found(tmp_path, monkeypatch):
+    """Every batch on disk — including the ones behind published numbers — keeps these files
+    inside the run directory, and offline scoring reads them long after the run."""
+    monkeypatch.setenv("AUTO_RESEARCH_DATA_DIR", str(tmp_path))
+    from auto_research.sandbox import workspace
+
+    legacy = workspace.run_dir("old") / "monitor.jsonl"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("{}\n", encoding="utf-8")
+    assert workspace.resolve_record("old", "monitor.jsonl") == legacy
+    # A run with no legacy file resolves to the new location, which is where it will be written.
+    assert workspace.resolve_record("new", "monitor.jsonl") == (
+        workspace.ledger_dir("new") / "monitor.jsonl"
+    )
+
+
 # ── F10: reads follow the allow-list, writes follow the role's own work folder ──
 
 

@@ -17,8 +17,8 @@ io_search_max_iterations: 1  # Phase-2 stub — evaluate_search_results() return
 tool_retry_cap: 3            # legacy, unused (the ReAct loop self-corrects)
 
 # ── ReAct loop caps (per-role step-count backstops; a token/cost budget is the intended future primary guard) ──
-react_loop_cap: 100            # budget-consuming tool iterations per agent loop
-react_loop_absolute_cap: 200   # hard ceiling incl. budget-free iterations (lead's §5.5 plan_and_debate rounds count only here)
+react_loop_cap: 400            # budget-consuming tool iterations per agent loop
+react_loop_absolute_cap: 600   # hard ceiling incl. budget-free iterations (lead's §5.5 plan_and_debate rounds count only here)
 librarian_react_loop_cap: 1   # tighter — each librarian search re-sends the growing paper context
 status_react_loop_cap: 6      # /status reporter — tight; a human is waiting on a phone
 structured_retry_cap: 4       # off-schema retries for a structured _call before raising
@@ -65,7 +65,9 @@ agent_fs_allow:
                                                              # Xspec/… , so the jail needs both
   - /man1/CALDB                           # CALDB
   - /grad/fzhou/pfiles                    # local PFILES (HEASoft parameter files)
-  - /data/fzhou/ar_runtime/test_runtime   # runtime_dir
+  - /data/fzhou/ar_runtime/test_runtime/runs   # run WORKSPACES only — the ledger,
+                                              # backend.log and checkpoint live in
+                                              # ../ledgers/, deliberately out of reach
   - /tmp
 
 # ── OS-level filesystem jail (§12) ──

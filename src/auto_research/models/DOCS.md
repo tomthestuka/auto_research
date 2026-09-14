@@ -1120,3 +1120,29 @@ Compacted 2026-09-01: entries through 2026-08-28 folded into themed ranges (deta
   `tests/test_provider_retry.py` 16 → 23, every string taken from a vendor page or a real
   failure; both traps verified against their own mutation.
 
+- 2026-09-14 (second) — **The emit-tool branch now reports what the vendor actually sent.** A
+  live reviewer (`qwen3.8-max`) died four times on `2 validation errors for ReviewVerdict …
+  input_value={}` and killed the run. The cause could not be established, and the reason is that
+  `_responses.py` swallowed a `json.loads` failure into `args = {}`: a malformed-arguments emit
+  call and an empty one were the same value by the time anything could look, the raw string was
+  dropped, and unlike the native `text.format` branch this one read neither `status` nor
+  `incomplete_details`.
+  A 12-draw probe on a reconstruction faithful to **0.29%** of the real request (107,308 vs
+  107,622 input tokens; the one ledger-trimmed tool result recovered byte-exact) **could not
+  reproduce it**, and the archive **refuted the size hypothesis outright** — the same seat,
+  model and schema succeeded at 186,025 and 433,079 input tokens, against 13 successes and 2
+  failures overall. Moderation was eliminated too: that block is an unbilled 400 in 4-6 s, while
+  these were billed and took ~100 s. What is known is that 4,487-4,795 non-reasoning output
+  tokens were billed on every failure — the cost of a *full* arguments payload, priced at
+  4,277-5,784 across the probe's passes — so the content existed and did not arrive as
+  parseable arguments.
+  New fourth case: an emit call that carries nothing usable raises a `ValueError` naming
+  `status`, `incomplete_details`, `raw_argument_chars`, the `json_fault` if any, and the raw
+  string capped at `_RAW_ARGUMENTS_CAP` (2000) with a count marker — the cap because that
+  string rides a ledger event replayed on every later turn. `ValueError`, not `RuntimeError`,
+  so the role layer's bounded structured retry still gets it: this adds diagnosis and changes no
+  control flow. The four shapes that were previously indistinguishable — truncated JSON, prose,
+  an empty string, a syntactically-valid empty object — are now separable in the message, each
+  pinned by a parametrised test and the branch mutation-verified.
+  `tests/test_responses_vendors.py` 106 → 112.
+
