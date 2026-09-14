@@ -1422,45 +1422,107 @@ def _cycle_instruction(cycle: LeadCycle, reports: Sequence[Any], rounds_left: in
 
 
 
-def _drop_coding_middle(messages: list, mark: int) -> list:
-    """Drop a finished coding session's transcript, keeping its outcome anchor (§ step 6).
+_CHAIN_DRIVING_TOOLS = frozenset({AUTHOR_CHAIN_TOOL, SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL})
 
-    The lead's context otherwise carries a whole ``drive_coder`` ⇄ coder transcript per authored
-    tool; in one live authoring phase the provider-native valve cleared ~86,000 tokens on every
-    turn. The cut is semantic rather than size-triggered:
 
-        [… author_chain filed]  [drive_coder ⇄ coder × N]  [submit_for_review + its result …]
-              kept (before mark)      DROPPED                        kept
+def _unanswered_call_ids(messages: list) -> list[str]:
+    """Ids of tool calls in ``messages`` that no turn answers.
 
-    Both survivors are turns the lead actually produced or actually received — its own brief,
-    and its own submit call whose result carries the real commit SHA, gate verdict and review
-    verdict. Nothing is synthesized in their place.
+    Every vendor enforces the same thing in its own vocabulary: a call replayed without its
+    result is a malformed request, not a stale detail. This is that rule written as a query, so
+    a conversation edit can be checked where it happens instead of being discovered as a 400 on
+    the next model call.
 
-    Three mechanical conditions, each from a rule already paid for: whole turns only (Anthropic
-    documents *echo the assistant message exactly as received*, so filtering inside a turn is
-    out); every ``tool_use`` leaves with its ``tool_result`` (a half-dropped pair is a 400); and
-    the anchor is real, not written by us. Safe for this role because all of the lead's tools are
-    resident, so no dropped turn can de-activate a discovered tool (§13 watch item (a)).
-
-    Returns ``messages`` unchanged when the span holds no submit at all (the lead gave up without
-    submitting): there is no anchor to keep, and dropping the span would leave the failure
-    unexplained.
+    A trailing assistant turn whose results the loop has not appended yet reports here too, and
+    legitimately so — the caller knows which turn that is; this function only states the fact.
     """
-    anchor = None
-    for index in range(len(messages) - 1, mark - 1, -1):
-        message = messages[index]
-        calls = getattr(message, "tool_calls", None) or ()
-        if any(c.name in (SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL) for c in calls):
-            anchor = index
-            break
-    if anchor is None:
-        return messages
-    tail = [messages[anchor]]
-    following = messages[anchor + 1] if anchor + 1 < len(messages) else None
-    if isinstance(following, ToolResultMessage):
-        tail.append(following)
-    return messages[:mark] + tail
+    answered = {
+        part.tool_call_id
+        for message in messages
+        if isinstance(message, ToolResultMessage)
+        for part in message.results
+    }
+    return [
+        call.id
+        for message in messages
+        for call in (getattr(message, "tool_calls", None) or ())
+        if call.id and call.id not in answered
+    ]
 
+
+def _render_span(span: list, *, per_message: int = 4000) -> str:
+    """The dropped coding span as plain text for the compactor to read.
+
+    Turns are labelled by who produced them, because the distinction is the substance: the
+    lead's steering and the coder's narration read very differently and the summary has to keep
+    them apart. Each turn is capped so one enormous tool result cannot crowd out the rest of a
+    session that the summary is supposed to cover end to end.
+    """
+    out: list[str] = []
+    for message in span:
+        if isinstance(message, ToolResultMessage):
+            for part in message.results:
+                label = f"result of {part.name}" + (" (error)" if part.is_error else "")
+                out.append(f"[{label}]\n{(part.content or '')[:per_message]}")
+            continue
+        calls = getattr(message, "tool_calls", None) or ()
+        text = (getattr(message, "content", "") or "")[:per_message]
+        if text:
+            out.append(f"[lead]\n{text}")
+        for call in calls:
+            args = json.dumps(dict(call.arguments or {}), default=str)[:per_message]
+            out.append(f"[lead calls {call.name}]\n{args}")
+    return "\n\n".join(out)
+
+
+def _compact_coding_span(messages: list, mark: int, summary: str) -> list:
+    """Replace a finished link's coding span with the outcome its own opening call returns.
+
+    A coding session is opened by a tool call — ``author_chain`` for the first link, the
+    ``submit_for_review`` that closed the previous one thereafter — and ``mark`` is where that
+    call's result lands. The whole span after it is the coder transcript, which the lead has no
+    further use for once the link is decided::
+
+        [… opening CALL]  [its ANSWER]  [drive/check/read × N]  [the CALL that closed the link]
+             kept           REWRITTEN            dropped                kept, result pending
+
+    The answer is rewritten rather than removed, which is what keeps the pair closed: the
+    opening call keeps an answer, and that answer now carries the outcome instead of a sentence
+    about a session that no longer exists. Only the parts belonging to a chain-driving tool are
+    rewritten, so a turn that batched ``author_chain`` with a file read keeps the read's result.
+
+    Nothing is synthesized as somebody else's words: a tool result is the harness's own to
+    write, and this is the harness reporting what its tool did.
+
+    Returns ``messages`` unchanged when there is nothing to compact — no answer has landed yet,
+    or the message at ``mark`` is not a chain-driving tool's result.
+    """
+    if mark <= 0 or mark >= len(messages):
+        return messages
+    answer = messages[mark]
+    if not isinstance(answer, ToolResultMessage):
+        return messages
+    if not any(part.name in _CHAIN_DRIVING_TOOLS for part in answer.results):
+        return messages
+    rebuilt = ToolResultMessage(
+        results=[
+            part.model_copy(update={"content": summary})
+            if part.name in _CHAIN_DRIVING_TOOLS
+            else part
+            for part in answer.results
+        ]
+    )
+    # The turn that triggered this close is still waiting for its own result, so it has to
+    # survive the cut — dropping it would strand the result the loop is about to append, which
+    # is the same malformed request one message later.
+    pending = set(_unanswered_call_ids(messages))
+    last = messages[-1]
+    tail = (
+        [last]
+        if pending and any(c.id in pending for c in (getattr(last, "tool_calls", None) or ()))
+        else []
+    )
+    return messages[:mark] + [rebuilt] + tail
 
 def _authoring_result(session: Any, spec: Any) -> MergeFlowResult:
     """The terminal ``MergeFlowResult`` for one authoring attempt, read off its session.
@@ -1587,10 +1649,19 @@ class _ChainDriver:
             "automatically — an honest failure is correct."
         )
 
-    async def _open(self, spec: Any) -> None:
+    async def _build_session(self, spec: Any) -> Any:
+        """Construct this link's authoring session.
+
+        **This is the seam a test replaces**, and its altitude is the point. Everything else in
+        `_open` — the mark, the provider swap, the background seed — is free bookkeeping that a
+        test must exercise rather than stand in for; only building, connecting and driving a
+        real coder costs money. A double installed one layer up (over `_open` itself) removes
+        the very bookkeeping under test, which is how a mark recorded one message too early
+        reached production with a green suite.
+        """
         from auto_research.sandbox.merge_flow import build_authoring_session
 
-        session = build_authoring_session(
+        return build_authoring_session(
             spec,
             lead=self.lead,
             toolkit_root=self.toolkit_root,
@@ -1602,12 +1673,20 @@ class _ChainDriver:
             direct_branch=self.direct_branch,
             monitor=self.lead.monitor,
         )
+
+    async def _open(self, spec: Any) -> None:
+        session = await self._build_session(spec)
         await session.connect()
         if self.lead.run_control is not None:
             self.lead.run_control.authoring_session = session
         self.provider.authoring_session = session
         self.session, self.spec = session, spec
         self.cycle.session_open = True
+        # Where this link's OPENING CALL will be answered. The loop appends the assistant
+        # turn, runs the tools (we are inside one of them now), then appends one results turn —
+        # so `len(messages)` is the index that results turn takes. `_compact_coding_span`
+        # rewrites the answer there rather than cutting from it, which is what keeps the
+        # opening call paired; a cut starting here orphaned it and 400'd the next call.
         self.mark = len(self.messages)
         # The brief goes to the coder in the BACKGROUND, so filing `author_chain` returns at once
         # and the lead keeps its turn — which is what §9.3 promises and what this line used to
@@ -1624,7 +1703,7 @@ class _ChainDriver:
             await session.drive(session.initial_message)
 
     async def _close_current(self) -> None:
-        """Record the finished link's result, drop its coding middle, release the session."""
+        """Record the finished link's result, compact its coding span, release the session."""
         if self.session is None:
             return
         session, spec = self.session, self.spec
@@ -1634,9 +1713,23 @@ class _ChainDriver:
         self.outcome.authored.append(result)
         if result.status == "committed":
             self.outcome.committed += 1
-            # Only a committed link's transcript goes (B6): a rejection or a spent budget has to
-            # stay legible, since it is what the lead's next brief has to be written against.
-            self.messages[:] = _drop_coding_middle(self.messages, self.mark)
+        # Both arms compact. A rejection used to be kept whole on the grounds that it is what
+        # the next brief has to be written against (B6) — true, and it is the summary's job to
+        # carry it, which is why the failure wording ends by handing the choice back to the
+        # lead. The raw transcript stays in the run ledger for a human.
+        span = self.messages[self.mark + 1:]
+        summary = await self._outcome_for(spec, result, span, session)
+        self.messages[:] = _compact_coding_span(self.messages, self.mark, summary)
+        await self.lead._record(
+            "analyst.tool.compacted", level=6,
+            summary=f"Coding span compacted: {spec.proposed_tool_name}",
+            data={
+                "tool": spec.proposed_tool_name,
+                "status": result.status,
+                "turns_dropped": len(span),
+                "outcome": summary,
+            },
+        )
         await self.lead._record(
             "analyst.tool.authored", level=5,
             summary=f"Tool authoring {result.status}: {spec.proposed_tool_name}",
@@ -1649,6 +1742,72 @@ class _ChainDriver:
         ):
             self.lead.run_control.authoring_session = None
         await session.aclose()
+
+    async def _outcome_for(self, spec: Any, result: Any, span: list, session: Any) -> str:
+        """What the opening call answers with once its link is decided.
+
+        Two halves, and the split is the whole safety argument. The **facts** — outcome, commit
+        identifier, submissions spent, credits left — are read off the session and the result
+        and written here, in Python, because this text is the lead's only view of the link and
+        its next brief is written against it. The **narrative** is a summary of the coding span
+        by a cheap model, which can therefore be thin or wrong without putting a false commit or
+        a false verdict in front of the lead.
+        """
+        name = spec.proposed_tool_name
+        narrative = await self._narrative_for(span)
+        used, cap = self._submissions_spent(session)
+        spent = f" Review submissions used: {used} of {cap}." if cap else ""
+        credits = f" Author credits left: {self.outcome.author_budget}."
+        if result.status == "committed":
+            sha = (result.commit_sha or "")[:10]
+            return (
+                f"You dispatched {name}. {narrative} COMMITTED {sha} — the gate passed and the "
+                "independent reviewer approved, so the tool is on the authoring branch and "
+                f"becomes callable once the workers rerun.{spent}{credits}"
+            ).replace("  ", " ")
+        reason = (result.reason or "no mergeable tool was produced").rstrip(".")
+        return (
+            f"You dispatched {name}. {narrative} NOT MERGEABLE: {reason}.{spent}{credits} With "
+            "demonstrated failure modes in mind, you may choose to either proceed without this "
+            "tool, or re-investigate, re-plan and retry with caution."
+        ).replace("  ", " ")
+
+    @staticmethod
+    def _submissions_spent(session: Any) -> tuple[int, int]:
+        """Submissions used and the cap, read off the session this link ran on."""
+        return (
+            int(getattr(session, "submits_used", 0) or 0),
+            int(getattr(session, "submit_cap", 0) or 0),
+        )
+
+    async def _narrative_for(self, span: list) -> str:
+        """One paragraph on the coding span, from the `compactor` role; "" if it cannot be had.
+
+        A compaction that fails leaves the facts standing alone rather than leaving the opening
+        call unanswered — an empty narrative costs the lead detail, an absent answer costs the
+        run (the malformed-request class this whole cut is shaped around).
+        """
+        rendered = _render_span(span)
+        if not rendered.strip():
+            return ""
+        try:
+            from auto_research.models import resolve
+
+            handle = resolve("compactor").handles[0]
+            response = await handle.call(
+                [
+                    ModelMessage(role="system", content=load_prompt("compactor")),
+                    ModelMessage(role="user", content=rendered),
+                ]
+            )
+            return " ".join((response.content or "").split())
+        except Exception as exc:  # noqa: BLE001 — a thin summary beats a dead run
+            await self.lead._record(
+                "analyst.tool.compactor_failed", level=3,
+                summary="Compacting the coding span failed; reporting the facts alone",
+                data={"error": repr(exc)},
+            )
+            return ""
 
     async def close(self) -> None:
         """Release whatever is still open when the cycle ends, however it ended."""

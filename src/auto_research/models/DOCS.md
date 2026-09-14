@@ -1077,3 +1077,46 @@ Compacted 2026-09-01: entries through 2026-08-28 folded into themed ranges (deta
   compatibility table (read 2026-09-11) lists every built-in type as *Ignored*. Moot either way —
   web search reaches every role as our own Tavily **function** tool — but the comment read as
   evidence of a capability the vendor disclaims.
+
+- 2026-09-13 — **Alibaba's output-arm content refusal is retried, on our own measurement and
+  against the vendor's documentation.** Slot 6 of the demonstration batch died at $22.83 after
+  104 minutes, with 12 of 14 quantities already measured, on `400 DataInspectionFailed / "Output
+  data may contain inappropriate content"` from a `qwen3.7-plus` worker — one HTTP attempt, no
+  retry, and the exception killed the whole graph.
+  **Measured before anything was decided** (100 live calls, $0.67, our own key and a payload
+  reconstructed from the run's own ledger to 119,826 input tokens, which reproduced the
+  production 400 on the first attempt): the block is **stochastic at 42%, 17 of 40 draws on
+  byte-identical input**, output arm on all 40 blocks, runs test consistent with independent
+  draws. The input arm was deterministic, 4 of 4. So a resend is a fresh draw — the block
+  depends on the *generation*, which differs per sample.
+  **Every external source says the opposite**, and the entry says so in those words: Alibaba
+  files the code at HTTP 400 with the remedy *"Modify the input content and retry"*, an action
+  rather than a wait; its own SDK's retry set is 503/504 only; and `QwenLM/qwen-code`,
+  `QwenLM/Qwen-Agent`, `dataelement/bisheng` and `modelscope/ms-agent` all classify it terminal —
+  two of those being Alibaba's own. One personal repo retries it, on an unmeasured premise.
+  The rule is therefore labelled in code as **our live measurement, uncited by the vendor**.
+  **Two traps, both mutation-pinned.** Alibaba publishes THREE messages under one code and the
+  arm lives only in the text, so (a) a code-set entry short-circuits before the markers and would
+  retry the **input** arm, and (b) the arm-ambiguous *"Input or output data…"* string CONTAINS
+  the output-arm sentence as a substring, so a plain marker matches it — as does the separate
+  `CustomRoleBlocked` code, whose documented message shares that wording. `_TRANSIENT_BODY_OVERRIDES`
+  gained a fourth field, **excluded markers**, checked before the code short-circuit so an
+  excluded verdict cannot be rescued by any other rule in the entry; an ambiguous verdict is
+  treated as the arm we do not retry. Dashscope only: the rule is one vendor's measured
+  behaviour, not a shared truth about moderation, and it never rotates or retires a key because
+  Green Net is account-independent.
+  **Stated limits.** The retry rides the ordinary transient path (human ruling: reuse the
+  machinery we have), so it pays that path's exponential cooldown — a resample that would clear
+  instantly waits ~60 s, which is cheap against losing a run but is dead wall-clock. A blocked
+  call returns **no usage object**, so what a retry bills is unmeasurable from the response and
+  undocumented by the vendor. And the retry lowers frequency without reaching zero, so the
+  containment of a worker's provider exception ([F15]) remains the primary fix and is unaffected.
+  **Separately measured and NOT acted on:** the trigger is the lead's own `what_to_probe` text,
+  handed to every worker verbatim — 0 of 24 draws blocked without it against 17 of 40 with it
+  (Fisher p = 0.000079), with request size excluded because stripping 46% of the payload *raises*
+  the rate. That text is model-generated per round, so there is no fixed string to edit, and
+  removing the field changes what the model is asked to do, so the experiment does not isolate a
+  phrase. Recorded in the handoff rather than fixed.
+  `tests/test_provider_retry.py` 16 → 23, every string taken from a vendor page or a real
+  failure; both traps verified against their own mutation.
+

@@ -219,18 +219,42 @@ def is_key_scoped_provider_error(exc: BaseException, provider: str) -> bool:
 #: permanent malformed-request error. Only the message separates them, which is why the marker
 #: list is matched as **vocabulary, never as a bare three-digit substring** — real scientific
 #: output is full of those (`0.36692140104299825` contains "429").
-_TRANSIENT_BODY_OVERRIDES: dict[str, tuple[frozenset[int], frozenset[str], tuple[str, ...]]] = {
+#:
+#: **The Alibaba content-moderation entry is OUR OWN LIVE MEASUREMENT, and the vendor documents
+#: the opposite.** Every other entry in this table cites a vendor page saying the condition is
+#: transient; this one does not, and the distinction must survive any later edit. Alibaba files
+#: `DataInspectionFailed` at HTTP 400 with the remedy *"Modify the input content and retry"* — an
+#: action, not a wait — its own SDK never retries it, and `QwenLM/qwen-code`, `QwenLM/Qwen-Agent`,
+#: `dataelement/bisheng` and `modelscope/ms-agent` all classify it terminal.
+#: We retry it anyway because we measured it, on our own key and our own payload, 2026-09-13:
+#: **17 of 40 draws blocked on byte-identical input (42%), output arm on all 40 blocks**, runs
+#: test consistent with independent draws. A block depends on the *generation*, which differs per
+#: sample, so a resend is a fresh draw — which is exactly what "modify the input and retry" does
+#: not describe and what the vendor never claims.
+#: The **input** arm is a different thing and is never retried: measured deterministic, 4 of 4.
+#: https://www.alibabacloud.com/help/en/model-studio/error-code
+_TRANSIENT_BODY_OVERRIDES: dict[
+    str, tuple[frozenset[int], frozenset[str], tuple[str, ...], tuple[str, ...]]
+] = {
     "dashscope": (
         frozenset({400}),
         frozenset({"serviceunavailable", "modelunavailable"}),
         ("throttl", "system capacity", "try again later", "no capacity",
-         "<500>", "<502>", "<503>", "<504>"),
+         "<500>", "<502>", "<503>", "<504>",
+         # Output-arm moderation only — see the note above. Matched as the whole documented
+         # sentence rather than as "output data", which appears in prose no classifier wrote.
+         "output data may contain inappropriate content"),
+        # NEVER transient, even though the marker above is a substring of the first one. Alibaba
+        # publishes THREE messages under this one code and the arm lives only in the text, so an
+        # arm-ambiguous verdict is treated as the arm we do not retry. The second is the separate
+        # `CustomRoleBlocked` code, whose documented message ends "with custom rule".
+        ("input or output data may contain inappropriate content",),
     ),
     # DeepSeek reports an overloaded inference cluster as the finish reason
     # `insufficient_system_resource` rather than as an HTTP error; when that surfaces as an
     # exception message it is the same documented-transient condition.
     # https://api-docs.deepseek.com/api/create-chat-completion/
-    "deepseek": (frozenset({400}), frozenset(), ("insufficient_system_resource",)),
+    "deepseek": (frozenset({400}), frozenset(), ("insufficient_system_resource",), ()),
 }
 
 
@@ -239,15 +263,20 @@ def _transient_by_body(provider: str, exc: BaseException) -> bool:
     rule = _TRANSIENT_BODY_OVERRIDES.get((provider or "").lower())
     if rule is None:
         return False
-    statuses, codes, markers = rule
+    statuses, codes, markers, excluded = rule
     status = getattr(exc, "status_code", None)
     if not isinstance(status, int) or status not in statuses:
+        return False
+    text = str(exc).lower()
+    # Checked FIRST, and before the code short-circuit, so an excluded verdict cannot be rescued
+    # by any other rule in this entry. The exclusions exist because one vendor message is a
+    # substring of another, which no amount of marker ordering fixes.
+    if any(bad in text for bad in excluded):
         return False
     if _error_code(exc).strip().lower().replace("_", "").replace(".", "") in {
         c.replace("_", "").replace(".", "") for c in codes
     } and codes:
         return True
-    text = str(exc).lower()
     return any(marker in text for marker in markers)
 
 

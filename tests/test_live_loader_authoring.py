@@ -443,6 +443,8 @@ _UNATTENDED = (
 #: Which author harness this run measures. Absent, the configured coder is used unchanged — still
 #: through the pointer, so the written `models.yaml` records the seat either way.
 CODER_HARNESS_ENV = "AUTO_RESEARCH_CODER_HARNESS"
+#: Which lead this run measures, as `provider:model`. Absent, the configured lead is used.
+LEAD_SEAT_ENV = "AUTO_RESEARCH_LEAD_SEAT"
 
 #: Authoring credits for the cycle. Two links plus one, so a rejected link can be re-attempted and
 #: F9's continue-the-chain behaviour is reachable rather than cut off by the budget.
@@ -514,6 +516,27 @@ def _coder_seat() -> SeatOverride:
         base_url=configured.get("base_url"),
         key_env=configured.get("key_env"),
     )
+
+
+def _lead_seat() -> SeatOverride | None:
+    """The lead seat to write into the faked configuration, or None to leave it configured.
+
+    **Why this exists.** This is the only test that drives a real authoring chain, and it seated
+    only the coder — so its lead was always the configured `claude-opus-5`, on Anthropic. The
+    contrast arm of the science sweep runs an OpenAI lead, and the one defect that arm hit lived
+    in the lead's own conversation editing, on the dialect this test never exercised. A seat
+    this test cannot vary is a seat this test cannot measure.
+
+    ``AUTO_RESEARCH_LEAD_SEAT=openai:gpt-5.6-terra`` runs the sweep's contrast lead; the value is
+    the same ``provider:model`` grammar `--seats` takes, so one spelling covers both.
+    """
+    spec = os.getenv(LEAD_SEAT_ENV, "").strip()
+    if not spec:
+        return None
+    if ":" not in spec:
+        raise ValueError(f"{LEAD_SEAT_ENV} takes 'provider:model', got {spec!r}")
+    provider, model = spec.split(":", 1)
+    return seat(provider.strip(), model.strip())
 
 
 def _worker_tool_request() -> AnalystToolRequest:
@@ -674,6 +697,11 @@ def test_lead_cycle_authors_a_chain_end_to_end(tmp_path):
                 "coder": yaml.safe_load(
                     (config_dir / "models.yaml").read_text()
                 )["roles"]["coder"]["members"][0],
+                # The lead is read back out of the written file for the same reason the coder
+                # is: a run states the seat it resolved, not the seat it meant to.
+                "lead": yaml.safe_load(
+                    (config_dir / "models.yaml").read_text()
+                )["roles"]["analyst_lead"]["members"][0],
             },
         )
         outcome = await lead.run_cycle(
@@ -709,7 +737,11 @@ def test_lead_cycle_authors_a_chain_end_to_end(tmp_path):
 
     # Every live test resolves its models through the configuration pointer, so a seat is a written
     # file the registry reads rather than a handle built beside the pipeline.
-    with seated(coder=_coder_seat()) as config_dir:
+    overrides = {"coder": _coder_seat()}
+    lead_seat = _lead_seat()
+    if lead_seat is not None:
+        overrides["analyst_lead"] = lead_seat
+    with seated(overrides) as config_dir:
         outcome = asyncio.run(_drive(config_dir))
 
     # Bundle the authored branch next to the ledger before anything else. pytest keeps only the

@@ -296,9 +296,12 @@ Role wrappers:
   - **`turn_end` validates** through `lead_turn_problems` (above): no report, `rework` without a
     probe/rationale or with no rounds left, a conclusion with no findings, a cited figure whose
     file is missing, a coder still running. A refusal is a correction, not a finish.
-  - **The coding middle is dropped** per committed link (`_drop_coding_middle`): the brief and the
-    `submit_for_review` call with its real result survive; the `drive_coder` transcript goes. A
-    rejection or a spent budget stays legible — it is what the next brief must be written against.
+  - **The coding span is compacted** per link (`_compact_coding_span`): the call that opened the
+    session keeps its answer, and that answer is rewritten to the link's outcome — code-owned
+    facts (status, commit sha, submissions spent, credits left) around a `compactor`-written
+    paragraph on the span. Both arms compact; the failure wording ends by handing the lead the
+    choice to proceed, re-plan or retry, which is how a rejection stays actionable without
+    keeping its transcript. Rewriting rather than cutting is what keeps the opening call paired.
   - **Figures.** Accumulates each worker's cited figures into a per-worker catalog source (keyed by
     `sources[i]`, append-only across rounds/iterations) and attaches them to the cycle's first
     call; the report is written through `edit_report` citing `{worker, index}`. The lead — not the
@@ -541,10 +544,12 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   tools on `cycle.authoring_enabled`, never on a live session, so swapping the session per chain
   link cannot shrink the declared set — the 2026-07-29 run-killer); and **caps stay in Python**
   (`rounds_left` is passed in and `request_another_round` is refused at zero with the cap named).
-  The **coding middle is dropped** at its own boundary (`_drop_coding_middle`): the filed brief and
-  the `submit_for_review` call with its real result survive, the `drive_coder` transcript goes,
-  whole turns only, nothing synthesized — safe here because `ReadOnlyToolProvider` sets
-  `defer_loading` on nothing, so no dropped turn can de-activate a discovered tool. A cycle with no
+  The **coding span is compacted** at its own boundary (`_compact_coding_span`): the call that
+  opened the session keeps its answer and that answer becomes the link's outcome, whole turns
+  only — safe here because `ReadOnlyToolProvider` sets `defer_loading` on nothing, so no dropped
+  turn can de-activate a discovered tool. A tool result is the harness's own to write, so this
+  synthesizes nobody's words; the facts in it are read off the session in Python and only the
+  narrative comes from a model. A cycle with no
   tool surface returns the failure rather than composing a stand-in ([F6]); a cycle that wrote a
   report but never filed it has that report used, because it is real evidence the lead produced.
   **The landmine was probed before the forms were written and was not there**
@@ -645,6 +650,8 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   **B6 — `_drop_coding_middle` fires on a COMMITTED link only.** A rejection or a spent CI budget
   is what the lead's next brief has to be written against, so dropping it would delete the reason
   the link died. Before this the drop ran for committed and failed links alike.
+  *(Superseded 2026-09-13: both arms compact, and the summary carries the reason — see that
+  day's changelog entry.)*
 
 - 2026-09-12 (third) — **`tests/test_live_form_shapes.py` is now `tests/test_live_lead_providers.py`**
   and covers three cells per vendor rather than one. The name went with the forms: it began as a
@@ -698,3 +705,56 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   `_coder_event` under the same A2 hold rule, injecting a `[coder asks]` user turn; the lead
   answers with `drive_coder`, which now steers a turn already in flight. `_ClarifyReply` deleted
   with it. See `sandbox/DOCS.md` for the channel as a whole.
+
+- 2026-09-13 — **The coding span is compacted into its opening call's answer, and the test seam
+  moved under the session.** A live run died at $13.26, after committing a tool, on
+  `400 No tool output found for function call call_AACT…`. `_ChainDriver._open` records the cut
+  position while the opening tool's handler is still running, so it named the index that tool's
+  *answer* was about to take; the old `_drop_coding_middle` cut **from** that index, keeping the
+  `author_chain` call and discarding its result. Every committed link stranded one call — the
+  first link's `author_chain`, thereafter the previous `submit_for_review` — and the run died on
+  the lead's next model call. Not OpenAI-specific: Anthropic rejects an unpaired `tool_use` too;
+  OpenAI was simply the seat the contrast arm's lead held. Introduced by the 2026-09-12 refactor,
+  which deleted the harness-voiced *"Coding session N of M is open"* user turn (the boundary the
+  mark used to be taken after) and folded its text into the tool result.
+  **The fix is the shape the human chose, and it subsumes the defect rather than patching it.**
+  `_compact_coding_span` rewrites the answer at the mark instead of cutting from it: the opening
+  call keeps an answer, and that answer becomes the link's outcome. Only parts belonging to a
+  chain-driving tool (`author_chain`/`submit_for_review`/`respond_to_review`) are rewritten, so a
+  turn that batched the brief with a file read keeps the read's own result; the trailing turn
+  whose result the loop has not appended yet survives the cut, because dropping it would strand
+  that result one message later — the mirror of the same defect.
+  New `compactor` role (`gpt_5_6_luna`, `prompts/compactor.md`, in `REQUIRED_ROLES`) writes the
+  narrative; the **facts are written in Python** — status, commit sha, submissions spent, credits
+  left — because that text is the lead's only view of the link and its next brief is written
+  against it, so a thin or wrong summary must not be able to put a false commit in front of it.
+  A compactor failure degrades to the facts alone (`analyst.tool.compactor_failed`) rather than
+  leaving the call unanswered. **Both arms compact now**, reversing B6: the failure wording ends
+  by handing the lead the three-way choice (proceed without the tool, re-investigate and re-plan,
+  or retry with caution), which is how a rejection stays actionable without its transcript; the
+  raw span stays in the ledger (`analyst.tool.compacted`, with `turns_dropped`).
+  **Why no test caught it, which is the reusable half.** `_coding_conversation()` hand-built a
+  `mark` production never produces — it placed the opening call's answer *before* the mark where
+  production places it *at* the mark — so `test_the_drop_leaves_no_tool_use_without_its_result`
+  passed against a retired shape. Worse, `_driver_with` replaced `_ChainDriver._open` outright,
+  and the fake never assigned `driver.mark`: it stayed `0` from `__init__`, so the buggy line was
+  executed by **no test at all**, and the fake `_close` re-implemented the cut it was meant to be
+  testing. The seam was one layer too high. `_build_session` is now the only method a double
+  replaces — building, connecting and driving a real coder is the only expensive part — so
+  `_open`, `advance`, the mark and the compaction all run as production runs them, and the
+  fixture is whatever the driver produced. New `_unanswered_call_ids` states the pairing rule as
+  a query so a conversation edit is checked where it happens rather than discovered as a 400.
+  Both new tests were mutation-verified against the shipped defect: restoring the old cut fails
+  with orphaned ids, and moving the mark one message fails four cells. `tests/chain_stub.py`
+  rewritten around a deliberately narrow `StubSession` — which immediately earned itself by
+  naming three session attributes a `Mock` would have auto-answered.
+  **Live-test coverage closed on the axis that mattered:** `test_lead_cycle_authors_a_chain_end_to_end`
+  is the only test that drives a real chain and it seated only the coder, so its lead was always
+  the configured Anthropic one while the defect lived on the Responses dialect. New
+  `AUTO_RESEARCH_LEAD_SEAT=provider:model` seats the lead through the same configuration pointer,
+  and the run records the lead it resolved out of the written file, as it already did the coder.
+  `tests/test_config_paths.py` now derives its role list from `REQUIRED_ROLES` instead of writing
+  it out — a hand-written list made a valid config fail the check that exists to catch an invalid
+  one, the same shape as the 2026-09-09 `_VALID_PROVIDERS` literal.
+  Suite 1499 → 1500 passed, 209 skipped, 0 failed.
+

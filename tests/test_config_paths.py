@@ -162,24 +162,29 @@ def test_the_analysis_stack_probe_reads_it(elsewhere):
 
 
 def test_the_model_registry_reads_it(elsewhere):
+    """The role list is DERIVED from `REQUIRED_ROLES`, never written out here.
+
+    A hand-written list makes a valid configuration fail the check that exists to catch an
+    invalid one: adding `compactor` to the required set broke this test while the config it
+    validates was correct (the same shape as the 2026-09-09 `_VALID_PROVIDERS` literal).
+    """
     from auto_research.models import registry
+    from auto_research.models.registry import REQUIRED_ROLES
+
+    def _member(role: str) -> str:
+        # The coder member names a harness as well as a model; every other role is a plain pair.
+        extra = ", harness: claude_sdk" if role == "coder" else ""
+        provider = "anthropic" if role == "coder" else "openai"
+        return (
+            f"  {role}: {{members: [{{name: n-{role}, provider: {provider}, "
+            f"model: m-{role}{extra}}}]}}"
+        )
 
     (elsewhere / "models.yaml").write_text(
-        textwrap.dedent(
-            """\
-            roles:
-              reviewer: {members: [{name: r, provider: openai, model: m-reviewer}]}
-              analyst_lead: {members: [{name: l, provider: openai, model: m-lead}]}
-              analyst_worker: {members: [{name: w, provider: openai, model: m-worker}]}
-              librarian_io: {members: [{name: i, provider: openai, model: m-io}]}
-              coder: {members: [{name: c, provider: anthropic, model: m-coder, harness: claude_sdk}]}
-              analyst_colead: {members: [{name: cl, provider: openai, model: m-colead}]}
-              status_monitor: {members: [{name: s, provider: openai, model: m-status}]}
-            """
-        ),
+        "roles:\n" + "\n".join(_member(r) for r in sorted(REQUIRED_ROLES)) + "\n",
         encoding="utf-8",
     )
-    assert registry.resolve("analyst_lead").handles[0].config.model == "m-lead"
+    assert registry.resolve("analyst_lead").handles[0].config.model == "m-analyst_lead"
 
 
 def test_the_observation_database_location_reads_it(elsewhere):

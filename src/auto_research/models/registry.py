@@ -24,6 +24,10 @@ REQUIRED_ROLES = frozenset(
         # live run: with no deterministic fallback left, a config missing this role must fail
         # at launch rather than at the moment someone reaches for it.
         "status_monitor",
+        # Summarises a finished authoring link for the lead. Required because a link's outcome
+        # is what the next brief is written against: a config without it would degrade every
+        # link to the deterministic facts alone, silently and for the whole run.
+        "compactor",
     }
 )
 

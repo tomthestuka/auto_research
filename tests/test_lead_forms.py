@@ -24,6 +24,7 @@ Their tests went with them; what they asserted is now asserted against the repor
 """
 
 import asyncio
+import itertools
 import types
 from pathlib import Path
 
@@ -47,7 +48,11 @@ from auto_research.agents.react import (
     edit_report_tool_def,
     lead_turn_problems,
 )
-from auto_research.agents.roles import AnalystLeadAgent, _drop_coding_middle
+from auto_research.agents.roles import (
+    AnalystLeadAgent,
+    _compact_coding_span,
+    _unanswered_call_ids,
+)
 from auto_research.models import (
     ModelMessage,
     ModelResponse,
@@ -270,89 +275,161 @@ def _drive(cycle, script, **kwargs):
     return lead, model, messages
 
 
+_ids = itertools.count()
+
+
 def _assistant(*names):
-    return ModelResponse(
-        tool_calls=[ToolCall(id=f"t{i}", name=n, arguments={}) for i, n in enumerate(names)]
-    )
+    """One assistant turn with uniquely-identified calls.
+
+    Ids are unique across the whole module because the pairing invariant these tests exist to
+    check is stated over ids: a fixture that reuses ``t0`` on every turn makes an orphaned call
+    look answered by an unrelated turn, which is precisely the defect being guarded.
+    """
+    calls = [ToolCall(id=f"t{next(_ids)}", name=n, arguments={}) for n in names]
+    return ModelResponse(tool_calls=calls)
 
 
-def _results(*names):
+def _results_for(response, content="ok"):
+    """The results turn that answers `response`, correlated by the ids it actually carries."""
     return ToolResultMessage(
         results=[
-            ToolResultPart(tool_call_id=f"t{i}", name=n, content="ok") for i, n in enumerate(names)
+            ToolResultPart(tool_call_id=c.id, name=c.name, content=content)
+            for c in response.tool_calls
         ]
     )
 
 
-def _coding_conversation():
-    """[seed, author_chain pair] then a coding span ending in submit_for_review."""
-    before = [
-        ModelMessage(role="user", content="seed"),
-        _assistant(AUTHOR_CHAIN_TOOL),
-        _results(AUTHOR_CHAIN_TOOL),
-        ModelMessage(role="user", content="session 1 of 1 is open"),
-    ]
-    span = [
-        _assistant(DRIVE_CODER_TOOL),
-        _results(DRIVE_CODER_TOOL),
-        _assistant("read_file"),
-        _results("read_file"),
-        _assistant(SUBMIT_TOOL),
-        _results(SUBMIT_TOOL),
-    ]
-    return before + span, len(before)
+def _results(*names):
+    """Legacy helper: a results turn whose ids nothing answers. Prefer `_results_for`."""
+    return ToolResultMessage(
+        results=[
+            ToolResultPart(tool_call_id=f"t{next(_ids)}", name=n, content="ok") for n in names
+        ]
+    )
 
 
-def test_the_coding_middle_goes_and_both_anchors_survive():
-    messages, mark = _coding_conversation()
-    kept = _drop_coding_middle(messages, mark)
-    assert kept[:mark] == messages[:mark]  # everything before the session is untouched
-    names = [c.name for m in kept for c in (getattr(m, "tool_calls", None) or ())]
-    assert AUTHOR_CHAIN_TOOL in names  # the lead's own filed brief
-    assert SUBMIT_TOOL in names  # its own submit, whose result carries the real SHA
-    assert DRIVE_CODER_TOOL not in names and "read_file" not in names  # the transcript is gone
+# ── the compaction, over conversations the real driver built ──────────────────
+#
+# These no longer hand-build a message list. The fixture that did encoded a `mark` production
+# never produces — it placed the opening call's ANSWER before the mark, where production places
+# it AT the mark — so the pairing assertion below passed against a shape the run path had not
+# had since the driver was rewritten, and a committed link killed a live run at $13.26.
 
 
-def test_the_drop_leaves_no_tool_use_without_its_result():
-    """A half-dropped pair is a 400 — whole turns only, contiguous span."""
-    messages, mark = _coding_conversation()
-    kept = _drop_coding_middle(messages, mark)
-    for index, message in enumerate(kept):
-        if getattr(message, "tool_calls", None):
-            following = kept[index + 1] if index + 1 < len(kept) else None
-            assert isinstance(following, ToolResultMessage), f"turn {index} lost its results"
+def _conversation_through_one_link(monkeypatch, status="committed"):
+    """Drive one link through the REAL driver and return (driver, messages).
+
+    Every append here is one the ReAct loop makes, in the loop's order: the assistant turn, then
+    the tools run (which is when `advance` is called, and when the mark is recorded), then the
+    one results turn. Getting that order right is the entire point — the defect lived in the gap
+    between the call and its answer.
+    """
+    from tests.chain_stub import stub_compactor
+
+    driver, messages, aio = _driver_with(monkeypatch, [status])
+    stub_compactor(monkeypatch)
+
+    opening = _assistant(AUTHOR_CHAIN_TOOL)
+    messages.append(opening)
+    aio.run(driver.advance())                      # the handler: opens link 1, records the mark
+    messages.append(_results_for(opening))         # the loop answers the opening call
+
+    coding = _assistant(DRIVE_CODER_TOOL)
+    messages.extend([coding, _results_for(coding)])
+    reading = _assistant("read_file")
+    messages.extend([reading, _results_for(reading)])
+
+    closing = _assistant(SUBMIT_TOOL)
+    messages.append(closing)
+    aio.run(driver.advance())                      # the handler: closes link 1, compacts
+    messages.append(_results_for(closing))         # the loop answers the closing call
+    return driver, messages
 
 
-def test_the_drop_synthesizes_no_assistant_turn():
-    """Every surviving turn is one the lead produced or received; nothing is written for it."""
-    messages, mark = _coding_conversation()
-    kept = _drop_coding_middle(messages, mark)
-    assert all(m in messages for m in kept)
+def test_every_call_keeps_an_answer_across_the_compaction(monkeypatch):
+    """THE invariant. A call replayed without its result is a malformed request at every vendor.
+
+    Written against the production ordering rather than a fixture, which is the only reason it
+    can fail: the shipped code passed the old fixture while orphaning `author_chain` in the run
+    path, and the live 400 named that call by id.
+    """
+    _, messages = _conversation_through_one_link(monkeypatch)
+    assert _unanswered_call_ids(messages) == [], (
+        "a tool call survived the compaction with no result — this is the 400 that killed "
+        "run 328347c4 after it had already committed a tool"
+    )
 
 
-def test_a_span_with_no_submit_is_left_whole():
-    """The lead gave up without submitting: there is no anchor, and dropping the span would
-    leave the failure unexplained."""
-    before = [ModelMessage(role="user", content="seed")]
-    messages = before + [_assistant(DRIVE_CODER_TOOL), _results(DRIVE_CODER_TOOL)]
-    assert _drop_coding_middle(messages, len(before)) == messages
+def test_the_coding_middle_goes_and_the_opening_call_carries_the_outcome(monkeypatch):
+    _, messages = _conversation_through_one_link(monkeypatch)
+    names = [c.name for m in messages for c in (getattr(m, "tool_calls", None) or ())]
+    assert AUTHOR_CHAIN_TOOL in names and SUBMIT_TOOL in names
+    assert DRIVE_CODER_TOOL not in names and "read_file" not in names
+    answer = next(
+        part
+        for m in messages
+        if isinstance(m, ToolResultMessage)
+        for part in m.results
+        if part.name == AUTHOR_CHAIN_TOOL
+    )
+    assert "COMMITTED" in answer.content, (
+        "the opening call's answer must carry the link's outcome — it is the only account of "
+        "the link the lead keeps"
+    )
 
 
-def test_respond_to_review_also_anchors_the_drop():
-    """A debate that persuaded the co-lead commits through respond_to_review, so that call and
-    its result are the outcome anchor."""
-    before = [ModelMessage(role="user", content="seed")]
-    messages = before + [
-        _assistant(SUBMIT_TOOL),
-        _results(SUBMIT_TOOL),
-        _assistant(DRIVE_CODER_TOOL),
-        _results(DRIVE_CODER_TOOL),
-        _assistant(RESPOND_TO_REVIEW_TOOL),
-        _results(RESPOND_TO_REVIEW_TOOL),
-    ]
-    kept = _drop_coding_middle(messages, len(before))
-    names = [c.name for m in kept for c in (getattr(m, "tool_calls", None) or ())]
-    assert names == [RESPOND_TO_REVIEW_TOOL]  # the LAST submit-class call is the anchor
+def test_a_failed_link_hands_the_choice_back(monkeypatch):
+    """B6's requirement, now met by the summary rather than by keeping the transcript: the lead
+    must be able to choose between proceeding, re-planning and retrying, from this text alone."""
+    _, messages = _conversation_through_one_link(monkeypatch, status="failed")
+    answer = next(
+        part
+        for m in messages
+        if isinstance(m, ToolResultMessage)
+        for part in m.results
+        if part.name == AUTHOR_CHAIN_TOOL
+    )
+    assert "NOT MERGEABLE" in answer.content
+    assert "proceed without this tool" in answer.content
+    assert "re-investigate" in answer.content
+
+
+def test_a_batched_turn_keeps_its_other_results(monkeypatch):
+    """A lead may file the brief in the same turn as an ordinary read. Only the chain-driving
+    part is rewritten; rewriting the whole turn would answer the read with the wrong thing."""
+    from tests.chain_stub import stub_compactor
+
+    driver, messages, aio = _driver_with(monkeypatch, ["committed"])
+    stub_compactor(monkeypatch)
+    opening = _assistant("read_file", AUTHOR_CHAIN_TOOL)
+    messages.append(opening)
+    aio.run(driver.advance())
+    messages.append(_results_for(opening, content="file contents"))
+    closing = _assistant(SUBMIT_TOOL)
+    messages.append(closing)
+    aio.run(driver.advance())
+    messages.append(_results_for(closing))
+
+    parts = {p.name: p.content for m in messages if isinstance(m, ToolResultMessage) for p in m.results}
+    assert parts["read_file"] == "file contents", "the batched read lost its own answer"
+    assert "COMMITTED" in parts[AUTHOR_CHAIN_TOOL]
+    assert _unanswered_call_ids(messages) == []
+
+
+def test_nothing_is_compacted_before_the_answer_lands():
+    """Called with no answer yet at the mark, the span is left exactly as it is — there is
+    nothing to rewrite, and inventing a turn to rewrite would synthesize one."""
+    opening = _assistant(AUTHOR_CHAIN_TOOL)
+    messages = [ModelMessage(role="user", content="seed"), opening]
+    assert _compact_coding_span(messages, 2, "outcome") == messages
+
+
+def test_a_span_whose_answer_is_not_chain_driving_is_left_whole():
+    """Defensive: if the message at the mark answers something else, the driver has lost track
+    of its own boundary and the safe move is to change nothing."""
+    opening = _assistant("read_file")
+    messages = [ModelMessage(role="user", content="seed"), opening, _results_for(opening)]
+    assert _compact_coding_span(messages, 2, "outcome") == messages
 
 
 # ── author_chain is a BRIEF, not a decision: it does not end anything ─────────
@@ -550,7 +627,7 @@ def _driver_with(monkeypatch, statuses):
 
     from auto_research.agents.react import LeadCycle, LeadCycleOutcome
     from auto_research.agents.roles import _ChainDriver
-    from auto_research.schemas import AuthoringDecision, MergeFlowResult
+    from auto_research.schemas import AuthoringDecision
 
     specs = [
         {**GOOD_LINK, "proposed_tool_name": f"tool_{i}"} for i in range(len(statuses))
@@ -578,53 +655,52 @@ def _driver_with(monkeypatch, statuses):
     )
     order = iter(statuses)
 
-    async def _open(spec):
-        driver.session = object()
-        driver.spec = spec
-        cycle.session_open = True
-        # The coding transcript this link produces, appended after the mark the driver recorded.
-        messages.extend([_assistant(DRIVE_CODER_TOOL), _results(DRIVE_CODER_TOOL)])
-        messages.extend([_assistant(SUBMIT_TOOL), _results(SUBMIT_TOOL)])
+    # The double sits at `_build_session` — the one method whose real body costs money. `_open`,
+    # `_close_current`, `advance`, the mark and the compaction all run as production runs them.
+    # Replacing `_open` itself (as this helper used to) removed the bookkeeping under test: the
+    # fake never assigned `driver.mark`, so it stayed 0 and every cut assertion was vacuous.
+    from tests.chain_stub import StubSession
 
-    async def _close():
-        if driver.session is None:
-            return
-        spec, driver.session, driver.spec = driver.spec, None, None
-        cycle.session_open = False
-        status = next(order)
-        outcome.authored.append(
-            MergeFlowResult(tool_spec_id=spec.id, status=status, reason="stub")
-        )
-        if status == "committed":
-            outcome.committed += 1
-            driver.messages[:] = _drop_coding_middle(driver.messages, driver.mark)
+    async def _build(self, spec):
+        return StubSession(spec, status=next(order), sha="0123456789ab")
 
-    driver._open = _open
-    driver._close_current = _close
+    monkeypatch.setattr(_ChainDriver, "_build_session", _build)
     return driver, messages, asyncio
 
 
-def test_a_committed_links_coding_middle_is_dropped(monkeypatch):
-    driver, messages, aio = _driver_with(monkeypatch, ["committed"])
-    aio.run(driver.advance())          # opens link 1, writing its transcript
-    aio.run(driver.advance())          # closes it (committed) → drop
-    names = [c.name for m in messages for c in (getattr(m, "tool_calls", None) or ())]
-    assert SUBMIT_TOOL in names, "the submit anchor must survive — it carries the real SHA"
-    assert DRIVE_CODER_TOOL not in names, "a committed link's transcript should be gone"
+def test_both_arms_compact_and_the_chain_still_advances(monkeypatch):
+    """A committed link and a failed one are both replaced by their outcome.
 
+    B6 used to keep a failed link's transcript whole, on the grounds that a rejection is what
+    the next brief has to be written against. That requirement did not go away — it moved into
+    the summary, which is why the failure wording ends by handing the choice back to the lead
+    (`test_a_failed_link_hands_the_choice_back`). Keeping the raw span was the expensive way of
+    meeting it, and it is the run ledger that keeps it now.
+    """
+    from tests.chain_stub import stub_compactor
 
-def test_a_rejected_links_coding_middle_stays_legible(monkeypatch):
-    """B6. A rejection or a spent budget is what the lead's NEXT brief has to be written against,
-    so dropping it would delete the reason the link died. Before this, the drop ran for committed
-    and failed links alike."""
-    driver, messages, aio = _driver_with(monkeypatch, ["failed"])
+    driver, messages, aio = _driver_with(monkeypatch, ["committed", "failed"])
+    stub_compactor(monkeypatch)
+
+    for expected in ("COMMITTED", "NOT MERGEABLE"):
+        opening = _assistant(AUTHOR_CHAIN_TOOL if expected == "COMMITTED" else SUBMIT_TOOL)
+        messages.append(opening)
+        aio.run(driver.advance())
+        messages.append(_results_for(opening))
+        coding = _assistant(DRIVE_CODER_TOOL)
+        messages.extend([coding, _results_for(coding)])
+
+    closing = _assistant(SUBMIT_TOOL)
+    messages.append(closing)
     aio.run(driver.advance())
-    aio.run(driver.advance())
-    names = [c.name for m in messages for c in (getattr(m, "tool_calls", None) or ())]
-    assert DRIVE_CODER_TOOL in names, (
-        "a failed link's transcript was dropped — the lead cannot write a better brief against a "
-        "reason it can no longer read"
+    messages.append(_results_for(closing))
+
+    assert [r.status for r in driver.outcome.authored] == ["committed", "failed"], (
+        "a failed link must not end the chain (F9)"
     )
+    names = [c.name for m in messages for c in (getattr(m, "tool_calls", None) or ())]
+    assert DRIVE_CODER_TOOL not in names, "both arms compact, so no coding turn survives"
+    assert _unanswered_call_ids(messages) == []
 
 
 def test_the_lead_is_actually_OFFERED_its_decision_fields(tmp_path):

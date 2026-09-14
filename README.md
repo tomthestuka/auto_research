@@ -426,8 +426,11 @@ provider-decorrelated. The `coder` member names **both a model and the author ha
 it** (`harness: claude_sdk | codex`): the shipped default is DeepSeek through the Codex
 app-server, and the Claude Agent SDK is the second harness; Codex also reaches Z.AI GLM and
 Alibaba Model Studio models through the endpoints those vendors document. Legal harness/provider pairings
-are checked at launch. There is no LLM librarian-searcher role; local
-retrieval is pure Python.
+are checked at launch. A light `compactor` role summarises a finished
+authoring link into the outcome sentence the lead reads in place of the coding transcript; the
+verifiable facts around that summary (commit sha, gate and review verdicts) are written by code,
+so a weak summariser cannot put a false commit in front of the lead. There is no LLM
+librarian-searcher role; local retrieval is pure Python.
 
 Current role/tool surfaces:
 

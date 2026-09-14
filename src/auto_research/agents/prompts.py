@@ -16,6 +16,7 @@ PromptRole = Literal[
     "analyst_colead",
     "coder",
     "status_monitor",
+    "compactor",
 ]
 
 PROMPT_FILENAMES: dict[PromptRole, str] = {
@@ -34,6 +35,9 @@ PROMPT_FILENAMES: dict[PromptRole, str] = {
     # (§4: runtime agents are configured only from `prompts/`), which also puts it under
     # `load_prompt`'s governance-reference check.
     "status_monitor": "status_monitor.md",
+    # Summarises one finished authoring link into the outcome sentence the lead reads in place
+    # of the coding transcript. A runtime LLM like any other, so its instructions live here.
+    "compactor": "compactor.md",
 }
 
 FORBIDDEN_RUNTIME_REFERENCES = ("CLAUDE.md", "DOCS.md", "AGENTS.md")

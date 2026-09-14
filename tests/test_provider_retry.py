@@ -218,6 +218,89 @@ def test_f7_the_same_error_stays_fatal_without_the_provider():
     assert not is_transient_provider_error(exc, "anthropic")
 
 
+# ── Alibaba content moderation: the output arm resamples, the input arm does not ──────────
+#
+# These pin a rule that is OUR live measurement and that the vendor documents the other way
+# (see the note on `_TRANSIENT_BODY_OVERRIDES`). Every string below is one Alibaba publishes or
+# one we captured from a real failure, because the arm lives only in the message text and a
+# hand-written approximation of it would pin nothing.
+
+#: The production error that killed slot 6 on 2026-09-13, verbatim from `result.json`.
+_SLOT6_MODERATION = (
+    "Error code: 400 - {'request_id': '4e45ea38-1936-901d-b265-790b00bf531e', "
+    "'code': 'DataInspectionFailed', 'message': 'Output data may contain inappropriate "
+    "content. For details, see: https://www.alibabacloud.com/help/en/model-studio/"
+    "error-code#inappropriate-content'}"
+)
+
+
+def test_the_output_arm_is_retried_on_the_real_production_error():
+    """Measured 17/40 blocked on byte-identical input, output arm on all 40 — a resend is a
+    fresh draw, so this one call is worth repeating even though the vendor says otherwise."""
+    exc = _BodyError(_SLOT6_MODERATION, status_code=400, code="DataInspectionFailed")
+    assert is_transient_provider_error(exc, "dashscope")
+
+
+def test_the_2026_09_11_spelling_of_the_output_arm_is_also_retried():
+    """The same block reached us once wrapped as `<400> InternalError.Algo.…`; the arm is the
+    message, not the envelope."""
+    exc = _BodyError(
+        "Error code: 400 - <400> InternalError.Algo.DataInspectionFailed: Output data may "
+        "contain inappropriate content.",
+        status_code=400, code="DataInspectionFailed",
+    )
+    assert is_transient_provider_error(exc, "dashscope")
+
+
+def test_the_input_arm_is_never_retried():
+    """Measured deterministic, 4 of 4: the input is what it is, and a resend cannot change it."""
+    exc = _BodyError(
+        "Error code: 400 - {'code': 'DataInspectionFailed', 'message': 'Input data may contain "
+        "inappropriate content.'}",
+        status_code=400, code="DataInspectionFailed",
+    )
+    assert not is_transient_provider_error(exc, "dashscope")
+
+
+def test_the_arm_ambiguous_message_is_never_retried():
+    """THE trap. Alibaba publishes three messages under one code, and the ambiguous one CONTAINS
+    the output-arm sentence as a substring — so a plain marker matches it and would retry a block
+    that may be an input block. The exclusion is what makes the marker arm-selective."""
+    exc = _BodyError(
+        "Error code: 400 - {'code': 'DataInspectionFailed', 'message': 'Input or output data "
+        "may contain inappropriate content.'}",
+        status_code=400, code="DataInspectionFailed",
+    )
+    assert not is_transient_provider_error(exc, "dashscope")
+
+
+def test_the_custom_rule_code_is_never_retried():
+    """A different documented code (`CustomRoleBlocked`) sharing the ambiguous wording."""
+    exc = _BodyError(
+        "Error code: 400 - {'code': 'CustomRoleBlocked', 'message': 'Input or output data may "
+        "contain inappropriate content with custom rule.'}",
+        status_code=400, code="CustomRoleBlocked",
+    )
+    assert not is_transient_provider_error(exc, "dashscope")
+
+
+def test_moderation_is_dashscope_only():
+    """The rule is one vendor's measured behaviour, not a shared truth about moderation."""
+    exc = _BodyError(_SLOT6_MODERATION, status_code=400, code="DataInspectionFailed")
+    for other in ("openai", "anthropic", "deepseek", "zai", "google", ""):
+        assert not is_transient_provider_error(exc, other), other
+
+
+def test_moderation_never_rotates_or_retires_a_key():
+    """Green Net is account-independent: another key sees the same classifier, so a rotation
+    would spend a key's cooldown on a verdict it cannot change."""
+    from auto_research.models.retry import is_exhausted_key_error, is_key_scoped_provider_error
+
+    exc = _BodyError(_SLOT6_MODERATION, status_code=400, code="DataInspectionFailed")
+    assert not is_key_scoped_provider_error(exc, "dashscope")
+    assert not is_exhausted_key_error(exc, "dashscope")
+
+
 def test_f7_a_genuine_dashscope_400_stays_fatal():
     """The same code family contains a permanent member — the vendor documents
     `400-ServiceUnavailableError` as a malformed request — so the message decides, and a real
