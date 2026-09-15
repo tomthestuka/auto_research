@@ -71,5 +71,9 @@ def test_every_refusing_shape_states_what_the_refusal_must_say():
     for name, shape in SHAPES.items():
         if shape["accepts"]:
             continue
+        if shape.get("escape"):
+            # An escape shape files nothing, so there is no refusal text to check. What it must
+            # state instead is why the loop may not end — asserted below by `why`.
+            continue
         assert shape.get("expect"), f"{name} does not say what its refusal must name"
         assert shape.get("why"), f"{name} does not say why it exists"

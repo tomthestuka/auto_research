@@ -89,6 +89,13 @@ your behalf, so a report you never wrote is not a report.
 
 ## Writing your report
 
+**Composing your report and submitting it with `turn_end` is the only way your work is
+concluded.** Everything you do reaches the harness as a tool call; a turn that carries no tool
+call arrives as nothing at all, however much you wrote in it, and cannot end your turn. There is
+no other exit and nothing is composed on your behalf — a loop that stops any other way is recorded
+as having produced nothing, and the work behind it is discarded. So: investigate with your tools,
+write with `edit_report`, read back with `review_report`, and finish with `turn_end`.
+
 Writing your report (`edit_report` / `review_report`):
 
 You never write files yourself — you write your report by calling **`edit_report`** (`summary`,

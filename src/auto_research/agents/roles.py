@@ -38,7 +38,7 @@ from auto_research.agents.react import (
     _written_report,
 )
 from auto_research.consensus import IODebateToConverge
-from auto_research.env import ledger_caps
+from auto_research.env import react_grace_rounds, ledger_caps
 from auto_research.monitor import RunMonitor
 from auto_research.models import (
     ModelGroupHandle,
@@ -316,6 +316,7 @@ class AgentRole:
         images: Sequence[FigureRef] = (),
         on_result=None,
         share_messages: bool = False,
+        require_terminal: bool = False,
         free_tools: frozenset[str] = frozenset(),
         absolute_cap: int | None = None,
         terminal_tools: frozenset[str] = frozenset(),
@@ -381,11 +382,45 @@ class AgentRole:
         budget_used = 0
         iteration = 0
         silent_turns = 0  # consecutive tool-call-free turns nudged through (F5b)
+        # Grace (§2b): budget exhaustion is not an exit. When the budget runs out and there IS a
+        # terminal tool to reach, the role is told so and gets a bounded window to compose and
+        # file. A loop with no terminal tool has no exit to force, so its exhaustion stays a
+        # legitimate end and this never opens.
+        grace_total = react_grace_rounds() if terminal_tools else 0
+        # The ceiling must leave room for the grace window, or the window is cut short and the
+        # loop returns unfiled with nothing recorded — which the live adversarial cell found on
+        # 2026-09-15 (grace opened, the ceiling ended the loop two rounds later, silently). Grace
+        # is a window the role is PROMISED; a bound that can retract it is not a window.
+        if grace_total:
+            absolute_ceiling = max(absolute_ceiling, budget_cap + grace_total + 1)
+        grace_used = 0
+        in_grace = False
         # Injected turns waiting for a legal boundary (A2). Anything the harness wants to say to
         # the model mid-loop lands here first — a human steer, and from B onward a background
         # coder event — rather than being appended wherever the code happened to be.
         injections: list[tuple[str, str]] = []  # (kind, text)
-        while budget_used < budget_cap and iteration < absolute_ceiling:
+        while iteration < absolute_ceiling:
+            if budget_used >= budget_cap and not in_grace:
+                if grace_total <= 0:
+                    break  # no terminal tool to reach, or grace disabled: the old behaviour
+                in_grace = True
+                await self._record(
+                    f"{self.role}.{action}.grace_opened", level=3,
+                    summary=f"{self.role} ran out of budget; {grace_total} grace round(s) to file",
+                    data={"cap": budget_cap, "grace": grace_total, "iteration": iteration},
+                )
+                injections.append(("grace", _GRACE_OPENED.format(grace=grace_total)))
+            if in_grace and grace_used >= grace_total:
+                await self._record(
+                    f"{self.role}.{action}.grace_exhausted", level=1,
+                    summary=f"{self.role} did not file within its grace window — fatal",
+                    data={"cap": budget_cap, "grace": grace_total, "iteration": iteration},
+                )
+                raise ReactBudgetExhausted(
+                    f"{self.role}.{action}: used its full budget ({budget_cap}) and all "
+                    f"{grace_total} grace rounds without filing a terminal form. Exhausting a "
+                    "cap is not an exit (CLAUDE.md §2b); nothing is composed on a role's behalf."
+                )
             # Cooperative HITL steer (§12): before the next model turn, collect any human steer
             # for this role. A no-op when run_control is unset. A /stop is NOT read here: it
             # cancels the run task outright (see ``RunControl.interrupt``), so there is nothing
@@ -461,6 +496,18 @@ class AgentRole:
                 # while these fields do not (Z.AI reports a dropped inference as `network_error`,
                 # which the ecosystem maps to `stop`).
                 nudge = _continuation_for(response, terminal_tools)
+                if (
+                    require_terminal
+                    and nudge is None
+                    and getattr(response, "stop", None) not in ("refusal", "transient")
+                ):
+                    # No escape path. For a role that writes its artifact inside the loop,
+                    # `turn_end` is the submission, so any other ending throws the work away —
+                    # and `_continuation_for`'s length test waved exactly that through (58
+                    # characters of text over 799 output tokens, the rest reasoning it cannot
+                    # see). A refusal or a transient still ends the loop: repeating the request
+                    # cannot fix either, and re-injecting into one would spin to the ceiling.
+                    nudge = _TERMINAL_REQUIRED_NUDGE
                 await self._record(
                     f"{self.role}.{action}.silent_turn", level=4,
                     summary=(
@@ -475,7 +522,9 @@ class AgentRole:
                         "continued": bool(nudge),
                     },
                 )
-                if nudge is None or silent_turns >= _SILENT_TURN_CAP:
+                if nudge is None or (
+                    silent_turns >= _SILENT_TURN_CAP and not require_terminal
+                ):
                     break
                 silent_turns += 1
                 # The whole turn is replayed, then the nudge as its own NEW user message — never
@@ -504,6 +553,13 @@ class AgentRole:
                     )
                     iteration += 1
                     continue
+                # A silent turn IS a model call, so it advances the absolute ceiling even though
+                # it consumes no tool budget (`consumed_budget` is False with no tool calls).
+                # This is what bounds `require_terminal`: with `_SILENT_TURN_CAP` no longer
+                # ending that loop, the ceiling is the only remaining bound, and without this
+                # line there is none — the first version of the no-escape rule span forever
+                # against a model that kept answering in prose (caught by its own test, 2026-09-15).
+                iteration += 1
                 messages.append(ModelMessage(role="user", content=nudge))
                 continue
             silent_turns = 0
@@ -591,6 +647,17 @@ class AgentRole:
                     filed_terminal = True
                 if self.run_control is not None:
                     batch_steers.extend(self.run_control.drain_steer(self.agent_key))
+            if in_grace:
+                # The countdown rides the tool results rather than a separate user turn: a turn
+                # appended after tool results is the one position a provider forbids when the
+                # answered turn left a server tool unresolved (A2), and a model reads what comes
+                # back from its own call.
+                remaining = max(0, grace_total - grace_used - 1)
+                note = _GRACE_REMAINING.format(remaining=remaining)
+                result_parts = [
+                    part.model_copy(update={"content": part.content + note})
+                    for part in result_parts
+                ]
             messages.append(ToolResultMessage(results=result_parts))
             # Queued rather than appended here (A2). This drain used to write a user turn
             # immediately after the tool results it had just built, which is the one position the
@@ -604,7 +671,10 @@ class AgentRole:
             # absolute backstop still bounds them) but not `budget_used`.
             consumed_budget = any(call.name not in free_tools for call in response.tool_calls)
             if consumed_budget:
-                budget_used += 1
+                if in_grace:
+                    grace_used += 1
+                else:
+                    budget_used += 1
             iteration += 1
             await self._record(
                 f"{self.role}.{action}.tools",
@@ -1283,6 +1353,12 @@ class AnalystWorkerAgent(AgentRole):
             # turn_end is free too, by ruling: the editing burns budget, so the loop is bounded
             # by the work rather than by the validation (F5c/D3).
             free_tools=frozenset({EDIT_REPORT_TOOL, REVIEW_REPORT_TOOL, TURN_END_TOOL}),
+            # No escape path (CLAUDE.md §2b). The worker writes its report INSIDE this loop and
+            # `turn_end` submits it, so the lead's rule is this loop's rule — and all three
+            # measured losses are the worker's, not the lead's: a completed 14-quantity
+            # reproduction, a comparison CSV and two more analyses, each discarded because a
+            # 58-to-66-character turn read as a finish.
+            require_terminal=True,
             terminal_tools=frozenset({TURN_END_TOOL}),
             absolute_cap=_react_loop_absolute_cap(),
         )
@@ -1373,6 +1449,12 @@ class AnalystWorkerAgent(AgentRole):
 # separately bounded by the session's own submit/debate caps.
 _CYCLE_FREE_TOOLS: frozenset[str] = frozenset(
     {
+        # Free on every graph loop, so the rule is one rule (human ruling 2026-09-15). The
+        # worker and reviewer already had it; the lead did not, which made its own tool
+        # description ("Free: calling it costs no tool budget") false for one caller of four and
+        # made a REFUSED turn_end cost a grace round — charging a role for trying to file inside
+        # the window it was given to file in. The absolute ceiling still bounds the retries.
+        TURN_END_TOOL,
         PLAN_AND_DEBATE_TOOL,
         EDIT_REPORT_TOOL,
         REVIEW_REPORT_TOOL,
@@ -1642,11 +1724,13 @@ class _ChainDriver:
         return (
             f"Coding session {self.index} of {len(specs)} is open on "
             f"'{spec.proposed_tool_name}'. The coder has your brief and is working on it now — "
-            "you keep your turn. Call check_coder for its narration when you want it; meanwhile "
-            "read the library it is extending, or plan the next link. Steer it with drive_coder "
-            "and finish it with submit_for_review, which waits for the coder to stop. If it "
-            "cannot be made mergeable, let its submissions run out and the next link opens "
-            "automatically — an honest failure is correct."
+            "you keep your turn, and it will take minutes rather than seconds. Spend them on "
+            "the library it is extending, the next link, or your report. check_coder reports its "
+            "narration once it stops and is rate-limited, so there is nothing to gain by asking "
+            "repeatedly. Steer it with drive_coder; submit_for_review is refused while it is "
+            "still working, so submit once it has stopped. If it cannot be made mergeable, let "
+            "its submissions run out and the next link opens automatically — an honest failure "
+            "is correct."
         )
 
     async def _build_session(self, spec: Any) -> Any:
@@ -2025,6 +2109,7 @@ class AnalystLeadAgent(AgentRole):
                 images=all_figures,
                 free_tools=_CYCLE_FREE_TOOLS,
                 absolute_cap=_react_loop_absolute_cap(),
+                require_terminal=True,  # no escape path: turn_end is the only exit
                 terminal_tools=frozenset({TURN_END_TOOL}),
             )
         finally:
@@ -2327,6 +2412,41 @@ def _dedup_results(results: Sequence[SearchResult]) -> list[SearchResult]:
 #: How many consecutive silent turns one loop will nudge through before giving up. Small on
 #: purpose: a continuation is for a model that stopped by accident, and a model that keeps
 #: returning nothing is not going to start. The loop's own budget still bounds everything else.
+#: What a role is told when it stops calling tools without having finished.
+#:
+#: States the channel rule first, because that is the actual mistake: a turn with no tool call
+#: reaches the harness as nothing at all, however much text it carried. Then the three routes
+#: out, so the model is told what to DO rather than only what it failed to do. Human wording,
+#: 2026-09-15, after a worker lost a completed 14-quantity reproduction to a 58-character turn:
+#: **the normal exit is the only allowed exit.**
+_TERMINAL_REQUIRED_NUDGE = (
+    "Your actions and conclusions only reach the harness as tool calls — a turn without one "
+    "arrives as nothing, whatever text it carried, and cannot end your turn. To investigate "
+    "further, call the tool you need. To record or revise your conclusions, call edit_report, "
+    "and review_report to read back what you have written. When your report is complete, end "
+    "your turn with turn_end: composing the report and submitting it that way is the only way "
+    "your work is concluded, and nothing is written on your behalf if you stop any other way."
+)
+
+class ReactBudgetExhausted(RuntimeError):
+    """A role used its whole budget AND its grace window without filing a terminal form.
+
+    Fatal by design (CLAUDE.md §2b): exhausting a cap is not an exit. The alternative — returning
+    an unfiled result — is indistinguishable in the ledger from a role that was never asked to
+    run, and it is how a completed 14-quantity reproduction was discarded on 2026-09-15.
+    """
+
+
+#: Said once, at budget exhaustion, before the grace window opens.
+_GRACE_OPENED = (
+    "You have run out of rounds. Summarise your work within {grace} rounds, using edit_report "
+    "and then turn_end. Report what you actually have, including what is incomplete — an honest "
+    "partial is a correct outcome. Work that is not filed this way is not recorded at all."
+)
+
+#: Appended to every tool result inside the grace window, so the countdown is unmissable.
+_GRACE_REMAINING = "\n\n[{remaining} grace round(s) left — file with edit_report then turn_end.]"
+
 _SILENT_TURN_CAP = 2
 
 

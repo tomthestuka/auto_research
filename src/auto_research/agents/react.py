@@ -22,7 +22,7 @@ from typing import Any, Protocol, get_args
 
 from pydantic import ValidationError
 
-from auto_research.env import tool_search_config
+from auto_research.env import check_coder_min_interval_s, tool_search_config
 from auto_research.observations import load_observations_config
 from auto_research.sandbox.fs_guard import GOVERNANCE_BASENAMES, PathGuard
 
@@ -1347,7 +1347,7 @@ async def execute_drive_coder(session: Any, arguments: Mapping[str, Any]) -> Too
         text=(
             "Sent to the coder; it is working now and you keep your turn. Do something useful "
             "while it does — read the diff it produced last time, plan the next link, or check "
-            "the data catalog — then call check_coder for its narration. Do not wait idly."
+            "the data catalog. Its narration is available through check_coder once it has stopped."
         )
     )
 
@@ -1358,8 +1358,10 @@ def check_coder_tool_def() -> dict:
         "name": CHECK_CODER_TOOL,
         "description": (
             "Check on the coder you sent an instruction to: whether it is still working, and its "
-            "narration once it has stopped. Free: calling it costs no tool budget. If it is still "
-            "working, do something else and check again rather than calling this repeatedly."
+            "narration once it has stopped. Costs a tool turn, and is rate-limited — one check "
+            "per interval, and an early call is refused with the time remaining. A coder works "
+            "for many minutes and its narration is worth reading once it has stopped, so spend "
+            "the wait on the library, the next link, or your report."
         ),
         "strict": True,
         "input_schema": _strictify({"type": "object", "properties": {}, "required": []}),
@@ -1367,8 +1369,40 @@ def check_coder_tool_def() -> dict:
 
 
 async def execute_check_coder(session: Any) -> ToolOutcome:
-    """Report the background drive's state, consuming a finished result exactly once."""
+    """Report the background drive's state, consuming a finished result exactly once.
+
+    **Rate-limited** (``check_coder_min_interval_s``). Measured across three runs of the same
+    seat: 116 / 138 / 122 polls per authoring window at a 3.6-5.6 s median cadence, 96.6 / 98.6 /
+    99.2 per cent of them returning a byte-identical "still working" string — $3.73 in one run,
+    59% of the lead's whole spend, to learn four things. The limit is enforced here rather than
+    asked for in prose because the prose was already there and was obeyed in the wrong direction:
+    the description called the call free (it is not), and three separate strings told the model
+    to check again.
+
+    A refusal carries the time remaining and is **not** an error the model should work around —
+    it is the answer. The state lives on the session, so a new coder session starts unthrottled:
+    the first check after a fresh drive is always allowed, which is the one poll that reliably
+    carries information.
+    """
+    import time
+
     status = getattr(session, "drive_status", None)
+    interval = check_coder_min_interval_s()
+    last = getattr(session, "_check_coder_last", None)
+    now = time.monotonic()
+    # Throttle only while there is nothing to report. A finished drive is consumed exactly once
+    # (`take_drive_result`), so refusing that call would strand the narration the lead is owed.
+    if status == "working" and interval > 0 and last is not None and now - last < interval:
+        remaining = int(interval - (now - last))
+        return ToolOutcome(
+            text=(
+                f"Checked {int(now - last)}s ago and the coder is still working; the next check "
+                f"is available in {remaining}s. It works for many minutes — read its last diff, "
+                "plan the next link, or draft your report in the meantime."
+            ),
+            is_error=True,
+        )
+    session._check_coder_last = now
     if status is None:
         return ToolOutcome(
             text="This coder session does not run in the background; drive_coder returns its "
@@ -1381,8 +1415,11 @@ async def execute_check_coder(session: Any) -> ToolOutcome:
         )
     if status == "working":
         return ToolOutcome(
-            text="The coder is still working. Do something else and check again — reading its "
-            "last diff or planning the next link is a better use of the wait than another check."
+            text=(
+                "The coder is still working — it will be some minutes. Read its last diff, plan "
+                "the next link, or draft your report; there is nothing further to learn here "
+                "until it stops."
+            )
         )
     text, error = session.take_drive_result()
     if error is not None:
@@ -1421,8 +1458,8 @@ async def execute_submit(session: Any, cycle: "LeadCycle | None" = None) -> Tool
         return ToolOutcome(
             text=(
                 "The coder is still working, and the gate reads the working tree — submitting now "
-                "would judge a half-written tool. Call check_coder to see where it got to, then "
-                "submit once it has stopped."
+                "would judge a half-written tool. Submit once it has stopped; check_coder reports "
+                "when that is, within its rate limit."
             ),
             is_error=True,
         )

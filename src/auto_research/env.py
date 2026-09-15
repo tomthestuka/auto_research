@@ -396,6 +396,50 @@ def ledger_caps() -> LedgerCaps:
     )
 
 
+def react_grace_rounds() -> int:
+    """Rounds a role gets to summarise after its ReAct budget runs out (``react_grace_rounds``).
+
+    CLAUDE.md §2b: exhausting a cap is not an exit. A loop that hits its budget is not finished —
+    it is out of time — so it is told so and given a bounded window to compose and file. Failing
+    to file inside that window is **fatal to the run**, because the alternative is the silent
+    unfiled return that discarded a completed 14-quantity reproduction (2026-09-15) and that the
+    ledger could not distinguish from a role never asked to run.
+
+    Applies only where a terminal tool exists. A loop with no terminal tool (the librarian, the
+    co-lead's review, ``drive_authoring``) has no exit to force and its exhaustion is a
+    legitimate end, so it keeps the old behaviour.
+    """
+    cfg = _orch_config()
+    try:
+        value = int(cfg.get("react_grace_rounds", 20))
+    except (TypeError, ValueError):
+        return 20
+    return value if value >= 0 else 20
+
+
+def check_coder_min_interval_s() -> int:
+    """Minimum seconds between the lead's ``check_coder`` polls (``check_coder_min_interval_s``).
+
+    Measured 2026-09-15 across three runs of the same seat: 116 / 138 / 122 polls per authoring
+    window at a 3.6-5.6 s median cadence, of which 96.6 / 98.6 / 99.2 per cent returned a
+    byte-identical "still working" string. In run ``328347c4`` that was **$3.73, 59% of the
+    lead's entire spend and 13% of the run**, to learn four things — one per coder turn-end. Each
+    poll re-reads a growing trajectory to emit one tool call, so the per-poll price rose 41% as
+    cache-read grew 96k to 180k tokens.
+
+    The behaviour was compliance rather than pathology: three separate model-visible strings told
+    the lead to check again, the tool's own description called the call budget-free when it was
+    not, and the loop has no wait primitive, so emitting a poll is the only way a model without a
+    clock can let time pass. The strings are fixed; this bounds what remains.
+    """
+    cfg = _orch_config()
+    try:
+        value = int(cfg.get("check_coder_min_interval_s", 900))
+    except (TypeError, ValueError):
+        return 900
+    return value if value >= 0 else 900
+
+
 def sandbox_call_timeout_default() -> int:
     """Global default sandbox per-tool-call timeout (seconds) from config/orchestration.yaml.
 

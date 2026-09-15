@@ -42,6 +42,35 @@ def ledger_dir(run_id: str) -> Path:
     return runtime_data_dir() / "ledgers" / run_id
 
 
+def record_beside(run_directory: Path, name: str) -> Path:
+    """Where a record file lives, derived from the RUN DIRECTORY rather than from config.
+
+    `run_dir` and `ledger_dir` are siblings under the runtime dir, so the record directory is
+    reachable from the workspace path alone — which is what callers holding a `Path` need.
+
+    **Use this, not :func:`resolve_record`, wherever the run directory was handed in.** A trial
+    runs with its own `AUTO_RESEARCH_CONFIG_DIR` pointing `runtime_data_dir()` at a private
+    tree, so a helper that consults ambient config resolves to the *launcher's* runtime dir
+    instead of the run's. That is not hypothetical: it failed the first slot-5 relaunch at spawn
+    (2026-09-14), trying to open `…/test_runtime/ledgers/<id>/backend.log` for a run living
+    under `…/ws/<id>/runtime/`. The code it replaced took the directory it was given and
+    appended a filename, depending on nothing.
+    """
+    legacy = run_directory / name
+    if legacy.exists():
+        return legacy
+    target = run_directory.parent.parent / "ledgers" / run_directory.name / name
+    # The directory is created HERE, by the function that decides the location, so a caller
+    # cannot get the path right and the directory wrong. Two separate launchers made exactly
+    # that mistake within an hour of the split (`graph.detached._default_launcher` and
+    # `science_bench.trial`, the second after the first had been fixed): opening the log for
+    # append is the first thing a spawned backend does, so a missing parent is an immediate
+    # exit 1 with no run and no ledger to explain it. A stray empty directory from a read is a
+    # far smaller cost than a launcher that silently cannot start.
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 def resolve_record(run_id: str, name: str) -> Path:
     """Where a record file lives, tolerating the pre-2026-09-14 layout.
 

@@ -22,6 +22,9 @@ react_loop_absolute_cap: 600   # hard ceiling incl. budget-free iterations (lead
 librarian_react_loop_cap: 1   # tighter — each librarian search re-sends the growing paper context
 status_react_loop_cap: 6      # /status reporter — tight; a human is waiting on a phone
 structured_retry_cap: 4       # off-schema retries for a structured _call before raising
+check_coder_min_interval_s: 900  # min seconds between the lead's check_coder polls
+react_grace_rounds: 20        # rounds a role gets to summarise after its budget runs out;
+                              # failing to file within them is fatal to the run (CLAUDE.md §2b)
 
 # ── Run ledger (monitor JSONL) field caps (characters; a longer field is trimmed with a
 #    "[+N chars]" marker so what was dropped stays countable) ──

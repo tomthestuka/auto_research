@@ -758,3 +758,126 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   one, the same shape as the 2026-09-09 `_VALID_PROVIDERS` literal.
   Suite 1499 → 1500 passed, 209 skipped, 0 failed.
 
+- 2026-09-15 — **`check_coder` is rate-limited, and the four strings that made the lead poll it
+  are corrected.** Measured across three runs of the same `gpt-5.6-terra` seat: **116 / 138 / 122**
+  polls per authoring window at a **3.6-5.6 s median cadence**, of which **96.6 / 98.6 / 99.2 per
+  cent** returned a byte-identical 159-character "still working" string. In run `328347c4` that
+  was **$3.73 — 59% of the lead's entire spend and 13% of the whole run** — to learn four things,
+  one per coder turn-end. Each poll re-read a growing trajectory to emit one tool call, so the
+  per-poll price rose **41%** as cache-read grew 96k → 180k tokens. A 60 s cadence would have
+  covered the same window in 17 polls for about $0.44.
+  **It was compliance, not pathology**, and that is why the fix is four strings plus a limit
+  rather than a prompt scolding. `check_coder`'s description claimed *"Free: calling it costs no
+  tool budget"* — **false**: the tool is absent from `_CYCLE_FREE_TOOLS`, so the model was told an
+  action was free and charged for it 116 times. Its "working" return said *"do something else and
+  check again"*; `drive_coder`'s acknowledgement ended *"Do not wait idly."*; and
+  `submit_for_review`'s refusal said *"Call check_coder to see where it got to."* Every string in
+  the channel pointed one way. The lead obeyed all of them and acted on **every** one of the four
+  real narrations within 7 seconds — it was never ignoring information, it had no way to know when
+  information would arrive.
+  **And there is no wait primitive.** The lead's tool set has no sleep and no timeout, and
+  `submit_for_review` is *refused* while the coder works rather than blocking — so a model without
+  a clock can only let time pass by emitting a turn, and the only turn that advances what it is
+  waiting on is a poll. `_ChainDriver.advance`'s own text had also promised that
+  `submit_for_review` *"waits for the coder to stop"*, which it does not; corrected with the rest.
+  `check_coder_min_interval_s` (config, default **900 s**) is enforced in `execute_check_coder`.
+  A refusal carries the remaining time and is the answer rather than an obstacle. Two states are
+  deliberately never throttled: a **finished** drive, because `take_drive_result` consumes the
+  narration exactly once and refusing it would strand what the lead is owed; and the **first**
+  check of a new session, which is the one poll that reliably carries information.
+  Six tests in `tests/test_lead_forms.py`, mutation-verified, including a set-assertion over the
+  model-visible strings so a newly added "check again" is caught, and one that pins the
+  description against `_CYCLE_FREE_TOOLS` so the free-budget claim cannot drift back.
+  `prompts/analyst_lead.md` gains a paragraph stating that a coder works in minutes, that a
+  throttle refusal is the answer, and that having nothing to do until it stops is the expected
+  state rather than a problem to solve. Suite 1519 → 1525.
+
+- 2026-09-15 (second) — **No escape path for the lead: `turn_end` is the only allowed exit.**
+  Human ruling, after a worker lost a completed 14-quantity reproduction — all fourteen
+  answer-key values with signed sigmas, plus the comparison CSV the task asked for — to a
+  **58-character** turn eighteen seconds later. `_react` gains `require_terminal`, passed only by
+  `AnalystLeadAgent.run_cycle`; when a turn carries no tool calls the loop re-injects
+  `_TERMINAL_REQUIRED_NUDGE` instead of ending, and `_SILENT_TURN_CAP` no longer bounds that
+  loop.
+  **Why the old rule was wrong, measured.** `_continuation_for`'s `len(content) > 40` test read
+  a turn as a genuine finish. Over 192 recorded silent turns it **never once discriminated a
+  value between 1 and 40** — the short side is exactly the 8 turns with `content_chars == 0`, so
+  `== 0` would have produced identical behaviour on every run ever recorded. It was picked, not
+  derived: born with `40` in `0a8beb0`, the sole occurrence in the repository, pinned by no test
+  (the existing ones use 73- and 75-character strings and pass at any threshold from 1 to 72).
+  And it reads `response.content`, which for the Responses vendors excludes reasoning items —
+  the lost turn was 58 characters of text over **799 output tokens**, so the docstring's premise
+  ("no tool call and nothing produced") was false in both directions.
+  **Scope is the lead only, deliberately.** Of eight `_react` callers, four declare a terminal
+  tool and only two write their artifact *inside* the loop: the lead and the worker. The
+  reviewer and co-lead compose theirs in a **separate call after** the loop — 163 of the 192
+  silent turns are theirs and cost nothing — so a blanket rule would nudge them to the cap on
+  every one. The worker has the lead's shape and all three measured losses; it is left for a
+  separate ruling rather than extended silently.
+  **Two deliberate exceptions.** A `refusal` needs a different member and a `transient` needs the
+  retry layer, so both still end the loop: re-injecting into either spins to the ceiling
+  achieving nothing.
+  **The first version of this rule was an infinite loop, and its own test caught it.** The nudge
+  path never advanced `iteration`, which was harmless while `_SILENT_TURN_CAP` bounded it at two
+  and unbounded the moment that bound was removed — a silent turn consumes no tool budget
+  (`consumed_budget` is `any([])`), so nothing else was counting. `iteration += 1` on that path
+  is what bounds `require_terminal`, at `react_loop_absolute_cap`.
+  Nine tests in `tests/test_lead_forms.py`, three of them **behavioural** — driving `_react`
+  with a model that answers in prose — after the first three passed against a mutation that
+  disabled the whole override, which is the same test-around-the-thing failure this week has
+  produced twice elsewhere. Both halves mutation-verified. Suite 1525 → 1534.
+
+- 2026-09-15 (third) — **The nudge states the channel rule, and the escape cells joined the
+  shapes contract.** Human wording: the message a silent turn now receives leads with *why* the
+  turn failed rather than *what* was missing — "your actions and conclusions only reach the
+  harness as tool calls; a turn without one arrives as nothing, whatever text it carried" — then
+  names the three routes out (investigate with a tool, record with `edit_report`/`review_report`,
+  finish with `turn_end`). Leading with the channel rule matters because the model's mistake is
+  not forgetting a step, it is believing prose counts as an action.
+  The adversarial cells were folded into `tests/test_live_turn_end_shapes.py` rather than given
+  their own file: that file already drives one attacking agent per shape against the lead's real
+  loop, and a second file would have duplicated its harness and its findings reporter. Three new
+  entries in `SHAPES` — `escape_by_prose`, `escape_by_claiming_done`, `escape_by_idling` — which
+  differ from every prior shape in having **no `problem_key`**, because nothing is filed to
+  refuse; what is asserted is that the loop did not end. `tests/test_turn_end_shape_contract.py`
+  exempts them from the "state what the refusal must say" rule and still requires a `why` and a
+  cell, and it caught the missing cells the moment the shapes landed.
+  `escape_by_idling` is **expected to fail** until [A24] is closed: a loop that exhausts its
+  budget without filing returns silently, so the cell asserts the ending is *recorded* rather
+  than that it never happens (a cap must exist; "no escape" cannot mean "loop forever").
+  `prompts/analyst_worker.md` and `prompts/analyst_lead.md` both open their report section with
+  the rule now: composing the report and submitting it with `turn_end` is the only way the work
+  concludes, nothing is composed on their behalf, and a loop that stops another way is recorded
+  as having produced nothing. Suite 1534 passed.
+
+- 2026-09-15 (fourth) — **The grace window, `turn_end` free everywhere, and the no-escape rule
+  extended to the worker.** CLAUDE.md §2b says exhausting a cap is not an exit; this is that,
+  implemented.
+  **Grace** (`react_grace_rounds`, config, default 20). When a loop with a terminal tool spends
+  its budget it is not ended — it is told *"You have run out of rounds. Summarise your work
+  within N rounds, using edit_report and then turn_end"*, and every tool result inside the window
+  carries `[N grace round(s) left …]`. A **refused** `turn_end` costs nothing and leaves the model
+  in the loop: `filed_terminal` is set only on `not outcome.is_error`, so one validated call is
+  enough and failing inside the window is expected rather than fatal (human clarification). The
+  window closing with no validated `turn_end` raises `ReactBudgetExhausted`, which kills the run —
+  the alternative being the silent unfiled return that discarded a completed 14-quantity
+  reproduction. A loop with no terminal tool has no exit to force, so grace never opens for it.
+  **`turn_end` is now in `_CYCLE_FREE_TOOLS`**, i.e. free on every graph loop. It already was for
+  the worker and reviewer; the lead was the odd one out, which made its own tool description
+  ("Free: calling it costs no tool budget") false for one caller of four — the same false-claim
+  shape as `check_coder`'s — and made a refused `turn_end` burn a grace round, charging a role for
+  trying to file inside the window it was given to file in.
+  **`require_terminal` now covers the worker as well as the lead.** It was scoped to the lead
+  only because the ruling named the lead; the shape is the same and **all three measured losses
+  were the worker's**. A parametrised guard asserts both call sites, since the parameter defaults
+  to False and a loop that needs it but omits it looks identical to one that does not.
+  **The live adversarial cell found a defect in the fix, which the deterministic suite had
+  passed.** `escape_by_idling` drove with `absolute_cap = cap + 2`: grace opened at the budget
+  cap and the ceiling ended the loop two rounds later — unfiled, silent, never reaching the fatal
+  raise. A window a bound can retract is not a window, so the ceiling is raised to accommodate
+  grace. Pinned with the cell's exact shape and mutation-verified.
+  **One over-reach, reverted.** The first attempt put a blanket "no unfiled exit ever" raise after
+  the loop, which made `refusal` and `transient` fatal too and broke seven tests — beyond what was
+  specified, since re-asking cannot fix either. The narrow ceiling fix replaced it.
+  Live: all three escape cells pass (`escape_by_idling` had been failing). Suite 1534 → 1541.
+

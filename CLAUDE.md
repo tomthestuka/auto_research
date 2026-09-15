@@ -72,6 +72,47 @@ Consequences:
 - Recommended placement: a development workspace directory containing both repos side by
   side, with this `CLAUDE.md` at the workspace root.
 
+## 2b. `turn_end` is the only exit — provenance at every role edge
+
+**Every graph role leaves its ReAct loop through `turn_end` and through nothing else, enforced
+mechanically.** No fallback composes a role's artifact; no heuristic reads a turn as finished; no
+cap silently returns an unfiled result. This binds the roles in the architecture figure — reviewer,
+librarian, analyst lead, analyst workers — and not the coding pipeline, whose sanctioned exits are a
+gated commit or an honest failure ([§9](#9-phase-2--tool-authoring-the-active-phase)).
+
+**This is a trust boundary at the same altitude as the two-repository separation in
+[§2](#2-the-two-repository-trust-boundary), and it is written here because it was not written at the
+beginning and should have been.** §2 binds **what code may run**. This binds **what may be claimed**.
+`turn_end`'s validator is where a role's output is bound to the work that produced it, so an exit
+skipping the validator yields an artifact nothing vouched for. Neither boundary suffices alone: an
+isolated toolkit with unvalidated role edges gives trustworthy tools and untraceable conclusions,
+while validated edges over a toolkit the runtime can rewrite give careful accounting of unreliable
+work. **Only both together make provenance complete**, and that completeness is what the repository
+rests on.
+
+Consequences, each with a measured failure behind it:
+
+- **A role's artifact is written by the role, inside its loop, and submitted by `turn_end`.** A
+  harness that composes an artifact on a model's behalf fabricates provenance — which is why the
+  worker's fallback compose was deleted (F5), and why a loop that ends unfiled records an honest
+  `failed` rather than a substitute.
+- **No heuristic may decide that a turn was a finish.** `_continuation_for`'s `len(content) > 40`
+  test did exactly that and lost a completed 14-quantity reproduction to a 58-character turn
+  (2026-09-15); over 192 recorded silent turns it had never once discriminated a value between 1
+  and 40.
+- **Exhausting a cap is not an exit.** A loop that runs out of budget without filing must fail
+  loudly and record that it did. Returning an unfiled result silently is the same defect wearing a
+  limit's clothing.
+- **A role that composes its artifact *after* its loop sits outside this boundary and is wrong.**
+  The reviewer and analyst co-lead do this today — the loop gathers evidence and a separate
+  structured call creates the verdict, so the artifact is validated by nothing. Recorded as a known
+  violation to be fixed, not as a sanctioned pattern.
+
+The testable corollary: **every role edge is a validation point.** A live adversarial test drives
+each role with a model instructed to escape — answering in prose, idling on free tools to the cap,
+refusing, emitting malformed calls, claiming completion without filing — and asserts that no path
+yields an unfiled artifact or a silent exit.
+
 ---
 
 ## 3. Coding-agent contract (read this every session)

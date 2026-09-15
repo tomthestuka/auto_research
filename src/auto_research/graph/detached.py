@@ -53,9 +53,9 @@ def _record(run_directory: Path, name: str) -> Path:
     resolver is deliberate: a run that started under the old layout keeps appending where its
     earlier lines already are.
     """
-    from auto_research.sandbox.workspace import resolve_record
+    from auto_research.sandbox.workspace import record_beside
 
-    return resolve_record(run_directory.name, name)
+    return record_beside(run_directory, name)
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -286,7 +286,6 @@ def _default_launcher(
     if resume:
         argv += ["--resume"]
     backend_log = _record(run_directory, _BACKEND_LOG)
-    backend_log.parent.mkdir(parents=True, exist_ok=True)
     pid = _spawn_orphaned(argv, backend_log)
     (run_directory / _PID_FILE).write_text(
         json.dumps({"pid": pid, "create_time": _proc_create_time(pid)}),

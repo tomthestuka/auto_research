@@ -105,9 +105,9 @@ def record_path(run_directory: Path, name: str) -> Path:
     archives long after the run. `run_dir(run_id)` ends in the run id, so the directory names
     its own run.
     """
-    from auto_research.sandbox.workspace import resolve_record
+    from auto_research.sandbox.workspace import record_beside
 
-    return resolve_record(run_directory.name, name)
+    return record_beside(run_directory, name)
 
 
 def _git(repo: Path, *args: str) -> str:

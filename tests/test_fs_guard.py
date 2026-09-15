@@ -111,6 +111,48 @@ def test_the_two_directories_do_not_nest():
     assert not ledger.is_relative_to(run) and not run.is_relative_to(ledger)
 
 
+def test_a_records_location_follows_the_run_directory_not_ambient_config(tmp_path, monkeypatch):
+    """A trial runs with its OWN runtime dir, so a path helper must not consult global config.
+
+    This failed the first slot-5 relaunch at spawn: the launcher resolved the backend log
+    through `runtime_data_dir()` — its own — and tried to open
+    `…/test_runtime/ledgers/<id>/backend.log` for a run living under `…/ws/<id>/runtime/`.
+    Exit 1, $0, nothing started. The code it replaced took the directory it was handed and
+    appended a name, depending on nothing, and that property is what this pins.
+    """
+    from auto_research.sandbox import workspace
+
+    # Ambient config points somewhere else entirely — as it does for every benchmark trial.
+    monkeypatch.setenv("AUTO_RESEARCH_DATA_DIR", str(tmp_path / "launcher_runtime"))
+    private = tmp_path / "ws" / "abc123" / "runtime" / "runs" / "abc123"
+    private.mkdir(parents=True)
+
+    resolved = workspace.record_beside(private, "backend.log")
+    assert resolved == private.parent.parent / "ledgers" / "abc123" / "backend.log"
+    assert "launcher_runtime" not in str(resolved), (
+        "the record resolved through ambient config instead of the run directory it was given"
+    )
+    # And it is still outside the workspace, which is the whole point of the split.
+    assert not resolved.is_relative_to(private)
+
+
+def test_the_record_directory_exists_by_the_time_the_path_is_handed_back(tmp_path, monkeypatch):
+    """The helper that chooses the location also creates it, so no launcher can forget.
+
+    Two launchers did forget, within an hour: opening `backend.log` for append is a spawned
+    backend's first act, so a missing parent is exit 1 with no run and no ledger explaining it.
+    Both failures cost $0 and 60 s, which is the only reason this is cheap to have learned.
+    """
+    from auto_research.sandbox import workspace
+
+    monkeypatch.setenv("AUTO_RESEARCH_DATA_DIR", str(tmp_path / "elsewhere"))
+    run_directory = tmp_path / "ws" / "r1" / "runtime" / "runs" / "r1"
+    run_directory.mkdir(parents=True)
+    path = workspace.record_beside(run_directory, "backend.log")
+    assert path.parent.is_dir(), "the record directory must exist before anyone opens the file"
+    path.write_text("x", encoding="utf-8")  # the operation a launcher actually performs
+
+
 def test_a_record_written_under_the_old_layout_is_still_found(tmp_path, monkeypatch):
     """Every batch on disk — including the ones behind published numbers — keeps these files
     inside the run directory, and offline scoring reads them long after the run."""

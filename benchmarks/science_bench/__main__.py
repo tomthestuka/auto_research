@@ -16,6 +16,7 @@ gate and a tool review, over hours. The report states what it cost.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import asyncio
 import json
 import os
@@ -533,6 +534,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out", type=Path, default=None,
                         help="records directory (default logs/dev/science-bench/<UTC>)")
     parser.add_argument("--chatter", type=int, default=7, help="per-trial ledger chatter")
+    parser.add_argument("--verbatim", action="store_true",
+                        help="force verbatim prompt recording on every selected slot. Normally "
+                             "only replicate 1 of an arm records, because the dump is large and "
+                             "one per arm is enough to audit for leaks; turn it on when a "
+                             "specific slot is being re-run to diagnose something, where the "
+                             "prompt IS the evidence (2026-09-14: a reviewer compose failed four "
+                             "times and the absence of a dump forced a full reconstruction)")
     parser.add_argument("--check", action="store_true", help="preflight only, no spend")
     parser.add_argument("--status", metavar="DIR", type=Path, default=None,
                         help="print a batch's progress; costs nothing")
@@ -587,6 +595,8 @@ def main(argv: list[str] | None = None) -> int:
 
     pool = BLOCK1 if args.block1 else DEMO
     slots = [BLOCK0] if args.block0 else parse_slots(args.slots, pool)
+    if args.verbatim:
+        slots = [replace(slot, verbatim_recording=True) for slot in slots]
 
     print(f"science_bench: {len(slots)} slot(s)")
     for slot in slots:

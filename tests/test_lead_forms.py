@@ -230,9 +230,14 @@ def test_the_chain_link_schema_asks_for_every_lead_owned_field():
 class _FormsProvider:
     """A cycle-backed provider over a scripted call sequence (no model, no network)."""
 
-    def __init__(self, cycle):
+    def __init__(self, cycle, turn_end_validator=None):
         self.cycle = cycle
         self.inner = ReadOnlyToolProvider(roots=[], cycle=cycle)
+        if turn_end_validator is not None:
+            # `turn_end`'s refusal is what this exercises, and the validator IS that decision.
+            # Building a real report workspace needs a memory path too, and a half-built one
+            # returns None — which silently makes the validator vacuous and the test hollow.
+            self.inner.turn_end_validator = turn_end_validator
 
     def tool_definitions(self):
         return self.inner.tool_definitions()
@@ -958,3 +963,527 @@ def test_drive_coder_steers_a_working_coder_instead_of_being_refused():
     idle = _AskingSession(status="idle")
     out = _run(execute_drive_coder(idle, {"instructions": "next link"}))
     assert not out.is_error and idle.started == ["next link"]
+
+
+# ── check_coder is rate-limited, because three strings told the lead to spam it ──────────
+#
+# Measured across three runs of the same seat: 116 / 138 / 122 polls per authoring window at a
+# 3.6-5.6 s median cadence, of which 96.6 / 98.6 / 99.2 per cent returned a byte-identical
+# "still working" string. In run 328347c4 that was $3.73 — 59% of the lead's whole spend and 13%
+# of the run — to learn four things, one per coder turn-end. It was compliance, not pathology:
+# the tool's description called the call budget-free when it is not, its "working" return said
+# "check again", drive_coder's acknowledgement said "do not wait idly", and submit_for_review's
+# refusal said "call check_coder". All four strings are fixed; this pins the enforcement.
+
+
+class _Drive:
+    """The surface `execute_check_coder` reads, and nothing else."""
+
+    def __init__(self, status="working"):
+        self.drive_status = status
+        self.taken = 0
+
+    def take_drive_result(self):
+        self.taken += 1
+        return ("the coder's narration", None)
+
+
+def _check(session):
+    from auto_research.agents.react import execute_check_coder
+
+    return asyncio.run(execute_check_coder(session))
+
+
+def test_a_second_check_inside_the_interval_is_refused_with_the_time_left(monkeypatch):
+    monkeypatch.setattr("auto_research.agents.react.check_coder_min_interval_s", lambda: 900)
+    session = _Drive()
+    first = _check(session)
+    assert not first.is_error and "still working" in first.text
+
+    second = _check(session)
+    assert second.is_error, "an early re-check must be refused, not answered"
+    assert "s." in second.text and "available in" in second.text
+    # The refusal says what to do instead, and does NOT say to check again.
+    assert "check again" not in second.text.lower()
+
+
+def test_the_refusal_names_a_shrinking_remainder(monkeypatch):
+    import auto_research.agents.react as react
+
+    monkeypatch.setattr(react, "check_coder_min_interval_s", lambda: 900)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("time.monotonic", lambda: clock["t"])
+    session = _Drive()
+    _check(session)
+    clock["t"] += 100
+    early = _check(session)
+    assert "800s" in early.text, early.text
+    clock["t"] += 900
+    allowed = _check(session)
+    assert not allowed.is_error, "past the interval the check must be allowed again"
+
+
+def test_a_finished_drive_is_never_throttled(monkeypatch):
+    """A finished result is consumed exactly once (`take_drive_result`), so refusing that call
+    would strand the narration the lead is owed. The throttle guards the empty answer only."""
+    import auto_research.agents.react as react
+
+    monkeypatch.setattr(react, "check_coder_min_interval_s", lambda: 900)
+    session = _Drive()
+    _check(session)               # working → starts the clock
+    session.drive_status = "done"
+    out = _check(session)         # immediately after, but there is something to report
+    assert not out.is_error and session.taken == 1
+
+
+def test_a_fresh_session_starts_unthrottled(monkeypatch):
+    """The first check after a new drive is the one poll that reliably carries information."""
+    import auto_research.agents.react as react
+
+    monkeypatch.setattr(react, "check_coder_min_interval_s", lambda: 900)
+    first_session, second_session = _Drive(), _Drive()
+    assert not _check(first_session).is_error
+    assert not _check(second_session).is_error
+
+
+def test_the_interval_is_configurable_and_zero_disables(monkeypatch):
+    import auto_research.agents.react as react
+
+    monkeypatch.setattr(react, "check_coder_min_interval_s", lambda: 0)
+    session = _Drive()
+    assert not _check(session).is_error
+    assert not _check(session).is_error, "interval 0 must not throttle"
+
+
+def test_no_model_visible_string_tells_the_lead_to_poll():
+    """The four strings that produced the behaviour, asserted as a set so a new one is caught.
+
+    `check_coder`'s description also claimed the call was budget-free; it is not in
+    `_CYCLE_FREE_TOOLS`, so the model was told an action was free and charged for it 116 times.
+    """
+    from auto_research.agents.react import (
+        CHECK_CODER_TOOL,
+        check_coder_tool_def,
+        drive_coder_tool_def,
+    )
+    from auto_research.agents.roles import _CYCLE_FREE_TOOLS
+
+    desc = check_coder_tool_def()["description"].lower()
+    assert "check again" not in desc
+    assert "costs no tool budget" not in desc, (
+        "check_coder is not in _CYCLE_FREE_TOOLS, so calling it free is false"
+    )
+    assert CHECK_CODER_TOOL not in _CYCLE_FREE_TOOLS  # the fact the description must match
+    assert "do not wait idly" not in drive_coder_tool_def()["description"].lower()
+
+
+# ── no escape path: for the lead, turn_end is the only way out ───────────────
+#
+# Human ruling 2026-09-15: "THERE WILL BE NO ESCAPE PATH. the normal exit is the only allowed
+# exit." The lead writes its report INSIDE its loop (`edit_report` into the workspace) and
+# `turn_end` is what submits it, so a loop that ends any other way discards work already done —
+# and for the lead specifically `strategy.py` then RAISES, killing the run.
+#
+# The hole was `_continuation_for`'s `len(content) > 40` test. Measured over 192 recorded silent
+# turns it never once discriminated a value between 1 and 40 (the short side is exactly the 8
+# turns with zero content), and the three destructive cases sat at 58/62/66 characters against
+# 799/35/62 output tokens — mostly reasoning the text channel cannot see.
+
+
+def _silent(content: str, stop: str = "end_turn"):
+    from auto_research.models.types import ModelResponse, ModelUsage
+
+    return ModelResponse(
+        content=content, tool_calls=[], stop=stop,
+        usage=ModelUsage(input_tokens=1, output_tokens=799),
+    )
+
+
+class _SilentThenScripted:
+    """Emits `n_silent` prose-only turns, then follows a script. The shape that lost the work."""
+
+    def __init__(self, n_silent, content, script=()):
+        self.n_silent, self.content = n_silent, list(script)
+        self.text = content
+        self.script = list(script)
+        self.calls = 0
+
+    async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
+                   images=(), documents=(), cache_prefix=False):
+        from auto_research.models.types import ModelUsage
+
+        self.calls += 1
+        if self.n_silent > 0:
+            self.n_silent -= 1
+            return ModelResponse(
+                content=self.text, tool_calls=[], stop="end_turn",
+                usage=ModelUsage(input_tokens=1, output_tokens=799),
+            )
+        if not self.script:
+            return ModelResponse(content="", tool_calls=[], stop="end_turn")
+        name, arguments = self.script.pop(0)
+        return ModelResponse(
+            tool_calls=[ToolCall(id=f"c{self.calls}", name=name, arguments=arguments)]
+        )
+
+
+def _drive_with_model(model, **kwargs):
+    from auto_research.agents.react import LeadCycle
+
+    cycle = LeadCycle(authoring_enabled=False, rounds_left=1)
+    lead = AnalystLeadAgent(model=model, prompt="p")
+    asyncio.run(
+        lead._react(
+            seed_messages=[],
+            tools=_FormsProvider(cycle), action="run_cycle",
+            cap=8, absolute_cap=12, terminal_tools=frozenset({TURN_END_TOOL}), **kwargs,
+        )
+    )
+    return model
+
+
+def test_a_prose_turn_does_not_end_the_loop_when_the_terminal_is_required():
+    """THE behavioural test. 58 characters of prose, no tool call — the exact shape that lost a
+    completed 14-quantity reproduction. With `require_terminal` the loop must keep going."""
+    prose = "Analysis complete. All quantities measured and written."
+    assert len(prose) > 40
+
+    without = _drive_with_model(_SilentThenScripted(3, prose))
+    with_flag = _drive_with_model(_SilentThenScripted(3, prose), require_terminal=True)
+
+    assert without.calls == 1, "today's behaviour: the first prose turn ends the loop"
+    assert with_flag.calls > 3, (
+        f"require_terminal must re-inject past every silent turn, got {with_flag.calls} calls"
+    )
+
+
+def test_the_re_injected_message_reaches_the_model():
+    """Not just 'the loop continued' — the lead must actually be told what to do."""
+    from auto_research.agents.roles import _TERMINAL_REQUIRED_NUDGE
+
+    seen = []
+
+    class _Recorder(_SilentThenScripted):
+        async def call(self, messages, **kw):
+            seen.append(" ".join(getattr(m, "content", "") or "" for m in messages))
+            return await super().call(messages, **kw)
+
+    _drive_with_model(_Recorder(2, "Work is finished, nothing further to do here."),
+                      require_terminal=True)
+    assert any(_TERMINAL_REQUIRED_NUDGE in s for s in seen), (
+        "the required-terminal message was never sent to the model"
+    )
+
+
+def test_the_silent_cap_no_longer_ends_a_required_terminal_loop():
+    """`_SILENT_TURN_CAP` is 2. Without the override it bounds the nudging; with it, it must not
+    become a second escape two turns later."""
+    from auto_research.agents.roles import _SILENT_TURN_CAP
+
+    model = _drive_with_model(
+        _SilentThenScripted(_SILENT_TURN_CAP + 3, "Finished the analysis, all done here."),
+        require_terminal=True,
+    )
+    assert model.calls > _SILENT_TURN_CAP + 1, (
+        f"the loop stopped at the silent cap ({model.calls} calls) — still an escape"
+    )
+
+
+def test_a_prose_turn_no_longer_ends_the_leads_loop():
+    """The exact shape that lost a completed analysis: 58 characters, no tool call."""
+    from auto_research.agents.roles import _TERMINAL_REQUIRED_NUDGE, _continuation_for
+
+    response = _silent("Analysis complete. All quantities measured and written to CSV.")
+    assert len(response.content) > 40
+    # Unchanged for a role that legitimately ends in prose …
+    assert _continuation_for(response, frozenset({"turn_end"})) is None
+    # … and the lead's loop overrides it, which is what `require_terminal` selects.
+    assert "turn_end" in _TERMINAL_REQUIRED_NUDGE
+
+
+def test_the_nudge_states_the_channel_rule_then_the_routes_out():
+    """The lead must be told what 'done' actually requires, not merely that it is not done."""
+    from auto_research.agents.roles import _TERMINAL_REQUIRED_NUDGE
+
+    text = _TERMINAL_REQUIRED_NUDGE
+    # The channel rule comes first — that is the actual mistake — then the three routes out.
+    assert text.index("tool calls") < text.index("edit_report") < text.index("turn_end")
+    for route in ("investigate", "edit_report", "review_report", "turn_end"):
+        assert route in text, route
+    assert "only way" in text and "nothing is written on your behalf" in text
+
+
+@pytest.mark.parametrize(
+    "method_path",
+    [("AnalystLeadAgent", "run_cycle"), ("AnalystWorkerAgent", "analyze")],
+    ids=["lead", "worker"],
+)
+def test_every_loop_that_writes_its_artifact_inside_itself_has_no_escape(method_path):
+    """Both roles whose report is written IN the loop opt in — the rule is the shape's, not the
+    lead's. All three measured losses were the WORKER's; extending it was the whole point.
+
+    Asserted at the call site because the parameter defaults to False: a loop that needs it and
+    does not pass it looks identical to one that does not need it.
+    """
+    import inspect
+
+    import auto_research.agents.roles as roles_mod
+
+    cls, method = method_path
+    source = inspect.getsource(getattr(getattr(roles_mod, cls), method))
+    assert "require_terminal=True" in source, (
+        f"{cls}.{method} writes its report inside its loop and turn_end submits it, so it must "
+        "opt in — otherwise a prose turn discards the work (CLAUDE.md §2b)"
+    )
+
+
+def test_the_lead_loop_is_wired_with_no_escape_path():
+    """Asserted at the call site, because the parameter defaults to False: a role that needs it
+    and does not pass it looks identical to one that does not need it."""
+    import inspect
+
+    from auto_research.agents.roles import AnalystLeadAgent
+
+    source = inspect.getsource(AnalystLeadAgent.run_cycle)
+    assert "require_terminal=True" in source, (
+        "run_cycle must opt in — its report is written in-loop and turn_end submits it"
+    )
+
+
+def test_a_refusal_still_ends_the_loop():
+    """The one deliberate exception. A refusal needs a different member and a transient needs the
+    retry layer; re-injecting into either spins to the absolute ceiling achieving nothing."""
+    from auto_research.agents.roles import _continuation_for
+
+    for stop in ("refusal", "transient"):
+        assert _continuation_for(_silent("", stop=stop), frozenset({"turn_end"})) is None
+
+
+def test_roles_that_compose_after_their_loop_are_untouched():
+    """The reviewer and co-lead produce their artifact in a SEPARATE call after the loop, so a
+    silent exit costs them nothing — 163 of the 192 measured silent turns are theirs. Nudging
+    them would be wrong, and `require_terminal` defaults False so they keep the old behaviour."""
+    import inspect
+
+    from auto_research.agents.roles import AnalystColeadAgent, ReviewerAgent
+
+    for method in (ReviewerAgent.review, AnalystColeadAgent.review_tool):
+        assert "require_terminal" not in inspect.getsource(method)
+
+
+def test_require_terminal_defaults_off():
+    import inspect
+
+    from auto_research.agents.roles import AgentRole
+
+    sig = inspect.signature(AgentRole._react)
+    assert sig.parameters["require_terminal"].default is False
+
+
+# ── grace: budget exhaustion is not an exit (CLAUDE.md §2b) ──────────────────
+#
+# A loop that hits its cap is not finished, it is out of time. It is told so, given a bounded
+# window to compose and file, and counted down on every tool result. Failing to file inside that
+# window is fatal to the RUN — the alternative is the silent unfiled return that discarded a
+# completed 14-quantity reproduction on 2026-09-15 and that the ledger could not tell apart from
+# a role never asked to run.
+
+
+class _ToolSpammer:
+    """Calls one budget-consuming tool per turn, forever. Never files."""
+
+    def __init__(self, tool="list_dir", arguments=None):
+        self.tool, self.arguments = tool, arguments or {"path": "."}
+        self.calls = 0
+
+    async def call(self, messages, **kwargs):
+        self.calls += 1
+        return ModelResponse(
+            tool_calls=[ToolCall(id=f"c{self.calls}", name=self.tool, arguments=self.arguments)]
+        )
+
+
+class _SpamsThenFiles(_ToolSpammer):
+    """Spams until told it is out of rounds, then files — the behaviour grace exists to buy."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.saw_grace_notice = False
+        self.countdowns: list[str] = []
+
+    async def call(self, messages, **kwargs):
+        import re
+
+        blob = " ".join(
+            (getattr(m, "content", "") or "") if not isinstance(m, ToolResultMessage)
+            else " ".join(p.content for p in m.results)
+            for m in messages
+        )
+        if "run out of rounds" in blob:
+            self.saw_grace_notice = True
+        self.countdowns += re.findall(r"\[(\d+) grace round\(s\) left", blob)
+        # Spend one grace round working before filing. A model that files the instant it is
+        # told would never SEE a countdown — the countdown rides tool results, and the
+        # turn_end result ends the loop.
+        if self.saw_grace_notice and self.countdowns:
+            self.calls += 1
+            return ModelResponse(
+                tool_calls=[ToolCall(id=f"t{self.calls}", name=TURN_END_TOOL, arguments={})]
+            )
+        return await super().call(messages, **kwargs)
+
+
+def _drive_budget(model, *, cap, grace, monkeypatch, terminal=True, absolute_cap=None,
+                  turn_end_validator=None):
+    """Drive a real `_react` with a tiny budget.
+
+    `turn_end_validator` makes `turn_end` actually refuse. Without one the provider's default is
+    vacuous for a loop with no report workspace (`lead_turn_problems` returns `[]`, the path
+    recorded against [A26]), which would turn a test of refusal into a test of nothing.
+    """
+    from auto_research.agents.react import LeadCycle
+    import auto_research.agents.roles as roles_mod
+
+    monkeypatch.setattr(roles_mod, "react_grace_rounds", lambda: grace)
+    cycle = LeadCycle(authoring_enabled=False, rounds_left=1)
+    lead = AnalystLeadAgent(model=model, prompt="p")
+    lead.tools = None
+    return asyncio.run(
+        lead._react(
+            seed_messages=[],
+            tools=_FormsProvider(cycle, turn_end_validator=turn_end_validator),
+            action="run_cycle",
+            cap=cap, absolute_cap=absolute_cap if absolute_cap is not None else cap + grace + 5,
+            terminal_tools=frozenset({TURN_END_TOOL}) if terminal else frozenset(),
+        )
+    )
+
+
+def test_exhausting_the_budget_opens_a_grace_window_rather_than_ending(monkeypatch):
+    model = _SpamsThenFiles()
+    _drive_budget(model, cap=3, grace=20, monkeypatch=monkeypatch)
+    assert model.saw_grace_notice, "the role was never told it had run out of rounds"
+    assert model.calls > 3, "the loop ended at the cap instead of opening grace"
+
+
+def test_every_tool_result_in_grace_carries_the_countdown(monkeypatch):
+    model = _SpamsThenFiles()
+    _drive_budget(model, cap=2, grace=5, monkeypatch=monkeypatch)
+    assert model.countdowns, "no countdown reached the model"
+    # It counts DOWN, and never below zero.
+    values = [int(v) for v in model.countdowns]
+    assert values == sorted(values, reverse=True), values
+    assert min(values) >= 0
+
+
+def test_failing_to_file_within_grace_is_fatal(monkeypatch):
+    """The whole point: an unfiled loop must die loudly rather than return nothing."""
+    from auto_research.agents.roles import ReactBudgetExhausted
+
+    with pytest.raises(ReactBudgetExhausted) as caught:
+        _drive_budget(_ToolSpammer(), cap=2, grace=3, monkeypatch=monkeypatch)
+    assert "grace" in str(caught.value) and "not an exit" in str(caught.value)
+
+
+def test_grace_never_opens_for_a_loop_with_no_terminal_tool(monkeypatch):
+    """The librarian, the co-lead's review and `drive_authoring` have no exit to force, so their
+    exhaustion is a legitimate end and must keep the old behaviour."""
+    model = _ToolSpammer()
+    _drive_budget(model, cap=2, grace=20, monkeypatch=monkeypatch, terminal=False)
+    assert model.calls <= 3, "grace opened for a loop that has no terminal tool to reach"
+
+
+def test_grace_rounds_are_spent_separately_from_the_budget(monkeypatch):
+    """Grace is a window, not extra budget: a filing inside it must not look like a role that
+    stayed within its cap."""
+    model = _SpamsThenFiles()
+    _drive_budget(model, cap=2, grace=4, monkeypatch=monkeypatch)
+    # It filed during grace, so it consumed more rounds than its cap allowed.
+    assert model.calls > 2
+
+
+def test_the_absolute_ceiling_cannot_cut_the_grace_window_short(monkeypatch):
+    """Found live 2026-09-15 by the adversarial idling cell, not by this suite.
+
+    The cell drove with `absolute_cap = cap + 2`. Grace opened at the budget cap and the ceiling
+    then ended the loop two rounds later — unfiled, and with nothing recorded. A window a bound
+    can retract is not a window, so the ceiling is raised to accommodate it.
+    """
+    from auto_research.agents.roles import ReactBudgetExhausted
+
+    # A ceiling far below cap + grace: the loop must still run the full window and then die
+    # loudly, rather than returning silently when the ceiling bites first.
+    with pytest.raises(ReactBudgetExhausted):
+        # `absolute_cap` deliberately BELOW cap + grace — the live cell's exact shape.
+        _drive_budget(_ToolSpammer(), cap=2, grace=4, monkeypatch=monkeypatch, absolute_cap=4)
+
+
+class _FilesBadlyThenWell(_ToolSpammer):
+    """Calls turn_end and is refused `refusals` times, then files a valid one — inside grace.
+
+    Human clarification 2026-09-15: *"turn_end() within grace can fail; it is acceptable if one
+    turn_end() succeeded before the grace period exhausted."* A refused turn_end returns
+    `is_error=True` and must NOT count as filed, and must not be fatal on its own.
+    """
+
+    def __init__(self, refusals: int):
+        super().__init__()
+        self.refusals = refusals
+        self.turn_end_attempts = 0
+        self.saw_grace = False
+
+    async def call(self, messages, **kwargs):
+        blob = " ".join(
+            (getattr(m, "content", "") or "") if not isinstance(m, ToolResultMessage)
+            else " ".join(p.content for p in m.results)
+            for m in messages
+        )
+        if "run out of rounds" in blob:
+            self.saw_grace = True
+        if not self.saw_grace:
+            return await super().call(messages, **kwargs)
+        self.calls += 1
+        self.turn_end_attempts += 1
+        # A report is never written, so `turn_end` is refused by the validator — until the last
+        # attempt, where one is written first so it validates.
+        if self.turn_end_attempts > self.refusals:
+            return ModelResponse(tool_calls=[
+                ToolCall(id=f"e{self.calls}", name=EDIT_REPORT_TOOL,
+                         arguments={"summary": "s", "findings": ["f"], "status": "succeeded",
+                                    "rework": False}),
+                ToolCall(id=f"t{self.calls}", name=TURN_END_TOOL, arguments={}),
+            ])
+        return ModelResponse(
+            tool_calls=[ToolCall(id=f"t{self.calls}", name=TURN_END_TOOL, arguments={})]
+        )
+
+
+def test_a_refused_turn_end_inside_grace_is_not_fatal_and_one_success_is_enough(monkeypatch):
+    """The clarified contract: failing turn_end within grace is fine; succeeding once ends it."""
+    refused = {"n": 0}
+
+    def _validator():
+        refused["n"] += 1
+        return ["the report is not complete"] if refused["n"] <= 2 else []
+
+    model = _FilesBadlyThenWell(refusals=2)
+    _drive_budget(model, cap=2, grace=10, monkeypatch=monkeypatch,
+                  turn_end_validator=_validator)
+    assert refused["n"] >= 3, "the validator was never consulted three times"
+    assert model.turn_end_attempts >= 3, "the refused attempts did not happen"
+
+
+def test_the_absolute_ceiling_cannot_cut_the_grace_window_short(monkeypatch):
+    """Found LIVE 2026-09-15 by the adversarial idling cell, not by this suite.
+
+    That cell drove with `absolute_cap = cap + 2`. Grace opened at the budget cap and the ceiling
+    ended the loop two rounds later — unfiled, and with nothing recorded. A window a bound can
+    retract is not a window, so the ceiling is raised to accommodate it and the loop reaches its
+    fatal grace exhaustion instead of returning quietly.
+    """
+    from auto_research.agents.roles import ReactBudgetExhausted
+
+    with pytest.raises(ReactBudgetExhausted):
+        # absolute_cap deliberately BELOW cap + grace — the live cell's exact shape.
+        _drive_budget(_ToolSpammer(), cap=2, grace=4, monkeypatch=monkeypatch, absolute_cap=4)
+
