@@ -417,27 +417,32 @@ def react_grace_rounds() -> int:
     return value if value >= 0 else 20
 
 
-def check_coder_min_interval_s() -> int:
-    """Minimum seconds between the lead's ``check_coder`` polls (``check_coder_min_interval_s``).
+def coder_wait_limits_s() -> tuple[int, int, int]:
+    """``(floor, default, max)`` seconds for the lead's blocking ``wait_coder``.
 
-    Measured 2026-09-15 across three runs of the same seat: 116 / 138 / 122 polls per authoring
-    window at a 3.6-5.6 s median cadence, of which 96.6 / 98.6 / 99.2 per cent returned a
-    byte-identical "still working" string. In run ``328347c4`` that was **$3.73, 59% of the
-    lead's entire spend and 13% of the run**, to learn four things — one per coder turn-end. Each
-    poll re-reads a growing trajectory to emit one tool call, so the per-poll price rose 41% as
-    cache-read grew 96k to 180k tokens.
+    Keys ``coder_wait_floor_s`` / ``coder_wait_default_s`` / ``coder_wait_max_s``. A requested
+    timeout below the floor is RAISED to it rather than refused: a refusal comes back at once and
+    costs the lead a model turn, which is how a poll limit only moved the spam onto other tools
+    (slot 6, 2026-09-15: 114 refused polls, 47 mid-turn steers and 31 refused submits at a 3-10 s
+    cadence). This is the shape Codex's ``wait_agent`` uses (clamp up to a minimum, error only
+    above the maximum). Read at call time, so a config edit takes effect on the next wait.
 
-    The behaviour was compliance rather than pathology: three separate model-visible strings told
-    the lead to check again, the tool's own description called the call budget-free when it was
-    not, and the loop has no wait primitive, so emitting a poll is the only way a model without a
-    clock can let time pass. The strings are fixed; this bounds what remains.
+    A malformed value falls back to its default; the three are then ordered so that
+    ``floor <= default <= max`` always holds.
     """
     cfg = _orch_config()
-    try:
-        value = int(cfg.get("check_coder_min_interval_s", 900))
-    except (TypeError, ValueError):
-        return 900
-    return value if value >= 0 else 900
+
+    def _read(key: str, fallback: int) -> int:
+        try:
+            value = int(cfg.get(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+        return value if value > 0 else fallback
+
+    floor = _read("coder_wait_floor_s", 60)
+    maximum = max(_read("coder_wait_max_s", 1800), floor)
+    default = min(max(_read("coder_wait_default_s", 300), floor), maximum)
+    return floor, default, maximum
 
 
 def sandbox_call_timeout_default() -> int:

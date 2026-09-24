@@ -1145,4 +1145,3 @@ Compacted 2026-09-01: entries through 2026-08-28 folded into themed ranges (deta
   an empty string, a syntactically-valid empty object — are now separable in the message, each
   pinned by a parametrised test and the branch mutation-verified.
   `tests/test_responses_vendors.py` 106 → 112.
-

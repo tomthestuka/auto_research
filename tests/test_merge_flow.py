@@ -6,6 +6,7 @@ analyst lead, and stub gate/review hooks — so no live LLM or git is involved.
 
 import asyncio
 import pathlib
+import types
 
 import pytest
 
@@ -1197,6 +1198,7 @@ class _SlowBackend:
         self.delay = delay
         self.fail = fail
         self.driven: list[str] = []
+        self.steered: list[str] = []
 
     async def connect(self):
         self.events.append("connect")
@@ -1213,6 +1215,15 @@ class _SlowBackend:
             raise RuntimeError("Credit balance is too low")
         self.events.append("drive:end")
         return f"coder says: {message}"
+
+    async def steer(self, message: str) -> bool:
+        """Mid-turn delivery, available only while a drive is running (as on both harnesses)."""
+        if self.events.count("drive:start") <= self.events.count("drive:end") + self.events.count(
+            "drive:cancelled"
+        ):
+            return False
+        self.steered.append(message)
+        return True
 
     async def disconnect(self):
         self.events.append("disconnect")
@@ -1231,6 +1242,9 @@ def _bg_session(events, **kw):
     session._drive_error = None
     session._direct_branch = None
     session._monitor = None
+    session._pending_questions = []
+    session._init_channel()
+    session.tool_spec = types.SimpleNamespace(proposed_tool_name="ixpe_pcube_bands")
     return session
 
 
@@ -1348,3 +1362,307 @@ def test_the_background_drive_inherits_the_cost_meter_context():
 
     asyncio.run(scenario())
     assert seen == ["run-42"], "the background drive ran outside the caller's context"
+
+
+# ══════════════════════════════════════════ wait_coder + queued drive_coder (2026-09-24)
+#
+# Slot 6 (2026-09-15): 134 checks (114 refused), 47 mid-turn steers, 31 refused submits at a
+# 3-10 s cadence. The replacement is a blocking wait with early wake, and a message to a working
+# coder is queued for its next turn unless the lead asks for mid-turn delivery.
+
+
+def test_a_message_to_a_working_coder_is_queued_and_becomes_its_next_turn():
+    events: list = []
+
+    async def scenario():
+        session = _bg_session(events, delay=0.1)
+        session.start_drive("first")
+        await asyncio.sleep(0.02)                   # the turn is genuinely running now
+        assert await session.send("second") == "queued"
+        assert session._backend.steered == [], "a plain send must not steer the running turn"
+        assert session.drive_status == "working"
+        await asyncio.sleep(0.35)
+        assert session.drive_status == "stopped"
+        assert session._backend.driven == ["first", "second"]
+        text, error = session.take_drive_result()
+        assert error is None and "coder says: first" in text and "coder says: second" in text
+
+    asyncio.run(scenario())
+
+
+def test_mid_turn_steers_the_running_turn():
+    async def scenario():
+        session = _bg_session([], delay=0.2)
+        session.start_drive("first")
+        await asyncio.sleep(0.02)
+        assert await session.send("change course", mid_turn=True) == "steered"
+        assert session._backend.steered == ["change course"]
+        await asyncio.sleep(0.3)
+        assert session._backend.driven == ["first"], "a steer is not a new turn"
+
+    asyncio.run(scenario())
+
+
+def test_an_answer_to_an_open_question_goes_mid_turn_without_the_flag():
+    """The coder may be waiting on the answer, so it must not sit in the queue behind the turn."""
+
+    async def scenario():
+        session = _bg_session([], delay=0.2)
+        session.start_drive("first")
+        await asyncio.sleep(0.02)
+        session.park_question("ENERGY or PI?")
+        assert await session.send("PI") == "answered"
+        assert session._backend.steered == ["PI"]
+        assert await session.send("and add a test") == "queued", "only the answer skips the queue"
+        await asyncio.sleep(0.5)
+
+    asyncio.run(scenario())
+
+
+def test_a_send_that_races_the_turn_end_still_delivers():
+    """A mid-turn steer refused because the turn just ended falls through to a new turn."""
+
+    async def scenario():
+        session = _bg_session([], delay=0.05)
+        session.start_drive("first")
+        await asyncio.sleep(0.15)
+        assert session.drive_status == "stopped"
+        assert await session.send("late", mid_turn=True) == "started"
+        await asyncio.sleep(0.15)
+        assert session._backend.driven == ["first", "late"]
+
+    asyncio.run(scenario())
+
+
+def _timed_wait(session, timeout):
+    async def go():
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        reason = await session.wait_for_event(timeout)
+        return reason, loop.time() - t0
+    return go()
+
+
+def test_the_wait_returns_when_the_turn_ends_not_at_its_timeout():
+    async def scenario():
+        session = _bg_session([], delay=0.1)
+        session.start_drive("go")
+        reason, waited = await _timed_wait(session, 30)
+        assert reason == "turn_ended" and waited < 1.0, (reason, waited)
+
+    asyncio.run(scenario())
+
+
+def test_the_wait_returns_when_the_coder_asks():
+    async def scenario():
+        session = _bg_session([], delay=5.0)
+        session.start_drive("go")
+        asyncio.get_running_loop().call_later(0.1, session.park_question, "which epoch?")
+        reason, waited = await _timed_wait(session, 30)
+        assert reason == "question" and waited < 1.0, (reason, waited)
+        assert session.take_questions() == ["which epoch?"]
+        await session.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_the_wait_returns_when_a_human_steer_arrives_for_the_lead():
+    from auto_research.run_control import RunControl
+
+    async def scenario():
+        rc = RunControl()
+        session = _bg_session([], delay=5.0)
+        session.watch_steers(rc.steer_event("analyst_lead"))
+        session.start_drive("go")
+        asyncio.get_running_loop().call_later(0.1, rc.add_steer, "analyst_lead", "wrap up")
+        reason, waited = await _timed_wait(session, 30)
+        assert reason == "steer" and waited < 1.0, (reason, waited)
+        # The wait consumed nothing: the steer is still delivered by the loop's own drain.
+        assert rc.drain_steer("analyst_lead") == ["wrap up"]
+        assert not rc.steer_event("analyst_lead").is_set()
+        await session.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_the_wait_times_out_while_the_coder_keeps_working():
+    async def scenario():
+        session = _bg_session([], delay=5.0)
+        session.start_drive("go")
+        reason, waited = await _timed_wait(session, 0.2)
+        assert reason == "timeout" and 0.15 < waited < 1.0, (reason, waited)
+        assert session.drive_status == "working"
+        await session.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_waiting_on_an_idle_coder_returns_at_once():
+    async def scenario():
+        session = _bg_session([], delay=5.0)
+        reason, waited = await _timed_wait(session, 30)
+        assert reason == "idle" and waited < 0.1
+
+    asyncio.run(scenario())
+
+
+def test_a_stop_cancels_a_pending_wait_and_leaves_no_waiter_behind():
+    async def scenario():
+        session = _bg_session([], delay=5.0)
+        session.start_drive("go")
+        before = len(asyncio.all_tasks())
+        wait = asyncio.create_task(session.wait_for_event(30))
+        await asyncio.sleep(0.05)
+        wait.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await wait
+        await asyncio.sleep(0)
+        assert len(asyncio.all_tasks()) <= before, "a waiter task outlived the cancelled wait"
+        await session.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_wait_coder_reports_the_narration_and_the_time(monkeypatch):
+    import auto_research.agents.react as react
+
+    monkeypatch.setattr(react, "coder_wait_limits_s", lambda: (1, 2, 3))
+
+    async def scenario():
+        session = _bg_session([], delay=0.1)
+        session.start_drive("write it")
+        out = await react.execute_wait_coder(session, {"timeout_s": 99})
+        assert not out.is_error
+        assert out.text.startswith("[waited ") and "lowered to the 3s maximum" in out.text
+        assert "coder says: write it" in out.text and "It has stopped" in out.text
+        again = await react.execute_wait_coder(session, {})
+        assert "nothing to wait for" in again.text, "a narration is reported once"
+
+    asyncio.run(scenario())
+
+
+def test_wait_coder_raises_a_short_timeout_to_the_floor(monkeypatch):
+    """wait_coder(0) on a busy coder must hold for the floor, not answer instantly."""
+    import auto_research.agents.react as react
+
+    monkeypatch.setattr(react, "coder_wait_limits_s", lambda: (1, 2, 3))
+
+    async def scenario():
+        session = _bg_session([], delay=5.0)
+        session.start_drive("go")
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        out = await react.execute_wait_coder(session, {"timeout_s": 0})
+        assert loop.time() - t0 >= 0.95, "the floor was not enforced"
+        assert "raised to the 1s minimum" in out.text and "still working" in out.text
+        await session.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_wait_coder_reports_a_dead_coder_as_an_error(monkeypatch):
+    import auto_research.agents.react as react
+
+    monkeypatch.setattr(react, "coder_wait_limits_s", lambda: (1, 2, 3))
+
+    async def scenario():
+        session = _bg_session([], delay=0.01, fail=True)
+        session.start_drive("go")
+        out = await react.execute_wait_coder(session, {})
+        assert out.is_error and "FAILED" in out.text and "Credit balance" in out.text
+
+    asyncio.run(scenario())
+
+
+def test_submit_waits_for_the_coder_to_stop_before_the_gate(monkeypatch):
+    import auto_research.agents.react as react
+
+    monkeypatch.setattr(react, "coder_wait_limits_s", lambda: (1, 2, 30))
+    seen: list = []
+
+    async def fake_submit_now(session, cycle):
+        seen.append(session.drive_status)
+        return react.ToolOutcome(text="GATE FAILED — x")
+
+    monkeypatch.setattr(react, "_submit_now", fake_submit_now)
+
+    async def scenario():
+        session = _bg_session([], delay=0.2)
+        session.start_drive("finish it")
+        await session.send("and the test")          # queued: the wait must span both turns
+        out = await react.execute_submit(session, None)
+        assert seen == ["stopped"], "the gate ran while the coder was still writing"
+        assert "coder says: finish it" in out.text and "coder says: and the test" in out.text
+        assert out.text.endswith("GATE FAILED — x")
+
+    asyncio.run(scenario())
+
+
+def test_submit_returns_a_question_instead_of_gating(monkeypatch):
+    """A coder waiting on the lead would never stop; the submit hands the question back."""
+    import auto_research.agents.react as react
+
+    monkeypatch.setattr(react, "coder_wait_limits_s", lambda: (1, 2, 30))
+
+    async def never(session, cycle):  # pragma: no cover — reaching it is the failure
+        raise AssertionError("gated while the coder had an open question")
+
+    monkeypatch.setattr(react, "_submit_now", never)
+
+    async def scenario():
+        session = _bg_session([], delay=5.0)
+        session.start_drive("go")
+        asyncio.get_running_loop().call_later(0.1, session.park_question, "PI or ENERGY?")
+        out = await react.execute_submit(session, None)
+        assert not out.is_error and "Not submitted" in out.text and "PI or ENERGY?" in out.text
+        await session.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_a_question_wake_does_not_claim_the_coder_started_a_next_turn(monkeypatch):
+    """Found live 2026-09-24 (question cell): woken by a question while the coder was still in
+    its FIRST turn, the wait also said "It has already started its next turn on the message(s)
+    you queued" — nothing was queued and no turn had ended."""
+    import auto_research.agents.react as react
+
+    monkeypatch.setattr(react, "coder_wait_limits_s", lambda: (1, 2, 3))
+
+    async def scenario():
+        session = _bg_session([], delay=5.0)
+        session.start_drive("go")
+        asyncio.get_running_loop().call_later(0.1, session.park_question, "PI or ENERGY?")
+        out = await react.execute_wait_coder(session, {})
+        assert "[coder asks] PI or ENERGY?" in out.text
+        assert "next turn" not in out.text and "has stopped" not in out.text, out.text
+        await session.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_a_stop_cancels_a_submit_that_is_waiting_on_the_coder(monkeypatch):
+    """`/stop` cancels the run task; a submit parked in its wait must die with it, never run the
+    gate afterwards, and leave no waiter behind."""
+    import auto_research.agents.react as react
+
+    monkeypatch.setattr(react, "coder_wait_limits_s", lambda: (1, 2, 30))
+
+    async def never(session, cycle):  # pragma: no cover — reaching it is the failure
+        raise AssertionError("gated after the stop")
+
+    monkeypatch.setattr(react, "_submit_now", never)
+
+    async def scenario():
+        session = _bg_session([], delay=5.0)
+        session.start_drive("go")
+        before = len(asyncio.all_tasks())
+        submit = asyncio.create_task(react.execute_submit(session, None))
+        await asyncio.sleep(0.05)
+        submit.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await submit
+        await asyncio.sleep(0)
+        assert len(asyncio.all_tasks()) <= before, "a waiter outlived the cancelled submit"
+        await session.aclose()
+
+    asyncio.run(scenario())

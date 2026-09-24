@@ -1,6 +1,7 @@
 """Pydantic v2 message schemas: the inter-agent protocol."""
 
 from auto_research.schemas.analysis import AnalysisTask, AnalystReport
+from auto_research.schemas.artifacts import InputFile, PaperAttribution, Receipt
 from auto_research.schemas.base import MessageModel
 from auto_research.schemas.figures import (
     DocumentRef,
@@ -16,9 +17,13 @@ from auto_research.schemas.merge import (
     MergeFlowResult,
     ToolReviewVerdict,
 )
-from auto_research.schemas.report import LatexReport, Reference, ReportSection, ResearchReport
+from auto_research.schemas.report import ResearchReport
 from auto_research.schemas.requests import ResearchRequest
-from auto_research.schemas.review import ReviewVerdict
+from auto_research.schemas.review import (
+    ReviewerReport,
+    ReviewerSection,
+    ReviewerTable,
+)
 from auto_research.schemas.search import FullTextLink, SearchRequest, SearchResult, SearchSource
 from auto_research.schemas.tools import ToolCallRequest, ToolCallReview, ToolKind, ToolResult
 from auto_research.schemas.toolspec import (
@@ -44,14 +49,16 @@ __all__ = [
     "HumanQuery",
     "HumanQueryKind",
     "HumanResponse",
-    "LatexReport",
+    "InputFile",
     "MergeFlowResult",
     "MessageModel",
-    "Reference",
-    "ReportSection",
+    "PaperAttribution",
+    "Receipt",
     "ResearchReport",
     "ResearchRequest",
-    "ReviewVerdict",
+    "ReviewerReport",
+    "ReviewerSection",
+    "ReviewerTable",
     "SearchRequest",
     "SearchResult",
     "SearchSource",

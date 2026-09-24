@@ -211,10 +211,15 @@ def test_uncited_catalog_figures_are_surfaced_as_a_problem():
     assert any("2 figure(s)" in p for p in problems)
 
 
-def test_a_complete_worker_report_has_no_problems():
+def test_a_complete_worker_report_has_no_problems(tmp_path):
     from auto_research.agents.react import ReportWorkspace
 
-    report = NS(summary="PD = 3.4 +/- 0.14 percent", status="succeeded", figures=[object()])
+    # The worker's cited figures are stat'ed too since provenance P2 (every unit shares the
+    # check), so the figure here is a real file.
+    png = tmp_path / "fig.png"
+    png.write_bytes(b"\x89PNG")
+    report = NS(summary="PD = 3.4 +/- 0.14 percent", status="succeeded",
+                figures=[NS(path=png, caption="PD")])
     ws = ReportWorkspace.__new__(ReportWorkspace)
     object.__setattr__(ws, "written_report", report)
     object.__setattr__(ws, "catalog", {"self": [object()]})

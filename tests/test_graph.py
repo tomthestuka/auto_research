@@ -10,42 +10,29 @@ import pytest
 from langgraph.graph import END
 
 from auto_research.graph import build_graph
-from auto_research.graph.builder import _resolve_cited_paths
 from auto_research.retrieval import RetrievalBackend
+from auto_research.schemas.literature import LiteratureReport
 from auto_research.agents.react import TURN_END_TOOL, LeadCycleOutcome
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
     ResearchRequest,
-    ReviewVerdict,
-    SearchRequest,
-    SearchResult,
+    ReviewerReport,
 )
 
 
 class FakeIOAgent:
-    """Fake IO agent: composes a trivial search strategy and records calls."""
+    """Fake librarian: files a trivial literature report per pass and records calls."""
 
     def __init__(self):
-        self.compose_calls: int = 0
-        self.ingest_calls: int = 0
-        self._search_count: int = 0
+        self.research_calls: int = 0
+        self.follow_ups: list[str | None] = []
+        self.last_receipts: dict = {}
 
-    async def compose_search_strategy(
-        self, request: ResearchRequest, *, follow_up=None
-    ) -> SearchRequest:
-        self.compose_calls += 1
-        query = request.question
-        if follow_up:
-            query = f"{query} | reviewer follow-up: {follow_up}"
-        return SearchRequest(query=query)
-
-    async def search(self, request: SearchRequest) -> list[SearchResult]:
-        self._search_count += 1
-        return [SearchResult(source="arxiv", title=f"Paper {self._search_count}")]
-
-    async def ingest_results(self, results: list[SearchResult]) -> None:
-        self.ingest_calls += 1
+    async def research(self, request: ResearchRequest, *, follow_up=None) -> LiteratureReport:
+        self.research_calls += 1
+        self.follow_ups.append(follow_up)
+        return LiteratureReport(summary=f"Pass {self.research_calls}", status="succeeded")
 
 
 class FakeRetrieval:
@@ -80,26 +67,27 @@ class FakeReviewer:
         self.analysis_pass_after = analysis_pass_after
         self.lit_calls = 0
         self.analysis_calls = 0
+        self.stages: list[tuple[str, int]] = []
 
-    async def review(self, request, *, report=None):
-        if report is None:
+    async def review(self, request, *, stage, literature=None, literature_receipts=None,
+                     report=None, iterations_left=0, render=None):
+        self.stages.append((stage, iterations_left))
+        if stage == "literature":
             self.lit_calls += 1
             need_more = self.lit_calls < self.lit_pass_after
-            return ReviewVerdict(
+            return ReviewerReport(
                 accepted=False,
                 rationale=f"literature pass {self.lit_calls}",
                 needs_more_literature=need_more,
-                follow_up="search more" if need_more else None,
+                follow_up="search more" if need_more else "analyse",
             )
         self.analysis_calls += 1
         need_rework = self.analysis_calls < self.analysis_pass_after
-        return ReviewVerdict(
+        return ReviewerReport(
             accepted=not need_rework,
             rationale=f"analysis pass {self.analysis_calls}",
             needs_analysis_rework=need_rework,
-            follow_up="address X" if need_rework else None,
-            # On acceptance the reviewer cites a paper it read; flows to compose_report.
-            cited_paths=[] if need_rework else ["/fake/cited.pdf"],
+            follow_up="address X" if need_rework else "",
         )
 
 
@@ -164,11 +152,9 @@ def test_graph_runs_full_loop_in_single_pass():
     assert state["report"].summary == "final 1"
     assert reviewer.lit_calls == 1
     assert reviewer.analysis_calls == 1
-    assert io_agent.compose_calls == 1
-    assert io_agent.ingest_calls == 1
-    # The literature node ingests but no longer pre-loads review docs; the reviewer's
-    # accepted verdict carries cited_paths, which flow to compose_report.
-    assert state["cited_paths"] == [Path("/fake/cited.pdf")]
+    assert io_agent.research_calls == 1
+    # Each review is told its stage and what the graph has left for that stage's loop edge.
+    assert reviewer.stages == [("literature", 2), ("analysis", 2)]
 
 
 def test_graph_literature_feedback_capped_at_three():
@@ -187,8 +173,10 @@ def test_graph_literature_feedback_capped_at_three():
     state = _invoke(graph, ResearchRequest(question="What is X?"))
 
     assert state["lit_iterations"] == 3
-    assert io_agent.compose_calls == 3
-    assert io_agent.ingest_calls == 3
+    assert io_agent.research_calls == 3
+    # The reviewer's re-loop instruction reaches the librarian, and state holds the latest pass.
+    assert io_agent.follow_ups == [None, "search more", "search more"]
+    assert state["literature"].summary == "Pass 3"
     assert state["analysis_iterations"] == 1
     assert state["verdict"].accepted is True
 
@@ -300,25 +288,3 @@ def test_build_graph_rejects_zero_max_iterations():
             lead=FakeLead(),
             max_iterations=0,
         )
-
-
-def test_resolve_cited_paths_drops_unopened_citations(tmp_path):
-    """A citation is kept only if the reviewer actually opened that paper."""
-    opened = tmp_path / "read.pdf"
-    other = tmp_path / "unread.pdf"
-    reviewer = SimpleNamespace(tools=SimpleNamespace(opened_paths=[opened.resolve()]))
-    verdict = ReviewVerdict(
-        accepted=True, rationale="ok", cited_paths=[str(opened), str(other)]
-    )
-
-    cited = _resolve_cited_paths(verdict, reviewer)
-
-    assert cited == [opened]  # the un-opened citation is dropped
-
-
-def test_resolve_cited_paths_no_tools_takes_citations_as_is(tmp_path):
-    """A reviewer with no KB-tool provider (e.g. a test double) keeps citations as given."""
-    reviewer = SimpleNamespace()  # no .tools
-    verdict = ReviewVerdict(accepted=True, rationale="ok", cited_paths=["/x/a.pdf"])
-
-    assert _resolve_cited_paths(verdict, reviewer) == [Path("/x/a.pdf")]

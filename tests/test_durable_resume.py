@@ -29,7 +29,7 @@ from auto_research.graph.detached import (
     resolve_run_id,
     run_research_nohup,
 )
-from auto_research.schemas.review import ReviewVerdict
+from auto_research.schemas.review import ReviewerReport
 
 
 # ── The checkpointer mechanism (MemorySaver — no pip package needed) ──────────
@@ -144,7 +144,7 @@ def _write_pid(rd: Path, pid: int, create_time) -> None:
 def _done_result(rationale: str) -> str:
     return json.dumps({
         "status": "done",
-        "verdict": ReviewVerdict(accepted=True, rationale=rationale).model_dump(mode="json"),
+        "verdict": ReviewerReport(accepted=True, rationale=rationale).model_dump(mode="json"),
     })
 
 

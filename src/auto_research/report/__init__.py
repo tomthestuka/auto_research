@@ -1,22 +1,28 @@
-"""Report composition utilities for reviewer-authored research artifacts."""
+"""Report rendering and publishing for the reviewer's filed report."""
 
-from auto_research.report.figures import stage_figures, stage_papers
-from auto_research.report.references import build_references
-from auto_research.report.writers import (
-    compile_latex,
-    validate_latex_figures,
-    validate_report_links,
-    write_report_jsonl,
-    write_report_latex,
+from auto_research.report.figures import stage_figure_receipts
+from auto_research.report.publish import PublishResult, cited_handles, publish_report, receipt_closure
+from auto_research.report.render import (
+    CompileResult,
+    RenderResult,
+    compile_report,
+    latex_escape,
+    parse_delimited,
+    render_report,
 )
+from auto_research.report.writers import write_report_jsonl
 
 __all__ = [
-    "build_references",
-    "compile_latex",
-    "stage_figures",
-    "stage_papers",
-    "validate_latex_figures",
-    "validate_report_links",
+    "CompileResult",
+    "PublishResult",
+    "RenderResult",
+    "cited_handles",
+    "compile_report",
+    "latex_escape",
+    "parse_delimited",
+    "publish_report",
+    "receipt_closure",
+    "render_report",
+    "stage_figure_receipts",
     "write_report_jsonl",
-    "write_report_latex",
 ]

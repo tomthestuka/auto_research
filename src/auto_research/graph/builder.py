@@ -13,16 +13,8 @@ from auto_research.consensus import ConsensusStrategy, DebateToConverge, LeadLik
 from auto_research.graph.state import ResearchState
 from auto_research.monitor import RunMonitor
 from auto_research.observations import ObservationsConfig, load_observations_config
-from auto_research.report import (
-    build_references,
-    compile_latex,
-    stage_figures,
-    stage_papers,
-    validate_latex_figures,
-    validate_report_links,
-    write_report_jsonl,
-    write_report_latex,
-)
+from auto_research.provenance import ReceiptStore
+from auto_research.report import publish_report
 from auto_research.retrieval import RetrievalBackend
 from auto_research.sandbox.registry import ToolkitRegistry
 from auto_research.sandbox.workspace import report_dir as _report_dir
@@ -30,29 +22,24 @@ from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
     ResearchRequest,
-    ReviewVerdict,
-    SearchRequest,
-    SearchResult,
+    ReviewerReport,
 )
-from auto_research.storage import Storage
+from auto_research.schemas.literature import LiteratureReport
+from auto_research.schemas.artifacts import Receipt
 
 
 class IOAgentLike(Protocol):
-    """Minimal interface required of the librarian I/O agent."""
+    """Minimal interface required of the librarian."""
 
-    async def compose_search_strategy(
+    last_receipts: dict[str, Receipt]
+
+    async def research(
         self,
         request: ResearchRequest,
         *,
         follow_up: str | None = None,
-    ) -> SearchRequest:
-        """Compose a focused search strategy from a research request."""
-
-    async def search(self, request: SearchRequest) -> list[SearchResult]:
-        """Query external sources and return raw results."""
-
-    async def ingest_results(self, results: list[SearchResult]) -> None:
-        """Download, abstract, and store each search result."""
+    ) -> LiteratureReport:
+        """Research the literature for ``request`` and return the report it filed."""
 
 
 class ReviewerLike(Protocol):
@@ -62,9 +49,14 @@ class ReviewerLike(Protocol):
         self,
         request: ResearchRequest,
         *,
+        stage: str,
+        literature: LiteratureReport | None = None,
+        literature_receipts: Mapping[str, Receipt] | None = None,
         report: AnalystReport | None = None,
-    ) -> ReviewVerdict:
-        """Return a review verdict for the supplied state."""
+        iterations_left: int = 0,
+        render: Any | None = None,
+    ) -> ReviewerReport:
+        """Run one review and return the report the reviewer filed through ``turn_end``."""
 
 
 def _build_task(
@@ -110,8 +102,7 @@ def build_graph(
     registry: ToolkitRegistry | None = None,
     monitor: RunMonitor | None = None,
     run_id: str | None = None,
-    storage: Storage | None = None,
-    report_retry_cap: int = 2,
+    receipts: ReceiptStore | None = None,
     report_formats: list[str] | None = None,
     checkpointer: Any | None = None,
 ) -> Any:
@@ -126,11 +117,9 @@ def build_graph(
     ``ToolkitRegistry``) so the consensus strategy can execute tools and
     share truncated summaries across workers between debate rounds.
 
-    The literature node follows a four-step pipeline:
-    IO agent composes search strategy → IO agent queries online sources →
-    IO agent downloads and abstracts results → ``text_search_paths()`` queries
-    local SQLite (pure Python, no LLM). The reviewer receives local PDF paths
-    and loads them as full-document attachments.
+    The literature node runs the librarian's research loop, which searches, reads papers and
+    pages in full, and files a ``LiteratureReport`` through ``turn_end``. The report and the
+    documents it read (by handle) go into state for the reviewer.
     """
 
     if max_iterations < 1:
@@ -167,35 +156,20 @@ def build_graph(
         prior = _latest_verdict(state)
         follow_up = prior.follow_up if prior and prior.needs_more_literature else None
 
-        # Prefer the ReAct librarian (iterative search/refine over its sources);
-        # fall back to the single-shot compose→search path when unavailable.
-        if hasattr(io_agent, "gather_literature"):
-            raw = await io_agent.gather_literature(state["request"], follow_up=follow_up)  # type: ignore[attr-defined]
-        else:
-            search_request = await io_agent.compose_search_strategy(
-                state["request"], follow_up=follow_up
-            )
-            await _record(
-                monitor,
-                "librarian.search.strategy",
-                level=5,
-                summary="Librarian IO composed search strategy",
-                actor="librarian_io",
-                data={"search_request": search_request, "follow_up": follow_up},
-            )
-            raw = await io_agent.search(search_request)
+        report = await io_agent.research(state["request"], follow_up=follow_up)
         await _record(
             monitor,
-            "librarian.search.results",
-            level=5,
-            summary=f"Librarian IO returned {len(raw)} raw search results",
+            "librarian.literature.report",
+            level=3,
+            summary=(
+                f"Librarian filed {len(report.findings)} finding(s), status {report.status}"
+            ),
             actor="librarian_io",
-            data={"results": raw},
+            data={"report": report, "documents": sorted(io_agent.last_receipts)},
         )
-        await io_agent.ingest_results(raw)
-        # Retrieval-for-review is reviewer-driven now (the reviewer pulls papers via its
-        # text_search/open_paper tools); this node only ingests into the knowledge base.
         return {
+            "literature": report,
+            "literature_receipts": dict(io_agent.last_receipts),
             "lit_iterations": state.get("lit_iterations", 0) + 1,
         }
 
@@ -209,13 +183,16 @@ def build_graph(
         )
         verdict = await reviewer.review(
             state["request"],
-            report=None,
+            stage="literature",
+            literature=state.get("literature"),
+            literature_receipts=state.get("literature_receipts") or {},
+            iterations_left=max_iterations - state.get("lit_iterations", 0),
         )
         await _record(
             monitor,
             "reviewer.literature_review.verdict",
             level=2,
-            summary="Reviewer returned literature verdict",
+            summary="Reviewer filed its literature review",
             actor="reviewer",
             data={"verdict": verdict},
         )
@@ -261,6 +238,14 @@ def build_graph(
         }
 
     async def review_analysis_node(state: ResearchState) -> dict[str, Any]:
+        """The analysis review, whose final report is rendered inside its own ``turn_end``.
+
+        The ``.tex`` and PDF are therefore finished when the reviewer's loop returns; this node
+        only records where they are, and any compile failure that was the renderer's rather than
+        the model's, loudly (it never holds the reviewer in a loop it cannot leave).
+        """
+        from auto_research.agents.reviewer_tools import ReviewerRender
+
         await _record(
             monitor,
             "reviewer.analysis_review.start",
@@ -269,20 +254,42 @@ def build_graph(
             actor="reviewer",
             data={"report": state.get("report")},
         )
+        render = ReviewerRender(
+            report_dir=_report_dir(_run_id), run_id=_run_id, formats=tuple(_report_formats),
+        )
         verdict = await reviewer.review(
             state["request"],
+            stage="analysis",
+            literature=state.get("literature"),
+            literature_receipts=state.get("literature_receipts") or {},
             report=state.get("report"),
+            iterations_left=max_iterations - state.get("analysis_iterations", 0),
+            render=render,
         )
-        cited = _resolve_cited_paths(verdict, reviewer)
         await _record(
             monitor,
             "reviewer.analysis_review.verdict",
             level=2,
-            summary="Reviewer returned final/rework verdict",
+            summary="Reviewer filed its analysis review",
             actor="reviewer",
-            data={"verdict": verdict, "cited_paths": [str(p) for p in cited]},
+            data={"verdict": verdict},
         )
-        return {"verdicts": [verdict], "cited_paths": cited}
+        update: dict[str, Any] = {"verdicts": [verdict]}
+        if not verdict.needs_analysis_rework and "tex" in _report_formats:
+            tex = render.render.tex_path if render.render is not None else None
+            pdf = render.compile.pdf_path if render.compile is not None else None
+            update["report_latex"] = tex
+            update["report_pdf"] = pdf
+            if render.renderer_errors or pdf is None:
+                await _record(
+                    monitor,
+                    "reviewer.compose_report.renderer_error",
+                    level=1,
+                    summary="The report was accepted but no PDF was produced — a renderer defect",
+                    actor="reviewer",
+                    data={"errors": render.renderer_errors, "tex": str(tex) if tex else None},
+                )
+        return update
 
     def after_review_analysis(state: ResearchState) -> str:
         verdict = _latest_verdict(state)
@@ -302,7 +309,7 @@ def build_graph(
         bypass). This node only records the terminal and forwards the reviewer's verdict; the
         report is always composed (``route_after_finalize`` honours ``report_formats``), so an
         honest failure is *documented*, never silent. The no-fabrication guarantee lives in the
-        reviewer + compose prompts, not in suppressing the report.
+        reviewer's prompt and in its ``turn_end`` check, not in suppressing the report.
         """
         report = state.get("report")
         # An absent report is not a success (F9): the harness never infers a terminal state, and
@@ -320,108 +327,51 @@ def build_graph(
         return {"verdict": verdict}
 
     _run_id = run_id or uuid.uuid4().hex
-    _storage = storage or Storage()
     _report_formats: list[str] = report_formats if report_formats is not None else ["jsonl", "tex"]
 
     async def compose_report_node(state: ResearchState) -> dict[str, Any]:
+        """Publish the accepted report: receipts for its files, and the JSONL when configured.
+
+        No model runs here. The reviewer wrote the report inside its loop and its ``turn_end``
+        rendered and compiled the ``.tex``; what remains is making the report an artifact
+        (``rev:dN`` receipts whose parents are the receipts it cites) and the machine handle.
+        """
         verdict = state["verdict"]
-        analyst_report = state.get("report")
-        cited = state.get("cited_paths") or []
-
-        rdir = _report_dir(_run_id)
-        references = await build_references(_storage, cited)
-
+        store = receipts if receipts is not None else getattr(reviewer, "receipts", None)
         result: dict[str, Any] = {}
-
-        if "jsonl" in _report_formats:
-            machine = await reviewer.compose_machine_report(  # type: ignore[attr-defined]
-                state["request"], analyst_report, references, verdict, _run_id
-            )
-            jsonl_path = write_report_jsonl(machine, rdir / "report.jsonl")
-            result["research_report"] = machine
-            result["report_jsonl"] = jsonl_path
+        if store is None:
             await _record(
                 monitor,
-                "reviewer.compose_report.jsonl",
-                level=3,
-                summary="Reviewer wrote machine report (JSONL)",
+                "reviewer.compose_report.no_store",
+                level=1,
+                summary="No receipt store in this run, so the report was not published",
                 actor="reviewer",
-                data={"path": str(jsonl_path)},
             )
-
-        if "tex" in _report_formats:
-            staged = stage_figures(analyst_report.figures if analyst_report else [], rdir)
-            staged_papers = stage_papers(cited, rdir)
-            pdf_path: Path | None = None
-
-            latex_path = rdir / "report.tex"
-            attempts: list[int] = []
-
-            def _latex_problems() -> list[str]:
-                """The reviewer's ``turn_end`` door: figures resolve, links resolve, it compiles.
-
-                F5e: this used to be a recompose loop — the reviewer produced a whole
-                ``LatexReport`` through structured output on each attempt and the previous
-                attempt's errors came back as prose, so every attempt discarded the last one's
-                fixes ([D7]: the retry re-emitted the same document). Now the reviewer edits the
-                file and this is what stands between the draft and acceptance.
-                """
-                attempts.append(1)
-                if not latex_path.is_file():
-                    return [f"{latex_path.name} has not been written yet — draft it with file_edit."]
-                # [D1] survives the move to file editing. `write_report_latex` wraps every
-                # `\href` DISPLAY argument in `\nolinkurl`, and without it a single `_` in a
-                # staged filename broke the compile of every citing PDF. The reviewer now writes
-                # the file itself, so that normalization is re-applied here rather than lost:
-                # it is mechanical formatting, not authorship, so it is applied silently instead
-                # of being charged to the model as a problem to fix.
-                write_report_latex(latex_path.read_text(encoding="utf-8"), latex_path)
-                latex = latex_path.read_text(encoding="utf-8")
-                errs = validate_latex_figures(latex, staged)
-                errs += validate_report_links(latex, rdir, staged_papers)
-                _ok, cerrs = compile_latex(rdir)
-                return errs + cerrs
-
-            await reviewer.author_latex_report(  # type: ignore[attr-defined]
-                state["request"], analyst_report, staged, staged_papers, verdict,
-                tex_path=latex_path, validator=_latex_problems,
-                roots=[rdir], cap=max(1, report_retry_cap) * 4,
-            )
-            errs = _latex_problems()
-            await _record(
-                monitor,
-                "reviewer.compose_report.compile",
-                level=4,
-                summary=(
-                    f"LaTeX authored over {len(attempts)} validation(s): "
-                    + ("OK" if not errs else f"{len(errs)} residual error(s)")
-                ),
-                actor="reviewer",
-                data={"validations": len(attempts), "errors": errs},
-            )
-            if not errs:
-                pdf_candidates = list(rdir.glob("*.pdf"))
-                pdf_path = pdf_candidates[0] if pdf_candidates else None
-
-            if errs:
-                await _record(
-                    monitor,
-                    "reviewer.compose_report.compile_warning",
-                    level=2,
-                    summary=f"LaTeX compile finished with {len(errs)} residual error(s) after {report_retry_cap} attempt(s)",
-                    actor="reviewer",
-                    data={"errors": errs},
-                )
-            result["report_latex"] = latex_path
-            if pdf_path:
-                result["report_pdf"] = pdf_path
-
+            return result
+        published = publish_report(
+            verdict,
+            store=store,
+            run_id=_run_id,
+            request_question=state["request"].question,
+            report_dir=_report_dir(_run_id),
+            formats=_report_formats,
+            tex_path=state.get("report_latex"),
+            pdf_path=state.get("report_pdf"),
+        )
+        if published.research_report is not None:
+            result["research_report"] = published.research_report
+            result["report_jsonl"] = published.jsonl_path
         await _record(
             monitor,
             "run.report",
             level=1,
-            summary="Research report artifacts written",
-            data={k: str(v) for k, v in result.items() if isinstance(v, Path)},
+            summary="Research report artifacts published",
+            data={
+                "artifacts": published.artifacts,
+                "jsonl": str(published.jsonl_path) if published.jsonl_path else None,
+                "tex": str(state.get("report_latex")) if state.get("report_latex") else None,
+                "pdf": str(state.get("report_pdf")) if state.get("report_pdf") else None,
+            },
         )
         return result
 
@@ -480,23 +430,8 @@ async def _record(
         await monitor.record(team, event, level=level, summary=summary, actor=actor, data=data)
 
 
-def _latest_verdict(state: ResearchState) -> ReviewVerdict | None:
+def _latest_verdict(state: ResearchState) -> ReviewerReport | None:
     verdicts = state.get("verdicts") or []
     if verdicts:
         return verdicts[-1]
     return state.get("verdict")
-
-
-def _resolve_cited_paths(verdict: ReviewVerdict, reviewer: Any) -> list[Path]:
-    """Resolve a verdict's ``cited_paths`` to ``Path``s, keeping only papers the reviewer
-    actually opened this run (so a citation can't name a paper it never read).
-
-    When the reviewer carries no knowledge-base tool provider (e.g. a test double with no
-    ``opened_paths``), the citations are taken as-is — there is nothing to enforce against.
-    """
-    opened_attr = getattr(getattr(reviewer, "tools", None), "opened_paths", None)
-    cited = [Path(p) for p in getattr(verdict, "cited_paths", [])]
-    if opened_attr is None:
-        return cited
-    opened = {Path(p).resolve() for p in opened_attr}
-    return [p for p in cited if p.resolve() in opened]

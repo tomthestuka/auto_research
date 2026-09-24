@@ -103,9 +103,15 @@ def test_run_research_actually_calls_both_factories():
     """
     tree = _tree(RUNTIME)
     owners = _enclosing_functions(tree)
+    # The lead's and reviewer's read-only loops are built through their own attach seams, which
+    # `run_research` calls, so a factory counts as the run path's when either calls it.
+    seams = {"attach_lead_runtime", "attach_reviewer_runtime"}
+    for seam in seams:
+        callers = {owners.get(line) for _, line in _calls_to(tree, (seam,))}
+        assert "run_research" in callers, f"{seam} is not called by run_research"
     for factory in FACTORIES:
         callers = {owners.get(line) for _, line in _calls_to(tree, (factory,))}
-        assert "run_research" in callers, (
+        assert callers & ({"run_research"} | seams), (
             f"{factory} is not called by run_research (callers: {callers or 'none'})"
         )
 

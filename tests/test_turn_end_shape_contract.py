@@ -17,11 +17,21 @@ from tests.test_live_turn_end_shapes import SHAPES
 
 
 def _refusable_clauses() -> int:
-    """How many distinct problems `lead_turn_problems` can raise."""
-    from auto_research.agents.react import lead_turn_problems
+    """How many distinct problems `lead_turn_problems` can raise.
 
-    source = inspect.getsource(lead_turn_problems)
-    return source.count("problems.append(") + source.count("return [\n")
+    Counts its own clauses plus the ones it shares with every unit through
+    `report_provenance_problems` (the cited-figure stat moved there, 2026-09-24), and every clause of
+    `provenance.check_bindings`, which that function reaches through `check_report_fields`.
+    """
+    from auto_research.agents.react import lead_turn_problems, report_provenance_problems
+    from auto_research.provenance.bindings import check_bindings
+
+    source = inspect.getsource(lead_turn_problems) + inspect.getsource(report_provenance_problems)
+    bindings = inspect.getsource(check_bindings)
+    return (
+        source.count("problems.append(") + source.count("return [\n")
+        + bindings.count("result.problems.append(")
+    )
 
 
 def test_every_refusable_clause_has_a_shape_bound_to_it():

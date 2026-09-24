@@ -54,7 +54,7 @@ class GateReport(MessageModel):
 class ToolReviewVerdict(MessageModel):
     """The provider-decorrelated co-lead's code-review verdict (CLAUDE.md §9.3 step 4).
 
-    Distinct from the research :class:`~auto_research.schemas.review.ReviewVerdict`: this
+    Distinct from the research :class:`~auto_research.schemas.review.ReviewerReport`: this
     is code review only. ``checks_adequate`` is the co-lead's most leveraged judgement —
     are the Layer-B checks the right ones and strict enough (§9.4). ``issues`` are the
     specific fixes fed back to the author on rejection. ``commit_summary`` is the one-line,

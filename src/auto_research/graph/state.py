@@ -9,25 +9,30 @@ from typing import Annotated, TypedDict
 from auto_research.schemas import (
     AnalystReport,
     ResearchRequest,
-    ReviewVerdict,
+    ReviewerReport,
 )
+from auto_research.schemas.literature import LiteratureReport
 from auto_research.schemas.report import ResearchReport
+from auto_research.schemas.artifacts import Receipt
 
 
 class ResearchState(TypedDict, total=False):
     """State carried through the orchestration graph."""
 
     request: ResearchRequest
-    # PDFs the reviewer opened and cited during the final analysis review (∩ actually
-    # opened). The report's References link to exactly these files.
-    cited_paths: list[Path]
+    # The librarian's latest filed report, and the documents it read by handle (lib:pN / lib:wN).
+    # Each literature pass replaces both: a re-loop researches the reviewer's follow-up afresh.
+    literature: LiteratureReport | None
+    literature_receipts: dict[str, Receipt]
     report: AnalystReport | None
-    verdict: ReviewVerdict | None
-    verdicts: Annotated[list[ReviewVerdict], operator.add]
+    # The reviewer's filed reports, one per review; the latest routes the graph, and the final one
+    # is the run's report (its references are the paper receipts it cites).
+    verdict: ReviewerReport | None
+    verdicts: Annotated[list[ReviewerReport], operator.add]
     lit_iterations: int
     analysis_iterations: int
     max_iterations: int
-    # Report artifacts (populated by compose_report node on accepted verdicts)
+    # Report artifacts: .tex/PDF rendered inside the reviewer's turn_end, JSONL by compose_report
     research_report: ResearchReport | None
     report_jsonl: Path | None
     report_latex: Path | None

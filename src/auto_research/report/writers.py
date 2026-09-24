@@ -1,13 +1,10 @@
-"""Report serialization, LaTeX writing, validation, and compilation."""
+"""Report serialization, and the TeX log reader the compiler step uses."""
 
 from __future__ import annotations
 
 import re
-import shutil
-import subprocess
 from pathlib import Path
 
-from auto_research.schemas.figures import FigureRef
 from auto_research.schemas.report import ResearchReport
 
 
@@ -18,138 +15,6 @@ def write_report_jsonl(report: ResearchReport, path: Path) -> Path:
     return path
 
 
-# `\href{URL}{DISPLAY}` with simple (brace-free) arguments — what the compose prompt emits.
-_HREF_RE = re.compile(r"\\href\{([^{}]*)\}\{([^{}]*)\}")
-
-
-def _sanitize_href_display(latex: str) -> str:
-    r"""Wrap every ``\href`` display argument in ``\nolinkurl{}``.
-
-    The compose prompt tells the reviewer to emit ``\href{<relpath>}{<relpath>}``
-    verbatim, and staged relpaths are always ``papers/arxiv_<id>.pdf`` — the ``_``
-    in the *display* argument is typeset in text mode as a math subscript, giving a
-    fatal ``! Missing $ inserted.`` and no PDF, every run that cites a paper.
-    hyperref reads the *URL* argument verbatim (so it is fine) and ``\includegraphics``
-    filenames are fine; only the display text breaks. ``\nolinkurl`` (hyperref, already
-    loaded) typesets the path verbatim while the enclosing ``\href`` keeps the link.
-    Idempotent: an already-wrapped display arg contains braces, so it never matches.
-    """
-
-    def _wrap(match: re.Match) -> str:
-        url, display = match.group(1), match.group(2)
-        return f"\\href{{{url}}}{{\\nolinkurl{{{display}}}}}"
-
-    return _HREF_RE.sub(_wrap, latex)
-
-
-def write_report_latex(latex: str, path: Path) -> Path:
-    """Write the LaTeX source, sanitizing ``\\href`` display args so it compiles."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_sanitize_href_display(latex), encoding="utf-8")
-    return path
-
-
-def validate_latex_figures(
-    latex: str,
-    staged_figures: list[tuple[FigureRef, str]],
-) -> list[str]:
-    """Return errors for `\\includegraphics` paths that were not staged."""
-    errors: list[str] = []
-    staged_paths = {relpath for _, relpath in staged_figures}
-    relpaths = ", ".join(sorted(staged_paths)) or "(none)"
-
-    for m in re.finditer(r"\\includegraphics(?:\[.*?\])?\{([^}]+)\}", latex):
-        p = m.group(1).strip()
-        if p not in staged_paths:
-            errors.append(f"\\includegraphics path not staged: {p!r}. Use one of: {relpaths}")
-
-    return errors
-
-
-def validate_report_links(
-    latex: str,
-    report_dir: Path,
-    staged_papers: list[tuple[Path, str]],
-) -> list[str]:
-    """Hard reference-link gate: every `\\href` to a staged paper must resolve to a PDF.
-
-    Parses `\\href{<target>}{...}` from the composed LaTeX and, for each target that points
-    into ``papers/`` (the staged-paper area), resolves ``report_dir/target`` (following the
-    symlink) and asserts it exists and is a real PDF. A miss is a hard reject — the message
-    names the offending target and lists the valid staged relpaths so the reviewer can fix it.
-    """
-    errors: list[str] = []
-    valid = ", ".join(sorted(relpath for _, relpath in staged_papers)) or "(none)"
-
-    for m in re.finditer(r"\\href\{([^}]+)\}", latex):
-        target = m.group(1).strip()
-        # Only gate links into the staged-paper area; leave other hyperlinks alone.
-        if not (target.startswith("papers/") or target.endswith(".pdf")):
-            continue
-        resolved = (report_dir / target).resolve()
-        ok = resolved.is_file()
-        if ok:
-            try:
-                ok = b"%PDF-" in resolved.read_bytes()[:1024]
-            except OSError:
-                ok = False
-        if not ok:
-            errors.append(
-                f"reference link does not resolve to a PDF on disk: {target!r}. "
-                f"Use one of these exact staged paper paths: {valid}"
-            )
-
-    return errors
-
-
-def compile_latex(
-    report_dir: Path,
-    *,
-    compiler: str = "pdflatex",
-) -> tuple[bool, list[str]]:
-    """Run pdflatex non-interactively in report_dir; return (success, error_lines).
-
-    Parses !-prefixed error lines from pdflatex output, **each with the ``l.<n>`` context
-    line TeX prints beneath it**. The `!` line alone is usually not actionable — TeX says
-    *"! Undefined control sequence."* and only the context line names the macro:
-
-        ! Undefined control sequence.
-        l.110 ...restrict the peak search to $|\\tau| \\lesssim
-
-    Without it a retry is told what kind of error occurred but not where or what, so it
-    re-emits the same document; observed live on Q21 (2026-08-10), where two attempts failed
-    identically on `\\lesssim` and the run finished with no PDF.
-
-    Returns (True, []) when the compiler is not on PATH so the feedback loop degrades to
-    ref-checks only.
-    """
-    if not shutil.which(compiler):
-        return True, []
-
-    tex_files = list(report_dir.glob("*.tex"))
-    if not tex_files:
-        return True, []
-
-    try:
-        result = subprocess.run(
-            [compiler, "-interaction=nonstopmode", "-halt-on-error", tex_files[0].name],
-            cwd=report_dir,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except subprocess.TimeoutExpired:
-        return False, ["pdflatex timed out after 60 s"]
-
-    if result.returncode == 0:
-        return True, []
-
-    errors = _errors_with_context(result.stdout)
-    if not errors:
-        errors = [f"pdflatex exited with code {result.returncode}"]
-    return False, errors
-
-
 # TeX prints the offending source line as `l.<number> <text>` a line or two below its `!`
 # message; nothing else in the log identifies what failed.
 _TEX_CONTEXT = re.compile(r"^l\.\d+\s")
@@ -158,8 +23,10 @@ _TEX_CONTEXT = re.compile(r"^l\.\d+\s")
 def _errors_with_context(stdout: str, *, lookahead: int = 4) -> list[str]:
     """Pair each ``!`` error line with the ``l.<n>`` source line that follows it.
 
-    ``lookahead`` bounds the search so an error with no context (TeX does not always print
-    one) yields the bare message rather than swallowing an unrelated later line.
+    The ``!`` line alone is usually not actionable — TeX says *"! Undefined control sequence."*
+    and only the context line names the macro (observed live on Q21, 2026-08-10, where two
+    attempts failed identically on ``\\lesssim``). ``lookahead`` bounds the search so an error with
+    no context yields the bare message rather than swallowing an unrelated later line.
     """
 
     lines = stdout.splitlines()

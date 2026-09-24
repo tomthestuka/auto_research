@@ -1,57 +1,53 @@
-"""Stage figures as symlinks in the report directory."""
+"""Stage cited figure receipts into the report directory."""
 
 from __future__ import annotations
 
+import shutil
+from collections.abc import Sequence
 from pathlib import Path
 
-from auto_research.schemas.figures import FigureRef
+from auto_research.provenance import ReceiptLookup
+from auto_research.schemas.artifacts import Receipt
 
 
-def stage_figures(
-    figures: list[FigureRef],
+def stage_figure_receipts(
+    handles: Sequence[str],
+    lookup: ReceiptLookup,
     report_dir: Path,
-) -> list[tuple[FigureRef, str]]:
-    """Symlink each figure into report_dir/figures/; return (figref, relpath) pairs.
+) -> tuple[list[tuple[Receipt, str]], list[str]]:
+    """Copy each cited figure receipt into ``report_dir/figures/<sha12><ext>``, re-hashed first.
 
-    Replaces any stale link with the same name. The relpath is relative to
-    report_dir and suitable for use in \\includegraphics{<relpath>}.
+    Returns ``(staged, problems)``: ``(receipt, relpath)`` pairs in citation order, and one sentence
+    per handle that cannot be placed. Two fixes in one ([D4]+[D5]): the staged name is the content
+    hash, so two figures sharing a basename never collide, and the bytes are verified against the
+    receipt before they are copied, so a figure whose file changed or vanished after it was produced
+    never reaches the report. A figure cited twice is placed once.
     """
     figs_dir = report_dir / "figures"
-    figs_dir.mkdir(parents=True, exist_ok=True)
-
-    staged: list[tuple[FigureRef, str]] = []
-    for figref in figures:
-        src = Path(figref.path).resolve()
-        link = figs_dir / src.name
-        if link.is_symlink() or link.exists():
-            link.unlink(missing_ok=True)
-        link.symlink_to(src)
-        staged.append((figref, f"figures/{link.name}"))
-    return staged
-
-
-def stage_papers(
-    cited_paths: list[Path],
-    report_dir: Path,
-) -> list[tuple[Path, str]]:
-    """Symlink each cited PDF into report_dir/papers/; return (path, relpath) pairs.
-
-    Mirrors :func:`stage_figures`. The relpath (e.g. ``papers/<name>.pdf``) is what the
-    reviewer hyperlinks in the report's References section; the resolve gate
-    (``validate_report_links``) checks each ``\\href`` target points at one of these files.
-    Only existing files are staged, so a dangling link is never offered as valid.
-    """
-    papers_dir = report_dir / "papers"
-    papers_dir.mkdir(parents=True, exist_ok=True)
-
-    staged: list[tuple[Path, str]] = []
-    for cited in cited_paths:
-        src = Path(cited).resolve()
-        if not src.is_file():
+    staged: list[tuple[Receipt, str]] = []
+    problems: list[str] = []
+    seen: set[str] = set()
+    for handle in handles:
+        if handle in seen:
             continue
-        link = papers_dir / src.name
-        if link.is_symlink() or link.exists():
-            link.unlink(missing_ok=True)
-        link.symlink_to(src)
-        staged.append((src, f"papers/{link.name}"))
-    return staged
+        seen.add(handle)
+        receipt = lookup.get(handle)
+        if receipt is None:
+            problems.append(f"figures lists {handle}, which is not a receipt you can cite.")
+            continue
+        if receipt.kind != "figure":
+            problems.append(
+                f"figures lists {handle}, a {receipt.kind}, not a figure. List figure receipts only."
+            )
+            continue
+        mismatch = lookup.verify(handle)
+        if mismatch:
+            problems.append(f"figures lists {handle}: {mismatch} Cite a different figure.")
+            continue
+        source = Path(receipt.path)
+        target = figs_dir / f"{receipt.sha256[:12]}{source.suffix.lower()}"
+        if not target.is_file():
+            figs_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+        staged.append((receipt, f"figures/{target.name}"))
+    return staged, problems

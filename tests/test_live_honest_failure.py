@@ -29,7 +29,7 @@ from auto_research.schemas import (
     MergeFlowResult,
     ProposedCheck,
     ResearchRequest,
-    ReviewVerdict,
+    ReviewerReport,
     ToolReviewVerdict,
     ToolSpec,
     ValidationDataset,
@@ -238,9 +238,19 @@ def test_live_lead_finalizes_failed_authoring(tmp_path):
 # --- Probe 2: the reviewer at a failed analysis ----------------------------------------------
 
 def test_live_reviewer_adjudicates_failed_analysis():
+    import uuid
+
+    from auto_research.agents.reviewer_tools import ReviewerRender
+    from auto_research.env import toolkit_root as configured_toolkit_root
+    from auto_research.graph.runtime import attach_reviewer_runtime
+    from auto_research.sandbox.workspace import report_dir
+
     load_dotenv()
     registry = load_registry()
     reviewer = ReviewerAgent(model=registry.resolve("reviewer").handles[0])
+    run_id = f"live-honest-failure-{uuid.uuid4().hex[:8]}"
+    # Production's own wiring: tools, report folder and the run's receipt store.
+    attach_reviewer_runtime(reviewer, run_id=run_id, toolkit_root=configured_toolkit_root())
 
     request = ResearchRequest(
         question=(
@@ -251,7 +261,10 @@ def test_live_reviewer_adjudicates_failed_analysis():
     report = _failed_analyst_report()
     log_path = dev_log_path("honest-failure", "live_reviewer_failed_analysis", ".jsonl")
 
-    verdict = asyncio.run(reviewer.review(request, report=report))
+    verdict = asyncio.run(reviewer.review(
+        request, stage="analysis", report=report, iterations_left=1,
+        render=ReviewerRender(report_dir=report_dir(run_id), run_id=run_id),
+    ))
 
     _write(log_path, {"edge": "reviewer.review", "input": {
         "request": request.model_dump(mode="json"),
@@ -265,7 +278,7 @@ def test_live_reviewer_adjudicates_failed_analysis():
     )
 
     # Structural contract only.
-    assert isinstance(verdict, ReviewVerdict)
+    assert isinstance(verdict, ReviewerReport)
     assert verdict.rationale.strip()
     assert isinstance(verdict.accepted, bool)
     assert isinstance(verdict.needs_analysis_rework, bool)

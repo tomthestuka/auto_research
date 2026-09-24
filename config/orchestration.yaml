@@ -13,16 +13,17 @@ analyze_probe: "import xspec, xspec_utils"  # one-line python smoke-test run und
 # ── Feedback-loop caps (hard backstops against pathology, not workflow budgets) ──
 max_iterations: 3            # reviewer→work send-backs per feedback edge (literature / analysis)
 debate_max_rounds: 3         # analyst debate rounds before the lead adjudicates
-io_search_max_iterations: 1  # Phase-2 stub — evaluate_search_results() returns accepted=True
 tool_retry_cap: 3            # legacy, unused (the ReAct loop self-corrects)
 
 # ── ReAct loop caps (per-role step-count backstops; a token/cost budget is the intended future primary guard) ──
 react_loop_cap: 400            # budget-consuming tool iterations per agent loop
 react_loop_absolute_cap: 600   # hard ceiling incl. budget-free iterations (lead's §5.5 plan_and_debate rounds count only here)
-librarian_react_loop_cap: 1   # tighter — each librarian search re-sends the growing paper context
+librarian_react_loop_cap: 40  # librarian research loop turns (reading is paged)
 status_react_loop_cap: 6      # /status reporter — tight; a human is waiting on a phone
 structured_retry_cap: 4       # off-schema retries for a structured _call before raising
-check_coder_min_interval_s: 900  # min seconds between the lead's check_coder polls
+coder_wait_floor_s: 60        # lead's blocking wait_coder: a shorter timeout is raised to this
+coder_wait_default_s: 300     # timeout when the lead names none
+coder_wait_max_s: 1800        # longest single wait (also bounds submit_for_review's wait)
 react_grace_rounds: 20        # rounds a role gets to summarise after its budget runs out;
                               # failing to file within them is fatal to the run (CLAUDE.md §2b)
 
@@ -85,9 +86,8 @@ agent_fs_readonly:            # subset of agent_fs_allow the jail mounts read-on
 mcp_servers: []      # extra MCP servers for workers ({name,command,args}); empty ⇒ built-in only (bash_exec/list_dir/read_file)
 disabled_tools: [research_toolkit.heasarc_utils.acquire]   # tool names to hide from the catalogue regardless of what the toolkit exposes
 
-# ── Report composition (compose_report node, on accepted verdicts) ──
+# ── Report (rendered inside the reviewer's turn_end; compose_report publishes it) ──
 report_formats: [tex]   # output handles: jsonl (machine), tex (LaTeX+PDF)
-report_retry_cap: 2            # LaTeX compile+ref-check iterations before accepting residual errors
 
 # ── Phase-2 tool authoring (backstops, not budgets; §9.3/§9.9) ──
 tool_author_max_turns: 999            # Sonnet author's own SDK self-correction turns (L0)

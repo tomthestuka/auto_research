@@ -19,12 +19,6 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
 - Stop on convergence **or** at a hard cap of **3 rounds**, after which the lead
   adjudicates/synthesizes a final report and flags residual uncertainty.
 
-**IO abstraction debate** (`IODebateToConverge`):
-- Mirrors `DebateToConverge` but operates over `MemoryRecord` instead of
-  `AnalystReport`. Workers call `abstract_document()` with peer abstracts;
-  the lead calls `judge_abstract_convergence()` and `adjudicate_abstract()`.
-- Used by `LibrarianIOAgent.ingest_results()` with `max_rounds=2`.
-
 ## Interfaces / Contracts
 - `ConsensusStrategy` protocol:
   `async run(workers, lead, task) -> AnalystReport`.
@@ -36,12 +30,6 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   Optional `monitor` records worker reports, convergence verdicts, revisions,
   and lead adjudication. `registry` and `tool_retry_cap` are accepted for
   call-site compatibility but unused by the strategy.
-- `IOAbstractionStrategy` protocol:
-  `async run(workers, lead, document) -> MemoryRecord`.
-- `IODebateToConverge(max_rounds=3)` implements the IO abstraction policy.
-  Same bounded debate structure as `DebateToConverge` but produces a
-  `MemoryRecord` rather than `AnalystReport`. Optional `monitor` records the
-  IO abstraction debate.
 - Worker objects for analyst debate must provide
   `analyze(task, *, peer_reports=()) -> AnalystReport`.
 - Lead objects for analyst debate must provide **one** method:
@@ -85,11 +73,6 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   files `submit_terminal_report` (§9.6). That report flows to the reviewer (sole I/O) which
   adjudicates finalize vs. bounded rework; never fabricated. A cycle that files **no** form and
   wrote **no** report raises rather than composing one ([F6]).
-- Worker objects for IO debate (`IOAbstractionWorkerLike`) must provide
-  `abstract_document(document, *, peer_abstracts=()) -> MemoryRecord`.
-- Lead objects for IO debate (`IOAbstractionLeadLike`) must provide
-  `judge_abstract_convergence(document, abstracts, *, round_index, max_rounds)
-  -> ReviewVerdict` and `adjudicate_abstract(document, abstracts) -> MemoryRecord`.
 - The round cap is hard, and it is enforced in **two** places that agree: consensus passes
   `rounds_left` into the cycle, and the `request_another_round` handler refuses the form once that
   reaches zero, naming the cap and pointing at `submit_adjudication`. So a lead at the cap files a
@@ -126,15 +109,6 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   `_augment_with_failed_tool(task, tool_spec, result)` (failed-attempt note so a retry adapts), and
   `_augment_with_probe(task, verdict)` — hands the lead's `request_another_round` dispatch text to
   every worker verbatim, which is what that form's description promises.
-- `IOAbstractionWorkerLike` — protocol for IO abstraction workers. Method:
-  `abstract_document()`.
-- `IOAbstractionLeadLike` — protocol for IO abstraction lead. Methods:
-  `judge_abstract_convergence()` and `adjudicate_abstract()`.
-- `IOAbstractionStrategy` — protocol for swappable IO abstraction policies.
-  Method: `run()`.
-- `IODebateToConverge(max_rounds: int = 3, monitor: RunMonitor | None = None)`
-  — bounded IO abstraction debate strategy. Method:
-  `run(workers, lead, document)`.
 
 ## Changelog
 Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
@@ -267,3 +241,7 @@ Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
   notes and the rerun is still charged to an author credit, never to a debate round. Strictly more
   expressive than before: *"the tool now exists, and here is what to point it at."*
   `_augment_with_probe` reads either shape (`follow_up` on a verdict, `what_to_probe` on a report).
+
+- 2026-09-24 — **`IODebateToConverge` deleted** with its `IOAbstraction*` protocols (95). Its only
+  caller, the librarian's ingest, ran it as one model debating itself (`[self, self], self`); the
+  librarian now writes its own report in one loop and a paper's memory is that report's findings.

@@ -117,9 +117,6 @@ uninstalled configuration rather than silently falling back here.
   feedback edge.
 - `orchestration.yaml.debate_max_rounds` — hard cap for analyst debate rounds
   before lead adjudication.
-- `orchestration.yaml.io_search_max_iterations` — deferred hook for future
-  librarian I/O search-refinement loops; current config keeps it at `1` because
-  `evaluate_search_results()` is a stub.
 - `orchestration.yaml.tool_retry_cap` — legacy accepted cap for old tool-execution
   call sites; the current worker ReAct loop self-corrects inside `react_loop_cap`.
 - `orchestration.yaml.react_loop_cap` — general inner ReAct cap; bounds the
@@ -127,13 +124,19 @@ uninstalled configuration rather than silently falling back here.
 - `orchestration.yaml.react_loop_absolute_cap` — hard ceiling on *total* ReAct iterations
   incl. budget-free ones (the lead's §5.5 `plan_and_debate` design rounds don't count toward
   `react_loop_cap`, only toward this runaway backstop). Defaults to 60.
-- `orchestration.yaml.librarian_react_loop_cap` — tighter cap for the literature loop,
-  whose repeated searches re-send a growing paper context.
+- `orchestration.yaml.librarian_react_loop_cap` — tool budget (model turns) for the librarian's
+  research loop; config 40. Reading is paged (24k characters per page), so a paper read in full
+  costs several turns; report authoring and `turn_end` are budget-free.
 - `orchestration.yaml.status_react_loop_cap` — cap for the `/status` reporter's ledger
   investigation. Defaults to 6, deliberately tight: a human is waiting on a phone, and the
   ledger it reads runs to thousands of events.
 - `orchestration.yaml.structured_retry_cap` — bounded off-schema structured-output retry
   count.
+- `orchestration.yaml.coder_wait_floor_s` / `coder_wait_default_s` / `coder_wait_max_s` — the
+  analyst lead's blocking `wait_coder` (defaults 60 / 300 / 1800 s, read per call via
+  `env.coder_wait_limits_s`, kept ordered floor ≤ default ≤ max). A requested timeout below the
+  floor is raised to it and one above the max lowered to it, never refused; the max also bounds how
+  long `submit_for_review` waits for a working coder before the gate.
 - `orchestration.yaml.tool_search_enabled` — provider-native **tool search / lazy tool loading**
   (shipped **true** since 2026-07-28; the *code* default stays **false**, so a config lacking the
   key keeps every tool resident, byte-identical to before; read via `env.tool_search_config`).
@@ -377,3 +380,8 @@ Compacted 2026-09-01: entries through 2026-08-20 folded into themed ranges (deta
   roots mounted read-only. Enabling it required one allow-list correction only a mount plan could
   reveal — the HEASoft release root, because PyXspec's files symlink out of `$HEADAS` — which is why
   a launch check now runs `analyze_probe` inside the jail.
+- 2026-09-24 — `librarian_react_loop_cap` 1 → 40 for the librarian research loop; the unused
+  `io_search_max_iterations` key removed with the stub it described (95).
+- 2026-09-24 — `check_coder_min_interval_s` removed with `check_coder`; `coder_wait_floor_s` /
+  `coder_wait_default_s` / `coder_wait_max_s` added for the lead's blocking `wait_coder` (85), in
+  both `orchestration.yaml` and `orchestration.yaml.example`.

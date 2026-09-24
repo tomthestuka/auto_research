@@ -29,7 +29,9 @@ START → literature → review_literature
                              compose_report → END
 ```
 
-Reviewer nodes return state updates containing the newest `ReviewVerdict`.
+Reviewer nodes return state updates containing the newest `ReviewerReport` — the one report the
+reviewer filed through `turn_end` for that review (`ReviewerAgent.review(stage=…,
+iterations_left=…)`, each stage told what its loop edge has left).
 `add_conditional_edges()` then routes from `review_literature` back to
 `literature` or onward to `analysis`, and from `review_analysis` back to
 `analysis` or onward to `finalize_run`. `finalize_run` copies the latest
@@ -41,12 +43,16 @@ whenever any report format is configured (else `END`).
 is now an **unconditional** edge (the old `after_analysis` bypass that sent a failed report
 straight to `finalize_run` is gone; the analyst lead gets no bypass). The reviewer decides
 **finalize vs. bounded rework** (`needs_analysis_rework`, capped by `max_iterations`), and on
-finalize a report is **always** composed (`route_after_finalize → compose_report` when
-`report_formats` is non-empty), so an honest failure is **documented, not silent**.
+finalize the report is **always** written (the final review's report is the run's report), so an
+honest failure is **documented, not silent**. With `tex` configured the `.tex`/PDF are rendered and
+compiled **inside the reviewer's `turn_end`** (a `ReviewerRender` built by `review_analysis_node`),
+and `review_analysis_node` records `report_latex`/`report_pdf` plus a level-1
+`reviewer.compose_report.renderer_error` when the report was accepted but no PDF came out. The
+`compose_report` node runs **no model**: `report.publish_report` mints `rev:dN` receipts for the
+published files and writes the JSONL when `jsonl` is configured.
 `finalize_run` only records the terminal (`run.honest_failure` for a `failed`/`needs_human`
-status) and forwards the reviewer's verdict. The no-fabrication guarantee now lives in the
-reviewer + compose prompts (document the limitation; never invent a result), not in suppressing
-the report.
+status) and forwards the reviewer's verdict. The no-fabrication guarantee lives in the reviewer's
+prompt and its `turn_end` check (every number grounded in a receipt), not in suppressing the report.
 
 **Tool execution inside `analysis_node`:** `analysis_node` calls
 `consensus_strategy.run(workers, lead, task)`. Each worker's
@@ -55,33 +61,25 @@ when sandbox + registry are attached, writes real `ToolResult`s to its private
 `memory_path`, and exposes `last_tool_results`. `DebateToConverge` injects a
 truncated cross-worker summary into `task.instructions` for the next round.
 
-The literature node is **ingest-only** (three steps); retrieval-for-review is
-reviewer-driven (see below):
-1. **IO agent composes search strategy** — `io_agent.compose_search_strategy()`
-   translates the research intent (and optional reviewer follow-up) into a
-   focused `SearchRequest`.
-2. **IO agent queries online sources** — `io_agent.search()` hits external
-   APIs (arXiv, NASA ADS, web). No LLM ranking; raw results only.
-3. **IO agent downloads and abstracts** — `io_agent.ingest_results()` downloads
-   PDFs, runs `IODebateToConverge`, and writes `mem_abbrev` to SQLite (no-PDF
-   results land as orphan memory notes). The node no longer pre-loads papers for
-   the reviewer — **the reviewer pulls literature itself** via its `text_search`
-   (find candidate paths) and `open_paper` (read a chosen PDF) ReAct tools.
+The literature node runs **one librarian research pass**: `io_agent.research(request,
+follow_up=…)` searches, reads papers and pages in full, and files a `LiteratureReport` through
+`turn_end` (see `agents/DOCS.md`). The node writes `state["literature"]` (that report) and
+`state["literature_receipts"]` (handle → `Receipt` for every document it opened); each pass
+replaces both. Both reviews receive them; the reviewer also keeps `text_search` and its own
+receipted `read_paper`.
 
 The analysis node builds an `AnalysisTask` from the question and optional
-instructions (carrying the reviewer's `follow_up` on rework). After the final
-analysis review, `review_analysis_node` records `cited_paths` =
-`verdict.cited_paths ∩ reviewer.tools.opened_paths` (via `_resolve_cited_paths`),
-so a citation can only name a paper the reviewer actually opened; `compose_report`
-builds References from those paths.
+instructions (carrying the reviewer's `follow_up` on rework). References are built by the
+renderer from the paper/web receipts the final report cites.
 
-`ResearchState` carries: the request, the `cited_paths: list[Path]` the reviewer
-cited, the latest analyst report, the final reviewer verdict, accumulated reviewer
-verdicts, two iteration counters, and the cap.
+`ResearchState` carries: the request, the literature report and its receipts, the latest analyst
+report, the final reviewer report (`verdict`), the accumulated reviewer reports (`verdicts`), two
+iteration counters, the cap, and the published artifact paths.
 
 ## Interfaces / Contracts
 - `build_graph(*, reviewer, io_agent, retrieval=None, workers, lead,
-  consensus=None, max_iterations=3, registry=None, monitor=None) -> CompiledStateGraph` —
+  consensus=None, max_iterations=3, registry=None, monitor=None, run_id=None, receipts=None,
+  report_formats=None, checkpointer=None) -> CompiledStateGraph` —
   pure constructor.  `retrieval` defaults to `SqliteRetrievalBackend()`.
   `consensus` defaults to `DebateToConverge(max_rounds=max_iterations, monitor=monitor, registry=registry)`.
   `registry` defaults to `ToolkitRegistry(Path("/data/fzhou/research_toolkit"))` and is
@@ -166,7 +164,7 @@ verdicts, two iteration counters, and the cap.
   consensus/roles layers).
 - Both outer feedback edges are gated by the reviewer's structured verdict flags
   (`needs_more_literature`, `needs_analysis_rework`). The reviewer's `follow_up`
-  text is fed back into the next `compose_search_strategy()` call and/or analysis
+  text is fed back into the next `research(follow_up=…)` call and/or analysis
   instructions. The routing is implemented with LangGraph conditional edges
   after each reviewer node has appended its verdict to `state["verdicts"]`.
 - Live graph verification is opt-in:
@@ -189,15 +187,19 @@ verdicts, two iteration counters, and the cap.
   `auto_research.models`, `auto_research.retrieval`, `auto_research.schemas`.
 
 ## Dictionary-level reference
-- `ResearchState` — TypedDict for the graph state; `cited_paths` is `list[Path]`
-  (the papers the reviewer cited); `verdicts` is an accumulated list of reviewer
-  decisions. Tool queues/results are not graph state; tool calls run inside analyst
+- `ResearchState` — TypedDict for the graph state; `verdicts` is an accumulated list of
+  `ReviewerReport`s, `verdict` the final one. Tool queues/results are not graph state; tool calls run inside analyst
   workers and are recorded in per-worker `memory.md` files.
-- `IOAgentLike` — protocol with `compose_search_strategy()`, `search()`, `ingest_results()`.
-- `ReviewerLike` — protocol with `async review(request, *, report)`.
-- `_resolve_cited_paths(verdict, reviewer) -> list[Path]` — resolves a verdict's
-  `cited_paths` to `Path`s, keeping only papers the reviewer actually opened this run
-  (no enforcement when the reviewer has no KB-tool provider, e.g. a test double).
+- `IOAgentLike` — protocol with `async research(request, *, follow_up) -> LiteratureReport` and
+  `last_receipts: dict[str, Receipt]`.
+- `ResearchState` literature keys: `literature: LiteratureReport | None`,
+  `literature_receipts: dict[str, Receipt]`.
+- `ReviewerLike` — protocol with `async review(request, *, stage, literature=None,
+  literature_receipts=None, report=None, iterations_left=0, render=None) -> ReviewerReport`.
+- `attach_reviewer_runtime(reviewer, *, run_id, toolkit_root, run_monitor=None, retrieval=None,
+  web_source=None, human_handler=None)` — the reviewer's production wiring (tools via
+  `readonly_tools_for("reviewer")`, `report_dir`, the run's `ReceiptStore`), called by
+  `run_research` and by live cells so they drive the same reviewer.
 - `readonly_tools_for(role, *, roots, retrieval=None, web_source=None, human_handler=None,
   model="") -> ReadOnlyToolProvider` — the read-only inspection loop production gives the
   `reviewer` or the `analyst_lead`. The two differ on purpose: the lead gets the data catalog and,
@@ -319,3 +321,23 @@ Compacted 2026-09-01: entries through 2026-07-31 folded into themed ranges (deta
   The benchmark's copy was checked rather than assumed and resolves to the identical five tools,
   so the published Table 6 / Fig. 5 numbers are unaffected; no number in the paper is backed by a
   live test at all.
+
+- 2026-09-24 — **Literature node = one librarian research pass** (95). `literature_node` calls
+  `io_agent.research()` and puts the filed `LiteratureReport` and its receipts into state
+  (`literature`, `literature_receipts`); `IOAgentLike` shrank to that method. The runtime creates
+  the `librarian_io` working folder and sets `io_agent.report_dir`. The compose→search→ingest
+  pipeline is gone.
+
+- 2026-09-24 — **Workers and the lead get the run's receipt store (provenance P2, session 0f).**
+  `attach_worker_runtime` sets `worker.receipts` and `attach_lead_runtime` sets `lead.receipts`
+  plus `lead.tools.receipts` / `receipt_source="analyst_lead"`, all from
+  `ReceiptStore.for_run(run_dir(run_id))` — the one process-wide store per run (the librarian's
+  attach site uses the same accessor), so every role's handles share counters and survive a resume.
+- 2026-09-24 (5c) — **The reviewer is a unit.** Reviewer nodes pass `stage`, the literature report
+  and receipts, and `iterations_left`; `review_analysis_node` builds the `ReviewerRender` that makes
+  rendering part of the reviewer's `turn_end`; `compose_report` publishes (receipts + JSONL) with no
+  model. `ReviewVerdict` → `ReviewerReport` throughout; `cited_paths`/`_resolve_cited_paths` removed;
+  `build_graph(storage=, report_retry_cap=)` → `receipts=`; new `attach_reviewer_runtime` seam
+  (`test_role_wiring_seams` counts a factory called through it as the run path's);
+  `readonly_tools_for("reviewer")` passes `include_open_paper=False`; `detached.py` reads the
+  verdict as `ReviewerReport`. `config: report_retry_cap` removed.

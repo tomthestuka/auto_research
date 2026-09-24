@@ -25,7 +25,7 @@ from auto_research.agents import (
 from auto_research.graph import build_graph
 from auto_research.models import load_registry
 from auto_research.retrieval import SqliteRetrievalBackend
-from auto_research.schemas import ResearchRequest, SearchRequest, SearchResult
+from auto_research.schemas import ResearchRequest
 from auto_research.storage import Storage
 from tests.dev_logs import dev_log_path, summarize_graph_log
 
@@ -137,10 +137,10 @@ class LoggingReviewer:
         self.events = events
         self.calls = 0
 
-    async def review(self, request, *, literature=(), report=None):
+    async def review(self, request, *, stage, **kwargs):
         self.calls += 1
-        verdict = await self.agent.review(request, literature=literature, report=report)
-        stage = "review_analysis" if report is not None else "review_literature"
+        verdict = await self.agent.review(request, stage=stage, **kwargs)
+        stage = f"review_{stage}"
         self.events.append(
             _event(
                 f"{stage}_{self.calls}",
@@ -152,44 +152,28 @@ class LoggingReviewer:
 
 
 class LoggingIOAgent:
-    """Wraps LibrarianIOAgent, delegates all methods and logs key calls."""
+    """Wraps LibrarianIOAgent, delegates research() and logs each filed report."""
 
     def __init__(self, agent: LibrarianIOAgent, events: list[dict]):
         self.agent = agent
         self.events = events
-        self.compose_calls = 0
-        self.ingest_calls = 0
+        self.research_calls = 0
 
-    async def compose_search_strategy(self, request, *, follow_up=None) -> SearchRequest:
-        self.compose_calls += 1
-        strategy = await self.agent.compose_search_strategy(request, follow_up=follow_up)
+    @property
+    def last_receipts(self):
+        return self.agent.last_receipts
+
+    async def research(self, request, *, follow_up=None):
+        self.research_calls += 1
+        report = await self.agent.research(request, follow_up=follow_up)
         self.events.append(
             _event(
-                f"io_compose_{self.compose_calls}",
+                f"io_research_{self.research_calls}",
                 self.agent,
-                output=strategy.model_dump(mode="json"),
+                output=report.model_dump(mode="json"),
             )
         )
-        return strategy
-
-    async def search(self, request: SearchRequest) -> list[SearchResult]:
-        return await self.agent.search(request)
-
-    async def ingest_results(self, results: list[SearchResult]) -> None:
-        self.ingest_calls += 1
-        await self.agent.ingest_results(results)
-        self.events.append(
-            {
-                "event": f"io_ingest_{self.ingest_calls}",
-                "role": "librarian_io",
-                "model_member": "io_agent",
-                "status": "succeeded",
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "output": {"n_ingested": len(results)},
-                "error": None,
-            }
-        )
+        return report
 
 
 class LoggingWorker:

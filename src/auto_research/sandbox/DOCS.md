@@ -762,6 +762,20 @@ the hook mapping a fake-model verdict — no live LLM).
   `pending_changes()` rather than on `committed` — see the 2026-09-09 F1 entry). `propose_and_pr` drives
   these in the auto-loop; the analyst lead's authoring ReAct tools drive the *same* primitives
   directly (so the lead diagnoses each verdict rather than the run terminating).
+  **The lead<->coder channel** (the lead's `drive_coder` / `wait_coder` / `submit_for_review`):
+  `start_drive(message)` runs one instruction in a background task and returns at once (a second
+  one while it runs raises); `send(message, *, mid_turn=False)` → `"started"` | `"queued"` |
+  `"steered"` | `"answered"` — an idle coder gets a new turn; a working one has the message
+  **queued** and run as its next turn in the same task (`coder.queued` / `coder.queued.delivered`),
+  unless `mid_turn` is set or the coder has an open question, in which case it is steered into the
+  running turn (`CoderBackend.steer`); `park_question(message)` (the `ask_lead` handler) /
+  `take_questions()`; `wait_for_event(timeout_s)` → `"turn_ended"` | `"failed"` | `"question"` |
+  `"steer"` | `"idle"` | `"timeout"` — parks on the session's wake event (set by a finished turn,
+  a failure or a question) and on the lead's `RunControl.steer_event` (`watch_steers(event)`),
+  returns at once when something is already waiting, consumes nothing, and records `coder.wait`;
+  `drive_status` (`idle` | `working` | `stopped` | `cancelled`), `take_drive_result()` →
+  `(text, error)` consumed once (narrations of consecutive queued turns are joined),
+  `has_unread_result()`, `current_instruction_elapsed_s()`.
 - `build_authoring_session(tool_spec, *, lead, toolkit_root, worktree_base, colead=None,
   human_handler=None, coder=None, allow_correlated_review=False, run_gate=None, run_review=None,
   max_turns=None, direct_branch=None, worktree_factory=None, sdk_client_factory=None,
@@ -1552,4 +1566,33 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   **live** config; the two directories provably do not nest (nested, narrowing the allow-list
   would be inert); and a legacy record still resolves. Mutation-verified by putting `ledger_dir`
   back inside `run_dir`. Suite 1514 passed.
+- 2026-09-24 — **The lead waits on the coder instead of polling it (85).** Slot 6 (2026-09-15)
+  made 134 `check_coder` calls (114 refused by the 900 s rate limit), 47 mid-turn steers and 31
+  refused submits at a 3-10 s cadence: a refusal costs a model turn, so rate-limiting the poll moved
+  the spam onto the other tools. `AuthoringSession` gains the blocking wait every harness that
+  solved this uses (Codex `wait_agent`): `wait_for_event(timeout_s)` parks on a wake event set when
+  a coder turn ends, a drive fails or the coder asks (`park_question`), and on the lead's
+  `RunControl.steer_event` (`watch_steers`), so it returns within a second of the event. `send`
+  **queues** a message for a working coder by default and runs it as the next turn inside the same
+  background task; `mid_turn=True` or an open question steers it into the running turn instead.
+  Channel state lives in `_init_channel()` so `object.__new__` doubles get it from the production
+  line. No backend changed: queuing needed only the existing `steer` and `drive`. Tests:
+  `tests/test_merge_flow.py` +16 (queue, mid-turn, answer-goes-mid-turn, race-to-turn-end, every
+  wake source, timeout, idle, cancel leaves no waiter, the executors' floor/narration/failure
+  texts, submit waits, submit hands back a question, and a question wake not claiming a next turn —
+  found live), each checked against a mutation. **LIVE-VERIFIED 2026-09-24**
+  (`tests/test_live_coder_wait.py`, DeepSeek coder on Codex, ~$0.01): turn end woke the wait in
+  4 s, a question in 1.5 s with the answer delivered mid-turn, `wait_coder(5)` held the 60 s floor,
+  a plain message ran as the next turn while `mid_turn` steered, and a submit waited 40 s for the
+  coder before the gate. Second batch, same day: an idle wait returned at once; a SIGKILLed Codex
+  process surfaced as FAILED (`TransportClosedError`) both to a wait and to a submit waiting on it
+  (0.04 s after the kill, no gate); a coder question during a submit's wait came back without
+  spending a submission; `RunControl.interrupt` during a submit's wait cancelled it with the tree
+  clean. Two real-lead draws (Opus, `gpt-5.6-terra`): 8 and 7 lead turns over 8.7 and 10.3 min of
+  coder work, a steer woke the parked wait in 10 s, both links committed ($3.98, $1.30). Cells
+  kill and leak-check only processes descended from the test itself, never a peer's by name.
+  **Found, not fixed** (outside this change): a killed or cancelled Codex turn books **$0.00**,
+  because usage is booked on `turn/completed`; and `mcpServer/startupStatus/updated` is not
+  recorded, so one live cell whose coder reported `ask_lead` missing could not be told apart from
+  a model that looked in the wrong place (it listed MCP *resources*, not tools).
 

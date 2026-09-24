@@ -376,10 +376,11 @@ def test_openai_strict_schema_strips_unsupported_format_and_default():
 def test_sanitizers_preserve_field_named_title():
     """A field literally named `title` must survive — sanitizers strip the JSON
     Schema `title` *annotation*, not a property whose name is `title`. Regression:
-    ResearchReport.required listed `title` while properties had dropped it."""
+    ResearchReport.required listed `title` while properties had dropped it. The fixture is now
+    the reviewer's report, which carries a top-level `title` field (2026-09-24)."""
     from auto_research.models.providers.google import _to_gemini_schema
     from auto_research.models.providers.openai import _strict_json_schema_format
-    from auto_research.schemas.report import ResearchReport
+    from auto_research.schemas.review import ReviewerReport as ResearchReport
 
     g = _to_gemini_schema(ResearchReport)
     assert "title" in g["properties"]

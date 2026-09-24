@@ -1,317 +1,148 @@
-"""Deterministic tests for the report composition module (step-13)."""
+"""Publishing the reviewer's accepted report, the TeX log reader, and report_formats handling."""
 
 from __future__ import annotations
 
 import asyncio
-import json
-from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from auto_research.report import (
-    build_references,
-    compile_latex,
-    stage_figures,
-    stage_papers,
-    validate_latex_figures,
-    validate_report_links,
-    write_report_jsonl,
-    write_report_latex,
-)
+from auto_research.agents.react import TURN_END_TOOL, LeadCycleOutcome
+from auto_research.graph import build_graph
+from auto_research.provenance import ReceiptStore
+from auto_research.report import cited_handles, publish_report, receipt_closure
 from auto_research.report.writers import _errors_with_context
-from auto_research.schemas import FigureRef
-from auto_research.schemas.report import (
-    LatexReport,
-    Reference,
-    ReportSection,
-    ResearchReport,
-)
-from auto_research.storage import Storage
+from auto_research.schemas import AnalystReport, ResearchRequest
+from auto_research.schemas.literature import LiteratureReport
+from auto_research.schemas.report import ResearchReport
+from auto_research.schemas.review import ReviewerReport, ReviewerSection, ReviewerTable
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+@pytest.fixture
+def store(tmp_path: Path) -> ReceiptStore:
+    s = ReceiptStore(tmp_path / "receipts")
+    raw = s.mint(source="analyst_worker_0", kind="result", produced_by="xspec_fit", data="PD = 4.02 ± 0.21 %")
+    s.mint(source="analyst_lead", kind="result", produced_by="summarise", data="PD = 4.02", parents=[raw.handle])
+    csv = tmp_path / "t.csv"
+    csv.write_text("a,b\n1,2\n")
+    s.mint(source="analyst_lead", kind="data", produced_by="compare", path=csv)
+    s.mint(source="lib", kind="paper", produced_by="read_paper", data="PD = 4.0 %", title="Paper")
+    return s
 
-def _make_fig(tmp_path: Path, name: str) -> FigureRef:
-    p = tmp_path / f"{name}.png"
-    p.write_bytes(b"\x89PNG\r\n")
-    import hashlib
-    sha = hashlib.sha256(p.read_bytes()).hexdigest()
-    return FigureRef(
-        path=p,
-        caption=name,
-        mime_type="image/png",
-        produced_by="test",
-        created_at=datetime.now(UTC),
-        sha256=sha,
+
+def _report() -> ReviewerReport:
+    return ReviewerReport(
+        accepted=True,
+        rationale="Agrees [lib:p1].",
+        title="T",
+        abstract='We find {{analyst_lead:r1 "PD = 4.02"}}.',
+        sections=[ReviewerSection(heading="R", body="See [analyst_lead:r1].")],
+        key_findings=["Holds [lib:p1]."],
+        tables=[ReviewerTable(caption="c", receipt="analyst_lead:d1")],
     )
 
 
-def _make_report(run_id: str = "run123", figures: list[FigureRef] | None = None) -> ResearchReport:
-    return ResearchReport(
-        run_id=run_id,
-        request_question="What is the spin of Cyg X-1?",
-        title="Broadband spectral analysis of Cyg X-1",
-        abstract="We fit the joint IXPE+NuSTAR+NICER spectrum.",
-        sections=[ReportSection(heading="Results", body="Spin is high.")],
-        key_findings=["High spin confirmed."],
-        figures=figures or [],
-        references=[],
-        verdict_rationale="Accepted.",
-        created_at=datetime.now(UTC),
+def test_cited_handles_cover_prose_figures_and_table_receipts():
+    assert cited_handles(_report(), own_source="rev") == ["lib:p1", "analyst_lead:r1", "analyst_lead:d1"]
+
+
+def test_the_closure_carries_every_ancestor_once(store):
+    handles = [r.handle for r in receipt_closure(store, ["analyst_lead:r1", "lib:p1"])]
+    assert handles == ["analyst_lead:r1", "lib:p1", "analyst_worker_0:r1"]
+
+
+def test_published_files_become_receipts_whose_parents_are_the_citations(store, tmp_path):
+    tex = tmp_path / "report" / "report.tex"
+    tex.parent.mkdir()
+    tex.write_text("\\documentclass{article}")
+    result = publish_report(
+        _report(), store=store, run_id="r1", request_question="Q?", report_dir=tmp_path / "report",
+        formats=["jsonl", "tex"], tex_path=tex,
     )
+    assert set(result.artifacts) == {"tex", "jsonl"}
+    tex_receipt = store.get(result.artifacts["tex"])
+    assert tex_receipt.handle.startswith("rev:d") and tex_receipt.produced_by == "report_renderer"
+    assert tex_receipt.parents == ["lib:p1", "analyst_lead:r1", "analyst_lead:d1"]
+    machine = ResearchReport.model_validate_json(result.jsonl_path.read_text())
+    assert machine.report == _report() and machine.artifacts == {"tex": result.artifacts["tex"]}
+    assert machine.paper_attributions == []  # this report attributes no paper value
+    assert {r.handle for r in machine.receipts} >= {"analyst_lead:r1", "analyst_worker_0:r1"}
 
 
-# ---------------------------------------------------------------------------
-# build_references
-# ---------------------------------------------------------------------------
+def test_the_jsonl_lists_every_value_attributed_to_a_paper(store, tmp_path):
+    report = _report().model_copy(update={"key_findings": ['The paper gives {{lib:p1 "PD = 4.0 %" Table 1}}.']})
+    result = publish_report(report, store=store, run_id="r1", request_question="Q?",
+                            report_dir=tmp_path / "report", formats=["jsonl"])
+    [item] = result.research_report.paper_attributions
+    assert (item.handle, item.value, item.locator) == ("lib:p1", "PD = 4.0 %", "Table 1")
 
-def test_build_references_maps_stored_papers(tmp_path):
-    """Papers in storage are matched by local_path; cite keys are derived from metadata."""
-    pdf = tmp_path / "arxiv_2603.10870v1.pdf"
-    pdf.write_bytes(b"%PDF")
 
-    storage = Storage(tmp_path / "db.sqlite")
-    from auto_research.storage.database import PaperRecord
-    paper = PaperRecord(
-        source="arxiv",
-        source_id="2603.10870",
-        title="Soft-state spectropolarimetry of Cyg X-1",
-        authors=["Niedźwiecki, A.", "Smith, B."],
-        year=2026,
-        local_path=pdf,
-        sha256="a" * 64,
+def test_the_jsonl_is_written_only_when_configured(store, tmp_path):
+    result = publish_report(
+        _report(), store=store, run_id="r1", request_question="Q?", report_dir=tmp_path / "report",
+        formats=["tex"],
     )
-    asyncio.run(storage.initialize())
-    asyncio.run(storage.upsert_paper(paper))
-
-    refs = asyncio.run(build_references(storage, [pdf]))
-    assert len(refs) == 1
-    assert refs[0].title == paper.title
-    assert refs[0].year == 2026
-    assert "2026" in refs[0].key
-    assert refs[0].local_path == pdf
+    assert result.jsonl_path is None and result.research_report is None
+    assert not (tmp_path / "report" / "report.jsonl").exists()
 
 
-def test_build_references_fallback_to_stem(tmp_path):
-    """Papers not in storage fall back to the filename stem."""
-    pdf = tmp_path / "mystery_paper.pdf"
-    pdf.write_bytes(b"%PDF")
-
-    storage = Storage(tmp_path / "db.sqlite")
-    asyncio.run(storage.initialize())
-
-    refs = asyncio.run(build_references(storage, [pdf]))
-    assert len(refs) == 1
-    assert refs[0].title == "mystery_paper"
-    assert refs[0].key  # non-empty key derived from stem
+def test_a_flag_on_a_cited_receipt_marks_the_published_report(store, tmp_path):
+    store.mint(source="analyst_lead", kind="result", produced_by="fit", data="PD = 9.9", failed=True)
+    report = _report().model_copy(update={"key_findings": ["Failed run [analyst_lead:r2]."]})
+    result = publish_report(
+        report, store=store, run_id="r1", request_question="Q?", report_dir=tmp_path / "report",
+        formats=["jsonl"],
+    )
+    assert "failed" in store.get(result.artifacts["jsonl"]).flags
 
 
-def test_build_references_deduplicates_keys(tmp_path):
-    """Duplicate cite keys get letter suffixes."""
-    pdfs = []
-    for i in range(3):
-        p = tmp_path / f"paper_{i}.pdf"
-        p.write_bytes(b"%PDF")
-        pdfs.append(p)
-
-    storage = Storage(tmp_path / "db.sqlite")
-    asyncio.run(storage.initialize())
-    from auto_research.storage.database import PaperRecord
-    for i, p in enumerate(pdfs):
-        asyncio.run(storage.upsert_paper(PaperRecord(
-            source="arxiv", source_id=f"x{i}", title=f"Title {i}",
-            authors=["Smith, J."], year=2026, local_path=p, sha256=str(i) * 64,
-        )))
-
-    refs = asyncio.run(build_references(storage, pdfs))
-    keys = [r.key for r in refs]
-    assert len(keys) == len(set(keys)), f"Duplicate keys: {keys}"
+# -- the graph publishes what the reviewer filed ----------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# stage_figures
-# ---------------------------------------------------------------------------
+class _Reviewer:
+    def __init__(self, store):
+        self.receipts = store
 
-def test_stage_figures_creates_symlinks(tmp_path):
-    (tmp_path / "src").mkdir(exist_ok=True)
-    fig = _make_fig(tmp_path / "src", "fit_plot")
-
-    rdir = tmp_path / "report"
-    staged = stage_figures([fig], rdir)
-
-    assert len(staged) == 1
-    figref, relpath = staged[0]
-    assert relpath == f"figures/{Path(fig.path).name}"
-    link = rdir / relpath
-    assert link.is_symlink()
-    assert link.resolve() == Path(fig.path).resolve()
+    async def review(self, request, *, stage, literature=None, literature_receipts=None,
+                     report=None, iterations_left=0, render=None):
+        if stage == "literature":
+            return ReviewerReport(rationale="ok [lib:p1]", follow_up="analyse")
+        return _report()
 
 
-def test_stage_figures_replaces_stale_symlink(tmp_path):
-    """A stale symlink is replaced without error."""
-    src = tmp_path / "src"
-    src.mkdir()
-    fig = _make_fig(src, "plot")
-    rdir = tmp_path / "report"
-    stage_figures([fig], rdir)
-    # Call again — should not raise
-    staged = stage_figures([fig], rdir)
-    assert len(staged) == 1
+class _IO:
+    last_receipts: dict = {}
+
+    async def research(self, request, *, follow_up=None):
+        return LiteratureReport(summary="s", status="succeeded")
 
 
-def test_stage_papers_symlinks_cited_pdfs(tmp_path):
-    pdf = tmp_path / "src" / "Cyg X-1.pdf"
-    pdf.parent.mkdir()
-    pdf.write_bytes(b"%PDF-1.5\nbody")
-    rdir = tmp_path / "report"
-
-    staged = stage_papers([pdf], rdir)
-
-    assert len(staged) == 1
-    src, relpath = staged[0]
-    assert relpath == f"papers/{pdf.name}"
-    link = rdir / relpath
-    assert link.is_symlink()
-    assert link.resolve() == pdf.resolve()
+class _Worker:
+    async def analyze(self, task, *, peer_reports=()):
+        return AnalystReport(summary="w", findings=["f"])
 
 
-def test_stage_papers_skips_missing_and_replaces_stale(tmp_path):
-    """Nonexistent paths are skipped; a repeat call replaces the stale link."""
-    pdf = tmp_path / "p.pdf"
-    pdf.write_bytes(b"%PDF-1.5\n")
-    rdir = tmp_path / "report"
-
-    assert stage_papers([tmp_path / "gone.pdf"], rdir) == []  # missing source skipped
-    stage_papers([pdf], rdir)
-    staged = stage_papers([pdf], rdir)  # call again — must not raise
-    assert len(staged) == 1
+class _Lead:
+    async def run_cycle(self, task, reports, *, sources=None, **kwargs):
+        return LeadCycleOutcome(filed=TURN_END_TOOL, report=AnalystReport(summary="l", findings=["f"]))
 
 
-# ---------------------------------------------------------------------------
-# write_report_jsonl
-# ---------------------------------------------------------------------------
-
-def test_write_report_jsonl_round_trips(tmp_path):
-    report = _make_report()
-    path = write_report_jsonl(report, tmp_path / "report.jsonl")
-    assert path.exists()
-    lines = path.read_text().strip().splitlines()
-    assert len(lines) == 1
-    restored = ResearchReport.model_validate_json(lines[0])
-    assert restored.run_id == report.run_id
-    assert restored.title == report.title
-
-
-def test_write_report_jsonl_figures_by_reference(tmp_path):
-    """Figures are stored as FigureRef dicts (path/sha256), not bytes."""
-    fig = _make_fig(tmp_path, "plot")
-    report = _make_report(figures=[fig])
-    path = write_report_jsonl(report, tmp_path / "report.jsonl")
-    raw = json.loads(path.read_text())
-    assert "figures" in raw
-    assert raw["figures"][0]["sha256"] == fig.sha256
-    assert "thumbnail_b64" in raw["figures"][0]  # field present, may be null
+def test_the_graph_publishes_the_accepted_report_as_jsonl(store, tmp_path, monkeypatch):
+    monkeypatch.setattr("auto_research.graph.builder._report_dir", lambda run_id: tmp_path / "rep")
+    graph = build_graph(
+        reviewer=_Reviewer(store), io_agent=_IO(), workers=[_Worker()], lead=_Lead(),
+        run_id="r1", receipts=store, report_formats=["jsonl"],
+    )
+    state = asyncio.run(graph.ainvoke({
+        "request": ResearchRequest(question="Q?"), "report": None, "verdict": None,
+        "lit_iterations": 0, "analysis_iterations": 0, "max_iterations": 2,
+    }))
+    assert state["verdict"] == _report()
+    assert state["research_report"].report == _report()
+    assert state["report_jsonl"] == tmp_path / "rep" / "report.jsonl"
 
 
-# ---------------------------------------------------------------------------
-# validate_latex_figures (figure paths only)
-# ---------------------------------------------------------------------------
-
-_FIG_GOOD_TEX = r"""
-\documentclass{article}
-\begin{document}
-\includegraphics{figures/fit.png}
-\end{document}
-"""
-
-_FIG_BAD_TEX = r"""
-\documentclass{article}
-\begin{document}
-\includegraphics{figures/missing.png}
-\end{document}
-"""
-
-
-def test_validate_latex_figures_passes_clean(tmp_path):
-    fig = _make_fig(tmp_path, "fit")
-    staged = [(fig, "figures/fit.png")]
-    assert validate_latex_figures(_FIG_GOOD_TEX, staged) == []
-
-
-def test_validate_latex_figures_flags_missing(tmp_path):
-    fig = _make_fig(tmp_path, "fit")
-    staged = [(fig, "figures/fit.png")]
-    errs = validate_latex_figures(_FIG_BAD_TEX, staged)
-    assert any("missing.png" in e for e in errs)
-
-
-# ---------------------------------------------------------------------------
-# validate_report_links (hard reference-link resolve gate)
-# ---------------------------------------------------------------------------
-
-
-def test_validate_report_links_passes(tmp_path):
-    rdir = tmp_path / "report"
-    rdir.mkdir()
-    pdf = tmp_path / "cited.pdf"
-    pdf.write_bytes(b"%PDF-1.5\nbody")
-    staged = stage_papers([pdf], rdir)
-    relpath = staged[0][1]
-    tex = r"\href{" + relpath + r"}{" + relpath + r"}"
-    assert validate_report_links(tex, rdir, staged) == []
-
-
-def test_validate_report_links_flags_dead_link(tmp_path):
-    rdir = tmp_path / "report"
-    (rdir / "papers").mkdir(parents=True)
-    tex = r"\href{papers/missing.pdf}{papers/missing.pdf}"
-    errs = validate_report_links(tex, rdir, [])
-    assert any("missing.pdf" in e for e in errs)
-
-
-# ---------------------------------------------------------------------------
-# compile_latex
-# ---------------------------------------------------------------------------
-
-_MINIMAL_TEX = r"""
-\documentclass{article}
-\begin{document}
-Hello world.
-\end{document}
-"""
-
-_BROKEN_TEX = r"""
-\documentclass{article}
-\begin{document}
-\unknowncommand{broken
-\end{document}
-"""
-
-
-@pytest.mark.skipif(
-    not __import__("shutil").which("pdflatex"),
-    reason="pdflatex not available",
-)
-def test_compile_latex_clean(tmp_path):
-    (tmp_path / "report.tex").write_text(_MINIMAL_TEX)
-    ok, errs = compile_latex(tmp_path)
-    assert ok
-    assert errs == []
-    assert (tmp_path / "report.pdf").exists()
-
-
-def test_compile_latex_no_compiler_returns_ok(tmp_path):
-    """When compiler is absent, returns (True, []) to degrade gracefully."""
-    (tmp_path / "report.tex").write_text(_BROKEN_TEX)
-    with patch("shutil.which", return_value=None):
-        ok, errs = compile_latex(tmp_path)
-    assert ok
-    assert errs == []
-
+# -- TeX log reading --------------------------------------------------------------------------
 
 # An undefined macro is the one compile error a retry cannot fix from the `!` line alone:
 # TeX names the macro only on the `l.<n>` context line. Observed live on Q21 2026-08-10,
@@ -331,188 +162,40 @@ l.204 \end{document}
 
 
 def test_compile_errors_carry_the_offending_source_line():
-    """The retry is told *which* macro failed, not merely that something did."""
-
+    """The error names *which* macro failed, not merely that something did."""
     errors = _errors_with_context(_TEX_UNDEFINED_MACRO_LOG)
-
     assert len(errors) == 3
     assert errors[0].startswith("! Undefined control sequence.")
-    assert r"\lesssim" in errors[0], "the retry cannot fix what the error does not name"
-    assert "l.110" in errors[0]
+    assert r"\lesssim" in errors[0] and "l.110" in errors[0]
     assert "l.204" in errors[1]
 
 
 def test_compile_error_without_context_stays_bare():
     """TeX does not always print a context line; the bare message must not absorb a later one."""
-
     errors = _errors_with_context("! Emergency stop.\nno context here\nl.999 unrelated\n", lookahead=1)
-
     assert errors == ["! Emergency stop."]
 
 
 def test_compile_error_context_does_not_leak_across_errors():
     errors = _errors_with_context("! First.\n! Second.\nl.7 belongs to second\n")
-
     assert errors[0] == "! First."
     assert "l.7" in errors[1]
 
 
-# ---------------------------------------------------------------------------
-# report_formats gating (node-level)
-# ---------------------------------------------------------------------------
-
-class FakeAnalystReport:
-    figures: list = []
-    summary: str = "analysis done"
-    findings: list = []
-    uncertainty: str = ""
-
-    def model_dump(self, **kw):
-        return {"summary": self.summary, "findings": [], "uncertainty": ""}
+# -- report_formats ---------------------------------------------------------------------------
 
 
-class FakeVerdict:
-    accepted = True
-    rationale = "Test accepted."
-    needs_more_literature = False
-    needs_analysis_rework = False
-    follow_up = None
-
-
-class FakeReviewerForReport:
-    """Canned reviewer for report composition tests."""
-
-    def __init__(self, *, latex_attempts: int = 1):
-        self._attempt = 0
-        self._latex_attempts = latex_attempts
-
-    async def compose_machine_report(self, request, report, references, verdict, run_id):
-        return _make_report(run_id=run_id)
-
-    # `compose_latex_report` is deliberately absent: F5e retired it, and a fake that still
-    # offers it would let a test pass against an interface production does not call.
-
-
-def test_report_jsonl_only(tmp_path):
-    """report_formats=['jsonl'] writes only JSONL; no .tex file."""
-    from auto_research.report.figures import stage_figures as sf
-    from auto_research.report.references import build_references as br
-    from auto_research.report.writers import write_report_jsonl as wrj
-
-    storage = Storage(tmp_path / "db.sqlite")
-    asyncio.run(storage.initialize())
-    reviewer = FakeReviewerForReport()
-    rdir = tmp_path / "report"
-    rdir.mkdir()
-
-    refs = asyncio.run(br(storage, []))
-    machine = asyncio.run(
-        reviewer.compose_machine_report(
-            type("R", (), {"question": "Q", "model_dump": lambda s, **k: {"question": "Q"}})(),
-            FakeAnalystReport(),
-            refs,
-            FakeVerdict(),
-            "run1",
-        )
-    )
-    path = wrj(machine, rdir / "report.jsonl")
-    assert path.exists()
-    assert not (rdir / "report.tex").exists()
-
-
-def test_report_formats_empty_skips_report(tmp_path):
-    """report_formats=[] means the compose_report node is not reached (route returns END)."""
+def test_report_formats_empty_skips_report():
     from auto_research.graph.runtime import _normalize_report_formats
-    resolved = _normalize_report_formats([], ["jsonl", "tex"])
-    assert resolved == []
+
+    assert _normalize_report_formats([], ["jsonl", "tex"]) == []
 
 
 def test_report_formats_normalization():
     from auto_research.graph.runtime import _normalize_report_formats
+
     assert _normalize_report_formats(None, ["jsonl"]) == ["jsonl"]
     assert _normalize_report_formats("tex", ["jsonl"]) == ["tex"]
     assert _normalize_report_formats(["jsonl", "tex"], []) == ["jsonl", "tex"]
     with pytest.raises(ValueError, match="Unknown report_formats"):
         _normalize_report_formats(["pdf"], [])
-
-
-def test_a_dead_reference_link_is_a_validation_rejection_not_an_accepted_report(tmp_path):
-    """A dead reference link keeps the reviewer's turn open, with the error named.
-
-    Rewritten for F5e (2026-09-09). It used to drive `FakeReviewerForReport.compose_latex_report`
-    in a hand-rolled recompose loop — the control flow production had *then*. Production no longer
-    recomposes: the reviewer edits `report.tex` with `file_edit` and calls `turn_end`, which
-    accepts only once the validator passes. So the old test kept passing while exercising a
-    method the real `ReviewerAgent` no longer has, which is the "measures its own scaffolding"
-    shape. This drives the **real** validator and the **real** `turn_end` instead, with no fake
-    reviewer at all.
-    """
-    from auto_research.agents.react import execute_turn_end
-
-    rdir = tmp_path / "report"
-    rdir.mkdir()
-    pdf = tmp_path / "cited.pdf"
-    pdf.write_bytes(b"%PDF-1.5\nbody")
-    staged_papers = stage_papers([pdf], rdir)
-    staged = stage_figures([], rdir)
-    tex = rdir / "report.tex"
-
-    def problems() -> list[str]:
-        """The same closure `graph.builder.compose_report_node` builds."""
-        if not tex.is_file():
-            return [f"{tex.name} has not been written yet — draft it with file_edit."]
-        latex = tex.read_text(encoding="utf-8")
-        errs = validate_latex_figures(latex, staged)
-        errs += validate_report_links(latex, rdir, staged_papers)
-        return errs
-
-    # Nothing written yet: turn_end refuses and says what to do.
-    out = asyncio.run(execute_turn_end(problems, {"summary": "done"}))
-    assert out.is_error and "file_edit" in out.text
-
-    # A dead link: refused, and the offending target is named.
-    tex.write_text(
-        r"\documentclass{article}\begin{document}"
-        r"\href{papers/missing.pdf}{papers/missing.pdf}\end{document}"
-    )
-    out = asyncio.run(execute_turn_end(problems, {"summary": "done"}))
-    assert out.is_error
-    assert "missing.pdf" in out.text
-
-    # Fixed in place — the shape `file_edit` produces — and the turn is accepted.
-    links = "".join(r"\href{" + rp + "}{" + rp + "}" for _, rp in staged_papers)
-    tex.write_text(
-        r"\documentclass{article}\begin{document}Hello world." + links + r"\end{document}"
-    )
-    assert problems() == []
-    out = asyncio.run(execute_turn_end(problems, {"summary": "report written"}))
-    assert not out.is_error
-
-
-def test_write_report_latex_sanitizes_href_display(tmp_path):
-    r"""The \href display arg is wrapped in \nolinkurl so an underscore in a staged
-    relpath (papers/arxiv_<id>.pdf) no longer trips 'Missing $ inserted' (the
-    systematic no-PDF bug). URL arg and \includegraphics are left untouched."""
-    latex = (
-        r"\href{papers/arxiv_2401_12345.pdf}{papers/arxiv_2401_12345.pdf}"
-        "\n"
-        r"\includegraphics{figures/plot_fit_1.png}"
-    )
-    written = write_report_latex(latex, tmp_path / "report.tex").read_text(encoding="utf-8")
-
-    # Display arg is now verbatim (link preserved), so the underscore is no longer text-mode math.
-    assert r"\href{papers/arxiv_2401_12345.pdf}{\nolinkurl{papers/arxiv_2401_12345.pdf}}" in written
-    # The raw, unwrapped display (the failing form) is gone.
-    assert r"{papers/arxiv_2401_12345.pdf}{papers/arxiv_2401_12345.pdf}" not in written
-    # \includegraphics is untouched (graphicx tolerates underscores in filenames).
-    assert r"\includegraphics{figures/plot_fit_1.png}" in written
-
-
-def test_sanitize_href_display_is_idempotent(tmp_path):
-    r"""Re-writing an already-sanitized \href does not double-wrap (braces block the match)."""
-    once = write_report_latex(
-        r"\href{papers/a_b.pdf}{papers/a_b.pdf}", tmp_path / "r1.tex"
-    ).read_text(encoding="utf-8")
-    twice = write_report_latex(once, tmp_path / "r2.tex").read_text(encoding="utf-8")
-    assert once == twice
-    assert twice.count(r"\nolinkurl") == 1

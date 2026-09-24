@@ -711,7 +711,8 @@ def test_resolving_one_position_leaves_the_other_untouched():
 
 def test_no_position_means_the_schema_is_untouched():
     """A vendor that resolves references itself is sent exactly what Pydantic produced."""
-    from auto_research.schemas import ResearchReport
+    # A schema whose only references sit in `items` (two list[Model] fields).
+    from auto_research.schemas import ReviewerReport as ResearchReport
 
     assert _fmt(ResearchReport, frozenset()) == _fmt(ResearchReport, frozenset())
     assert "$defs" in _fmt(ResearchReport, frozenset())
@@ -719,7 +720,8 @@ def test_no_position_means_the_schema_is_untouched():
 
 def test_definitions_survive_only_while_something_points_at_them():
     """Kept for a surviving reference, dropped once every pointer is resolved."""
-    from auto_research.schemas import ResearchReport
+    # A schema whose only references sit in `items` (two list[Model] fields).
+    from auto_research.schemas import ReviewerReport as ResearchReport
 
     resolved = _fmt(ResearchReport, frozenset({"items"}))
     assert "$ref" not in json.dumps(resolved)

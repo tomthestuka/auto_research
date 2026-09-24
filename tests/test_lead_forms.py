@@ -32,7 +32,6 @@ import pytest
 
 from auto_research.agents.react import (
     AUTHOR_CHAIN_TOOL,
-    CHECK_CODER_TOOL,
     DRIVE_CODER_TOOL,
     EDIT_REPORT_TOOL,
     LEAD_FORM_TOOLS,
@@ -41,6 +40,7 @@ from auto_research.agents.react import (
     RESPOND_TO_REVIEW_TOOL,
     SUBMIT_TOOL,
     TURN_END_TOOL,
+    WAIT_CODER_TOOL,
     LeadCycle,
     ReadOnlyToolProvider,
     ReportWorkspace,
@@ -762,7 +762,7 @@ def test_every_declared_authoring_tool_is_actually_ROUTED():
     """
     cycle = _cycle()
     provider = ReadOnlyToolProvider(roots=[], cycle=cycle)
-    authoring = {DRIVE_CODER_TOOL, CHECK_CODER_TOOL, SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL}
+    authoring = {DRIVE_CODER_TOOL, WAIT_CODER_TOOL, SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL}
     declared = set(_names(provider)) & authoring
     assert declared == authoring, f"an authoring tool is not declared at all: {authoring - declared}"
 
@@ -841,8 +841,8 @@ def test_opening_a_link_sends_the_brief_in_the_background(monkeypatch):
     assert session.started == ["here is your brief"], "the brief was not sent in the background"
     assert session.blocking == [], "the lead blocked on the coder's first turn"
     assert session.drive_status == "working", (
-        "check_coder would report 'you have not sent the coder anything yet' to a lead whose "
-        "coder is working"
+        "the lead would be told 'you have not sent the coder anything yet' by a coder that is "
+        "working"
     )
 
 
@@ -868,18 +868,18 @@ def test_a_session_with_no_background_seam_still_gets_its_brief(monkeypatch):
     assert session.blocking == ["here is your brief"]
 
 
-def test_submitting_while_the_coder_is_still_writing_is_refused():
+def test_submitting_while_a_legacy_coder_is_still_writing_is_refused():
     """The gate reads the working tree, so a mid-write submit judges a half-written tool.
 
-    Unreachable before the seed drive was backgrounded — a coder could not be working while the
-    lead acted — so the guard lands with the change that makes the race possible.
+    A session with a blocking wait holds the submit until the coder stops (pinned in
+    `test_merge_flow`); one without it (a benchmark's, a double's) still refuses.
     """
     from auto_research.agents.react import execute_submit
 
     session = types.SimpleNamespace(drive_status="working")
     out = _run(execute_submit(session, None))
     assert out.is_error
-    assert "still working" in out.text and CHECK_CODER_TOOL in out.text
+    assert "still working" in out.text
 
 
 # ---------------------------- the coder's question reaches the lead's OWN loop (2026-09-12) ----
@@ -904,11 +904,14 @@ class _AskingSession:
         pending, self.questions = self.questions, []
         return pending
 
-    async def send(self, message: str) -> str:
+    async def send(self, message: str, *, mid_turn: bool = False) -> str:
         self.sent.append(message)
+        self.mid_turn = mid_turn
         if self.drive_status == "working":
-            self.steered.append(message)
-            return "steered"
+            if mid_turn:
+                self.steered.append(message)
+                return "steered"
+            return "queued"
         self.started.append(message)
         return "started"
 
@@ -930,7 +933,7 @@ def test_a_parked_question_is_collected_once_for_injection():
 
     first = _coder_questions(provider)
     assert len(first) == 1 and "ENERGY or PI?" in first[0]
-    assert CHECK_CODER_TOOL not in first[0], "the lead is pointed at the reply path, not at polling"
+    assert WAIT_CODER_TOOL not in first[0], "the lead is pointed at the reply path, not at waiting"
     assert DRIVE_CODER_TOOL in first[0], "the lead must be told how to answer"
     assert _coder_questions(provider) == [], "a collected question must not be re-injected"
 
@@ -945,136 +948,75 @@ def test_a_session_with_no_question_park_is_simply_quiet():
     assert _coder_questions(provider) == []
 
 
-def test_drive_coder_steers_a_working_coder_instead_of_being_refused():
-    """ONE lead->coder path. A working coder is steered; an idle one is given a new turn.
+def test_drive_coder_reports_what_the_session_did_with_the_message():
+    """ONE lead->coder path; the session picks the primitive and the tool says which it was.
 
-    The old path could only start a turn, so a lead with something to say to a working coder was
-    told "the coder is already working on an instruction" — the refusal it hit twice in the live
-    run of 2026-09-12 while holding the answer to that coder's own question.
+    Queued is the default for a working coder (slot 6, 2026-09-15: 47 mid-turn steers), so the
+    lead is told the message waits for the next turn; ``mid_turn`` reaches the running turn.
     """
     from auto_research.agents.react import execute_drive_coder
 
     working = _AskingSession(status="working")
     out = _run(execute_drive_coder(working, {"instructions": "use PI"}))
-    assert not out.is_error
-    assert working.steered == ["use PI"]
-    assert "inside the turn it is running" in out.text
+    assert not out.is_error and working.mid_turn is False
+    assert "Queued" in out.text and WAIT_CODER_TOOL in out.text
+
+    out = _run(execute_drive_coder(working, {"instructions": "stop, use PI", "mid_turn": True}))
+    assert working.steered == ["stop, use PI"] and working.mid_turn is True
+    assert "inside the turn the coder is running" in out.text
 
     idle = _AskingSession(status="idle")
     out = _run(execute_drive_coder(idle, {"instructions": "next link"}))
     assert not out.is_error and idle.started == ["next link"]
+    assert WAIT_CODER_TOOL in out.text
 
 
-# ── check_coder is rate-limited, because three strings told the lead to spam it ──────────
+# ── wait_coder replaces polling ───────────────────────────────────────────────────────────
 #
-# Measured across three runs of the same seat: 116 / 138 / 122 polls per authoring window at a
-# 3.6-5.6 s median cadence, of which 96.6 / 98.6 / 99.2 per cent returned a byte-identical
-# "still working" string. In run 328347c4 that was $3.73 — 59% of the lead's whole spend and 13%
-# of the run — to learn four things, one per coder turn-end. It was compliance, not pathology:
-# the tool's description called the call budget-free when it is not, its "working" return said
-# "check again", drive_coder's acknowledgement said "do not wait idly", and submit_for_review's
-# refusal said "call check_coder". All four strings are fixed; this pins the enforcement.
-
-
-class _Drive:
-    """The surface `execute_check_coder` reads, and nothing else."""
-
-    def __init__(self, status="working"):
-        self.drive_status = status
-        self.taken = 0
-
-    def take_drive_result(self):
-        self.taken += 1
-        return ("the coder's narration", None)
-
-
-def _check(session):
-    from auto_research.agents.react import execute_check_coder
-
-    return asyncio.run(execute_check_coder(session))
-
-
-def test_a_second_check_inside_the_interval_is_refused_with_the_time_left(monkeypatch):
-    monkeypatch.setattr("auto_research.agents.react.check_coder_min_interval_s", lambda: 900)
-    session = _Drive()
-    first = _check(session)
-    assert not first.is_error and "still working" in first.text
-
-    second = _check(session)
-    assert second.is_error, "an early re-check must be refused, not answered"
-    assert "s." in second.text and "available in" in second.text
-    # The refusal says what to do instead, and does NOT say to check again.
-    assert "check again" not in second.text.lower()
-
-
-def test_the_refusal_names_a_shrinking_remainder(monkeypatch):
-    import auto_research.agents.react as react
-
-    monkeypatch.setattr(react, "check_coder_min_interval_s", lambda: 900)
-    clock = {"t": 1000.0}
-    monkeypatch.setattr("time.monotonic", lambda: clock["t"])
-    session = _Drive()
-    _check(session)
-    clock["t"] += 100
-    early = _check(session)
-    assert "800s" in early.text, early.text
-    clock["t"] += 900
-    allowed = _check(session)
-    assert not allowed.is_error, "past the interval the check must be allowed again"
-
-
-def test_a_finished_drive_is_never_throttled(monkeypatch):
-    """A finished result is consumed exactly once (`take_drive_result`), so refusing that call
-    would strand the narration the lead is owed. The throttle guards the empty answer only."""
-    import auto_research.agents.react as react
-
-    monkeypatch.setattr(react, "check_coder_min_interval_s", lambda: 900)
-    session = _Drive()
-    _check(session)               # working → starts the clock
-    session.drive_status = "done"
-    out = _check(session)         # immediately after, but there is something to report
-    assert not out.is_error and session.taken == 1
-
-
-def test_a_fresh_session_starts_unthrottled(monkeypatch):
-    """The first check after a new drive is the one poll that reliably carries information."""
-    import auto_research.agents.react as react
-
-    monkeypatch.setattr(react, "check_coder_min_interval_s", lambda: 900)
-    first_session, second_session = _Drive(), _Drive()
-    assert not _check(first_session).is_error
-    assert not _check(second_session).is_error
-
-
-def test_the_interval_is_configurable_and_zero_disables(monkeypatch):
-    import auto_research.agents.react as react
-
-    monkeypatch.setattr(react, "check_coder_min_interval_s", lambda: 0)
-    session = _Drive()
-    assert not _check(session).is_error
-    assert not _check(session).is_error, "interval 0 must not throttle"
+# Slot 6 (2026-09-15, gpt-5.6-terra lead, $20.43): 134 check_coder calls (114 refused by the
+# 900 s rate limit), 47 mid-turn steers, 31 refused submits and 9 refused turn_ends at a 3-10 s
+# cadence. A refusal returns at once and costs a model turn, so rate-limiting the poll moved the
+# spam onto the other tools. The session-level behaviour is pinned in test_merge_flow; these pin
+# the lead-facing surface.
 
 
 def test_no_model_visible_string_tells_the_lead_to_poll():
-    """The four strings that produced the behaviour, asserted as a set so a new one is caught.
-
-    `check_coder`'s description also claimed the call was budget-free; it is not in
-    `_CYCLE_FREE_TOOLS`, so the model was told an action was free and charged for it 116 times.
-    """
-    from auto_research.agents.react import (
-        CHECK_CODER_TOOL,
-        check_coder_tool_def,
-        drive_coder_tool_def,
-    )
+    """The declared surface: wait_coder is free, advertises long waits, and nothing says 'check'."""
+    from auto_research.agents.react import drive_coder_tool_def, wait_coder_tool_def
     from auto_research.agents.roles import _CYCLE_FREE_TOOLS
 
-    desc = check_coder_tool_def()["description"].lower()
+    desc = wait_coder_tool_def()["description"].lower()
+    assert "prefer long waits" in desc
     assert "check again" not in desc
-    assert "costs no tool budget" not in desc, (
-        "check_coder is not in _CYCLE_FREE_TOOLS, so calling it free is false"
+    assert WAIT_CODER_TOOL in _CYCLE_FREE_TOOLS, "the wait costs nothing, and says so"
+    assert "check_coder" not in drive_coder_tool_def()["description"]
+    assert "mid_turn" in drive_coder_tool_def()["input_schema"]["properties"]
+
+
+def test_the_wait_limits_are_read_from_config_and_kept_ordered(monkeypatch):
+    import auto_research.env as env
+
+    monkeypatch.setattr(env, "_orch_config", lambda: {})
+    assert env.coder_wait_limits_s() == (60, 300, 1800)
+    monkeypatch.setattr(
+        env, "_orch_config",
+        lambda: {"coder_wait_floor_s": 120, "coder_wait_default_s": 30, "coder_wait_max_s": 90},
     )
-    assert CHECK_CODER_TOOL not in _CYCLE_FREE_TOOLS  # the fact the description must match
-    assert "do not wait idly" not in drive_coder_tool_def()["description"].lower()
+    floor, default, maximum = env.coder_wait_limits_s()
+    assert floor <= default <= maximum and floor == 120, (floor, default, maximum)
+    monkeypatch.setattr(env, "_orch_config", lambda: {"coder_wait_floor_s": "x"})
+    assert env.coder_wait_limits_s()[0] == 60, "a malformed value falls back to its default"
+
+
+def test_a_short_timeout_is_raised_to_the_floor_not_refused(monkeypatch):
+    """The whole point: no calling pattern gets an instant answer from a coder with no news."""
+    import auto_research.agents.react as react
+
+    monkeypatch.setattr(react, "coder_wait_limits_s", lambda: (60, 300, 1800))
+    assert react._wait_timeout({"timeout_s": 5}) == (60, " (asked 5s, raised to the 60s minimum)")
+    assert react._wait_timeout({"timeout_s": 9999})[0] == 1800
+    assert react._wait_timeout({}) == (300, "")
+    assert react._wait_timeout({"timeout_s": "soon"}) == (300, "")
 
 
 # ── no escape path: for the lead, turn_end is the only way out ───────────────
@@ -1259,16 +1201,25 @@ def test_a_refusal_still_ends_the_loop():
         assert _continuation_for(_silent("", stop=stop), frozenset({"turn_end"})) is None
 
 
-def test_roles_that_compose_after_their_loop_are_untouched():
-    """The reviewer and co-lead produce their artifact in a SEPARATE call after the loop, so a
-    silent exit costs them nothing — 163 of the 192 measured silent turns are theirs. Nudging
-    them would be wrong, and `require_terminal` defaults False so they keep the old behaviour."""
+def test_the_colead_composes_after_its_loop_and_is_untouched():
+    """The co-lead produces its verdict in a SEPARATE call after the loop (it sits in the coding
+    pipeline, outside §2b's role edges), so a silent exit costs it nothing. Nudging it would be
+    wrong, and `require_terminal` defaults False so it keeps the old behaviour."""
     import inspect
 
-    from auto_research.agents.roles import AnalystColeadAgent, ReviewerAgent
+    from auto_research.agents.roles import AnalystColeadAgent
 
-    for method in (ReviewerAgent.review, AnalystColeadAgent.review_tool):
-        assert "require_terminal" not in inspect.getsource(method)
+    assert "require_terminal" not in inspect.getsource(AnalystColeadAgent.review_tool)
+
+
+def test_the_reviewer_has_no_escape_path():
+    """The reviewer writes its report inside its loop (2026-09-24), so `turn_end` is its only exit,
+    exactly as for the lead, the workers and the librarian."""
+    import inspect
+
+    from auto_research.agents.roles import ReviewerAgent
+
+    assert "require_terminal=True" in inspect.getsource(ReviewerAgent.review)
 
 
 def test_require_terminal_defaults_off():

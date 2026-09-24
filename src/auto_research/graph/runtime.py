@@ -34,6 +34,7 @@ from auto_research.sandbox.mcp_client import MCPToolClient
 from auto_research.sandbox.persistent import PersistentSandbox
 from auto_research.sandbox.registry import ToolkitRegistry
 from auto_research.agents.react import ReadOnlyToolProvider
+from auto_research.provenance import ReceiptStore
 from auto_research.agents.roles import _model_label
 from auto_research.sandbox.workspace import (
     agent_dir,
@@ -42,7 +43,7 @@ from auto_research.sandbox.workspace import (
     memory_path,
     run_dir,
 )
-from auto_research.schemas import ResearchRequest, ReviewVerdict
+from auto_research.schemas import ResearchRequest, ReviewerReport
 from auto_research.storage import Storage
 
 
@@ -54,7 +55,7 @@ class ResearchRun:
     """Result object returned by the monitored library entry."""
 
     request: ResearchRequest
-    verdict: ReviewVerdict
+    verdict: ReviewerReport
     final_state: dict[str, Any]
     monitor: RunMonitor
     research_report: Any = None  # ResearchReport | None — avoids circular import at class def
@@ -214,6 +215,9 @@ def readonly_tools_for(
         # headless, a role must not be handed a channel that cannot answer.
         include_plan_and_debate=lead and human_handler is not None,
         include_text_search=not lead,
+        # The reviewer reads papers through its own receipted `read_paper` (the Docling text its
+        # quotes are checked against), so the native-PDF `open_paper` is not declared for it.
+        include_open_paper=False,
         human_handler=human_handler,
         asked_by=role,
         model=model,
@@ -254,6 +258,46 @@ class SandboxSettings:
         )
 
 
+def attach_reviewer_runtime(
+    reviewer: Any,
+    *,
+    run_id: str,
+    toolkit_root: Path,
+    run_monitor: Any | None = None,
+    retrieval: Any | None = None,
+    web_source: Any | None = None,
+    human_handler: Any | None = None,
+) -> None:
+    """Give the reviewer the tools, report folder, receipt store and monitor production gives it.
+
+    The same seam as :func:`attach_lead_runtime`, for the same reason: a live cell driving a real
+    reviewer outside the graph gets exactly production's wiring rather than a copy of it. Leaves a
+    pre-wired ``tools`` alone and is best-effort for duck-typed fakes.
+    """
+    if getattr(reviewer, "tools", None) is None:
+        try:
+            reviewer.tools = readonly_tools_for(
+                "reviewer",
+                roots=readonly_roots_for(run_id, toolkit_root),
+                retrieval=retrieval,
+                web_source=web_source,
+                human_handler=human_handler,
+                model=_model_label(getattr(reviewer, "model", None)) or "",
+            )
+        except Exception:  # noqa: BLE001 — tools are optional; never block the run
+            pass
+    # The reviewer's work folder (one report JSONL per review) and the run's ONE receipt store.
+    try:
+        if getattr(reviewer, "report_dir", None) is None:
+            reviewer.report_dir = agent_dir(run_id, "reviewer")
+        if getattr(reviewer, "receipts", None) is None:
+            reviewer.receipts = ReceiptStore.for_run(run_dir(run_id))
+    except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it
+        pass
+    if run_monitor is not None:
+        _attach_monitor(reviewer, run_monitor)
+
+
 def attach_lead_runtime(
     lead: Any,
     *,
@@ -279,6 +323,7 @@ def attach_lead_runtime(
     try:
         lead.agent_key = "analyst_lead"
         lead.report_dir = agent_dir(run_id, "analyst_lead")
+        lead.receipts = ReceiptStore.for_run(run_dir(run_id))
     except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it
         pass
     if run_monitor is not None:
@@ -299,6 +344,14 @@ def attach_lead_runtime(
                 model=_model_label(getattr(lead, "model", None)) or "",
             )
         except Exception:  # noqa: BLE001 — tools are optional; never block the run
+            pass
+    # Provenance: what the lead reads is receipted under its key, so it can ground its report.
+    tools = getattr(lead, "tools", None)
+    if tools is not None and getattr(tools, "receipts", None) is None:
+        try:
+            tools.receipts = ReceiptStore.for_run(run_dir(run_id))
+            tools.receipt_source = "analyst_lead"
+        except Exception:  # noqa: BLE001 — a pre-wired fake may not accept it
             pass
 
 
@@ -328,6 +381,7 @@ def attach_worker_runtime(
         worker.memory_path = memory_path(run_id, key)
         worker.agent_key = key
         worker.report_dir = agent_dir(run_id, key)
+        worker.receipts = ReceiptStore.for_run(run_dir(run_id))
         sandbox = PersistentSandbox(
             toolkit_root=toolkit_root,
             workdir=memory_path(run_id, key).parent,
@@ -394,7 +448,7 @@ async def run_request(
     monitor: RunMonitor | None = None,
     monitor_jsonl: str | Path | None = None,
     report_formats: str | list[str] | None = None,
-) -> ReviewVerdict:
+) -> ReviewerReport:
     """Run the research-loop graph for one request and return the verdict."""
 
     run = await run_research(
@@ -545,7 +599,6 @@ async def run_research(
     repl_init_py = sandbox_settings.repl_init_py
     analyze_probe = sandbox_settings.analyze_probe
     disabled_tools: list[str] = orch.get("disabled_tools") or []
-    report_retry_cap = int(orch.get("report_retry_cap", 2))
     default_formats: list[str] = orch.get("report_formats") or ["jsonl", "tex"]
     resolved_formats = _normalize_report_formats(report_formats, default_formats)
 
@@ -584,8 +637,19 @@ async def run_research(
 
     # Create per-agent workspace folders
     analyst_keys = [f"analyst_worker_{i}" for i in range(len(workers))]
-    agent_keys = ["reviewer", "analyst_lead"] + analyst_keys
+    agent_keys = ["reviewer", "analyst_lead", "librarian_io"] + analyst_keys
     create_run_workspace(run_id, agent_keys)
+    # The librarian's working folder (its per-pass report JSONL) and the run's ONE receipt store,
+    # so its paper/web handles share counters with every other role's.
+    try:
+        if getattr(io_agent, "report_dir", None) is None:
+            io_agent.report_dir = agent_dir(run_id, "librarian_io")
+        if getattr(io_agent, "receipts", None) is None:
+            from auto_research.provenance.store import ReceiptStore
+
+            io_agent.receipts = ReceiptStore.for_run(run_dir(run_id))
+    except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it
+        pass
 
     # Give the reviewer and lead a read-only inspection loop (run artifacts +
     # knowledge base), unless a caller pre-wired their own tools.
@@ -604,21 +668,14 @@ async def run_research(
     # tool source/manifests and confirm results came from correctly-parameterised tool
     # calls. Read-only/path-confined, no shell: the runtime never writes the toolkit (§2)
     # and this matches the §12 "read-only file-tree exploration" posture.
-    readonly_roots = readonly_roots_for(run_id, toolkit_root)
-    for target, role in ((reviewer, "reviewer"),):
-        if getattr(target, "tools", None) is not None:
-            continue  # a caller pre-wired its own
-        try:
-            target.tools = readonly_tools_for(
-                role,
-                roots=readonly_roots,
-                retrieval=retrieval,
-                web_source=web_source,
-                human_handler=human_handler,
-                model=_model_label(target.model) or "",
-            )
-        except Exception:  # noqa: BLE001 - tools are optional; never block the run
-            pass
+    attach_reviewer_runtime(
+        reviewer,
+        run_id=run_id,
+        toolkit_root=toolkit_root,
+        retrieval=retrieval,
+        web_source=web_source,
+        human_handler=human_handler,
+    )
 
     # V-4: a stable key + report folder for the lead's per-round adjudicated report JSONLs, its
     # monitor, its stop channel and its read-only tools — all through the one seam, so a live
@@ -794,8 +851,7 @@ async def run_research(
             registry=registry,
             monitor=run_monitor,
             run_id=run_id,
-            storage=storage,
-            report_retry_cap=report_retry_cap,
+            receipts=ReceiptStore.for_run(run_dir(run_id)),
             report_formats=resolved_formats,
             checkpointer=saver,
         )

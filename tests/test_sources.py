@@ -4,6 +4,8 @@ import asyncio
 import json
 from datetime import UTC, datetime
 
+import pytest
+
 from auto_research.schemas import FullTextLink
 from auto_research.sources import ArxivSource, NasaAdsSource, WebSource
 from auto_research.sources import nasa_ads_source
@@ -32,7 +34,8 @@ class FakeArxivResult:
 
 class FakeArxivClient:
     def results(self, search):
-        assert search.query == "black hole binary"
+        # Bare keywords are sent requiring every term (ArxivSource.search_with_match).
+        assert search.query == "all:black AND all:hole AND all:binary"
         yield FakeArxivResult()
 
 
@@ -241,3 +244,82 @@ def test_download_and_ingest_result_returns_none_on_failed_download(tmp_path, mo
         return await download_and_ingest_result(db, result, target_dir=tmp_path / "papers")
 
     assert asyncio.run(run()) is None
+
+
+# ── arXiv discipline ─────────────────────────────────────────────────────────────
+
+
+class _ArxivServer:
+    """Records the requests an arXiv download makes; answers from a script of codes/bytes."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.requests = []
+
+    def __call__(self, request, timeout=None):
+        from urllib.error import HTTPError
+
+        self.requests.append((request.full_url, dict(request.header_items())))
+        answer = self.answers.pop(0)
+        if isinstance(answer, int):
+            raise HTTPError(request.full_url, answer, "refused", {}, None)
+        return _FakeResponse(answer)
+
+
+@pytest.fixture
+def arxiv(monkeypatch):
+    from auto_research.sources import downloads
+
+    downloads._ARXIV_GATE = downloads._ArxivGate()
+    sleeps: list[float] = []
+    monkeypatch.setattr(downloads.time, "sleep", sleeps.append)
+    return downloads, sleeps
+
+
+def test_arxiv_pdfs_are_fetched_from_the_export_host_with_a_nameless_agent(tmp_path, arxiv, monkeypatch):
+    downloads, _ = arxiv
+    server = _ArxivServer([b"%PDF-1.5 real"])
+    monkeypatch.setattr(downloads, "urlopen", server)
+    assert downloads.download_pdf("http://arxiv.org/pdf/2206.09972v2", tmp_path / "a.pdf")
+    url, headers = server.requests[0]
+    assert url == "https://export.arxiv.org/pdf/2206.09972v2"
+    assert headers["User-agent"].startswith("auto_research/") and "@" not in headers["User-agent"]
+    assert headers["Accept"] == "application/pdf"
+
+
+def test_an_arxiv_403_stops_arxiv_downloads_for_the_process(tmp_path, arxiv, monkeypatch):
+    downloads, _ = arxiv
+    server = _ArxivServer([403])
+    monkeypatch.setattr(downloads, "urlopen", server)
+    assert downloads.download_pdf("https://arxiv.org/pdf/1", tmp_path / "a.pdf") is None
+    assert downloads.download_pdf("https://arxiv.org/pdf/2", tmp_path / "b.pdf") is None
+    assert len(server.requests) == 1  # never retried, never another request after the block
+
+
+def test_an_arxiv_406_waits_the_crawl_delay_and_tries_once_more(tmp_path, arxiv, monkeypatch):
+    downloads, sleeps = arxiv
+    server = _ArxivServer([406, b"%PDF-1.5 real"])
+    monkeypatch.setattr(downloads, "urlopen", server)
+    assert downloads.download_pdf("https://arxiv.org/pdf/1", tmp_path / "a.pdf")
+    assert downloads._ARXIV_REFUSAL_WAIT_S in sleeps and len(server.requests) == 2
+    server = _ArxivServer([429, 429])
+    monkeypatch.setattr(downloads, "urlopen", server)
+    assert downloads.download_pdf("https://arxiv.org/pdf/2", tmp_path / "b.pdf") is None
+    assert len(server.requests) == 2  # one retry only
+
+
+def test_arxiv_requests_are_spaced(tmp_path, arxiv, monkeypatch):
+    downloads, sleeps = arxiv
+    clock = iter([100.0, 100.0, 101.0, 103.0])
+    monkeypatch.setattr(downloads.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(downloads, "urlopen", _ArxivServer([b"%PDF-1 a", b"%PDF-1 b"]))
+    downloads.download_pdf("https://arxiv.org/pdf/1", tmp_path / "a.pdf")
+    downloads.download_pdf("https://arxiv.org/pdf/2", tmp_path / "b.pdf")
+    assert sleeps == [pytest.approx(2.0)]  # 1 s after the first, so wait out the 3 s interval
+
+
+def test_non_arxiv_urls_are_left_alone():
+    from auto_research.sources.downloads import arxiv_download_url
+
+    assert arxiv_download_url("https://iopscience.iop.org/x.pdf") is None
+    assert arxiv_download_url("https://arxiv.org/abs/2206.09972") is None

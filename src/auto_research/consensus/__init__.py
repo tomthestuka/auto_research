@@ -3,10 +3,6 @@
 from auto_research.consensus.strategy import (
     ConsensusStrategy,
     DebateToConverge,
-    IOAbstractionLeadLike,
-    IOAbstractionStrategy,
-    IOAbstractionWorkerLike,
-    IODebateToConverge,
     LeadLike,
     WorkerLike,
 )
@@ -14,10 +10,6 @@ from auto_research.consensus.strategy import (
 __all__ = [
     "ConsensusStrategy",
     "DebateToConverge",
-    "IOAbstractionLeadLike",
-    "IOAbstractionStrategy",
-    "IOAbstractionWorkerLike",
-    "IODebateToConverge",
     "LeadLike",
     "WorkerLike",
 ]

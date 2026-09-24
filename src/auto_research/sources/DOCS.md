@@ -11,14 +11,40 @@ the web, behind a single shared interface so new sources drop in cleanly
 - `nasa_ads_source.py` — backed by the `ads` client; token from `ADS_DEV_KEY`.
 - `web_source.py` — generic web search via Tavily; also reused by analysts for
   reading authoritative documentation.
+- `receipts.py` — mints the **paper** and **web** receipts every role that reads literature uses
+  (P5 of the provenance generalization). A **paper** receipt IS the PDF the model reads natively
+  (`path` = `source_path`, `sha256` = `source_sha256`) and is **cited, never text-matched** (human
+  ruling 2026-09-24, option A): no text is extracted, a quote of a paper is refused ("no text to
+  quote"), and a person checks paper values against the PDF. A **web** receipt's stored text is the Tavily extract, which is
+  also what the model reads (`parser="tavily-extract"`; Tavily returns no raw HTML). Both carry
+  `title` and persistent `ids`.
 
-Each module is independent; no source imports another.
+Each source module is independent; no source imports another.
 
 ## Interfaces / Contracts
 - `QuerySource` protocol: `async search(query: str, *, limit: int = 10) ->
   list[SearchResult]`.
+- `download_pdf(url, destination) -> Path | None` — cached, PDF-signature-checked download. An
+  arXiv PDF URL follows **arXiv's discipline**, read on arXiv's own pages: fetched from
+  `export.arxiv.org` ("specifically set aside for programmatic access"; the primary host, never a
+  fallback, since switching hosts to escape a refusal is the circumvention arXiv's terms prohibit),
+  one at a time and ≥3 s apart process-wide (API terms), a `403` stops arXiv downloads for the rest
+  of the process (continued requests after a 403 "will be interpreted as an attack"), a `406`/`429`
+  waits 15 s (`robots.txt` crawl delay) and retries once. Headers: `Accept: application/pdf` and a
+  nameless `auto_research/<version>` User-Agent (shared repo; no personal contact, human ruling).
+  `arxiv_download_url(url) -> str | None` gives the export form of an arXiv `/pdf/` URL.
+- `mint_paper_receipt(store, pdf, *, source, title, ids=None, produced_by="read_paper") ->
+  Receipt | None` — mint, or return the receipt `source` already minted for this PDF (matched on
+  `source_sha256`, so a handle is stable for the run and across a resume). `None` when the file is
+  not a PDF (no `%PDF-` signature). A scan with no text layer is as citable as any PDF.
+- `mint_web_receipt(store, url, text, *, source, title=None, produced_by="web_fetch") -> Receipt`
+  — the same for a page extract (`parser="tavily-extract"`).
+- `existing_receipt(store, *, source, kind, source_sha256) -> Receipt | None`.
 - `ArxivSource(client: arxiv.Client | None = None)` searches arXiv and returns
-  `SearchResult(source="arxiv")`.
+  `SearchResult(source="arxiv")`. `search_with_match(query, *, limit) -> (results, match)`:
+  bare keywords are sent joined with AND (`all:a AND all:b …`); when no paper matches them all the
+  loose query runs (`match="any"`); a query in arXiv field syntax (`au:`, `ti:`, `abs:`, `AND`/`OR`)
+  is sent as written (`"as_written"`). `search()` returns just the results.
 - `NasaAdsSource(token: str | None = None)` searches NASA ADS and returns
   `SearchResult(source="nasa_ads")`. If `token` is not provided, the ADS client
   reads `ADS_DEV_KEY` or `ADS_API_TOKEN` from the environment.
@@ -105,3 +131,24 @@ Each module is independent; no source imports another.
   query while arxiv/web answered fine. Now a bad record costs that one link, never the source; the
   same guard covers a missing `link_type` against `NonEmptyStr`. Recording per-source failures on
   the librarian side stays open ([I9]). `tests/test_sources.py::test_ads_full_text_skips_malformed_records`.
+- 2026-09-24 — `receipts.py` added (95, P5): paper/web receipt minting over the P0 `ReceiptStore`,
+  used by the librarian under `lib` and offered to the reviewer under `rev`. [I9] closed on the
+  librarian side: a failing source is a `librarian.source.error` event and an error outcome.
+- 2026-09-24 — arXiv matches every term first (95). The live librarian run never retrieved the
+  paper it needed: the arXiv API does not require every bare term to match, so a query naming the
+  author, target and topic ranked unrelated papers first, while the same terms joined with AND put
+  it in the top five. AND first, loose fallback only on zero results, and the librarian's tool says
+  when the fallback ran.
+- 2026-09-24 — Paper receipts cite the PDF and check against its pypdf text layer (95, human
+  ruling). Docling is no longer on the librarian's path; the `parse_root` argument is gone.
+- 2026-09-24 — arXiv PDFs follow arXiv's automated-access discipline (95). The second live run was
+  refused by `arxiv.org` with HTTP 406 partway through, including for a PDF it had served minutes
+  earlier, while `export.arxiv.org` served the same file; arXiv's bulk-data page names that host for
+  programmatic access, and the `arxiv` Python package made the same switch (its PR #172, per a
+  subagent's source reading). Pacing, a stop on 403, one wait-and-retry on 406/429, and a nameless
+  versioned User-Agent. `tests/test_sources.py` +5.
+- 2026-09-24 — **Papers are cited, never text-matched** (95, human ruling "option A"). The paper
+  receipt stores the PDF itself; the pypdf text layer is gone. Measured reason: no extractor is
+  faithful to a PDF — live, a text layer dropped the minus sign of a correct "−22 ± 2" (5c), and
+  Docling split number tokens (run 1). Rejected for now: checking against arXiv HTML/LaTeX, and a
+  union of extractors.

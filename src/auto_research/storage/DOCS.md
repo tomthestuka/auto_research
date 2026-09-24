@@ -28,12 +28,11 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   - `papers(id, source, source_id, title, authors_json, year, abstract,
     keywords_json, local_path, sha256, inserted_at, embedding)`.
   - `memory(id, paper_id, summary, tags_json, mem_abbrev, created_at, embedding)`.
-    `mem_abbrev` is the IO-team consensus-produced memory abbreviation written by
-    `LibrarianIOAgent.ingest_results()`. For papers with a PDF, it is a rich
-    summary produced by `IODebateToConverge`; for a no-PDF search result, the
-    result is recorded as an **orphan memory** (`paper_id = NULL`, no paper row)
-    whose `mem_abbrev` is the original `SearchResult.abstract`. Added via additive
-    migration in `Storage._initialize()`.
+    `mem_abbrev` holds what a run learned from a paper. The librarian appends one row per paper
+    its filed report cites (`LibrarianIOAgent.research`), with the findings that cite it; rows
+    are appended, never replaced, so each run's notes stay searchable. Rows written by the retired
+    IO abstraction debate, including orphan notes (`paper_id = NULL`), remain readable. Added via
+    additive migration in `Storage._initialize()`.
   - `query_log(id, role, query, source, n_results, latency_ms, created_at)`.
   - `embeddings(id, owner_table, owner_id, embedding, created_at)` reserved for
     Phase 2.
@@ -46,11 +45,9 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   from filename stem, `local_path`, and `sha256`.
 - Downloaded source PDFs are ingested with source metadata when available. For
   example, arXiv downloads use `source="arxiv"` and `source_id=<arxiv_id>`.
-- A search result with **no downloadable PDF never becomes a paper row** — it is
-  kept only as an orphan `memory` note (see `LibrarianIOAgent.ingest_results`).
-- `librarian_io_enrich_stub()` is the documented handoff point for the librarian
-  I/O team to read downloaded PDFs, extract abstractions/keywords, and write
-  `memory` rows. It intentionally does no work until agent roles land.
+- A search result with **no downloadable PDF never becomes a paper row**: the librarian records
+  it among its report's gaps, or reads it as a web page.
+- The librarian upserts a paper row when it first opens a PDF (`read_paper`).
 - Tests use temp dirs and must not touch the real runtime DB.
 
 ## Dependencies
@@ -97,9 +94,6 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   `replace_memory_for_paper(memory)`, `log_query(query)`.
 - `ingest_local_papers(storage: Storage, papers_dir: str | Path) ->
   list[StoredPaper]` — upserts all `*.pdf` files in a directory.
-- `librarian_io_enrich_stub(storage: Storage, paper_id: int) -> None` —
-  no-op stub; superseded by `LibrarianIOAgent.ingest_results()` which now
-  handles PDF download, IO debate abstraction, and memory writes.
 - `auto_research.storage.ingest_local.ingest_and_log(papers_dir: Path) -> dict`
   — developer utility that ingests PDFs and writes a `logs/dev/step-4/` JSON
   log.
@@ -118,3 +112,5 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
 - 2026-06-23 — Added `check_database_health()` (+ `EXPECTED_TABLES`), registered in the launch
   preflight as `database_health`: creates the schema if absent and verifies tables, so a fresh
   run's first `text_search` no longer dies on `no such table: papers`.
+- 2026-09-24 — `librarian_io_enrich_stub` deleted (95). The librarian writes paper rows when it
+  opens a PDF and appends memory rows from its filed report's findings.

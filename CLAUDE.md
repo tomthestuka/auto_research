@@ -16,8 +16,9 @@ symlinks to this file (see [§11](#11-file-linking)).
 with **LangGraph**, that takes a research request, searches the literature, runs
 analyses, and reviews the results. The agent team has three roles:
 
-- **Librarians** — find and curate literature (I/O sub-team) and retrieve from local
-  memory (searcher sub-team). Librarians **use** tools; they never author them.
+- **Librarian** — one research loop that searches, reads papers and pages in full, and files a
+  `LiteratureReport` whose findings cite what it read. The librarian **uses** tools; it never
+  authors them.
 - **Analysts** — perform analysis tasks; workers debate to convergence, a lead model
   adjudicates and maintains library discipline. Analysts **author** new tools in Phase 2.
 - **Reviewer** — top-tier models that triage research requests, dispatch work, and
@@ -104,14 +105,22 @@ Consequences, each with a measured failure behind it:
   loudly and record that it did. Returning an unfiled result silently is the same defect wearing a
   limit's clothing.
 - **A role that composes its artifact *after* its loop sits outside this boundary and is wrong.**
-  The reviewer and analyst co-lead do this today — the loop gathers evidence and a separate
-  structured call creates the verdict, so the artifact is validated by nothing. Recorded as a known
-  violation to be fixed, not as a sanctioned pattern.
+  Closed for every graph role on 2026-09-24: the reviewer writes its `ReviewerReport` inside its
+  loop and `turn_end` renders and compiles it; the librarian files a `LiteratureReport` the same
+  way. The analyst co-lead still composes its verdict after its loop, and stays so on purpose: it
+  belongs to the coding pipeline, whose exits are a gated commit or an honest failure.
+- **Every number a report states is bound to a receipt** (2026-09-24). Every artifact a role can
+  rest a claim on — a tool's output, a figure, a data file, a paper, a web page, a human answer, the
+  task it was handed — is a **receipt** the runtime mints: bytes hashed by the runtime, producer and
+  inputs stamped, parents linked, `failed`/`synthetic` flags propagated. Prose cites receipts by
+  handle, and `turn_end` refuses a number that no cited receipt carries (*scoped grounding*, §7).
+  The figure discipline was the first instance of this; it is now the rule for every artifact.
 
 The testable corollary: **every role edge is a validation point.** A live adversarial test drives
 each role with a model instructed to escape — answering in prose, idling on free tools to the cap,
-refusing, emitting malformed calls, claiming completion without filing — and asserts that no path
-yields an unfiled artifact or a silent exit.
+refusing, emitting malformed calls, claiming completion without filing, stating a number no
+receipt carries, citing a handle it was never given, misquoting a span — and asserts that no path
+yields an unfiled artifact, a silent exit, or an ungrounded claim.
 
 ---
 
@@ -268,8 +277,7 @@ Default tier mapping (a *config default*, edit freely — not code):
 | Reviewer group | top | `claude-opus-4-8`, `gpt-5.5` (reasoning high), `gemini-3.5-flash` (thinking high) |
 | Analyst lead | top | `claude-opus-4-8` |
 | Analyst worker group | medium | `claude-sonnet-4-6`, `gpt-5.5` (reasoning medium) |
-| Librarian I/O group | medium | `claude-sonnet-4-6`, `gpt-5.5` (reasoning medium), `gemini-3.5-flash` (thinking high) |
-| Librarian searcher group | light | `gpt-5.4-nano` |
+| Librarian | medium | `claude-sonnet-4-6`, `gpt-5.5` (reasoning medium), `gemini-3.5-flash` (thinking high) |
 | Embeddings | — | `text-embedding-3-small` *(deferred — see [§12](#12-deferred-beyond-phase-2))* |
 
 Implement a thin provider abstraction so a role can be backed by any provider via config.
@@ -283,10 +291,15 @@ All inter-agent messages are **Pydantic v2** models in a shared `schemas` module
 are the protocol and double as documentation. Bad data must fail loudly and early.
 
 Representative messages: `ResearchRequest`, `SearchRequest` / `SearchResult`,
-`AnalysisTask` / `AnalystReport`, `ReviewVerdict`, the report types (`ReportSection`,
-`Reference`, `ResearchReport`, `LatexReport`), and the Phase-2 additions `ToolSpec`,
-`HumanQuery` / `HumanResponse` ([§9](#9-phase-2--tool-authoring-the-active-phase)). Keep
-the set minimal; refine signatures in the module's `DOCS.md`.
+`LiteratureReport` (the librarian's), `AnalysisTask` / `AnalystReport`, `ReviewerReport` (the one
+report the reviewer files per review: the verdict fields the graph routes on, plus title,
+abstract, sections, key findings, figure receipt handles and tables), `ResearchReport` (the
+published JSONL envelope: the filed report, its receipt closure and the artifact handles),
+`Receipt` ([below](#receipts--every-artifact-by-reference-hashed-by-the-runtime)), and the
+Phase-2 additions `ToolSpec`, `HumanQuery` / `HumanResponse`
+([§9](#9-phase-2--tool-authoring-the-active-phase)). `ReviewVerdict`, `LatexReport`,
+`ReportSection` and `Reference` were retired on 2026-09-24. Keep the set minimal; refine
+signatures in the module's `DOCS.md`.
 
 **One report class serves both analyst roles, and the TOOL SURFACE keeps them apart** (2026-09-12).
 `AnalystReport` carries the lead's decision fields (`rework`, `rationale`, `what_to_probe`)
@@ -310,8 +323,57 @@ logs, LangSmith traces, and SQLite). Pattern:
 - Bytes are loaded and passed as image content blocks **only at the multimodal-call
   boundary** — exactly when the reviewer, or analysts during debate, need to *see* them.
 
-The `FigureRef` `sha256` + `produced_by` pair is the seed of the **provenance** model
-Phase 2 extends to all tool results ([§9.5](#95-no-fabrication-is-absolute--synthetic-data-is-data-never-toolkit-code)).
+The `FigureRef` `sha256` + `produced_by` pair was the seed of the **provenance** model below; the
+tool-declared values it carried are no longer trusted (the runtime recomputes them).
+
+### Receipts — every artifact by reference, hashed by the runtime
+
+Built 2026-09-24 (`schemas/artifacts.py`, `auto_research.provenance`); the figure pattern above,
+generalised and corrected.
+
+- **One shape for every kind** — `figure | result | data | paper | web | human | commit` — and one
+  handle scheme, `<source>:<letter><n>` (`analyst_worker_0:r12`, `lib:p4`, `rev:d1`,
+  `input:h1`). The source is the producing agent's key; the letter names the kind.
+- **Minted by the runtime, never declared by a tool or a model.** The hash is computed over the
+  bytes the runtime stored; the producer (tool kind, toolkit commit, call id, hash of the call's
+  arguments) is stamped by the code that ran the work. A figure a tool returns is re-hashed from
+  the file, a declared hash that disagrees is overridden with a note, and a figure whose file is
+  absent is dropped. Every tool call's output text is itself a receipt, and so is every file the
+  call created or changed, every page fetched, every paper opened (the receipt is the PDF itself;
+  a paper value is *attributed* with a locator, never text-matched, §13), every human answer, and every task a unit is handed (source `input`).
+- **Inputs and ancestry.** The files a call's arguments name are hashed before it runs (once per
+  run, cached by path, size and mtime); an input whose bytes an earlier receipt produced links it as
+  a parent, so a result's ancestry is walkable and `failed` / `synthetic` (§9.5) flags propagate to
+  every descendant. A flagged receipt can be cited to describe what happened; it cannot ground a
+  number.
+- **One store per run** (`ReceiptStore.for_run`), append-only, replayed on resume, so a handle
+  means the same artifact everywhere. It lives beside the run's ledger, outside every role's
+  allow-list, so no role can read another's evidence and re-mint it as its own. Each unit cites through a scoped view: its own receipts, the
+  run's inputs, and whatever the reports it received cite, with their ancestors.
+- **Scoped grounding** (human ruling 2026-09-24, replacing "every number quoted"): a finding cites
+  the receipts its numbers come from as `[handle]`, and every number in it must appear, on token
+  boundaries, in one of them; other fields are grounded by everything the report cites.
+  `{{handle "…"}}` pins an exact span of a text receipt; for a paper the same form, with a
+  locator (`{{lib:p3 "4.0 ± 0.2 %" Table 2}}`), attributes the value instead. A task's own numbers ground a text only where it cites
+  `[input:…]`, for every unit including the reviewer, so a value handed in by the question cannot
+  reappear as a finding unmarked. Measured before the ruling, over 231 real reports: a median
+  worker report states ~240 numbers and 98% of its decimals already appear verbatim in that run's
+  tool outputs, so quoting every number would have meant hundreds of quotes per report while
+  scoped grounding refuses exactly the residue (mental arithmetic, rounding, sign drift). Plain
+  arithmetic on receipted numbers runs as a `python -c` call, which is receipted like any other;
+  a number the role typed into any shell command cannot be grounded by shell output, so `echo` or
+  write-then-read cannot mint a receipt for a number nothing computed.
+- **Normalisation and boundaries** are applied to both sides of a comparison and never to what is
+  rendered: NFC, never NFKC (it maps `10²³` to `1023`); a U+2212 minus before a digit reads as `-`;
+  paper/web text is compared with whitespace removed except between two digits (extracted text
+  can split a number into `4 . 0 ± 0 . 2`), and math-italic letters read as plain ones (`𝜎` as
+  `σ`). A failed quote is answered with the receipt that holds it, or the closest passage, never
+  with text that lost a sign the quote carries. A needle may not sit inside a
+  longer number or after a sign it lacks (`0.51` never matches `-0.51` or `10.51`), `2-8` is a
+  range, `+/-` an error bar. Exempt: Figure/Table/Eq. numbers, years, source designations,
+  ordinals that name a role or a step (`worker 0`, `DU 2`, `round 3`), list enumerators,
+  persistent identifiers (DOIs, bibcodes, prefixed arXiv ids), and HTTP status codes with their
+  reason phrase.
 
 ---
 
@@ -330,14 +392,17 @@ column reserved); `observations.py` (generic mission archive paths from
 **Librarians & retrieval.** `sources` exposes a shared `QuerySource` interface with
 `arxiv`, `nasa_ads`, and `web` (Tavily) adapters. `retrieval` implements `text_search()`
 over SQLite; `vector_search()` is a Phase-2 stub raising `NotImplementedError`. The
-librarian I/O role builds queries and ingests papers; `evaluate_search_results()` is a
-stub returning `accepted=True` (IO ingest consensus deferred — [§12](#12-deferred-beyond-phase-2)).
+librarian is one research loop that exits through `turn_end` (2026-09-24): it searches, reads
+papers and pages in full, mints each document it opens as a paper/web receipt, and files a
+`LiteratureReport` whose findings cite what it read by handle.
 *(Phase 2 relocates literature search into a `research_toolkit/lib_utils` package —
 [§9.2](#92-toolkit-architecture--the-uniform-module-structure).)*
 
-**Agents.** Thin per-role wrappers (`agents`, `roles.py`) each load their `prompts/<role>.md`,
-resolve models via config, and exchange structured Pydantic messages: reviewer, librarian
-I/O, analyst worker, analyst lead.
+**Agents.** Per-role wrappers (`agents`, `roles.py`) each load their `prompts/<role>.md`,
+resolve models via config, and exchange structured Pydantic messages: reviewer, librarian,
+analyst worker, analyst lead. Every graph role is the same unit — tools, inputs, a quick channel
+(`/steer`, `ask_human`), and one report written in its loop that leaves only through `turn_end`
+(§2b); the graph is built from that unit.
 
 **Consensus.** `ConsensusStrategy` = `DebateToConverge`: workers each analyze; each round
 they see peers' analyses and figures and revise; the lead (top tier) judges convergence
@@ -366,10 +431,15 @@ into `auto_research`; it must be relocated to per-worker scratch under the runti
 The runtime tool-authoring path, `sandbox/merge_flow.propose_and_pr()`, is a stub raising
 `NotImplementedError` — **this is what Phase 2 implements.**
 
-**Report & entry.** The `report` module composes, after an accepted verdict, a machine
-handle (structured JSONL with resolvable `FigureRef`/file references) and a human handle
-(compilable LaTeX with real `\includegraphics`/citations); an in-graph `compose_report`
-node runs a compile+ref-check feedback loop capped at `report_retry_cap`. The `monitor`
+**Report & entry.** The reviewer writes plain text only; `report/render.py` is the only LaTeX
+author (lualatex, DejaVu Serif with luaotfload fallbacks). Figures are staged by hash and
+re-hashed, tool-computed tables are typeset from their receipt's bytes, references come from
+paper/web receipt identifiers, a provenance appendix lists what the report cites, and a
+"values to verify against the PDFs" appendix lists every paper value the report attributes. Render and
+compile run **inside the reviewer's `turn_end`**; the `compose_report` node runs no model — it
+mints `rev:dN` receipts for `report.tex`/`.pdf`/`.jsonl` (parents: the cited receipts) and writes
+the JSONL when configured. Output formats come from config and `turn_end` validates every
+configured one. The `monitor`
 gives async-safe run logging (JSONL + team-grouped Markdown, 1–10 chatter). Entry points:
 `run_research()` (monitored library call), `python -m auto_research "…" --chatter 10`
 (CLI, incl. `--report-format`), and a notebook. Minimal `pytest` covers deterministic
@@ -495,7 +565,11 @@ toolkit.**
    (`debate_max_rounds`, `tool_author_cap`), so the loop chooses *what* and the harness decides
    *how many times*. Briefing the chain **spawns a Sonnet-tier coding sub-agent** (the **author**)
    per link, the lead staying in an **interactive channel** with it during authoring — to clarify science/code as it goes (this
-   lead↔author loop is built in step 2 of [§9.10](#910-build-order-phase-2)). Between links the
+   lead↔author loop is built in step 2 of [§9.10](#910-build-order-phase-2)). The coder works
+   *beside* the lead: a message to a working coder is queued for its next turn unless the lead
+   asks for mid-turn delivery, and the lead lets time pass with a **blocking `wait_coder`** that
+   wakes on the coder's turn end, its question, or a human steer — a short timeout is raised to a
+   floor rather than refused, because a refused poll is still a paid turn. Between links the
    coding transcript is dropped at its own boundary — for a **committed** link only, since a
    rejection or a spent budget is what the next brief must be written against — keeping the lead's
    brief and its own submit call with the real commit SHA on the result: both turns it produced or
@@ -554,9 +628,11 @@ itself implements):
   in the GPT co-lead review ([§9.3](#93-actors-and-the-propose--author--review-flow)).
 - **Structural** — a `TOOL_MANIFEST` entry and a test file exist; only allowed
   `research_toolkit` paths are touched.
-- **Provenance** — outputs carry input **sha256** hashes + the tool-call chain (extend the
-  `FigureRef` pattern, [§7](#7-schemas--protocols), to all results), making "computed a
-  downstream result from a failed/synthetic upstream step" mechanically detectable.
+- **Provenance** — outputs carry input **sha256** hashes + the tool-call chain, making "computed a
+  downstream result from a failed/synthetic upstream step" mechanically detectable. At run time
+  this is now the runtime's job, not the tool's: every call is receipted with its inputs' hashes
+  and parents ([§7](#receipts--every-artifact-by-reference-hashed-by-the-runtime)). The gate's own
+  static provenance check still recognises one constructor (§13).
 
 **Layer B — the tool's own tests**, authored *with* the tool, committed beside it (as
 `xspec_utils` already carries its tests), and *run* by the gate. The `ToolSpec`'s checks are
@@ -850,8 +926,6 @@ Statuses: **Todo** = in Phase 2 scope, not yet built · **Done** = built & docum
   kickoff; only the pipeline entry point is unbuilt.
 - **Lead-scientist group:** an idea-generation team that mines the knowledge base to propose
   new research requests, routed through the same reviewer gate.
-- **Librarian IO ingest consensus:** activate `IODebateToConverge` and replace the
-  `evaluate_search_results()` stub (`accepted=True`) with a real IO-lead LLM call (cap 3).
 - **Restrict runtime MCP to read-only file-tree exploration:** no network, shell, or writes
   via MCP — directory listing and path/metadata reads only, via prompt + a registration
   filter at role-init. *(Largely subsumed by the §13 `PathGuard` allow-list, which now scopes
@@ -865,6 +939,54 @@ A **living registry** of code that is intentionally incomplete, deprecated, or b
 gaps stay visible rather than getting rediscovered the hard way. Distinct from §12 (planned-but-
 unbuilt *features*): these exist in the tree **today**. Append as new ones land; delete when closed.
 
+- **Provenance: what the receipts do not yet cover (2026-09-24).** (a) **Inputs are the files a
+  call's arguments name.** A file a tool locates itself from an identifier (an ObsID under a data
+  root) is read without being hashed, so that step's ancestry stops at the identifier. (b)
+  **Grounding checks existence in a cited receipt, not position.** A number copied correctly from
+  the wrong row or column of a cited table passes; a pinned `{{handle "…"}}` quote is the stronger
+  form and is optional. (c) **The gate's static provenance check is unchanged**: it recognises one
+  constructor, so a figure handle a tool returns as a plain dict passes it (the runtime now
+  re-hashes such a figure at call time, which closes the run-time half only). (d) Exemptions (years,
+  source designations, Figure/Table/Eq. numbers) are a short list decided on 231 past reports; a
+  number wearing one of those shapes is not checked. (e) **Laundering through a tool** is closed for the two routes measured (reading the store; typing
+  a number into a shell command) but not in general: a toolkit tool that writes a file whose
+  content the model chose, read back later, would ground that content. (f) `FigureRef` keeps its tool-declared
+  fields as the multimodal carrier; the receipt beside it is authoritative. **Live status
+  (2026-09-24, `tests/test_live_turn_end_shapes.py`, Sonnet-5 lead):** the ungrounded-number,
+  unknown-handle, misquoted-span and quote-without-text shapes each refused, named the real problem,
+  and the lead recovered; the flagged-quote shape was never reached — twice the lead declined to put
+  a failed call's value in its report, so that clause is pinned deterministically only. Two accepted
+  reports carried content no check reads (a self-contradictory summary; `TBD` as summary and only
+  finding): every number was grounded, the prose was empty — the "checked for emptiness, not
+  content" entry below, now ruled an accepted limit.
+- **Two Codex-coder blind spots, found by the wait_coder live cells (2026-09-24, predate that
+  change; awaiting a ruling).** (a) A killed or cancelled Codex coder turn books **$0.00**, because
+  its tokens are booked only on `turn/completed`. (b) Codex's `mcpServer/startupStatus/updated` is
+  not recorded, so a coder reporting `ask_lead` "not available" (seen once, live) cannot be told
+  apart from a model that looked in the wrong place.
+- **A value attributed to a paper is recorded, not verified (2026-09-24, human ruling).** Measured
+  first: a PDF's text layer can lose a sign (a table row reading `22 ± 2` where the page shows −22),
+  so any check against PDF text either refuses the correct value or pushes the model toward the
+  wrong one. Papers are therefore never text-checked: each paper value is **attributed** explicitly,
+  `{{lib:p3 "4.0 ± 0.2 %" Table 2}}` — handle resolved and re-hashed, locator required, value not
+  matched — and every report carries the list of its attributions (`paper_attributions`) for a
+  human to verify against the PDF. One paper citation never exempts the numbers beside it (that was
+  a per-sentence exemption, built and superseded the same day). **Honest limit:** a model can still
+  attribute a wrong number to a paper; the list makes that visible and cheap to check, it does not
+  prevent it. Rejected alternatives: checking against a PDF text layer or several extractions of it,
+  and arXiv HTML/LaTeX sources.
+- **The reviewer and librarian units are LIVE-TESTED on current code, the reviewer on its contrast
+  seat only (2026-09-24).** `tests/test_live_reviewer_paths.py`: all 10 cells green on
+  `qwen3.8-max` (literature dispatch / more / cap, analysis rework / finalize+publish with papers,
+  tables and the verify list / cap, honest failure, JSONL-only, two escape attempts; ~$26 across
+  the day's runs, which drove four fixes). The librarian's shape matrix under the attribution rule:
+  19 of 21 cells pass, the other two being one cell whose seeded state the model never reached (it
+  now skips and records). The configured reviewer is **not** live-tested
+  on this path (human ruling: a run on it is unnecessary). Reviewer residuals: a compile failure
+  other than a missing glyph is recorded as `reviewer.compose_report.renderer_error` (L1) and does
+  not block `turn_end` (the model cannot fix it), leaving a `.tex` and no PDF; a table receipt is
+  typeset to 60 rows with a note naming the receipt; the draft preview needs poppler's `pdftoppm`,
+  without which `review_report` shows text only.
 - **`review_report` returns the whole citable catalogue, every call, by value.**
   `execute_review_report` attaches every figure the agent may cite (`_catalog_menu` over the
   accumulated per-source catalog), it is budget-free (`free_tools`), and each result then replays
@@ -965,24 +1087,15 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   `wait_for` already cancelled. `test_cli_stdin_handler_times_out` was rewritten onto a genuinely
   blocked `input()` (the defect was never in the timeout but in what survived it) and fails against
   a `daemon=False` mutation.
-- **Report fields are checked for emptiness, not for content — OPEN, needs a ruling. Confirmed
-  independently by an attacking agent, and it is wider than the probe.** `lead_turn_problems`
-  tests `.strip()` truthiness, so any field that is *present* passes however little it carries.
-  Measured twice on 2026-09-12: a lead filled `what_to_probe` with the literal token
-  `</antml_placeholder>\n` (that text is handed to **every worker verbatim** as their next
-  instruction, so the round would have been dispatched with nothing to do); and a second lead
-  reported the general case in its own words — *"Probe 5: meaningless placeholder content
-  ('Placeholder' summary, 'x' finding) → accepted by edit_report with no semantic check; turn_end
-  only flags truly-empty fields, not low-content placeholders."* So it covers `summary` and
-  `findings` too, not only the probe.
-  **Likelihood, stated honestly:** the literal-markup case needed an explicit instruction to
-  misbehave and is unlikely unprompted. The realistic cousin is a lead with nothing specific to
-  say writing `TBD`, `N/A`, or a restatement of another field — plausible, and equally invisible.
-  **Severity is low either way**: the probe is an *addition* to a task the workers already hold,
-  so the cost is a wasted round rather than a wrong answer. Recorded rather than fixed because the
-  remedy is a policy call: the cheap principled version reuses `code_gate.yaml`'s existing banned
-  vocabulary (`placeholder`, `for now`) against these fields, plus a markup-only test; anything
-  broader is a quality bar the validator has no business setting.
+- **Report fields are checked for emptiness, not for content — ACCEPTED as a known limit, every
+  role (human ruling 2026-09-24).** No placeholder or markup check will be built. Any field that is
+  *present* passes however little it carries. Observed: a lead filled `what_to_probe` with the
+  literal token `</antml_placeholder>` (2026-09-12); a lead filed `TBD` as summary and only finding,
+  and another a self-contradictory summary (2026-09-24, lead shapes); a librarian filed the summary
+  `x` after two empty-summary refusals, and another a summary of pure markup (2026-09-24,
+  `logs/dev/librarian-shapes/`). **Cost:** a wasted round or an empty-looking report, never a wrong
+  value — every number a report states is still bound to a receipt (§7), so a meaningless field
+  cannot smuggle one in.
 - **Gemini response parts are captured twice, in production, today.** `google.py` appends each
   part at the top of its walk (line 367) and again in the `else` branch (line 383), so anything
   that is neither a `function_call` nor a non-thought text part lands in `provider_parts` twice —
@@ -1010,8 +1123,6 @@ unbuilt *features*): these exist in the tree **today**. Append as new ones land;
   rather than deferred because those are the exact lines A2 was already editing.
 - **`retrieval.vector_search` / `vector_search_paths`** — `NotImplementedError` Phase-2 stub
   (ChromaDB RAG backend deferred — §12).
-- **Librarian IO search-iteration / `evaluate_search_results()`** — Phase-1 stubs; the latter
-  returns `accepted=True` (IO ingest consensus deferred — §12).
 - **`sandbox.merge_flow._make_path_confiner`** — **DEPRECATED, unwired.** The SDK runs
   `can_use_tool` last and skips it under `acceptEdits`/allow-rules, so it never gated reads/Bash.
   Superseded by the `_make_fs_guard_hook` `PreToolUse` hook (`sandbox.fs_guard.PathGuard`). Kept
@@ -2772,3 +2883,114 @@ history. Token-level preservation of the second pass was checked mechanically, n
   (the key variable), a tool declared in one place and routed in another, a contract stated in
   §9.3 and implemented otherwise — each invisible because the *other* half passed. All three are
   now single-sourced or guarded over the declared set rather than a written-out list.
+
+- 2026-09-24 — **The librarian became a deep-research unit** (95's session; the librarian row of
+  the provenance generalization, P5 included). Before, it violated §2b outright: a 1-turn source
+  loop, raw hits ingested uncurated ([I2]), each PDF "debated" by one model against itself, source
+  failures swallowed ([I9]), and no report at all — the reviewer pulled papers for itself. Now it
+  is one `_react` loop over a new `LibrarianToolProvider` (search · read papers and pages in full,
+  paged · `edit_report` · `turn_end`) that files a `LiteratureReport` (`summary`, `findings` with
+  `support` handles, `gaps`, `status`) into `state["literature"]`, with its receipts in
+  `state["literature_receipts"]`. **Papers are read as native PDF attachments** (human ruling the
+  same day, provider-agnostic; Anthropic Citations rejected): each opened paper is minted into the
+  run's `ReceiptStore` as the PDF itself, and — a second ruling the same day — a paper is **cited,
+  never quoted or number-checked**: a finding it supports is bound to the citation as a whole claim,
+  while web pages keep the full check. A pypdf text layer was tried as the checked text in between
+  and dropped too (it can lose a sign). Docling was the first reading copy and was dropped: on Krawczynski+2022 it split 379 of 482
+  decimals into `4 . 0 ± 0 . 2`, and in the first live run 4 of 8 refused quotes were honest copies
+  it had mangled (HTML entities, math-italic glyphs). arXiv search matches all terms first, with a
+  labelled loose fallback. The
+  prompt's old query examples named the live test scenario and were replaced. Deleted:
+  `IODebateToConverge` and its protocols, the compose/search/ingest/abstract/evaluate methods, the
+  storage enrich stub, and the unused `io_search_max_iterations` key; `librarian_react_loop_cap`
+  1 → 40. **Live:** `tests/test_live_librarian.py` (env-gated `AUTO_RESEARCH_LIVE_LIBRARIAN=1`)
+  passed once on the Docling path ($0.94, 7 papers, 43 quotes accepted, all inside the shown text,
+  4 genuine misquotes refused); on the final path (native PDF, papers attributed) the librarian's
+  live shape matrix passes 19 of 21 cells (§13).
+
+- 2026-09-24 (5c) — **The reviewer became a unit** (5c's session; the reviewer row of the provenance
+  generalization). It files one `ReviewerReport` per review inside its loop — the verdict fields the
+  graph routes on plus title, abstract, sections, key findings, figure receipt handles and tables —
+  and leaves only through `turn_end`, which renders and compiles every configured format (human
+  ruling: formats come from config and each is validated); `ReviewVerdict`, `LatexReport`,
+  `ReportSection` and `Reference` are deleted, and `ResearchReport` is the published JSONL envelope
+  (report + receipt closure + artifact handles). The reviewer writes plain text only;
+  `report/render.py` (lualatex, DejaVu) is the only LaTeX author, figures are staged by hash and
+  re-hashed, tool-computed tables are typeset from their receipt's bytes, and the `compose_report`
+  node runs no model — it mints `rev:dN` receipts for the outputs, parented on what the report cites.
+  **Rulings:** any receipt the reviewer can read grounds any field, except the request's own numbers,
+  which ground only where `[input:…]` is cited; `follow_up` is checked like any report text (a
+  rework request is a report); tables are cell-quoted or tool-computed (an unparseable table
+  receipt is refused); papers are read through the librarian's shared reader — the PDF attached,
+  cited by handle, each value attributed with its place and listed in a "values to verify against
+  the PDFs" appendix (`PaperAttribution`, the same shape the librarian's report carries); one
+  polishing pass via `review_report`, which shows the rendered pages. **Live:**
+  `tests/test_live_reviewer_paths.py`, 10 cells on the contrast seat `qwen3.8-max` (~$12); the
+  configured reviewer seat is not live-tested on this path (ruled unnecessary). The live matrix
+  found a crash (`review_report` on a JSONL-only run hit the analysts' figure view; the reviewer's
+  own text view is now its draft view) and three checker false negatives fixed in provenance
+  (a signed value in a PDF table row, a lost minus in a text layer, the input-scope leak).
+
+- 2026-09-24 (85) — **The lead waits on its coder instead of polling it.** The 2026-09-15 rate
+  limit on `check_coder` did not stop the polling; it moved it. Slot 6 (`gpt-5.6-terra` lead,
+  $20.43, the costliest role) made 134 checks (114 refused), 47 mid-turn steers, 31 refused
+  submits and 9 refused `turn_end` calls at a 3-10 s cadence: a loop with no way to let time pass
+  emits a tool call to do it, and a refusal costs a turn like an answer. The field has one answer
+  and it was adopted as-is: Codex's `wait_agent` **blocks inside the tool call, wakes early on an
+  event, and raises a too-short timeout to a floor instead of refusing it** (codex-rs
+  `multi_agents_v2/wait.rs`; its busy-polling reports #35259, #46120). `check_coder` is replaced
+  by `wait_coder` (floor 60 / default 300 / max 1800 s, config), which wakes on the coder's turn
+  end, its `ask_lead`, or a human `/steer` (a per-role `RunControl.steer_event`; the steer is still
+  delivered by `_react`'s drain, so A2's hold rule is untouched), and reports elapsed time on every
+  return — the lead's clock. `drive_coder` **queues** a message for a working coder as its next
+  turn (Codex's queued-vs-interrupt split); `mid_turn=true`, or a reply to an open coder question,
+  steers the running turn. `submit_for_review` waits for the coder to stop instead of refusing. No
+  coder backend changed. Rulings: the full version (all four wake sources, queued steering) and a
+  live test per behaviour. **LIVE-VERIFIED** on the five mechanism cells
+  (`tests/test_live_coder_wait.py`, real DeepSeek coder on Codex, ~$0.01): turn end woke the wait in
+  4 s, a question in 1.5 s with the answer delivered mid-turn, `wait_coder(5)` held the 60 s floor,
+  a plain message ran as the next turn while `mid_turn` steered, and a submit waited 40 s before the
+  gate. The live question cell caught one defect the stub suite had missed (a question wake also
+  claimed "it has already started its next turn"); fixed and pinned. The real-lead cells are
+  **LIVE-VERIFIED** on two seats, one draw each: Opus and `gpt-5.6-terra` took 8 and 7 lead turns
+  over 8.7 and 10.3 min of coder work (against slot 6's ~400 calls over 75 min), a steer woke the
+  parked wait in 10 s, and both links committed, for $3.98 and $1.30. A second mechanism batch: a
+  SIGKILLed Codex coder surfaces as FAILED to a wait and to a waiting submit (no gate runs); a
+  question during a submit's wait comes back without spending a submission; `/stop` during a
+  submit's wait cancels it with the tree clean. `/stop` while parked (real Opus lead, coder
+  working): the run was cancelled 8 s after the stop, HEAD back at the base ref, worktree clean, no
+  coder process left ($1.21). Two findings recorded in §13, not fixed.
+
+- 2026-09-24 (0f) — **Provenance is enforced for every artifact, not only figures** (four sessions,
+  coordinated on `tmp_coord_provenance.md`; this entry is the consolidated one). The figure
+  discipline — tool-produced, by reference, append-only handle, runtime-resolved, checked at the
+  exit — became the rule for every artifact a claim can rest on, and its one gap was closed: a
+  `FigureRef`'s hash and producer were whatever the tool said. New `schemas/artifacts.py`
+  (`Receipt`, one shape and one handle scheme for figure/result/data/paper/web/human/commit) and
+  `auto_research.provenance` (the per-run store, tool-call capture, and the claim check). Every tool
+  call on both providers now mints receipts (output text; figures re-hashed from the file; files
+  written; inputs hashed before the call and linked as parents; `failed`/`synthetic` flags
+  propagated), and the model sees each handle on the result. **The rule, by human ruling:** scoped
+  grounding — a finding cites the receipts its numbers come from and every number must appear in
+  one of them — chosen over "quote every number" after measuring 231 real reports (median ~240
+  numbers per worker report; 98% of decimals already verbatim in the run's own tool outputs).
+  Checked at every unit's `turn_end` and shown as notes while `edit_report` writes the draft;
+  workers may do plain arithmetic on receipted numbers as a receipted `python -c` call; a task's own
+  numbers ground only where `[input:…]` is cited, for every unit (so a reproduction question's
+  published values cannot reappear as findings unmarked). The same session work made the reviewer
+  and the librarian full units (their entries above and their module DOCS), which closes §2b's
+  "composes after its loop" violation for every graph role; the co-lead stays out of scope as part
+  of the coding pipeline. Literature basis (three subagent sweeps): data-to-paper, ECT and NabaOS
+  bind numbers or hash one hop; none binds transitively over input hashes, none covers figures by
+  handle and hash, none checks at every role edge — the parts this adds. Sign-flip and
+  superscript holes found in prior art were designed out (boundary rule; NFC not NFKC). Tests:
+  `tests/test_provenance.py`, `tests/test_provenance_wiring.py` (real providers → receipts →
+  `turn_end`), five new live shapes; §13 records what the receipts do not yet cover. **Live, the
+  first run found two defects of ours:** agent ordinals ("Worker 0 … worker 1") were read as
+  ungrounded numbers in four of ten lead cells and drove one cell into nine refusals (the lead
+  stripped its findings to escape the note, then was refused for having none) — exempted, and the
+  same cell then filed with zero refusals; and the `coder_still_running` cell forced an open session
+  it gave the lead no way to close, so it spun on free tools to the loop ceiling (it had hung the
+  2026-09-15 run the same way) — the seed now closes when the lead acts on the refusal. The
+  librarian's live runs found three more in the checker (math-italic glyphs, and a closest-passage
+  hint that was itself unquotable twice over a line-broken word), all fixed and property-tested.

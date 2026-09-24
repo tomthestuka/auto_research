@@ -1,78 +1,70 @@
-# `auto_research.report` — research report composition
+# `auto_research.report` — rendering and publishing the reviewer's report
 
 ## Purpose
-Produces durable research-report artifacts after an accepted verdict: a structured
-machine-readable JSONL report (for upstream planning teams) and a human-readable
-LaTeX document (compiled to PDF by pdflatex). Invoked from the in-graph
-`compose_report` node in `auto_research.graph.builder`.
+Turns the reviewer's filed `ReviewerReport` into the run's durable artifacts: a LaTeX document
+compiled to PDF (the human handle) and, when configured, a JSONL machine handle — and makes each
+published file a receipt, so the report is an artifact like any other (human 2026-09-24).
 
 ## Architecture
-Three sub-modules, each stateless and deterministic except for filesystem I/O:
-- `references.py` — maps the reviewer's cited paths to `Reference` objects via SQLite
-  storage metadata (the JSONL handle; the `.tex` handle uses hyperlinks, below).
-- `figures.py` — symlinks figure files into the reviewer's report directory so
-  the LaTeX project can reference them by relative path without copying bytes;
-  `stage_papers` does the same for cited PDFs so the References section can link them.
-- `writers.py` — serializes reports (JSONL, `.tex`), validates `\includegraphics`
-  paths and **resolves reference `\href` links against on-disk PDFs**, and drives
-  pdflatex compilation with parsed error output.
+The reviewer writes plain text with receipt bindings and never writes LaTeX; this module is the
+only author of LaTeX (human 2026-09-24). That split is what lets the quote check run on the very
+text the model wrote.
+- `render.py` — `render_report` substitutes each quote through `provenance.render_bindings`,
+  escapes LaTeX's specials with one fixed map, and writes `report.tex` for **lualatex** (DejaVu
+  Serif plus luaotfload fallbacks, so χ², ± and ≲ typeset as written). Figures are copied into
+  `figures/<sha12><ext>` after re-hashing against their receipt ([D4]+[D5]); a tool-computed table
+  is typeset from its receipt's stored bytes; references come from the cited paper/web receipts'
+  titles and ids ([C4]); a provenance appendix lists every cited handle. A value attributed to a
+  paper (`{{lib:p4 "value" Table 2}}` — papers are cited, never text-checked, human 2026-09-24) is
+  typeset with its reference, and every such value is listed in a "Values to verify against the
+  PDFs" appendix (`report_attributions`). `compile_report` runs
+  lualatex twice and separates missing glyphs (the model's to fix) from errors (the renderer's).
+  Both run **inside the reviewer's `turn_end`** (`agents/reviewer_tools.ReviewerRender`), so the
+  final report is validated at the role's edge rather than composed after it.
+- `figures.py` — `stage_figure_receipts`.
+- `publish.py` — after the reviewer's final report is accepted, with no model: mints `rev:dN`
+  receipts for `report.tex`/`report.pdf`/`report.jsonl` whose parents are the receipts the report
+  cites (so a failed/synthetic flag propagates to the report), and writes the JSONL
+  (`ResearchReport`: the filed report + the receipt closure) when `jsonl` is configured.
+- `writers.py` — `write_report_jsonl` and the TeX log reader `_errors_with_context`.
 
-The `compose_report` graph node (in `builder.py`) orchestrates these utilities:
-1. Builds references from storage + the reviewer's `cited_paths`.
-2. For the **JSONL handle**: calls `reviewer.compose_machine_report()` then
-   overwrites figures/references/metadata deterministically before serializing.
-   References are correct by construction (built from already-validated cited PDFs),
-   so the JSONL handle needs no separate link gate.
-3. For the **LaTeX handle**: symlinks figures + cited papers, calls
-   `reviewer.compose_latex_report()` (with pydantic `LatexReport` schema), validates
-   figure paths + **resolves every reference `\href` link to a real PDF (hard reject)**,
-   compiles, and feeds errors back in a capped retry loop — a dead link is fed back
-   exactly like a compile error.
+The graph's `compose_report` node calls `publish_report`; the `.tex`/PDF already exist by then.
 
 ## Interfaces / Contracts
-- `build_references(storage, cited_paths) -> list[Reference]` — async; calls
-  `storage.initialize()` then `storage.list_papers()`. Papers matched by resolved
-  `local_path`; unmatched paths fall back to file stem. Used for the JSONL handle.
-- `stage_figures(figures, report_dir) -> list[tuple[FigureRef, str]]` — symlinks
-  each figure into `report_dir/figures/`; returns `(figref, relpath)` pairs.
-  Replaces stale symlinks in-place.
-- `stage_papers(cited_paths, report_dir) -> list[tuple[Path, str]]` — symlinks each
-  existing cited PDF into `report_dir/papers/`; returns `(path, relpath)` pairs. The
-  relpath (`papers/<name>.pdf`) is what the reviewer hyperlinks in References; missing
-  sources are skipped so a dangling link is never offered as valid.
-- `write_report_jsonl(report, path) -> Path` — single JSONL line via
-  `model_dump_json()`.
-- `write_report_latex(latex, path) -> Path` — writes `.tex` source, first wrapping every
-  `\href` display argument in `\nolinkurl{}` (`_sanitize_href_display`) so a staged relpath's
-  underscore in the display text does not trip `! Missing $ inserted.`. URL arg and
-  `\includegraphics` are left untouched; idempotent.
-- `validate_latex_figures(latex, staged_figures) -> list[str]` — returns error
-  strings for `\includegraphics` relpaths that were not staged (names the valid relpaths).
-- `validate_report_links(latex, report_dir, staged_papers) -> list[str]` — the **hard
-  reference-link gate**: every `\href` target into `papers/` (or ending `.pdf`) must
-  resolve under `report_dir` to a real PDF; a miss returns an actionable error naming the
-  target and the valid staged relpaths.
-- `compile_latex(report_dir, *, compiler="pdflatex") -> tuple[bool, list[str]]`
-  — runs pdflatex non-interactively; parses `!`-prefixed error lines. Returns
-  `(True, [])` when compiler absent so the loop degrades to ref-checks only.
+- `render_report(report, lookup, report_dir, *, run_id, own_source="rev") -> RenderResult` —
+  writes `report_dir/report.tex` only when no model-fixable problem stands; `RenderResult(tex_path,
+  problems, cited, references, figures)`. Problems (sentences for `turn_end`): a figure handle that is
+  missing, not a figure, or whose bytes no longer match; a table filling both forms or neither; a
+  table receipt that does not parse as delimited text; a built table with a ragged row.
+- `compile_report(report_dir, *, compiler="lualatex", run=subprocess.run, timeout_s=120) ->
+  CompileResult(pdf_path, glyph_problems, errors)` — a missing compiler is an error, never a pass.
+- `stage_figure_receipts(handles, lookup, report_dir) -> (list[(Receipt, relpath)], problems)` —
+  sha-named copies, verified first, deduplicated by handle.
+- `parse_delimited(text) -> list[list[str]] | None` — CSV/TSV/`;`/Markdown pipe rows; `#` lines
+  dropped; `None` unless header + ≥1 row, ≥2 columns, every row as wide as the header.
+- `latex_escape(text) -> str` — the ten LaTeX specials; Unicode passes through.
+- `report_attributions(report, lookup, *, own_source) -> list[Attribution]` — every value the report
+  attributes to a paper, in reading order, each once (over `provenance.paper_attributions`).
+- `publish_report(report, *, store, run_id, request_question, report_dir, formats, tex_path=None,
+  pdf_path=None, own_source="rev") -> PublishResult(research_report, jsonl_path, artifacts)` —
+  `artifacts` maps format → minted handle.
+- `cited_handles(report, *, own_source) -> list[str]` — prose bindings, figures, table receipts, in
+  reading order. `receipt_closure(store, handles) -> list[Receipt]` — cited first, then ancestors.
+- `write_report_jsonl(report, path) -> Path` — one JSONL line.
 
 ## Dependencies
-- External: stdlib (`re`, `shutil`, `subprocess`, `pathlib`).
-- Internal: `auto_research.schemas.figures.FigureRef`,
-  `auto_research.schemas.report.{Reference, ResearchReport}`,
-  `auto_research.storage.Storage`.
-- Used by: `auto_research.graph.builder` (`compose_report` node).
+- External: stdlib (`re`, `csv`, `shutil`, `subprocess`, `pathlib`, `urllib.parse`); lualatex with
+  fontspec and the DejaVu/FreeSerif fonts; `pdftoppm` for the reviewer's draft preview (optional).
+- Internal: `auto_research.provenance`, `auto_research.schemas.{review,report,artifacts}`.
+- Used by: `auto_research.agents.reviewer_tools` (render, compile), `auto_research.graph.builder`
+  (`compose_report` → `publish_report`).
 
 ## Dictionary-level reference
-- `build_references` — see Interfaces.
-- `stage_figures`, `stage_papers` — see Interfaces.
-- `write_report_jsonl`, `write_report_latex` — see Interfaces.
-- `validate_latex_figures` — checks `\includegraphics{...}` relpaths against staged
-  figure relpaths.
-- `validate_report_links` — checks reference `\href{...}` targets resolve to staged
-  on-disk PDFs (hard reject on a miss).
-- `compile_latex` — 60 s timeout; `capture_output=True`; looks for `*.tex` in
-  `report_dir`. Sets `report.pdf` on success.
+- The functions above — see Interfaces. `RenderResult`, `CompileResult`, `PublishResult` —
+  dataclasses as named there.
+- `MAIN_FONT` (`DejaVu Serif`), `FALLBACK_FONTS`, `LATEX_COMPILER` (`lualatex`), `TEX_NAME`
+  (`report.tex`), `MAX_TABLE_ROWS` (60; further rows are counted in a note naming the receipt),
+  `JSONL_NAME` (`report.jsonl`).
 
 ## Changelog
 - 2026-06-03 -> 2026-06-12 — Report composition module built: references, figure staging,
@@ -126,3 +118,23 @@ The `compose_report` graph node (in `builder.py`) orchestrates these utilities:
   `format_requirements`. `\lesssim` without `amssymb` exhausted `report_retry_cap` on Q21 and the
   run finished with a `report.tex` and no PDF; the changelog records that the prompt-side mandate
   in `prompts/reviewer.md` was **not** sufficient on its own.
+- 2026-09-24 — **Reviewer-as-unit renderer (5c; steps 1–3 of the reviewer refactor).** New
+  `render.py` (`render_report`, `compile_report`, `parse_delimited`, `latex_escape`) and
+  `figures.stage_figure_receipts`. The human's design: the reviewer writes one plain-text report
+  like every other unit and the harness renders the `.tex` from it once verified, so quotes are
+  checked on the text the model wrote rather than on escaped LaTeX. lualatex replaces pdflatex on
+  this path (human ruling) with a fallback font chain; measured, DejaVu Serif alone lacks ≲
+  (U+2272). Closes [D4] (sha-named staging) and [D5] (re-hash before staging) and [C4] (references
+  from receipt ids) on the new path. The old pdflatex path is unchanged until the graph switches.
+  Tests: `tests/test_reviewer_report.py`.
+- 2026-09-24 (second) — **The pdflatex path is deleted and the report is published as receipts
+  (5c; steps 4–5).** Removed: `references.py` (`build_references`), `stage_figures`,
+  `stage_papers`, `write_report_latex` + `_sanitize_href_display`, `validate_latex_figures`,
+  `validate_report_links`, `compile_latex`. The reviewer no longer writes LaTeX, so the href
+  sanitizer, the figure-path and link validators and the separate compile loop have nothing left
+  to guard; their jobs moved into `render.py`, where the harness writes every `\includegraphics`
+  and `\href` itself. New `publish.py`. `config: report_retry_cap` removed with the loop it bounded.
+- 2026-09-24 (third) — Paper values are attributed, not quoted (human ruling, option A): the
+  renderer typesets an attribution with its reference and adds the verify-against-the-PDFs list;
+  `publish_report` writes the same list as `ResearchReport.paper_attributions`. `render_bindings` is
+  no longer used here (an attribution needs its handle beside the value).

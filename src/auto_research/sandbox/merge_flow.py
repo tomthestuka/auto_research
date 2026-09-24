@@ -28,6 +28,7 @@ import asyncio
 import inspect
 import json
 import subprocess
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -937,6 +938,7 @@ class AuthoringSession:
         self._drive_status = "idle"
         self._drive_result: str | None = None
         self._drive_error: str | None = None
+        self._init_channel()
         # Lead-driven loop state (§9.3 B-topology): the most recent gate/review/commit, so a
         # caller (the lead's drive_authoring loop) can build the terminal MergeFlowResult from
         # session state; submit_cap bounds the expensive submit_for_review calls.
@@ -1017,29 +1019,70 @@ class AuthoringSession:
     #
     # `drive` blocks for as long as the coder works, which for a real link is minutes. The lead
     # spent that time doing nothing, and the loop it was in could not be re-entered. `start_drive`
-    # hands the instruction over and returns at once; the lead keeps investigating, and asks
-    # `status` when it wants to know. `submit_for_review` stays BLOCKING by ruling — the gate runs
-    # pytest twice through a blocking `subprocess.run`, and the CI framing says you wait for the
-    # ticket.
+    # hands the instruction over and returns at once; the lead keeps investigating, and parks in
+    # `wait_for_event` (the lead's `wait_coder`) when it has nothing else to do. `submit_for_review`
+    # stays BLOCKING by ruling — the gate runs pytest twice through a blocking `subprocess.run`,
+    # and the CI framing says you wait for the ticket.
 
-    async def send(self, message: str) -> str:
+    def _init_channel(self) -> None:
+        """State for the lead<->coder channel: the wake event a blocking wait parks on, messages
+        queued for the coder's next turn, and the clocks a wait reports.
+
+        Separate from ``__init__`` so a test double built with ``object.__new__`` gets the same
+        state from the same line production runs.
+        """
+        # Set whenever there is something the lead should hear: a coder turn ended, the coder
+        # asked a question, a drive failed. A waiter clears it before it parks.
+        self._wake = asyncio.Event()
+        # Messages for the coder's NEXT turn. Queued by default rather than steered into the
+        # running one: slot 6 (2026-09-15) steered its coder 47 times mid-turn, as a way of
+        # staying busy while it could not wait.
+        self._queued: list[str] = []
+        # True from the coder's `ask_lead` until something reaches it, so the lead's reply is
+        # delivered inside the running turn however it is sent — the coder may be waiting on it.
+        self._question_open = False
+        # The lead's steer event on RunControl (see `watch_steers`), or None when unattended.
+        self._steer_event: asyncio.Event | None = None
+        self._drive_started_at: float | None = None
+
+    def watch_steers(self, event: asyncio.Event | None) -> None:
+        """Wake a pending :meth:`wait_for_event` when a human steer for the lead arrives.
+
+        The wait only returns; the steer itself is still delivered by the lead's loop at its next
+        safe boundary (the A2 hold rule), so this adds no injection site.
+        """
+        self._steer_event = event
+
+    async def send(self, message: str, *, mid_turn: bool = False) -> str:
         """Say one thing to the coder, whatever state it is in — the ONE lead->coder path.
 
-        Picks the primitive from the coder's state rather than making the lead pick: a turn in
-        flight is *steered*, an idle coder is given a new turn. Before this, the only path was
-        "start a turn", so a lead with something to say to a working coder was refused with
-        "the coder is already working on an instruction" — including when the thing it had to say
-        was the answer to the coder's own question, which is the state that refusal would have
-        cleared (measured live 2026-09-12, twice in one run).
+        Picks the primitive from the coder's state rather than making the lead pick. An idle
+        coder is given a new turn. A working coder has the message **queued** for its next turn,
+        unless ``mid_turn`` is set or the coder has an open question, in which case it is
+        *steered* into the turn it is running (an answer must reach a coder that may be waiting
+        on it). The queued-by-default split is Codex's: a queued follow-up is delivered at the
+        next boundary, and redirecting a running turn is a separate, explicit act.
 
-        Returns a short word for what happened, which is what the tool reports back.
+        Returns ``"started"`` | ``"queued"`` | ``"steered"`` | ``"answered"`` — what the tool
+        reports back.
         """
         if self.drive_status == "working":
-            steered = await self._backend.steer(message)
-            if steered:
-                return "steered"
-            # The turn ended between the check and the steer. Falling through to a new turn is
-            # right: the message still needs delivering and the coder is now idle.
+            if mid_turn or self._question_open:
+                answered = self._question_open
+                steered = await self._backend.steer(message)
+                if steered:
+                    self._question_open = False
+                    return "answered" if answered else "steered"
+                # The turn ended between the check and the steer. Falling through is right: the
+                # message still needs delivering, and the coder is now between turns.
+            if self.drive_status == "working":
+                self._queued.append(message)
+                await _emit(
+                    self._monitor, "coder.queued", level=5,
+                    summary=f"queued for the coder's next turn: {_cap_text(message, 60)}",
+                    data={"text": _cap_text(message), "queued": len(self._queued)},
+                )
+                return "queued"
         self.start_drive(message)
         return "started"
 
@@ -1049,9 +1092,11 @@ class AuthoringSession:
         Parked rather than pushed for the reason the whole A2 fix exists: only the loop knows
         when an injected user turn is legal, and an injection appended after a turn that left a
         server-tool call unresolved is a 400 that kills the run. Same seam and same hold rule as
-        the background-coder notice.
+        the background-coder notice. It also wakes a lead parked in :meth:`wait_for_event`.
         """
         self._pending_questions.append(message)
+        self._question_open = True
+        self._wake.set()
 
     def take_questions(self) -> list[str]:
         """Collect the parked questions, once."""
@@ -1063,37 +1108,126 @@ class AuthoringSession:
 
         One drive at a time: a second instruction while the coder is working would interleave two
         conversations on one warm session, which no harness defines. The caller is told rather
-        than silently queued.
+        than silently queued — :meth:`send` is the path that queues.
         """
         if self._drive_task is not None and not self._drive_task.done():
             raise RuntimeError("the coder is already working on an instruction")
         self._drive_status = "working"
+        self._question_open = False
+        self._drive_started_at = time.monotonic()
         self._drive_task = asyncio.create_task(self._drive_in_background(message))
 
     async def _drive_in_background(self, message: str) -> str:
         """The background half of :meth:`start_drive`.
 
+        Runs the instruction, then any messages queued meanwhile as the NEXT turn, in the same
+        task — so the coder stays ``working`` across the handover and a second task never
+        exists. Each finished turn's narration is kept unread and wakes the lead's wait.
+
         Cost attribution needs nothing special: the meter is a ``ContextVar`` and a task created
         here inherits the context that created it, so the coder's spend lands in the run total
         exactly as it did when the drive blocked (B7).
         """
-        try:
-            text = await self._backend.drive(message)
-        except asyncio.CancelledError:
-            self._drive_status = "cancelled"
-            raise
-        except Exception as exc:  # noqa: BLE001 — a dead coder is a result, not a crash
-            # Never let a backend failure escape into the event loop as an unretrieved exception:
-            # the lead has to be TOLD the coder died. A Claude-harness session whose credential
-            # ran out returned its billing text with `is_error` discarded on 2026-09-09, and the
-            # lead spent three drives steering a corpse at $0.
-            self._drive_status = "stopped"
-            self._drive_error = repr(exc)
-            self._drive_result = f"[harness error] the coder turn failed: {exc}"
-            return self._drive_result
+        while True:
+            try:
+                text = await self._backend.drive(message)
+            except asyncio.CancelledError:
+                self._drive_status = "cancelled"
+                self._queued = []
+                raise
+            except Exception as exc:  # noqa: BLE001 — a dead coder is a result, not a crash
+                # Never let a backend failure escape into the event loop as an unretrieved
+                # exception: the lead has to be TOLD the coder died. A Claude-harness session
+                # whose credential ran out returned its billing text with `is_error` discarded on
+                # 2026-09-09, and the lead spent three drives steering a corpse at $0.
+                self._drive_status = "stopped"
+                self._drive_error = repr(exc)
+                self._drive_result = f"[harness error] the coder turn failed: {exc}"
+                self._queued = []
+                self._wake.set()
+                return self._drive_result
+            self._drive_result = text if self._drive_result is None else (
+                f"{self._drive_result}\n\n--- next turn ---\n\n{text}"
+            )
+            self._wake.set()
+            if not self._queued:
+                break
+            message = "\n\n".join(self._queued)
+            delivered, self._queued = len(self._queued), []
+            self._question_open = False
+            self._drive_started_at = time.monotonic()
+            await _emit(
+                self._monitor, "coder.queued.delivered", level=5,
+                summary=f"started the coder's next turn on {delivered} queued message(s)",
+                data={"delivered": delivered},
+            )
         self._drive_status = "stopped"
-        self._drive_result = text
         return text
+
+    # ── the blocking wait (replaces polling) ─────────────────────────────────
+
+    def _ready_reason(self) -> str | None:
+        """What a wait would return right now, or None when there is nothing yet."""
+        if self._drive_error is not None:
+            return "failed"
+        if self._drive_result is not None:
+            return "turn_ended"
+        if self._pending_questions:
+            return "question"
+        if self._steer_event is not None and self._steer_event.is_set():
+            return "steer"
+        if self.drive_status != "working":
+            return "idle"
+        return None
+
+    async def wait_for_event(self, timeout_s: float) -> str:
+        """Park until there is something for the lead, or ``timeout_s`` passes.
+
+        Returns ``"turn_ended"`` (narration unread), ``"failed"``, ``"question"``, ``"steer"``,
+        ``"idle"`` (nothing is running and nothing is unread) or ``"timeout"``. Returns at once
+        when something is already waiting. Consumes nothing: the caller reads what it needs with
+        :meth:`take_drive_result` / :meth:`take_questions`.
+
+        A cancel (``/stop``) propagates out of the awaited event as it does from any await.
+        """
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        deadline = started + max(0.0, timeout_s)
+        reason: str | None = None
+        while True:
+            reason = self._ready_reason()
+            if reason is not None:
+                break
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                reason = "timeout"
+                break
+            self._wake.clear()
+            waiters = [asyncio.ensure_future(self._wake.wait())]
+            if self._steer_event is not None:
+                waiters.append(asyncio.ensure_future(self._steer_event.wait()))
+            try:
+                await asyncio.wait(waiters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for waiter in waiters:
+                    waiter.cancel()
+        await _emit(
+            self._monitor, "coder.wait", level=5,
+            summary=f"lead waited {loop.time() - started:.0f}s → {reason}",
+            data={"reason": reason, "waited_s": round(loop.time() - started, 1),
+                  "timeout_s": timeout_s, "drive_status": self.drive_status},
+        )
+        return reason
+
+    def current_instruction_elapsed_s(self) -> float | None:
+        """Seconds the coder has spent on the turn it is running now; None when it is not."""
+        if self.drive_status != "working" or self._drive_started_at is None:
+            return None
+        return time.monotonic() - self._drive_started_at
+
+    def has_unread_result(self) -> bool:
+        """Whether a finished turn's narration (or a failure) is waiting to be read."""
+        return self._drive_result is not None or self._drive_error is not None
 
     @property
     def drive_status(self) -> str:

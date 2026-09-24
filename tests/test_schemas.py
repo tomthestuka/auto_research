@@ -15,7 +15,7 @@ from auto_research.schemas import (
     GateReport,
     MergeFlowResult,
     ResearchRequest,
-    ReviewVerdict,
+    ReviewerReport,
     SearchRequest,
     SearchResult,
     ToolCallRequest,
@@ -128,11 +128,11 @@ def test_document_ref_is_attachment_metadata_only(tmp_path):
 
 def test_protocol_rejects_extra_fields():
     with pytest.raises(ValidationError):
-        ReviewVerdict(accepted=True, rationale="Looks sound.", surprise="nope")
+        ReviewerReport(accepted=True, rationale="Looks sound.", surprise="nope")
 
 
 def test_review_verdict_flags_feedback_edges():
-    verdict = ReviewVerdict(
+    verdict = ReviewerReport(
         accepted=False,
         rationale="Literature is stale.",
         needs_more_literature=True,

@@ -25,9 +25,11 @@ Runtime prompt files:
 - `reviewer.md` — input portal for human or authorized upstream research
   requests, work dispatch, result review, feedback decisions, and output portal
   for triage plans or final verdicts.
-- `librarian_io.md` — external literature/source search, direct document/PDF
-  attachment reading, download and ingest reporting, and bibliographic
-  summaries.
+- `librarian_io.md` — the librarian's research loop: plan the literature questions, search
+  (short keyword queries), read papers and pages in full, follow the citation trail, and file a
+  `LiteratureReport` whose findings cite what was read by handle and quote every number exactly
+  as the document's text shows it (including PDF-spaced numbers). Scope stays literature-only;
+  observation and data work belongs to the analysts. Examples are domain-neutral.
 - `analyst_worker.md` — task analysis, debate revisions, assumptions, figure
   reference handling, ReAct tool use, the **analysis-is-tool-driven / authors-no-code policy**
   (real steps run through tools; `bash`/`python -c` is read-only inspection only; missing logic
@@ -80,7 +82,7 @@ logic here.
 
 ## Dictionary-level reference
 - `reviewer.md` — system prompt for the reviewer role.
-- `librarian_io.md` — system prompt for the librarian I/O role.
+- `librarian_io.md` — system prompt for the librarian (research loop → `turn_end`).
 - `analyst_worker.md` — system prompt for analyst worker roles.
 - `analyst_lead.md` — system prompt for the analyst lead role.
 - `analyst_colead.md` — system prompt for the Phase-2 provider-decorrelated co-lead reviewer.
@@ -231,3 +233,27 @@ Compacted 2026-09-01: entries through 2026-07-29 folded into themed ranges (deta
   7.7k of well-wrapped short lines that reads fine unsectioned and a lower threshold would be a
   style rule invented to catch it. The existing `Responsibilities:` assertion now also accepts a
   `## ` heading — asserting one legacy literal made a structural *improvement* fail.
+- 2026-09-24 — `librarian_io.md` rewritten for the research loop (95): what the report contains,
+  the plan→search→read→follow→stop method, citation by handle and quoting by exact copy. The old
+  query examples named the live test scenario and were replaced with domain-neutral ones.
+
+- 2026-09-24 — **`analyst_worker.md` and `analyst_lead.md`: every number comes from a receipt
+  (provenance P2, session 0f).** One paragraph each, in the report section: tool results arrive
+  labelled `[receipt <handle>]`; a finding cites the receipts its numbers come from and copies
+  each number exactly; `{{handle "…"}}` pins a span; a derived value comes from a toolkit tool
+  (worker: or a `tool_request`; lead: a probe back to the workers), consistent with the worker's
+  standing rule that inline `python`/`bash` only looks. Domain-neutral example values.
+- 2026-09-24 (second) — **`analyst_worker.md`: plain arithmetic on receipted numbers is allowed as a
+  `python -c` one-liner** (human ruling). Under scoped grounding a derived value needs a receipt, and
+  every shell call now mints one, so a difference, ratio, significance or unit conversion computed
+  that way is recorded; data operations still go through toolkit tools or a `tool_request`.
+- 2026-09-24 — `librarian_io.md`: 3–6-term queries (arXiv now requires all terms), field syntax to
+  find a known paper, read the original behind a cited result, and page past the first window.
+- 2026-09-24 — `librarian_io.md`: papers are read as attached PDFs (no paging); quote exactly as
+  printed, a single table cell rather than a reconstructed row, and re-copy the closest passage a
+  refusal shows.
+- 2026-09-24 — `librarian_io.md`: write identifiers with their prefix (`arXiv:…`, `doi:…`).
+- 2026-09-24 — `librarian_io.md`: a paper is cited, not quoted (value exactly as printed, with its
+  handle and place); a web page is quoted (option A).
+- 2026-09-24 — `librarian_io.md`: a paper value is attributed with its place
+  (`{{lib:p3 "value" Table 2}}`); any number outside an attribution is checked.

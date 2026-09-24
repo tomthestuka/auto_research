@@ -20,6 +20,17 @@ from auto_research.models.types import ModelMessage, ModelResponse
 from auto_research.run_control import STOP_SENTINEL, RunControl
 
 
+def test_a_steer_sets_its_role_event_and_draining_clears_it():
+    """What a blocking wait (the lead's `wait_coder`) watches, per key, never across keys."""
+    rc = RunControl()
+    assert not rc.steer_event("analyst_lead").is_set()
+    rc.add_steer("analyst_lead", "wrap up")
+    assert rc.steer_event("analyst_lead").is_set()
+    assert not rc.steer_event("analyst_worker_0").is_set(), "one role's steer woke another"
+    assert rc.drain_steer("analyst_lead") == ["wrap up"]
+    assert not rc.steer_event("analyst_lead").is_set()
+
+
 def test_run_control_steer_inbox_drains_once_per_key():
     rc = RunControl()
     rc.add_steer("analyst_worker_0", "focus on DU3")
@@ -516,7 +527,7 @@ def _coder_notes(sent) -> list[str]:
 
 def test_a_stopped_coder_reaches_the_lead_as_its_own_user_turn():
     """The lead does not have to poll: when the coder stops, the loop tells it at the next legal
-    boundary — and points at check_coder rather than pasting a transcript into the turn."""
+    boundary — and points at wait_coder rather than pasting a transcript into the turn."""
     model = _FakeModel([_resolved_turn(), ModelResponse(content="done")])
     role = _bare_role(model, agent_key="w")
 
@@ -526,7 +537,7 @@ def test_a_stopped_coder_reaches_the_lead_as_its_own_user_turn():
 
     notes = [n for sent in model.calls for n in _coder_notes(sent)]
     assert notes, "the coder stopped and the lead was never told"
-    assert "check_coder" in notes[0]
+    assert "wait_coder" in notes[0]
     assert "ixpe_pcube_bands" in notes[0], "the notice must name which link stopped"
 
 
@@ -545,7 +556,7 @@ def test_a_failed_coder_session_reaches_the_lead_as_a_failure():
 
     notes = [n for sent in model.calls for n in _coder_notes(sent)]
     assert notes and "FAILED" in notes[0]
-    assert "Do not keep steering it" in notes[0]
+    assert "say what happened" in notes[0]
 
 
 def test_a_coder_event_is_held_by_the_same_rule_as_a_steer():

@@ -75,7 +75,10 @@ def test_every_compose_site_was_found() -> None:
     # Was >= 3. The lead's author-clarification compose went with `clarify_for_author` on
     # 2026-09-12: the coder's question now enters the lead's OWN loop as an injected turn and is
     # answered with `drive_coder`, so there is no second conversation to compose a reply out of.
-    assert len(COMPOSES) >= 2, f"expected the known compose sites, found {len(COMPOSES)}"
+    # Was >= 2. The reviewer's verdict compose went on 2026-09-24: the reviewer writes its one
+    # report inside its loop and files it through a validating `turn_end` (§2b), so the co-lead's
+    # `review_tool` is the one compose left.
+    assert len(COMPOSES) >= 1, f"expected the known compose sites, found {len(COMPOSES)}"
 
 
 def test_the_leads_cycle_runs_every_react_on_one_shared_provider() -> None:

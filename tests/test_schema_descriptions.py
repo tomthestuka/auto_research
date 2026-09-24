@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import pytest
 
-from auto_research.schemas import AnalystReport, AnalysisTask, ResearchRequest, ReviewVerdict
+from auto_research.schemas import AnalystReport, AnalysisTask, ResearchRequest, ReviewerReport
+from auto_research.schemas.review import ReviewerSection, ReviewerTable
 from auto_research.schemas.figures import FigureCitation
 from auto_research.schemas.toolspec import (
     AnalystToolRequest,
@@ -42,7 +43,9 @@ MODEL_FILLED = [
     AuthoringDecision,
     FigureCitation,
     ProposedCheck,
-    ReviewVerdict,
+    ReviewerReport,
+    ReviewerSection,
+    ReviewerTable,
     ToolSpec,
     ValidationDataset,
 ]

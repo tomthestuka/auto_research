@@ -378,17 +378,6 @@ async def ingest_local_papers(storage: Storage, papers_dir: str | Path) -> list[
     return inserted
 
 
-async def librarian_io_enrich_stub(storage: Storage, paper_id: int) -> None:
-    """Placeholder for librarian I/O PDF reading and abstraction.
-
-    Phase 1 only records metadata and local files. The librarian I/O agent will
-    later read downloaded PDFs, produce summaries/keywords, and write memory
-    records through the storage API.
-    """
-
-    _ = (storage, paper_id)
-
-
 def _paper_from_row(row: sqlite3.Row) -> StoredPaper:
     data: dict[str, Any] = dict(row)
     return StoredPaper(

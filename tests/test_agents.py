@@ -8,7 +8,6 @@ import pytest
 from auto_research.agents import (
     AnalystLeadAgent,
     AnalystWorkerAgent,
-    LibrarianIOAgent,
     ReviewerAgent,
 )
 from auto_research.models import ModelResponse, ToolCall
@@ -16,11 +15,8 @@ from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
     ResearchRequest,
-    SearchRequest,
     SearchResult,
-    document_from_file,
 )
-from auto_research.storage import MemoryRecord, Storage
 
 
 class FakeModel:
@@ -60,15 +56,74 @@ def _user_payload(fake_model: FakeModel):
     return json.loads(fake_model.messages[1].content)
 
 
-def test_reviewer_agent_returns_verdict():
-    fake = FakeModel({"accepted": True, "rationale": "Evidence is sufficient."})
+class _ScriptedModel:
+    """Issues a fixed sequence of tool calls, then prose."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.messages = []
+        self.tools = None
+        self.turn = 0
+
+    async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
+                   images=(), documents=(), cache_prefix=False):
+        self.messages = list(messages)
+        self.tools = tools
+        self.turn += 1
+        if self.turn > len(self.script):
+            return ModelResponse(content="done")
+        name, arguments = self.script[self.turn - 1]
+        return ModelResponse(tool_calls=[ToolCall(id=f"c{self.turn}", name=name, arguments=arguments)])
+
+
+def _reviewer(tmp_path, script):
+    from auto_research.agents.react import ReadOnlyToolProvider
+    from auto_research.provenance import ReceiptStore
+
+    fake = _ScriptedModel(script)
     agent = ReviewerAgent(model=fake, prompt="reviewer prompt")
+    agent.report_dir = tmp_path / "reviewer"
+    agent.receipts = ReceiptStore(tmp_path / "receipts")
+    agent.tools = ReadOnlyToolProvider(roots=[tmp_path], include_open_paper=False)
+    return agent, fake
 
-    verdict = asyncio.run(agent.review(ResearchRequest(question="Check this result.")))
 
-    assert verdict.accepted is True
-    assert verdict.rationale == "Evidence is sufficient."
+def test_reviewer_writes_and_files_one_report_in_its_loop(tmp_path):
+    from auto_research.agents.react import EDIT_REPORT_TOOL, TURN_END_TOOL
+
+    agent, fake = _reviewer(tmp_path, [
+        (EDIT_REPORT_TOOL, {"rationale": "The literature is adequate.", "follow_up": "Fit the data."}),
+        (TURN_END_TOOL, {"summary": "dispatched"}),
+    ])
+    report = asyncio.run(agent.review(ResearchRequest(question="Check this."), stage="literature",
+                                      iterations_left=1))
+    assert report.follow_up == "Fit the data." and report.rework is False
     assert fake.messages[0].content == "reviewer prompt"
+    assert _user_payload(fake)["review_stage"] == "literature"
+    names = {t["name"] for t in fake.tools}
+    assert {"edit_report", "review_report", "turn_end", "read_paper"} <= names
+    assert "open_paper" not in names
+    assert (tmp_path / "reviewer" / "review1_literature.jsonl").is_file()
+
+
+def test_reviewer_turn_end_refuses_until_the_report_is_complete(tmp_path):
+    from auto_research.agents.react import EDIT_REPORT_TOOL, TURN_END_TOOL
+
+    agent, fake = _reviewer(tmp_path, [
+        (TURN_END_TOOL, {"summary": "nothing written"}),
+        (EDIT_REPORT_TOOL, {"rationale": "Adequate.", "follow_up": ""}),
+        (TURN_END_TOOL, {"summary": "no dispatch"}),
+        (EDIT_REPORT_TOOL, {"rationale": "Adequate.", "follow_up": "Fit it."}),
+        (TURN_END_TOOL, {"summary": "ok"}),
+    ])
+    report = asyncio.run(agent.review(ResearchRequest(question="q"), stage="literature"))
+    assert report.follow_up == "Fit it." and fake.turn == 5
+
+
+def test_a_reviewer_that_never_files_raises_rather_than_returning(tmp_path):
+    agent, _ = _reviewer(tmp_path, [])
+    with pytest.raises(Exception):
+        asyncio.run(agent.review(ResearchRequest(question="q"), stage="literature"))
 
 
 def test_call_fails_loudly_when_no_structured_output():
@@ -79,9 +134,9 @@ def test_call_fails_loudly_when_no_structured_output():
                        images=(), documents=(), cache_prefix=False):
             return ModelResponse(parsed=None)
 
-    agent = ReviewerAgent(model=_NullModel(), prompt="p")
+    agent = AnalystWorkerAgent(model=_NullModel(), prompt="p")
     with pytest.raises(ValueError):
-        asyncio.run(agent.review(ResearchRequest(question="q")))
+        asyncio.run(agent.analyze(AnalysisTask(question="q")))
 
 
 def test_call_fails_loudly_on_schema_mismatch():
@@ -92,56 +147,9 @@ def test_call_fails_loudly_on_schema_mismatch():
                        images=(), documents=(), cache_prefix=False):
             return ModelResponse(parsed={"unexpected": "shape"})
 
-    agent = ReviewerAgent(model=_BadModel(), prompt="p")
+    agent = AnalystWorkerAgent(model=_BadModel(), prompt="p")
     with pytest.raises(Exception):
-        asyncio.run(agent.review(ResearchRequest(question="q")))
-
-
-def test_librarian_io_agent_searches_injected_source_and_returns_raw_results():
-    # search() makes no LLM call — it returns raw source results directly.
-    fake = FakeModel({})
-    agent = LibrarianIOAgent(sources={"arxiv": FakeSource()}, model=fake, prompt="librarian prompt")
-
-    results = asyncio.run(
-        agent.search(SearchRequest(query="Cyg X-1 polarization", sources=["arxiv"], max_results=1))
-    )
-
-    assert results[0].source == "arxiv"
-    assert results[0].title == "Cyg X-1 paper"
-    assert results[0].abstract == "A relevant paper."
-    assert fake.messages is None  # no LLM call was made
-
-
-def test_librarian_io_agent_ingests_document_attachment(tmp_path):
-    pdf = tmp_path / "GX339_4.pdf"
-    pdf.write_bytes(b"%PDF-1.5\n")
-    fake = FakeModel(
-        {
-            "paper_id": 3,
-            "summary": "GX339-4 memory abstraction with spectural fit methods.",
-            "tags": ["GX339-4", "spectural fit"],
-        }
-    )
-    agent = LibrarianIOAgent(sources={}, model=fake, prompt="librarian prompt")
-    document = document_from_file(pdf)
-
-    memory = asyncio.run(agent.ingest_document(document, paper_id=3))
-
-    assert memory.paper_id == 3
-    assert "spectural fit" in memory.summary
-    assert fake.documents == (document,) or list(fake.documents) == [document]
-    payload = _user_payload(fake)
-    assert payload["document"]["path"] == str(pdf)
-
-
-def test_agent_extracts_json_from_wrapped_model_text():
-    fake = FakeModel({"accepted": True, "rationale": "ok"})
-    fake.content = 'Here is the result:\n{"accepted": true, "rationale": "ok"}\nDone.'
-    agent = ReviewerAgent(model=fake, prompt="reviewer prompt")
-
-    verdict = asyncio.run(agent.review(ResearchRequest(question="Check this result.")))
-
-    assert verdict.accepted is True
+        asyncio.run(agent.analyze(AnalysisTask(question="q")))
 
 
 def test_analyst_worker_agent_exposes_toolkit_as_available_context_only():
@@ -208,53 +216,3 @@ def test_analyst_lead_agent_adjudicates_reports(tmp_path):
     assert outcome.report.findings == ["Workers agree."]
     payload = _user_payload(fake)
     assert payload["worker_reports"][0]["summary"] == "Worker result."
-
-
-def test_librarian_io_agent_compose_search_strategy():
-    fake = FakeModel({"query": "Cyg X-1 X-ray polarization IXPE", "sources": ["arxiv"], "max_results": 5})
-    agent = LibrarianIOAgent(sources={}, model=fake, prompt="librarian prompt")
-
-    result = asyncio.run(
-        agent.compose_search_strategy(
-            ResearchRequest(question="What is the X-ray polarization of Cyg X-1?")
-        )
-    )
-
-    assert result.query == "Cyg X-1 X-ray polarization IXPE"
-    assert result.sources == ["arxiv"]
-    payload = _user_payload(fake)
-    assert "research_request" in payload
-    assert payload["research_request"]["question"] == "What is the X-ray polarization of Cyg X-1?"
-
-
-def test_librarian_io_agent_ingest_results_no_pdf(tmp_path):
-    """ingest_results() with no PDF: records an orphan memory note, never a paper row."""
-
-    stored_memories: list[MemoryRecord] = []
-
-    class FakeStorage:
-        async def upsert_paper(self, paper):  # must NOT be called for the no-PDF path
-            raise AssertionError("no-PDF results must not create a paper row")
-
-        async def insert_memory(self, memory: MemoryRecord):
-            stored_memories.append(memory)
-            return len(stored_memories)
-
-    fake = FakeModel({})  # LLM should not be called for no-PDF path
-    result = SearchResult(
-        source="arxiv",
-        title="Cyg X-1 polarization study",
-        abstract="We measure hard X-ray polarization of Cyg X-1.",
-        keywords=["X-ray", "polarization"],
-    )
-    agent = LibrarianIOAgent(sources={}, model=fake, prompt="librarian prompt")
-    agent.storage = FakeStorage()
-
-    asyncio.run(agent.ingest_results([result]))
-
-    assert len(stored_memories) == 1
-    mem = stored_memories[0]
-    assert mem.paper_id is None  # orphan note — no paper row
-    assert mem.mem_abbrev == "We measure hard X-ray polarization of Cyg X-1."
-    assert "X-ray" in mem.tags
-    assert fake.messages is None  # no LLM call made for no-PDF path

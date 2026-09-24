@@ -10,7 +10,7 @@ from auto_research.agents.react import (
     LeadCycleOutcome,
 )
 from auto_research.consensus import DebateToConverge
-from auto_research.schemas import AnalysisTask, AnalystReport, ReviewVerdict
+from auto_research.schemas import AnalysisTask, AnalystReport
 from auto_research.schemas.figures import FigureRef
 
 

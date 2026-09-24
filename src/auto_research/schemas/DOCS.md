@@ -54,9 +54,19 @@ carried by **reference** (`FigureRef`), never embedded
   (the finished report).
 - `FiguredReport` is the base for inter-LLM reports carrying figures by citation:
   `cited_figures: list[FigureCitation]` (what the model emits) + the runtime-resolved, ordered
-  `figures: list[FigureRef]`. `AnalystReport` extends it (and, from increment 5, `ResearchReport`
-  will). Citation *is* the de-duplication — cited figures are placed and ordered, uncited catalog
+  `figures: list[FigureRef]`. `AnalystReport` extends it; the reviewer's `ReviewerReport` does not
+  (it places figures by receipt handle). Citation *is* the de-duplication — cited figures are placed and ordered, uncited catalog
   figures are dropped — so no separate figure-dedup pass exists.
+- `Receipt` (`schemas/artifacts.py`, provenance P0) is the runtime's record of one artifact of
+  any kind (`figure | result | data | paper | web | human | commit`). It is **minted by the
+  runtime, never declared by a tool or a model**: `sha256` is computed over the stored bytes at
+  `path`, and `produced_by` / `call_id` / `toolkit_commit` / `args_sha256` are stamped by the code
+  that ran the work. `inputs` are the files the call read, hashed before it ran; `parents` are the
+  receipts it derives from; `flags` (`failed`, `synthetic`) propagate to descendants. Its `handle`
+  is `<source>:<letter><n>` (letters `f r d p w h c`, one per kind), so a handle names its kind;
+  the validator refuses a handle whose letter disagrees with `kind`, and a figure receipt without
+  `caption`/`mime_type`. `to_figure_ref()` is the multimodal-boundary view. Minting, lookup and
+  the claim check live in `auto_research.provenance` (see its DOCS.md).
 - `DocumentRef` carries only metadata: `path`, `title`, `mime_type`,
   `created_at`, and `sha256`. Document bytes are loaded only at provider-call
   boundaries for models configured with document support.
@@ -70,8 +80,8 @@ carried by **reference** (`FigureRef`), never embedded
 - `SearchResult.local_path` (`Path | None`) is set only for records with a downloaded
   local file. Online/external search results usually leave it `None`; local retrieval
   returns stored PDF paths separately for reviewer `DocumentRef` attachments.
-- `ReviewVerdict.needs_more_literature` and
-  `ReviewVerdict.needs_analysis_rework` are the schema-level flags used by the
+- `ReviewerReport.needs_more_literature` and
+  `ReviewerReport.needs_analysis_rework` are the schema-level flags used by the
   Phase 1 feedback edges. Each controls **one** loop edge: `needs_more_literature`
   is the literature **re-loop** switch (the graph always runs an initial literature
   pass before the first verdict, so it is set true only to close a real literature
@@ -115,6 +125,11 @@ carried by **reference** (`FigureRef`), never embedded
   `branch`, `commit_sha`, `gate_report`, `review`). These make the rework loop legible
   end-to-end through the gate (step 3), provider-decorrelated review (step 4), and the
   `approve_edit` atomic commit (step 6).
+- The **librarian's report** (`literature.py`): `LiteratureReport` (`summary`, `findings`, `gaps`,
+  `status` ∈ `succeeded|failed`, default `failed`) and `LiteratureFinding` (`claim`, `support` —
+  handles such as `lib:p3`/`lib:w1` of documents the librarian read). Permissive by design so a
+  partial `edit_report` write is legal; completeness is the librarian's `turn_end`. There is no
+  bibliography field: references derive from the cited receipts' `title` + `ids`.
 
 ## Dependencies
 - External: `pydantic>=2`.
@@ -127,6 +142,13 @@ carried by **reference** (`FigureRef`), never embedded
   created_at: datetime, sha256: str, thumbnail_b64: str | None = None)` —
   serializable artifact image reference. `sha256` must be a 64-character
   lowercase hexadecimal digest.
+- `Receipt(handle, kind, path, sha256, produced_by, created_at, call_id=None,
+  toolkit_commit=None, args_sha256=None, inputs=[], parents=[], flags=[], caption=None,
+  mime_type=None, title=None, ids={}, source_sha256=None, parser=None, commit_sha=None)` — the
+  runtime's record of one artifact; `.source` is the handle's source; `.to_figure_ref()`.
+- `InputFile(path, sha256, basis="content"|"listing", receipt=None)` — one input a call read.
+- `KIND_LETTER` / `LETTER_KIND` / `HANDLE_PATTERN` / `ArtifactKind` / `ReceiptFlag` — the handle
+  scheme.
 - `DocumentRef(path: Path, title: str, mime_type: str, created_at: datetime,
   sha256: str)` — serializable document attachment reference. Bytes stay out of
   messages and logs.
@@ -159,12 +181,23 @@ carried by **reference** (`FigureRef`), never embedded
   `status` — plus the inherited `cited_figures: list[FigureCitation]` and runtime-resolved
   `figures: list[FigureRef]` (V-4). Worker or lead output. `tool_request` (Phase 2) is set when
   the worker raises a toolkit gap/defect. Figures are placed by citation, not attached directly.
-- `ReviewVerdict(accepted: bool, rationale: str,
-  needs_more_literature: bool = False, needs_analysis_rework: bool = False,
-  follow_up: str | None = None, cited_paths: list[str] = [])` — reviewer decision
-  and optional feedback request. `cited_paths` lists the local PDFs the reviewer
-  opened (via `open_paper`) and actually used; they become the report's References
-  (intersected with the paths actually opened, then staged + linked).
+- `ReviewerReport` (`review.py`, 2026-09-24) — the one report the reviewer files per review
+  through `edit_report`/`turn_end`: verdict fields (`accepted`, `rationale`,
+  `needs_more_literature`, `needs_analysis_rework`, `follow_up`, the names the graph routes on)
+  + `title`, `abstract`, `sections:
+  list[ReviewerSection(heading, body)]`, `key_findings`, `figures: list[Handle]` (figure receipts,
+  in 'Figure k' order), `tables: list[ReviewerTable(caption, receipt | columns+rows)]`. Permissive
+  (every field defaulted); what each decision requires is checked at `turn_end`
+  (`agents/reviewer_tools`). `rework` = either flag. `prose_fields() -> dict[label, str | list[str]]`
+  is the single enumeration of its prose, in reading order, walked by both the quote check and the
+  renderer; table rows are joined per row with `" | "`. No references field: the bibliography is
+  built from the cited paper/web receipts.
+- `ResearchReport(run_id, request_question, created_at, report: ReviewerReport, receipts:
+  list[Receipt], artifacts: dict[str, Handle])` (`report.py`) — the machine handle
+  (`report.jsonl`), written by the runtime after the final review: the filed report, every receipt
+  it cites with their ancestors, the handles of the other published files by format, and
+  `paper_attributions: list[PaperAttribution(handle, value, locator)]` — every value the report
+  attributes to a paper, for a human to verify against the PDF.
 - `ToolKind` — string tool request kind. Core categories include `"bash"`,
   `"python"`, `"research_toolkit"`, `"observation_db"`, and
   `"source_archive"`; registered tool names such as
@@ -218,7 +251,7 @@ carried by **reference** (`FigureRef`), never embedded
   `gate.run_gate` (step 3).
 - `ToolReviewVerdict(approved: bool, rationale: str, issues: list[str] = [],
   checks_adequate: bool = True, commit_summary: str = "")` — the provider-decorrelated
-  co-lead's code-review verdict (§9.3 step 4); distinct from the research `ReviewVerdict`.
+  co-lead's code-review verdict (§9.3 step 4); distinct from the reviewer's `ReviewerReport`.
   `commit_summary` is the one-line imperative commit subject the co-lead drafts when
   approving; it becomes the §9.9 atomic-commit message (`approve_edit` falls back to the tool
   name if empty).
@@ -240,6 +273,14 @@ carried by **reference** (`FigureRef`), never embedded
   headless fail-safe.
 - `HumanResponse(query_id: str, answer: str, created_at)` — the human's reply. Both are the
   typed contract behind the injectable `human_handler` and the `ask_human` tools.
+- `LiteratureFinding(claim: str, support: list[str] = [])` — one claim and the handles of the
+  documents behind it. Every number in `claim` sits inside a quote binding.
+- `LiteratureReport(summary: str = "", findings: list[LiteratureFinding] = [], gaps: list[str] = [],
+  attributed_values: list[PaperAttribution] = [], status: Literal["succeeded", "failed"] = "failed")`
+  — the librarian's filed report. Field descriptions are the prose the librarian's `edit_report`
+  tool shows the model; `attributed_values` is set by the runtime at filing, never by the model.
+- `attributed_values` uses the shared `artifacts.PaperAttribution(handle, value, locator)` (0f's), the
+  one verify-list shape across roles (human ruling); title and ids resolve from the receipt.
 
 ## Changelog
 - 2026-05-26 -> 2026-06-12 — Full Pydantic v2 protocol: research/search/analysis/review messages, `FigureRef`/`DocumentRef`, function-call tool envelopes, sandbox results, report + LaTeX schemas, strict JSON-serializable boundaries.
@@ -315,3 +356,29 @@ carried by **reference** (`FigureRef`), never embedded
   (`react.lead_turn_problems`). Conditional required-fields is also not portable across the six
   vendors. Guarded by `test_schemas.py::test_needs_human_is_barred_by_the_workers_surface_not_by_
   the_type` and `::test_every_declared_report_property_is_a_real_field_on_the_model`.
+
+- 2026-09-24 — **`Receipt` added (`schemas/artifacts.py`, provenance P0).** One runtime-minted
+  record for every artifact kind a claim can rest on, generalising what `FigureRef` did for
+  figures without its gap: a `FigureRef`'s hash and producer were whatever the tool returned,
+  while a receipt's are computed and stamped by the runtime. Adds input hashes, parent receipts and
+  propagating `failed`/`synthetic` flags. `FigureRef` is unchanged and remains the multimodal
+  carrier (`Receipt.to_figure_ref`). Tests in `tests/test_provenance.py`.
+- 2026-09-24 — `literature.py` added (95): `LiteratureReport` + `LiteratureFinding`, the report the
+  librarian files through `turn_end` and the reviewer receives as `state["literature"]`.
+- 2026-09-24 — `review.py` gains `ReviewerReport`, `ReviewerSection`, `ReviewerTable` (5c, the
+  reviewer as the unit): one plain-text report per review, rendered to LaTeX by the harness only
+  after its quotes check out. `ReviewVerdict` stays until the graph switches. `LatexReport`
+  deleted from `report.py` (dead since F5e; the reviewer no longer returns LaTeX).
+- 2026-09-24 (second) — `ReviewVerdict` deleted (5c): the graph routes on `ReviewerReport`'s verdict
+  fields and every caller moved. `report.py` reshaped: `ReportSection` and `Reference` deleted
+  (references come from receipts), `ResearchReport` is now the published envelope (filed report +
+  receipt closure + artifact handles) rather than a model-composed document.
+- 2026-09-24 — `AttributedValue` + `LiteratureReport.attributed_values` (95): the verify-against-
+  the-PDF list, runtime-set (papers are cited, never text-matched; human ruling).
+- 2026-09-24 (third) — `PaperAttribution` + `ResearchReport.paper_attributions`; the reviewer's field
+  descriptions tell it to attribute a paper's value with its place (`{{lib:p4 "value" Table 2}}`).
+- 2026-09-24 — **`PaperAttribution` added** (`schemas/artifacts.py`): one value a report attributes
+  to a paper (`handle`, `value`, `locator`), the single shape of every report's verify-against-the-
+  PDF list, since papers are cited and never text-checked (human ruling).
+- 2026-09-24 — `AttributedValue` removed; `LiteratureReport.attributed_values` is
+  `list[PaperAttribution]`, the shape every role's verify list shares (human ruling via 5c).

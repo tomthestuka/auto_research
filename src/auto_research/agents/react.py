@@ -10,19 +10,22 @@ reviewer/lead read-only tools and the librarian's sources are added alongside.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import time
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, get_args
 
 from pydantic import ValidationError
 
-from auto_research.env import check_coder_min_interval_s, tool_search_config
+from auto_research.provenance import check_report_fields
+from auto_research.provenance.capture import inputs_before, receipt_call
+from auto_research.env import coder_wait_limits_s, tool_search_config
 from auto_research.observations import load_observations_config
 from auto_research.sandbox.fs_guard import GOVERNANCE_BASENAMES, PathGuard
 
@@ -46,8 +49,8 @@ from auto_research.schemas import (
     DocumentRef,
     FigureCitation,
     FigureRef,
+    FiguredReport,
     ProposedCheck,
-    ReviewVerdict,
     ToolResult,
     ToolSpec,
     ValidationDataset,
@@ -99,6 +102,58 @@ class ToolProvider(Protocol):
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
         """Execute the named tool with ``arguments`` and return its outcome."""
+
+
+#: A role-specific tool plugged into a provider without editing it: ``(definition, executor)``.
+#: The reviewer's and the librarian's own tools arrive this way (board 2026-09-24).
+ExtraTool = tuple[dict, Callable[[Mapping[str, Any]], Awaitable[ToolOutcome]]]
+
+
+async def _run_extra_tool(
+    extra_tools: Sequence[ExtraTool], name: str, arguments: Mapping[str, Any]
+) -> ToolOutcome | None:
+    for definition, executor in extra_tools:
+        if definition.get("name") == name:
+            return await executor(arguments)
+    return None
+
+
+def _receipted(
+    receipts: Any | None,
+    source: str | None,
+    name: str,
+    arguments: Mapping[str, Any],
+    outcome: ToolOutcome,
+    *,
+    kind: str = "result",
+    fields: Mapping[str, Any] | None = None,
+) -> ToolOutcome:
+    """Mint a receipt for an in-process tool's outcome and label the text the model sees with it.
+
+    The blob is the outcome text as the tool produced it, before the label, so a quote the model
+    copies from the text it read is checked against exactly that text.
+    """
+    if receipts is None or source is None:
+        return outcome
+    minted = receipt_call(
+        receipts, source=source, produced_by=name, args=arguments, text=outcome.text,
+        failed=outcome.is_error, kind=kind, fields=fields,
+    )
+    return replace(outcome, text=f"{minted.header()}\n{outcome.text}")
+
+
+async def _web_receipted(
+    receipts: Any | None, source: str | None, arguments: Mapping[str, Any], outcome: ToolOutcome
+) -> ToolOutcome:
+    """A fetched page becomes a ``web`` receipt minted the librarian's way, for every role."""
+    if receipts is None or source is None or outcome.is_error:
+        return outcome
+    from auto_research.sources.receipts import mint_web_receipt
+
+    receipt = await asyncio.to_thread(
+        mint_web_receipt, receipts, str(arguments.get("url", "")), outcome.text, source=source
+    )
+    return replace(outcome, text=f"[receipt {receipt.handle}]\n{outcome.text}")
 
 
 # ----------------------------------------------------------------------------
@@ -519,6 +574,66 @@ class ReportWorkspace:
     # handler copies cannot drift. cited_figures/figures are handled separately (FiguredReport).
     prose_fields: tuple[str, ...] = WORKER_REPORT_FIELDS
     status_values: tuple[str, ...] = WORKER_STATUS_VALUES
+    # Provenance (P2): the receipts this role may cite (a `ReceiptLookup`, usually a
+    # `ScopedLookup` over the run's store) and the source `self:` stands for in its prose. With
+    # `receipts` unset the report's numbers are not checked — only a caller with no run (Studio).
+    receipts: Any | None = None
+    receipt_source: str | None = None
+    # Fields whose items are grounded only by what each item cites itself (a finding).
+    itemised: tuple[str, ...] = ("findings",)
+    # A role whose prose is nested (the reviewer's sections and table rows) supplies its own
+    # check, ``report -> problems``; it then replaces the default field walk, both in edit_report's
+    # notes and at turn_end, so the report is checked once.
+    provenance_check: Callable[[Any], list[str]] | None = None
+    # How review_report shows this role's own draft, when the default (summary / findings /
+    # numbered figures) does not fit its report — the reviewer shows its rendered pages.
+    draft_view: Callable[[Any], tuple[str, list[FigureRef]]] | None = None
+    # edit_report's description, when the analysts' wording (cited_figures, [source:index])
+    # does not describe this role's report.
+    edit_description: str | None = None
+
+
+#: The report fields the provenance check reads: prose a claim can be made in. Decision and
+#: request fields (`status`, `rework`, `tool_request`, `what_to_probe`) are instructions, not claims.
+_CLAIM_FIELDS: tuple[str, ...] = ("summary", "findings", "uncertainty", "rationale")
+
+
+def report_provenance_problems(workspace: "ReportWorkspace | None", report: Any) -> list[str]:
+    """The numbers in ``report``'s prose that its cited receipts do not carry, plus stale files.
+
+    The shared half of every unit's ``turn_end``: each cited receipt resolves, is re-hashed, and
+    every number in a finding appears in a receipt that finding cites (scoped grounding, human
+    ruling 2026-09-24). A cited figure whose file is gone is refused here too, for every role.
+    """
+    if workspace is None or report is None:
+        return []
+    problems: list[str] = []
+    for index, figure in enumerate(getattr(report, "figures", None) or [], 1):
+        if not hasattr(figure, "path"):
+            continue  # a figure *handle* (the reviewer's); its receipt is re-hashed by its own check
+        path = Path(str(figure.path))
+        if not path.is_file():
+            problems.append(
+                f"Figure {index} ({getattr(figure, 'caption', '')}) points at {path}, which is not a file "
+                "on disk. Re-cite it from your catalog with review_report, or drop it."
+            )
+    custom = getattr(workspace, "provenance_check", None)
+    if custom is not None:
+        return problems + list(custom(report))
+    receipts = getattr(workspace, "receipts", None)
+    if receipts is None:
+        return problems
+    prose_fields = getattr(workspace, "prose_fields", WORKER_REPORT_FIELDS)
+    fields = {
+        name: getattr(report, name, None)
+        for name in _CLAIM_FIELDS
+        if name in prose_fields or name in ("summary", "findings")
+    }
+    result = check_report_fields(
+        fields, receipts, own_source=getattr(workspace, "receipt_source", None),
+        itemised=getattr(workspace, "itemised", ("findings",)),
+    )
+    return problems + result.problems
 
 
 # Matches a numbered figure reference in prose — "Figure 1", "Fig. 2", "Fig 3", "figs 4" —
@@ -820,7 +935,7 @@ def worker_report_problems(workspace: ReportWorkspace | None) -> list[str]:
             f"{uncited} figure(s) are in your catalog and none is cited. Cite the ones your "
             "prose refers to with edit_report's cited_figures, or say why none apply."
         )
-    return problems
+    return problems + report_provenance_problems(workspace, report)
 
 
 def _written_report(workspace: "ReportWorkspace | None") -> Any | None:
@@ -850,9 +965,9 @@ def lead_turn_problems(cycle: "LeadCycle | None", workspace: "ReportWorkspace | 
       as their next instruction, so "go again" with nothing to go on is not a decision; and the cap
       is Python's, named here rather than discovered by the model.
     * **A conclusion with no findings.** ``rework=False`` means this report IS the analysis result.
-    * **A cited figure whose file is gone.** Resolution already checks the catalog handle; this
-      stats the path, because a report whose figure cannot be opened is not a deliverable and the
-      reviewer would be the one to discover it.
+    * **A cited figure whose file is gone, or a number no cited receipt carries.** Shared with
+      every unit through :func:`report_provenance_problems`: the path is stat'ed, each cited
+      receipt is re-hashed, and each number must appear in a receipt its text cites.
     * **A coding session still open.** Walking away from a running coder leaves the tree mid-edit
       and the outcome unrecorded; finishing or abandoning it is a decision the lead has to make.
     """
@@ -890,24 +1005,43 @@ def lead_turn_problems(cycle: "LeadCycle | None", workspace: "ReportWorkspace | 
                     "Your report concludes the analysis but lists no findings. State what the "
                     "work established, or set rework=true if it did not establish anything yet."
                 )
-        for index, figure in enumerate(getattr(report, "figures", None) or [], 1):
-            path = Path(str(getattr(figure, "path", "")))
-            if not path.is_file():
-                problems.append(
-                    f"Figure {index} ({figure.caption}) points at {path}, which is not a file "
-                    "on disk. Re-cite it from your catalog with review_report, or drop it."
-                )
+        problems.extend(report_provenance_problems(workspace, report))
     if cycle is not None and cycle.session_open:
         problems.append(
-            "A coding session is still open. Finish it with submit_for_review, or let its budget "
-            "run out, before ending your turn — do not leave a coder running."
+            "A coding session is still open. If the coder is still working, call wait_coder (a "
+            "blocking wait that returns when the coder stops); then finish the session with "
+            "submit_for_review, or let its budget run out, before ending your turn."
         )
     return problems
+
+
+def _model_field_schema(model: type, name: str) -> dict:
+    """``model``'s field ``name`` as a tool property: its own JSON Schema, references inlined.
+
+    How a role whose report is not an ``AnalystReport`` (the reviewer's, the librarian's) gets an
+    ``edit_report`` without forking it: the property and its description come from the model's
+    ``Field(description=…)``, the same single source the lead forms read.
+    """
+    full = model.model_json_schema()
+    defs = full.get("$defs", {})
+
+    def inline(node: Any) -> Any:
+        if isinstance(node, dict):
+            if "$ref" in node:
+                return inline(defs[node["$ref"].rsplit("/", 1)[-1]])
+            return {k: inline(v) for k, v in node.items() if k not in ("title", "default")}
+        if isinstance(node, list):
+            return [inline(v) for v in node]
+        return node
+
+    return inline(full["properties"][name])
 
 
 def edit_report_tool_def(
     prose_fields: tuple[str, ...] = WORKER_REPORT_FIELDS,
     status_values: tuple[str, ...] = WORKER_STATUS_VALUES,
+    report_model: type | None = None,
+    description: str | None = None,
 ) -> dict:
     """Definition for ``edit_report`` — the disciplined write path for an ``AnalystReport``.
 
@@ -929,7 +1063,12 @@ def edit_report_tool_def(
             "from review_report, IN THE ORDER you want them shown — the runtime places exactly "
             "those and you refer to the k-th as 'Figure k' in your prose; a figure you omit is "
             "dropped. After writing, call review_report to see the placement and refine until "
-            "every figure is in the right place."
+            "every figure is in the right place. Every number in your prose comes from a receipt: "
+            "each tool result is labelled [receipt <handle>], and a finding cites the receipts its "
+            "numbers come from as [handle] (or pins one exact span as {{handle \"copied text\"}}). "
+            "Copy numbers exactly as the receipt prints them, sign and digits included; compute "
+            "any derived value with a tool so the calculation has its own receipt. turn_end "
+            "refuses a number that no receipt the text cites carries, naming it."
         ),
         "input_schema": {
             "type": "object",
@@ -938,13 +1077,17 @@ def edit_report_tool_def(
                     "type": "string",
                     "description": (
                         "The report summary (prose). Refer to figures as 'Figure 1', 'Figure 2', "
-                        "… matching the order of cited_figures."
+                        "… matching the order of cited_figures. Its numbers are grounded by every "
+                        "receipt the report cites."
                     ),
                 },
                 "findings": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Key findings, each a self-contained prose string.",
+                    "description": (
+                        "Key findings, each a self-contained prose string that cites the receipts "
+                        "its numbers come from as [handle]."
+                    ),
                 },
                 "cited_figures": {
                     "type": "array",
@@ -1075,8 +1218,26 @@ def edit_report_tool_def(
             "required": ["summary", "status"],
         },
     }
+    if description is not None:
+        declared["description"] = description
+    if report_model is not None and not _is_figured(report_model):
+        # A report that is not the analysts': every property, and which are required, come from
+        # the model itself; there is no figure placement to declare.
+        declared["input_schema"]["properties"] = {
+            name: _model_field_schema(report_model, name) for name in prose_fields
+        }
+        if "status" in prose_fields:
+            declared["input_schema"]["properties"]["status"]["enum"] = list(status_values)
+        declared["input_schema"]["required"] = [
+            name for name in prose_fields if report_model.model_fields[name].is_required()
+        ]
+        return declared
     properties = declared["input_schema"]["properties"]
     keep = set(prose_fields) | {"cited_figures"}
+    if report_model is not None:
+        for name in prose_fields:
+            if name not in properties and name in report_model.model_fields:
+                properties[name] = _model_field_schema(report_model, name)
     unknown = keep - set(properties) - {"cited_figures"}
     if unknown:  # pragma: no cover — a typo in a surface constant, caught at import by the tests
         raise ValueError(f"edit_report has no property for {sorted(unknown)}")
@@ -1118,6 +1279,39 @@ def review_report_tool_def() -> dict:
     }
 
 
+def _is_figured(model: type) -> bool:
+    """Whether a report model places figures by ``cited_figures`` (the analysts' reports)."""
+    return isinstance(model, type) and issubclass(model, FiguredReport)
+
+
+async def _edit_plain_report(workspace: ReportWorkspace, arguments: Mapping[str, Any]) -> ToolOutcome:
+    """``edit_report`` for a report that is not a ``FiguredReport`` (the reviewer's).
+
+    Exactly the surface fields are copied onto the model; figures, when the model has them, are
+    whatever it declares (for the reviewer, figure receipt handles checked by its own validator).
+    """
+    fields = {
+        key: arguments[key] for key in workspace.prose_fields
+        if key in arguments and arguments[key] is not None
+    }
+    try:
+        report = workspace.report_model.model_validate(fields)
+    except Exception as exc:  # noqa: BLE001 — off-schema report → self-correct and call again
+        return ToolOutcome(
+            text=f"edit_report: the report did not validate — fix and call again: {exc}",
+            is_error=True,
+        )
+    workspace.report_path.parent.mkdir(parents=True, exist_ok=True)
+    workspace.report_path.write_text(report.model_dump_json() + "\n", encoding="utf-8")
+    workspace.written_report = report
+    lines = ["Report saved."]
+    provenance = report_provenance_problems(workspace, report)
+    if provenance:
+        lines.append("Provenance — turn_end will refuse until these are fixed:")
+        lines.extend(f"  - {problem}" for problem in provenance)
+    return ToolOutcome(text="\n".join(lines))
+
+
 async def execute_edit_report(
     workspace: ReportWorkspace | None, arguments: Mapping[str, Any]
 ) -> ToolOutcome:
@@ -1128,6 +1322,8 @@ async def execute_edit_report(
     """
     if workspace is None:
         return ToolOutcome(text="edit_report is not available for this role.", is_error=True)
+    if not _is_figured(workspace.report_model):
+        return await _edit_plain_report(workspace, arguments)
     cited: list[FigureCitation] = []
     for entry in arguments.get("cited_figures") or []:
         try:
@@ -1158,6 +1354,12 @@ async def execute_edit_report(
     lines = [f"Report saved — {len(report.figures)} figure(s) placed:"]
     for n, fig in enumerate(report.figures, 1):
         lines.append(f"  Figure {n}: {fig.caption}")
+    # The same check turn_end runs, reported here as a note while the draft is still being
+    # written, so the fix happens now rather than as a refusal at the end.
+    provenance = report_provenance_problems(workspace, report)
+    if provenance:
+        lines.append("Provenance — turn_end will refuse until these are fixed:")
+        lines.extend(f"  - {problem}" for problem in provenance)
     if drop_notes:
         lines.append("Citations dropped (fix or re-cite): " + "; ".join(drop_notes))
     placed = {(str(f.path), f.sha256) for f in report.figures}
@@ -1222,6 +1424,13 @@ async def execute_review_report(
         return ToolOutcome(text=f"Report from {source}:\n\n{text}", figures=images)
 
     draft = workspace.written_report or workspace.prior_report
+    if draft is not None and workspace.draft_view is not None:
+        draft_text, draft_images = workspace.draft_view(draft)
+        text = "Your current report draft:\n\n" + draft_text
+        receipts_text = _receipt_menu(workspace.receipts)
+        if receipts_text:
+            text += "\n\n--- receipts your prose can cite as [handle] ---\n" + receipts_text
+        return ToolOutcome(text=text, figures=draft_images)
     if draft is not None:
         draft_text, _ = _report_view(draft)
         header = "Your current report draft:\n\n" + draft_text
@@ -1233,7 +1442,40 @@ async def execute_review_report(
         + "\n\n--- figures you can cite (pick by [source:index], in the order you want them shown) ---\n"
         + menu_text
     )
+    receipts_text = _receipt_menu(workspace.receipts)
+    if receipts_text:
+        text += (
+            "\n\n--- receipts your prose can cite as [handle] (numbers must come from these) ---\n"
+            + receipts_text
+        )
     return ToolOutcome(text=text, figures=menu_images)
+
+
+_RECEIPT_MENU_CAP = 60
+
+
+def _receipt_menu(lookup: Any | None) -> str:
+    """One line per citable receipt: handle, what produced it, and the start of its text."""
+    handles = getattr(lookup, "handles", None)
+    if not callable(handles):
+        return ""
+    listed = handles()
+    lines: list[str] = []
+    for handle in listed[-_RECEIPT_MENU_CAP:]:
+        receipt = lookup.get(handle)
+        if receipt is None:
+            continue
+        marks = f" [{', '.join(receipt.flags)}]" if receipt.flags else ""
+        if receipt.kind == "figure":
+            gist = receipt.caption or ""
+        elif receipt.kind == "data":
+            gist = str(receipt.path)
+        else:
+            gist = " ".join((lookup.text(handle) or "").split())[:100]
+        lines.append(f"  [{handle}] {receipt.kind} from {receipt.produced_by}{marks}: {gist}")
+    if len(listed) > _RECEIPT_MENU_CAP:
+        lines.insert(0, f"  (showing the latest {_RECEIPT_MENU_CAP} of {len(listed)})")
+    return "\n".join(lines)
 
 
 # ----------------------------------------------------------------------------
@@ -1258,8 +1500,11 @@ def drive_coder_tool_def() -> dict:
             "read back what it did. The coder executes your plan — give concrete, algorithm-level "
             "instructions (signature, the exact procedure, edge cases, the tests to add), not a "
             "restated goal. It keeps the working files across your instructions, so iterate: "
-            "inspect its diff with read_file, then drive_coder again. When the tool and its tests "
-            "are right, call submit_for_review. Write 'instructions' as Markdown."
+            "inspect its diff with read_file, then drive_coder again. Returns at once. While the "
+            "coder is working, the message is queued and becomes its next turn when the current "
+            "one ends; an answer to a question the coder asked you reaches it inside the running "
+            "turn. Then call wait_coder to hear back. When the tool and its tests are right, call "
+            "submit_for_review. Write 'instructions' as Markdown."
         ),
         "input_schema": {
             "type": "object",
@@ -1269,6 +1514,14 @@ def drive_coder_tool_def() -> dict:
                     "description": (
                         "What the coder should do next, in Markdown — concrete and algorithm-level. "
                         "On the first call, seed the full brief; afterwards, the specific change."
+                    ),
+                },
+                "mid_turn": {
+                    "type": "boolean",
+                    "description": (
+                        "true delivers the message inside the turn the coder is running now, to "
+                        "change its course before it finishes — for a correction that cannot wait. "
+                        "Default false: the message waits for the coder's next turn."
                     ),
                 },
             },
@@ -1293,13 +1546,23 @@ def submit_tool_def() -> dict:
             "tool is committed solely through this call — if your turn ends without calling it (or "
             "respond_to_review), the work is discarded as a failure. When the tool and its tests are "
             "right, call it; if after your best effort it genuinely cannot be made mergeable, say so "
-            "explicitly in one line rather than stopping silently. Takes no arguments."
+            "explicitly in one line rather than stopping silently. While the coder is still "
+            "working, this first waits for it to stop, then runs the gate. Takes no arguments."
         ),
         "input_schema": {"type": "object", "properties": {}},
     }
 
 
-CHECK_CODER_TOOL = "check_coder"
+WAIT_CODER_TOOL = "wait_coder"
+
+
+def _fmt_s(seconds: float | None) -> str:
+    """``95`` → ``1m35s``; the unit a lead reads to pace itself."""
+    if seconds is None:
+        return "?"
+    seconds = int(round(seconds))
+    minutes, secs = divmod(seconds, 60)
+    return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
 
 
 async def execute_drive_coder(session: Any, arguments: Mapping[str, Any]) -> ToolOutcome:
@@ -1308,16 +1571,17 @@ async def execute_drive_coder(session: Any, arguments: Mapping[str, Any]) -> Too
     The coder works beside the lead rather than under it. A real link's turn takes minutes, and
     the lead used to spend all of them blocked inside this call — unable to read the diff it had
     just asked for, or to think about the next link. It now gets the instruction acknowledged and
-    keeps its turn; `check_coder` says what happened, and `submit_for_review` stays **blocking**
-    by ruling (the gate runs pytest twice through a blocking `subprocess.run`, and the CI framing
-    says you wait for the ticket).
+    keeps its turn; `wait_coder` parks until the coder has something to say, and
+    `submit_for_review` stays **blocking** by ruling (the gate runs pytest twice through a
+    blocking `subprocess.run`, and the CI framing says you wait for the ticket).
 
-    **It reaches a working coder too**, which is what makes the lead<->coder channel symmetric.
-    The session picks the primitive: a turn in flight is steered (Codex `turn_steer`, or a second
-    `query()` on the Claude SDK's live client), an idle coder is given a new turn. Before that,
-    the only primitive was "start a turn" and a lead with something to say to a working coder was
-    refused — including when what it had to say was the ANSWER to that coder's own question, the
-    state the refusal was reporting. Measured live 2026-09-12, twice in one run.
+    **A working coder is reached too**, which keeps the lead<->coder channel symmetric, and the
+    session picks the primitive. By default the message is **queued** for the coder's next turn;
+    ``mid_turn=true`` steers it into the running one (Codex `turn_steer`, or a second `query()`
+    on the Claude SDK's live client), and so does any message sent while the coder has an open
+    question, because that message is most likely the answer. Queued is the default because slot
+    6 (2026-09-15) steered its coder 47 times mid-turn: steering had become the lead's way of
+    staying busy while it had no way to wait.
 
     A session that predates B — a benchmark's, or a test double's — has no `send`, so this falls
     back to the blocking call. `drive_authoring` is deliberately on that path: it backs the
@@ -1335,111 +1599,211 @@ async def execute_drive_coder(session: Any, arguments: Mapping[str, Any]) -> Too
             or "(coder produced no narration; inspect the worktree with read_file, or "
             "submit_for_review to run the gate.)"
         )
-    outcome = await session.send(instructions)
-    if outcome == "steered":
-        return ToolOutcome(
-            text=(
-                "Delivered to the coder inside the turn it is running; it sees this without "
-                "stopping. You keep your turn — call check_coder for its narration when it ends."
-            )
+    outcome = await session.send(instructions, mid_turn=bool(arguments.get("mid_turn")))
+    if outcome == "answered":
+        text = (
+            "Delivered inside the turn the coder is running, as the answer to its question. "
+            "Call wait_coder to hear back."
         )
-    return ToolOutcome(
-        text=(
-            "Sent to the coder; it is working now and you keep your turn. Do something useful "
-            "while it does — read the diff it produced last time, plan the next link, or check "
-            "the data catalog. Its narration is available through check_coder once it has stopped."
+    elif outcome == "steered":
+        text = (
+            "Delivered inside the turn the coder is running; it changes course without stopping. "
+            "Call wait_coder to hear back."
         )
-    )
+    elif outcome == "queued":
+        text = (
+            "Queued: the coder is mid-turn, so this becomes its next turn when the current one "
+            "ends. Call wait_coder to hear when that turn ends."
+        )
+    else:
+        text = (
+            "Sent; the coder is working on it now and you keep your turn. Read the library, plan "
+            "the next link or draft your report, and call wait_coder when you are ready to hear "
+            "back — it returns as soon as the coder stops or asks you something."
+        )
+    return ToolOutcome(text=text)
 
 
-def check_coder_tool_def() -> dict:
-    """Definition for ``check_coder`` — what the coder is doing, and what it last said (B3)."""
+def wait_coder_tool_def() -> dict:
+    """Definition for ``wait_coder`` — park until the coder has something for the lead."""
+    floor, default, maximum = coder_wait_limits_s()
     return {
-        "name": CHECK_CODER_TOOL,
+        "name": WAIT_CODER_TOOL,
         "description": (
-            "Check on the coder you sent an instruction to: whether it is still working, and its "
-            "narration once it has stopped. Costs a tool turn, and is rate-limited — one check "
-            "per interval, and an early call is refused with the time remaining. A coder works "
-            "for many minutes and its narration is worth reading once it has stopped, so spend "
-            "the wait on the library, the next link, or your report."
+            "Wait for the coder. Returns as soon as its turn ends (with its narration), it asks "
+            "you a question, or a human steer arrives for you; otherwise after timeout_s, saying "
+            "how long it has been working. Waiting costs nothing while it waits, so prefer long "
+            f"waits: the default is {default}s, anything under {floor}s is raised to {floor}s, "
+            f"and the longest is {maximum}s. Call it when you have nothing else to do for this "
+            "link, and read the time it reports to pace yourself."
         ),
-        "strict": True,
-        "input_schema": _strictify({"type": "object", "properties": {}, "required": []}),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "timeout_s": {
+                    "type": "integer",
+                    "description": (
+                        f"Longest to wait, in seconds (default {default}, raised to at least "
+                        f"{floor}, at most {maximum}). It returns earlier on any event."
+                    ),
+                },
+            },
+            "required": [],
+        },
     }
 
 
-async def execute_check_coder(session: Any) -> ToolOutcome:
-    """Report the background drive's state, consuming a finished result exactly once.
+def _wait_timeout(arguments: Mapping[str, Any]) -> tuple[int, str]:
+    """The timeout a wait actually uses, and a note when it differs from the one asked for."""
+    floor, default, maximum = coder_wait_limits_s()
+    raw = arguments.get("timeout_s")
+    try:
+        requested = int(raw) if raw is not None else default
+    except (TypeError, ValueError):
+        requested = default
+    if requested < floor:
+        return floor, f" (asked {requested}s, raised to the {floor}s minimum)"
+    if requested > maximum:
+        return maximum, f" (asked {requested}s, lowered to the {maximum}s maximum)"
+    return requested, ""
 
-    **Rate-limited** (``check_coder_min_interval_s``). Measured across three runs of the same
-    seat: 116 / 138 / 122 polls per authoring window at a 3.6-5.6 s median cadence, 96.6 / 98.6 /
-    99.2 per cent of them returning a byte-identical "still working" string — $3.73 in one run,
-    59% of the lead's whole spend, to learn four things. The limit is enforced here rather than
-    asked for in prose because the prose was already there and was obeyed in the wrong direction:
-    the description called the call free (it is not), and three separate strings told the model
-    to check again.
 
-    A refusal carries the time remaining and is **not** an error the model should work around —
-    it is the answer. The state lives on the session, so a new coder session starts unthrottled:
-    the first check after a fresh drive is always allowed, which is the one poll that reliably
-    carries information.
+def _coder_clock(session: Any) -> str:
+    """How long the coder has been on its current turn, for the lead to pace itself."""
+    elapsed = getattr(session, "current_instruction_elapsed_s", lambda: None)()
+    if elapsed is None:
+        return f"coder {getattr(session, 'drive_status', 'idle')}"
+    return f"coder working, {_fmt_s(elapsed)} into its current turn"
+
+
+def _read_coder_news(session: Any) -> tuple[list[str], bool, bool]:
+    """Everything the coder has for the lead right now, consumed once.
+
+    Returns ``(parts, failed, turn_read)`` — ``turn_read`` is whether a finished turn's narration
+    was among them, which is what decides the closing line a wait adds.
     """
-    import time
-
-    status = getattr(session, "drive_status", None)
-    interval = check_coder_min_interval_s()
-    last = getattr(session, "_check_coder_last", None)
-    now = time.monotonic()
-    # Throttle only while there is nothing to report. A finished drive is consumed exactly once
-    # (`take_drive_result`), so refusing that call would strand the narration the lead is owed.
-    if status == "working" and interval > 0 and last is not None and now - last < interval:
-        remaining = int(interval - (now - last))
-        return ToolOutcome(
-            text=(
-                f"Checked {int(now - last)}s ago and the coder is still working; the next check "
-                f"is available in {remaining}s. It works for many minutes — read its last diff, "
-                "plan the next link, or draft your report in the meantime."
-            ),
-            is_error=True,
+    parts: list[str] = []
+    failed = False
+    turn_read = False
+    if getattr(session, "has_unread_result", lambda: False)():
+        turn_read = True
+        text, error = session.take_drive_result()
+        if error is not None:
+            failed = True
+            # The coder DIED and the lead is told so. On 2026-09-09 a Claude-harness session
+            # whose credential ran out returned the CLI's own billing string with `is_error`
+            # discarded, and the lead spent three drives steering a corpse at $0 before giving
+            # up — then recorded the failure with a confidently wrong cause.
+            parts.append(
+                f"The coder session FAILED and is not usable: {error}\n"
+                "This is a harness or credential fault, not something to steer around: write "
+                "your report and say what happened."
+            )
+        else:
+            parts.append(
+                "The coder's turn ended. Its narration:\n\n"
+                + ((text or "").strip() or "(no narration; inspect the worktree with read_file)")
+            )
+    questions = session.take_questions() if hasattr(session, "take_questions") else []
+    for question in questions:
+        parts.append(
+            f"[coder asks] {question}\n\nAnswer with drive_coder — while the question is open, "
+            "your message reaches the coder inside the turn it is running."
         )
-    session._check_coder_last = now
-    if status is None:
+    return parts, failed, turn_read
+
+
+async def execute_wait_coder(session: Any, arguments: Mapping[str, Any]) -> ToolOutcome:
+    """Park inside the tool call until the coder has something for the lead (replaces polling).
+
+    ``check_coder`` answered at once and was rate-limited, and a refusal costs a model turn as
+    surely as an answer: slot 6 (2026-09-15) made 134 checks (114 refused), 47 mid-turn steers,
+    31 refused submits and 9 refused ``turn_end`` calls at a 3-10 s cadence, because a loop with
+    no way to let time pass emits a tool call to do it. The fix every harness that solved this
+    converged on (Codex ``wait_agent``) is a **blocking wait with early wake**: parked, it costs
+    nothing; it returns the moment the coder's turn ends, the coder asks, or a human steer lands;
+    and a short timeout is raised to a floor instead of being refused, so no calling pattern can
+    reintroduce a tight loop. Every return states elapsed time, which is the lead's clock.
+    """
+    if not hasattr(session, "wait_for_event"):
         return ToolOutcome(
             text="This coder session does not run in the background; drive_coder returns its "
             "narration directly.",
             is_error=True,
         )
-    if status == "idle":
-        return ToolOutcome(
-            text="You have not sent the coder anything yet. Use drive_coder with what it should do."
+    timeout, note = _wait_timeout(arguments)
+    started = time.monotonic()
+    reason = await session.wait_for_event(timeout)
+    waited = time.monotonic() - started
+    header = f"[waited {_fmt_s(waited)} of {_fmt_s(timeout)}{note}; {_coder_clock(session)}]"
+    parts, failed, turn_read = _read_coder_news(session)
+    if reason == "steer":
+        parts.append(
+            "A human steer for you has arrived; it is delivered right after this result."
         )
-    if status == "working":
-        return ToolOutcome(
-            text=(
-                "The coder is still working — it will be some minutes. Read its last diff, plan "
-                "the next link, or draft your report; there is nothing further to learn here "
-                "until it stops."
+    elif reason == "timeout":
+        parts.append(
+            f"No news in {_fmt_s(timeout)}: the coder is still working. Carry on with other work, "
+            "or call wait_coder again — a longer wait costs no more than a short one."
+        )
+    elif reason == "idle" and not parts:
+        parts.append(
+            "The coder is not working and has nothing unread, so there is nothing to wait for. "
+            "Give it work with drive_coder, inspect the tree with read_file, or submit_for_review."
+        )
+    elif turn_read and not failed and getattr(session, "drive_status", None) == "working":
+        parts.append("It has already started its next turn on the message(s) you queued.")
+    elif turn_read and not failed:
+        parts.append(
+            "It has stopped. Inspect the tree with read_file, drive_coder the next change, or "
+            "submit_for_review."
+        )
+    return ToolOutcome(text=header + "\n\n" + "\n\n".join(parts), is_error=failed)
+
+
+async def _wait_before_submit(session: Any) -> tuple[str, ToolOutcome | None]:
+    """Hold a submit until the coder stops, so the gate never judges a half-written tree.
+
+    Returns ``(narration_prefix, None)`` to proceed, or ``("", outcome)`` when the lead needs
+    to act first (the coder asked something, a steer arrived, it failed, or it is still working
+    at the maximum wait). Nothing here spends a submission.
+    """
+    _, _, maximum = coder_wait_limits_s()
+    started = time.monotonic()
+    narration: list[str] = []
+    while getattr(session, "drive_status", None) == "working":
+        remaining = maximum - (time.monotonic() - started)
+        if remaining <= 0:
+            return "", ToolOutcome(
+                text=(
+                    f"Not submitted: the coder is still working after {_fmt_s(maximum)} "
+                    f"({_coder_clock(session)}). Call wait_coder, then submit once it stops."
+                    + ("\n\n" + "\n\n".join(narration) if narration else "")
+                )
             )
-        )
-    text, error = session.take_drive_result()
-    if error is not None:
-        # The coder DIED and the lead is told so. On 2026-09-09 a Claude-harness session whose
-        # credential ran out returned the CLI's own billing string with `is_error` discarded, and
-        # the lead spent three drives steering a corpse at $0 before giving up — then recorded the
-        # failure with a confidently wrong cause.
-        return ToolOutcome(
-            text=(
-                f"The coder session FAILED and is not usable: {error}\n"
-                "This is a harness or credential fault, not something to steer around. Do not "
-                "keep sending it instructions — write your report and say what happened."
-            ),
-            is_error=True,
-        )
-    return ToolOutcome(
-        text=(text or "").strip()
-        or "(the coder stopped without narration; inspect the worktree with read_file, or "
-        "submit_for_review to run the gate.)"
-    )
+        reason = await session.wait_for_event(remaining)
+        parts, failed, _ = _read_coder_news(session)
+        if failed or reason in ("question", "steer") or (
+            parts and any(p.startswith("[coder asks]") for p in parts)
+        ):
+            if reason == "steer":
+                parts.append("A human steer for you has arrived; it is delivered right after this.")
+            return "", ToolOutcome(
+                text=(
+                    "Not submitted yet — something needs you first:\n\n"
+                    + "\n\n".join(narration + parts)
+                    + ("" if failed else "\n\nsubmit_for_review again once that is settled.")
+                ),
+                is_error=failed,
+            )
+        narration.extend(parts)
+    waited = time.monotonic() - started
+    if not narration and waited < 1:
+        return "", None
+    prefix = f"[waited {_fmt_s(waited)} for the coder to stop before running the gate]\n\n"
+    if narration:
+        prefix += "\n\n".join(narration) + "\n\n"
+    return prefix, None
 
 
 async def execute_submit(session: Any, cycle: "LeadCycle | None" = None) -> ToolOutcome:
@@ -1447,22 +1811,34 @@ async def execute_submit(session: Any, cycle: "LeadCycle | None" = None) -> Tool
     on gate-pass ∧ review-pass (§9.9 commit ⇔ gate ∧ review — the lead never self-approves).
     Returns a verdict the lead diagnoses: a gate failure (fix via drive_coder), a review rejection
     (drive_coder or respond_to_review), or a successful commit. Bounded by ``session.submit_cap``
-    (each submit runs the gate twice + a co-lead review — expensive)."""
+    (each submit runs the gate twice + a co-lead review — expensive).
+
+    **Waits for a working coder first.** The gate reads the WORKING TREE, so a gate run while
+    the coder is mid-write would run pytest twice and a paid co-lead review over a half-written
+    tool and reject it for a defect nobody wrote. It used to *refuse* instead, and a refusal
+    returns at once and costs a model turn: slot 6 (2026-09-15) was refused 31 times. Waiting is
+    what the lead meant by submitting, and nothing is spent until the gate actually runs."""
+    prefix = ""
     if getattr(session, "drive_status", None) == "working":
-        # The gate reads the WORKING TREE, so submitting while the coder is mid-write would run
-        # pytest twice and a paid co-lead review over a half-written tool and reject it for a
-        # defect nobody wrote. Nothing guarded this before 2026-09-12 because the seed drive was
-        # blocking: a coder could not be working while the lead acted. Backgrounding that drive
-        # (so the lead keeps its turn) is what makes the race reachable, so the guard lands with
-        # it. Budget-free — a refusal is not a submission.
-        return ToolOutcome(
-            text=(
-                "The coder is still working, and the gate reads the working tree — submitting now "
-                "would judge a half-written tool. Submit once it has stopped; check_coder reports "
-                "when that is, within its rate limit."
-            ),
-            is_error=True,
-        )
+        if not hasattr(session, "wait_for_event"):
+            return ToolOutcome(
+                text=(
+                    "The coder is still working, and the gate reads the working tree. Submit "
+                    "once it has stopped."
+                ),
+                is_error=True,
+            )
+        prefix, blocked = await _wait_before_submit(session)
+        if blocked is not None:
+            return blocked
+    outcome = await _submit_now(session, cycle)
+    if prefix:
+        outcome.text = prefix + outcome.text
+    return outcome
+
+
+async def _submit_now(session: Any, cycle: "LeadCycle | None") -> ToolOutcome:
+    """The gate + review + commit half of :func:`execute_submit`, over a tree nobody is writing."""
     if getattr(session, "last_commit_sha", None) is not None and not _has_pending_changes(session):
         # The tool already landed and nothing has changed since. Submitting again would scan an
         # empty changeset and then ask `approve_edit` to commit nothing, which exits non-zero and
@@ -1724,7 +2100,6 @@ class LeadCycleOutcome:
 
     filed: str | None
     report: Any | None = None
-    verdict: ReviewVerdict | None = None
     decision: AuthoringDecision | None = None
     authored: list[MergeFlowResult] = field(default_factory=list)
     committed: int = 0
@@ -2121,6 +2496,11 @@ class SandboxToolProvider:
     ``ToolResult`` accumulates in ``results`` for memory/peer-summary use.
     """
 
+    # Class-level defaults so a provider built without __init__ (tests) reads as unreceipted.
+    receipts: Any | None = None
+    receipt_source: str | None = None
+    extra_tools: Sequence[ExtraTool] = ()
+
     def __init__(
         self,
         registry: Any,  # ToolkitRegistry — avoid import cycle
@@ -2134,10 +2514,18 @@ class SandboxToolProvider:
         model: str = "",
         figure_sink: list[FigureRef] | None = None,
         report_workspace: ReportWorkspace | None = None,
+        receipts: Any | None = None,
+        receipt_source: str | None = None,
+        extra_tools: Sequence[ExtraTool] = (),
     ) -> None:
         self.registry = registry
         self.sandbox = sandbox
         self.cwd = cwd
+        # Provenance (P1): the run's ReceiptStore and this agent's source key. Every tool call
+        # mints receipts; the model sees each result labelled with its handle.
+        self.receipts = receipts
+        self.receipt_source = receipt_source
+        self.extra_tools = list(extra_tools)
         # When a human_handler is wired, expose the shared ask_human tool (§9.7).
         self.human_handler = human_handler
         # V-4: the agent's append-only figure catalog (its "self" source). Figures produced by
@@ -2188,7 +2576,8 @@ class SandboxToolProvider:
         if self.report_workspace is not None:
             defs.append(
                 edit_report_tool_def(
-                    self.report_workspace.prose_fields, self.report_workspace.status_values
+                    self.report_workspace.prose_fields, self.report_workspace.status_values,
+                    self.report_workspace.report_model, self.report_workspace.edit_description,
                 )
             )
             defs.append(review_report_tool_def())
@@ -2196,19 +2585,27 @@ class SandboxToolProvider:
             # it validates: without it the loop ended on "no tool calls", and an unwritten report
             # was composed on the model's behalf.
             defs.append(turn_end_tool_def())
+        defs.extend(definition for definition, _ in getattr(self, "extra_tools", ()))
         return defs
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
         # ``data_catalog`` is a registry tool here — it falls through to the sandbox path below,
         # not a special in-process branch (only the sandbox-less lead runs it in-process).
+        extra = await _run_extra_tool(getattr(self, "extra_tools", ()), name, arguments)
+        if extra is not None:
+            return extra
         if name == ASK_HUMAN_TOOL:
-            return await execute_ask_human(
+            return _receipted(self.receipts, self.receipt_source, name, arguments, await execute_ask_human(
                 self.human_handler, self.asked_by, arguments, model=self.model
-            )
+            ), kind="human")
         if name == WEB_SEARCH_TOOL:
-            return await execute_web_search(self.web_source, arguments)
+            return _receipted(self.receipts, self.receipt_source, name, arguments,
+                              await execute_web_search(self.web_source, arguments))
         if name == WEB_FETCH_TOOL:
-            return await execute_web_fetch(self.web_source, arguments)
+            return await _web_receipted(
+                self.receipts, self.receipt_source, arguments,
+                await execute_web_fetch(self.web_source, arguments),
+            )
         if name == EDIT_REPORT_TOOL:
             return await execute_edit_report(self.report_workspace, arguments)
         if name == REVIEW_REPORT_TOOL:
@@ -2265,9 +2662,11 @@ class SandboxToolProvider:
         call_timeout = ceiling_fn(kind) if ceiling_fn is not None else self.timeout_s
 
         t0 = time.monotonic()
+        state = None
         if not self.registry.is_known(kind):
             raw = {"exit_code": 127, "stderr": f"Tool not registered: {kind}", "stdout": ""}
         elif self.registry.is_mcp(kind):
+            state = await self._inputs_before(args)
             raw = await self.sandbox.call_mcp_tool(kind, args, timeout_s=call_timeout)
         else:
             spec = self.registry.spec(kind)
@@ -2276,6 +2675,7 @@ class SandboxToolProvider:
                 if arg_name in schema_props and not args.get(arg_name):
                     args[arg_name] = path
             self._redirect_figure_args(spec["fn"], args, schema_props)
+            state = await self._inputs_before(args)
             raw = await self.sandbox.call_tool(
                 spec["module"], spec["fn"], args, timeout_s=call_timeout
             )
@@ -2283,6 +2683,24 @@ class SandboxToolProvider:
 
         raw = _normalize_tool_raw(raw)
         figures, figure_notes = _parse_tool_figures(raw.get("figures"))
+        exit_code = raw.get("exit_code", 1)
+        if exit_code == 0:
+            text = raw.get("stdout", "") or "(tool returned no output)"
+        else:
+            text = f"[exit {exit_code}]\n{raw.get('stderr') or raw.get('stdout') or '(no error detail)'}"
+        header = ""
+        provenance_notes: list[str] = []
+        if self.receipts is not None and self.receipt_source is not None:
+            # The runtime's receipts, not the tool's word: figures come back carrying the hash of
+            # the file on disk, and a figure whose file is absent is dropped here.
+            minted = await asyncio.to_thread(
+                receipt_call, self.receipts, source=self.receipt_source, produced_by=kind,
+                args=args, text=text, failed=exit_code != 0, state=state, figures=figures,
+                cwd=self.cwd, toolkit_root=getattr(self.registry, "_root", None),
+            )
+            figures = minted.figures
+            provenance_notes = minted.notes
+            header = minted.header() + "\n"
         # V-4: accumulate produced figures into the agent's append-only "self" catalog (deduped by
         # path+sha), so they persist across rounds and stay citable via review_report/edit_report.
         if self.figure_sink is not None and figures:
@@ -2296,20 +2714,28 @@ class SandboxToolProvider:
             tool_name=kind,
             stdout=raw.get("stdout", ""),
             stderr=raw.get("stderr", ""),
-            exit_code=raw.get("exit_code", 1),
+            exit_code=exit_code,
             figures=figures,
             elapsed_s=elapsed,
         )
         self.results.append(result)
-        if result.exit_code == 0:
-            text = result.stdout or "(tool returned no output)"
-        else:
-            text = f"[exit {result.exit_code}]\n{result.stderr or result.stdout or '(no error detail)'}"
+        text = header + text
         # Surface any dropped figures so the analyst notices its plotter emitted a bad
         # FigureRef (rather than the figure silently vanishing) — never fatal (F4).
         if figure_notes:
             text += f"\n[figure capture: {len(figure_notes)} dropped] " + " | ".join(figure_notes)
+        if provenance_notes:
+            text += "\n[provenance] " + " | ".join(provenance_notes)
         return ToolOutcome(text=text, is_error=result.exit_code != 0, figures=figures, result=result)
+
+    async def _inputs_before(self, args: Mapping[str, Any]) -> Any:
+        """Hash what the call's arguments name, before it runs (data roots and outputs skipped)."""
+        if self.receipts is None or self.receipt_source is None:
+            return None
+        skip = set(_observation_path_args()) | set(_FIGURE_PATH_ARGS)
+        return await asyncio.to_thread(
+            inputs_before, self.receipts, args, cwd=self.cwd, skip_keys=skip
+        )
 
     def _redirect_figure_args(self, fn: str, args: dict, schema_props: Mapping) -> None:
         """Force figure-output paths under the worker's ``figures_dir``.
@@ -2757,6 +3183,10 @@ class ReadOnlyToolProvider:
     the local knowledge base via the retrieval backend. No science sandbox is involved.
     """
 
+    receipts: Any | None = None
+    receipt_source: str | None = None
+    extra_tools: Sequence[ExtraTool] = ()
+
     def __init__(
         self,
         *,
@@ -2764,6 +3194,7 @@ class ReadOnlyToolProvider:
         retrieval: Any | None = None,
         web_source: Any | None = None,
         include_text_search: bool = True,
+        include_open_paper: bool = True,
         include_data_catalog: bool = False,
         include_plan_and_debate: bool = False,
         authoring_session: Any | None = None,
@@ -2774,7 +3205,15 @@ class ReadOnlyToolProvider:
         model: str = "",
         editable_file: Path | None = None,
         turn_end_validator: Callable[[], list[str]] | None = None,
+        receipts: Any | None = None,
+        receipt_source: str | None = None,
+        extra_tools: Sequence[ExtraTool] = (),
     ) -> None:
+        # Provenance (P1): read results are receipted like any tool output, so what a role read
+        # can ground what it writes. Role-specific tools arrive through `extra_tools`.
+        self.receipts = receipts
+        self.receipt_source = receipt_source
+        self.extra_tools = list(extra_tools)
         self.roots = [Path(r).resolve() for r in roots]
         # F5e: the ONE file this role may write, and what must hold before its turn can end.
         # Set only for the reviewer, on its own `report.tex`. `file_edit` never takes a path from
@@ -2824,6 +3263,9 @@ class ReadOnlyToolProvider:
         # co-lead reviewer omits text_search (roots = the toolkit worktree instead).
         # text_search + open_paper are gated together as the knowledge-base toolset.
         self.include_text_search = include_text_search
+        # The reviewer reads papers as receipted text through its own read_paper (extra_tools);
+        # the native-PDF open_paper stays off for it (human ruling, 2026-09-24).
+        self.include_open_paper = include_open_paper
         # Paths opened via open_paper this session — the reviewer's cited_paths are
         # intersected with this so a citation can only name a paper actually read.
         self.opened_paths: list[Path] = []
@@ -2906,6 +3348,7 @@ class ReadOnlyToolProvider:
                     },
                 }
             )
+        if self.include_text_search and self.include_open_paper:
             definitions.append(
                 {
                     "name": "open_paper",
@@ -2942,7 +3385,7 @@ class ReadOnlyToolProvider:
                 definitions.append(plan_and_debate_tool_def())
         if self.authoring_session is not None or self._authoring_declared():
             definitions.append(drive_coder_tool_def())
-            definitions.append(check_coder_tool_def())
+            definitions.append(wait_coder_tool_def())
             definitions.append(submit_tool_def())
             definitions.append(respond_to_review_tool_def())
         if self.cycle is not None and self.cycle.authoring_enabled:
@@ -2953,7 +3396,8 @@ class ReadOnlyToolProvider:
         if self.report_workspace is not None:
             definitions.append(
                 edit_report_tool_def(
-                    self.report_workspace.prose_fields, self.report_workspace.status_values
+                    self.report_workspace.prose_fields, self.report_workspace.status_values,
+                    self.report_workspace.report_model, self.report_workspace.edit_description,
                 )
             )
             definitions.append(review_report_tool_def())
@@ -2961,6 +3405,7 @@ class ReadOnlyToolProvider:
             definitions.append(file_edit_tool_def(self.editable_file))
         if self.turn_end_validator is not None:
             definitions.append(turn_end_tool_def())
+        definitions.extend(definition for definition, _ in getattr(self, "extra_tools", ()))
         return definitions
 
     def _authoring_declared(self) -> bool:
@@ -2991,7 +3436,26 @@ class ReadOnlyToolProvider:
             return False
         return any(resolved == root or root in resolved.parents for root in self.roots)
 
+    #: What a read-only role reads is evidence it may cite; its harness tools are not.
+    _RECEIPTED: dict[str, str] = {
+        "read_file": "result", "list_dir": "result", "text_search": "result",
+        DATA_CATALOG_TOOL: "result", WEB_SEARCH_TOOL: "result", WEB_FETCH_TOOL: "web",
+        ASK_HUMAN_TOOL: "human", PLAN_AND_DEBATE_TOOL: "human",
+    }
+
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
+        extra = await _run_extra_tool(getattr(self, "extra_tools", ()), name, arguments)
+        if extra is not None:
+            return extra
+        outcome = await self._execute(name, arguments)
+        kind = self._RECEIPTED.get(name)
+        if kind is None or outcome.is_error:
+            return outcome
+        if kind == "web":
+            return await _web_receipted(self.receipts, self.receipt_source, arguments, outcome)
+        return _receipted(self.receipts, self.receipt_source, name, arguments, outcome, kind=kind)
+
+    async def _execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
         if name == DATA_CATALOG_TOOL:
             return await execute_data_catalog(arguments)
         if name == ASK_HUMAN_TOOL:
@@ -3002,13 +3466,13 @@ class ReadOnlyToolProvider:
             return await execute_plan_and_debate(
                 self.human_handler, self.asked_by, arguments, model=self.model
             )
-        if name in (DRIVE_CODER_TOOL, CHECK_CODER_TOOL, SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL):
+        if name in (DRIVE_CODER_TOOL, WAIT_CODER_TOOL, SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL):
             if self.authoring_session is None:
                 return ToolOutcome(text=self._no_session_text(), is_error=True)
             if name == DRIVE_CODER_TOOL:
                 return await execute_drive_coder(self.authoring_session, arguments)
-            if name == CHECK_CODER_TOOL:
-                return await execute_check_coder(self.authoring_session)
+            if name == WAIT_CODER_TOOL:
+                return await execute_wait_coder(self.authoring_session, arguments)
             if name == SUBMIT_TOOL:
                 return await execute_submit(self.authoring_session, self.cycle)
             return await execute_respond_to_review(self.authoring_session, arguments)
@@ -3072,7 +3536,7 @@ class ReadOnlyToolProvider:
             text = "\n".join(str(p) for p in paths) or "(no local matches)"
             return ToolOutcome(text=text)
 
-        if name == "open_paper":
+        if name == "open_paper" and self.include_text_search and self.include_open_paper:
             target = Path(str(arguments.get("path", "")))
             resolved = target.resolve()
             if not self._allowed(target):
@@ -3115,118 +3579,5 @@ class ReadOnlyToolProvider:
             return await execute_web_search(self.web_source, arguments)
         if name == WEB_FETCH_TOOL:
             return await execute_web_fetch(self.web_source, arguments)
-
-        return ToolOutcome(text=f"unknown tool: {name}", is_error=True)
-
-
-# ----------------------------------------------------------------------------
-# Literature source tools — librarian I/O (in-process QuerySources).
-# ----------------------------------------------------------------------------
-
-
-class SourceToolProvider:
-    """Literature-search tools for the librarian: external sources + local knowledge base.
-
-    ``search_literature`` runs one configured ``QuerySource`` (arxiv/nasa_ads/web);
-    ``text_search`` queries already-ingested papers. Accumulated results are exposed
-    on ``results`` for downstream ingestion by the graph node.
-    """
-
-    def __init__(self, sources: Mapping[str, Any], *, retrieval: Any | None = None, max_chars: int = 6000) -> None:
-        self.sources = dict(sources)
-        self.retrieval = retrieval
-        self.max_chars = max_chars
-        self.results: list[Any] = []  # SearchResult accumulator
-
-    def tool_definitions(self) -> list[dict]:
-        return [
-            {
-                "name": "search_literature",
-                "description": (
-                    "Search one external literature source for papers and add the hits to this "
-                    "run's results. Sources: " + ", ".join(self.sources) + "."
-                ),
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "source": {
-                            "type": "string",
-                            "enum": list(self.sources),
-                            "description": "The literature source to query.",
-                        },
-                        "query": {
-                            "type": "string",
-                            "description": (
-                                "A short keyword query of 4–8 terms; arXiv and ADS match on "
-                                "keywords."
-                            ),
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of papers to return (default 10).",
-                        },
-                    },
-                    "required": ["source", "query"],
-                },
-            },
-            {
-                "name": "text_search",
-                "description": (
-                    "Search the local knowledge base of already-ingested papers; returns "
-                    "matching paper paths."
-                ),
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Keywords or a phrase to match against ingested papers.",
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of paper paths to return (default 5).",
-                        },
-                    },
-                    "required": ["query"],
-                },
-            },
-        ]
-
-    async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
-        if name == "search_literature":
-            source = self.sources.get(str(arguments.get("source", "")))
-            if source is None:
-                return ToolOutcome(text=f"unknown source: {arguments.get('source')}", is_error=True)
-            # A source provider raising (network, rate limit, ADS 404, malformed
-            # response) must not kill the whole ReAct loop/run — surface it as an
-            # error outcome so the model can retry, switch source, or stop. Mirrors
-            # the per-source guard in LibrarianIOAgent.search().
-            try:
-                results = await source.search(
-                    str(arguments.get("query", "")), limit=int(arguments.get("limit", 10))
-                )
-            except Exception as exc:  # noqa: BLE001 — degrade one source, keep the loop alive
-                return ToolOutcome(
-                    text=f"source '{arguments.get('source')}' failed: {type(exc).__name__}: {exc}",
-                    is_error=True,
-                )
-            self.results.extend(results)
-            lines = [f"- {r.title} ({r.source}) {r.url}\n  {(r.abstract or '')[:300]}" for r in results]
-            return ToolOutcome(text="\n".join(lines)[: self.max_chars] or "(no results)")
-
-        if name == "text_search":
-            from auto_research.retrieval import text_search_paths
-
-            try:
-                paths = await text_search_paths(
-                    str(arguments.get("query", "")),
-                    limit=int(arguments.get("limit", 5)),
-                    backend=self.retrieval,
-                )
-            except Exception as exc:  # noqa: BLE001 — keep the loop alive
-                return ToolOutcome(
-                    text=f"local text_search failed: {type(exc).__name__}: {exc}", is_error=True
-                )
-            return ToolOutcome(text="\n".join(str(p) for p in paths) or "(no local matches)")
 
         return ToolOutcome(text=f"unknown tool: {name}", is_error=True)

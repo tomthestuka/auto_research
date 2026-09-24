@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
@@ -33,11 +32,10 @@ from auto_research.agents.react import (
     ReportWorkspace,
     lead_turn_problems,
     SUBMIT_TOOL,
+    WAIT_CODER_TOOL,
     SandboxToolProvider,
-    SourceToolProvider,
     _written_report,
 )
-from auto_research.consensus import IODebateToConverge
 from auto_research.env import react_grace_rounds, ledger_caps
 from auto_research.monitor import RunMonitor
 from auto_research.models import (
@@ -59,17 +57,16 @@ from auto_research.schemas import (
     GateReport,
     MergeFlowResult,
     ResearchRequest,
-    ReviewVerdict,
-    SearchRequest,
-    SearchResult,
     ToolResult,
     ToolReviewVerdict,
     ToolSpec,
-    document_from_file,
 )
 from auto_research.sources import ArxivSource, NasaAdsSource, QuerySource, WebSource
-from auto_research.sources.downloads import download_and_ingest_result, papers_dir
+from auto_research.env import papers_dir
 from auto_research.storage import MemoryRecord, Storage
+from auto_research.schemas.literature import LiteratureReport
+from auto_research.provenance import ReceiptStore, ScopedLookup, parse_bindings
+from auto_research.schemas.artifacts import Receipt
 
 
 class CallableModel(Protocol):
@@ -760,218 +757,234 @@ class AgentRole:
 
 
 class ReviewerAgent(AgentRole):
-    """Reviewer role: compare request, literature, and analysis into a verdict."""
+    """Reviewer role: one loop per review, one report, filed through ``turn_end`` (§2b).
+
+    Each review — the literature review and the analysis review — is a single ReAct loop whose
+    only exit is ``turn_end``. The reviewer writes its :class:`ReviewerReport` inside the loop with
+    ``edit_report``; at the analysis review, a finalizing report is rendered to LaTeX and compiled
+    by the ``turn_end`` check itself, so the run's report is validated at the role's edge rather
+    than composed after it. Nothing is composed on the reviewer's behalf: a loop that ends without
+    an accepted ``turn_end`` raises.
+
+    What this replaced (2026-09-24): the verdict came from a structured call AFTER a loop whose
+    ``turn_end`` validated nothing (``lambda: []``), the JSONL from a second one-shot call, and the
+    LaTeX from a second loop — three conversations for one decision, two of them unvalidated.
+    """
 
     role = "reviewer"
+    #: The run's receipt store and this role's work folder; the runtime sets both.
+    receipts: Any | None = None
+    report_dir: Path | None = None
 
     async def review(
         self,
         request: ResearchRequest,
         *,
+        stage: str = "analysis",
+        literature: LiteratureReport | None = None,
+        literature_receipts: Mapping[str, Any] | None = None,
         report: AnalystReport | None = None,
-    ) -> ReviewVerdict:
-        """Return a review verdict for the supplied research state.
+        iterations_left: int = 0,
+        render: Any | None = None,
+    ) -> "ReviewerReport":
+        """Run one review and return the report the reviewer filed.
 
-        The reviewer pulls literature itself: it searches the local knowledge base
-        (``text_search``) and reads chosen papers (``open_paper``) inside its ReAct
-        loop, so the papers it opens arrive as ``DocumentRef`` attachments via the
-        loop and are forwarded into the terminal verdict call.
+        ``stage`` is ``"literature"`` or ``"analysis"``; ``iterations_left`` is what remains of
+        the loop edge this stage controls; ``render`` (a ``ReviewerRender``) makes the analysis
+        review's final report part of its ``turn_end`` check. The reviewer may cite its own
+        receipts, the librarian's, and every receipt the lead's report cites, with their ancestors.
         """
+        from auto_research.agents.reviewer_tools import (
+            REVIEWER_EDIT_DESCRIPTION,
+            REVIEWER_REPORT_FIELDS,
+            REVIEWER_SOURCE,
+            REVIEWER_STATUS_VALUES,
+            reviewer_draft_view,
+            reviewer_scope,
+            reviewer_text_view,
+            reviewer_turn_problems,
+        )
+        from auto_research.agents.paper_tools import PaperReader
+        from auto_research.provenance import ScopedLookup, check_report_fields
+        from auto_research.schemas.review import ReviewerReport
+
+        if self.tools is None or self.receipts is None or self.report_dir is None:
+            raise RuntimeError(
+                "the reviewer needs its tools, the run's receipt store and a report folder; "
+                "the runtime wires all three (graph/runtime.py)"
+            )
+        store = self.receipts
+        figure_handles = _receipt_handles_for_figures(store, report.figures if report else ())
+        request_handle = _request_receipt(store, request)
+        admitted = [
+            request_handle,
+            *(literature_receipts or {}),
+            *_cited_handles(report, REVIEWER_SOURCE),
+            *figure_handles,
+        ]
+        lookup = ScopedLookup(store, own_source=REVIEWER_SOURCE, admitted=admitted)
+        self._reviews = getattr(self, "_reviews", 0) + 1
+        workspace = ReportWorkspace(
+            report_path=Path(self.report_dir) / f"review{self._reviews}_{stage}.jsonl",
+            report_model=ReviewerReport,
+            catalog={},
+            own_source=REVIEWER_SOURCE,
+            prose_fields=REVIEWER_REPORT_FIELDS,
+            status_values=REVIEWER_STATUS_VALUES,
+            receipts=lookup,
+            receipt_source=REVIEWER_SOURCE,
+            itemised=(),
+            provenance_check=lambda r: check_report_fields(
+                r.prose_fields(), lookup, own_source=REVIEWER_SOURCE, itemised=(),
+                scope=reviewer_scope(lookup),
+            ).problems,
+            draft_view=(
+                reviewer_draft_view(render.report_dir, render.run_id, lookup)
+                if render is not None and "tex" in render.formats and stage == "analysis"
+                else reviewer_text_view(lookup)
+            ),
+            edit_description=REVIEWER_EDIT_DESCRIPTION,
+        )
+        accepted: list[bool] = []
+
+        def validator() -> list[str]:
+            problems = reviewer_turn_problems(
+                workspace.written_report, lookup=lookup, scope=reviewer_scope(lookup), stage=stage,
+                iterations_left=iterations_left, render=render,
+            )
+            if not problems:
+                accepted.append(True)
+            return problems
 
         payload = {
             "request": request.model_dump(mode="json"),
+            "request_receipt": request_handle,
+            "review_stage": stage,
+            "your_turn": _review_instruction(stage, iterations_left),
+            "literature_report": literature.model_dump(mode="json") if literature else None,
+            "literature_documents": [
+                {"handle": h, "title": getattr(r, "title", None), "ids": getattr(r, "ids", {})}
+                for h, r in (literature_receipts or {}).items()
+            ],
             "analysis_report": report.model_dump(mode="json") if report else None,
+            "figures_you_can_place": [
+                {"handle": h, "caption": store.get(h).caption} for h in figure_handles
+            ],
         }
-        images = report.figures if report else ()
-
-        if self.tools is None:
-            return await self._call(
-                payload, ReviewVerdict, images=images, action="review"
-            )
-
-        # Investigate run artifacts + the knowledge base via read-only tools (seeing
-        # the analysis figures from the first turn), opening the papers it needs, then
-        # issue the verdict grounded in that investigation and the opened papers.
         seed = [
             ModelMessage(role="system", content=self.prompt),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
-        # A9: the investigation ends on an explicit signal, not on silence. Without a terminal
-        # tool `_continuation_for` returns None immediately, so an EMPTY or TRUNCATED reviewer
-        # turn reads as "finished investigating" — the F5 defect class that killed slot 3, and
-        # measured here: 17 of the 184 silent turns across 221 runs are this loop ending that way.
-        #
-        # The validator has nothing to check, and says so rather than pretending: the reviewer's
-        # material is the verdict composed AFTER this loop, so there is no artifact to validate
-        # yet. What `turn_end` buys is the classification — a turn that stopped by accident is
-        # continued, a turn that meant to stop says so.
-        previous_validator = getattr(self.tools, "turn_end_validator", None)
-        self.tools.turn_end_validator = lambda: []
+        provider = self.tools
+        saved = {
+            name: getattr(provider, name, None)
+            for name in ("report_workspace", "turn_end_validator", "receipts", "receipt_source")
+        }
+        saved_extra = list(getattr(provider, "extra_tools", ()) or ())
+        # The knowledge base the reader takes titles and identifiers from: the provider's, or the
+        # default database `text_search` itself falls back to, so the two never disagree.
+        storage = getattr(getattr(provider, "retrieval", None), "storage", None) or Storage()
+        reader = PaperReader(
+            store, lookup, source=REVIEWER_SOURCE, allowed=provider._allowed,
+            storage=storage,
+            unreadable_action="state it as a limitation if the review depended on it",
+        )
+        provider.report_workspace = workspace
+        provider.turn_end_validator = validator
+        provider.receipts = store
+        provider.receipt_source = REVIEWER_SOURCE
+        provider.extra_tools = [*saved_extra, reader.tool()]
         try:
-            messages, _, docs = await self._react(
-                seed_messages=seed, tools=self.tools, action="review",
-                cap=_react_loop_cap(), images=images,
-                free_tools=frozenset({TURN_END_TOOL}),
+            await self._react(
+                seed_messages=seed,
+                tools=provider,
+                action=f"review_{stage}",
+                cap=_react_loop_cap(),
+                images=report.figures if report else (),
+                free_tools=frozenset({TURN_END_TOOL, EDIT_REPORT_TOOL, REVIEW_REPORT_TOOL}),
+                absolute_cap=_react_loop_absolute_cap(),
+                require_terminal=True,  # turn_end is the only exit
                 terminal_tools=frozenset({TURN_END_TOOL}),
             )
         finally:
-            self.tools.turn_end_validator = previous_validator
-        return await self._call_over_messages(
-            messages, ReviewVerdict, action="review", images=images, documents=docs,
-            tools=self.tools,
+            for name, value in saved.items():
+                setattr(provider, name, value)
+            provider.extra_tools = saved_extra
+        filed = workspace.written_report
+        if not accepted or filed is None:
+            # A refusal or a transient provider stop ends the loop without a filed report; the
+            # budget case already raised inside `_react`. Either way nothing is composed here.
+            raise RuntimeError(f"the reviewer's {stage} review ended without an accepted turn_end")
+        await self._record(
+            f"reviewer.review_{stage}.filed", level=2,
+            summary=f"reviewer filed its {stage} review",
+            data={"report": filed.model_dump(mode="json"), "path": str(workspace.report_path)},
         )
+        return filed
 
-    async def compose_machine_report(
-        self,
-        request: ResearchRequest,
-        report: AnalystReport,
-        references: "list",
-        verdict: ReviewVerdict,
-        run_id: str,
-    ) -> "ResearchReport":
-        """Compose a structured machine-readable research report (JSONL handle).
 
-        After the LLM returns the parsed report, figures/references/run_id/created_at
-        are overwritten deterministically so machine refs are correct by construction.
-        Only the prose fields (title, abstract, sections, key_findings) are LLM-authored.
-        """
-        from datetime import UTC, datetime
+def _request_receipt(store: Any, request: ResearchRequest) -> str:
+    """The research request as an input receipt (``input:hN``), one per distinct text.
 
-        from auto_research.schemas.report import ResearchReport
+    The request's own numbers — an ObsID, an energy band the human named — reach every role's
+    task, and a role that repeats them grounds them like any other number.
+    """
+    text = request.question + (f"\n\n{request.context}" if request.context else "")
+    return store.mint_input(text, kind="human", produced_by="research_request").handle
 
-        payload = {
-            "output_format": "jsonl",
-            "output_format_instructions": (
-                "You are composing a structured machine-readable research report in JSON. "
-                "Populate title, abstract, sections (list of {heading, body}), and key_findings. "
-                "The runtime will overwrite figures, references, run_id, and created_at — "
-                "you may leave them as empty lists / empty string / now."
-            ),
-            "request": request.model_dump(mode="json"),
-            "analysis_report": report.model_dump(mode="json"),
-            "verdict_rationale": verdict.rationale,
-            "references": [r.model_dump(mode="json") for r in references],
-            "run_id": run_id,
-        }
-        result: ResearchReport = await self._call(
-            payload,
-            ResearchReport,
-            images=report.figures,
-            action="compose_machine_report",
-            overrides={
-                "run_id": run_id,
-                "request_question": request.question,
-                "verdict_rationale": verdict.rationale,
-                "created_at": datetime.now(UTC),
-            },
+
+def _review_instruction(stage: str, iterations_left: int) -> str:
+    """The reviewer's task for this review, with the budget the graph actually has left."""
+    if stage == "literature":
+        more = (
+            f"{iterations_left} further literature pass(es) remain."
+            if iterations_left > 0 else "No further literature passes remain."
         )
-        return result.model_copy(
-            update={
-                "run_id": run_id,
-                "figures": report.figures,
-                "references": references,
-            }
+        return (
+            "Review the literature report and dispatch the next step. Write your report with "
+            "edit_report — rationale plus follow_up, which is the analysts' task (or, with "
+            f"needs_more_literature, the librarian's next questions) — then call turn_end. {more}"
         )
+    more = (
+        f"{iterations_left} further analysis iteration(s) remain."
+        if iterations_left > 0 else "No further analysis iterations remain, so finalize."
+    )
+    return (
+        "Review the analysis report against the literature and decide. To send the analysts back, "
+        "set needs_analysis_rework with rationale and follow_up. To finalize, write the run's "
+        "report: title, abstract, sections, key_findings, figures and tables. Use review_report to "
+        f"see the draft as typeset, polish it once, then call turn_end. {more}"
+    )
 
-    async def author_latex_report(
-        self,
-        request: ResearchRequest,
-        report: AnalystReport,
-        staged_figures: "list[tuple]",
-        staged_papers: "list[tuple]",
-        verdict: ReviewVerdict,
-        *,
-        tex_path: Path,
-        validator,
-        roots: "Sequence[Path]",
-        cap: int,
-    ) -> Path:
-        """Author the LaTeX report by **editing the file**, ending on a validated ``turn_end``.
 
-        Replaces the recompose loop (F5e). That loop asked for a whole `LatexReport` through
-        structured output on every attempt, fed the previous attempt's compile errors back as
-        prose, and got a fresh document each time — which is how [D7] happened: the retry saw
-        `! Undefined control sequence.` with no macro named and re-emitted the same document.
-        Two problems the file-editing shape removes:
+def _receipt_handles_for_figures(store: Any, figures: Sequence[FigureRef]) -> list[str]:
+    """The receipt handle of each figure, matched by content hash (the lead cites FigureRefs)."""
+    by_sha = {r.sha256: r.handle for r in store.receipts(kind="figure")}
+    return list(dict.fromkeys(by_sha[f.sha256] for f in figures if f.sha256 in by_sha))
 
-        1. **A regeneration can silently undo an earlier fix.** Editing keeps every fix that
-           already landed, and `file_edit`'s targeted mode makes that the cheap path.
-        2. **`LatexReport` is structured output, and the contrast arm's reviewer cannot reliably
-           produce it.** `ResearchReport`/`AuthoringDecision` failed on `qwen3.8-max` at every
-           reasoning effort (2026-08-24: unresolved `$ref` in `list[Model]` fields, so the model
-           invented a shape and returned HTTP 200). Nothing here declares an output schema.
 
-        The validator is the door: figures resolve, links resolve, and pdflatex compiles. A
-        failing `turn_end` returns the specific errors and the loop continues with the tools.
-        """
-        from auto_research.agents.react import TURN_END_TOOL, FILE_EDIT_TOOL, ReadOnlyToolProvider
+def _cited_handles(report: AnalystReport | None, own_source: str) -> list[str]:
+    """Every receipt handle the lead's report cites in its prose."""
+    from auto_research.provenance import parse_bindings
 
-        fig_descriptions = [
-            {"relpath": relpath, "caption": figref.caption, "sha256": figref.sha256}
-            for figref, relpath in staged_figures
-        ]
-        payload = {
-            "task": (
-                "Write the LaTeX research report for this run, then end your turn. Draft it with "
-                f"`{FILE_EDIT_TOOL}`, read it back with `read_file`, and call `{TURN_END_TOOL}` "
-                "when it is complete — the harness then checks that every figure and link "
-                "resolves and that the document compiles, and tells you precisely what to fix if "
-                "it does not."
-            ),
-            # Carried over verbatim in substance from the retired `compose_latex_report`. Both
-            # clauses are fixes for real run-killers and neither is optional:
-            #
-            # [D6] the preamble list. `\lesssim` with no `amssymb` is a fatal compile error, and
-            # it exhausted `report_retry_cap` on Q21 (2026-08-10) — the run finished with a
-            # `report.tex` and no `report.pdf`. `prompts/reviewer.md` mandates the same list; the
-            # changelog records that BOTH were needed, so this is not redundant.
-            #
-            # The references clause is a no-fabrication guard: the References section is
-            # hyperlinks to the local PDFs actually used, never invented author/title text.
-            "format_requirements": (
-                "Write ordinary LaTeX source. Load graphicx, amsmath, amssymb and hyperref in the "
-                "preamble, plus any further package a symbol you use requires — amssymb carries "
-                "the relation symbols science prose reaches for (\\lesssim, \\gtrsim, \\simeq), "
-                "and a symbol whose package is absent is a fatal compile error that costs the "
-                "whole PDF. Use \\includegraphics{<relpath>} verbatim for each figure relpath "
-                "supplied below. Cite papers in prose in the body. The References section is a "
-                "list of hyperlinks to the local PDFs you used: for each supplied paper relpath "
-                "emit \\href{<relpath>}{<relpath>} using the relpath verbatim. Use ONLY the "
-                "supplied paper relpaths; add no \\cite, no \\begin{thebibliography}, and no "
-                "invented author/title text."
-            ),
-            "output_path": tex_path.name,
-            "request": request.model_dump(mode="json"),
-            "analysis_report": report.model_dump(mode="json") if report else None,
-            "verdict_rationale": verdict.rationale,
-            "figures": fig_descriptions,
-            "paper_links": [relpath for _, relpath in staged_papers],
-        }
-        provider = ReadOnlyToolProvider(
-            roots=list(roots),
-            include_text_search=False,
-            editable_file=tex_path,
-            turn_end_validator=validator,
-        )
-        seed = [
-            ModelMessage(role="system", content=self.prompt),
-            ModelMessage(role="user", content=_payload_text(payload)),
-        ]
-        await self._react(
-            seed_messages=seed,
-            tools=provider,
-            action="author_latex_report",
-            cap=cap,
-            images=report.figures if report else (),
-            # Both are free: the drafting is the work, and the validation must not compete with
-            # it for budget (F5c/D3).
-            free_tools=frozenset({FILE_EDIT_TOOL, TURN_END_TOOL}),
-            terminal_tools=frozenset({TURN_END_TOOL}),
-        )
-        return tex_path
+    if report is None:
+        return []
+    texts = [report.summary or "", report.uncertainty or "", report.rationale or "",
+             *(report.findings or [])]
+    return list(dict.fromkeys(
+        b.handle for text in texts for b in parse_bindings(text) if not b.handle.startswith("self:")
+    ))
+
 
 class LibrarianIOAgent(AgentRole):
-    """Librarian I/O role: compose search strategies, query external sources, and abstract papers."""
+    """Librarian: research the literature for a request in one loop, and file what it found.
+
+    One ReAct loop that ends only through ``turn_end`` (CLAUDE.md §2b), the same unit as every
+    other graph role. It plans what to look for, searches, opens papers and pages in full, and
+    writes a :class:`LiteratureReport` inside the loop whose findings cite what it read by handle.
+    Each document it opens is minted as a paper/web receipt in the run's receipt store
+    (:mod:`auto_research.sources.receipts`), and those receipts are handed on with the report.
+    """
 
     role = "librarian_io"
 
@@ -995,244 +1008,115 @@ class LibrarianIOAgent(AgentRole):
         )
         self.sources = dict(sources) if sources is not None else _default_sources()
         self.storage = storage or Storage()
+        # This librarian's working folder (set by the runtime): its per-pass report JSONL and the
+        # fetched web pages live here. Papers go to the shared papers dir, where the knowledge
+        # base points at them.
+        self.report_dir: Path | None = None
+        self.agent_key: str | None = None
+        self._pass = 0
+        # The run's ONE receipt store (the runtime sets it: `ReceiptStore.for_run(run_dir)`). Unwired
+        # — a standalone call with no run — the working folder stands in for the run directory, so
+        # the call still mints and checks real receipts, beside that folder and outside it.
+        self.receipts: ReceiptStore | None = None
+        # What the last pass read, by handle: the receipts its report cites.
+        self.last_receipts: dict[str, Receipt] = {}
 
-    async def compose_search_strategy(
+    async def research(
         self,
         request: ResearchRequest,
         *,
         follow_up: str | None = None,
-    ) -> SearchRequest:
-        """Compose a focused search strategy from a research request."""
+    ) -> LiteratureReport:
+        """Research the literature for ``request`` and return the report the librarian filed.
 
-        payload = {
-            "research_request": request.model_dump(mode="json"),
-            "follow_up": follow_up,
-        }
-        return await self._call(payload, SearchRequest, action="compose_search_strategy")
-
-    async def gather_literature(
-        self,
-        request: ResearchRequest,
-        *,
-        follow_up: str | None = None,
-    ) -> list[SearchResult]:
-        """ReAct over literature sources: search, read results, refine, repeat.
-
-        Runs an inner loop over a :class:`SourceToolProvider` (arxiv/ADS/web +
-        local text_search), letting the model iteratively refine its queries until
-        it has a focused set, then returns the de-duplicated accumulated results.
-        Falls back to the single-shot compose→search path when no sources are
-        configured.
+        ``follow_up`` is the reviewer's literature re-loop instruction, when there is one. The loop
+        either files a report through ``turn_end`` or raises ``ReactBudgetExhausted``; nothing is
+        composed on the librarian's behalf.
         """
-        if not self.sources:
-            return await self.search(await self.compose_search_strategy(request, follow_up=follow_up))
+        import tempfile
 
-        provider = SourceToolProvider(self.sources)
+        from auto_research.agents.librarian_tools import (
+            LIBRARIAN_FREE_TOOLS,
+            LibrarianToolProvider,
+        )
+
+        self._pass += 1
+        work_dir = self.report_dir or Path(tempfile.mkdtemp(prefix="librarian_"))
+        if self.receipts is None:
+            self.receipts = ReceiptStore.for_run(work_dir)
+        provider = LibrarianToolProvider(
+            self.sources,
+            storage=self.storage,
+            store=self.receipts,
+            report_path=work_dir / f"literature_pass{self._pass}.jsonl",
+            papers_dir=papers_dir(),
+            record=self._record,
+        )
         payload = {
             "research_request": request.model_dump(mode="json"),
             "follow_up": follow_up,
-            "instruction": (
-                "Search the literature sources for papers relevant to this request. "
-                "Read each batch of results, refine your query, and search again as "
-                "needed across sources. Stop when you have a focused, relevant set."
-            ),
         }
         seed = [
             ModelMessage(role="system", content=self.prompt),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
         await self._react(
-            seed_messages=seed, tools=provider, action="gather_literature",
+            seed_messages=seed,
+            tools=provider,
+            action="research",
             cap=_librarian_react_loop_cap(),
+            free_tools=LIBRARIAN_FREE_TOOLS,
+            require_terminal=True,
+            terminal_tools=frozenset({TURN_END_TOOL}),
+            absolute_cap=_react_loop_absolute_cap(),
         )
-        return _dedup_results(provider.results)
+        report = provider.written_report
+        if report is None:  # pragma: no cover — _react raises before an unfiled return
+            raise RuntimeError("librarian loop returned without a filed report")
+        # The verify-against-the-PDF list: every value the report attributes to a paper, collected by
+        # the runtime so a person can check each one (papers are cited, never text-matched).
+        report = report.model_copy(update={"attributed_values": provider.attributed_values(report)})
+        provider.report_path.write_text(report.model_dump_json() + "\n", encoding="utf-8")
+        self.last_receipts = dict(provider.captures)
+        await self._record(
+            "librarian_io.research.filed",
+            level=3,
+            summary=(
+                f"Librarian filed {len(report.findings)} finding(s) over "
+                f"{len(provider.captures)} document(s); status {report.status}"
+            ),
+            data={
+                "report": report.model_dump(mode="json"),
+                "receipts": {h: r.model_dump(mode="json") for h, r in provider.captures.items()},
+            },
+        )
+        await self._lay_down_memory(report, provider.paper_ids)
+        return report
 
-    async def search(self, request: SearchRequest) -> list[SearchResult]:
-        """Query external sources and return raw results.
+    async def _lay_down_memory(self, report: LiteratureReport, paper_ids: Mapping[str, int]) -> None:
+        """Record each finding as memory on the papers it cites, so later runs retrieve it.
 
-        No LLM call: the I/O team does not filter or rank results. Per-paper
-        abstraction is a separate step via ingest_results().
-        A failing source is skipped so the others can still contribute results.
+        Appended, never replacing: an earlier run's notes on the same paper answer a different
+        question and stay searchable beside these.
         """
-
-        selected = request.sources or ["arxiv", "nasa_ads", "web"]
-        results: list[SearchResult] = []
-        for source_name in selected:
-            source = self.sources.get(source_name)
-            if source is None:
+        for handle, paper_id in paper_ids.items():
+            claims = [f.claim for f in report.findings if handle in f.support]
+            if not claims:
                 continue
             try:
-                results.extend(await source.search(request.query, limit=request.max_results))
-            except Exception:
-                pass  # one source failing does not abort the others
-        return results
-
-    async def ingest_document(
-        self,
-        document: DocumentRef,
-        *,
-        peer_abstracts: Sequence[MemoryRecord] = (),
-        paper_id: int | None = None,
-        instructions: str | None = None,
-    ) -> MemoryRecord:
-        """Read a document attachment and return one memory abstraction."""
-
-        payload = {
-            "document": document.model_dump(mode="json"),
-            "paper_id": paper_id,
-            "instructions": instructions
-            or (
-                "Compose a durable memory abstraction: abstract, key points, key methods, "
-                "data, and analysis results useful for future text search."
-            ),
-            "peer_abstracts": [a.model_dump(mode="json") for a in peer_abstracts],
-        }
-        return await self._call(
-            payload,
-            MemoryRecord,
-            documents=[document],
-            action="ingest_document",
-        )
-
-    async def abstract_document(
-        self,
-        document: DocumentRef,
-        *,
-        peer_abstracts: Sequence[MemoryRecord] = (),
-    ) -> MemoryRecord:
-        """Worker shim: produce one memory abstraction for IO debate."""
-
-        return await self.ingest_document(document, peer_abstracts=peer_abstracts)
-
-    async def judge_abstract_convergence(
-        self,
-        document: DocumentRef,
-        abstracts: Sequence[MemoryRecord],
-        *,
-        round_index: int,
-        max_rounds: int,
-    ) -> ReviewVerdict:
-        """Lead role: judge whether IO worker abstractions have converged."""
-
-        payload = {
-            "document": document.model_dump(mode="json"),
-            "abstracts": [a.model_dump(mode="json") for a in abstracts],
-            "round_index": round_index,
-            "max_rounds": max_rounds,
-            "decision_semantics": (
-                "accepted=true means workers have converged to a consistent memory abstraction; "
-                "accepted=false means another round would improve coverage or consistency."
-            ),
-        }
-        return await self._call(
-            payload,
-            ReviewVerdict,
-            documents=[document],
-            action="judge_abstract_convergence",
-        )
-
-    async def adjudicate_abstract(
-        self,
-        document: DocumentRef,
-        abstracts: Sequence[MemoryRecord],
-    ) -> MemoryRecord:
-        """Lead role: synthesize the final memory record from worker abstractions."""
-
-        payload = {
-            "document": document.model_dump(mode="json"),
-            "worker_abstracts": [a.model_dump(mode="json") for a in abstracts],
-            "instructions": (
-                "Synthesize the worker abstractions into one final memory record. "
-                "Produce a mem_abbrev that is a comprehensive, durable summary of the paper's "
-                "key findings, methods, data analysis, and results."
-            ),
-        }
-        return await self._call(
-            payload,
-            MemoryRecord,
-            documents=[document],
-            action="adjudicate_abstract",
-        )
-
-    async def ingest_results(self, results: list[SearchResult]) -> None:
-        """Download, abstract, and store each search result in parallel.
-
-        Papers already abstracted (mem_abbrev populated in memory table) are
-        skipped — PDFs are re-downloaded only if the file is absent.
-        Concurrency is capped at 4 simultaneous ingests to respect API rate limits.
-        """
-
-        consensus = IODebateToConverge(max_rounds=2, monitor=self.monitor)
-        sem = asyncio.Semaphore(4)
-
-        async def _store_metadata_only(result: SearchResult) -> None:
-            """Record a no-PDF search result as an orphan memory note (never a paper row).
-
-            A paper row requires a downloaded PDF (its sha256 is the identity); a result
-            we could not fetch a PDF for is kept as a free-standing memory note (paper_id
-            None) so its title/abstract stay searchable without polluting the paper table.
-            """
-            await self.storage.insert_memory(
-                MemoryRecord(
-                    paper_id=None,
-                    summary=result.title,
-                    tags=result.keywords,
-                    mem_abbrev=result.abstract,
+                await self.storage.insert_memory(
+                    MemoryRecord(
+                        paper_id=paper_id,
+                        summary=claims[0][:300],
+                        tags=[],
+                        mem_abbrev="\n".join(claims),
+                    )
                 )
-            )
-
-        async def _ingest_one(result: SearchResult) -> None:
-            async with sem:
-                try:
-                    stored = await download_and_ingest_result(
-                        self.storage, result, target_dir=papers_dir()
-                    )
-                    if stored is not None and stored.local_path is not None:
-                        existing = await self.storage.get_memory_for_paper(stored.id)
-                        if existing is not None and existing.mem_abbrev:
-                            return
-                        doc = document_from_file(stored.local_path)
-                        memory = await consensus.run([self, self], self, doc)
-                        await self.storage.replace_memory_for_paper(
-                            MemoryRecord(
-                                paper_id=stored.id,
-                                summary=memory.summary,
-                                tags=memory.tags,
-                                mem_abbrev=memory.mem_abbrev,
-                            )
-                        )
-                    else:
-                        await _store_metadata_only(result)
-                except Exception as exc:  # noqa: BLE001
-                    # One paper's ingest failure (a document the model API rejects,
-                    # a provider fault, an oversized PDF) must not abort the whole
-                    # literature node. Degrade to metadata-only ingest and continue;
-                    # a failed batch member is never allowed to propagate.
-                    await self._record(
-                        "librarian_io.ingest_document.error",
-                        level=3,
-                        summary=f"Ingest fell back to metadata: {result.title[:80]}",
-                        data={"error": repr(exc)},
-                    )
-                    try:
-                        await _store_metadata_only(result)
-                    except Exception:  # noqa: BLE001
-                        pass  # give up on this one paper; never fail the batch
-
-        await asyncio.gather(*(_ingest_one(r) for r in results))
-
-    async def evaluate_search_results(
-        self,
-        request: ResearchRequest,
-        results: list[SearchResult],
-    ) -> ReviewVerdict:
-        """Phase 1 stub — IO search iteration is deferred. See CLAUDE.md §13."""
-
-        _ = (request, results)
-        return ReviewVerdict(
-            accepted=True,
-            rationale="IO search evaluation deferred — see CLAUDE.md §13",
-        )
+            except Exception as exc:  # noqa: BLE001 — memory is a convenience, not the record
+                await self._record(
+                    "librarian_io.memory.error", level=3,
+                    summary=f"could not store memory for {handle}", data={"error": repr(exc)},
+                )
 
 
 class AnalystWorkerAgent(AgentRole):
@@ -1286,6 +1170,9 @@ class AnalystWorkerAgent(AgentRole):
         # from memory_path). agent_key is the figure-catalog source key the lead addresses it by.
         self.agent_key: str | None = None
         self.report_dir: Path | None = None
+        # Provenance: the run's ReceiptStore (set by runtime). Every tool call this worker makes
+        # mints receipts under its agent_key, and its report's numbers are checked against them.
+        self.receipts: ReceiptStore | None = None
         # V-4: append-only figure catalog (source "self" = figures this worker's tools produced),
         # persisting across debate rounds and rework iterations so nothing is dropped; the per-round
         # report (ReAct-refined via edit_report) cites from it. Monotonic debate-round counter names
@@ -1329,7 +1216,8 @@ class AnalystWorkerAgent(AgentRole):
 
         self._round += 1
         cwd = self.memory_path.parent if self.memory_path is not None else None
-        workspace = self._make_report_workspace()
+        _mint_task_input(self.receipts, task)
+        workspace = self._make_report_workspace(peer_reports)
         provider = SandboxToolProvider(
             self.registry, self.sandbox, cwd=cwd,
             human_handler=self.human_handler, web_source=WebSource(),
@@ -1337,6 +1225,8 @@ class AnalystWorkerAgent(AgentRole):
             model=_model_label(self.model) or "",
             figure_sink=self._figure_catalog["self"],
             report_workspace=workspace,
+            receipts=self.receipts,
+            receipt_source=self.agent_key if self.receipts is not None else None,
         )
         seed = [
             ModelMessage(role="system", content=self.prompt),
@@ -1410,7 +1300,9 @@ class AnalystWorkerAgent(AgentRole):
     report_fields: tuple[str, ...] = WORKER_REPORT_FIELDS
     report_status_values: tuple[str, ...] = WORKER_STATUS_VALUES
 
-    def _make_report_workspace(self) -> ReportWorkspace | None:
+    def _make_report_workspace(
+        self, peer_reports: Sequence[AnalystReport] = ()
+    ) -> ReportWorkspace | None:
         """Build this round's report workspace (V-4), or None when no report dir is wired.
 
         The report dir is the agent's working folder (``report_dir``, else ``memory_path.parent``);
@@ -1441,7 +1333,36 @@ class AnalystWorkerAgent(AgentRole):
             prior_report=self._last_report,
             prose_fields=self.report_fields,
             status_values=self.report_status_values,
+            receipts=_receipt_scope(self.receipts, self.agent_key, peer_reports),
+            receipt_source=self.agent_key,
         )
+
+
+def _mint_task_input(store: ReceiptStore | None, task: Any) -> None:
+    """Make the task a unit was handed a receipt, so the numbers it states may be repeated."""
+    if store is None or task is None:
+        return
+    text = "\n".join(filter(None, [getattr(task, "question", ""), getattr(task, "instructions", "")]))
+    if text.strip():
+        store.mint_input(text)
+
+
+def _receipt_scope(
+    store: ReceiptStore | None, own_source: str | None, reports: Any = ()
+) -> ScopedLookup | None:
+    """What a role may cite: its own receipts, plus those the reports it received cite.
+
+    ``None`` when no store is wired (Studio), which leaves the report's numbers unchecked.
+    """
+    if store is None or not own_source:
+        return None
+    cited: list[str] = []
+    for report in reports:
+        texts = [getattr(report, "summary", "") or "", getattr(report, "uncertainty", "") or ""]
+        texts.extend(getattr(report, "findings", None) or [])
+        for text in texts:
+            cited.extend(b.handle for b in parse_bindings(text))
+    return ScopedLookup(store, own_source=own_source, admitted=cited)
 
 
 # Budget-free in the lead's cycle loop: the human design channel (§5.5), the two report-writing
@@ -1460,6 +1381,9 @@ _CYCLE_FREE_TOOLS: frozenset[str] = frozenset(
         REVIEW_REPORT_TOOL,
         SUBMIT_TOOL,
         RESPOND_TO_REVIEW_TOOL,
+        # Waiting is not evidence-gathering, and it cannot be spammed: a short timeout is raised
+        # to the configured floor, so the absolute ceiling bounds it at ceiling x floor seconds.
+        WAIT_CODER_TOOL,
     }
 )
 
@@ -1725,10 +1649,12 @@ class _ChainDriver:
             f"Coding session {self.index} of {len(specs)} is open on "
             f"'{spec.proposed_tool_name}'. The coder has your brief and is working on it now — "
             "you keep your turn, and it will take minutes rather than seconds. Spend them on "
-            "the library it is extending, the next link, or your report. check_coder reports its "
-            "narration once it stops and is rate-limited, so there is nothing to gain by asking "
-            "repeatedly. Steer it with drive_coder; submit_for_review is refused while it is "
-            "still working, so submit once it has stopped. If it cannot be made mergeable, let "
+            "the library it is extending, the next link, or your report, and when you have "
+            "nothing else to do for this link call wait_coder: it returns the moment the coder "
+            "stops or asks you something, and says how long it has been working. Messages you "
+            "send with drive_coder while it works are queued for its next turn. "
+            "submit_for_review waits for the coder to stop before the gate runs. If it cannot be "
+            "made mergeable, let "
             "its submissions run out and the next link opens automatically — an honest failure "
             "is correct."
         )
@@ -1766,6 +1692,11 @@ class _ChainDriver:
         self.provider.authoring_session = session
         self.session, self.spec = session, spec
         self.cycle.session_open = True
+        # A human steer for the lead wakes a pending `wait_coder` at once, rather than at its
+        # timeout; the steer itself is still delivered by the loop's own drain (A2 hold rule).
+        control, key = self.lead.run_control, getattr(self.lead, "agent_key", None)
+        if control is not None and key and hasattr(session, "watch_steers"):
+            session.watch_steers(control.steer_event(key))
         # Where this link's OPENING CALL will be answered. The loop appends the assistant
         # turn, runs the tools (we are inside one of them now), then appends one results turn —
         # so `len(messages)` is the index that results turn takes. `_compact_coding_span`
@@ -1775,7 +1706,7 @@ class _ChainDriver:
         # The brief goes to the coder in the BACKGROUND, so filing `author_chain` returns at once
         # and the lead keeps its turn — which is what §9.3 promises and what this line used to
         # break. Measured 2026-09-12: a blocking seed held the lead still for 263 s, and because
-        # no background task existed `check_coder` reported "you have not sent the coder anything
+        # no background task existed the status tool reported "you have not sent the coder anything
         # yet" to a lead whose coder had just worked for four minutes — advice that would have had
         # it re-send the whole brief. The first turn's narration was discarded here too, so the
         # lead re-read five files by hand to learn what its own coder had already told it.
@@ -1933,6 +1864,9 @@ class AnalystLeadAgent(AgentRole):
         # per-round report; last report seeds the next round's review_report(None).
         self.agent_key: str | None = None
         self.report_dir: Path | None = None
+        # Provenance: the run's ReceiptStore (set by runtime). The lead may cite its own reads and
+        # every receipt a worker report it received cites (with their ancestors).
+        self.receipts: ReceiptStore | None = None
         self._figure_catalog: dict[str, list[FigureRef]] = {}
         self._round = 0
         self._last_report: AnalystReport | None = None
@@ -1968,6 +1902,10 @@ class AnalystLeadAgent(AgentRole):
             # prose." Read off the role, so the two builders cannot disagree.
             prose_fields=self.report_fields,
             status_values=self.report_status_values,
+            receipts=_receipt_scope(
+                self.receipts, self.agent_key or "analyst_lead", source_reports.values()
+            ),
+            receipt_source=self.agent_key or "analyst_lead",
         )
 
     # ------------------------------------------------------------------
@@ -2051,6 +1989,7 @@ class AnalystLeadAgent(AgentRole):
         """
         self._round += 1
         source_keys, source_reports, all_figures = self._accumulate_figures(reports, sources)
+        _mint_task_input(self.receipts, task)
         workspace = self._make_report_workspace(source_reports)
         authoring_possible = (
             toolkit_root is not None
@@ -2397,18 +2336,6 @@ def _model_label(model: CallableModel) -> str | None:
     return None
 
 
-def _dedup_results(results: Sequence[SearchResult]) -> list[SearchResult]:
-    """Deduplicate search results by URL (falling back to title), first-seen order."""
-    seen: set[str] = set()
-    out: list[SearchResult] = []
-    for result in results:
-        key = str(result.url or result.title)
-        if key not in seen:
-            seen.add(key)
-            out.append(result)
-    return out
-
-
 #: How many consecutive silent turns one loop will nudge through before giving up. Small on
 #: purpose: a continuation is for a model that stopped by accident, and a model that keeps
 #: returning nothing is not going to start. The loop's own budget still bounds everything else.
@@ -2454,9 +2381,10 @@ def _coder_event(tools: Any) -> str | None:
     """A one-line notice that the background coder stopped, or ``None`` while it works (B4).
 
     Read from the provider's live session rather than pushed by it, because the loop is the only
-    place that knows when a turn boundary is safe. The narration itself is left for ``check_coder``
-    — a notice is a nudge to look, not the looking — which also keeps a long coder transcript out
-    of the injected turn.
+    place that knows when a turn boundary is safe. The narration itself is left for ``wait_coder``
+    (which returns it at once when it is unread) — a notice is a nudge to look, not the looking —
+    which also keeps a long coder transcript out of the injected turn. A lead parked in
+    ``wait_coder`` consumes the narration itself, so this fires only for a lead busy elsewhere.
     """
     session = getattr(tools, "authoring_session", None)
     if session is None or getattr(session, "drive_status", None) != "stopped":
@@ -2467,12 +2395,12 @@ def _coder_event(tools: Any) -> str | None:
     failed = getattr(session, "_drive_error", None) is not None
     if failed:
         return (
-            f"[coder] the session on '{name}' FAILED and is not usable. Call check_coder for the "
-            "fault. Do not keep steering it."
+            f"[coder] the session on '{name}' FAILED and is not usable. Call wait_coder for the "
+            "fault, then write your report and say what happened."
         )
     return (
-        f"[coder] the coder working on '{name}' has stopped. Call check_coder to read what it "
-        "did, then inspect the tree or submit_for_review."
+        f"[coder] the coder working on '{name}' has stopped. Call wait_coder to read what it "
+        "did (it returns at once), then inspect the tree or submit_for_review."
     )
 
 
@@ -2569,12 +2497,10 @@ def _react_loop_cap() -> int:
 
 
 def _librarian_react_loop_cap() -> int:
-    """Max tool iterations for the librarian literature ReAct loop.
+    """Tool budget (model turns) for the librarian's research loop.
 
-    Key: ``librarian_react_loop_cap``. Defaults to 3 (falling back to
-    ``react_loop_cap``). Tighter than the generic cap because each librarian
-    search re-sends the growing 20-paper abstract context, so unbounded query
-    refinement is the dominant token-cost driver of a run.
+    Key: ``librarian_react_loop_cap``, falling back to ``react_loop_cap``. Reading is paged, so a
+    paper read in full costs several turns; report authoring and ``turn_end`` are budget-free.
     """
     cfg = _orchestration_config()
     return int(cfg.get("librarian_react_loop_cap", cfg.get("react_loop_cap", 12)))

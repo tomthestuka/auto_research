@@ -74,8 +74,32 @@ cap); `web_fetch(url, offset, limit, depth)` reads one page in full as Markdown 
 `depth="advanced"` default) and pages it exactly like `read_file` (shared `_page_text_lines` +
 resume footer). The `WebSource` client is lazy so attaching it never reads the key at construction
 (`TAVILY_API_KEY` is a launch preflight requirement)),
-`SourceToolProvider` (librarian — arXiv/ADS/web + local `text_search`). A role with
-`tools=None` falls back to a plain single structured call.
+`LibrarianToolProvider` (librarian, `agents/librarian_tools.py` — search, read in full, report,
+`turn_end`; see below). A role with `tools=None` falls back to a plain single structured call.
+
+**The librarian is one research loop that exits only through `turn_end` (CLAUDE.md §2b).**
+`LibrarianIOAgent.research` runs `_react` over a `LibrarianToolProvider`: `search_literature`
+returns numbered hits (leads, not evidence); `read_paper(hit|path)` downloads a hit's PDF (its
+`pdf_url`, then its full-text links), mints a **paper receipt** in the run's `ReceiptStore`
+(`sources.receipts.mint_paper_receipt`: the receipt IS the PDF — a paper is cited, never
+text-matched, human ruling 2026-09-24) and
+**attaches the PDF itself** as a document, which `_react` keeps attached for the rest of the loop
+so every vendor reads it natively — text, tables, equations, figures; a paper with no text layer is
+refused as uncitable; `web_fetch(url|handle, offset)` mints a web receipt and pages the extract in
+24k-character windows that end at a line break;
+`text_search` searches the local knowledge base. The model writes a `LiteratureReport` with
+`edit_report` and submits it with `turn_end`, whose validator refuses: no report; success with no
+findings; a finding with no `support` or citing a handle this loop never opened; and every problem
+the shared binding check (`provenance.check_bindings`) finds. A paper value must be an
+**attribution** with its place, `{{lib:p3 "12.5 ± 3.1 days" Table 2}}` — unverified, and collected at
+filing into `LiteratureReport.attributed_values` (`LibrarianToolProvider.attributed_values`, the
+shared `PaperAttribution` shape), the list a person checks against the PDFs; every number outside a binding is checked against the web
+extracts cited, so a paper citation never exempts the numbers beside it; gaps have their citations
+checked but no number scan. Reopening a document
+returns its existing receipt, so a handle is stable for the run (and across a resume). Report
+authoring and `turn_end` are budget-free; the budget is `librarian_react_loop_cap`. After filing,
+each finding is appended as memory on the knowledge-base rows of the papers it cites. Nothing is
+composed on the librarian's behalf: an unfiled loop raises `ReactBudgetExhausted`.
 
 **Inter-LLM report authoring — `edit_report` / `review_report` (V-4).** Every analyst report
 (worker→lead, lead→reviewer) is a per-round JSONL the agent ReAct-refines **through tools**, so
@@ -132,6 +156,20 @@ never self-approves (`commit ⇔ gate ∧ review`, §9.9). The gate is a mechani
 listed in the lead's authoring-loop `free_tools` (slice 3), bounded by `submit_cap` +
 `react_loop_absolute_cap`. They drive the **same** `AuthoringSession` primitives `propose_and_pr`
 drives in its auto-loop — the difference is *who* diagnoses each verdict (the lead, vs. the coder).
+
+**The lead waits on its coder; it does not poll (`wait_coder`, 2026-09-24).** The coder runs beside
+the lead: `drive_coder` returns at once, **queueing** a message for a working coder as its next
+turn (`mid_turn=true`, or any reply to an open coder question, steers the running turn instead).
+`wait_coder(timeout_s)` (`execute_wait_coder`) parks inside the tool call on
+`AuthoringSession.wait_for_event` and returns when the coder's turn ends (with its narration), the
+coder asks (`[coder asks] …`), a human steer for the lead arrives (the steer itself is still
+delivered by `_react`'s own drain), or the timeout passes. A timeout under
+`coder_wait_floor_s` is **raised** to it, never refused, so no calling pattern gets an instant
+empty answer; every return starts `[waited X of Y; coder working, Z into its current turn]`,
+which is the lead's clock. `wait_coder` is in `_CYCLE_FREE_TOOLS`. `submit_for_review` on a
+working coder waits for it to stop (up to `coder_wait_max_s`) before the gate runs, and hands back
+a question or steer instead of gating. `_ChainDriver._open` wires the lead's
+`RunControl.steer_event(agent_key)` into each link's session.
 
 **The lead's cycle (`LeadCycle`, §9.3).** The lead's turn is **one ReAct loop with no stages**,
 ending on `turn_end`, and **its report is its decision** — the same contract an analyst already
@@ -201,7 +239,7 @@ Current role capability surfaces:
 
 | Role | Tool surface | What "one task" means |
 |---|---|---|
-| Librarian I/O | `SourceToolProvider` over arXiv, ADS, Tavily web, and local text search. | Real source/document input can produce structured search results or memory abstractions. |
+| Librarian I/O | `LibrarianToolProvider`: arXiv/ADS/web search, full-text reading of papers and pages (each minted as a receipt), local text search, `edit_report`/`review_report`/`turn_end`. | One research pass: a `LiteratureReport` whose findings cite, by handle, the documents it read. |
 | Local retrieval | Pure-Python `text_search_paths()` over SQLite. | No runtime LLM role; returns local paper paths for reviewer attachments. |
 | Analyst worker | `SandboxToolProvider` over `research_toolkit` manifest tools plus MCP tools in a persistent sandbox, plus `web_search` + `web_fetch`. | Runs the full analysis tool chain inside `analyze()`, then reports grounded results and figures. |
 | Analyst lead | `ReadOnlyToolProvider` over run artifacts, papers, and `research_toolkit`; `web_search` + `web_fetch`; the five **cycle forms** + the three authoring tools when a `LeadCycle` is wired. | One cycle: investigate, triage the tool request, drive the chain, judge, and file the form that carries the decision. Also answers author questions. |
@@ -219,54 +257,30 @@ Prompt loading:
   the Phase-2 `coder` prompt used by `merge_flow`.
 
 Role wrappers:
-- `ReviewerAgent.review(request, *, report=None) -> ReviewVerdict`. When a
-  `ReadOnlyToolProvider` is attached (`tools`), the reviewer investigates run
-  artifacts/figures/memory and **pulls literature itself** (`text_search` →
-  `open_paper`) via a ReAct loop; the opened PDFs arrive as `DocumentRef`
-  attachments (threaded through the loop) and are forwarded into the terminal
-  verdict call. With no `tools` it makes a single structured call (no attachments).
-- `LibrarianIOAgent(sources, storage, ...) -> LibrarianIOAgent`. Constructor
-  now accepts a `storage: Storage | None` (defaults to `Storage()`). The IO
-  agent satisfies both `IOAbstractionWorkerLike` and `IOAbstractionLeadLike`
-  protocols for use in `IODebateToConverge`.
-- `LibrarianIOAgent.compose_search_strategy(request, *, follow_up=None) ->
-  SearchRequest` — LLM call. Translates a research request (and optional
-  reviewer follow-up) into a focused `SearchRequest` (query, sources, limit).
-  Called by the graph before each online search pass.
-- `LibrarianIOAgent.search(request) -> list[SearchResult]` — no LLM call.
-  Queries external sources and returns raw results. Intent-blind: does not
-  filter or rank.
-- `LibrarianIOAgent.gather_literature(request, *, follow_up=None) ->
-  list[SearchResult]` — ReAct loop over a `SourceToolProvider` (arXiv/ADS/web +
-  local `text_search`): the model searches, reads results, refines its query, and
-  searches again until it has a focused set; returns de-duplicated results. Falls
-  back to `compose_search_strategy`→`search` when no sources are configured. The
-  graph `literature_node` prefers this over the single-shot path.
-- `LibrarianIOAgent.ingest_document(document, *, peer_abstracts=(), paper_id=None,
-  instructions=None) -> MemoryRecord` — LLM call. Passes a `DocumentRef`
-  attachment to the configured I/O model and returns one memory abstraction.
-  `peer_abstracts` are serialized into the payload for IO debate rounds.
-- `LibrarianIOAgent.abstract_document(document, *, peer_abstracts=()) ->
-  MemoryRecord` — worker shim over `ingest_document()`. Used by
-  `IODebateToConverge` as the worker-role method.
-- `LibrarianIOAgent.judge_abstract_convergence(document, abstracts, *,
-  round_index, max_rounds) -> ReviewVerdict` — lead-role convergence check for
-  IO debate.
-- `LibrarianIOAgent.adjudicate_abstract(document, abstracts) -> MemoryRecord`
-  — lead-role synthesis of the final memory record from worker abstractions.
-- `LibrarianIOAgent.ingest_results(results) -> None` — downloads, abstracts,
-  and stores each `SearchResult` concurrently (`asyncio.gather`, capped at 4). For
-  PDF-bearing results: downloads via `download_and_ingest_result()`, runs
-  `IODebateToConverge` (2 worker passes + lead), writes `mem_abbrev` to storage.
-  For results without a PDF: records an **orphan memory** note (`paper_id = NULL`,
-  `mem_abbrev = result.abstract`, no LLM call, no paper row) — a paper row requires a
-  downloaded PDF (its sha256 is the identity). **Each paper's ingest is isolated**: any
-  failure (a document the model API rejects, a provider fault, an oversized PDF) is caught,
-  logged as `librarian_io.ingest_document.error`, and degraded to the orphan-note path —
-  one bad paper can never propagate out of the batch and abort the `literature` node (the
-  shared `_store_metadata_only` helper is the fallback).
-- `LibrarianIOAgent.evaluate_search_results(request, results) -> ReviewVerdict`
-  — Phase 1 stub returning `accepted=True`. See CLAUDE.md §12.
+- `ReviewerAgent.review(request, *, stage, literature=None, literature_receipts=None,
+  report=None, iterations_left=0, render=None) -> ReviewerReport` — one review as ONE ReAct loop
+  whose only exit is `turn_end` (`require_terminal=True`, §2b). The reviewer writes its report with
+  `edit_report` (surface `REVIEWER_REPORT_FIELDS` over `ReviewerReport`, description
+  `REVIEWER_EDIT_DESCRIPTION`), reads papers with the shared `paper_tools.PaperReader` under source
+  `rev` (via `extra_tools`: the PDF itself attached, quotes checked against its text layer, one
+  handle per paper across roles; `open_paper` is not declared for it), sees its draft typeset through
+  `review_report` (`draft_view`), and `turn_end` runs `reviewer_turn_problems` — including render
+  + compile of a final analysis review through `render` (a `ReviewerRender`). Its scope is a
+  `ScopedLookup` over the run's store: its own `rev:` receipts, the request (`input:hN`, minted via
+  `store.mint_input`), the librarian's receipts, every handle the lead's report cites and the
+  lead's figures (matched to receipts by hash), with their ancestors. Requires `tools`, `receipts`
+  and `report_dir` (the runtime sets all three, `graph/runtime.attach_reviewer_runtime`); raises
+  if the loop ends without an accepted `turn_end`. One JSONL per review under `report_dir`
+  (`review{n}_{stage}.jsonl`).
+- `LibrarianIOAgent(*, sources=None, storage=None, model=None, ...)`. `sources` defaults to
+  arXiv, NASA ADS and Tavily web; `storage` to `Storage()`. Attributes the runtime sets:
+  `report_dir` (its working folder; per-pass `literature_pass{n}.jsonl`), `agent_key`, and
+  `receipts` (the run's one store, `ReceiptStore.for_run(run_dir)`; unwired, it takes
+  `for_run(report_dir)`, so no second instance ever opens one directory).
+  `last_receipts: dict[str, Receipt]` — the documents the last pass opened, by handle.
+- `LibrarianIOAgent.research(request, *, follow_up=None) -> LiteratureReport` — one research
+  loop (above). `follow_up` is the reviewer's literature re-loop instruction. Returns the report
+  the librarian filed through `turn_end`, or raises `ReactBudgetExhausted`.
 - `AnalystWorkerAgent(*, sandbox=None, registry=None, memory_path=None, ...)`.
   `AnalystWorkerAgent.analyze(task, *, peer_reports=()) -> AnalystReport` runs the
   inner ReAct loop over a `SandboxToolProvider` (when `sandbox`+`registry` are
@@ -348,6 +362,29 @@ Role wrappers:
   It runs one real model call for each role and writes JSONL plus Markdown logs
   under `logs/dev/step-8/`.
 
+Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
+`ReviewerAgent.review`):
+- `REVIEWER_REPORT_FIELDS`, `REVIEWER_STATUS_VALUES` (empty: the verdict fields are the decision),
+  `REVIEWER_SOURCE = "rev"` (the reviewer's own receipts: papers it opens, reports it renders).
+- `reviewer_turn_problems(report, *, lookup, scope, stage, iterations_left, render=None) ->
+  list[str]` — the reviewer's `turn_end` door. Refuses: no report; empty `rationale`; empty
+  `follow_up` on a dispatch or rework; a switch set at the stage that ignores it; a rework with no
+  iterations left (cap named); a finalizing report missing title/abstract/sections/key_findings;
+  any number no receipt grounds, anywhere, `follow_up` included (`check_report_fields(itemised=(),
+  scope=…)`, scope = every readable receipt); then, for a final report only,
+  whatever `render` returns.
+- `ReviewerRender(report_dir, run_id, formats=("tex",))` — callable used as `render`: renders and
+  compiles when `tex` is configured, returns model-fixable problems, and keeps the last
+  `render`/`compile` result and `renderer_errors` for the graph.
+- `reviewer_scope(lookup) -> list[str]` — every readable handle except inputs: the request and
+  dispatched tasks ground a text only when it cites `[input:hN]` (human 2026-09-24).
+- `reviewer_draft_view(report_dir, run_id, lookup) -> (report -> (text, [FigureRef]))` — renders
+  the draft into `report_dir/draft/`, compiles, and rasterizes up to `MAX_PREVIEW_PAGES` (12) pages
+  at `PREVIEW_DPI` (80) with `pdftoppm`; a render problem is shown instead of pages.
+- `reviewer_text_view(lookup) -> (report -> (text, [FigureRef]))` — `review_report`'s draft view
+  when no `.tex` is configured: the prose fields plus each placed figure from its receipt.
+- `READ_PAPER_TOOL`, `REVIEWER_EDIT_DESCRIPTION`.
+
 ## Dependencies
 - Internal: `auto_research.models`, `auto_research.schemas`,
   `auto_research.sources`, `auto_research.retrieval`,
@@ -369,13 +406,25 @@ Role wrappers:
   task JSON, validates JSON responses, and stores the most recent
   `ModelResponse` on `last_response` for logging. Optional `monitor` records
   model-call inputs, outputs, and errors.
-- `ReviewerAgent` — reviewer wrapper. Method: `review(request, *, literature: Sequence[Path], report)`.
-  Loads each path as a `DocumentRef` attachment for full-text access.
-- `LibrarianIOAgent(sources, storage, ...)` — IO librarian. Constructor accepts
-  injected `sources` and `storage`. Methods: `compose_search_strategy()`,
-  `search()`, `ingest_document()`, `abstract_document()`,
-  `judge_abstract_convergence()`, `adjudicate_abstract()`, `ingest_results()`,
-  `evaluate_search_results()`.
+- `ReviewerAgent` — the reviewer as a unit. Method: `review(...)` (see Interfaces); attributes
+  `receipts`, `report_dir`.
+- `LibrarianIOAgent(sources, storage, ...)` — the librarian. Method: `research()`.
+- `agents/paper_tools.py` — **the shared paper reader** (human ruling 2026-09-24: every role opens a
+  paper the librarian's way). `PaperReader(store, lookup, *, source, storage=None, allowed=None,
+  minter=None, unreadable_action=...)`: `execute({"path"|"handle"})`, `open_pdf(pdf, *, title=None,
+  ids=None) -> (ToolOutcome, Receipt | None)`, `open_handle(handle)`, `tool() -> ExtraTool`,
+  `definition(extra_properties=, lead=)`. Opening attaches the PDF natively; a PDF whose bytes
+  already have a paper receipt from ANY source keeps that handle and is admitted into `lookup`
+  (one paper, one handle per run); otherwise it is minted under `source`. `lookup` may be a
+  zero-argument callable (per-round scopes). Title/ids from the knowledge base, else the file stem.
+  `paper_reader_tool(store, lookup, *, source, storage=None, allowed=None) -> ExtraTool`.
+- `agents/librarian_tools.py`: `LibrarianToolProvider(sources, *, storage, store, report_path,
+  papers_dir, web_source=None, retrieval=None, source_key="lib", record=None, downloader=None,
+  paper_minter=None)` — the librarian's tool surface; `captures` (handle → `Receipt` opened by
+  this loop), `hits`, `paper_ids`, `written_report`, `turn_problems()`. Constants
+  `SEARCH_LITERATURE_TOOL`, `READ_PAPER_TOOL`, `WEB_FETCH_TOOL`, `TEXT_SEARCH_TOOL`,
+  `LIBRARIAN_FREE_TOOLS`, `READ_WINDOW_CHARS = 24_000`. `SourceToolProvider` (the old
+  librarian's `react.py` provider) is deleted.
 - `AnalystWorkerAgent(*, available_toolkits, sandbox=None, registry=None,
   memory_path=None, worker_index=0, ...)` —
   analyst worker wrapper.
@@ -881,3 +930,158 @@ Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (deta
   specified, since re-asking cannot fix either. The narrow ceiling fix replaced it.
   Live: all three escape cells pass (`escape_by_idling` had been failing). Suite 1534 → 1541.
 
+- 2026-09-24 — **The librarian became one deep-research loop filing a `LiteratureReport`** (95's
+  session, human-approved design). Before: a 1-turn source loop, raw hits ingested uncurated
+  ([I2]), each PDF "debated" by one model against itself (`IODebateToConverge([self, self])`),
+  per-source failures swallowed ([I9]), no report and no `turn_end` (a §2b violation). Now:
+  `research()` = one `_react` loop over the new `LibrarianToolProvider` — search, read papers and
+  pages in full (paged), write the report, `turn_end`; every opened document is a P0 receipt
+  minted through `sources.receipts`, and the validator runs the shared binding check. Deleted:
+  `compose_search_strategy`, `search`, `gather_literature`, `ingest_document`,
+  `abstract_document`, `judge_abstract_convergence`, `adjudicate_abstract`, `ingest_results`,
+  `evaluate_search_results`, `_dedup_results`. Source failures are now recorded as
+  `librarian.source.error`. Tests: new `tests/test_librarian.py` (26), env-gated
+  `tests/test_live_librarian.py`; the old librarian cases in `test_agents.py` and the retired
+  pipeline in `test_live_agents.py` removed.
+- 2026-09-24 — **`check_coder` is replaced by a blocking `wait_coder`, and `drive_coder` queues
+  by default (85).** The 2026-09-15 rate limit did not stop the polling; it moved it. Slot 6
+  (`gpt-5.6-terra` lead, $20.43, the costliest role) made 134 `check_coder` calls (114 refused),
+  47 mid-turn steers, 31 refused `submit_for_review` calls and 9 refused `turn_end` calls at a
+  3-10 s cadence, because a loop with no way to let time pass emits a tool call to do it, and a
+  refusal is a paid turn. Researched against the harnesses that solved it: Codex's `wait_agent`
+  blocks in the tool call, wakes on child activity or new input, and **clamps a short timeout up**
+  to a minimum (`multi_agents_v2/wait.rs`, "Prefer longer waits (minutes) to avoid busy
+  polling"); its queued `send_message` vs explicit interrupt split is the model for `mid_turn`.
+  Deleted: `CHECK_CODER_TOOL`, `check_coder_tool_def`, `execute_check_coder`,
+  `env.check_coder_min_interval_s` and its config key. New: `WAIT_CODER_TOOL`,
+  `wait_coder_tool_def`, `execute_wait_coder`, `_wait_before_submit`, `_submit_now` (the old
+  gate+review+commit body), `env.coder_wait_limits_s` (floor 60 / default 300 / max 1800 s);
+  `drive_coder` gains `mid_turn`; `execute_submit` waits rather than refuses. `_coder_event` now
+  points at `wait_coder` and says what to do with a dead session instead of what not to do.
+  `analyst_lead.md`'s coder paragraph rewritten to match. Tests: `tests/test_lead_forms.py` (the
+  rate-limit block replaced by the wait surface, floor clamp and config ordering),
+  `tests/test_run_control.py` (+1, the per-key steer event), session-level cells in
+  `tests/test_merge_flow.py`; new env-gated `tests/test_live_coder_wait.py` (five mechanism cells
+  on a real coder, two real-lead cells). Out-of-region touches, agreed with 0f: the `react.py`
+  env import, the `roles.py` import block and `_CYCLE_FREE_TOOLS`.
+- 2026-09-24 — `reviewer_tools.py` added (5c): the reviewer's report surface and `turn_end` check,
+  including render + compile of the final report inside the check (§2b: the artifact is validated
+  at the role's edge). A number in `follow_up` must be grounded too (human ruling: a request for
+  more work is a report). Wiring into `ReviewerAgent.review` waits on 0f's generic `edit_report`.
+
+- 2026-09-24 — **Provenance P1/P2: every tool call mints receipts, and every unit's report is
+  checked against them (session 0f).** Generalises the figure discipline to every artifact
+  (`auto_research.provenance`, `schemas/artifacts.py`). **Minting:** `SandboxToolProvider.execute`
+  hashes the files a call's arguments name *before* it runs (data roots and figure-output args
+  skipped), then `provenance.capture.receipt_call` mints a `result` receipt over the tool's own
+  output text, a `figure` receipt per returned figure **with the hash recomputed from the file**
+  (a tool-declared hash that disagrees is overridden and noted under `[provenance]`; a figure whose
+  file is absent is dropped), and a `data` receipt per file the call created or changed. The text
+  the model sees opens with `[receipt <handle>] · [<handle>] <product>`. `ReadOnlyToolProvider`
+  receipts its reads (`read_file`, `list_dir`, `text_search`, `data_catalog`, `web_search`,
+  `ask_human`, `plan_and_debate`; errors are not receipted); `web_fetch` on both providers mints a
+  `web` receipt through the librarian's `sources.receipts.mint_web_receipt`, so every role's pages
+  carry the same fields. **Checking:** `report_provenance_problems(workspace, report)` is the
+  shared half of `worker_report_problems` and `lead_turn_problems`: it stats every cited figure
+  (the worker now gets the stat the lead had) and runs `check_report_fields` over the claim fields
+  (`summary`, `findings`, `uncertainty`, `rationale`) through the workspace's `receipts` lookup.
+  `execute_edit_report` runs the same check and reports its problems as notes while the draft is
+  written; `turn_end` refuses on them. **Surface:** `ReportWorkspace` gains `receipts`,
+  `receipt_source` (what `self:` means), `itemised`, and `provenance_check` (a role with nested
+  prose supplies its own check, which replaces the default field walk in both places);
+  `edit_report_tool_def(..., report_model=)` derives any property it does not hand-write from the
+  model's own `Field(description=…)`, so the reviewer and librarian reuse it without a fork; both
+  providers take `extra_tools: [(definition, executor)]`, dispatched first; `review_report` lists
+  the citable receipts. `edit_report`'s description and the `summary`/`findings` properties tell
+  the model how to cite. **Roles:** `AnalystWorkerAgent.receipts` / `AnalystLeadAgent.receipts`
+  (set by runtime); each round's workspace gets a `ScopedLookup` — own receipts plus those the
+  received reports cite (peer reports for a worker, worker reports for the lead) and their
+  ancestors (`roles._receipt_scope`). `test_turn_end.py`'s complete-worker fixture now uses a real
+  figure file; `test_turn_end_shape_contract.py` counts `report_provenance_problems`' clauses with
+  the lead's (the number-grounding family is owed live shapes in P7). Also: the open-session
+  refusal in `lead_turn_problems` now points the lead at `wait_coder` (85's request).
+- 2026-09-24 (second) — **The report tools serve a report that is not the analysts' (for the
+  reviewer session).** `execute_edit_report` branches on `issubclass(report_model, FiguredReport)`;
+  a plain model (`_edit_plain_report`) takes exactly its surface fields, no figure placement.
+  `edit_report_tool_def(..., description=)` and, for a plain model, every property and the
+  `required` list come from the model itself. `ReportWorkspace.draft_view` replaces the own-draft
+  view in `review_report`; `ReportWorkspace.edit_description` overrides the description.
+  `ReadOnlyToolProvider(include_open_paper=False)` drops the native-PDF `open_paper` while keeping
+  `text_search` (the reviewer reads receipted Docling text instead, human ruling). The shared figure
+  stat skips figure *handles* (no `path`). `tests/test_provenance_wiring.py` (6) drives the real
+  `SandboxToolProvider` → receipts → `edit_report` → `turn_end` path, including a tool-declared
+  figure hash overridden by the file's, a missing figure dropped, a written file becoming a data
+  receipt that the next call's input links as its parent, and the scoped views of worker and lead.
+- 2026-09-24 (third) — **Provenance P7: the live turn_end shapes attack the binding (written, NOT
+  YET RUN).** `tests/test_live_turn_end_shapes.py` wires a receipt store the way
+  `attach_lead_runtime` does and gives the workers' reports real receipts; five new refusing
+  shapes, one per clause of `provenance.check_bindings` — `ungrounded_number`, `unknown_handle`,
+  `misquoted_span`, `quote_without_text`, `flagged_quote` — each seeded deterministically and told
+  to attack. `test_turn_end_shape_contract.py` now counts `check_bindings`' clauses, so the
+  exhaustiveness claim covers them (13 = 13). `LeadCycleOutcome.verdict` deleted (read nowhere;
+  the reviewer's session retires `ReviewVerdict`).
+- 2026-09-24 (fourth) — **Workers and the lead receipt the task they were handed**
+  (`roles._mint_task_input`, on entry to `analyze` / `run_cycle`), so a number their task states is
+  citable as `[input:…]` (see `provenance/DOCS.md`).
+- 2026-09-24 (second) — **`ReviewerAgent` rewritten as one loop over one report (5c; step 4).**
+  `compose_machine_report` and `author_latex_report` deleted; `review` no longer composes a verdict
+  after its loop (that loop's `turn_end` validated nothing, `lambda: []`). It now runs on 0f's
+  generic `edit_report` (plain `report_model`, `edit_description`, `draft_view`,
+  `provenance_check`) and `ReadOnlyToolProvider(include_open_paper=False)`; `reviewer_tools` gains
+  `ReviewerPaperReader`, `reviewer_draft_view` and `reviewer_scope`. §2b's recorded violation for
+  the reviewer is closed; the co-lead keeps its compose (coding pipeline, out of scope).
+- 2026-09-24 — Librarian tool + prompt tuned from the first live run (95): `search_literature`
+  uses `search_with_match` and prefixes a fallback note when no paper matched all terms; its query
+  description names 3–6 terms and each source's field syntax; the prompt tells the librarian to
+  find and read the original paper behind a cited result, and to page past the first window into
+  results, tables and discussion (the live run read only page 1 of all 7 papers). The live test now
+  attaches its cost meter to the monitor, so every ledger line carries the running cost.
+- 2026-09-24 — **The librarian reads PDFs natively** (95, human ruling: provider-agnostic, no
+  Docling, no vendor citation feature). `read_paper` attaches the downloaded PDF instead of paging a
+  Docling text export; the paper receipt cites the PDF (`source_path`, re-hashed by `verify()`) and
+  checks quotes against its pypdf text layer, and a refused quote now shows the closest passage
+  (0f's `check_bindings`). Paging and the `offset`/`handle` arguments are gone from `read_paper`.
+- 2026-09-24 (fifth) — **P7 live results** (`tests/test_live_turn_end_shapes.py`). Four provenance
+  shapes refused with the right reason and the lead recovered; `flagged_quote` was never reached
+  (the lead declined the bait twice), so that cell now judges the three outcomes the way
+  `rework_without_probe` does: refused-and-recovered, declined, or the failed value in an accepted
+  report (the finding). `coder_still_running`'s seed closes the session when the lead waits or
+  submits (or after three refusals), since a session it could never close had hung the cell on
+  2026-09-15 and again today. Not metered: the shapes harness installs no cost meter.
+- 2026-09-24 — `agents/paper_tools.py`: the shared `read_paper` (95, from 0f's human's ruling that
+  the reviewer uses the librarian's paper path), generalised from 5c's interim reviewer reader. The
+  librarian's `read_paper` now adds only `hit=N` on top of it. Tests: `tests/test_paper_tools.py` (5),
+  including one paper opened by two sources yielding one receipt.
+- 2026-09-24 (third) — The reviewer reads papers through 95's shared `paper_tools.PaperReader`
+  (human ruling: the librarian's path, native PDF). `ReviewerPaperReader` (it paged a Docling, then
+  pypdf, text copy) deleted.
+- 2026-09-24 — Live shape matrix for the librarian (95, human: "the live test asserts every possible
+  path"): `tests/test_live_librarian_shapes.py` (18 cells: every reachable `turn_end` refusal, the
+  three escapes, both legal outcomes, and the no-PDF / no-text-layer / failing-source paths) on local
+  real PDFs, plus the free `tests/test_librarian_shape_contract.py`, which binds every validator
+  clause to a cell or a stated unreachability. First run: 17/18, the one failure a wording
+  expectation in the test (fixed); $1.78. The librarian's citations are now scoped to what it opened
+  (`ScopedLookup`); identifiers render with their prefix (`paper_tools.format_ids`: `arXiv:…`,
+  `doi:…`) so the number check reads them as names; a PDF outside the knowledge base takes its
+  identifier from the downloader's `<source>_<id>` file name (`ids_from_stem`, from 5c's live run).
+- 2026-09-24 — Option A on the librarian (95, human ruling): papers cited by handle, never
+  quoted; the librarian's check uses 0f's sentence-scoped `cited_only_kinds` and `support=`; the
+  prompt says to cite papers beside each claim (value exactly as printed, and where) and to quote
+  web pages. Live shapes: `quoted_paper` added (the clause is now reachable), `misquoted_span` /
+  `ungrounded_number` moved onto a web page, `scanned_pdf` replaces the no-text-layer cell.
+- 2026-09-24 — Per-number attribution replaces the paper exemption (95, human ruling: "one paper
+  citation must never exempt other numbers"). Found by the human: the sentence/claim-scoped
+  exemption let any number sit unchecked beside a paper citation. Checker side is 0f's
+  (`bindings.py`: required locator, `paper_attributions`, `cited_only_kinds` removed); librarian side
+  here: `attributed_values` collected at filing and persisted in the pass JSONL; live shapes
+  `attribution_without_place` and `unattributed_paper_value` replace `quoted_paper`.
+- 2026-09-24 (sixth) — **Live shape `attribution_without_locator`** (not yet run): a worker report
+  cites a real `%PDF-` paper receipt and the lead is told to attribute a value to it with no
+  locator; binds the attribution clause `provenance.check_bindings` gained under the "papers are
+  attributed, never text-checked" ruling, so the shape contract stays exhaustive (14 = 14).
+- 2026-09-24 (fourth) — Fixed, found by the live path matrix: with `tex` not configured the reviewer's
+  `review_report` fell back to the analysts' figure-record view, which read `.caption` off a handle
+  string and raised out of the loop. `reviewer_text_view` is now its draft view there. The prompt
+  now asks for paper values as attributions with a place (option A).
+- 2026-09-24 (seventh) — **`attribution_without_locator` LIVE-VERIFIED**: the lead's unlocated
+  attribution was refused with "without saying where", and it recovered and filed.

@@ -35,7 +35,7 @@ from auto_research.run_control import UserInterruptionError
 from auto_research.sandbox.workspace import run_dir
 from auto_research.schemas import ResearchRequest
 from auto_research.schemas.report import ResearchReport
-from auto_research.schemas.review import ReviewVerdict
+from auto_research.schemas.review import ReviewerReport
 from auto_research.graph.runtime import ResearchRun
 
 _DEFAULT_POLL_S = 5.0
@@ -198,7 +198,7 @@ def reconstruct_run(request: ResearchRequest | str, run_directory: Path, run_id:
         )
     return ResearchRun(
         request=_normalize_request(request),
-        verdict=ReviewVerdict.model_validate(result["verdict"]),
+        verdict=ReviewerReport.model_validate(result["verdict"]),
         final_state=result.get("final_state") or {},
         monitor=monitor,
         research_report=research_report,

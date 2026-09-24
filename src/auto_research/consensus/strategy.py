@@ -11,11 +11,8 @@ from auto_research.monitor import RunMonitor
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
-    DocumentRef,
-    ReviewVerdict,
     ToolResult,
 )
-from auto_research.storage import MemoryRecord
 
 
 class WorkerLike(Protocol):
@@ -460,7 +457,7 @@ def _augment_with_probe(task: AnalysisTask, verdict: Any) -> AnalysisTask:
     tool description and unimplemented in code is worse than one never stated. Returns the task
     unchanged when the verdict carries no dispatch text.
     """
-    # Reads either shape: a ``ReviewVerdict`` (``follow_up``) or the lead's own report
+    # Reads either shape: a ``ReviewerReport`` (``follow_up``) or the lead's own report
     # (``what_to_probe``). Both are "the dispatch text handed to every worker verbatim", and the
     # report became the second source when the lead's decision moved onto it (A3).
     probe = (
@@ -522,140 +519,6 @@ def _peer_tool_summary(all_results: list[list[ToolResult]]) -> str:
                 line += f"  figures={[str(f.path) for f in r.figures]}"
             parts.append(line)
     return "\n".join(parts)
-
-
-class IOAbstractionWorkerLike(Protocol):
-    """Worker interface for IO paper abstraction debate."""
-
-    async def abstract_document(
-        self,
-        document: DocumentRef,
-        *,
-        peer_abstracts: Sequence[MemoryRecord] = (),
-    ) -> MemoryRecord:
-        """Produce or revise one memory abstraction for a document."""
-
-
-class IOAbstractionLeadLike(Protocol):
-    """Lead interface for IO paper abstraction debate."""
-
-    async def judge_abstract_convergence(
-        self,
-        document: DocumentRef,
-        abstracts: Sequence[MemoryRecord],
-        *,
-        round_index: int,
-        max_rounds: int,
-    ) -> ReviewVerdict:
-        """Judge whether worker abstractions have converged."""
-
-    async def adjudicate_abstract(
-        self,
-        document: DocumentRef,
-        abstracts: Sequence[MemoryRecord],
-    ) -> MemoryRecord:
-        """Synthesize the final memory record."""
-
-
-class IOAbstractionStrategy(Protocol):
-    """IO abstraction consensus policy interface."""
-
-    async def run(
-        self,
-        workers: Sequence[IOAbstractionWorkerLike],
-        lead: IOAbstractionLeadLike,
-        document: DocumentRef,
-    ) -> MemoryRecord:
-        """Run IO abstraction consensus and return a final memory record."""
-
-
-@dataclass(frozen=True)
-class IODebateToConverge:
-    """Bounded IO abstraction debate with lead convergence checks."""
-
-    max_rounds: int = 3
-    monitor: RunMonitor | None = None
-
-    async def run(
-        self,
-        workers: Sequence[IOAbstractionWorkerLike],
-        lead: IOAbstractionLeadLike,
-        document: DocumentRef,
-    ) -> MemoryRecord:
-        """Run worker debate until convergence or the hard round cap."""
-
-        if not workers:
-            raise ValueError("at least one worker is required")
-        if self.max_rounds < 1:
-            raise ValueError("max_rounds must be at least 1")
-
-        await _record(
-            self.monitor,
-            "librarian.consensus.start",
-            level=5,
-            summary="Librarian IO abstraction debate started",
-            data={"document": document, "worker_count": len(workers), "max_rounds": self.max_rounds},
-        )
-        abstracts: list[MemoryRecord] = []
-        for index, worker in enumerate(workers):
-            abstract = await worker.abstract_document(document)
-            abstracts.append(abstract)
-            await _record(
-                self.monitor,
-                "librarian.worker.initial_abstract",
-                level=7,
-                summary=f"Librarian IO worker {index + 1} produced initial abstraction",
-                actor=f"io-worker-{index + 1}",
-                data={"memory": abstract},
-            )
-        for round_index in range(1, self.max_rounds + 1):
-            verdict = await lead.judge_abstract_convergence(
-                document,
-                abstracts,
-                round_index=round_index,
-                max_rounds=self.max_rounds,
-            )
-            await _record(
-                self.monitor,
-                "librarian.lead.convergence",
-                level=7,
-                summary=f"IO lead judged abstraction round {round_index}",
-                actor="librarian_io_lead",
-                data={"round_index": round_index, "verdict": verdict},
-            )
-            if verdict.accepted or round_index == self.max_rounds:
-                final = await lead.adjudicate_abstract(document, abstracts)
-                await _record(
-                    self.monitor,
-                    "librarian.lead.adjudication",
-                    level=5,
-                    summary="IO lead synthesized final memory record",
-                    actor="librarian_io_lead",
-                    data={"memory": final, "round_index": round_index},
-                )
-                return final
-            revised: list[MemoryRecord] = []
-            for index, worker in enumerate(workers):
-                abstract = await worker.abstract_document(
-                    document,
-                    peer_abstracts=_peers_for_io(abstracts, index),
-                )
-                revised.append(abstract)
-                await _record(
-                    self.monitor,
-                    "librarian.worker.revision",
-                    level=7,
-                    summary=f"Librarian IO worker {index + 1} revised abstraction",
-                    actor=f"io-worker-{index + 1}",
-                    data={"round_index": round_index, "memory": abstract},
-                )
-            abstracts = revised
-
-        raise RuntimeError("unreachable IO consensus loop exit")
-
-
-def _peers_for_io(abstracts: Sequence[MemoryRecord], index: int) -> list[MemoryRecord]:
-    return [a for i, a in enumerate(abstracts) if i != index]
 
 
 async def _record(

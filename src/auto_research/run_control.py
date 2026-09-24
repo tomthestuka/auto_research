@@ -87,6 +87,10 @@ class RunControl:
         # once. Constructed without a running loop is fine on Python ≥3.10 (Event binds lazily).
         self.stop_event: asyncio.Event = asyncio.Event()
         self._steer: dict[str, list[str]] = {}
+        # agent_key → set while that role has an undelivered steer, so a role parked in a
+        # blocking wait (the lead's `wait_coder`) wakes the moment one arrives rather than at its
+        # next timeout. Cleared by `drain_steer`, which is where the steer is actually delivered.
+        self._steer_events: dict[str, asyncio.Event] = {}
         # agent_key → how to cancel that role's in-flight tool call (its sandbox's `abort`).
         self._aborters: dict[str, Callable[[], Awaitable[bool]]] = {}
         # The task running the pipeline, and the live authoring session (if any) — both set by
@@ -136,6 +140,15 @@ class RunControl:
         roster), so there is no shared "all" bucket to race — each role owns its own inbox.
         """
         self._steer.setdefault(agent_key, []).append(message)
+        self.steer_event(agent_key).set()
+
+    def steer_event(self, agent_key: str) -> asyncio.Event:
+        """The event set while ``agent_key`` has a steer waiting — what a blocking wait watches.
+
+        The wait only *wakes* on it; the steer itself still reaches the role through
+        :meth:`drain_steer` at the loop's next safe boundary, so waking adds no injection site.
+        """
+        return self._steer_events.setdefault(agent_key, asyncio.Event())
 
     # ── cancelling work in flight ─────────────────────────────────────────────
     def register_aborter(self, agent_key: str, aborter: "Callable[[], Awaitable[bool]]") -> None:
@@ -165,6 +178,9 @@ class RunControl:
         if not agent_key:
             return []
         msgs = self._steer.get(agent_key)
+        event = self._steer_events.get(agent_key)
+        if event is not None:
+            event.clear()
         if not msgs:
             return []
         self._steer[agent_key] = []

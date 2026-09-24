@@ -39,9 +39,7 @@ from auto_research.models.types import (
 from auto_research.schemas import (
     AnalystReport,
     AuthoringDecision,
-    LatexReport,
     ResearchReport,
-    ReviewVerdict,
     SearchRequest,
     ToolReviewVerdict,
 )
@@ -70,14 +68,12 @@ pytestmark = pytest.mark.skipif(
 # through `drive_coder` as a mid-turn steer. Nothing composes that shape any more, so measuring
 # it on six vendors measured nothing.
 SCHEMAS = [
-    ("ReviewVerdict", ReviewVerdict),          # COMPOSE (reviewer.review)
     ("AnalystReport", AnalystReport),          # COMPOSE (analyze / lead report terminals)
     ("AuthoringDecision", AuthoringDecision),  # shape-only: the nested chain, no longer composed
     ("ToolReviewVerdict", ToolReviewVerdict),  # COMPOSE (colead.review_tool)
     ("SearchRequest", SearchRequest),
     ("MemoryRecord", MemoryRecord),
     ("ResearchReport", ResearchReport),
-    ("LatexReport", LatexReport),
 ]
 
 PROVIDERS = [

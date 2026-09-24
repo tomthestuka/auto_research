@@ -348,10 +348,12 @@ def _terminal_schemas() -> dict:
     Composing that is the closest this probe can get to the real terminal while staying below
     the ReAct loop, which is where it deliberately sits.
     """
-    from auto_research.schemas import AnalystReport, ReviewVerdict
+    from auto_research.schemas import AnalystReport, ReviewerReport
 
+    # The reviewer's is its one report (2026-09-24); like the lead's, production files it through
+    # `turn_end` rather than composing it, and composing the same schema is this probe's stand-in.
     return {"analyst_worker": AnalystReport, "analyst_lead": AnalystReport,
-            "reviewer": ReviewVerdict}
+            "reviewer": ReviewerReport}
 
 
 _TERMINAL_SCHEMA: dict = {}

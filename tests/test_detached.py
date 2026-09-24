@@ -29,7 +29,7 @@ from auto_research.graph.detached import (
     run_research_nohup,
     run_status,
 )
-from auto_research.schemas.review import ReviewVerdict
+from auto_research.schemas.review import ReviewerReport
 
 
 @pytest.fixture
@@ -66,7 +66,7 @@ def _write_pid(rd: Path, pid: int, create_time) -> None:
 def _done_result(rationale: str, accepted: bool = True) -> str:
     return json.dumps({
         "status": "done",
-        "verdict": ReviewVerdict(accepted=accepted, rationale=rationale).model_dump(mode="json"),
+        "verdict": ReviewerReport(accepted=accepted, rationale=rationale).model_dump(mode="json"),
     })
 
 
@@ -151,7 +151,7 @@ def test_reconstruct_done(tmp_path):
     rd = tmp_path / "r"; rd.mkdir(parents=True)
     (rd / "result.json").write_text(json.dumps({
         "status": "done",
-        "verdict": ReviewVerdict(accepted=True, rationale="looks good").model_dump(mode="json"),
+        "verdict": ReviewerReport(accepted=True, rationale="looks good").model_dump(mode="json"),
         "final_state": {"analysis_iterations": 2},
     }))
     (rd / "monitor.jsonl").write_text("")

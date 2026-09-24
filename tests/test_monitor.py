@@ -21,8 +21,7 @@ from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
     ResearchRequest,
-    ReviewVerdict,
-    SearchRequest,
+    ReviewerReport,
 )
 
 
@@ -384,14 +383,12 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path, mon
     )
 
     class IO:
-        async def compose_search_strategy(self, request, *, follow_up=None):
-            return SearchRequest(query=request.question, sources=["local"])
+        last_receipts: dict = {}
 
-        async def search(self, request):
-            return []
+        async def research(self, request, *, follow_up=None):
+            from auto_research.schemas.literature import LiteratureReport
 
-        async def ingest_results(self, results):
-            pass
+            return LiteratureReport(summary="nothing found", status="failed")
 
     class Retrieval:
         async def text_search(self, query, *, limit=10, require_local_path=False):
@@ -401,10 +398,11 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path, mon
             raise NotImplementedError
 
     class Reviewer:
-        async def review(self, request, *, report=None):
-            return ReviewVerdict(
+        async def review(self, request, *, stage, report=None, **_):
+            return ReviewerReport(
                 accepted=report is not None,
                 rationale="analysis done" if report is not None else "literature ok",
+                follow_up="" if report is not None else "analyse",
             )
 
     class Consensus:
@@ -431,7 +429,7 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path, mon
     assert run.monitor.jsonl_path == tmp_path / "monitor.jsonl"
     events = [event.event for event in run.monitor.events]
     assert events[0] == "run.start"
-    assert "librarian.search.strategy" in events
+    assert "librarian.literature.report" in events
     assert "reviewer.analysis_review.verdict" in events
     # The run closes on the derived digest, one event after the finish record.
     assert events[-2:] == ["run.finish", "run.summary"]

@@ -173,13 +173,16 @@ offline scoring or audit pass, so its per-field text caps are config rather than
 (`ledger_arg_cap` / `ledger_result_cap` / `ledger_coder_text_cap`, each 100,000 characters);
 a longer field keeps a `[+N chars]` marker so what was dropped stays countable. What the
 `/status` reporter can pull into its own context is capped separately and independently. On an accepted verdict,
-`runs/{run_id}/reviewer/report/` holds `report.jsonl` (machine handle for upstream
-planning teams), `report.tex` + symlinked `figures/` and `papers/` (human LaTeX project;
-the References section is `\href` links into `papers/`, checked to resolve to real PDFs), and
-`report.pdf` (compiled by `pdflatex` when available). The reviewer **edits** that `.tex` with a
-file tool and ends its turn by calling `turn_end`, which accepts only once every figure and link
-resolves and the document compiles — so a fix it already made is never lost to a regeneration,
-and no report is composed on a model's behalf.
+`runs/{run_id}/reviewer/report/` holds `report.tex` + `report.pdf` and, when configured,
+`report.jsonl` (the machine handle: the filed report, its receipt closure and the artifact
+handles). The reviewer writes **plain text only**, through `edit_report`; the harness renders
+the LaTeX (`report/render.py`, compiled with `lualatex`, DejaVu fonts) inside the reviewer's
+`turn_end`, which accepts only once every configured format renders and every number in the report
+is grounded in a receipt. Figures are staged by hash and re-hashed, tool-computed tables are
+typeset from their receipt's bytes, references come from paper/web receipt identifiers, and a
+provenance appendix lists what the report cites. Nothing is composed on a model's behalf. The
+receipts themselves are kept beside the run's ledger, under `ledgers/{run_id}/receipts/`
+(`receipts.jsonl` + content-addressed `blobs/`), out of every agent's reach.
 
 ---
 
@@ -343,8 +346,8 @@ beyond Phase 2 and will route requests through the same reviewer gate when built
                       │ literature tasks                    │ analysis tasks
                       ▼                                     ▼
       ┌──────────────────────────────┐       ┌──────────────────────────────┐
-      │        LIBRARIAN I/O         │       │           ANALYSTS           │
-      │ medium group · ReAct sources │       │ workers debate · lead judges │
+      │          LIBRARIAN           │       │           ANALYSTS           │
+      │ research → LiteratureReport  │       │ workers debate · lead judges │
       │ arXiv · ADS · web · local DB │       │ data work · figures · tools  │
       └───────────────┬──────────────┘       └───────┬──────────────┬───────┘
                       │ papers + memory              │ read-only     │ ToolSpec
@@ -352,9 +355,9 @@ beyond Phase 2 and will route requests through the same reviewer gate when built
       ┌──────────────────────────────┐               ▼               ▼
       │      SQLite papers/memory    │       ╔══════════════════════╗ ┌──────────────────────┐
       │      text search now         │       ║ research_toolkit repo║ │ CODER + GATE flow    │
-      │      vector search Todo      │       ║ xspec_utils today    ║ │ Claude author · gate │
+      │      vector search Todo      │       ║ xspec_utils today    ║ │ coder · Layer-A gate │
       └───────────────┬──────────────┘       ║ future *_utils       ║ │ GPT co-lead review   │
-                      │ literature results   ║ TOOL_MANIFEST        ║◄┤ isolated branch Todo │
+                      │ literature results   ║ TOOL_MANIFEST        ║◄┤ isolated branch      │
                       │                      ╚══════════╤═══════════╝ └──────────────────────┘
                       │                                 │ tool results + figs
                       │                                 ▼
@@ -368,8 +371,9 @@ beyond Phase 2 and will route requests through the same reviewer gate when built
       ┌────────────────────────────────────────────────────────────────────┐
       │                  REVIEWER receives evidence/results                │
       │              capped feedback to librarians / analysts              │
+      │        report rendered + compiled inside its turn_end              │
       └───────────────────────────────┬────────────────────────────────────┘
-                                      │ final verdict + report
+                                      │ final verdict + report → publish (no model)
                                       ▼
       ┌────────────────────────────────────────────────────────────────────┐
       │                               HUMAN                                │
@@ -386,14 +390,13 @@ directions — an adapter returns it and the loop hands it straight back — so 
 replayed is the turn received, parts we do not interpret (reasoning, tool-search
 discovery, anything a provider adds next) included. Each adapter follows its own
 provider's documented replay rule; the neutral layer never reshapes a turn the provider
-authored. The terminal structured call that ends a loop **declares the same tools with
-`tool_choice="none"`** — the replayed turn's parts reference those tools, so declaring
-them keeps every reference resolvable while the model is still forbidden to call one.
+authored. Every graph role — reviewer, librarian, analyst lead, analyst workers — writes its
+report **inside** its loop and leaves only through `turn_end`, whose validator is where the report
+is bound to the work behind it; no harness step composes a role's report for it.
 Each role's tool surface is a uniform `ToolProvider`: the analyst's
 science sandbox, the reviewer/lead's read-only inspection tools, and the librarian's
-literature sources. The loop is bounded by `react_loop_cap`, with
-`librarian_react_loop_cap` kept tighter because repeated searches re-send a growing paper
-context. Prompt caching is a uniform `cache_prefix` knob each provider realizes natively
+search-and-read tools. The loop is bounded by `react_loop_cap`; the librarian's research loop by
+`librarian_react_loop_cap`. Prompt caching is a uniform `cache_prefix` knob each provider realizes natively
 (Anthropic explicit stable-prefix + rolling-tail `cache_control`; OpenAI/Google native
 automatic caching). For long loops, the same knob optionally carries Anthropic's
 provider-native **context editing** — clearing the oldest tool results server-side once a
@@ -419,7 +422,7 @@ DeepSeek, Z.AI, and Alibaba Model Studio. Role eligibility follows capabilities:
 Responses endpoint is text-only, while Alibaba currently documents Qwen Max with image/text/video
 input. No model identifier is hardcoded. Defaults: reviewer group = Fable 5,
 GPT-5.5 high effort, and Gemini 3.5 Flash high thinking; analyst lead = Opus 4.8;
-analyst worker group = Sonnet 4.6 and GPT-5.5 medium effort; librarian I/O group =
+analyst worker group = Sonnet 4.6 and GPT-5.5 medium effort; librarian group =
 Sonnet 4.6, GPT-5.5 medium effort, and Gemini 3.5 Flash thinking. Phase 2 adds `coder`
 (the tool author) and `analyst_colead` (GPT-5.5 xhigh) so tool authoring and review are
 provider-decorrelated. The `coder` member names **both a model and the author harness that drives
@@ -436,12 +439,23 @@ Current role/tool surfaces:
 
 | Role | Tool surface | What "one task" means |
 |---|---|---|
-| Librarian I/O | `SourceToolProvider`: arXiv, ADS, Tavily web, and local text search. | Real source/document input can produce structured search results or memory abstractions. |
-| Local retrieval | Pure-Python `text_search()`/`vector_search()` (stub) over SQLite, reached through the **reviewer's** `text_search` + `open_paper` tools — not a graph node. | Returns local paper paths and attaches chosen PDFs; no standalone LLM role. |
+| Librarian | `LibrarianToolProvider`: arXiv/ADS/web search, full-text reading of papers and pages (each minted as a receipt), local text search, `edit_report`/`turn_end`. | One research pass: a `LiteratureReport` whose findings cite, by handle, the documents it read. |
+| Local retrieval | Pure-Python `text_search()`/`vector_search()` (stub) over SQLite, reached through the **reviewer's** `text_search` and the shared `read_paper` (which attaches the PDF) — not a graph node. | Returns local paper paths and attaches chosen PDFs; no standalone LLM role. |
 | Analyst worker | `SandboxToolProvider`: `research_toolkit` manifest tools (including `catalog_utils`'s read-only `data_catalog`) + MCP tools in a persistent sandbox, plus `web_search`, `web_fetch`, and the report tools `edit_report`/`review_report`. | `analyze()` chains load→fit→run→plot or other tools, self-corrects in-loop, then **writes its report via `edit_report`**, citing figures from its catalog. |
 | Analyst lead | `ReadOnlyToolProvider`: run artifacts, figures, memory, papers dir, full `research_toolkit` source, the `data_catalog` tool (from `research_toolkit`'s `catalog_utils`, run in-process for the sandbox-less lead), `web_search` + `web_fetch` (`include_text_search=False` — knowledge-base search is the reviewer's), `edit_report`/`review_report`, the three authoring tools, `author_chain`, and `turn_end`. | **One cycle** (`run_cycle`): one ReAct loop with **no stages** — investigate, brief a coding chain if the analysts hit a missing capability, drive and submit each link, write the report, end on `turn_end`. **The report is the decision**: `rework=true` sends the analysts back with a probe, `rework=false` makes it the analysis result. `author_chain` is a *brief*, not a terminal — a finished link advances the chain on a tool result, so a dead link is a sentence in the conversation rather than the end of the turn. A cycle that commits anything ends before judging, so the committed tools are reloaded and the workers rerun on them first. Also answers author clarifications. |
 | Analyst co-lead | `ReadOnlyToolProvider`: the authored toolkit worktree + `web_search` + `web_fetch` (`include_text_search=False`). | Provider-decorrelated **code review** of one authored tool — brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs → `ToolReviewVerdict`. |
-| Reviewer | `ReadOnlyToolProvider`: run artifacts, figures, memory, `web_search` + `web_fetch`, plus the knowledge-base tools `text_search` (find papers) + `open_paper` (read a chosen PDF). | Pulls and reads literature itself, dispatches/reviews work, requests capped rework, and composes final report handles (References = local-PDF hyperlinks it used). |
+| Reviewer | `ReadOnlyToolProvider`: run artifacts, figures, memory, `web_search` + `web_fetch`, `text_search`, and the shared `read_paper` (attaches the PDF itself; papers are cited by handle and never text-matched, each paper value attributed with its place in the paper and listed for verification), `edit_report`/`review_report` (the draft shown as rendered pages), `turn_end`. | Reviews the analysis against the literature and files one `ReviewerReport` per review (its PDF carries a "values to verify against the PDFs" appendix) — the verdict fields the graph routes on plus the report body — which the harness renders; requests capped rework through the same report. |
+
+
+**Provenance: every number is bound to a receipt.** Every artifact a claim can rest on — each tool
+call's output, each figure and file it writes, each paper or page read, each human answer, each
+task a role is handed — is a **receipt** the runtime mints (`auto_research.provenance`): the
+runtime hashes the bytes itself, stamps the producer (tool, toolkit commit, call), hashes the
+call's input files and links the receipts that produced them, and propagates `failed` /
+`synthetic` marks. The model sees each result labelled `[receipt <handle>]`; a report's findings
+cite the receipts their numbers come from, and every role's `turn_end` refuses a number that no
+cited receipt carries (*scoped grounding*). A task's own numbers count only where the task is cited
+(`[input:…]`), so a value handed in by the question cannot reappear as a finding unmarked.
 
 ---
 
@@ -505,6 +519,4 @@ Vector retrieval (ChromaDB; embedding column reserved) · durable HITL suspend/r
 (LangGraph checkpointer) · OS-level sandbox jailing (bind-mounts / seccomp — every agent's file
 access is already confined to the `agent_fs_allow` allow-list via `sandbox.fs_guard.PathGuard`; the
 OS jail would also gate a shell subprocess's implicit reads) ·
-`bash_exec` figure capture (diff worker cwd → `FigureRef`s) · librarian IO ingest
-consensus (activate `IODebateToConverge`, replace `accepted=True` stub) ·
-the lead-scientist group that mines the knowledge base to propose new research requests.
+`bash_exec` figure capture (diff worker cwd → `FigureRef`s) · the lead-scientist group that mines the knowledge base to propose new research requests.
