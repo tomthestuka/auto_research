@@ -298,7 +298,7 @@ def summarize_product(csv_path, require_complete=True, min_total_counts=0.0):
         verdict = "constant"
     return {
         "source": str(csv_path),
-        "status": "succeeded",
+        "status": "ok",
         "complete": complete,
         "n_rows": len(rows),
         "n_rows_used": len(usable_rows(rows)),

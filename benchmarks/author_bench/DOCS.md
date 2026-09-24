@@ -243,6 +243,7 @@ batch reports both sittings instead of losing the first.
 | `legs.GridMember` | One coordinate on a grid axis: vendor, model, declared vision, vendor concurrency ceiling. |
 | `legs.GRID_LEADS` / `legs.GRID_COLEADS` / `legs.GRID_AUTHOR` | The two axes and the author held fixed across all twenty cells. |
 | `legs.GROUPS` | Named selections `--legs` accepts beside individual slugs (`grid`, `curated`). |
+| `plot_sweep_cost.collect()` / `.plot(corpus, out)` | Cumulative cost against elapsed time for the reported sweep trials, one line per trial. `LEGS` names the arms drawn and their line style; `K` is the trials-per-leg taken by number. |
 | `legs.resolve(slugs) -> list[Leg]` | Every runnable leg, or exactly the ones named; a name may be a leg slug or a group; `reuse` rows are skipped unless named. |
 | `legs.BRAND_COLOURS` / `legs.QWEN_ABSENT` | Figure colours by vendor; the recorded reason the Qwen row is absent rather than substituted. |
 | `score.leg_of(record)` / `score.by_leg(records)` | Which row a record came from, and the grouping the multi-leg report renders. |
@@ -310,6 +311,14 @@ observation database. Nothing depends on this package.
   The record carries the path as `patch`.
 - **`summarise_ledger`** — tolerant of a truncated final line, so a batch that is still running
   can be read live.
+- **`plot_sweep_cost`** — the generator for the manuscript's sweep-cost figure
+  (`papers/FANGZ/figures/fig_coder_sweep_cost.png`), promoted here from `tmp_scripts/` on
+  2026-09-21 so a published figure is regenerable from the package that produced its data. Reads
+  each reported trial's `monitor.jsonl` through `timeline.load_corpus` and colours by vendor via
+  `legs.BRAND_COLOURS`; colour carries the vendor and shape carries the event, so neither
+  encoding depends on the other. Run as `python -m benchmarks.author_bench.plot_sweep_cost
+  [out.png]`, defaulting to the manuscript's figure path.
+
 - **`stress` (in `tmp_scripts/author_bench_heartbeat.py`)** — cap proximity plus rejection
   density, reported at every heartbeat while a batch runs, because pressure is the leading
   indicator of fabrication.
@@ -504,3 +513,24 @@ Compacted 2026-09-01: entries through 2026-08-27 folded into themed ranges (deta
   directory before cleanup, guarded so a diagnostic can never fail a trial. Three tests: the branch is
   opaque, no path an actor sees names the experiment, and the leg-named tree never reaches a prompt.
   Package suite 63 → 65.
+
+- 2026-09-21 — **`plot_coder_sweep_cost.py` promoted out of `tmp_scripts/` into the package** as
+  `plot_sweep_cost.py`, with the two `parents[1]` repo-root offsets corrected to `parents[2]` and
+  the usage line changed to `python -m benchmarks.author_bench.plot_sweep_cost`. Behaviour is
+  unchanged: regenerating writes the same 1541x984 panel with the same per-leg totals
+  (deepseek $37.98, glm $80.98, claude-sonnet-5 $400.26, the same-provider Claude arm $132.27,
+  gpt-5.6-terra $56.02). The figure backs a manuscript claim, so its generator belongs beside the
+  benchmark that produced its ledgers rather than in a gitignored scratch directory;
+  `papers/FANGZ/DOCS.md` §4 is updated to the new path.
+
+- 2026-09-22 — **Role vocabulary in the two generated paper artifacts follows the manuscript.**
+  `table_grid.py` now emits "LLM reviewer" where it emitted "co-lead" (caption and column group)
+  and "coder" where it emitted "author", and `plot_sweep_cost.py` draws the Claude arm at its full
+  $K=10$ rather than the first five trials, so its row agrees with the manuscript prose (7 of 10
+  committed) instead of reporting 3 of 5 for the same configuration. The same-provider Claude arm
+  (`claude_sonnet_5_correlated`) is no longer drawn: its reviewer differs from every other arm's,
+  so it varied the reviewer as well as the coder, and reviewer coupling is measured on the
+  lead x reviewer grid instead. Numbers are untouched in both: regenerating the grid changes only
+  the four renamed strings, and the sweep figure's Claude total is $809.40, the US$809 the
+  manuscript already quoted.
+

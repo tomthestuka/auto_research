@@ -5,7 +5,7 @@
 Writes ``papers/FANGZ/tables/grid_leadcolead.tex``, which ``main.tex`` inputs. Re-running it after
 a re-measurement updates the table; nothing in the manuscript holds a hand-copied count.
 
-Each cell carries the co-lead rejection total over the arm's trials, and is shaded by the arm's
+Each cell carries the LLM-reviewer rejection total over the arm's trials, and is shaded by the arm's
 commit rate, so the reader sees both quantities at once: how much the reviewer objected, and what
 that cost the arm.
 """
@@ -61,7 +61,7 @@ def main() -> int:
             rejections = sum(t.get("review_rejections", 0) for t in trials)
             committed = sum(1 for t in trials if t["status"] == "committed")
             # No correlation marker: the diagonal IS the lead-correlated arm and the last column IS
-            # the author-correlated one, both readable off the axes. Annotating them restated the
+            # the coder-correlated one, both readable off the axes. Annotating them restated the
             # table's own geometry and cost a caption sentence to explain (user, 2026-08-27).
             parts.append(
                 f"\\cellcolor{{{shade(committed / len(trials))}}}"
@@ -81,18 +81,18 @@ def main() -> int:
         f"% source: {BATCH}\n"
         "\\begin{table*}\n"
         "\\centering\n"
-        "\\caption{Co-lead rejections in the lead $\\times$ co-lead grid, with the arm's commit\n"
-        "count in parentheses and cells shaded by commit rate. The author is pinned to\n"
+        "\\caption{LLM-reviewer rejections in the lead $\\times$ reviewer grid, with the arm's commit\n"
+        "count in parentheses and cells shaded by commit rate. The coder is pinned to\n"
         "\\texttt{deepseek-v4-flash} in all twenty arms and the brief is fixed, so each arm varies\n"
         "only the analyst lead and the reviewer. $N=5$ per arm. Rejections are totals over the\n"
-        "arm, not per trial. No arm has a reviewer sharing both the lead's vendor and the author's,\n"
-        "since the author's vendor is not eligible to lead. Arms differ in the count of trials\n"
+        "arm, not per trial. No arm has a reviewer sharing both the lead's vendor and the coder's,\n"
+        "since the coder's vendor is not eligible to lead. Arms differ in the count of trials\n"
         f"reaching a verdict, where a vendor returned no parseable verdict ({errors} of {total}).}}\n"
         "\\label{t:leadcolead}\n"
         "\\small\n"
         "\\begin{tabular}{@{}l" + "c" * len(COLEADS) + "@{}}\n"
         "\\hline\n"
-        f"Analyst lead & \\multicolumn{{{len(COLEADS)}}}{{c}}{{Co-lead (reviewer)}} \\\\\n"
+        f"Analyst lead & \\multicolumn{{{len(COLEADS)}}}{{c}}{{LLM reviewer}} \\\\\n"
         f" & {header} \\\\\n"
         "\\hline\n"
         f"{body}\n"
