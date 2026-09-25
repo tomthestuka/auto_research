@@ -43,26 +43,9 @@ runtime data directory or `logs/dev/step-N/`.
   `run_research_nohup` code cell.
 
 ## Changelog
-- 2026-05-28 -> 2026-06-12 — Added and retained the Step 12 monitor inspection notebook
-  for live-run and monitor-artifact review; notebooks remain human-only and never runtime
-  prompt context.
-- 2026-06-12 — Compacted changelog; no notebook behavior changes.
-- 2026-06-15 -> 2026-06-16 — Reworked into the live `usage_example.ipynb`. The notebook now
-  uses live monitor progress lines (`chatter=7` tool/debate summaries, model-prefixed agent
-  events, compact per-tool result summaries, quiet HTTP/source loggers). Renamed from
-  `step12_monitor_inspection.ipynb` and restructured into a "using existing tools" section
-  (the Cyg X-1 spectral fit) and a new "test code authoring" section (IXPE P1 PA/PD stability,
-  the Phase 2 step-7 authoring chain), keeping the monitor-inspection cell.
-- 2026-07-06 — **`usage_example.ipynb` switched to the detached entry `run_research_nohup`.**
-  Both example runs (existing-tools + authoring) now use `run_research_nohup(request, chatter=7[,
-  human_channel="slack"])` instead of `run_research(monitor=RunMonitor(...))`, so a killed kernel
-  survives and re-running a cell reconnects by `run_id`. Dropped the in-notebook `RunMonitor`
-  construction (the monitor lives in the detached backend; `run.monitor` is reconstructed from its
-  JSONL); markdown notes updated (live progress = tail the run dir's `monitor.jsonl`; `human_channel='cli'`
-  rejected under detach).
-- 2026-07-15 — Added the **#21** Q–U time-lag cross-correlation census section (plain-English markdown
-  summary + a run cell) to `usage_example.ipynb`. The run cell assembles the `ResearchRequest` verbatim
-  from the research database (`bhxrb_intraobs_qu_lag_crosscorr`) and drives `run_research_nohup(...,
-  chatter=7, human_channel="telegram")`, logging under `logs/dev/P21-qu-lag-ccf/step-7/`. Also brought
-  this doc current: the code-authoring sections are #2/#7/#12/#21 (not just P1) and the recent channel is
-  telegram, not slack. Existing notebook cells were left byte-identical.
+- 2026-05-28 -> 2026-06-16 — Monitor inspection notebook, reworked into the live
+  `usage_example.ipynb` (renamed from `step12_monitor_inspection.ipynb`): an existing-tools section
+  (Cyg X-1 fit) and a code-authoring section (IXPE P1); human-only, never runtime context.
+- 2026-07-06 -> 2026-07-15 — Runs use detached `run_research_nohup` (no in-notebook `RunMonitor`;
+  `human_channel='cli'` rejected under detach); added the #21 Q–U lag cross-correlation section
+  (telegram); authoring sections are #2/#7/#12/#21.

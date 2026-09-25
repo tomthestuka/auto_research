@@ -104,10 +104,8 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
 - 2026-05-26 -> 2026-06-12 — SQLite storage built: papers, memory with `mem_abbrev`, query log,
   reserved embedding columns/table, paper ingestion/upserts, no-PDF metadata records, memory
   replacement, local PDF ingestion, config-driven runtime DB path.
-- 2026-06-22 — Paper identity became the PDF content hash: `papers.sha256` is `NOT NULL` with
-  `UNIQUE(sha256)` (was `UNIQUE(source, source_id)`) and `_upsert_paper` dedups
-  `ON CONFLICT(sha256)`, so the same PDF via two sources collapses to one row; a no-PDF result is
-  now recorded as an orphan `memory` note rather than a paper row (`paper_record_from_result`
+- 2026-06-22 — Paper identity is the PDF hash: `papers.sha256` `NOT NULL UNIQUE`, `_upsert_paper`
+  dedups `ON CONFLICT(sha256)`; a no-PDF result is an orphan `memory` note (`paper_record_from_result`
   removed). Requires a fresh DB.
 - 2026-06-23 — Added `check_database_health()` (+ `EXPECTED_TABLES`), registered in the launch
   preflight as `database_health`: creates the schema if absent and verifies tables, so a fresh

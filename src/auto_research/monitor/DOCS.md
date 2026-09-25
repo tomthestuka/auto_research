@@ -107,57 +107,20 @@ diagnostic trace, while terminal/notebook output is filtered by `chatter`.
   recorded, so consumers render what the run computed instead of recomputing it.
 
 ## Changelog
-Compacted 2026-08-05: the 2026-07-29 cluster folded into one entry (detail in git history).
+Compacted 2026-08-05 and again 2026-09-24 (detail in git history).
 
-- 2026-05-28 -> 2026-06-23 — `RunMonitor` built and made fully diagnostic: async-safe full-fidelity
-  JSONL streaming, chatter-filtered in-memory events, grouped Markdown rendering, offline JSONL
-  reconstruction, config-driven runtime paths; optional live progress lines prefixing `team(model)`
-  and carrying compact per-tool result details without dumping tool bodies; the tool-authoring flow
-  emitting a `tooling`-team stream (`coder.*`, `gate.result`, `review.result`, `commit`) with heavy
-  text landing in the JSONL only; and tool input/output split into `*.{action}.tool_call` (before
-  dispatch) and `*.{action}.tool_result` (on return) sharing a `tool_call_id`, so a hung tool leaves
-  an unmatched `tool_call` in the log.
-- 2026-07-29 — **The ledger becomes the run's single source of truth ([J1]): preflight, cost, and a
-  derived end-of-run summary — and it is never erased.** `Preflight.run_checklist(monitor=…)` records
-  `preflight.<name>` per check (level 5 pass / level 1 failure, since a failure kills the launch) plus
-  a level-3 `preflight.summary`; `run_research` builds the monitor *before* the preflight to make this
-  possible, since the checklist had printed only to stdout — terminal scrollback a detached or
-  notebook run never saw, with a failed preflight leaving no artifact at all. Recording is guarded: a
-  monitor fault must never block a runnable launch ([J2]). **Cost:** `MonitorEvent` gains
-  `cost_usd_total` and `RunMonitor` a `cost_meter`, so every event carries the run's spend so far
-  (`[HH:MM:SS] #0042 $12.34 team(model) L7 …`) and each priced call is one level-10 `cost.call` event
-  — the separate run-blind `cost_ledger.jsonl` is deleted. **`summary.py`** derives the end-of-run
-  digest (status, wall clock, cost incl. the coder's Agent-SDK share, tools authored + commit shas,
-  gate/co-lead rework counts, HITL raises, tool-call/error counts, one labelled full path per report
-  artifact plus the run dir and ledger — `run.start` carries both so they stay derivable from the
-  ledger alone) from the event stream, records it as a level-1 `run.summary`, and renders it as a
-  block for the live terminal, a detached follower, the CLI and a notebook, including a crashed run.
-  Its `cost_usd` is the **sum** of `cost.call` payloads, not the highest stamp — a resumed segment
-  restarts its stamps, which is what made one digest report an $8.85 headline against its own $8.98
-  by-role breakdown. Two erasure bugs fixed: the monitor's `run_id` is the **run's** id (a real run's
-  ledger named itself `e754020b…` while its directory was `8c75990e…`), and `__init__` no longer
-  truncates the JSONL — it appends and continues numbering from the last readable event, while
-  `write_jsonl()` refuses to rewrite the live ledger from chatter-filtered memory. Tests:
-  `tests/test_monitor.py`, `tests/test_preflight.py`.
-
-- 2026-09-01 — **Per-field ledger caps became config and rose 2,000/4,000 → 100,000**
-  (`orchestration.yaml: ledger_arg_cap` / `ledger_result_cap` / `ledger_coder_text_cap`; the
-  accessor is `env.ledger_caps()`). The ledger is the run's durable record, so these bound what
-  an **offline** scoring or audit pass can still read months later — which is why the value now
-  travels with a batch's config instead of with the source. Measured over real ledgers first: the
-  heaviest run hid 6.50 M characters behind 1,027 trimmed fields (7.92 → 14.42 MB uncapped, 1.8×),
-  trimming is almost entirely an *authoring* phenomenon, and the largest single field was 68 kB.
-  A trimmed field keeps its `"[+N chars]"` marker, so the drop stays countable — that marker is
-  what made the measurement possible at all. **The read path is unchanged and separately capped**
-  (`MonitorToolProvider.ledger_event` windows a payload at 8,000 chars default / 32,000 max with
-  a `bias` offset; `ledger_grep` returns index rows only), so a larger on-disk event cannot flood
-  the `/status` reporter's context.
-
-- 2026-09-01 (same day) — **New author-escalation events:** `coder.ask_human.unattended` (L3, the
-  author raised on an unattended run and was told to ground it itself) and `coder.ask_human.error`
-  (L1, the human channel itself failed). Previously both, and a genuine answer's absence, were
-  indistinguishable — `coder.ask_human` fires before the call and `coder.ask_human.answer` simply
-  never appeared, so a broken connector read exactly like a healthy headless run. Neither new
-  event is followed by `.answer`: an unanswered question is never recorded as answered. Detail in
-  `sandbox/DOCS.md`.
+- 2026-05-28 -> 2026-06-23 — `RunMonitor` built: async-safe JSONL streaming, chatter-filtered events,
+  grouped Markdown, offline reconstruction, live `team(model)` progress lines, a `tooling`-team stream
+  (`coder.*`, `gate.result`, `review.result`, `commit`), and paired `*.tool_call`/`*.tool_result` events.
+- 2026-07-29 — [J1] the ledger is the single source of truth: `Preflight.run_checklist(monitor=…)` records
+  `preflight.<name>` + `preflight.summary` (guarded, [J2]); `MonitorEvent.cost_usd_total`,
+  `RunMonitor.cost_meter` and per-call `cost.call` replace `cost_ledger.jsonl`.
+- 2026-07-29 — `summary.py` derives `run.summary` from the event stream (`cost_usd` = sum of `cost.call`).
+  The monitor's `run_id` is the run's id; `__init__` appends and continues numbering; `write_jsonl()`
+  refuses to rewrite the live ledger.
+- 2026-09-01 — Per-field ledger caps are config (`ledger_arg_cap`/`ledger_result_cap`/
+  `ledger_coder_text_cap` via `env.ledger_caps()`), raised 2,000/4,000 → 100,000; trimmed fields keep
+  their `"[+N chars]"` marker.
+- 2026-09-01 — New events `coder.ask_human.unattended` (L3) and `coder.ask_human.error` (L1); neither is
+  followed by `.answer`.
 

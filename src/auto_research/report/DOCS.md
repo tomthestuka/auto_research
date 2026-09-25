@@ -67,74 +67,21 @@ The graph's `compose_report` node calls `publish_report`; the `.tex`/PDF already
   `JSONL_NAME` (`report.jsonl`).
 
 ## Changelog
-- 2026-06-03 -> 2026-06-12 — Report composition module built: references, figure staging,
-  JSONL/LaTeX writers, ref validation, pdflatex compile loop.
-- 2026-06-22 — References became verifiable local-PDF hyperlinks: the `.tex` References section is
-  `\href{papers/<name>.pdf}{…}` links over cited PDFs (no BibTeX/`\cite`). Added `stage_papers`
-  and `validate_report_links` (hard gate resolving every reference `\href` to a real on-disk PDF,
-  a dead link re-entering the compose loop like a compile error); `validate_latex_refs` narrowed
-  to `validate_latex_figures`; `compose_latex_report` takes `staged_papers`. The JSONL handle
-  keeps `build_references`/`Reference`.
-- 2026-07-06 — Deterministic `\href` display escaping ([D1]): `write_report_latex` runs
-  `_sanitize_href_display`, wrapping each `\href` display argument in `\nolinkurl{}`, fixing the
-  `_`-as-math-subscript `! Missing $ inserted.` that produced no PDF on every paper-citing run.
-  No prompt change.
-
-- 2026-08-10 — **A one-symbol LaTeX failure cost a whole run's PDF; the retry could not see which
-  symbol.** Q21 (`8c75990e`) finished accepted, with `report.tex` and no `report.pdf`: both compile
-  attempts died on `! Undefined control sequence.` at `\lesssim`, `report_retry_cap: 2` was exhausted,
-  and the loop accepted the residual errors. Two independent causes, both fixed. (1) `compile_latex`
-  extracted only `!`-prefixed lines, discarding the `l.<n>` source line that is the *only* place TeX
-  names the offending macro — so the retry was told the error class and not the error, and re-emitted
-  the same document. `_errors_with_context` now pairs each `!` message with its context line, stopping
-  the lookahead at the next `!` so one error's context cannot be attributed to another. (2) The preamble
-  is written by the reviewer model, not a code template, and the only instruction was "load hyperref";
-  `graphicx`/`amsmath`/`amssymb`/`hyperref` are now mandated in both places that carry it
-  (`prompts/reviewer.md` and the `output_format_instructions` in `agents/roles.py`), with the reason
-  stated so the model extends the list when a symbol needs more. `amssymb.sty` was installed the whole
-  time — this was never an environment gap. Tests: `tests/test_report.py::test_compile_errors_carry_the_offending_source_line`
-  plus the no-context and no-leak cases.
-
-- 2026-09-09 — **F5e: the reviewer authors `report.tex` by editing it, not by recomposing it.**
-  `compose_latex_report` asked for a whole `LatexReport` through structured output on every
-  attempt and fed the previous attempt's compile errors back as prose, so each attempt produced a
-  fresh document — which is how [D7] happened (the retry saw `! Undefined control sequence.` with
-  no macro named and re-emitted the same document). It is replaced by
-  `ReviewerAgent.author_latex_report`, a real ReAct loop with `file_edit` on that one file plus a
-  validating `turn_end`; the validator is the door (figures resolve, links resolve, pdflatex
-  compiles) and a rejection names the errors and keeps the loop going. Two motives: an edit keeps
-  every fix that already landed, and nothing here declares an output schema —
-  `ResearchReport`/`LatexReport` are structured output, and the contrast arm's reviewer
-  (`qwen3.8-max`) is recorded as failing that path at every reasoning effort (2026-08-24:
-  unresolved `$ref` in `list[Model]` fields, so it invented a shape and returned HTTP 200).
-  `compose_machine_report` (the JSONL handle) is **untouched** — a machine-readable artifact is
-  where a schema belongs, and replacing it was not part of the ruling.
-  **Two fixes were nearly lost in the move and are carried explicitly, both of them past
-  run-killers no test covers:** [D1]'s `\href`-display sanitization lived in
-  `write_report_latex`, which a direct file write bypasses, so the validator re-applies it as
-  mechanical formatting before validating; and [D6]'s mandated preamble
-  (`graphicx, amsmath, amssymb, hyperref`) plus the references no-fabrication clause lived in the
-  retired method's `output_format_instructions`, and are restored on the new payload as
-  `format_requirements`. `\lesssim` without `amssymb` exhausted `report_retry_cap` on Q21 and the
-  run finished with a `report.tex` and no PDF; the changelog records that the prompt-side mandate
-  in `prompts/reviewer.md` was **not** sufficient on its own.
-- 2026-09-24 — **Reviewer-as-unit renderer (5c; steps 1–3 of the reviewer refactor).** New
-  `render.py` (`render_report`, `compile_report`, `parse_delimited`, `latex_escape`) and
-  `figures.stage_figure_receipts`. The human's design: the reviewer writes one plain-text report
-  like every other unit and the harness renders the `.tex` from it once verified, so quotes are
-  checked on the text the model wrote rather than on escaped LaTeX. lualatex replaces pdflatex on
-  this path (human ruling) with a fallback font chain; measured, DejaVu Serif alone lacks ≲
-  (U+2272). Closes [D4] (sha-named staging) and [D5] (re-hash before staging) and [C4] (references
-  from receipt ids) on the new path. The old pdflatex path is unchanged until the graph switches.
-  Tests: `tests/test_reviewer_report.py`.
-- 2026-09-24 (second) — **The pdflatex path is deleted and the report is published as receipts
-  (5c; steps 4–5).** Removed: `references.py` (`build_references`), `stage_figures`,
-  `stage_papers`, `write_report_latex` + `_sanitize_href_display`, `validate_latex_figures`,
-  `validate_report_links`, `compile_latex`. The reviewer no longer writes LaTeX, so the href
-  sanitizer, the figure-path and link validators and the separate compile loop have nothing left
-  to guard; their jobs moved into `render.py`, where the harness writes every `\includegraphics`
-  and `\href` itself. New `publish.py`. `config: report_retry_cap` removed with the loop it bounded.
-- 2026-09-24 (third) — Paper values are attributed, not quoted (human ruling, option A): the
-  renderer typesets an attribution with its reference and adds the verify-against-the-PDFs list;
-  `publish_report` writes the same list as `ResearchReport.paper_attributions`. `render_bindings` is
-  no longer used here (an attribution needs its handle beside the value).
+- 2026-06-03 -> 2026-06-12 — Report composition built: references, figure staging, JSONL/LaTeX writers,
+  ref validation, pdflatex compile loop.
+- 2026-06-22 -> 2026-07-06 — References became `\href{papers/<name>.pdf}{…}` links (`stage_papers`,
+  `validate_report_links`; `validate_latex_figures`); [D1] `_sanitize_href_display` wraps displays in
+  `\nolinkurl{}`.
+- 2026-08-10 — `_errors_with_context` pairs each `!` compile error with its `l.<n>` source line; the
+  reviewer's preamble mandates `graphicx`/`amsmath`/`amssymb`/`hyperref` ([D6]).
+- 2026-09-09 — F5e: `compose_latex_report` replaced by `ReviewerAgent.author_latex_report`, a ReAct loop
+  editing `report.tex` behind a validating `turn_end` ([D1] sanitizer and [D6] preamble carried over).
+  Superseded 09-24.
+- 2026-09-24 — Reviewer as a unit (5c): new `render.py` (`render_report`, `compile_report`,
+  `parse_delimited`, `latex_escape`), `figures.stage_figure_receipts` and `publish.py`; the harness
+  renders the reviewer's plain-text report. lualatex (ruling) with a fallback font chain; closes [D4], [D5], [C4].
+- 2026-09-24 — pdflatex path deleted: `references.py`, `stage_figures`, `stage_papers`,
+  `write_report_latex`, `_sanitize_href_display`, `validate_latex_figures`, `validate_report_links`,
+  `compile_latex`, and `config: report_retry_cap`.
+- 2026-09-24 — Ruling: paper values are attributed, not quoted; the renderer adds the verify-against-
+  the-PDFs list and `publish_report` writes it as `ResearchReport.paper_attributions`.

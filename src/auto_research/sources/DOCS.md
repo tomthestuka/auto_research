@@ -114,41 +114,15 @@ Each source module is independent; no source imports another.
 ## Changelog
 - 2026-05-26 -> 2026-06-12 — Source layer built: `QuerySource`, arXiv/NASA ADS/Tavily adapters,
   PDF download/ingest helpers, ADS full-text resolver, ADS 404 degradation for no-esource records.
-- 2026-06-18 — `download_pdf` retries transient fetch failures and returns `None` (instead of
-  raising) on ultimate failure, and `download_and_ingest_result` propagates it, so a single bad
-  PDF URL no longer crashes the `literature` graph node.
-- 2026-06-22 — `download_pdf` validates content via the `%PDF-` signature (`_is_pdf_bytes`):
-  a non-PDF response returns `None` and a stale non-PDF cache file is discarded/re-fetched,
-  keeping HTML-saved-as-`.pdf` out of ingest.
-- 2026-07-13 — `WebSource` Tavily client is now lazy ([I1], built on first use behind a `client`
-  property so construction no longer reads the key and `web_search` attaches to every role
-  unconditionally) and gains `WebSource.fetch` ([I10], a page-read primitive over the Tavily
-  Extract endpoint backing the agents' `web_fetch` tool).
-- 2026-08-03 — `resolve_ads_full_text` skips a malformed ADS record instead of letting its
-  `ValidationError` escape. Observed live (run `b-run-q21`, seq 18 — the run's first tool error):
-  ADS served a **relative** URL, `FullTextLink.url` (an `HttpUrl`) rejected it, and the error
-  propagated out of the whole `search_literature` call, so `nasa_ads` returned nothing for that
-  query while arxiv/web answered fine. Now a bad record costs that one link, never the source; the
-  same guard covers a missing `link_type` against `NonEmptyStr`. Recording per-source failures on
-  the librarian side stays open ([I9]). `tests/test_sources.py::test_ads_full_text_skips_malformed_records`.
-- 2026-09-24 — `receipts.py` added (95, P5): paper/web receipt minting over the P0 `ReceiptStore`,
-  used by the librarian under `lib` and offered to the reviewer under `rev`. [I9] closed on the
-  librarian side: a failing source is a `librarian.source.error` event and an error outcome.
-- 2026-09-24 — arXiv matches every term first (95). The live librarian run never retrieved the
-  paper it needed: the arXiv API does not require every bare term to match, so a query naming the
-  author, target and topic ranked unrelated papers first, while the same terms joined with AND put
-  it in the top five. AND first, loose fallback only on zero results, and the librarian's tool says
-  when the fallback ran.
-- 2026-09-24 — Paper receipts cite the PDF and check against its pypdf text layer (95, human
-  ruling). Docling is no longer on the librarian's path; the `parse_root` argument is gone.
-- 2026-09-24 — arXiv PDFs follow arXiv's automated-access discipline (95). The second live run was
-  refused by `arxiv.org` with HTTP 406 partway through, including for a PDF it had served minutes
-  earlier, while `export.arxiv.org` served the same file; arXiv's bulk-data page names that host for
-  programmatic access, and the `arxiv` Python package made the same switch (its PR #172, per a
-  subagent's source reading). Pacing, a stop on 403, one wait-and-retry on 406/429, and a nameless
-  versioned User-Agent. `tests/test_sources.py` +5.
-- 2026-09-24 — **Papers are cited, never text-matched** (95, human ruling "option A"). The paper
-  receipt stores the PDF itself; the pypdf text layer is gone. Measured reason: no extractor is
-  faithful to a PDF — live, a text layer dropped the minus sign of a correct "−22 ± 2" (5c), and
-  Docling split number tokens (run 1). Rejected for now: checking against arXiv HTML/LaTeX, and a
-  union of extractors.
+- 2026-06-18 -> 2026-06-22 — `download_pdf` retries transient failures and returns `None` on ultimate
+  failure or a non-`%PDF-` body (`_is_pdf_bytes`; a stale non-PDF cache file is re-fetched).
+- 2026-07-13 — [I1] `WebSource`'s Tavily client is lazy (a `client` property); [I10] `WebSource.fetch`
+  (Tavily Extract) backs `web_fetch`.
+- 2026-08-03 — `resolve_ads_full_text` skips a malformed ADS record (relative URL, missing `link_type`)
+  instead of failing the whole source.
+- 2026-09-24 — `receipts.py` (P5): paper/web receipt minting, used by the librarian (`lib`) and the
+  reviewer (`rev`). [I9] closed: a failing source is a `librarian.source.error` event and an error outcome.
+- 2026-09-24 — arXiv search ANDs every term first, loose fallback only on zero results (reported to the
+  librarian). arXiv PDFs come from `export.arxiv.org` with pacing, a stop on 403, one retry on 406/429.
+- 2026-09-24 — Ruling: papers are cited, never text-matched — the paper receipt is the PDF itself.
+  Docling (and `parse_root`) left the librarian's path, then the interim pypdf text layer.

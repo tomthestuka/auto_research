@@ -100,48 +100,19 @@ and `usage.py` (cumulative spend rollup CLI).
   `python -m auto_research.observability.usage` CLI.
 
 ## Changelog
-Compacted 2026-08-05: the 2026-07-29 entries folded into one (detail in git history).
+Compacted 2026-08-05 and again 2026-09-24 (detail in git history).
 
 - 2026-05-26 -> 2026-06-12 — LangSmith tracing, JSONL cost ledger, config-priced per-call costing,
-  config-driven runtime data dir, opt-in live LangSmith verification, and `plot_run.py` for
-  monitor Gantt/cost visualization.
-- 2026-07-22 — [I5] cost visibility: pricing is now **litellm-first, config-fallback**
-  (`token_rates_for`/`TokenRates`, litellm `model_cost` lazy-cached); `CostLedgerEntry` gains the
-  cache/reasoning token classes + per-class cost + `price_source`; `traced_model_call` annotates the
-  LangSmith run with `usage_metadata` + `cost_usd` so the dashboard shows spend; new `usage.py`
-  rollup CLI (total / by provider·model·role·day / `--since`); `plot_run.py` prices via the same
-  path (cache/reasoning-aware). Fixes the under-count where cached ReAct input was uncounted. Tests
-  in `tests/test_observability.py`. `litellm>=1.93` added to `environment.yml` (conda-forge).
-- 2026-07-29 — **Cost moved into the monitor ledger; the separate ledger deleted; the coder's SDK
-  spend included; totals span a resume.** `CostLedgerEntry`/`cost_entry_for`/`append_cost_entry`/
-  `cost_ledger_path` are replaced by `CallCost`/`cost_for_call` plus a run-scoped `CostMeter`
-  (installed by `run_research`, found via a `ContextVar`) that records one level-10 `cost.call` event
-  per call and stamps the running total on **every** monitor event. `<runtime_dir>/cost_ledger.jsonl`
-  is no longer written: it was a second, run-blind log whose rows under-counted, and everything
-  derived from it is answerable from the event stream ([J1]). The coder's Agent-SDK spend lands in the
-  same stream via `record_session_total`, converting its session-cumulative `total_cost_usd` into
-  per-turn deltas — previously it reached no total anywhere. `usage.py` rolls up over monitor ledgers
-  (`load_cost_records`, de-duplicated on `(run_id, sequence)`, `--jsonl`/`--ledger-dir`/`--runs`), and
-  `plot_run.py`'s pie prefers recorded cost and no longer drops non-analyst teams from a chart
-  claiming a total. `CostMeter.seed_from_ledger` reads the run's own `cost.call` rows back at install
-  time, since a resumed run builds a fresh meter in a new process and its accumulated figure had
-  restarted at $0.00 mid-run. Tests: `tests/test_observability.py`, `tests/test_monitor.py`.
-
-- 2026-08-19 — **A litellm entry with no rates is now treated as absent.** `_rates_from_litellm`
-  returned on the first entry it found, so a model litellm *knows* but does not price booked every
-  token at zero while reporting `source="litellm"` — and because the resolver is litellm-first, the
-  member's own `priceMTk` could never override it. Found live: a Qwen coder leg on `qwen3.7-plus`
-  recorded 40 model calls at `$0.00` and no configured price could fix it. An entry whose input and
-  output rates are both non-positive now falls through to `priceMTk`; a genuinely free model states
-  that explicitly, which at least labels the zero as ours. Tests: `test_observability.py` 13 → 15.
-
-- 2026-09-09 — **N6: `traced_model_call` bills the exception path.** Usage was recorded only after
-  `provider_call()` returned, so an adapter that raises **after** a billable response made the
-  turn silently free — the vendor had generated and charged for those tokens; only our own
-  extraction rejected them. Slot 5's two failing structured attempts (~195k input tokens) appear
-  neither in its ledger nor in its reported $29.23. The call now runs under `try/except
-  BaseException`, records `getattr(exc, "billed_usage", None)` when present, and re-raises. The
-  producing side is `_responses._raise_billed`, which attaches the usage and re-raises the **same
-  exception type**, because the type is the role layer's retry contract. A provider refusal before
-  generation carries no `billed_usage` and is correctly billed as nothing — a request refused
-  before any tokens is never billed. Tests: `test_observability.py::test_n6_*` (2).
+  config-driven runtime data dir, opt-in live LangSmith test, `plot_run.py` Gantt/cost plots.
+- 2026-07-22 — [I5] pricing litellm-first, config-fallback (`token_rates_for`/`TokenRates`); cache/
+  reasoning token classes + `price_source`; LangSmith runs annotated with `usage_metadata` + `cost_usd`;
+  new `usage.py` rollup CLI. Dep `litellm>=1.93`.
+- 2026-07-29 — [J1] `CostLedgerEntry`/`cost_entry_for`/`append_cost_entry`/`cost_ledger_path` replaced by
+  `CallCost`/`cost_for_call` + a `ContextVar`-found `CostMeter` emitting `cost.call` events;
+  `cost_ledger.jsonl` no longer written.
+- 2026-07-29 — Coder SDK spend via `record_session_total` (per-turn deltas); `usage.py` reads monitor
+  ledgers (`load_cost_records`); `CostMeter.seed_from_ledger` carries totals across a resume.
+- 2026-08-19 — `_rates_from_litellm` treats an entry with no positive rates as absent, so `priceMTk`
+  applies (litellm had priced `qwen3.7-plus` at $0).
+- 2026-09-09 — N6: `traced_model_call` records `billed_usage` from an exception (set by
+  `_responses._raise_billed`) and re-raises.

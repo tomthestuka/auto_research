@@ -564,210 +564,36 @@ Nothing depends on this package.
   under the declared ceilings.
 
 ## 6. Changelog
+Compacted 2026-09-24 (detail in git history).
 
-- **2026-09-01** — Created. Step 1 of the science sweep: the measurement design only — seat levels,
-  the two pinned seats, the three axes, block 1's eleven-slot array, block 0 as an alias of its
-  first slot, `confirm_block` for block 2, opaque run identity keyed on (seats, repetition), and
-  the vendor ceilings with `vendor_load` / `admissible` / `schedule`. No pipeline change, no
-  spend. 35 deterministic tests, including the leak guard written before there is anything to
-  leak. Two things the build surfaced and did not paper over: the design document labels one cell
-  as lead-correlated where the derived property finds five slots over three arms (the anchor is
-  Anthropic lead with an Anthropic reviewer, and it is replicated three times), and the maximum
-  reasoning effort the design pins has never been sent by this codebase.
-- **2026-09-01** — `PINNED_EFFORT` set to `high` for every seat (user ruling), replacing the
-  design's `max`. Every measured path in this project, both published batches included, has used
-  `high`; `max` is unverified against all four Responses-dialect vendors, and an unaccepted effort
-  string rejects every call rather than degrading it. Kept as one constant so a probe that
-  establishes `max` changes one line.
-- **2026-09-01** — Steps 2b, 3, 4 and 5. `environment` builds a trial's private world (config
-  directory, toolkit clone at the pinned base on the authoring branch, per-file-filtered
-  observation copy with the catalog reconciled by the toolkit's own recovery path, private runtime
-  and papers directories); `request` freezes the recovered question plus the fourteen-quantity step
-  and hashes it; `trial` launches the production entry point into that world, waits, and records
-  one row separating infrastructure from measurement; `__main__` adds the preflight, the
-  vendor-ceiling scheduler, the status view and the leak scanner. Verified live with no model
-  spend: materialisation takes about a minute and 4 GB, reduces 1,023 + 321 event files to 6 + 6,
-  and a process launched against the result resolves every seat, path and allow-list root to the
-  trial with the catalog health check passing.
-  **Block 0's first launch leaked and was killed five minutes in**: the workspace was named
-  `science_bench`, which reached the librarian's verbatim prompt inside every downloaded-paper
-  path. Fixed structurally — a word list beside the roster, a refusal in the world-builder, a
-  meaningless default workspace name, a preflight check, and a guard test that exercises the real
-  path construction rather than a stub of it (the version that missed this had monkeypatched away
-  the function that builds the paths). The scanner that found it then had to be narrowed from whole
-  records to path-shaped substrings: over five records it reported forty-nine leaks of which one
-  was real, the rest being an abstract saying *probe*, a fit called an *anchor*, and the actor's own
-  model name. Relaunched clean. 98 tests; suite 1,366.
-  One production change came with this: the orphaning spawner takes an optional environment
-  addition, which is how a trial process is pointed at its own configuration.
-- **2026-09-02** — Block 0's launches 2 and 3, and the refactor they forced. Launch 2 ran clean of
-  leaks (the structural fix held) and confirmed one thing worth recording: the `claude-fable-5`
-  reviewer returned an ordinary literature verdict, so the refusal rate this design document once
-  cited for that model was **unsourced** and nothing in this repository supports it. **Launch 3
-  died at $19.43**, and the cause was the interface the lead was handed rather than the lead: it
-  answered the authoring question with `should_author=true` and an **empty** `tool_specs` — output
-  the schema permitted — and a Pydantic validator killed the run. The post-mortem is in the
-  project changelog; what matters here is that a batch cannot be spent against an interface with
-  that failure available, so the analyst lead was rebuilt as **one ReAct loop that files forms**
-  (`AnalystLeadAgent.run_cycle`) in which "author, with nothing to author" is inexpressible and
-  every question the lead answers carries its own description. Three clone/jail fixes landed with
-  the same launches: `_rej` event lists are copied (the pinned toolkit globs only those, so an
-  archive-only filter had made `load_data` fail on an empty glob — user ruling: add them, keep
-  measurements out), the Codex jail launcher moved out of the worktree (a codex+jail run could
-  land exactly one tool, invisible until a multi-tool chain), and the shell-command path scan
-  stands down when the kernel jail is enforcing the same allow-list (a false positive on a
-  relative path had cost one worker its entire contribution).
-  **Open, and deliberately not fixed here** (§3: consult before fixing): `trial.wait_for` has no
-  deadline, so a wedged run holds its concurrency slot indefinitely. Nothing has been observed to
-  hang — the observed failures all died in minutes — and a deadline risks killing a legitimately
-  long reduction, which is what this question spends most of its time doing. `--status` makes a
-  stall visible; a bounded wait is a change to propose, not to assume.
-
-- **2026-09-02 — every recorded commit is checked against the repository.** `trial.
-  commit_reachability(toolkit_root, commit_shas)` cross-checks each ledger `commit` event's SHA
-  against `git rev-list --all` in the trial's private checkout, before teardown; `run_trial`
-  records `commits_checked` and `commits_unreachable`. This is a property of the *run's record
-  versus the repository*, which nothing inside the authoring session can see: a
-  `submit_for_review` after a successful commit used to revert that commit, and every layer of the
-  record still showed a `commit` event for the reverted SHA — the defect was invisible until the
-  git log was read by hand. Reachability is taken over **all** refs rather than one branch name,
-  because the private clone carries exactly the authoring branch and the harness is not told the
-  name the live configuration gave it; ledger SHAs are 10-character prefixes, so membership is by
-  prefix.
-  **`checked` is a separate return value because the first draft was wrong in the silent
-  direction.** It returned one list, and pointing it at attempt 5's real ledger — whose private
-  clone teardown had already swept — produced `[]`, i.e. a clean bill of health for the very run
-  that reverted two approved commits. "Could not look" and "nothing wrong" have to be
-  distinguishable in the record an offline scoring pass reads. Two tests in
-  `tests/test_science_bench.py`, the second built from that failure.
-
-- **2026-09-03 — the leak scanner walks the record instead of the line.** On attempt 6's real dump
-  `--scan` reported 11 leaks; 10 were the token `w3` occurring by chance inside base64
-  extended-thinking `signature` values, which contain `/` and so read as paths to `_PATHLIKE`.
-  `_scannable_text(record)` now walks the parsed record, skipping opaque keys (`signature`, `raw`,
-  `id`, `tool_call_id`, `thought_signature`) and base64-shaped strings, before `_leaks_in` sees
-  anything; the ledger half still passes the raw line. Message content is never under those keys,
-  so an id leaking through a brief (the 2026-08-27 `ToolSpec.id` shape) is still scanned. Two
-  tests. Also from the same audit, for the record the scan reads: the coder learned the lead's
-  and both workers' models from the run record (seq 4007–4045), `runtime_dir` stays on the
-  allow-list by ruling, and the actor-read check is what watches that channel per trial.
-
-- **2026-09-08 — the array became a demonstration, and the scoring pass was built.**
-  **Design (ruling, user).** The eleven-slot screening array is superseded by six runs: the
-  incumbent seat assignment three times (attempt 6 is its first) and one contrast assignment three
-  times. Two reasons, and the second is the load-bearing one. Nine arms at n=1 with 2 df of pure
-  error cannot carry a seat effect at any price — the published floor for a stable per-cell
-  estimate on agentic tasks is 8-16 trials (arXiv 2512.06710) — and the claim being made was never
-  a per-seat effect: it is that a tree of weaker models still reaches a verifiable result or
-  declines cleanly, because the gate, the cross-provider review and the honest-failure floor carry
-  the load. An existence claim is demonstrated. The array is **kept** (`--block1`, its balance
-  still asserted) as the record of what was designed. New roster levels: `gpt-5.6-terra` as a lead,
-  `w4` = `claude-sonnet-5` + `qwen3.7-plus` as a worker pair, `arms.pinned_parameters` made public,
-  `qwen3.7-plus` priced off the vendor's own page (litellm knows the model and prices it at zero,
-  so without the entry that member bills nothing).
-  **Seats chosen per seat, on independent boards, never on price** (user correction: "each seat
-  values different abilities"). Lead takes the strongest mid model on sustained tool use; reviewer
-  takes a real step down on critique that is still a first-rate figure reader; workers drop their
-  OpenAI member two index points below the pair floor. Lowering reasoning effort was **rejected**
-  as the lever: effort is the campaign's pinned constant across both published batches, and a
-  low-effort model fails by quitting early (measured: `gpt-5.6-luna` low, 1.5% pass@1 at 12.5
-  steps) where a weaker model fails by thrashing — a different failure shape than the one under
-  study. `claude-haiku-4-5` excluded by the user as infrequently updated; it also scores 0% on
-  Terminal-Bench 4.0.
-  **Scoring built (steps 6-8), all deterministic, frozen before spend.** `answer_key.json` (the
-  fourteen paper values from the pipeline's own provenance-headed comparison CSV, itself what
-  `main.tex` publishes, hashed); `extract.py` (regex over the report's prescribed labels, no model);
-  `score.py` (Tier 0 terminal classification plus Tier 1 signed-z recovery); `report.py` (tree
-  table, full appendix table, forest figure, recovery scatter). New `--score DIR` runs the whole
-  pass offline for $0. **41 new tests**, and three defects were found by pointing the code at the
-  real artifact rather than at a fixture: the extractor's window spilled past the end of an item,
-  so eight of fourteen quantities inherited a **neighbour's** error as a dual error and every
-  `(same artifact)` back-reference inherited the wrong file; the unit alternation matched a bare
-  `percent` ahead of `percent/keV` and silently truncated the slope's unit; and `summarise_ledger`
-  read a worker's status at `data.status` where it lives at `data.report.status`, so attempt 6's
-  nine worker reports came back as nine `None`s while the ledger held `ok` x4, `failed` x3,
-  `needs_human` x2.
-  **[A20] implemented, and its first version was inert on the run it was written for.** The frozen
-  rule says a terminal report filed by a cycle that committed is not a failure row. Keyed on the
-  trial record's `measured.needs_human` — derived from *worker* statuses — it would never have
-  fired, so `summarise_ledger` now records `lead_cycles` (the form filed, that cycle's commit count,
-  the status filed) and the rule reads those: attempt 6 filed four terminal reports, three after a
-  commit. The want-a-human count is left exactly as the ledger derived it and the correction is
-  recorded as `terminals_relabelled`, because that count comes from `coder.ask_human*`/`hitl.*`
-  events which the mislabelled terminal never emits (attempt 6's ledger holds none at all), so
-  subtracting would have erased a genuine question asked elsewhere in the same run.
-  **Verified against attempt 6 end to end:** all fourteen labels found and measured, values
-  hand-checked, 14/14 within three sigma, 10/10 on the non-approximate rows, mean |z| 1.00, PD mean
-  signed z -1.39, PA max |z| 0.63, trap reproduced, `useful` true. A tree that reports the
-  published values back scores 14/14 and fails the trap, which a test pins.
-
-- **2026-09-08 (second) — vendor concurrency measured instead of inherited, and the seat probe
-  turned out to be measuring its own scaffolding.**
-  **Concurrency.** The two published batches carry ceilings for four vendors, but their *reasons*
-  are not interchangeable and Alibaba had never been measured at all — while the contrast tree puts
-  two Qwen seats in every trial, so concurrency three means six concurrent Qwen streams. Measured
-  (`tests/test_live_concurrency.py`, six concurrent structured calls per vendor through
-  `ModelHandle`, one alone as baseline): **zero refusals on all three vendors**, with slowdown 0.80
-  for `claude-opus-5`, 0.65 for `gpt-5.6-terra` and **1.69** for `qwen3.8-max` (17.2 s alone to
-  29.1 s median). So no vendor is capped here, on the distinction Z.AI forced: a vendor that
-  *refuses* turns above a ceiling corrupts a trial, one that merely slows costs wall clock. Two
-  stated limits: short single calls rather than a multi-hour loop with a large context, and the
-  Alibaba row taken on `qwen3.8-max` so `qwen3.7-plus` is assumed rather than measured. Also
-  re-derived: **the Claude ceiling of two in `author_bench` does not transfer** — it is the
-  *coder's subscription* session cap shared across concurrent author subprocesses, and this sweep
-  authors on DeepSeek/Codex with API-keyed Anthropic chat seats. Launch shape: anchor at
-  concurrency 2 and contrast at 3, run **sequentially**, because launching both at once puts nine
-  concurrent Anthropic streams up against the six measured.
-  **The seat probe was hand-rolled and one of its three cells measured nothing.** Its worker cell
-  built the agent itself with no sandbox and no registry, and `analyze()` runs its inner ReAct loop
-  only when both are attached, so that cell drove a worker that could not call a tool — making its
-  failure (`qwen3.7-plus` emitting a structured answer alongside `bash` calls) unattributable. The
-  probe now calls `graph.runtime`'s `readonly_tools_for` / `readonly_roots_for` /
-  `attach_worker_runtime`, which `run_research` itself calls. Two further defects surfaced for free
-  once it used the real seam: the sandbox refused to start because the probe passed none of the
-  `analyze_env`/`analyze_ini_sh`/`repl_init_py` configuration production reads (now owned by
-  `SandboxSettings.from_config`, so a caller cannot build a differently-configured REPL by
-  omission), and `shutdown` is a coroutine. **Re-run on the real wiring, all three seats hold:**
-  the Qwen reviewer received the paper as text plus all 15 figure crops and recovered both a
-  text-only value and pixel-only figure colours; the terra lead ran a 12-call cycle, was sent its
-  workers' figures, and filed a two-link `author_chain` whose rationale overruled the workers'
-  stale gap report from source; the `qwen3.7-plus` worker ran a 10-call loop over all 29 resident
-  tools, saw its peer's figure, and flagged both the synthetic and the GPG-locked ObsIDs as
-  unusable. Also added: a preflight check that the frozen answer key sits outside every read root
-  and allow-listed root, verified in both directions.
-
-- **2026-09-10 — the answer key's four withheld band PDs were wrong, and the correction sharpens
-  the trap.** The key gave `May_PD_{2-3,3-4,4-6,6-8}keV` as 2.8/3.3/4.4/7.1 +/- 0.4/0.4/0.4/1.0.
-  Read off the reference PDF on disk (`pdftotext -layout`, p. 48), Krawczynski et al. 2022
-  Table S2 prints:
-
-      PD - sum [%]          3.5 +/- 0.3   3.5 +/- 0.3   4.7 +/- 0.3   5.8 +/- 0.8   4.0 +/- 0.2
-      PD - sum (XSPEC) [%]  3.7 +/- 0.3   3.6 +/- 0.3   4.7 +/- 0.3   5.6 +/- 0.8   3.9 +/- 0.2
-
-  The key's numbers match no row. **Which row is the comparator needed no judgement, because the
-  key already answers it:** its own broadband entries are that table's 2.0-8.0 cells —
-  `May_PD_2-8keV_PCUBE` is `PD - sum`'s 4.0 +/- 0.2 and `May_XSPEC_PD_polconst` is the XSPEC row's
-  3.9 +/- 0.2, both exact. So the four bands are `PD - sum`'s band cells. The old values are most
-  likely a figure read: their shared +/- 0.4 matches the 11-bin linear-fit rows, not any table row.
-  Corrected in all three artifacts (human ruling): the provenance-headed CSV under `papers/FANGZ/`,
-  this key (re-frozen, `source_sha256` re-hashed, `frozen: 2026-09-10`), and `main.tex`'s
-  `t:cygx1` with a caption note recording the correction and leaving the pipeline column untouched.
-  `approximate` is now **false on all fourteen**, so `within_tolerance_exact == within_tolerance`
-  for this key; the flag and the column stay as per-quantity properties a later key may need, and
-  `appendix_table_markdown` now emits the `$^{a}$` note only when the key actually marks something
-  (a note describing an absent mark is worse than no note).
-  **What moves, stated rather than buried.** No recovery count changes: all four rows are inside
-  3 sigma against either set, so attempt 6 stays 14/14 with `useful` true and the trap reproduced.
-  Aggregates do move — attempt 6 goes mean |z| 1.00 -> **1.178** and PD mean signed z
-  -1.39 -> **-1.672**, and its exact count 10/10 -> 14/14. Re-scoring is `$0` and deterministic
-  (`--score DIR`), so any published batch can be regenerated.
-  **A claim in the working notes was wrong and is corrected here:** they said the corrected rows
-  score +2.36/+1.63/+2.31/+0.80, so three would flip positive. Those are magnitudes; every delta is
-  negative (2.584<3.5, 2.873<3.5, 3.755<4.7, 4.986<5.8). The correction therefore makes the PD
-  deficit **more** coherent — negative in all four bands and broadband, at larger magnitude —
-  rather than introducing band-level scatter. `main.tex`'s prose was corrected with it: it claimed
-  "every PD value lies 1.3--2.3 sigma below", which was false under *both* keys (June PD is
-  0.25 sigma and the PD(E) slope 0.24 sigma), and now reads "all ten PD quantities lie below the
-  published value, by 0.2--2.4 sigma and by 1.6 sigma on average".
-  The free oracle did its job: `test_signed_z_matches_the_pipelines_own_comparison_tool` failed the
-  moment the CSV and the key disagreed, which is how a half-applied correction was caught.
+- 2026-09-01 — Created (step 1): seat levels, two pinned seats, three axes, block 1's eleven-slot
+  array, block 0, `confirm_block`, opaque run identity, vendor ceilings. Ruling: `PINNED_EFFORT` is
+  `high` for every seat, not the design's `max` (both published batches used `high`).
+- 2026-09-01 — Steps 2b-5: `environment` (private trial world), `request` (frozen, hashed question),
+  `trial`, `__main__` (preflight, scheduler, status, leak scanner). Block 0's first launch leaked
+  (`science_bench` in paper paths), was killed, and relaunched after a structural word-list guard.
+- 2026-09-02 — Block 0 launches 2-3; launch 3 died at $19.43 on an empty `tool_specs`, which forced
+  the lead's `run_cycle` rebuild. Clone/jail fixes: `_rej` event lists copied (ruling), Codex jail
+  launcher out of the worktree, shell path scan stands down under the kernel jail.
+- 2026-09-02 — `trial.commit_reachability` checks each ledger commit SHA against `git rev-list --all`
+  before teardown (`commits_checked`/`commits_unreachable`). Open: `trial.wait_for` has no deadline.
+- 2026-09-03 — Leak scanner walks the parsed record, skipping opaque keys and base64 (attempt 6: 11 →
+  1 reported leaks). Ruling: `runtime_dir` stays on the allow-list; the actor-read check watches it.
+- 2026-09-08 — Ruling: the eleven-slot array is superseded by six runs (incumbent and contrast seat
+  trees x 3; attempt 6 is the incumbent's first); the array stays as `--block1`. Seats chosen per
+  seat, not on price; lowering effort rejected as the lever; `claude-haiku-4-5` excluded.
+- 2026-09-08 — New levels `gpt-5.6-terra` lead and `w4` = `claude-sonnet-5` + `qwen3.7-plus`;
+  `arms.pinned_parameters` public; `qwen3.7-plus` priced from the vendor page (litellm prices it 0).
+- 2026-09-08 — Scoring (steps 6-8), frozen before spend: `answer_key.json`, `extract.py`, `score.py`
+  (Tier 0 + Tier 1 signed z), `report.py`, `--score DIR` ($0 offline); [A20] via `lead_cycles` and
+  `terminals_relabelled`. Attempt 6: 14/14 within 3 sigma, mean |z| 1.00, `useful`, trap reproduced.
+- 2026-09-08 — Vendor concurrency measured (`tests/test_live_concurrency.py`): no refusals on the
+  three vendors; anchor at concurrency 2 and contrast at 3, run sequentially. Preflight keeps the
+  answer key outside every read root.
+- 2026-09-08 — Seat probe rewired onto the `graph.runtime` factories (its worker cell had no tools);
+  sandbox settings via `SandboxSettings.from_config`. LIVE-VERIFIED: all three seats hold.
+- 2026-09-10 — Answer key's `May_PD_{2-3,3-4,4-6,6-8}keV` corrected to Krawczynski+2022 Table S2
+  `PD - sum` (3.5/3.5/4.7/5.8 +/- 0.3/0.3/0.3/0.8) in key, CSV and `main.tex` (ruling); `approximate`
+  false on all 14. Attempt 6 stays 14/14; mean |z| 1.00 → 1.178, PD mean signed z -1.39 → -1.672.
+- 2026-09-10 — `main.tex` prose corrected to "all ten PD quantities lie below the published value,
+  by 0.2--2.4 sigma and by 1.6 sigma on average"; `--score DIR` regenerates any published batch.

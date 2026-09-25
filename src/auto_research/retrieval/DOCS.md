@@ -70,9 +70,6 @@ Live retrieval verification is opt-in:
 - 2026-05-26 -> 2026-06-12 — Pure-Python local retrieval built: backend protocol, SQLite text
   search over papers/memory/`mem_abbrev`, deterministic ordering, opt-in live test,
   `vector_search()` retained as a deferred stub.
-- 2026-06-22 — Retrieval items unified by paper: a paper and its memory abstraction are now one
-  hit keyed by paper id (PDF + joined memory text as attributes, folded into the search
-  haystack), fixing the double-surfacing that let abstractions crowd papers past the `limit`;
-  `require_local_path=True` filters to PDF-backed papers before the `limit` and orphan memories
-  stay standalone. Paired with storage's new `UNIQUE(sha256)` paper identity (no retrieval code
-  change), the same PDF via two sources can no longer return as two paths.
+- 2026-06-22 — A paper and its memory abstraction are one hit keyed by paper id (memory text folded
+  into the haystack); `require_local_path=True` filters before the `limit`; orphan memories stay
+  standalone.

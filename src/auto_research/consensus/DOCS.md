@@ -111,137 +111,30 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   every worker verbatim, which is what that form's description promises.
 
 ## Changelog
-Compacted 2026-08-05: entries folded into themed ranges (detail in git history).
+Compacted 2026-08-05 and again 2026-09-24 (every entry); detail in git history.
 
-- 2026-05-26 -> 2026-06-16 — Consensus strategies built: `DebateToConverge` (cap-3 analyst debate,
-  lead adjudication, cross-worker `last_tool_results` summaries, final figure propagation) and
-  `IODebateToConverge` (PDF memory abstraction). Phase 2 step 7 then had `DebateToConverge` drive lead
-  tool authoring/resume (`tool_author_cap`/`toolkit_root`/`worktree_base`/`direct_branch`/
-  `human_handler`/`colead`, `LeadLike.decide_authoring`): a committed tool reloads the registry,
-  restarts sandboxes and reruns workers, bounded by `tool_author_cap` (not `max_rounds`), with Phase-1
-  behaviour unchanged when `toolkit_root` is unset.
-- 2026-06-26 -> 2026-07-14 — **Honest finalize, lead-driven authoring, whole-chain planning, V-4.**
-  A non-committed attempt returns a terminal report via `lead.finalize_authoring_outcome` instead of
-  spinning in debate, and it flows to the reviewer (sole I/O) to adjudicate finalize vs. rework (§9.6).
-  A1: the lead drives authoring itself (B-topology, §9.3) through `lead.drive_authoring` — its own
-  ReAct loop over `drive_coder`/`submit_for_review`, diagnosing each verdict — bounded by
-  `tool_author_submit_cap`. **[A8]:** the whole ordered `AuthoringDecision.tool_specs` chain is
-  authored sequentially (each tool sees the prior's committed code), then reload/restart/rerun happens
-  once. **V-4:** the lead owns figures (`_deduplicated` removed); `run()` calls
-  `adjudicate(task, reports, sources=…)` and the lead accumulates a per-worker catalog and cites a
-  subset, instead of force-carrying the last round's figures.
-- 2026-07-22 — **[A11] recover, never choke on one failed authoring session.**
-  `_maybe_author_and_resume` stops the chain at the first non-commit and fires
-  `registry.reload()`/`sandbox.restart()`/worker-rerun whenever **≥1 tool committed** — previously only
-  a whole committed chain triggered it, which hid already-committed tools from the reran workers and
-  blocked #21's census. A non-commit records a task note (`_augment_with_failed_tool`) and loops back:
-  ≥1 committed → rerun on the committed prefix; nothing committed but credits remain → re-attempt
-  (burning a `tool_author_cap` credit). The honest §9.6 terminal fires **only** at credit exhaustion
-  with nothing ever committed. New event `analyst.tool.chain_resume`.
-- 2026-07-31 — **The pre-authoring stop check is gone.** `DebateToConverge` no longer polls
-  `run_control.stop_requested` before deciding to author or between chain tools: a `/stop` cancels
-  the run task, so there is no wind-down window in which the flag is set and the strategy still
-  runs. `run_control` is still carried — the lead uses it to publish its live authoring session so
-  an interrupt can reset the toolkit branch — and `_stop_requested` is removed. Tests:
-  `tests/test_consensus_authoring.py` (the skip-authoring test rewritten to pin the absence).
-- 2026-09-02 — **`LeadLike` shrank to one method: `run_cycle`.** The five lead actions consensus
-  used to sequence are branches the lead now takes inside one ReAct loop by filing a form, so
-  `run()` asks for a cycle and acts on whichever form came back. `_maybe_author_and_resume` is
-  replaced by `_resume_after_authoring` (per-link notes, reload/restart when ≥1 committed, rerun
-  once) and `_revision_round`; the authoring branch now **ends the cycle** — a committed tool is
-  evidence the current reports predate, so the workers rerun and the lead judges a fresh set in the
-  next cycle (A8), and authoring still does not consume debate rounds. Credits spent with nothing
-  committed **skips** the rerun (nothing to load, and re-running only re-surfaces the same gap), so
-  the honest §9.6 terminal is now the lead filing `submit_terminal_report` in the following cycle
-  rather than a separate `finalize_authoring_outcome` conversation. The round cap is enforced twice
-  and the two agree: consensus passes `rounds_left`, and the `request_another_round` handler refuses
-  the form at zero with the cap named. New `_augment_with_probe` hands that form's dispatch text to
-  every worker verbatim, which is what its description promises — a constraint stated in a tool
-  description and unimplemented in code is worse than one never stated. A cycle that files no form
-  and wrote no report raises rather than composing one ([F6]). The eleven behavioural tests in
-  `tests/test_consensus_authoring.py` pass **unchanged in intent** against the new topology.
-
-- **2026-09-02 (second) — the rerun follows the commit count, never the filed form.** A cycle
-  whose lead filed `submit_terminal_report` from **inside** the authoring stage returned with
-  `authored_chain` False, so `_resume_after_authoring` never ran: no `registry.reload()`, no
-  `sandbox.restart()`, no worker rerun. Observed live (block 0 attempt 5): links 1-2 committed
-  `ixpe_pcube_polarimetry` and `ixpe_pol_energy_fit`, link 3 exhausted its submissions, the lead
-  stopped honestly, and the reviewer's send-back then had a worker call the freshly committed tool
-  and receive `[exit 127] Tool not registered`. Two gated, co-lead-approved, committed tools that
-  the analysis could not use. **§9.6 and [A11] met at a stage §9.6 was opened into, and §9.6 won by
-  control flow rather than by decision.** `strategy.run` now branches on
-  `outcome.authored_chain or outcome.committed >= 1`: an honest terminal filed from the authoring
-  stage ends the **chain**, never the analysis, and its committed prefix still has to become
-  callable before any report is final. The §9.6 terminal keeps its meaning where it is a real
-  terminal — with nothing committed there is no new evidence to rerun on, and the honest report
-  stands. **Termination:** each pass through the branch needs at least one commit and every commit
-  spends an author credit, so `tool_author_cap` bounds it. `tests/test_consensus_authoring.py`
-  gains `test_terminal_filed_mid_chain_still_reloads_restarts_and_reruns` (verified to fail
-  against the old condition) and `test_terminal_with_nothing_committed_still_ends_the_analysis`.
-
-- 2026-09-09 — **N11: `tool_author_cap` is per analysis, and used not to be.** The budget was a
-  local initialised inside `run()`, and `run()` is re-entered on every reviewer send-back, so a
-  send-back silently refilled it: the real ceiling was `max_iterations x tool_author_cap` (36
-  against a documented 12), visible in slot 2's ledger as `author_budget: 11 -> 10 -> 10` across
-  cycles that spent 1, 1 and 2 credits. Human ruling 2026-09-09: per-analysis, never refilled.
-  Spent credits now live on the instance (the strategy is built once per run in `graph/builder.py`
-  / `graph/runtime.py` and the node closes over it) in a small mutable `_AuthorCredits` holder,
-  because `DebateToConverge` is a **frozen** dataclass and a plain int field raised
-  `FrozenInstanceError` at the first spend. Never binding in the observed runs (4 attempts used),
-  but the documented cap was wrong by 3x. Tests:
-  `test_consensus_authoring.py::test_n11_author_credits_are_per_analysis_and_never_refilled_by_a_send_back`,
-  `::test_n11_the_credit_holder_is_mutable_under_a_frozen_strategy`.
-
-- 2026-09-09 — **F9: the chain outlives one failed link, and terminal status is agent-declared.**
-  Two shapes of one defect. *(1)* `_author_chain` ended on the first non-committed link
-  (`if result.status != "committed": break`), on the sound reasoning that a chain is ordered so
-  later links depend on the committed prefix — and that made a single failure end the whole chain
-  with the credits that would have paid for a retry still unspent. Slot 3 (2026-09-08) spent
-  2h43m and ~$18 on six cycles refused before a coder session even opened; slot 4 queued ~8 more.
-  Human ruling: the **lead** owns the stop decision, and spending the authoring budget
-  discovering a capability cannot be built is an honest answer — burning all 12 credits is
-  intended. The loop now continues and appends a user turn naming the failed link, its reason,
-  and how to stop the chain (`hold_authoring` or a terminal), because "the lead decides" is only
-  real over a reason the lead can read. *(2)* `AnalystReport.status` is
-  `Literal["succeeded", "failed"]`, **declared by the agent**, defaulting to **`failed`** — a
-  report nobody filled in has not succeeded at anything, and the harness must never infer success
-  from silence (it previously defaulted to `ok`). `needs_human` is retired: headless, the
-  condition every benchmark batch runs under, `ask_human` is not in a graph role's tool list, so
-  the state was unreachable by the route it names, while [A20] shows the label being filed for
-  something that was not a human block at all. **In scope by ruling, because a permanent cause now
-  costs the whole budget and the lead can only avoid that over a legible reason:** N4 — the
-  unclean-branch error names the offending paths (with `-uall`, since plain `--porcelain`
-  collapses a new directory to its own name and slot 5's dirtying file is *permanently
-  undetermined* for want of exactly this); and N8 — `_worker_safe_reason` strips operator
-  remediation from the note reaching the analysts, which previously carried a §9.9 citation, an
-  internal repo path and two destructive git commands into slot 4's worker prompt three times, in
-  a role whose own prompt forbids it from touching git.
-  **Not changed, and flagged:** the lead's `submit_terminal_report` still takes
-  `failed`/`needs_human`. That is a different field (a cycle decision, not a worker's outcome) and
-  the ruling named `AnalystReport`; retiring it there would move the frozen [A20] Tier-0 scoring
-  rule, which is an instrument decision.
-
-- 2026-09-12 — **A8: the strategy branches on the report, and a probe can ride along with a
-  commit.** `run` no longer reads `outcome.filed` to learn what the lead decided: the lead's
-  report carries `rework`, and `LeadCycleOutcome.wants_another_round` / `.authored_chain` are
-  derived from the report and the brief rather than from a filed form's name. The
-  `analyst.lead.cycle` event now records `rework` and `status` directly, which is what an offline
-  scoring pass reads (`benchmarks/science_bench` no longer scrapes a decision tool's arguments).
-  **Ruling 18 — the two terminal branches stay separate, and the probe merges.** Asked whether
-  `committed >= 1` and `report.rework` could be one branch, since the lead re-dispatches either
-  way: no. They are two dispatches against two budgets. A commit reruns the workers **fresh** (no
-  prior report, no peers — the old report predates the capability, A8's stated reason), appends
-  the authored-tool provenance note, charges an **author credit**, and reloads the registry and
-  restarts the sandboxes; rework sends each worker back to **revise** with peers in view, appends
-  the probe, charges a **debate round**, and touches no infrastructure. Collapsing them would
-  either let a three-link chain exhaust the three-round debate cap or make rework unbounded.
-  What *did* merge: the two states were previously mutually exclusive by control flow (the
-  authoring branch `continue`s before `wants_another_round` is read), and one report can now carry
-  both — so on `committed >= 1 ∧ rework`, `_augment_with_probe` runs **beside** the authored-tool
-  notes and the rerun is still charged to an author credit, never to a debate round. Strictly more
-  expressive than before: *"the tool now exists, and here is what to point it at."*
-  `_augment_with_probe` reads either shape (`follow_up` on a verdict, `what_to_probe` on a report).
-
-- 2026-09-24 — **`IODebateToConverge` deleted** with its `IOAbstraction*` protocols (95). Its only
-  caller, the librarian's ingest, ran it as one model debating itself (`[self, self], self`); the
-  librarian now writes its own report in one loop and a paper's memory is that report's findings.
+- 2026-05-26 -> 2026-06-16 — `DebateToConverge` (cap-3 debate, lead adjudication, cross-worker
+  tool summaries, figure propagation) and `IODebateToConverge` built; step 7 added lead authoring/
+  resume: a commit reloads the registry, restarts sandboxes, reruns workers (`tool_author_cap`).
+- 2026-06-26 -> 2026-07-14 — A non-commit returns an honest terminal to the reviewer (§9.6); A1: the
+  lead drives authoring itself (`drive_authoring`); [A8] the whole `tool_specs` chain is authored,
+  then one rerun; V-4: the lead cites figures from a per-worker catalog (`_deduplicated` removed).
+- 2026-07-22 — [A11] reload/restart/rerun whenever ≥1 tool committed; a non-commit loops back
+  (`_augment_with_failed_tool`); §9.6 terminal only at credit exhaustion; `analyst.tool.chain_resume`.
+- 2026-07-31 — Pre-authoring stop poll removed (`_stop_requested` deleted: `/stop` cancels the task);
+  `run_control` still carried so the lead can publish its authoring session.
+- 2026-09-02 — `LeadLike` shrank to `run_cycle`; `_maybe_author_and_resume` replaced by
+  `_resume_after_authoring` + `_revision_round`; authoring ends the cycle; new `_augment_with_probe`;
+  a cycle with no form and no report raises ([F6]).
+- 2026-09-02 — The rerun follows `authored_chain or committed >= 1`, so a terminal filed mid-chain
+  still reloads, restarts and reruns; bounded by `tool_author_cap`.
+- 2026-09-09 — N11 (ruling): author credits are per analysis, never refilled by a send-back, held in
+  a mutable `_AuthorCredits` on the frozen strategy.
+- 2026-09-09 — F9 (ruling): the chain continues past a failed link, telling the lead why;
+  `AnalystReport.status` is agent-declared `succeeded|failed`, default `failed`, `needs_human`
+  retired. N4: unclean-branch error names paths; N8: `_worker_safe_reason` strips remediation.
+- 2026-09-12 — A8: `run` branches on the report's `rework`, not a filed form; `analyst.lead.cycle`
+  records `rework`/`status`. Ruling 18: commit and rework stay separate; a probe rides along with a
+  commit, charged to an author credit.
+- 2026-09-24 — `IODebateToConverge` and its `IOAbstraction*` protocols deleted (the librarian is
+  one loop).

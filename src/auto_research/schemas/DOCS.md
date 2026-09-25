@@ -283,102 +283,34 @@ carried by **reference** (`FigureRef`), never embedded
   one verify-list shape across roles (human ruling); title and ids resolve from the receipt.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Full Pydantic v2 protocol: research/search/analysis/review messages, `FigureRef`/`DocumentRef`, function-call tool envelopes, sandbox results, report + LaTeX schemas, strict JSON-serializable boundaries.
-- 2026-06-12 -> 2026-06-16 — Phase 2 schemas (steps 3–7): `ToolSpec`/`ValidationDataset`/`ProposedCheck`, `AnalystReport.tool_request`/`status`, merge-flow types (`CheckResult`, `GateReport` incl. `findings`, `ToolReviewVerdict` incl. `commit_summary`, `MergeFlowResult`), `HumanQuery`/`HumanResponse` (§9.7), and `AuthoringDecision`.
-- 2026-06-18 -> 2026-06-24 — Provider-strict + routing-legible fixes: `ReviewVerdict` fields carry `Field(description=…)` with one-edge-each `needs_more_literature`/`needs_analysis_rework` semantics; split the worker→lead `AnalystToolRequest` from the lead→coder `ToolSpec` and dropped `ProposedCheck.params` (the open map that 400'd GPT workers under OpenAI strict); added `ReviewVerdict.cited_paths`.
-- 2026-06-29 — `HumanQuery` carries one Markdown `message` (was `question`+`context`); added the `headline` property; connectors render per channel.
-- 2026-07-06 — [A8] `AuthoringDecision.tool_spec` → ordered `tool_specs: list[ToolSpec]`, with the codebase's first `@model_validator` enforcing `should_author ⇒ len(tool_specs) ≥ 1`.
-- 2026-07-09 — [A12] `ToolSpec.target_domain`/`disposition` documented as advisory intent (no schema change): the deterministic gate verifies where a tool landed from the diff, not these fields, so a descriptive value can no longer doom the gate.
-- 2026-07-14 — V-4: figures by citation. Added `FigureCitation{source, index}` and the `FiguredReport` base (`cited_figures` + runtime-resolved `figures`); `AnalystReport` extends it. Citation replaces the old figure-dedup pass, closing the "last-round-only figures" leak.
-- 2026-09-02 — **Every model-filled field carries `Field(description=...)`**, across `ToolSpec`,
-  `AnalystToolRequest`, `ValidationDataset`, `ProposedCheck`, `AuthoringDecision`, `AnalystReport`,
-  `FiguredReport` and `FigureCitation`. A `#` comment never reaches the JSON Schema the model is
-  given, so a field explained only in a comment is a field filled blind — and a live run died on
-  exactly that ($19.43, 2026-09-01). Prose was lifted where it already existed (`ReviewVerdict` was
-  already complete; `edit_report_tool_def` already described `AnalystReport` and the worker's half
-  of the tool request), so the genuinely new text is the **lead-owned** fields: `target_domain`
-  (required, and previously named in no channel the model could read), `disposition`,
-  `proposed_checks`, `replication_tolerance`. `ToolSpec` is re-documented as *the opening prompt of
-  a coding session*, not a classification of how novel a gap is; `AuthoringDecision` as
-  **harness-constructed from a filed form** — no model fills it any more, and its cross-field
-  validator is kept as an assertion on our own construction, where the state it rejects is
-  unreachable. New `tests/test_schema_descriptions.py` (19) makes the rule permanent, exempting by
-  name only runtime-resolved models (`FigureRef`) and auto-set bookkeeping.
-
-- 2026-09-09 — **F9: the chain outlives one failed link, and terminal status is agent-declared.**
-  Two shapes of one defect. *(1)* `_author_chain` ended on the first non-committed link
-  (`if result.status != "committed": break`), on the sound reasoning that a chain is ordered so
-  later links depend on the committed prefix — and that made a single failure end the whole chain
-  with the credits that would have paid for a retry still unspent. Slot 3 (2026-09-08) spent
-  2h43m and ~$18 on six cycles refused before a coder session even opened; slot 4 queued ~8 more.
-  Human ruling: the **lead** owns the stop decision, and spending the authoring budget
-  discovering a capability cannot be built is an honest answer — burning all 12 credits is
-  intended. The loop now continues and appends a user turn naming the failed link, its reason,
-  and how to stop the chain (`hold_authoring` or a terminal), because "the lead decides" is only
-  real over a reason the lead can read. *(2)* `AnalystReport.status` is
-  `Literal["succeeded", "failed"]`, **declared by the agent**, defaulting to **`failed`** — a
-  report nobody filled in has not succeeded at anything, and the harness must never infer success
-  from silence (it previously defaulted to `ok`). `needs_human` is retired: headless, the
-  condition every benchmark batch runs under, `ask_human` is not in a graph role's tool list, so
-  the state was unreachable by the route it names, while [A20] shows the label being filed for
-  something that was not a human block at all. **In scope by ruling, because a permanent cause now
-  costs the whole budget and the lead can only avoid that over a legible reason:** N4 — the
-  unclean-branch error names the offending paths (with `-uall`, since plain `--porcelain`
-  collapses a new directory to its own name and slot 5's dirtying file is *permanently
-  undetermined* for want of exactly this); and N8 — `_worker_safe_reason` strips operator
-  remediation from the note reaching the analysts, which previously carried a §9.9 citation, an
-  internal repo path and two destructive git commands into slot 4's worker prompt three times, in
-  a role whose own prompt forbids it from touching git.
-  **Not changed, and flagged:** the lead's `submit_terminal_report` still takes
-  `failed`/`needs_human`. That is a different field (a cycle decision, not a worker's outcome) and
-  the ruling named `AnalystReport`; retiring it there would move the frozen [A20] Tier-0 scoring
-  rule, which is an instrument decision.
-
-- 2026-09-12 — **A3: one report class, two role surfaces.** `AnalystReport` gained `rework`
-  (send the analysts back), `rationale` (why) and `what_to_probe` (handed to every worker
-  verbatim), and `status` regained `needs_human` beside `succeeded`/`failed`. The lead's decision
-  now rides on its report rather than on a filed form, which is the same contract an analyst
-  already writes.
-  **The third status value is barred by the SURFACE, not by the type.** F9 removed it from this
-  schema because a worker could reach it and did — filed for something that was not a human block
-  at all ([A20]) — and headless the route it names does not exist. That reasoning is unchanged;
-  what moved is where it is enforced. The lead's terminal is a cycle decision rather than a
-  worker's outcome and legitimately carries the value, so `edit_report` declares only the values
-  a role may file (`react.WORKER_STATUS_VALUES` / `LEAD_STATUS_VALUES`) and a worker's declaration
-  does not include it. Belt and suspenders: the surface makes it ungeneratable, the handler
-  validates anyway.
-  **A subclass was rejected.** `LeadReport(AnalystReport)` would have widened a `Literal` in a
-  subtype, so anything typed as the worker's report could receive a value the worker may not file
-  — and the analysis result returned all the way to the reviewer *is* that type.
-  **The conditional requirements are not in the schema.** `rework=true` needs a probe and a
-  rationale; `rework=false` needs findings. Neither is expressed here: the schema stays permissive
-  so a partial `edit_report` mid-turn is legal, and completeness is checked once at `turn_end`
-  (`react.lead_turn_problems`). Conditional required-fields is also not portable across the six
-  vendors. Guarded by `test_schemas.py::test_needs_human_is_barred_by_the_workers_surface_not_by_
-  the_type` and `::test_every_declared_report_property_is_a_real_field_on_the_model`.
-
-- 2026-09-24 — **`Receipt` added (`schemas/artifacts.py`, provenance P0).** One runtime-minted
-  record for every artifact kind a claim can rest on, generalising what `FigureRef` did for
-  figures without its gap: a `FigureRef`'s hash and producer were whatever the tool returned,
-  while a receipt's are computed and stamped by the runtime. Adds input hashes, parent receipts and
-  propagating `failed`/`synthetic` flags. `FigureRef` is unchanged and remains the multimodal
-  carrier (`Receipt.to_figure_ref`). Tests in `tests/test_provenance.py`.
-- 2026-09-24 — `literature.py` added (95): `LiteratureReport` + `LiteratureFinding`, the report the
-  librarian files through `turn_end` and the reviewer receives as `state["literature"]`.
-- 2026-09-24 — `review.py` gains `ReviewerReport`, `ReviewerSection`, `ReviewerTable` (5c, the
-  reviewer as the unit): one plain-text report per review, rendered to LaTeX by the harness only
-  after its quotes check out. `ReviewVerdict` stays until the graph switches. `LatexReport`
-  deleted from `report.py` (dead since F5e; the reviewer no longer returns LaTeX).
-- 2026-09-24 (second) — `ReviewVerdict` deleted (5c): the graph routes on `ReviewerReport`'s verdict
-  fields and every caller moved. `report.py` reshaped: `ReportSection` and `Reference` deleted
-  (references come from receipts), `ResearchReport` is now the published envelope (filed report +
-  receipt closure + artifact handles) rather than a model-composed document.
-- 2026-09-24 — `AttributedValue` + `LiteratureReport.attributed_values` (95): the verify-against-
-  the-PDF list, runtime-set (papers are cited, never text-matched; human ruling).
-- 2026-09-24 (third) — `PaperAttribution` + `ResearchReport.paper_attributions`; the reviewer's field
-  descriptions tell it to attribute a paper's value with its place (`{{lib:p4 "value" Table 2}}`).
-- 2026-09-24 — **`PaperAttribution` added** (`schemas/artifacts.py`): one value a report attributes
-  to a paper (`handle`, `value`, `locator`), the single shape of every report's verify-against-the-
-  PDF list, since papers are cited and never text-checked (human ruling).
-- 2026-09-24 — `AttributedValue` removed; `LiteratureReport.attributed_values` is
-  `list[PaperAttribution]`, the shape every role's verify list shares (human ruling via 5c).
+- 2026-05-26 -> 2026-06-12 — Full Pydantic v2 protocol: research/search/analysis/review messages,
+  `FigureRef`/`DocumentRef`, function-call tool envelopes, sandbox results, report + LaTeX schemas.
+- 2026-06-12 -> 2026-06-16 — Phase 2: `ToolSpec`/`ValidationDataset`/`ProposedCheck`,
+  `AnalystReport.tool_request`/`status`, `CheckResult`, `GateReport`, `ToolReviewVerdict`,
+  `MergeFlowResult`, `HumanQuery`/`HumanResponse`, `AuthoringDecision`.
+- 2026-06-18 -> 2026-06-24 — `ReviewVerdict` fields described, plus `cited_paths`; worker→lead
+  `AnalystToolRequest` split from lead→coder `ToolSpec`; `ProposedCheck.params` dropped (OpenAI strict).
+- 2026-06-29 — `HumanQuery` carries one Markdown `message` (was `question`+`context`) + `headline`.
+- 2026-07-06 -> 2026-07-09 — [A8] `AuthoringDecision.tool_specs: list[ToolSpec]` (validator:
+  `should_author ⇒ ≥1`). [A12] `ToolSpec.target_domain`/`disposition` documented as advisory.
+- 2026-07-14 — [V-4] `FigureCitation{source, index}` + `FiguredReport` base (`cited_figures`,
+  runtime-resolved `figures`); `AnalystReport` extends it; citation replaces figure-dedup.
+- 2026-09-02 — Every model-filled field carries `Field(description=...)` (a `#` comment never reaches the
+  model); `AuthoringDecision` is harness-constructed from a filed form. Guard:
+  `tests/test_schema_descriptions.py`.
+- 2026-09-09 — F9: `AnalystReport.status` is agent-declared `Literal["succeeded", "failed"]`, default
+  `failed` (was `ok`); `needs_human` retired. The lead's `submit_terminal_report` kept
+  `failed`/`needs_human` (deleted 09-12).
+- 2026-09-12 — A3: `AnalystReport` gained `rework`, `rationale`, `what_to_probe`; `status` regained
+  `needs_human`, barred from workers by the `edit_report` surface, not the type. Conditional
+  requirements checked at `turn_end`, not in the schema; a `LeadReport` subclass rejected.
+- 2026-09-24 — Provenance: `Receipt` (`schemas/artifacts.py`), runtime-minted, with input hashes, parents
+  and propagating `failed`/`synthetic` flags; `FigureRef` unchanged (`Receipt.to_figure_ref`).
+- 2026-09-24 — `literature.py`: `LiteratureReport` + `LiteratureFinding`, filed by the librarian through
+  `turn_end` into `state["literature"]`.
+- 2026-09-24 — `review.py`: `ReviewerReport`, `ReviewerSection`, `ReviewerTable`. Deleted: `LatexReport`,
+  `ReviewVerdict`, `ReportSection`, `Reference`; `ResearchReport` is the published envelope (filed
+  report + receipt closure + artifact handles).
+- 2026-09-24 — `PaperAttribution` (`handle`, `value`, `locator`), the one shape of every verify-against-
+  the-PDF list (ruling: papers cited, never text-checked): `ResearchReport.paper_attributions`,
+  `LiteratureReport.attributed_values`; the interim `AttributedValue` removed.

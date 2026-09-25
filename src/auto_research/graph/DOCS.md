@@ -240,104 +240,27 @@ iteration counters, the cap, and the published artifact paths.
 - `DEFAULT_WORKER_COUNT` — default analyst worker count (currently 2).
 
 ## Changelog
-Compacted 2026-09-01: entries through 2026-07-31 folded into themed ranges (detail in git history).
+Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
 
-- 2026-05-26 -> 2026-06-26 — **Graph/runtime built, ReAct-wired, then made reviewer-driven.** Six-node
-  LangGraph incl. `compose_report`, two capped feedback edges, Studio wiring, per-run workspace, one
-  persistent sandbox per worker, MCP client lifecycle, read-only reviewer/lead tools, required-env
-  checks, report formats. Phase 2 steps 0/5/7: off-repo MCP cwd + lead read-only `toolkit_root`;
-  `run_research` resolves the raise-to-human channel, awaits the async preflight (channel ping) and
-  threads the handler to roles; consensus authoring/resume wired. Then: the `literature` node only
-  ingests and the reviewer pulls literature via its own `text_search`/`open_paper`; `bash_exec` PATH
-  pinned to `{analyze_env}/bin`; hardcoded `toolkit_root` fallbacks removed. **Reviewer is the sole
-  I/O (§9.6):** `analysis → review_analysis` is unconditional, `finalize_run` forwards the reviewer's
-  verdict (recording `run.honest_failure`), and a report is always composed on finalize so an honest
-  failure is documented rather than silent.
-- 2026-07-06 -> 2026-07-16 — **Detached runs, and two ways they died.** `run_research_nohup` ([E5],
-  partial) runs the pipeline in a detached child surviving kernel death, reconnecting by deterministic
-  `run_id`, with `overwrite` guarded by process-based liveness and `RunDied` on a dead run. Two live
-  failures followed: liveness now treats a **zombie** as dead (a backend that died at preflight stays
-  unreaped in the notebook kernel's process table, and `overwrite=True` refused with a useless "kill
-  <pid>" hint — a zombie ignores signals), and `_spawn_orphaned(argv, log_path, env=None)`
-  **double-forks** so the backend is
-  reparented to init at spawn — a real VSCode logout killed a live run because graceful teardown kills
-  process *trees* by walking `/proc` parent→child links, which `start_new_session` does not sever (the
-  original verification had SIGKILLed the kernel, so no cleanup ran and the gap never showed).
-- 2026-07-22 -> 2026-07-31 — **Durable resume (Stages 1–3), the cost/summary ledger, and the interrupt
-  path (Stage 4).** New `graph/checkpoint.py`: `run_research` always compiles with a per-run
-  `AsyncSqliteSaver` at `run_dir/checkpoint.sqlite` (`thread_id=run_id`, `durability="sync"`), snapshotting
-  `ResearchState` after every node; `resume=True` invokes with input `None` (the in-flight node re-runs;
-  its ReAct history is not persisted) and records `run.resume`. **No silent non-durable fallback** — a
-  `checkpointer_available` preflight fails the launch if `langgraph-checkpoint-sqlite` is absent.
-  `run_research_nohup(resume=True)` relaunches a dead/`failed` backend (mutually exclusive with
-  `overwrite`); CLI `--resume`. Stage 2: the resume calls `heal_toolkit_branch_if_dirty` **before**
-  `run_preflight`, resetting a dirty `ai` branch to the persisted per-attempt base ref
-  (`run.resume.heal`). Stage 3: `build_graph(run_control=)` + stop-aware review edges (**both deleted
-  2026-07-31**, being unreachable once a stop cancels rather than winds down) and the `CommandContext` on
-  a command-capable connector. **The full killed-and-resumed run was NOT LIVE TESTED then** (it passed
-  four times later, 2026-08-03). **Cost/summary (2026-07-29):** `run_research` installs the run's
-  `CostMeter` before any model client (so every monitor line, preflight included, carries accumulated
-  spend), pins the monitor's `run_id` to the **run's** id (it had minted an unrelated `uuid4`), adds
-  `cost_usd` to `run.finish`, and records a derived `run.summary` on the success *and* failure paths —
-  rendered by `ResearchRun.summary()`, the CLI text output and `detached._partial` for a `RunDied`. `backend.log` is **appended**, not opened `"w"` (a
-  `--resume` relaunch had erased the dead attempt's traceback, the thing `RunDied` points the human at);
-  only `overwrite=True` is destructive, and the `result.json` unlink on relaunch stays so a stale `failed`
-  marker cannot read as done (its reason survives as the ledger's `run.error`). **Interrupt path
-  (2026-07-31):** `run_research` registers its task on `RunControl`, so a `/stop` — or SIGINT/SIGTERM
-  under `install_signal_handlers=True`, which only the CLI and the detached backend pass — cancels it
-  wherever it awaits. A `CancelledError` carrying `run_control.stop_requested` is ours: the task is
-  `uncancel()`-ed, `_interrupt_cleanup` runs under `asyncio.shield` (teardown otherwise dies with the
-  scope it is in, leaving sandbox children alive and the branch dirty), and `UserInterruptionError` is
-  raised naming the run dir and ledger; a `CancelledError` *without* the flag is re-raised untouched,
-  never relabelled as a human stop. `_interrupt_cleanup` is three ordered phases — **kill** every process
-  that can write (each sandbox and its descendants), **repair** (the live `AuthoringSession.aclose()`,
-  i.e. reset the branch to the attempt's base ref; the reverse order lets the coder re-dirty the branch a
-  moment after the reset), then **close and record** (MCP, HITL connector, `run.interrupted`, the derived
-  `run.summary`). Every step is bounded (`_INTERRUPT_STEP_TIMEOUT_S` 10 s, 30 s for the reset); a wedged
-  step logs `run.interrupt.step_timeout` and yields, a branch left dirty by a timeout being caught by the
-  next launch's clean-tree preflight and the resume-time heal. **No model is called on this path and no
-  report is composed.** `reconstruct_run` raises `UserInterruptionError` (not `RunDied`) for an
-  `interrupted` marker, so a detached notebook run sees the same exception as an in-process one. Tests:
-  `tests/test_interrupt.py` (+15).
-
-- 2026-09-08 — **Role wiring extracted into three factories the run path itself calls.** A caller
-  that assembled a role by hand assembled a *different* role, and the worker was the sharp case:
-  `analyze()` runs its inner ReAct tool loop only when a sandbox and a registry are attached and
-  otherwise falls back to a plain structured call, so a hand-built worker looks like a worker,
-  answers like a worker, and never calls a tool. Measured the same day on the science sweep's seat
-  probe: its worker cell attached neither, so the failure it produced was **unattributable** — a
-  model that will not drive a loop and a model that was never given one are indistinguishable from
-  outside. Its lead cell was wrong more quietly, building a provider that differed from
-  production's by five arguments. `run_research` now calls `readonly_tools_for`,
-  `readonly_roots_for` and `attach_worker_runtime` rather than restating them, so there is one
-  definition of what each role can do. Behaviour-preserving: the reviewer and lead branches
-  reproduce the previous flag sets exactly, with `include_plan_and_debate` now derived from
-  whether a human handler exists (previously passed `True` unconditionally for the lead, which was
-  already conditional one layer down in the provider). New `tests/test_role_wiring_seams.py` (8)
-  is a static guard: the two constructors appear in the run path only inside their factory,
-  `run_research` actually calls both, the seat probe hand-rolls neither, and the lead's and
-  reviewer's loops still differ the way this document says. **Known second definitions, left
-  alone:** six live tests and `benchmarks/author_bench/trial.py` build a lead provider directly.
-  The benchmark's copy was checked rather than assumed and resolves to the identical five tools,
-  so the published Table 6 / Fig. 5 numbers are unaffected; no number in the paper is backed by a
-  live test at all.
-
-- 2026-09-24 — **Literature node = one librarian research pass** (95). `literature_node` calls
-  `io_agent.research()` and puts the filed `LiteratureReport` and its receipts into state
-  (`literature`, `literature_receipts`); `IOAgentLike` shrank to that method. The runtime creates
-  the `librarian_io` working folder and sets `io_agent.report_dir`. The compose→search→ingest
-  pipeline is gone.
-
-- 2026-09-24 — **Workers and the lead get the run's receipt store (provenance P2, session 0f).**
-  `attach_worker_runtime` sets `worker.receipts` and `attach_lead_runtime` sets `lead.receipts`
-  plus `lead.tools.receipts` / `receipt_source="analyst_lead"`, all from
-  `ReceiptStore.for_run(run_dir(run_id))` — the one process-wide store per run (the librarian's
-  attach site uses the same accessor), so every role's handles share counters and survive a resume.
-- 2026-09-24 (5c) — **The reviewer is a unit.** Reviewer nodes pass `stage`, the literature report
-  and receipts, and `iterations_left`; `review_analysis_node` builds the `ReviewerRender` that makes
-  rendering part of the reviewer's `turn_end`; `compose_report` publishes (receipts + JSONL) with no
-  model. `ReviewVerdict` → `ReviewerReport` throughout; `cited_paths`/`_resolve_cited_paths` removed;
-  `build_graph(storage=, report_retry_cap=)` → `receipts=`; new `attach_reviewer_runtime` seam
-  (`test_role_wiring_seams` counts a factory called through it as the run path's);
-  `readonly_tools_for("reviewer")` passes `include_open_paper=False`; `detached.py` reads the
-  verdict as `ReviewerReport`. `config: report_retry_cap` removed.
+- 2026-05-26 -> 2026-06-26 — Six-node graph (`compose_report`, two capped feedback edges, Studio,
+  per-run workspace, per-worker sandbox, MCP lifecycle); HITL channel, async preflight and consensus
+  authoring wired. Reviewer is the sole I/O (§9.6): a report is always composed on finalize.
+- 2026-07-06 -> 2026-07-16 — [E5] `run_research_nohup` detached runs (reconnect by `run_id`,
+  `RunDied`); liveness treats a zombie as dead; `_spawn_orphaned` double-forks to survive IDE logout.
+- 2026-07-22 -> 2026-07-29 — Durable resume: `graph/checkpoint.py` (`AsyncSqliteSaver`, `resume=True`,
+  `checkpointer_available` preflight), `heal_toolkit_branch_if_dirty` before preflight, Stage 3
+  `CommandContext`; killed-and-resumed run LIVE-VERIFIED 2026-08-03.
+- 2026-07-29 — Cost meter installed before any model client; monitor `run_id` pinned to the run;
+  `cost_usd` on `run.finish`; `run.summary` on success and failure; `backend.log` appended.
+- 2026-07-31 — Interrupt: `/stop` or signals cancel the registered task; shielded `_interrupt_cleanup`
+  (kill → repair branch → close/record, each step bounded) raises `UserInterruptionError` with no
+  model call; `build_graph(run_control=)` and stop-aware edges deleted.
+- 2026-09-08 — Role wiring extracted into `readonly_tools_for`, `readonly_roots_for` and
+  `attach_worker_runtime`, called by `run_research` (behaviour-preserving); static guard
+  `tests/test_role_wiring_seams.py`.
+- 2026-09-24 — Literature node runs one librarian `research()` pass into `literature` /
+  `literature_receipts` (`IOAgentLike` shrank to it); workers and the lead get
+  `ReceiptStore.for_run` via `attach_worker_runtime` / `attach_lead_runtime`.
+- 2026-09-24 (5c) — Reviewer is a unit: `ReviewVerdict` → `ReviewerReport`, rendering inside its
+  `turn_end` (`ReviewerRender`), `compose_report` publishes with no model, new
+  `attach_reviewer_runtime`; `build_graph(storage=, report_retry_cap=)` → `receipts=`.

@@ -186,99 +186,22 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   via point / clone / start-fresh.
 
 ## Changelog
-Compacted 2026-09-01: entries through 2026-08-19 folded into themed ranges (detail in git history).
+Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
 
-- 2026-05-26 -> 2026-06-25 — **Phase 1 completed, Phase 2 begun, launch preflight built.** Phase 1:
-  schemas, providers, observability, storage/retrieval, sources, prompts, agents, consensus,
-  graph/runtime, sandbox, report, CLI, notebook, env checks, config-driven `runtime_dir`. Phase 2
-  began with off-repo scratch, `ToolSpec`/merge-flow/gate scaffolding, and `research_toolkit` as the
-  only runtime-authored repo. Steps 5–7 added centralized `.env` loading (`check_required_env`),
-  `preflight.py` (`Preflight`/`run_preflight`, async for the `human_channel` ping), the `hitl`
-  raise-to-human channel + `human_handler`/`human_channel`, `papers_dir()`, toolkit
-  git-identity/branch-clean checks, and `observations.py` (obs-db-location config +
-  `check_catalog_health` delegating to `research_toolkit`'s detect-only healthcheck) with a single
-  `obs_db_root` and missions discovered from disk. Resilience/UX: two Pydantic v2 warning families
-  muted, `env.sandbox_call_timeout_default()`, `database_health` + `toolkit_root_configured` checks,
-  one progress line per check, and a per-mission drift summary.
-
-- 2026-07-14 -> 2026-07-31 — **The domain-agnostic installer, retry-policy config, the catalog
-  relocation, and `/stop` as one interrupt.** *(Installer increments 0–4)* Machine-local config
-  (`orchestration.yaml`, `observations.yaml`, `sandbox/analyst_env.sh`, `sandbox/repl_init.py`) is
-  gitignored with tracked `*.example` templates and loaders raise a "copy the `.example` / run
-  install.sh" message; new keys `repl_init_py` (domain REPL session-setup hook, replacing the
-  hardcoded XSPEC boot) and `analyze_probe` (stack smoke test, with a `check_analyze_probe`
-  preflight). `install.sh` (thin bash: conda + the `auto_research` env, then the Python stage) +
-  `python -m auto_research.setup` — pages 1 conda, 2 analyst env, 3 typed domain-dependency entries
-  (`shell_init`/`env_var`/`conda_pkg`/`pip_pkg`/`python_init`/`license_tool`) materialized into
-  `analyst_env.sh` + `repl_init.py` and contributing `agent_fs_allow` domain roots and the probe,
-  4 `toolkit_root` by scan → point / clone / **start-fresh** (scaffold a §9.2 `<domain>_utils`
-  skeleton, `git init` + `ai` branch, stage raw code under `<runtime_dir>/staging/` *outside* the
-  worktree), 5 paths, 6 write configs deriving `agent_fs_allow`, 7 preflight. Interactive via
-  `questionary`, headless via `--answers` (fail-loud on a missing value). Scaffold templates live in
-  `auto_research` and are written into the toolkit only at install-runtime, so the build agent never
-  edits `research_toolkit`. Increment 5 (`onboard_toolkit`) is **deferred** — it needs cross-domain
-  collaborators. Tests: `tests/test_setup.py`. *(Retry + catalog)* `env.ProviderRetryPolicy`/
-  `provider_retry_policy()` expose the "Internet stability" section (`provider_retry_*`) backing
-  `models.retry`, after two live runs died on unhandled Anthropic 529s riding the SDKs'
-  seconds-scale default retries. Per §2 the domain read of a mission's `catalog.json` moved into
-  `research_toolkit`'s new `catalog_utils` (reusing the trusted `obsdb_catalog.neutral.read`,
-  surfaced as the `data_catalog` tool); `observations.py` keeps only the obs-db-location config +
-  `check_catalog_health`, and `env.toolkit_root()` is the new accessor. *(2026-07-31)* **`/stop` and
-  Ctrl-C are one interrupt; the cooperative wind-down is gone.** The polled stop flag stopped a
-  role's *tool use* and nothing else — every role still made its terminal write-up call and the
-  graph walked every remaining stage (measured on this config: ~14 further model calls, several
-  replaying a 100k-token trajectory, plus pdflatex), and because the stop truncated the workers'
-  evidence the lead judged the debate unconverged and ordered fresh revision rounds, so stopping
-  *manufactured* work; the first write-up call after a stop is also what crashed the 2026-07-29 run.
-  Now `RunControl.interrupt()` cancels the run task, `run_research` converts that cancellation into
-  `UserInterruptionError`, and cleanup is deterministic and model-free. New public symbols:
-  `run_control.UserInterruptionError`, `RunControl.interrupt`/`register_run_task`/
-  `authoring_session`; `run_research(install_signal_handlers=)`.
-
-- 2026-08-10 -> 2026-08-19 — **Two preflight corrections: fallback keys, and requirements derived
-  from config.** New check `api_key_fallbacks` (`models.keys.check_api_key_fallbacks`), registered
-  immediately after `required_env` because that check is what loads `.env`. A
-  `<PROVIDER>_API_KEY_FALLBACK` is optional, so an unset one passes; what fails is a fallback that
-  cannot do its job — blank after stripping, identical to the primary, or set without a primary —
-  all three being silently deduplicated away by the key pool, which would leave a human believing a
-  run is protected against throttling when rotation has nowhere to go (full design in
-  `models/DOCS.md`). **`check_required_env` derives its model keys from `config/models.yaml`:** the
-  hand-written list had drifted both ways — demanding `GOOGLE_API_KEY` from a config with no Google
-  member, and knowing nothing of the vendor variables the coder harnesses reach DeepSeek, Z.AI and
-  Alibaba Model Studio through (`key_env`), so a missing one surfaced inside an author subprocess
-  instead of at launch. Now: a provider a role names implies its SDK's variable, a member's
-  `key_env` requires that variable exactly and **wins over the provider default** (a plan-specific
-  endpoint may use a different name), and the error names which role/member wanted it. The alias
-  table carries the three coder vendors' documented variables (`DEEPSEEK_API_KEY`, `ZAI_API_KEY`,
-  `DASHSCOPE_API_KEY`) as well as the three chat providers', so configuring one of them as a chat
-  member later needs no `key_env`. Tests: `tests/test_env.py` 1 → 8.
-
-- 2026-09-01 — **Run-ledger field caps became config, and rose 2k/4k → 100k.** New
-  `LedgerCaps`/`ledger_caps()` reading `ledger_arg_cap` / `ledger_result_cap` /
-  `ledger_coder_text_cap`; `agents.roles` and `sandbox.coder.events` read them at call time
-  (the former module constants `_EVENT_ARG_CAP`/`_EVENT_RESULT_CAP`/`CODER_TEXT_CAP` are gone —
-  a constant captured at import would make the config key look wired while doing nothing).
-  **Measured before deciding**, over real ledgers: the heaviest run (`8c75990e`, five tools
-  authored, $116) hid **6.50 M characters behind 1,027 trimmed fields**, so uncapping takes it
-  7.92 → 14.42 MB (**1.8×**); a non-authoring run is 1.0×, i.e. trimming is almost entirely an
-  authoring phenomenon (`coder.tool_result` 2.03 M, co-lead review 1.06 M, lead `drive_authoring`
-  1.04 M). Largest single field 68 kB, so 100k retains everything observed while still bounding a
-  pathological blob. Config rather than source **because the ledger is the run's durable record**
-  and an offline scoring pass reads it long after: the value a batch used has to travel with that
-  batch. The read side needed nothing — `MonitorToolProvider` already windows a payload at 8,000
-  chars default / 32,000 max with a `bias` offset and `ledger_grep` returns index rows only — so
-  the write cap and the context an agent can pull are independent. Tests: `tests/test_env.py`
-  8 → 15.
-
-
-- 2026-09-12 — **One deriver for a provider's key variable.** `env.py` held a hand-written
-  provider -> variable table while `models.keys.env_var_names` derived the same names from a
-  format rule; they agreed for five of six providers, so nothing failed while they were two. The
-  cost landed on a third reader — `CodexBackend` derived nothing at all, so a coder member with no
-  `key_env` launched unauthenticated while this module required and found the very variable the
-  author never received. New public `env.provider_key_aliases(provider)` derives the standard name
-  from `env_var_names` and keeps only what cannot be derived (Google's `GEMINI_API_KEY`
-  alternate); an unrecognised provider still yields nothing, since the roles' YAML is read raw
-  here. `benchmarks/science_bench/__main__` stops reaching into the private table. Guarded by
-  `tests/test_env.py::test_every_provider_resolves_the_same_key_variable_everywhere` and a sibling
-  asserting the coder harness agrees — both verified against an injected drift.
+- 2026-05-26 -> 2026-06-25 — Phase 1 package complete; Phase 2 begun (off-repo scratch, `ToolSpec`,
+  merge flow, gate). Added `.env` loading (`check_required_env`), `preflight.py` (`run_preflight`,
+  async), `hitl` + `human_handler`, `papers_dir()`, toolkit checks, `observations.py`.
+- 2026-07-14 -> 2026-07-16 — Installer increments 0–4: machine-local config gitignored with
+  `*.example`, `repl_init_py`/`analyze_probe` keys (+ `check_analyze_probe`), `install.sh` +
+  `python -m auto_research.setup` (typed domain deps; toolkit point/clone/start-fresh); 5 deferred.
+- 2026-07-16 -> 2026-07-22 — `env.ProviderRetryPolicy`/`provider_retry_policy()` back
+  `models.retry`; catalog read moved to `research_toolkit` `catalog_utils`; new `env.toolkit_root()`.
+- 2026-07-31 — `/stop` and Ctrl-C are one interrupt (`RunControl.interrupt` cancels the run task;
+  wind-down removed): new `UserInterruptionError`, `RunControl.register_run_task`/
+  `authoring_session`, `run_research(install_signal_handlers=)`.
+- 2026-08-10 -> 2026-08-19 — New preflight `api_key_fallbacks` (after `required_env`);
+  `check_required_env` derives keys from `config/models.yaml`, a member's `key_env` winning.
+- 2026-09-01 — Ledger caps moved to config (`LedgerCaps`/`ledger_caps()`, `ledger_*_cap`, 2k/4k →
+  100k), read at call time; constants `_EVENT_ARG_CAP`/`_EVENT_RESULT_CAP`/`CODER_TEXT_CAP` deleted.
+- 2026-09-12 — New `env.provider_key_aliases(provider)` derives the key variable from
+  `models.keys.env_var_names`, replacing the hand-written table, so every reader agrees.

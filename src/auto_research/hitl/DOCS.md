@@ -142,79 +142,21 @@ protocol, §7).
 - `SlackHandler` / `TelegramHandler` / `WhatsAppHandler` — connector classes (see contracts above).
 
 ## Changelog
-Compacted 2026-09-01: entries through 2026-07-31 folded into themed ranges (detail in git history).
+Compacted 2026-09-01 and 2026-09-24 (detail in git history).
 
-- 2026-06-15 -> 2026-06-29 — **Package created and hardened (Phase 2 step 5).**
-  `HumanQuery`/`HumanResponse` protocol; injectable `HumanHandler` + `resolve_human` fail-safe;
-  `resolve_handler` CLI-vs-library auto-detect; CLI/Slack/WhatsApp connectors;
-  `make_human_channel_check` launch ping. Then: Twilio API-key auth, a shared `response_timeout_s()`
-  (default 1 h) every channel waits at most, `SlackHandler` construction deferred to `async start()`
-  with single-open plain-reply resolution and the benign Socket Mode rotation ERROR downgraded, and
-  connector/ping faults translated to named causes with a `cli`/`none` escape hatch. `HumanQuery`
-  settled on one Markdown `message` rendered per surface (CLI `rich`, Slack `markdown` block);
-  WhatsApp/Twilio deprecated (it bills per message).
-- 2026-07-02 -> 2026-07-16 — **Telegram becomes the recommended channel (§12/[E4]), then its
-  credential leak is closed.** `python-telegram-bot` long polling (outbound-only, no public URL,
-  reconnect-lossless), chosen over unreliable Slack Socket Mode; multi-question reply-to routing
-  (`message_id→Future`) with a single-open plain-reply fallback; Markdown→Telegram-HTML render
-  (`_md_to_html`, `_chunk_md`); wired into `build_human_handler`/CLI/preflight. Live fixes: blockquote
-  rendering (escape before the structure pass), plain-reply dedupe by Future identity, and each
-  `message_id→Future` registered immediately after its own send so a fast mid-send reply is not
-  dropped. **Credential leak:** `TelegramHandler.start()` pins `httpx`/`httpcore` to WARNING, since
-  Telegram embeds the bot token in every request URL and httpx logs full URLs at INFO — every backend
-  log had been writing the credential to disk (rotating the exposed token is the human's out-of-band
-  step). The suppression lives where Telegram traffic starts, so it covers every entry point.
-- 2026-07-22 -> 2026-07-30 — **The slash-command channel (§12 Stage 3), then its live-driven rework.**
-  New `commands.py` (channel-agnostic `dispatch_command` + `CommandContext` + `make_status_answer` +
-  `wait_reply_or_stop`) over the leaf `auto_research.run_control.RunControl`; **Telegram + Slack** gained
-  `attach_commands`, a command receive-path, and `/stop`-aware waiting so a stop releases a blocked
-  `ask_human`. **CLI/WhatsApp are NOT command-wired** — no background listener, so anytime-commands do
-  not fit cleanly (§13). The rework after the B-run, where a `/steer` that never arrived could not be
-  diagnosed from the log at all: **targets are roster ids** (`/help` prints `id · team · role · model`;
-  a name is rejected *and told its id*), **every invalid command fails immediately and
-  deterministically** with the valid options, the ack says **queued** rather than delivered, and
-  commands land in the ledger as `hitl.command` + `hitl.command.reply` (actor `human`) so a rejected,
-  a queued and a delivered steer are distinguishable after the fact. The `/status` prompt moved to
-  `prompts/status_monitor.md` (§4). Two rulings followed: **`/stop` is forceful with no modifier** — a
-  stop that waits for a safe point is not a stop, since on the live run the next safe point sat behind
-  25-minute downloads — and **buttons replace a flag vocabulary** (`-f/-p/-c` was designed and dropped:
-  a chat platform surfaces registered commands in a menu and buttons for follow-ups, flags are invisible
-  in both, and a dash is what a phone keyboard mangles). So the typed surface stays four verbs and the
-  escalations became taps on the steer ack (`[⚡ Deliver now]`, `[🗑 Clear]`). `dispatch_command` returns
-  `CommandReply`, a **`str` subclass** carrying `.buttons` — additive by construction, so other
-  connectors keep sending plain text and only Telegram reads them; a tap carries
-  `steer:<now|clear>:<id>:<run_id>:<boot>` and needs no side store, the two trailing fields answering
-  "is this button still mine?" (a foreign `run_id` is another run; a foreign boot nonce is an earlier
-  segment of *this* run, which `run_id` cannot detect because it is deliberately stable across a
-  resume). Telegram registers its menu from the same list `/help` prints, so the two cannot drift.
-- 2026-07-31 — **`/stop` is Ctrl-C, and `/status` investigates instead of being handed a digest.**
-  `_stop` calls `RunControl.interrupt()` — flag the run, then cancel its task — instead of setting a flag
-  and aborting in-flight tool calls for a pipeline that then wound itself down over ~14 more model calls.
-  The cancellation is *scheduled* (`call_soon`), not delivered inside the handler, so the acknowledgement
-  gets in flight before cleanup closes the connector. The reply says what actually happens: work
-  cancelled, sandbox processes killed, authoring branch reset if a tool was being written, **no report
-  composed**, and `resume=True` continues from the last completed step. `abort_all` stays — the ⚡ button
-  still cancels one role's in-flight call so a queued steer lands at once. **`/status`:**
-  `make_status_answer` builds a `StatusMonitorAgent` (a real ReAct role) over `MonitorToolProvider`, and
-  both compaction paths are **deleted** (`_status_digest` — last 80 events at any level, flattened, 8k cap
-  — and `_deterministic_status`); the digest dropped every event's `data`, i.e. exactly the answers people
-  ask for ("what did the reviewer decide?", "why did the gate reject it?"), and windowed the tail at *any*
-  level (44 L7 + 18 L10 against 6 significant events on a live run). **No fallback replaces it, by
-  ruling:** `status_monitor` is a required role so a misconfigured run fails at launch; transient provider
-  errors are already retried at the model layer; and a run whose provider is down cannot advance, so a
-  second, lesser view of the same log would report on a stalled run as if it were fine. Tests:
-  `tests/test_hitl_commands.py`, `tests/test_hitl.py`, `tests/test_run_control.py`.
-
-- 2026-09-12 — **A timed-out CLI prompt no longer hangs the process.** `cli_stdin_handler` read
-  stdin through `asyncio.to_thread`, so `wait_for` returned on schedule while `input()` stayed
-  blocked on a **non-daemon** executor worker that `_python_exit` then joins with no timeout and
-  no daemon check (bpo-39812) — the same defect class as the Codex coder's notification poll, found
-  beside it. Remedy (a) from that investigation is unavailable here: there is no router, no queue
-  and no `fail_all`, so a blocked `input()` has no doorway at all (closing the descriptor from
-  another thread is not guaranteed to wake the reader and risks the number being reused, `dup2`
-  does not touch a reader already inside `read()`, and PEP 475 retries a signalled syscall). Human
-  ruling: the daemon thread. New `_read_stdin_line`; a late answer settles a no-op rather than
-  raising `InvalidStateError` on the future `wait_for` already cancelled.
-  `test_cli_stdin_handler_times_out` was rewritten onto the real seam — a genuinely blocked
-  `input()` instead of a stubbed coroutine, since the defect was never in the timeout but in what
-  survived it — and verified to fail against a `daemon=False` mutation.
+- 2026-06-15 -> 2026-06-29 — Package built (Phase 2 step 5): `HumanQuery`/`HumanResponse`,
+  `HumanHandler` + `resolve_human`, `resolve_handler`, CLI/Slack/WhatsApp connectors,
+  `make_human_channel_check`; shared `response_timeout_s()` (1 h); one Markdown `message` rendered
+  per surface; WhatsApp/Twilio deprecated.
+- 2026-07-02 -> 2026-07-16 — Telegram is the recommended channel ([E4]): long polling, reply-to
+  routing (`message_id→Future`), `_md_to_html`/`_chunk_md`; `start()` pins `httpx`/`httpcore` to
+  WARNING so the bot token no longer reaches logs.
+- 2026-07-22 -> 2026-07-30 — `commands.py` (`dispatch_command`, `CommandContext`,
+  `make_status_answer`, `wait_reply_or_stop`) over `RunControl`; Telegram + Slack `attach_commands`
+  (CLI/WhatsApp not command-wired); roster-id targets, `hitl.command`/`.reply` ledger events.
+  Rulings: `/stop` forceful with no modifier; buttons replace flags (`CommandReply` with `.buttons`).
+- 2026-07-31 — `/stop` calls `RunControl.interrupt()` (scheduled; no report composed). `/status`
+  runs a `StatusMonitorAgent` over `MonitorToolProvider`; `_status_digest`/`_deterministic_status`
+  deleted, no fallback (ruling).
+- 2026-09-12 — CLI prompt timeout no longer hangs exit: stdin is read on a daemon thread
+  (`_read_stdin_line`, ruling); a late answer is a no-op.

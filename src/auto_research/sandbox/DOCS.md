@@ -961,638 +961,82 @@ the hook mapping a fake-model verdict — no live LLM).
     via `select_decorrelated_member`. Registered in `auto_research.preflight`.
 
 ## Changelog
-Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (detail in git history).
+Compacted 2026-09-01 and 2026-09-24 (detail in git history).
 
-- 2026-05-26 -> 2026-06-16 — **Phase 1 sandbox/tooling, then the whole Phase 2 authoring flow.**
-  Manifest-based `ToolkitRegistry` (disabled-tool filtering, provider-native tool defs), persistent
-  JSON-line sandbox (fd capture, non-interactive XSPEC boot), per-run workspace/memory/figures layout,
-  built-in MCP server/client, config-driven runtime paths. Then, with all writes pinned under the runtime
-  data dir: `merge_flow.propose_and_pr()` (isolated-worktree / `direct_branch` Sonnet author, runtime-safe
-  context, `ask_lead`/`ask_human`, bounded L0–L4 rework, typed no-commit failure); `gate.run_gate`
-  (Layer-A structural/provenance/determinism + no-fabrication scan, Layer-B test runner, extension-agnostic
-  over `*_utils`); `review.make_review_hook` (provider-decorrelated GPT co-lead); `approve_edit` (one atomic
-  commit, explicit-path staging, never `git add -A`); launch preflights
-  (`check_author_reviewer_decorrelation`, `check_toolkit_git_identity`/`_branch_clean`).
-- 2026-06-18 -> 2026-06-30 — **Live-run hardening (fix-lists #1–#11), the authoring refactor, and the
-  `bash_exec` hang fix.** Gate survives slow/erroring tests (`TimeoutExpired` caught; `propose_and_pr`
-  exception backstop → `status="failed"`); the SDK author's `Bash` runs in the analyst code-exec env;
-  `bash_exec` rescoped read-only; timeouts decoupled from the model (`call_timeout_ceiling`,
-  `gate_test_timeout_s`); `propose_and_pr(monitor=…)` streams events; the FS jail landed
-  (`fs_guard.PathGuard` + `agent_fs_allow` `PreToolUse` hook, `_make_path_confiner` deprecated); git
-  discipline (auto-reset to the per-attempt `base_ref` via `_reset_direct_tree` +
-  `tool_author_failed_*.patch`, coder Bash deny-rule, gate-entry auto-revert); gate fixes (annotated
-  manifests; stub/not-implemented → co-lead finding; determinism = per-test JUnit outcome maps, not a
-  byte compare). The inline authoring loop decomposed into an `AuthoringSession`
-  (`drive`/`run_gate_step`/`run_review_step`/`commit`/`aclose` via `build_authoring_session`) with
-  `submit_cap`/`debate_cap` + the co-lead debate path, driven by `lead.drive_authoring` (commit still ⇔
-  gate ∧ review); coder escalation tools take one Markdown `message`. `bash_exec` runs
-  `stdin=DEVNULL, start_new_session=True` with a process-group kill on timeout, and
-  `MCPToolClient.call_tool` bounds its await (900 s) — fixing a whole-run hang from an interactive FTOOL
-  wedging the MCP command channel.
-- 2026-07-06 -> 2026-07-16 — **Gate corrections, the domain-agnostic REPL boot, and the RNG demotion.**
-  [G2] Layer-B passes only if pytest exits 0 **and** ≥1 test PASSED (an all-SKIPPED suite fails rather
-  than merging an untested tool). [C1] bare ambiguous words (`synthetic`/`illustrative`) moved from
-  hard-fail to soft `finding_vocabulary`. **[A12]** `structural.tool_manifest_entry` and
-  `_gate_test_timeout` derive their `*_utils` targets from `_touched_packages` (the changeset) rather
-  than the unvalidated `tool_spec.target_domain`, removing the run-#12 doomed loop. [I1] the co-lead uses
-  `WebSource()` directly (lazy client, key is a preflight var), dropping `_resolve_web_source`.
-  **Installer increment 1:** `PersistentSandbox` gained `repl_init_py` — a config-pointed file exec'd once
-  at REPL boot — **replacing the hardcoded XSPEC/relxill `_configure_xspec_once()`** (the deepest domain
-  leak), and `builtin_server` builds the `bash_exec` description from the configured `analyze_probe`; new
-  `runner.check_analyze_probe()` preflight. **Scan config robustness:** every `code_gate.yaml` list read is
-  `or []`-guarded (an emptied section used to crash the scan), and `finding_code_patterns` became
-  dual-purpose so a dotted pattern there is matched like the hard tier but recorded as a finding — which
-  list a pattern sits in decides severity, and without this the human's RNG demotion (Monte-Carlo tools
-  need randomness; the co-lead judges intent) did nothing.
-- 2026-07-22 -> 2026-07-29 — **Branch self-heal, the tool-context diet, and two audit-trail fixes.**
-  Durable-resume Stage 2: `check_toolkit_branch_clean` raises the distinct `ToolkitBranchUnclean` so the
-  mid-run path degrades to an honest §9.6 terminal; `build_authoring_session` persists the per-attempt
-  base-ref; new `heal_toolkit_branch_if_dirty` resets a dirty authoring branch to it on resume (saving a
-  `resume_heal_*.patch`, best-effort, sharing `_save_diff_and_reset` with `_reset_direct_tree`).
-  **The docstring override in `ToolkitRegistry.load()` was removed** — since Phase 1 it had replaced each
-  `TOOL_MANIFEST` description with the backing function's `__doc__` whenever the module imported cleanly,
-  which Phase 2 inverts (the manifest entry *is* the agent-facing interface the coder authors and the
-  co-lead reviews), with the winner decided by the tool's dependency footprint; −~1,400 model-visible
-  tokens. **Tool search**: `SandboxToolProvider.tool_definitions()` marks every registry tool
-  `defer_loading: true` under `tool_search_enabled` while harness tools stay resident (also satisfying
-  both providers' "≥1 non-deferred tool" rule); 19,004 → 2,382 resident tokens, live-verified and enabled
-  2026-07-28. Prompts updated (`analyst_worker.md` teaches the search step; `coder.md` the one-line-brief
-  split). Audit trail: `build_authoring_session` now forwards `monitor` into `make_review_hook` (a dropped
-  kwarg had left the provider-decorrelated half of `commit ⇔ gate ∧ review` with no record of its actions
-  behind its verdict), and the coder's Agent-SDK spend reaches the cost record via
-  `_record_coder_cost` → `CostMeter.record_session_total` (session-cumulative, folded in as per-turn
-  deltas, `price_source="claude_sdk"`) — historically the largest unaccounted line.
-- 2026-07-30 -> 2026-07-31 — **The sandbox can be killed on demand, and the kill takes descendants with
-  it.** `PersistentSandbox.abort()` is the on-demand form of the timeout path: it kills the REPL so the
-  in-flight `readline` ends in EOF, `call_tool` returns its ordinary non-zero result (the caller gets a
-  real result, which is what keeps a tool_use/tool_result transcript valid), and the next call spawns a
-  fresh REPL; `run_research` registers each worker's `abort` on `RunControl`, which is how a `/stop` ends
-  a 25-minute download. `_kill_current` then gained descendants: it collects them from
-  `/proc/<pid>/task/*/children` and SIGKILLs deepest-last, since an XSPEC fit or a HEASARC download used
-  to keep writing into the obs-db after the caller believed the sandbox was gone (§13 [F5]). Deliberately
-  **not** `killpg` — the REPL shares the *backend's* process group, so a group kill would take the run
-  down, and that shared group is exactly what lets an external `kill -9 -<pgid>` reach the sandboxes when
-  our cleanup never runs (the §12 hard-kill fallback). New `kill_now()` is the human-interrupt entry point
-  (no handshake, no grace — the next cleanup step, the toolkit-branch reset, is only correct once nothing
-  can write), and `AuthoringSession.aclose()` is idempotent since the interrupt path closes it from
-  shielded cleanup. Tests: `tests/test_interrupt.py`.
-
-- 2026-08-10 -> 2026-08-19 — **The coder subprocess follows a key rotation, then a second author
-  harness and the live matrix that vetted it.** **Key rotation:** `_build_options` runs its `env`
-  through `_with_live_anthropic_key`, stamping `ANTHROPIC_API_KEY` **only when the live key
-  (`models/keys.py`) differs from the process environment's** — no rotation ⇒ options unchanged,
-  connected sessions unaffected
-  (`tests/test_provider_key_failover.py::test_coder_env_{is_untouched_while_the_primary_key_is_live,carries_the_rotated_key}`).
-  **Second harness:** new `coder/` package. `CoderBackend` (`connect`/`drive`/`disconnect`) is
-  everything the authoring flow needs from an author, so gate, review, commit, per-attempt base ref and
-  failure reset are untouched by which process wrote the code; `claude_sdk.py` holds today's SDK wires
-  verbatim (still re-exported from `merge_flow`, callers and tests unchanged), `codex_sdk.py` adds the
-  Codex app-server, `merge_flow._build_backend` dispatches on `coder_member().harness`,
-  `AuthoringSession` holds a backend. Legal pairings are a table (`coder/harness.py`), each non-native
-  row carrying the endpoint its vendor documents (verified 2026-08-19 against DeepSeek's, Z.AI's and
-  Alibaba Model Studio's own pages); Anthropic publishes no Responses endpoint and OpenAI no
-  Anthropic-dialect one, so those pairs are **absent rather than rejected**. Preflights
-  `coder_harness_supported` / `coder_harness_available` run before any model is built. **Codex seams:**
-  the allow-list becomes `writableRoots` under `workspace-write` (the OS-enforced write jail deferred
-  since Phase 2 began), `.git` read-only inside it, so the git ban is structural, not a deny-rule; escalation moves to an in-process Streamable-HTTP MCP endpoint (`escalation_server.py`,
-  loopback + per-session bearer token — `ask_lead`/`ask_human` must reach the live lead object and the
-  run's HITL connector); **reads are the regression**, full-disk read access being documented design, so
-  a crossing is only recorded as `coder.read_outside_allowlist` and the preventive form is the §12 OS
-  jail. Measured, not assumed (live probe ~$0.02): under `approvalPolicy="untrusted"` +
-  `approvalsReviewer="user"` a patch approval reaches the client handler and a denial is honoured, but a
-  shell command the sandbox already permits arrives with **no** approval request (the handler is a
-  second line, not the command gate); `developerInstructions` and `baseInstructions` are both honoured,
-  the role prompt riding as the former to layer over Codex's own tool account **rather than replacing
-  it**; the Python SDK *merges* `CodexConfig.env` into the inherited environment (the TypeScript SDK
-  documents replacement); per-model-call token classes price Codex-leg spend by the same code as every
-  chat role. `tests/test_coder_backends.py` (25, incl. live-shaped approval payloads and a real loopback
-  MCP round-trip) + env-gated `tests/test_live_coder_matrix.py`; suite 967 → 995.
-  **The matrix.** The three `claude_sdk` alt-vendor rows are gone (that backend sets no base URL or auth
-  token, so a member naming one would have silently authored on Claude); five pairs remain, the module
-  recording why the other three are absent. `tests/test_live_coder_matrix.py` walks one warm session per
-  leg through nine stimuli in real-attempt order, frozen out of real ledgers
-  (`tests/fixtures/coder_history.json` via `tmp_scripts/extract_coder_history.py`: a 2 kB lead
-  instruction, a `no_fabrication.vocabulary` rejection, a three-issue co-lead rejection, a coder
-  question); legs skip on a missing credential. Its first invocation died on a missing import — the
-  `NameError` class the 2026-08-06 guard prevents, in a file that guard did not scan — so
-  `tests/test_no_undefined_names.py` now scans `tests/` and `benchmarks/`, finding
-  `tests/test_live_agents.py` still constructing a `LibrarianSearcherAgent` for a deleted role (suite
-  995 → 1093, ~98 cases). **Four Codex defects, none visible to a deterministic test:** (1) MCP
-  servers are read when the app-server **process** starts, not per thread, so a server passed in
-  `thread_start(config=…)` never connected — the config now rides as flattened `--config` overrides
-  (`_flatten_overrides`, TOML literals); (2) an MCP tool call arrives as an **elicitation**
-  (`mcpServer/elicitation/request`, `_meta.codex_approval_kind = "mcp_tool_call"`) answered in the MCP
-  spec's `{"action": "accept"}`, so the `{"decision": …}` used for patch approvals reads as a rejection
-  ("user rejected MCP tool call") with our handler never reached, and a server the runtime did not
-  configure is now declined; (3) command-parse paths are **relative** to the command's cwd — 47 false
-  crossings; (4) `cwd` is a `RootModel` whose `str()` yields `root='/tmp/…'` — 40 more. Test-design
-  finding: demanding an *edit* asks a throwaway toolkit to contain the files a recorded rejection names,
-  so cells assert **delivery** and record `tree_changed` as data (`test_coder_backends.py` 25 → 33).
-  **Vendor keys.** DeepSeek and Z.AI answered on the first turn; Qwen refused every attempt with HTTP
-  400 `AccessDenied.Unpurchased` across three models and all three documented hosts — entitlement, not
-  wiring (the pay-as-you-go host recognised the key; the CN and token-plan hosts said `InvalidApiKey`).
-  Recorded three ways: `UNVERIFIED_PAIRINGS` in `coder/harness.py`; a new **`PreflightWarning`** tier so
-  `check_coder_harness_supported` cautions at launch without blocking (ledger level 2; the summary
-  counts warnings apart from failures); and a live-matrix skip carrying the vendor's own refusal — a
-  **classification, not a convenience**. A failed Codex turn had returned an empty string the lead reads
-  as a silent no-op; it now returns `[harness error] …` carrying the vendor's message. Suite 1108 → 1112.
-  **Final sheet** (`logs/dev/coder-matrix/`, ten cells per leg):
-
-  | leg | model | usage | cost | reads outside the allow-list |
-  |---|---|---|---|---|
-  | `claude_sdk`+anthropic | `claude-sonnet-5` | 11 calls | $1.69 | **0 — refused** |
-  | `codex`+openai | `gpt-5.6-terra` | 30 calls | $0.354 | 2 |
-  | `codex`+deepseek | `deepseek-v4-flash` | 100 calls | $0.041 | **36** |
-  | `codex`+zai | `glm-5.3` | 69 calls | $0.527 | 2 |
-  | `codex`+dashscope | `qwen3.7-plus` | — | — | skipped: account not entitled |
-
-  Both credentialled legs green (6m46s): escalation round-trips end to end on each harness (`ask_lead`
-  3 / `ask_human` 2 on Claude, 3 / 1 on Codex — model → localhost MCP → in-process handler → answer),
-  neither harness let the coder commit, spend booked on both ($1.84 notional on the subscription, $1.29
-  real). **Read asymmetry, measured:** the Claude leg refused the governance file (zero crossings), the
-  Codex leg read it with exactly **2** recorded, against the false counts before the path fixes. **The DeepSeek row is the finding:** unprompted it read `coder/codex_sdk.py`,
-  `sandbox/DOCS.md`, `tests/test_live_coder_matrix.py`, that test's fixture, the installed Codex SDK
-  sources and `~/.codex/config.toml` — the §2/§4 boundary as a measurement, denied on Claude,
-  recorded-and-allowed on Codex, exactly what the §12 `bwrap` jail blocks. Four more defects found by
-  running it: `glm-5.3` refuses every turn unless a reasoning effort is named ("This model always
-  engages in thinking and cannot be disabled; please use low, high, or max"), so a member's `parameters`
-  now flow into the Codex config; litellm knows `qwen3.7-plus` with no rates, pricing a leg at $0.00
-  under an authoritative-looking `source="litellm"` that shadowed `priceMTk` (a rate-less entry is now
-  treated as absent); `_touched_paths` sliced git porcelain at a fixed offset, clipping a path's first
-  character; three assertions measured model compliance rather than the harness contract (a reply's
-  wording, a tool *called* rather than *offered*, a priced rather than a booked cost) — the contract is
-  what the matrix asserts now, behaviour is recorded. Suite 1112 → 1115.
-
-- 2026-08-20 -> 2026-08-31 — **The author became a parameter, the OS jail met its first author, and an
-  authoring attempt became durable at the gate.** **(1) One coder member replaces three config reads:**
-  `build_authoring_session`, `propose_and_pr` and `AnalystLeadAgent.drive_authoring` take
-  `coder: RoleModelConfig | None`; `_build_backend` takes `member=` instead of `coder_model=`; model id,
-  review-routing provider and spawning harness come from one object so they cannot disagree;
-  `_resolve_coder_provider` deleted, `_resolve_coder_model` a thin accessor; `test_coder_backends.py`
-  proves dispatch by *passing* members rather than monkeypatching ambient config. **(2)
-  `make_review_hook(..., allow_correlated=False)`** — the only way past the decorrelation boundary,
-  opt-in, set by no production caller, so the sweep can measure what decorrelation is worth; every
-  review under it emits `review.correlated`. **(3)
-  `coder.codex_sdk.resolve_vendor_key`** — the Codex author read its vendor key from the raw environment
-  variable at two places, so it always launched on the **primary** even after a chat role had rotated
-  off a spent one (found with the OpenAI primary out of credits, `429 credit_balance_exhausted`, while
-  the configured fallback answered): worse than the §13 note that a session in flight keeps its key,
-  because it never *started* from the live one. One shared resolver now reads the pool for a rotating
-  provider whose member names that provider's standard primary variable, the raw variable otherwise (a
-  plan-specific variable must not be shadowed; harness-only vendors have no cited taxonomy so they never
-  rotate); a pooled key overrides an inherited environment value, an environment-sourced one does not.
-  Suite 1136 → 1160.
-  **The jail's first author** failed four ways, each hidden behind the last, all at startup for $0:
-  the launcher **never bound the binary it execs** (both CLIs ship inside the orchestration environment
-  the allow-list deliberately does not name — `bwrap` failed `execvp` on all 40 trials; it now binds the
-  binary's parent read-only); **bind and exec disagreed on the path spelling** (the bind resolved
-  symlinks, the exec did not, so the Claude author still failed while Codex survived only because for it
-  the two coincide — and the launch check resolved too, reporting "reachable" while the launcher failed:
-  *a check that normalises differently from the thing it checks is not a check*); **Codex was pointed at
-  the operator's own settings directory**, absent from the jail, now a fresh one; **both CLIs keep state
-  in SQLite while the runtime dir is NFS**, which cannot lock, so author homes moved to local disk. Two
-  defects of the fix: the re-addressed credential was built from the unresolved runtime path while the
-  home is bound resolved, and a label from the clone's *directory name* collided across concurrent
-  authors (every trial clones into a directory called `repo`). **Then the structural one: this harness's
-  own sandbox IS bubblewrap**, so jailing it nests the same mechanism — Codex cannot spawn
-  `codex-linux-sandbox`, every shell command is rejected, and the author reaches the gate having read
-  and written nothing, reading as a weak model rather than broken plumbing; the coder diagnosed it and
-  escalated, the honest-failure path working. Resolved as **one enforcement layer**: the harness sandbox
-  stands down when the kernel jail is on, and `coder_policy` tightens the author to two writable places
-  (working tree, own settings home), *stricter* than the `workspace-write` it replaces — the observation
-  database is read-only and the temp root absent, so one author cannot read another's solution. **Live-verified end to end:** two concurrent authors per harness starting jailed,
-  the Claude pair authenticating from the subscription and answering, and a full production trial
-  authoring both toolkit halves plus tests and passing the deterministic gate on its second submission.
-  `tests/test_jail.py` 19 → 28; suite 1136 → 1176. **Lesson recorded:** a hand-built probe is not the
-  production path — mine failed with the jail *off* too.
-  **Submission snapshots (2026-08-31)** close the volatile stretch between "coder starts" and
-  `approve_edit`, where any crash (incl. a review-provider failure on a gate-passed tree) reset the
-  branch to the base ref and forced a full re-authoring — ~$27–45 lost to save a ~$1–3 review.
-  `AuthoringSession.run_gate_step` persists the working tree at every submit, after the §9.9
-  coder-commit backstop and before the scan, as `run_dir/authoring/submissions/<tool>/submit_NN.patch` +
-  `state.json` (base ref, branch, spec id, and — appended as they land — the gate outcome and the
-  co-lead's issues); every submission is kept, failed ones included. `build_authoring_session`
-  (direct-branch mode) restores the latest snapshot **only when its recorded base ref equals current
-  HEAD** via `git apply` (a working-tree write; `approve_edit` stays the sole commit path), marks the
-  session `restored_submission`, and seeds the coder with a "Restored prior work" section carrying the
-  last feedback (continuation over tree + feedback, not a restart). The gate re-runs on the restored
-  tree: no stored verdict is ever trusted and `commit ⇔ gate ∧ review` stays defined over the live
-  tree. `commit()` discards the tool's snapshots; an unappliable snapshot is
-  discarded and authoring starts clean (an economy, never a dependency); worktree (non-direct) mode is
-  unchanged. Snapshots live under the run's authoring dir, outside both repos, so the failure reset,
-  `heal_toolkit_branch_if_dirty` and the clean-tree preflight neither see nor destroy them. Events
-  `authoring.snapshot.saved` (L5) / `.restored` (L3) / `.error` (L4); new `save_submission_snapshot`,
-  `find_submission_snapshot`, `restore_submission_snapshot`, `discard_submission_snapshots`,
-  `_working_tree_patch`, `_update_last_submission`; `tests/test_merge_flow.py` covers the
-  checkpoint→reset→restore round-trip incl. the seed section, the moved-base-ref refusal, commit cleanup
-  and corrupt-patch discard (41/41 + adjacent 278 green). **LIVE-VERIFIED 2026-09-01**
-  (`tests/test_live_snapshot_resume.py`, production functions only, real Sonnet coder + real gate + real
-  GPT co-lead, the frozen run-46ed6671 brief on a clone at its base SHA): phase 1 authored to a gate
-  pass; the in-flight review was cancelled with no cleanup (a hard kill's shape);
-  `heal_toolkit_branch_if_dirty` reset the branch; the rebuilt session restored submission 1 and the new
-  coder continued on the restored tree (submits 2–4, each gate-judged, two full co-lead reviews), ending
-  in an honest no-commit within the 2-round review cap — a correct outcome; **the commit path stays
-  covered deterministically, not live.** 48:40 wall. Three attempts, each a finding: (1) a clone nested
-  under `/tmp/pytest-of-*` is deleted by the coder's own pytest runs rotating that basetemp (keep
-  worktrees out of pytest's basetemp — [F7] family); (2) live tests must `load_dotenv()`; (3) a revoked
-  subscription OAuth token surfaces as ordinary coder text ("Failed to authenticate…") and burns gate
-  rounds on an empty tree — the [A13] shape, with an early-abort guard on auth-failure replies a
-  recorded candidate. Attempt 1 also live-demonstrated the honest-failure moat: worktree destroyed
-  mid-attempt, the coder escalated, diagnosed the deletion, found the tool already shipped in the real
-  toolkit, and stopped rather than fabricate.
-
-- 2026-09-01 — **The author's `ask_human` answered with the author's own question; three
-  different failures were one indistinguishable string.** Both harnesses expose `ask_human` over
-  MCP, and every MCP stack turns an exception raised inside a tool handler into an `isError`
-  result carrying only `str(exc)` (`mcp/server/lowlevel/server.py:583`;
-  `claude_agent_sdk/_internal/query.py:694`). `resolve_human` raises `HumanInputRequired(
-  query.headline)`, so a coder asking *"Which calibration epoch applies?"* was answered with
-  *"Which calibration epoch applies?"* — measured, not inferred. It reads as a harness bug,
-  invites a retry, and burns author turns, which is the coder-pressure path. Worse, the catch is
-  `except Exception`, so a **missing** handler, a **broken connector** (`ConnectionError`) and a
-  **wrong-typed** handler (`TypeError`) all arrived identically at the author *and* in the ledger
-  (`coder.ask_human` fires before the call; `coder.ask_human.answer` simply never appears) — a
-  live channel fault was indistinguishable from a healthy unattended run.
-  `_make_ask_human_handler` now **classifies before the boundary**: unattended →
-  `coder.ask_human.unattended` (L3) and a re-raised `HumanInputRequired` carrying the new
-  `UNATTENDED_GUIDANCE`; channel fault → `coder.ask_human.error` (L1) and a `RuntimeError` naming
-  the fault. Both stay a tool **error**, so an unanswered question is never dressed as an answer
-  and no `.answer` event is written for either; the typed `HumanInputRequired` still reaches any
-  caller that catches it, so the §9.8 contract and `author_bench/trial.py`'s fail-safe are
-  unchanged. `UNATTENDED_GUIDANCE` sends the author to the **web first and hard** (the strongest
-  resource it has with nobody to ask), then `ask_lead`, then to reason and state the assumption
-  in the code and its test — and is **domain-neutral by construction**, naming channels rather
-  than kinds of document, because `prompts/coder.md` and the toolkit are not tied to one field.
-  Also: `CODER_TEXT_CAP` became `coder_text_cap()`, read from config at call time (see the root
-  `DOCS.md` entry of the same date). Tests: `tests/test_coder_backends.py` 46 → 49, plus the
-  new live probe `tests/test_live_no_hitl.py` (`AUTO_RESEARCH_LIVE_NO_HITL=1`), which drives
-  the real author backend through three cells — unattended, channel fault, attended control —
-  and asserts the mirror regression against **what the author says it received**, so the whole
-  MCP round trip is covered rather than the handler alone. **LIVE-VERIFIED 2026-09-01, first
-  run, no rework:** the three arms produced `.unattended` / `.error` / `.answer` with no
-  `.answer` in either failure arm, and the author **distinguished the two failures unprompted**
-  — naming one a `ConnectionError` outage and the other nobody being there — which is what the
-  classification exists to make possible and what one flattened string could not support. It
-  reported receiving the guidance rather than its own question (the mirror is dead), recited
-  the three steps back, and then **acted on their ordering**, choosing `ask_lead` over the web
-  with a stated reason. In the fault arm it said outright *"I will not guess silently or
-  hardcode a calibration epoch choice without grounding it."* All three arms refused to invent
-  a `ToolSpec` to work from. Note what this does **not** cover: the leg drives the backend
-  directly, so no lead, no gate and no commit are exercised — end-to-end authoring is
-  `test_live_loader_authoring.py`'s job, not this file's.
-
-- 2026-09-01 (same day) — **What the audit found in the surrounding wiring, recorded because it
-  overturned a plan premise.** Withholding the tool (the "option (b)" a benchmark plan was about
-  to choose) **was already the code** for three of the four asking roles: `ask_human` is appended
-  only when a handler is wired (`react.py:1196` worker; `react.py:1904-1906` lead and reviewer)
-  and the lead's authoring loop passes `include_plan_and_debate=human_handler is not None`
-  (`roles.py:1460`), so headless the worker, lead and reviewer **cannot ask** and
-  `HumanInputRequired` is unreachable from them. The corresponding "catch it at the trial
-  boundary" arm was therefore **dead code**: `author_bench/trial.py:411`'s `except
-  HumanInputRequired` has never fired across ~180 trial records (every terminal is
-  `committed`/`failed`/`error`; zero `needs_human`), and that file's docstring claim to the
-  contrary is wrong. The author was the only live exposure, which is what the entry above fixes.
-
-- **2026-09-02 (second) — an approved commit becomes the attempt's base ref, and a negated banned
-  word is a judged finding.**
-  **`commit()` advances `_base_ref`** (in memory and in `run_dir/authoring/current_base_ref`).
-  The base ref means "the commit this attempt's work sits on", so once `approve_edit` lands one,
-  that commit *is* the base. It was never advanced, and three readers took the stale value: the
-  §9.9 gate-entry backstop reverts on `HEAD != _base_ref` without consulting `self.committed`, so
-  it could not tell an approved commit from a coder-slipped one and **a `submit_for_review` after a
-  successful commit reverted that commit**; `aclose`'s failure reset would reset *behind* a
-  legitimate commit; and `heal_toolkit_branch_if_dirty` does a `reset --hard` to the persisted
-  value, so a hard kill after a commit would have healed the tool off the branch. Observed live
-  (block 0 attempt 5, link 2): `1523349` -> reverted -> `49bbc53` -> reverted -> `da507d7`, three
-  full gate+review revolutions at ~$0.71 each, self-limiting only because the next link re-recorded
-  the base ref. **Pre-existing, not from the forms refactor** (`drive_authoring` had the same
-  exposure since `c2253d5`); the refactor multiplies it, N links giving N post-commit
-  opportunities over one conversation. Guarding the revert with `if not self.committed` would fix
-  the first reader and leave the other two wrong.
-  **Advancing the base ref alone is not enough, and the first draft of this fix was worse than the
-  bug.** With the revert gone, a post-commit `submit_for_review` scans an *empty* changeset and
-  then asks `approve_edit` to `git commit` with nothing staged — a non-zero exit that raises
-  straight out of the tool call, and `_react` does not catch tool exceptions ([F6]). Caught by
-  replaying the ledger's actual sequence through `execute_submit` rather than calling
-  `run_gate_step` directly, which is what the first test did. So `AuthoringSession.
-  pending_changes()` reports whether the tree holds unlanded work (clean **and** `HEAD == base_ref`
-  ⇒ nothing pending), and `execute_submit` answers a no-op submit with a model-visible "already
-  committed, nothing has changed" instead of executing it — **budget-free**, since answering a
-  question is not a submission, where the live run spent two of its five on this. The guard keys
-  on *nothing changed*, never on *already committed*, so a genuine follow-up after a commit still
-  gates, reviews and lands its increment. Four tests in `tests/test_merge_flow.py`, each verified
-  against the unfixed code: with only the guard removed the second submit raises, and with the
-  base-ref advance removed as well it reverts.
-  **The no-fabrication scan demotes a negated banned word** to the co-lead-judged finding tier
-  (`_negated`, applied in both `scan_python_source` and `scan_text_source`). A banned word inside
-  an explicit negation is the §9.5 discipline being *stated* — "the tool can never fabricate a
-  benchmark", "without any fabricated fixture" — and hard-failing it rejects a tool for
-  documenting the rule the scan enforces. The measurement that forced it: across every production
-  ledger on disk, **4 of 27 gate runs failed and all 4 were vocabulary failures**, every sampled
-  instance a negation; nothing else has ever hard-failed Layer A in production. Cost is one of five
-  submissions per firing, roughly once per authoring run. **Scope is the clause, not a token
-  window**, and that distinction was measured rather than argued: `gate_bench`'s `fab_shell_script`
-  plants `# where the reduction has not run yet, emit fake data for now`, where the negation
-  governs a different clause, and the proximity rule first proposed demotes it — voiding one of the
-  six mutants the published catch-rate table attributes to the scan. `tmp_scripts/
-  gate_bench_negation_rescan.py` re-scans the whole 134-entry corpus offline (LLM-free, $0) and
-  reports **0 moved** under the shipped predicate and **1 moved (`fab_shell_script`) under
-  `--naive`**, which is what proves the check can see a move at all. A missed negation degrades to
-  today's hard fail; a spurious cue degrades to a finding the co-lead reads.
-
-- **2026-09-03 — attempt 6 re-audited; two trivial changes, one ruling.** Eleven independent chunk
-  audits over the full ledger (`fbb93f26`) found the coder's read of the run record larger than
-  first stated — the lead's and **both workers'** models, from `monitor.jsonl` and `backend.log`
-  content (seq 4007–4045) — and one refused `AGENTS.md` read by the co-lead (not two `CLAUDE.md`
-  attempts). New: the coder's hunt for the orchestration repo and config (seq 4031–4042) was
-  stopped by the jail; its shell carried `CLAUDE_CODE_EXECPATH` and a Copilot variable inherited
-  from the launching terminal (seq 922). **Ruling: `runtime_dir` stays on every allow-list** —
-  agents may read their own logs — so the coder channel is measured per trial rather than closed.
-  Changes: `merge_flow._author_env` drops `CLAUDE*`/`COPILOT*`/`VSCODE*` variables
-  (`_HOST_TOOLING_PREFIXES`; the unconfigured inherit branch is unfiltered);
-  `workspace.round_report_path` names `<role>_round<n>` only (`model` accepted, unused; `_slug`
-  deleted). Tests: `test_merge_flow.py::test_author_env_drops_host_tooling_variables`,
-  `test_report_authoring.py::test_round_report_path_names_role_and_round_but_never_the_model`.
-
-- 2026-09-09 — **F1: "did this session commit?" is not "is the tree's work banked?"** `aclose`'s
-  failure-reset guard was `not self.committed`, a latch set by the first `commit()` and never
-  cleared, so a session that committed one tool and then kept working on a rejected second one
-  exited **without** resetting. The rejected `lib/` code, its `skills/` wrapper and its
-  `TOOL_MANIFEST` entry stayed in the tree, and because `ToolkitRegistry.reload` discovers tools
-  from the **tree** rather than from git, the rejected tool became callable: in the 2026-09-08
-  demonstration batch it produced two of the four figures in slot 2's reviewer-**accepted** report,
-  and the same shape produced a scored quantity in slot 3. `commit ⇔ gate ∧ review` held in git
-  throughout; the invariant that failed was the unstated one, *a tool a worker can call has been
-  committed*. Fix: the guard is now `pending_changes()`, which asks the tree directly (it is
-  already the question `execute_submit` asks, and a commit advances `_base_ref`, so a commit
-  followed by nothing resets nothing). `committed` keeps its original meaning as the durable
-  commit record — `_authoring_result` reads it to report `status="committed"`, so clearing it
-  would have made every successful commit report as a failed attempt. **Follow-on cleanup in the
-  same pass:** with the reset no longer reading it, the `committed` boolean became a shadow of
-  `last_commit_sha` (both set in `commit()`, neither ever cleared, one reader), so it is **deleted**
-  and `_authoring_result` reads `last_commit_sha is not None`. Two fields encoding one fact is how
-  the two meanings drifted apart to begin with. **The deletion nearly reintroduced a known
-  run-killer**, and only an existing test caught it: `react.execute_submit`'s [A17] no-op-submit
-  guard read the flag as `getattr(session, "committed", False)` — a string name an attribute grep
-  cannot see, with a default that failed *silently* into "not committed", so a submit after a
-  commit walked into `git commit` with nothing staged, the non-zero exit that raises out of a tool
-  call ([F6]). Now reads `last_commit_sha`. Lesson for any field removal here: grep the string
-  literal as well as the attribute, because `getattr(..., default)` converts a missing field into
-  a wrong answer instead of an error. Empty-diff closes stay
-  silent because `_save_diff_and_reset` already returns `None` when there is nothing to save.
-  Tests: `test_merge_flow.py::test_f1_work_after_a_commit_is_reset_on_close` (verified failing
-  against the old guard), `::test_f1_the_commit_record_survives_the_reset`,
-  `::test_f1_a_clean_close_writes_no_patch_artifact`; the existing
-  `::test_aclose_after_a_commit_leaves_the_commit_alone` keeps its assertions with its rationale
-  corrected.
-
-- 2026-09-09 — **F2: the gate's third job, `changes_allowed`.** Layer A now names three jobs — the
-  no-fabrication scan, the double pytest run, and **`changes_allowed`** — where the third used to be
-  `structural.allowed_paths`, a check that **could not fail for any input**: `collect_targets` drops
-  every path outside a `*_utils` package, and `check_structural` then computed `stray` by applying
-  the same pattern to that already-filtered list. Measured live 2026-09-08 (slot 4): 193 changed
-  lines in `obsdb_catalog` were never scanned, never tested, never in the reviewer's diff bundle,
-  reported as "only allowed paths touched", and unstageable by `approve_edit` — so the commit that
-  landed calls `neutral.advance_many`, defined only in the uncommitted file, and does not run on a
-  clean checkout. `gate_bench`'s `hole_structural_unfalsifiable` mutant was planted against this
-  hole and its recorded verdict names the co-lead as the only catcher.
-  New `collect_all_changes(worktree)` is the **wide** enumeration (every changed path, unfiltered);
-  `check_structural` gains an `all_changes` parameter that **defaults to deriving it**, so no caller
-  can reintroduce the defect by forgetting to pass it. Human ruling: an explicit **allow-list** of
-  `*_utils`, not a deny-list of protected packages — the naming convention is already enforced in
-  `prompts/coder.md` and §9.2, and an allow-list also closes the hole a deny-list would leave
-  (toolkit-root files and any future package not ending in `_utils` were silently dropped, the shape
-  whose cause went unidentified in slot 5). `run_gate` enumerates once, before Layer B executes, so
-  an artifact a tool's own test writes into the worktree cannot fail the check in the same run. The
-  rejection names the offending paths **and the route** (`ask_lead`), because banning the coder
-  without one recreates [C2]: in slot 4 the co-lead's own first rejection *demanded* the
-  `obsdb_catalog` change. `prompts/coder.md` states the boundary positively in both places it
-  matters — the catalog passage ("a library you call, and its own source stays as you found it")
-  and the diff-scope bullet. Tests: `test_gate.py::test_f2_*` (4; the two behavioural ones verified
-  failing against the vacuous check).
-
-- 2026-09-09 — **N1: the Layer-B failure window kept the wrong end of pytest's output.** It was a
-  hardcoded `out1[-2000:]`, and with a chatty science suite those 2,000 characters are *entirely*
-  the warnings summary plus the `short test summary info` line: measured live 2026-09-08 (slot 2),
-  119 warnings meant the failing test's **name** survived and every assertion and traceback was
-  cut. The coder ran the single test, the whole file, and the whole file twice more in fresh copies
-  — all green — and reported that it could not reproduce a failure it had never been shown. 3 h
-  28 m, $16.26, 43.7% of that run's wall clock, and two of the fourteen named quantities lost.
-  Two changes, and the second matters more than the first: the cap moves to
-  `orchestration.yaml: gate_layer_b_output_cap` (default 100000, read at call time so the value a
-  run used travels with it), and `_bounded_pytest_output` keeps the **head and the tail** rather
-  than the tail alone — pytest prints failure detail *before* the warnings summary, so a pure tail
-  window keeps the least useful end no matter how large the cap. Over the cap it keeps two thirds
-  from the front and one third from the back with an `[... N characters elided ...]` marker, so
-  nothing looks complete when it is not. Found because the first version of the test, written with
-  more noise than the cap, still failed: raising a tail window does not fix a tail window.
-  Tests: `test_gate.py::test_n1_layer_b_failure_keeps_far_more_than_the_old_2000_chars`.
-
-- 2026-09-09 — **F10: reads follow the allow-list, writes follow the role's own work folder.**
-  `PathGuard` made no read/write distinction, which was safe only while every graph role was
-  read-only. F5e gives the reviewer `file_edit` on its own `report.tex`, and once one formerly
-  read-only role becomes a writer, "read-only role" stops being the boundary and *its own work
-  product* becomes it. Human ruling: **the only writable folder for a role is its own work
-  folder.** `PathGuard` gains a separate `writable` set and `is_writable()`; empty means the role
-  writes nothing, which is the correct default for every role that needs no write, and an
-  unconfigured guard (no roots) is inactive for writes exactly as it is for reads. Reads stay
-  broad on purpose — a role must be able to read its own run logs (ruling 2026-09-03,
-  `runtime_dir` stays readable) — so this narrows writes only. `ReadOnlyToolProvider` derives its
-  writable set from the directory of its editable file, so the reviewer's scope is its report dir
-  and nothing else. Two independent bounds: `file_edit` never takes a path from the model, and the
-  guard then checks the path the provider was configured with, so a mis-wired provider cannot
-  widen the surface either. `jail.coder_policy` is the precedent the shape copies — an author
-  reads the allow-list and writes only its worktree and its own home.
-  **Residual, and deliberately not done blind:** the jail's `policy_from_config` still derives its
-  writable roots from `agent_fs_allow` minus `agent_fs_readonly` for the analyst REPL and the
-  gate's pytest, rather than from a per-role work folder. Narrowing those is a mount-plan change
-  to processes that run the science stack, and the standing lesson is that this allow-list "was
-  never exercised as a mount plan, so nobody had to know it was incomplete" — every PyXspec file
-  is a symlink four levels up, and the failure surfaced thirty suites deep instead of at launch.
-  That half needs a live probe under `agent_os_jail`, the same evidence bar §12 sets for turning
-  the flag on by default. The coder's policy is already correct and unchanged.
-  Tests: `test_fs_guard.py::test_f10_*` (5).
-
-- 2026-09-09 (second) — **The coder's git ban became a kernel rule.** `jail.coder_policy` now binds
-  `.git` read-only inside every writable root, so `add`/`commit`/`checkout` fail with *"Unable to
-  create '.git/index.lock': Read-only file system"* however the command is spelled, while
-  `status`/`diff`/`log`/`show` succeed. Until now the Claude harness had only its prefix-matched
-  Bash deny-rule (§9.9), which slips on a pipe or a subshell **and** denies read-only inspection —
-  a live coder lost a turn on 2026-09-09 trying to report its own change set
-  (`git status --short … ; git diff --stat …`, denied). `bwrap` cannot read a command's verbs, only
-  paths, so the enforceable form of "read-only git" is a read-only `.git`; `jail_argv` already
-  applies binds outermost-first, so the nested rule lands on top of the writable tree rather than
-  under it. Measured against a real repository through a real `bwrap` before it was written, and
-  again as a test. The runtime's own git is untouched — `approve_edit`, the gate-entry reset and
-  `collect_all_changes` run in the parent process, outside the jail — and on a *linked* worktree
-  the read-only `.git` pointer file names a gitdir the author's writable set does not contain.
-  Tests: `test_jail.py::test_the_coder_policy_binds_dot_git_read_only_inside_every_writable_root`,
-  `::test_a_jailed_process_can_read_git_history_and_cannot_write_it` (34 → 36).
-
-- 2026-09-12 — **B1/B2: the coder runs beside the lead.** `AuthoringSession.start_drive` hands the
-  coder one instruction and returns at once; `drive_status` and `take_drive_result` report what it
-  is doing and what it left. `drive` (blocking) stays, because the seed call and `drive_authoring`
-  still want to wait — and `drive_authoring` backs the paper's published authoring measurements,
-  so its path is byte-identical.
-  **Why:** a real link's turn takes minutes and the lead spent every one of them blocked inside
-  `drive_coder`, unable to read the diff it had just asked for or think about the next link.
-  `submit_for_review` stays **blocking** by ruling: the gate runs pytest twice through a blocking
-  `subprocess.run`, and the CI framing says you wait for the ticket.
-  **A failed drive is a result, not an escaped exception.** A backend that dies sets
-  `_drive_error` and returns a `[harness error]` line, so the lead is TOLD. On 2026-09-09 a
-  Claude-harness session whose credential ran out returned the CLI's own billing string with
-  `is_error` discarded; the lead spent three drives steering a corpse at $0 and then recorded the
-  failure with a confidently wrong cause.
-  **One conversation per warm session:** a second `start_drive` while one is in flight raises
-  rather than queueing — interleaving two conversations on one session is undefined on every
-  harness, and the caller is told instead of being silently serialised.
-  **B2 — `aclose` cancels and AWAITS the drive before `disconnect`, and the ordering is the
-  property.** `aclose` disconnects the backend and may reset the worktree to the per-attempt base
-  ref; a drive still in flight would be writing into that tree while it is repaired. And
-  `RunControl.interrupt` cancels only the *registered run task*, so a task created inside the
-  session is not in that set and would otherwise outlive the cleanup. Asserted on the recorded
-  lifecycle order (`drive:cancelled` before `disconnect`), not on a sleep.
-  **B7 — cost attribution needed nothing.** The meter is a `ContextVar` and a task created by
-  `start_drive` inherits the creating context, so coder spend lands in the run total exactly as it
-  did when the drive blocked. Pinned by a test that reads a marker variable from inside the
-  background drive rather than asserting the mechanism in prose.
-
-- 2026-09-12 (second) — **A `/stop` during a Codex turn no longer hangs the process.** The B8 live
-  drill passed every assertion it makes — run cancelled, tree repaired to the attempt's base ref,
-  no leaked coder — and then the process sat until a `timeout` killed it. Root cause was ours and
-  it was ordering, not a missing capability: `CodexBackend.drive`'s `finally` called
-  `unregister_turn_notifications`, an `await` in a `finally` **does** run on the cancelled path,
-  and the vendor's only close-time wake (`_MessageRouter.fail_all`) finds blocked waiters by
-  walking the `turn_id -> queue` dict that call had just popped us out of. Two changes, both in
-  `codex_sdk.py`: `drive` skips the deregistration **only** when cancelled, so `disconnect()`'s
-  `close()` can still reach the poller (measured: `asyncio.run` returned in 1.02 s, exit 0); and
-  the poll moved off the default executor onto a **daemon thread the backend owns** in the new
-  `_drain_turn`, because `_python_exit` joins every executor worker with no timeout and no daemon
-  check (bpo-39812) — so a poll nothing ever wakes is abandoned at exit instead of hanging it. The
-  poller stops itself on a terminal notification, `_TERMINAL_TURN_METHODS` being read both there
-  and by `_record_notification` so the two cannot disagree about what ends a turn, and the
-  cross-thread handoff treats a closed loop as its exit signal rather than printing a teardown
-  traceback. New cells in `tests/test_coder_backends.py` (49 -> 51), each verified against its own
-  mutation; the daemon one strands a non-daemon poller and wedges pytest itself, which is the
-  production symptom in miniature. The same defect class remains open at `hitl/cli.py:40`
-  (CLAUDE.md §13), where there is no router to stay registered in.
-
-- 2026-09-12 (third) — **A coder member that named no `key_env` launched with no credential at
-  all.** `config/models.yaml` dropped the field on 2026-09-09 on the stated grounds that
-  `DEEPSEEK_API_KEY` is the derived default — true of the launch check (`env.py:
-  _PROVIDER_KEY_ALIASES`), false of this backend, where `key_env` gates three separate things: the
-  child's environment overlay, the API-key login (`_login`), and the `env_key` handed to Codex in
-  the provider config. All three were skipped, so preflight passed on the very variable the author
-  could not see and every Codex turn returned `401 Unauthorized: Authentication Fails (governor)`
-  — against a key measured good the same day (`/models` 200, balance $64.60, `POST /responses` 200
-  on both `deepseek-flash` and `deepseek-v4-flash` when sent by hand). Found by the B8 stop drill,
-  whose coder had written nothing in three consecutive runs; the run that named the cause was the
-  first one carrying a monitor ledger and a `coder.*` digest, the two runs before it having
-  recorded "the coder wrote nothing" with no evidence of what it did instead.
-  `CodexBackend.__init__` now takes `member.key_env or env_var_names(member.provider)[0]`, which is
-  the shape the chat path already uses (`_responses.py` falls back to its vendor's `key_env`) — the
-  two agree rather than a new rule being invented. An explicitly named plan-specific variable still
-  wins. Published benchmark batches are unaffected: `science_bench/arms.py` pins
-  `CODER_KEY_ENV = "DEEPSEEK_API_KEY"` explicitly. `tests/test_coder_backends.py` 51 -> 54, the two
-  new behavioural cells verified against the unfixed code and the third a static guard that
-  whatever the config names as coder resolves *some* key variable.
-
-- 2026-09-12 (fourth) — **The lead<->coder channel is symmetric; `ask_lead` stopped blocking.**
-  `ask_lead` used to call `lead.clarify_for_author`, which opened a **second ReAct conversation**
-  on the lead — running concurrently with the lead's own turn, sharing its tool provider, and
-  holding the coder-control tools. Measured live 2026-09-12: 100 clarification tool calls
-  interleaved with 76 cycle tool calls, **85 of them `check_coder`** polling the very coder that
-  was blocked waiting for the answer being composed; the answer landed **326 s** after the
-  question, by which time the coder had timed out and recorded the wrong cause ("unattended" —
-  the lead was attending, slowly). A circular wait, in a loop with none of the brief's context.
-  Both directions now use the mechanism each side already had. **Coder -> lead:** `ask_lead`
-  parks the question on the session and returns `"delivered."`; the lead's own `_react` collects
-  it beside `_coder_event`, at the same boundary and under the same A2 hold rule, and it arrives
-  as a `[coder asks]` user turn in the conversation that wrote the brief. **Lead -> coder:**
-  `CoderBackend` gains `steer(message) -> bool` and `AuthoringSession.send` picks the primitive
-  from the coder's state — a turn in flight is steered, an idle coder is given a new turn — so
-  `drive_coder` is the single lead->coder path and the lead never meets "the coder is already
-  working on an instruction" again. That refusal fired twice in the live run *while the lead held
-  the answer that would have cleared it*. Codex publishes `turn_steer(thread_id,
-  expected_turn_id, …)`, pinned to the turn in flight so a steer racing its end is refused rather
-  than misdelivered; the Claude SDK has no such call and needs none, since a second `query()`
-  joins the response its streaming client is already draining (guarded on a turn actually running,
-  or it would open a second conversation behind the drive loop's back). Deleted:
-  `clarify_for_author`, `_ClarifyReply`, and that schema's row in the live matrix, which had been
-  measuring a shape nothing composes. Prompts updated on both sides — the coder is told the reply
-  arrives mid-turn and that going idle until it does is fine; the lead is told `[coder asks]`
-  messages are answered with `drive_coder`. `tests/test_coder_backends.py` 54 -> 59,
-  `tests/test_lead_forms.py` 36 -> 39.
-
-- 2026-09-14 — **A run's record moved out of its workspace, which closes self-reads in both
-  enforcement layers at once.** `workspace.ledger_dir(run_id)` (`<runtime_dir>/ledgers/<run_id>/`)
-  now holds `monitor.jsonl`, `monitor.md`, `backend.log` and `checkpoint.sqlite`; `run_dir`
-  keeps only what the agents produce — figures, reports, scratch, the authoring worktree — and
-  `agent_fs_allow` narrows from `runtime_dir` to `runtime_dir/runs`. One list change, two
-  layers: `PathGuard` for the chat roles and the bwrap mount plan for the coder, whose implicit
-  subprocess reads a named-path rule cannot see.
-  **Measured cause.** A reviewer read 191 KB of this run's own ledger (`limit: 60` → 60,289
-  chars, `limit: 115` → 130,954 — the limit is lines and a ledger line is a large JSON object)
-  into the trajectory whose structured compose then failed four times and killed the run
-  (2026-09-14, $3.51); a coder grepped the run record 31 times in one session. An archive sweep
-  found the pattern confined to those two seats: no worker, lead or co-lead has ever done it.
-  **Documented elsewhere, and worse.** openai/codex#27131 (open) reports a conversation reaching
-  **1,239,690 tokens** after Codex read its own rollouts — once deliberately, once through a
-  `rg -g '*.json*'` that matched `.jsonl`, a single call reporting 23,563,888 tokens — described
-  by its reporter as *"a self-amplifying token growth loop"*. codex#40493 names the class
-  **self-state reads** and measures 61% of a context window. The trigger in every case is a
-  *meta* question, because that is when the run's own record is the most relevant document
-  available.
-  **Why relocation rather than a denial rule.** Six surveyed CLIs all keep transcripts outside
-  the working tree, and none relies on path policy instead — Claude Code documents that reading
-  a transcript *"isn't blocked"* and that its outside-cwd prompt does not fire in `-p` or
-  background runs; Goose ships a tool for reading past sessions; OpenHands V1's system prompt
-  points the agent at its own conversation directory and leaked a key that way. The only hard
-  boundaries found anywhere are a mount layout or a remote service.
-  **Supervision is deliberately untouched.** `/status` reads the ledger through
-  `MonitorToolProvider`, built with the path and exposing no tool that takes one. That is the
-  established supervisory pattern (the closest published analogue is an MCP server with three
-  read-only tools over the same kind of file) and ours is stricter, having no arbitrary-read
-  primitive. Closing the channel entirely is its own failure: claude-code#83074 records an agent
-  with no way to check its own history inventing a fictional session and building real
-  constraints around it.
-  **Compatibility.** `workspace.resolve_record(run_id, name)` prefers the legacy in-workspace
-  path when it exists, so every archived batch — including the ones behind published numbers —
-  still scores; `benchmarks/science_bench/trial.record_path` is the same resolver for the
-  benchmark readers. This reverses the 2026-09-03 ruling that `runtime_dir` stays on the
-  allow-list because agents may read their own logs; the evidence since is one run killed and
-  24% of another's budget.
-  New guards in `tests/test_fs_guard.py`: the record is denied and the workspace allowed on the
-  **live** config; the two directories provably do not nest (nested, narrowing the allow-list
-  would be inert); and a legacy record still resolves. Mutation-verified by putting `ledger_dir`
-  back inside `run_dir`. Suite 1514 passed.
-- 2026-09-24 — **The lead waits on the coder instead of polling it (85).** Slot 6 (2026-09-15)
-  made 134 `check_coder` calls (114 refused by the 900 s rate limit), 47 mid-turn steers and 31
-  refused submits at a 3-10 s cadence: a refusal costs a model turn, so rate-limiting the poll moved
-  the spam onto the other tools. `AuthoringSession` gains the blocking wait every harness that
-  solved this uses (Codex `wait_agent`): `wait_for_event(timeout_s)` parks on a wake event set when
-  a coder turn ends, a drive fails or the coder asks (`park_question`), and on the lead's
-  `RunControl.steer_event` (`watch_steers`), so it returns within a second of the event. `send`
-  **queues** a message for a working coder by default and runs it as the next turn inside the same
-  background task; `mid_turn=True` or an open question steers it into the running turn instead.
-  Channel state lives in `_init_channel()` so `object.__new__` doubles get it from the production
-  line. No backend changed: queuing needed only the existing `steer` and `drive`. Tests:
-  `tests/test_merge_flow.py` +16 (queue, mid-turn, answer-goes-mid-turn, race-to-turn-end, every
-  wake source, timeout, idle, cancel leaves no waiter, the executors' floor/narration/failure
-  texts, submit waits, submit hands back a question, and a question wake not claiming a next turn —
-  found live), each checked against a mutation. **LIVE-VERIFIED 2026-09-24**
-  (`tests/test_live_coder_wait.py`, DeepSeek coder on Codex, ~$0.01): turn end woke the wait in
-  4 s, a question in 1.5 s with the answer delivered mid-turn, `wait_coder(5)` held the 60 s floor,
-  a plain message ran as the next turn while `mid_turn` steered, and a submit waited 40 s for the
-  coder before the gate. Second batch, same day: an idle wait returned at once; a SIGKILLed Codex
-  process surfaced as FAILED (`TransportClosedError`) both to a wait and to a submit waiting on it
-  (0.04 s after the kill, no gate); a coder question during a submit's wait came back without
-  spending a submission; `RunControl.interrupt` during a submit's wait cancelled it with the tree
-  clean. Two real-lead draws (Opus, `gpt-5.6-terra`): 8 and 7 lead turns over 8.7 and 10.3 min of
-  coder work, a steer woke the parked wait in 10 s, both links committed ($3.98, $1.30). Cells
-  kill and leak-check only processes descended from the test itself, never a peer's by name.
-  **Found, not fixed** (outside this change): a killed or cancelled Codex turn books **$0.00**,
-  because usage is booked on `turn/completed`; and `mcpServer/startupStatus/updated` is not
-  recorded, so one live cell whose coder reported `ask_lead` missing could not be told apart from
-  a model that looked in the wrong place (it listed MCP *resources*, not tools).
+- 2026-05-26 -> 2026-06-16 — Phase 1: manifest `ToolkitRegistry`, persistent JSON-line sandbox,
+  per-run workspace, built-in MCP server/client. Phase 2: `merge_flow.propose_and_pr()`,
+  `gate.run_gate` (Layer A + no-fabrication scan, Layer B), `review.make_review_hook` (decorrelated
+  co-lead), `approve_edit` (one atomic commit, explicit-path staging); launch preflights
+  `check_author_reviewer_decorrelation`, `check_toolkit_git_identity`/`_branch_clean`.
+- 2026-06-18 -> 2026-06-30 — Live hardening (fix-lists #1–#11): timeouts decoupled from the model
+  (`call_timeout_ceiling`, `gate_test_timeout_s`); FS jail (`fs_guard.PathGuard` hook;
+  `_make_path_confiner` deprecated); base-ref reset (`_reset_direct_tree`, `tool_author_failed_*.patch`),
+  coder Bash deny-rule, gate-entry auto-revert; determinism as JUnit outcome maps. Authoring split into
+  `AuthoringSession` (`build_authoring_session`, driven by `lead.drive_authoring`). `bash_exec`
+  process-group kill and a 900 s `MCPToolClient.call_tool` bound fix an FTOOL hang.
+- 2026-07-06 -> 2026-07-16 — [G2] Layer B needs ≥1 PASSED; [C1] ambiguous words → findings; [A12]
+  gate targets from `_touched_packages`, not `target_domain`; [I1] co-lead uses `WebSource()`.
+  `repl_init_py` replaces `_configure_xspec_once()`; `bash_exec` description from `analyze_probe`;
+  `runner.check_analyze_probe()`. `code_gate.yaml` reads `or []`-guarded; `finding_code_patterns`
+  recorded as findings (RNG demotion, ruling).
+- 2026-07-22 -> 2026-07-29 — `ToolkitBranchUnclean`; base ref persisted; `heal_toolkit_branch_if_dirty`
+  on resume. `ToolkitRegistry.load()` stops overriding manifest descriptions with `__doc__`. Registry
+  tools `defer_loading` under `tool_search_enabled` (live-verified 07-28). `monitor` reaches
+  `make_review_hook`; coder spend via `_record_coder_cost` → `CostMeter.record_session_total`.
+- 2026-07-30 -> 2026-07-31 — `PersistentSandbox.abort()` (registered on `RunControl`) and `kill_now()`;
+  `_kill_current` kills descendants via `/proc` (not `killpg`, which shares the backend's group) [F5];
+  `AuthoringSession.aclose()` idempotent.
+- 2026-08-10 -> 2026-08-19 — Coder env follows a key rotation (`_with_live_anthropic_key`). Second
+  author harness: `coder/` package with `CoderBackend` (`connect`/`drive`/`disconnect`),
+  `claude_sdk.py`, `codex_sdk.py`; `_build_backend` dispatches on harness; pairing table
+  `coder/harness.py` (five pairs; alt-vendor `claude_sdk` rows removed); preflights
+  `coder_harness_supported`/`_available`. Codex: `writableRoots` write jail, read-only
+  `.git`, escalation over loopback MCP (`escalation_server.py`), reads only recorded
+  (`coder.read_outside_allowlist`); MCP config via `--config` (`_flatten_overrides`), elicitations
+  answered `{"action": "accept"}`, member `parameters` reach Codex, a failed turn returns
+  `[harness error] …`; `_touched_paths` porcelain fix. Qwen in `UNVERIFIED_PAIRINGS` behind new
+  `PreflightWarning`. `tests/test_live_coder_matrix.py` LIVE-VERIFIED on the credentialled legs.
+- 2026-08-20 — One `coder: RoleModelConfig` through `build_authoring_session`/
+  `propose_and_pr`/`drive_authoring`, `_build_backend(member=)` (`_resolve_coder_provider` deleted);
+  `make_review_hook(allow_correlated=False)` emitting `review.correlated`;
+  `codex_sdk.resolve_vendor_key` reads the key pool. OS jail fixed for its first author (binds the
+  exec'd binary, resolved paths, fresh settings home on local disk); ruling: one enforcement layer —
+  the harness sandbox stands down under the kernel jail, `coder_policy` allows two writable places.
+  LIVE-VERIFIED end to end.
+- 2026-08-31 — Submission snapshots: `run_gate_step` saves each submit under
+  `run_dir/authoring/submissions/<tool>/`; `build_authoring_session` restores the latest only onto its
+  recorded base ref and the gate re-runs (`save_`/`find_`/`restore_submission_snapshot`,
+  `discard_submission_snapshots`, `authoring.snapshot.*`). LIVE-VERIFIED 09-01; commit path
+  deterministic only.
+- 2026-09-01 — `_make_ask_human_handler` classifies before the MCP boundary (the author had been
+  answered with its own question): `coder.ask_human.unattended` + `HumanInputRequired` carrying
+  `UNATTENDED_GUIDANCE`, vs `coder.ask_human.error` + `RuntimeError`; both stay tool errors.
+  `CODER_TEXT_CAP` → `coder_text_cap()`. LIVE-VERIFIED (`tests/test_live_no_hitl.py`).
+- 2026-09-02 — `commit()` advances `_base_ref` (memory + `current_base_ref`), so a later submit no
+  longer reverts an approved commit; `AuthoringSession.pending_changes()`, and `execute_submit`
+  answers a no-op submit budget-free. The scan demotes a clause-scoped negated banned word to a
+  finding (`_negated`).
+- 2026-09-03 — `_author_env` drops `CLAUDE*`/`COPILOT*`/`VSCODE*` (`_HOST_TOOLING_PREFIXES`);
+  `workspace.round_report_path` omits the model (`_slug` deleted). Ruling: `runtime_dir` stays on
+  every allow-list (reversed 09-14).
+- 2026-09-09 — [F1] `aclose` resets on `pending_changes()`, not a commit latch; `committed` deleted
+  (readers use `last_commit_sha`). [F2] `structural.changes_allowed` over new `collect_all_changes`
+  (ruling: `*_utils` allow-list), rejection names the route (`ask_lead`). [N1] Layer-B output keeps
+  head + tail (`_bounded_pytest_output`, `gate_layer_b_output_cap`). [F10] `PathGuard` writable set
+  (`is_writable()`; ruling: a role writes only its own work folder; jail side residual).
+  `jail.coder_policy` binds `.git` read-only in every writable root (kernel-enforced git ban).
+- 2026-09-12 — [B1/B2] coder runs beside the lead: `start_drive`/`drive_status`/`take_drive_result`
+  (`drive` stays blocking; `submit_for_review` blocking by ruling); a failed drive returns
+  `[harness error]`; a second `start_drive` in flight raises; `aclose` cancels and awaits the drive
+  before `disconnect`. Codex `/stop` hang fixed: registration kept on cancel, poll on a daemon thread
+  (`_drain_turn`). `CodexBackend` falls back to `env_var_names(provider)[0]` without `key_env`.
+  `ask_lead` parks the question (`[coder asks]`); `CoderBackend.steer`, `AuthoringSession.send`;
+  `clarify_for_author`/`_ClarifyReply` deleted.
+- 2026-09-14 — Run record moved to `workspace.ledger_dir(run_id)` (outside `run_dir`);
+  `agent_fs_allow` narrows to `runtime_dir/runs` for `PathGuard` and the coder's mount plan;
+  `workspace.resolve_record` still reads legacy in-workspace records. Reverses the 09-03 ruling.
+- 2026-09-24 — `AuthoringSession.wait_for_event` wakes on turn end, drive failure, `park_question`
+  or the lead's `steer_event` (`watch_steers`); `send` queues by default, `mid_turn=True` steers;
+  `_init_channel()`. LIVE-VERIFIED (`tests/test_live_coder_wait.py`). Open: a killed Codex turn books
+  $0.00; `mcpServer/startupStatus/updated` is not recorded.
 

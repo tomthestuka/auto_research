@@ -482,385 +482,71 @@ guard named fourteen at once, including the entry a paid run had reported that w
 seconds; that run cost $25.
 
 ## 6. Changelog
-Compacted 2026-09-01: entries through 2026-08-31 folded into themed ranges (detail in git history).
+Compacted 2026-09-01 and again 2026-09-24 (detail in git history).
 
-- 2026-08-14 -> 2026-08-17 — **Corpus built, first baseline measured, layer ablations (paper items
-  1–2).** Module created for the seeded-defect catch-rate benchmark (design from `tmp_gatetest.md`):
-  40 entries (36 planted defects across the manuscript's eight fixed families, 4 clean controls) over
-  two bases, run through the production gate with the live cross-provider review as an opt-in leg;
-  deterministic tests in `tests/test_gate_bench.py`. Five design points diverge from the 2026-07-09
-  plan: both RNG entries became review-layer probes (randomness is a finding, not a hard failure,
-  since 2026-07-16); the manuscript's fourth intent (silent capability bounds) was added;
-  `pa_pd_stability` was **dropped** as a real base because its committed tests fail on a stale
-  observation-database product (handoff [F2]), which would make every catch on it unattributable, so
-  the corpus rides `irf_epoch`, `qu_lag_dcf` and `toolargs`; the review leg runs only on a gate pass,
-  mirroring `propose_and_pr`; clean controls were added so the matrix carries a false-rejection rate.
-  The corpus is pinned to its own toolkit branch rather than `ai`. Two probes were retargeted after
-  measurement showed the first choice inert: an inclusive energy-band edge changes no rate (the IXPE
-  EBOUNDS grid aligns exactly with the 2/4/8 keV band edges), so the off-by-one archetype moved to the
-  lag-bin edges. `hole_structural_unfalsifiable` records a hole found while building:
-  `structural.allowed_paths` filtered its input through the same pattern it tested, so it could not
-  fail. **Closed 2026-09-09 (F2):** the check is now `structural.changes_allowed`, computed over
-  `collect_all_changes` (the unfiltered changeset), so this family is caught deterministically. The
-  recorded verdict below predates that fix and attributes the catch to the co-lead.
-  **Baseline (2026-08-17):** 41 entries, **41/41 as predicted, $4.52 and 34.7 min**, all **37 planted
-  defects stopped** (scan 6, structural 2, determinism 1, tool-local tests 7, co-lead 21, commit sweep
-  1; **none reached a commit**), **4/4 controls approved by the co-lead**. Records under
-  `logs/dev/gate-bench/20260817T203646Z/`. Four instrument corrections came first: (1) the synthetic
-  fixture labelled invented rows with **real IXPE ObsIDs** against a brief claiming validation on
-  `01002901`, so the co-lead rejected every synthetic changeset (controls included) and all 31
-  synthetic verdicts were unattributable — fixed with marked `synth260817-…` ObsIDs and the schema's
-  own `synthetic=True` set in the brief; (2) the harness never loaded the project `.env`, so the first
-  paid attempt made **zero calls and failed 26 times identically**, and the launch check now runs once
-  before the first mutant; (3) the co-lead found **three genuine defects in the supposedly-correct
-  base package** that every free check passed — a vanishing weighted resultant returning an arbitrary
-  position angle, a propagated uncertainty never asserted, a missing `test_repro…`; (4) hardening the
-  base defeated three planted defects, two legitimately (an independent-recompute check catches
-  results-path randomness that the scan only flags since the 2026-07-16 Monte-Carlo policy) and one
-  wrongly, collapsing an adequate/inadequate pair, whose inadequate twin now relaxes that assertion
-  too. **The prediction field split in two:** `expected` names the layer that **stops** the changeset,
-  `known_hole` the check **proven blind**; all six holes are confirmed real, no end-to-end miss.
-  `[G7]` is the sharpest — the constant sits at char 34,622 of a 34,831-char file, so the 20,000-char
-  bundle cap did elide it and the co-lead quoted it by line number anyway, having followed the
-  marker's `use read_file`; nothing forces that read, so the hole stands on one trial. **Attribution
-  added:** a co-lead catch scores only when a human has read the verdict and judged its stated reason
-  to be the plant; decisions live in `logs/dev/gate-bench/review_roster.json`, keyed by a verdict
-  fingerprint so a changed verdict reports `stale`. **21/21 read on-target**, each quoting specific
-  code (`kept = kept[:8]`, `max(ratio_error, 0.01)`, the 20-bin cap at `half_range=550`, `20211209`
-  for MJD 59714); `--rescore` applies a reading without paying again. Tests 60 → 67; full suite 891
-  passed / 71 skipped. **Caveat with the headline: 21 of 37 catches rest on the one non-deterministic
-  layer** (the deterministic gate alone stops 17).
-  **Layer ablations (2026-08-17, paper item 2, Table 5): the co-lead is the load-bearing layer.** Same
-  corpus and pins, one defence disabled at a time, $12.44 and ~72 min for the two paid legs.
-
-  | Configuration | Reaching a commit | Co-lead calls | Spend |
-  |---|---|---|---|
-  | Full stack | 0/37 | 25 | $4.52 |
-  | No mechanical scan | 0/37 | 29 | $5.61 |
-  | No tool-local tests | 0/37 | 33 | $6.83 |
-  | No cross-provider review | 21/37 | 0 | $0.00 |
-
-  Disabling either deterministic layer changes nothing that lands: the co-lead rejects **25/25** with
-  the scan off and **29/29** with the tool-local tests off, approving **4/4 controls in both** — no
-  false positives under a third more load. Disabling the co-lead lets **21 of 37** land, so
-  `commit ⇔ gate ∧ review` is, on this corpus, dominated by the review term. **Four caveats.** (1) One
-  trial per configuration: `0/37` is not "never". (2) Every planted defect is visible **in the diff**
-  by construction; runtime-only fabrication (handoff [B3], a monkeypatched fit returning invented
-  values) is absent and is the case the static layers and the reader may both miss. (3) The
-  deterministic layers are free, repeatable and always available while the layer covering for them is
-  paid, non-deterministic and provider-dependent, so redundancy is not equivalence. (4) "No mechanical
-  scan" means no vocabulary or code-pattern lists — the hardcoded binary and placeholder-body checks
-  cannot be configured off and still fired. **Structural findings:** determinism is not a separable
-  layer (same double test run, 1 catch → 0 when the tests go); the commit-sweep [G3] hole is only
-  reachable when a test actually runs, since a passing test is what writes the file; an empty Layer B
-  fails every changeset rather than ablating anything. No production code changed — both switches are
-  existing `run_gate` parameters, pinned by a test so an ablation cannot measure a fork of the gate.
-
-- 2026-08-18 — **Reviewer-model swap (paper §5.2 Table 5), matched controls, and the presentation
-  rulings.** Five models over the identical 78-changeset corpus at identical pins, ~$56: detection
-  19–21/21, false rejection 0–8/41, pair discrimination 15–21/21, spend $0.76 (`gpt-5.6-luna`) to
-  $22.81 (`claude-opus-5`). **Detection does not rank the models and discrimination does:** luna
-  detects 20/21 for a thirtieth of opus's price and separates 15 of 21 pairs against opus's 21.
-  **Matched controls made that visible** (user's design call): one clean twin per planted defect —
-  twenty-five bespoke, twelve with no honest counterpart (only an absence) whose control is the clean
-  base. Those repeats became a second measurement: ten byte-identical clean changesets give verdict
-  **stability** (opus 0 rejections, sonnet 0, sol 1, terra 1, luna 4), retiring the ablation's
-  single-trial caveat. **Two defects were approved by some reviewers:** the out-of-package fabricating
-  file, approved by two of five and invisible to the gate by construction (mechanical and review
-  layers blind together — the correlated failure §5.2's fourth family probes; the three that caught it
-  read the worktree beyond the diff), and a real tool's "surrogate lag grid" comment, approved by one
-  reviewer judging the code correct and the comment inaccurate. **Five matched controls were defective
-  when first written** (a fabricated calibration factor, an accessor raising `KeyError`, a documented
-  row bound that silently dropped the last row on a negative argument, a false capability claim, a
-  gratuitous dependency); the reviewers found them, two were confirmed by execution rather than by
-  vote, and the corpus was repaired and the affected changesets re-run (7 then 1 changeset x 5 models,
-  $7.41). Fixing a dishonest brief on one pair moved its **defect** from partial to 5/5 detection. One
-  control cannot be repaired: the truncation probe needs an oversized file, so its honest twin is
-  necessarily an oversized unrequested file, and two reviewers reject it on that ground.
-  **Attribution: 102/102 rejections hand-read as naming the planted defect**, keyed per (reviewer,
-  changeset) with the verdict fingerprint. Infrastructure: `reviewers.yaml` with harmonised
-  parameters; `--reviewer`, `--compare`; verdicts stored verbatim; `NO_AUTHOR` declares the absence of
-  an author rather than misstating one. **Concurrency bug fixed:** run directories named by timestamp
-  alone let five same-second launches share one `records.jsonl` and append past the 4 KB atomic-write
-  size; directories now carry reviewer and pid. Tests 110.
-  **Presentation (same day, two passes).** The swap table was **merged into the catch-rate table** as
-  panel (b). A family x model cross-product was **measured and rejected**: only 3 of 30 populated
-  review cells differ between models. A histogram was **considered and rejected** as the wrong form
-  (five named entities and aggregate measures, no distribution to bin). The corpus-wide aggregates sit
-  in panel (b) and in a four-panel dot figure (`tmp_scripts/plot_model_swap.py`) whose point is the
-  rank inversion: detection is flat, discrimination, false rejection and cost are not. Provider is
-  carried by marker shape rather than colour, so identity survives print and colour-vision deficiency.
-  The three count panels share a 0-100 per-cent axis (user, 2026-08-18): 21 defects reach the review
-  against 41 controls, so raw counts on different bases invite a comparison that is not there; cost
-  keeps its own units. Second pass: **pair discrimination was dropped** — it can flatter a reviewer,
-  a pair being judged only when the gate let the defect through, so false alarms on the other pairs
-  are excluded (`gpt-5.6-sol` scored 21/21 pairs while rejecting two clean changesets whose defects
-  the scan and the tool-local tests had already stopped); **instability became a rate**; and **the
-  model-swap table was removed in favour of the figure**, whose cost panel gained value labels (a
-  log-axis point cannot be read back to a number). `benchmarks/gate_bench` outputs are unchanged:
-  `model_swap.md` still reports pairs as an audit-trail diagnostic.
-
-- 2026-08-22 -> 2026-08-23 — **Two ledger-derived corpus halves, their mutual audit, and three live
-  passes that kept finding defects in the corpus rather than in the gate.** `Mutant` gained `author`
-  and `attested`: the original 78 entries are `claude-opus-5/blind`, and `mutants_ledger.py` added 18
-  defects plus their 18 matched controls as `claude-opus-5/ledger` (§5b), each citing the ledger
-  record it was observed in. Corpus 78 → 114. **Why:** the blind entries predate any benchmark run,
-  so they are an expectation of author error rather than a sample of it, and the reviewer swap scores
-  an Anthropic reviewer against defects from its own family with nothing in the data saying so.
-  **Sources:** 250 blocking co-lead issues over 151 author-bench trial ledgers and 24 over the
-  campaign's own runs. Three classes dominate and none appears in the blind half: a partially written
-  upstream product read as finished (68 of 274), an untestable statistic reported as a determined
-  negative (26), and a statistic whose validity rule differs from the one it reports (24). Every real
-  gate rejection on record was `no_fabrication.vocabulary`. Two things measuring taught: a degenerate
-  fixture (three position angles 60 degrees apart double onto a vanishing resultant, which the base
-  correctly refuses, so all 18 controls failed until the fixture moved), and that a dropped documented
-  output is a free `layer_b` catch whenever a committed check reads it — which is why that entry
-  predicts `layer_b` rather than having its suite edited until it reached a reviewer. Tests 143 → 149;
-  suite 1188 → 1225.
-  **Second vendor:** an independently mined Codex ledger half — 11 attested defects plus 11 matched
-  controls over one run-audit scaffold, each pair one anchored replacement apart. Corpus 114 → 136.
-  Free legs: 11/11 controls clean; ten defects reached review; the documented-output omission was
-  caught by Layer B as predicted.
-  **Merge and repair, after each half audited the other.** Corpus 136 → 134 entries (65 defects, 69
-  controls); free legs pass with 28 of 28 ledger controls clean, 26 defects reaching review as
-  predicted, 2 stopped by `layer_b` as predicted. Suite 1260. *Codex half:* its honest base reported
-  `exp(-0.5 * joint_stat)` as a p-value — the chi-square survival function for exactly two degrees of
-  freedom, applied where the joint statistic carries `2(n-1)`, with no dof anywhere in the module, so
-  the probability did not depend on sample size; on its own committed fixture it returned 0.039 and
-  the verdict `variable` where the correct four-dof value is 0.155 and `stable`, so **every one of its
-  matched controls mislabelled its own fixture**. Replaced with a real survival function reporting its
-  dof. That base also computed one published quantity on the Q-only sample while the statistic beside
-  it used the joint sample. **One entry retired rather than repaired:** the stale-completion-marker
-  defect was behaviourally inert in both forms tried (sidecar bytes, probability and verdict identical
-  to the honest build) because that scaffold binds its certificate to a content hash; the class is
-  real and attested, reachable only where the certificate is not content-bound, which another entry
-  plants directly. *Anthropic half, by the Codex audit:* its `attested` tokens (`AB 61`, `RT R14`)
-  indexed a working enumeration not in the repository, so all eighteen now carry a verified
-  `<path>#sequence=<n>` record; two entries carried a second edit that bought nothing (measured: the
-  honest suite passes twenty of twenty against the production defect alone) and are now single-anchor;
-  one description was inverted with respect to its own code; and the positional-contract entry was
-  inert because the parameter it reordered existed only in the signature, so the scaffold now applies
-  that threshold and commits a check for it. **On the two-file pairs:** ten Anthropic entries edit
-  production code and the check that would have pinned it, which the Codex audit read as constructing
-  a defect rather than reproducing one — measured per entry, for eight the relaxation is necessary
-  (the honest suite catches the production defect alone, so the entry would otherwise be a free
-  `layer_b` catch rather than the shape the ledgers record) and for two it was gratuitous and was
-  fixed; the eight are filed under the inadequate-test row. **Provenance stays in the code and makes
-  no claim in the paper:** the brief that produced the second half pointed it at this DOCS, which
-  already carried the three headline frequencies, and its class list reproduces two exactly while
-  differing on the third, so independent convergence cannot be claimed and nothing about authoring
-  provenance is asserted in the manuscript.
-  **2026-08-23 — three live passes.** Headline, stable across all three: **65 of 65 planted defects
-  stopped, none reaching a commit**, 18 by the deterministic layers and 47 by the co-lead. What moved
-  was the control column, **24 → 22 → 11 false rejections of 69**, and every rejection read by hand
-  rested on a verified defect in the two new scaffolds rather than on reviewer noise. **Seven defects
-  the reviewer found in our own honest code**, each confirmed by execution: a `chi_square` dividing by
-  a vanishing propagated uncertainty; a single joint validity mask where the brief requires one rule
-  per quantity; a chi-square centred on an unweighted mean of heteroscedastic terms, unreported; an
-  `angle_span_deg` computed over every row while its docstring declared the joint sample; an
-  unvalidated probability threshold; a hard-coded `tool_chain` the code never establishes; and a
-  committed suite that verified the tool by calling the helper under test — the defect this corpus
-  plants as `led_self_referential_differential`. **Four defects introduced while repairing those**,
-  all found locally: `NaN >= 0.0` is false, so ordering the count threshold before the validity rule
-  left the rule unreachable and its own plant inert; `peak_to_peak` received a pre-masked sample and
-  shadowed the plant that removes its mask; a threshold assertion left stale by the reordering; and a
-  short-arc expectation of 7 degrees where 10 is correct. **Two rules added (§5c)** and the test
-  suites split: `tests/` is the pipeline's, while `benchmarks/gate_bench/tests/` and
-  `benchmarks/author_bench/tests/` sit beside the instruments they pin (268 tests); the move exposed
-  an `author_bench` repo-root of `parents[1]`. **`--concurrency` added:** each mutant installs its own
-  cost meter (the meter is a `ContextVar` and a record's cost is its delta, so one shared meter charges
-  every entry with whatever ran beside it) and the review hook is built once up front. Verified
-  identical outcomes at concurrency 8 against serial; a full paid pass fell from 3.9 h to about 50
-  min. **Measured incidentally:** a ledger entry costs 1.9x a blind entry to review ($0.271 against
-  $0.142), its changeset being a whole capability rather than a one-line edit; and a review call can
-  hang indefinitely with no client-side timeout, which under concurrency degrades one slot rather than
-  stalling the run. **Process lesson, recorded because it cost the most:** one control reviewed in
-  isolation costs $0.25 and thirty seconds, and three full passes at $26 each were spent discovering
-  what that loop would have shown each time.
-
-- 2026-08-28 — **Scaffold repairs C4/C5 then C1, each followed by an independent adversarial review.**
-  **C5:** `mutants_ledger` `product_is_complete` bound its certificate by basename only, weaker than
-  its docstring — the convergent, near-verbatim ground on which all three GPT variants rejected 14–17
-  of the 18 byte-identical `ctl_led_*` controls that every other vendor approved 18/18. The
-  certificate now also binds content: the producer records `rows_sha256` (`rows_digest` over the
-  parsed rows, so the in-file header can cover the body beneath it) and the checker recomputes it; new
-  honest test `test_a_product_modified_after_certification_is_not_complete`; `_A_COMPLETE` anchor
-  updated, both anchor-replacing plants (`led_rows_imply_complete`, `led_certificate_not_bound`)
-  re-verified to fail the honest suite (5 and 3 failures). **C4:** `mutants_ledger_codex._chi2_sf`'s
-  odd-dof series seed used `half` where the statistic belongs (√2 low, ratio → 0.707; verified against
-  scipy at 0.71–0.82 over dof 3–9) — dead code in-tool since `dof = 2·(n_joint−1)` is always even, but
-  the ground on which reviewers split on the `ctl_codex_led_*` controls. One-token fix; max relative
-  error vs scipy now 9e-15 on the dof ≤ 15 / x ≤ 60 grid measured here (3e-14 on the independent
-  reviewer's wider x ≤ 200 grid); the honest suite pins only the even-dof value. Deterministic suite
-  unchanged: the same 9 pre-existing failures (anchor-count parametrization, the inert plant, the
-  ledger-control equality test), zero new. **Left open:** the codex scaffold's `_weighted_stat`
-  overflows silently (`q_err=1e-154` → weights 1e308 → sum inf → weighted mean 0.0, reproduced) —
-  terra's one uncorroborated-but-true rejection ground.
-  **C1 (second, same day): every real-base entry now carries a changeset-scoped `spec_behavior`.** The
-  tool-keyed brief (briefs.py) describes a capability none of the real-base edits implements, so the
-  2026-08-27 clean run rejected **every real-base changeset reaching review 8/8** — defects and
-  controls alike, zero pair discrimination (C1/C2 of the audit). Four maintenance-brief texts
-  (`_SPEC_QU_DOCS/_SPEC_QU_BIN/_SPEC_QU_RANGE/_SPEC_EPOCH`) now ride the nine previously spec-less
-  real entries; a pair shares the text by construction (`paired_controls` copies it), naming the
-  invariants the edit must preserve while carrying no class — the register `hole_regression_blindness`
-  already used, whose scoped spec split reviewers 4/4 on honoring it. C2's mechanism closed:
-  `sci_epoch_inversion_inadequate` now maps to `_ctl_real_epoch` in `_BESPOKE` instead of falling
-  through to `_real_control_docstring`, whose diff (qu_lag_dcf.py) and brief (load_data) described two
-  different tools. Two guard tests added:
-  `test_every_real_base_entry_carries_a_changeset_scoped_spec` (pure) and
-  `test_a_real_changeset_touches_only_its_named_tools_files` (skipped off-host); the second's first
-  run found a harness bug — `corpus()` already appends the paired controls, so `corpus() +
-  paired_controls(...)` built every control twice. Suite 232 → 234; the same 9 pre-existing failures.
-  Synthetic entries stay spec-less on purpose: their changesets ship the whole briefed capability.
-  **Third, same day — independent adversarial review, one finding applied.** The reviewer regenerated
-  both scaffolds (41/41, 37/37), re-verified the anchors, the digest round-trip on adversarial row
-  shapes, the C4 fix vs scipy (2.6e-14 over dof 1-11), the leak copy (`paired_controls` shares
-  `spec_behavior`; texts positive-form, no answer vocabulary), and the suite (225 + the same 9). Its
-  one confirmed gap: `sci_bin_edge_inadequate`'s control still fell through to
-  `_real_control_docstring` — the C1 shape in miniature — now mapped to `_ctl_real_bin_edge`. Recorded
-  out of scope: the reviewed worktree's `.git` still carries "gate-bench" (branch name, synthetic
-  committer identity); the `_nondeterministic_test` plant writes a `gate_bench_seen_` literal into its
-  diff (unreachable at review today: determinism catches it before review runs); `_A_COMPLETE_TESTS`/`_WEAK` are consumer-less constants and
-  `_A_MASK_TEST` no longer matches `_TEST_SOURCE`, so its first use as an anchor will raise.
-  **Fourth, same day — second independent review, on a different model per the working contract, and
-  it caught what the same-model review had blessed.** The C5 repair added a fourth certificate
-  condition while the two documents the reviewer reads — the ledger entries' shared `_SPEC` and the
-  changeset's own `_README_SOURCE` — still described three, and that README ships inside the reviewed
-  diff; on the changeset's own terms the digest was an undocumented condition no specified producer
-  emits, handing the co-lead a new convergent rejection ground on the same 18 `ctl_led_*` controls C5
-  was written to clean. Both texts now name the digest condition (and the README's test list gains the
-  modified-after-certification check); honest scaffold regenerates 41/41, full suite 225 + the same 9.
-  Also applied: a named assertion where the file-scope guard would have raised a bare `KeyError` on an
-  unregistered tool; the C4 error figure now states its grid (the reviewer's wider grid reads 3e-14);
-  and the previously-unsynced `_dump_prompt` hook got its `models/DOCS.md` entry plus a
-  docstring-reference fix. **Recorded, not fixed** (need rulings or are follow-ups): the
-  adequate/inadequate control pairs are now byte-identical twins (two changesets in four control slots
-  — a weighting question for the false-rejection table); `_REAL_TOOL_FILES` is per-tool, so a
-  docs-scoped control editing `toolargs.py` would still pass the guard; the real-base specs enumerate
-  the invariant each defect breaks, so real-base detection measures check-the-named-property rather
-  than unprompted science judgment — state beside Table 3 when comparing arms; and worktree `.git`
-  metadata (branch `gate-bench`, synthetic committer) remains the open in-repo channel the path test
-  cannot see.
-
-- 2026-08-31 — **The `.git` answer channel closed, the corpus frozen by ruling, and vendor review
-  errors scored as failures.** A three-way pre-launch review (docs/ledger reconciliation, diff code
-  review, fresh all-channel leak audit building all 134 worktrees) confirmed every 2026-08-28 repair:
-  C1 `spec_behavior` reaches the co-lead on `ToolSpec.expected_behavior` beside the tool-keyed brief
-  (`harness.tool_spec_for`), pairs share it; C4's fixed seed checks against an independent tail
-  integral at 1.9e-12 over dof 1–15; C5's digest is producer/checker-consistent and the honest
-  scaffold runs 26/26 with both anchor-replacing plants still failing it (5, 3); suite exactly 225 +
-  the same 9. **Leak finding:** `read_file`/`list_dir` filter only governance basenames, so
-  `.git/config` (committer `gate-bench`), `.git/HEAD` (branch `gate-bench`), `.git/logs/HEAD` (the
-  checkout line) and `.git/packed-refs` (`origin/gate-bench-base`) were reviewer-readable on **every**
-  worktree — class-invariant (defect and control carry identical `.git`), so no pair verdict could
-  flip, but naming the setting through a channel the tool surface advertises. Closed structurally: the
-  synthetic committer is `analyst`, the real-base branch is `ai` (`checkout -B`, the branch a
-  production authoring runs on) and the clone drops its remote (removing every remote-tracking ref);
-  the `_nondeterministic_test` marker became `demo_summary_cache_*` (its old `gate_bench_seen_`
-  literal rides the plant's own diff, which reaches the reviewer under `--ablate layer_b --review`),
-  with the harness sweeper's glob renamed in step. Guard tests extended per the no-leaks rule: the
-  tool-description test now also scans the built synthetic worktree's `.git` text against the full
-  leak vocabulary; a new on-host test scans a real-base worktree's `.git` against the harness-minted
-  strings (narrower on purpose — real toolkit history legitimately says "benchmark"); a source-level
-  test pins the marker rename and the producer↔sweeper glob agreement. Also synced: the corpus-count
-  header (136 → the actual 134, verified by `--list`) and the §2 family table, re-derived from
-  `corpus()` (four rows had drifted through the 2026-08 corpus merges); `Mutant`'s dictionary entry
-  gains `spec_behavior`/`pairs_with`; the `spec_behavior` field comment no longer claims to "override
-  the brief"; `models/DOCS.md` gains the `PROMPT_DUMP_ENV` dictionary entry (recorded narrowness:
-  schema by name, attachments by count, coder not covered); and `table_catchrate.py` now fails loudly
-  on a family missing from `FAMILY_ORDER`. Suite 234 → 236 + the same 9.
-  **Methodology ruling (second, same day): the repair loop ends here — the corpus is frozen in place,
-  and "clean" means honest, not unobjectionable.** Prompted by the operator observing that four
-  repair→run cycles (08-17 control repairs, 08-22 retirement, 08-27 leak + C1–C5 audit, 08-28 repairs,
-  08-31 roster read) each surfaced new flaws — the adaptive-revision hazard (Gelman & Loken's forking
-  paths; Dwork's holdout reuse). A literature sweep (`logs/dev/gate-bench/METHODOLOGY_20260831.md`:
-  SWE-bench Verified/+, EvalPlus, MMLU-Redux, mutation testing's equivalent-mutant discipline,
-  Redwood's AI-control line, SWR-Bench) sets the line the field draws: post-hoc repair is legitimate
-  only per score-blind validity criterion, invalid items are excluded from denominators with the
-  exclusion counted, pre/post numbers stay visible, and the instrument freezes before the headline
-  run. Decisions recorded:
-  1. **The control label is "honest"** — no fabrication, no planted defect, behavior matching its docs
-     within the brief's scope — **not "no reviewer can object"**. The unbounded scaffold-quality class
-     (certificate basename binding, the spread self-oracle, the missing `strict=True` test,
-     `peak_to_peak` circular wrap, err-row counting, `require_complete` strictness) is declared out of
-     repair scope: a strict reviewer rejecting honest-but-imperfect code is the false-rejection
-     measurement, itemized by ground beside the table, never repaired away. Chasing unobjectionable
-     controls tunes the corpus to the strictest reviewer, which is the result-engineering this ruling
-     forbids.
-  2. **The corpus version the 20260831T172738Z-swapfix batch ran on is the frozen v1**; that batch is
-     the headline measurement. The label violations the roster read found in it are handled by
-     documented exclusion/reclassification, mutation-testing style, not a re-run:
-     `led_total_on_a_different_sample` (the plant is an accidental swallowed NameError —
-     `usable_rows(above)`, this file's builder — not its described defect; excluded or footnoted),
-     `ctl_hole_g7_review_truncation` (the shared filler ships invented "reference response"
-     provenance, violating the honesty label — its rejections reclassify as justified, out of the
-     false-rejection denominator), and the real-base control verdicts resting on `_SPEC_QU_BIN`'s
-     overpromise ("half-range spanned", which the pinned `dcf_bins` floor() semantics do not honour —
-     our brief misstating ground truth; footnoted count).
-  3. **The four-round repair history is disclosed in the manuscript as a funnel** (round, what was
-     found, class, count, pre/post effect — the C1 spec repair's 8/8 → 0–4/10 real-base control
-     rejection is itself a measured result), with earlier batches reported as pilots.
-  4. **v2 repairs land in the tree without a paid re-run**: the label violations above, plus the
-     mechanical scaffold fixes, so any future batch runs clean; a confirmatory run happens only if a
-     referee requires one, once, on the tagged v2.
-  5. **Attribution roster**: the 306-entry LLM read
-     (`logs/dev/gate-bench/review_roster_20260831_proposed.json`, rubric in `…-swapfix-ROSTERREAD.md`)
-     merges only after a human spot-sample (~30 verdicts) with the agreement figure reported; readers
-     disagreed on ground-level justification (sol/terra vs luna readers), so justification is ruled
-     per ground by the human, not per record.
-
-  **The swapfix batch's 8 errored records investigated (third, same day): none is internet or
-  throttling; one was ours and is fixed.** claude_opus_5 ×2 (`fabgap_surrogate_real`,
-  `bound_lag_cap_real`): the reviewer sent `read_file` `offset='150, '` and `ReadOnlyToolProvider`'s
-  bare `int()` raised out of a `try` that caught only `OSError`, killing the review — fixed in
-  `agents/react.py` (malformed argument → `is_error` tool result, the [F11] rule on this path; test
-  `tests/test_react_tools.py::test_read_file_malformed_offset_is_a_tool_error_not_a_crash`), so those
-  two records are retryable in any future batch. deepseek_v4_pro ×3: the vendor's known
-  structured-output failure shape on long trajectories (one `max_output_tokens` with 0 output chars,
-  two "completed" at ~233/253 chars that parse to nothing) — vendor behavior, already a §13-class
-  caveat, reported beside its leg. qwen3_8_max ×2: the vendor's known thinking-mode emit-tool races
-  (one turn with no emit call at all, one emitting a structured answer beside a hallucinated
-  `emit_structified_response` tool call — the misspelling is the model's, not ours) — anticipated by
-  the adapter's premature-answer guard, retried, exhausted. glm_5_3 ×1 (`hole_regression_blindness`):
-  the forced emit call arrived with empty arguments `{}` and failed `ToolReviewVerdict` validation
-  after retries — the GLM forced-tool route's known degraded shape ([I14] family), reported beside its
-  leg. Error records carry no verdict and drop out of that leg's reviewed denominator (the 47/46/45
-  variance in the leg table).
-  **Ruling (fourth, same day): vendor review failures now score as failures, not gaps.** A gate-passed
-  item on which the vendor never delivered a verdict is a property of that reviewer and counts as
-  failing the item. `swap._review_errored` (error set, gate passed, no verdict) keeps such records in
-  the reviewed denominators — a defect earns no detection credit, a control is not cleanly approved,
-  an errored member fails its pair — and the summary table gains an `Errors` column; a pre-gate error
-  still drops out. This replaces the silent denominator shrink behind the swapfix table's 47/46/45
-  variance. The two claude_opus_5 records lost to the (now fixed) `read_file` coercion crash are
-  re-run on the same frozen corpus and patched into that leg with a note, since their failure was the
-  harness's, not the vendor's. Test:
-  `tests/test_gate_bench.py::test_a_vendor_error_counts_as_failing_the_item`.
-
-- **2026-09-03 — the pruning step was a leak generator, and the guard tests had filtered it out of
-  sight.** `keep_only_passing_tests` ran pytest with its cache on, so every pruned defect worktree
-  (the 20 `expected="review"` ledger + codex entries) carried `.pytest_cache/v/cache/lastfailed`
-  naming the honest test the plant breaks, and no control did; the reviewer is rooted at the
-  worktree with an unfiltered `list_dir`. Reproduced first-hand on
-  `codex_led_separate_validity_masks`. **Used live:** `qwen3_8_max` cited `.pytest_cache/v/cache/
-  lastfailed` and `nodeids` verbatim in two catches (`20260827T094057Z-swapclean-qwen3_8_max`,
-  `codex_led_weighted_center_variance`, `codex_led_separate_validity_masks`). Scope: pruning entered
-  `857025e` (08-25), so the 08-17 published 37-defect table is clean; every swap batch from 08-26 on
-  — including the paper's Table 3 / Fig. 4 source `20260831T172738Z-swapfix-*` — carried it, and
-  records hold no tool trajectories, so silent use by the other legs cannot be excluded. **Open:
-  re-run the swapfix legs or exclude the 20 entries with the reason stated.** Fix: the pruning
-  subprocess runs `-p no:cacheprovider` with `PYTHONDONTWRITEBYTECODE=1`. New guard
-  `test_a_pair_shows_the_reviewer_identical_root_listings` compares the two legs' full listings
-  (only `.git` excluded) across all 25 matched pairs — deliberately **without** `_TOOLING_ARTIFACT`,
-  since that filter, added to make the pair tests pass, is what had made them blind to this.
-  Test corrections from the same review: the one-anchor pair test is deleted (a pruned defect
-  legitimately differs in the lib file and its test file, verified against
-  `keep_only_passing_tests`); `_NOT_BEHAVIOURAL` gains `led_weighted_residuals_as_sample_variance`
-  (fixture residuals `[-9, -3, 3, 9]` sum to zero, so the arithmetic error cancels) and loses
-  `hole_g4_provenance_dict` (its control's suite fails against it) — the review's same claim for
-  `hole_g6_manifest_import` was wrong (15/15 pass), so it stays declared; the two hand-rolled
-  `__pycache__`/`.git` filters are unified on `_TOOLING_ARTIFACT`. Suite 227 → 274 passed.
-  Residual from the review, recorded not fixed: the two `_NOT_BEHAVIOURAL` lists (this file's tests
-  and `mutants_ledger.py`) are independently hardcoded and disagree; `expected` has no sweep-check
-  (an ad-hoc sweep through `run_gate` found 0 mismatches over 126 synthetic entries); the leak-path
-  test at line ~988 uses a never-pruned mutant and so cannot see a pruning artifact.
+- 2026-08-14 -> 2026-08-17 — Corpus built (paper items 1–2): 40 entries (36 planted defects over
+  eight families, 4 clean controls) on `irf_epoch`/`qu_lag_dcf`/`toolargs`, production gate plus an
+  opt-in live co-lead leg; `pa_pd_stability` dropped ([F2] stale product); own toolkit branch.
+- 2026-08-17 — `hole_structural_unfalsifiable` planted against `structural.allowed_paths`; closed
+  2026-09-09 (F2, `structural.changes_allowed`); its recorded verdict predates the fix and credits
+  the co-lead.
+- 2026-08-17 — Instrument fixes: marked `synth260817-…` ObsIDs (real ObsIDs had voided all 31
+  synthetic verdicts), `.env` loaded, base-package defects fixed; `expected`/`known_hole` split (six
+  holes confirmed, [G7] on one trial); co-lead catches hand-attributed in `review_roster.json`.
+- 2026-08-17 — Baseline (the published 37-defect table), `logs/dev/gate-bench/20260817T203646Z/`:
+  41/41 as predicted, $4.52; all 37 defects stopped (scan 6, structural 2, determinism 1, tool-local
+  7, co-lead 21 read on-target, sweep 1); 4/4 controls approved.
+- 2026-08-17 — Layer ablations (paper item 2, Table 5), one trial each: 0/37 defects reach a commit
+  with the scan or tool-local tests off, 21/37 with the review off; the co-lead is the load-bearing
+  layer. Caveat: every plant is diff-visible; runtime-only fabrication is absent.
+- 2026-08-18 — Reviewer-model swap (paper §5.2): five models, 78 changesets, ~$56; detection 19–21/21,
+  false rejection 0–8/41. Matched controls added (one clean twin per defect, repeats give stability);
+  five defective controls repaired and re-run; 102/102 rejections hand-attributed.
+- 2026-08-18 — The truncation probe's honest twin is necessarily an oversized unrequested file, so
+  that control stays unrepairable. `reviewers.yaml`, `--reviewer`, `--compare`, `NO_AUTHOR`; run
+  directories carry reviewer and pid (same-second launches had shared one `records.jsonl`).
+- 2026-08-18 — Presentation: the swap table merged into the catch-rate table, then replaced by a
+  figure (`tmp_scripts/plot_model_swap.py`; ruling: count panels share a 0-100 per-cent axis); pair
+  discrimination dropped, instability a rate; `model_swap.md` still reports pairs.
+- 2026-08-22 — Ledger-derived half: `Mutant.author`/`attested`; `mutants_ledger.py` adds 18 defects +
+  18 matched controls (`claude-opus-5/ledger`) mined from 274 blocking co-lead issues; the original
+  78 entries labelled `claude-opus-5/blind`. Corpus 78 → 114.
+- 2026-08-22 -> 2026-08-23 — Codex-mined half (11 + 11, → 136); mutual audit and repair → 134 entries
+  (65 defects, 69 controls): Codex base p-value fixed (every control mislabelled its fixture),
+  stale-marker entry retired, `attested` → `<path>#sequence=<n>`, two entries made single-anchor.
+- 2026-08-23 — Authoring provenance makes no claim in the paper (the second half's brief had seen
+  this DOCS). Three live passes: 65/65 defects stopped (18 deterministic, 47 co-lead); false
+  rejections 24 → 22 → 11 of 69, each from a defect in our scaffolds (seven fixed).
+- 2026-08-23 — §5c rules added; tests split beside the instruments; `--concurrency` with a per-mutant
+  cost meter (identical outcomes at 8 vs serial).
+- 2026-08-28 — C5: `product_is_complete` certificate binds content (`rows_sha256`), the ground on
+  which GPT reviewers rejected 14–17/18 `ctl_led_*`; C4: `_chi2_sf` odd-dof seed fixed. Open:
+  `_weighted_stat` overflows silently.
+- 2026-08-28 — C1: every real-base entry carries a changeset-scoped `spec_behavior` (the 08-27 run
+  rejected every real-base changeset 8/8); C2 and `sci_bin_edge_inadequate` controls mapped to
+  bespoke twins; C5's `_SPEC`/README name the digest condition.
+- 2026-08-28 — Recorded, not fixed: adequate/inadequate control pairs are byte-identical twins
+  (weighting question); real-base specs name the invariant each defect breaks (state beside Table 3).
+- 2026-08-31 — `.git` leak closed (class-invariant, no pair verdict could flip): committer
+  `analyst`, branch `ai`, no remote; `_nondeterministic_test` marker → `demo_summary_cache_*`; `.git`
+  guard tests; corpus header 136 → 134; `table_catchrate.py` fails on an unknown family.
+- 2026-08-31 — Ruling: corpus frozen; a control is "honest", not unobjectionable (scaffold-quality
+  rejections are the false-rejection measurement); the `20260831T172738Z-swapfix` batch on frozen v1
+  is the headline, with earlier batches reported as pilots.
+- 2026-08-31 — Ruling on v1 label violations: exclude or footnote `led_total_on_a_different_sample`,
+  reclassify `ctl_hole_g7_review_truncation` rejections as justified, footnote the `_SPEC_QU_BIN`
+  real-base controls; the four-round repair history disclosed in the manuscript as a funnel.
+- 2026-08-31 — Ruling: v2 repairs land without a paid re-run (a confirmatory run only if a referee
+  asks); the 306-entry roster read (`review_roster_20260831_proposed.json`) merges after a ~30-verdict
+  human spot-sample, justification ruled per ground.
+- 2026-08-31 — Swapfix's 8 errored records: 2 `claude_opus_5` from our `read_file` offset crash
+  (fixed in `agents/react.py`; re-run on the frozen corpus and patched into that leg), 6 vendor
+  structured-output failures (deepseek 3, qwen 2, glm 1).
+- 2026-08-31 — Ruling: a gate-passed item with no vendor verdict counts as failing
+  (`swap._review_errored`, `Errors` column), replacing the swapfix table's 47/46/45 denominators.
+- 2026-09-03 — Pruning leak: `keep_only_passing_tests` left `.pytest_cache/.../lastfailed` naming the
+  broken honest test in the 20 pruned defect worktrees only; `qwen3_8_max` cited it in two catches
+  (`20260827T094057Z-swapclean`). Fix: `-p no:cacheprovider`; unfiltered pair-listing guard test.
+- 2026-09-03 — Scope: the 08-17 published table is clean; every swap batch from 08-26, incl. the
+  Table 3 / Fig. 4 source `20260831T172738Z-swapfix-*`, carried it. Open: re-run the swapfix legs or
+  exclude the 20 entries with the reason stated. `_NOT_BEHAVIOURAL` lists corrected.

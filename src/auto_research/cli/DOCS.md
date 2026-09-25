@@ -46,21 +46,9 @@ the run, and prints the final `ReviewVerdict`.
 - `auto_research.__main__` — module entry point for `python -m auto_research`.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — CLI (`python -m auto_research`) supports chatter control, JSON/text
-  output, monitor JSONL/Markdown paths, repeatable report formats, report artifact printing,
-  `.env` loading, and required-key validation before the run starts.
-- 2026-06-15 — Streaming + preflight + raise-to-human: CLI constructs a streaming `RunMonitor`
-  (concise live stderr progress; JSON stdout preserved for `--format json`) and shares dotenv via
-  `check_required_env()`; the launch checklist moved into the now-async preflight owned by
-  `run_research`; added `--human {auto,cli,none,slack,whatsapp}` → `run_research(human_channel=…)`.
-- 2026-07-29 — `--format text` now leads with the derived end-of-run summary block
-  (`ResearchRun.summary()`), so a CLI run ends on the same digest as a live/detached one; the
-  verdict fields and artifact paths below it are unchanged. `--format json` is untouched.
-
-- 2026-07-31 — **Ctrl-C is the same interrupt as `/stop`.** `main()` passes
-  `install_signal_handlers=True` (the CLI and the detached backend own their process; a library
-  caller never gets this), so SIGINT/SIGTERM route through `RunControl.interrupt`. A
-  `UserInterruptionError` is not a crash: it writes `result.json` with status `interrupted` — which
-  `reconstruct_run` turns back into the same exception for a detached caller, rather than
-  `RunDied` — prints the message without a traceback, and exits **130**, the conventional shell
-  status for terminated-by-Ctrl-C. Any other exception keeps the existing `failed` marker path.
+- 2026-05-26 -> 2026-06-15 — CLI built: chatter, JSON/text output, monitor paths, report formats,
+  `.env` + `check_required_env()`; streaming `RunMonitor`; preflight owned by `run_research`;
+  `--human {auto,cli,none,slack,whatsapp}`.
+- 2026-07-29 -> 2026-07-31 — `--format text` leads with `ResearchRun.summary()`. Ctrl-C/SIGTERM
+  route through `RunControl.interrupt` (`install_signal_handlers=True`); `UserInterruptionError`
+  writes `result.json` status `interrupted` and exits 130.
