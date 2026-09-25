@@ -91,12 +91,29 @@ directly) so the preflight can import it without pulling the graph/LLM stack.
   (auth: `TELEGRAM_BOT_TOKEN` from BotFather) and awaits a reply via a Future resolved by `on_message`.
   **Multi-question ready:** `_pending` maps every posted `message_id → Future`, so a Telegram
   **reply-to** (`reply_to_message.message_id`) routes to the right pending query even with several open
-  (future parallel analysts); a plain reply resolves the single open one. The Markdown `message` is
-  rendered to Telegram's HTML subset (`_md_to_html`: bold/italic, inline+fenced code, links, headings→
-  bold, bullets→`•`, escaping `< > &`) and `_chunk_md` splits a long body across ≤4096-char messages;
-  `_send` falls back to plain text if Telegram rejects the HTML. `start()`/`aclose()` manage the
-  `Application` + polling; `timeout_s` defaults to the shared `response_timeout_s()`. Live-tested
-  via `tests/test_live_telegram.py` (opt-in, `AUTO_RESEARCH_LIVE_TELEGRAM=1`) and the cross-channel
+  (future parallel analysts); a plain reply resolves the single open one. **Sending** (`_send_md`):
+  the query (`_query_markdown`: header, body, hint) goes as a Bot API 10.1 **rich message**
+  (`_send_rich` → `bot.do_api_request("sendRichMessage", rich_message={"markdown": …})`, since
+  python-telegram-bot 22.8 does not wrap it), which renders headings, GFM tables, `$…$`/`$$…$$` math and
+  `<details>` natively; parts are ≤30000 chars / ≤400 block lines (`_RICH_CHUNK`, `_RICH_MAX_LINES`; `_block_lines`
+  counts a fenced block once) under
+  the 32768-char / 500-block limits. A `BadRequest` falls back to HTML for that part; a missing method
+  (`AttributeError`/`EndPointNotFound`) sets `_rich=False` for the handler's life;
+  `orchestration.yaml: telegram_rich_messages` (default `true`) turns the rich path off. **HTML
+  fallback** (`_html_chunks`): `_chunk_md(text, size, *, max_lines=None)` packs `_md_blocks` (a fence,
+  or a run of non-blank lines, with each heading glued to the block after it) so a cut never orphans a
+  heading or splits a fence/table; an oversize block is split by lines with the fence re-opened
+  (a split table repeats its header + separator rows in every part); each
+  chunk is measured after `_md_to_html` and re-split if it exceeds 4096. `_md_to_html` renders the HTML
+  subset (bold/italic, code, links, headings→bold, bullets→`•`), turns a GFM table into an aligned
+  `<pre>` (≤60 chars wide) or a bullet list (`_table_to_md`), and groups quoted lines into one
+  `<blockquote>`, `expandable` past 3 lines; `_send` falls back to plain text if Telegram rejects the
+  HTML. **Edits** are routed apart (`filters.UpdateType.EDITED_MESSAGE` → `handle_edit`): new-message
+  handlers match only `UpdateType.MESSAGE`, so an edited command is never re-run, and an edit to a reply
+  already taken as an answer (`_answered`, last 200 ids) gets a notice asking for a new message.
+  `start()`/`aclose()` manage the `Application` + polling; `timeout_s` defaults to the shared
+  `response_timeout_s()`. Live: `tests/test_live_telegram_render.py` (opt-in,
+  `AUTO_RESEARCH_LIVE_TELEGRAM=1`; `…_REPLY=1` adds a round trip) and the cross-channel
   `tests/test_live_hitl.py`.
 - `WhatsAppHandler(*, client=None, from_number=None, to_number=None, timeout_s=None,
   poll_interval_s=5)` — **deprecated** (Twilio bills per message; prefer `slack`/`cli` — emits a
@@ -160,3 +177,9 @@ Compacted 2026-09-01 and 2026-09-24 (detail in git history).
   deleted, no fallback (ruling).
 - 2026-09-12 — CLI prompt timeout no longer hangs exit: stdin is read on a daemon thread
   (`_read_stdin_line`, ruling); a late answer is a no-op.
+- 2026-09-25 — [E8] Telegram sends queries and command replies as Bot API 10.1 rich messages (native
+  tables/math/headings) via `do_api_request`, falling back to HTML chunked at block boundaries with a
+  table ladder (`<pre>` → bullets) and grouped/expandable quotes; edits routed apart (an edited command
+  no longer re-runs; an edited taken answer gets a notice). `telegram_rich_messages` flag. LIVE-VERIFIED
+  (both sends accepted; 34-payload attack corpus `tests/test_live_telegram_attack.py`: 30 rich, 4
+  fell back, 0 errors). Slack dropped by ruling (bolt-python#1529).

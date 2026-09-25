@@ -89,6 +89,12 @@ report renderer.
 - `parse_bindings(prose, *, own_source) -> list[Binding]` — `self:` resolves to `own_source`.
 - `Binding(start, end, handle, quote)`; `BindingResult(problems, bindings)`, `.cited`.
 - `is_synthetic_path(path)`, `sha256_file(path)`.
+- `capture.data_products(state, text, *, failed, figure_paths, stat, is_file)` — the one statement
+  of the data-product rule, used by `receipt_call` and the gate.
+- `capture.call_started_ns()` — call start on `CLOCK_REALTIME_COARSE` so it compares with mtimes.
+- `store.checkable_text(raw)` — the decode rule behind `ReceiptStore.text`.
+- `bindings.ungrounded_numbers(prose, usable, *, echoes, masked)` — the number-grounding loop, used
+  by `check_bindings` and the gate.
 
 ## Changelog
 
@@ -118,3 +124,6 @@ report renderer.
 - 2026-09-24 — Laundering closed: the store lives beside the ledger (`record_beside(run_dir,
   "receipts")`), outside every allow-list; numbers typed into a `SHELL_TOOLS` command
   (`Receipt.arg_numbers`, `ReceiptStore.typed_numbers`) never ground. Residual: via a toolkit-written file.
+- 2026-09-25 — [G15] `data_products`, `checkable_text`, `ungrounded_numbers` factored out for the
+  gate's return check; `call_started_ns` moved to the coarse realtime clock (200/200 fast writes had
+  read as older than their own call, so were never receipted).

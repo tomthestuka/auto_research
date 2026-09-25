@@ -205,6 +205,37 @@ def bounded_find(hay: str, needle: str) -> bool:
         start = i + 1
 
 
+def ungrounded_numbers(
+    prose: str,
+    usable: Mapping[str, str],
+    *,
+    echoes: Mapping[str, frozenset[str]] | None = None,
+    masked: Sequence[tuple[int, int]] = (),
+) -> list[re.Match]:
+    """Each number in ``prose`` that no normalised text in ``usable`` carries on token boundaries.
+
+    The one grounding rule for a number, shared by ``check_bindings`` (a report against its receipts)
+    and the gate's return check (a tool's returned values against its own receipted output). A
+    number inside ``masked`` or an exempt shape (Figure/Table/Eq. numbers, years, …) is skipped;
+    ``echoes`` names numbers a receipt only repeats back, which ground nothing.
+    """
+    spans = list(masked)
+    for pattern in _EXEMPT_RES:
+        spans.extend(m.span() for m in pattern.finditer(prose))
+    echoes = echoes or {}
+    missing: list[re.Match] = []
+    for m in NUMBER_RE.finditer(prose):
+        if any(s <= m.start() < e for s, e in spans):
+            continue
+        token = normalise(m.group(), "result")
+        if not any(
+            bounded_find(hay, token) and token not in echoes.get(h, ())
+            for h, hay in usable.items()
+        ):
+            missing.append(m)
+    return missing
+
+
 def parse_bindings(prose: str, *, own_source: str | None = None) -> list[Binding]:
     """Every citation in ``prose``, in order, with ``self:`` resolved to ``own_source``."""
 
@@ -435,18 +466,10 @@ def check_bindings(
             usable.setdefault(handle, hay)
             echoes.setdefault(handle, resolved.typed(receipt))
     masked = [(b.start, b.end) for b in result.bindings] + list(exempt_spans)
-    for pattern in _EXEMPT_RES:
-        masked.extend(m.span() for m in pattern.finditer(prose))
-    missing: list[str] = []
-    for m in NUMBER_RE.finditer(prose):
-        if any(s <= m.start() < e for s, e in masked):
-            continue
-        token = normalise(m.group(), "result")
-        if not any(
-            bounded_find(hay, token) and token not in echoes.get(h, ())
-            for h, hay in usable.items()
-        ):
-            missing.append(f'"{m.group()}" (…{_context(prose, m.start(), m.end())}…)')
+    missing: list[str] = [
+        f'"{m.group()}" (…{_context(prose, m.start(), m.end())}…)'
+        for m in ungrounded_numbers(prose, usable, echoes=echoes, masked=masked)
+    ]
     if missing:
         named = list(dict.fromkeys(cited_here))
         others = len(usable) - len(named)

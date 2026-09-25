@@ -281,7 +281,7 @@ def test_scan_failure_attributes_to_the_scan():
 
 def test_provenance_failure_attributes_to_the_scan():
     record = score.score_record(_record(gate={
-        "passed": False, "layer_a": [_check("provenance.figure_ref")], "layer_b": [],
+        "passed": False, "layer_a": [_check("provenance.figure_shape")], "layer_b": [],
         "findings": [], "reason": "",
     }))
     assert record["caught_by"] == ["scan"]

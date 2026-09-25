@@ -634,6 +634,10 @@ itself implements):
   and parents ([§7](#receipts--every-artifact-by-reference-hashed-by-the-runtime)). The gate's own
   static provenance check still recognises one constructor (§13).
 
+**Return check (dynamic, G15)** — the gate's Layer-B run records what each new or changed tool
+returns and judges it with the analyst runtime's own functions (transmit, figures, receipted files,
+tables, grounded numbers); limits (uncalled tools, C-level writes) are left to the co-lead.
+
 **Layer B — the tool's own tests**, authored *with* the tool, committed beside it (as
 `xspec_utils` already carries its tests), and *run* by the gate. The `ToolSpec`'s checks are
 only a **proposal** — the author and lead, with full `lib/` sight and knowledge of the real
@@ -876,7 +880,7 @@ One line each; the open-work queue lives in the gitignored handoff, not here.
   suggests a tighter ceiling than the documented inline 32 MB.
 - **`bash_exec` figure capture** — diff the scratch cwd for new images, synthesize `FigureRef`s.
 - **RAG (ChromaDB, three targets)** — literature, persistent memory, tool index; `vector_search`
-  stays stubbed.
+  stays stubbed. (A naive top-x literature injection for the librarian is open work, not deferred.)
 - **`onboard_toolkit`** (installer increment 5) — staged raw code → gated tools; needs collaborators.
 - **Lead-scientist group** — idea generation routed through the reviewer gate.
 - **Provider-native web tools [I11]** — per-member routing, Tavily as fallback
@@ -897,7 +901,8 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 **Provenance**
 - **What receipts do not cover (2026-09-24):** (a) inputs a tool locates itself from an identifier
   are not hashed; (b) grounding checks a number exists in a cited receipt, not its row/column;
-  (c) the gate's static provenance check recognises only `FigureRef(...)`; (d) exemption shapes
+  (c) the static figure-shape scan is beaten by one indirection; the dynamic return check (G15)
+  covers what the tests call; C-level writes and uncalled tools stay with the co-lead; (d) exemption shapes
   (years, Figure/Table numbers) are unchecked; (e) a toolkit tool writing model-chosen content could
   launder it; (f) `FigureRef`'s declared fields remain the multimodal carrier, the receipt is
   authoritative. The flagged-quote shape is pinned deterministically only.
@@ -920,7 +925,7 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 - **Worker `edit_report` misformatting** (whole report in `summary`) is mitigated by a soft note only.
 
 **Coder and sandbox**
-- **Codex coder blind spots** (awaiting ruling): a killed turn books $0; MCP startup status is not
+- **Codex coder blind spots** (on hold): a killed turn books $0; MCP startup status is not
   recorded.
 - **Qwen coder pairing** (`dashscope`+`codex`) unprobed since account activation, flagged in
   `UNVERIFIED_PAIRINGS`. Only a pay-as-you-go `sk-ws-` key on `dashscope-intl` serves; Coding Plan
@@ -939,8 +944,12 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 - **`_make_path_confiner`** — deprecated, unwired; use the `PreToolUse` hook.
 - **`PathGuard` denies governance basenames everywhere**, incl. research_toolkit's own contract —
   ruling: leave it.
-- **WhatsApp/Twilio connector deprecated** — prefer `telegram`/`slack`/`cli`.
+- **WhatsApp/Twilio connector deprecated** — prefer `telegram` or `cli`.
+- **Telegram rich messages render `||text||` as a spoiler** (hidden until tapped); agent prose is not
+  escaped for it.
 - **HITL slash-commands are Telegram/Slack only** — CLI and WhatsApp have no background listener.
+- **Slack Socket Mode can stop delivering events after idle, silently** (bolt-python#1529, closed
+  not-planned 2026-09-14); ruling 2026-09-25: Telegram is the channel, Slack not pursued.
 - **`retrieval.vector_search`** — `NotImplementedError` stub (§12 RAG).
 
 **Providers**
@@ -964,7 +973,8 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 
 **Benchmarks**
 - **gate_bench pruning cache leak** — 20 pruned entries in swap batches from 2026-08-26 carried
-  `.pytest_cache` naming the broken test; ruling: benchmark valid, no re-run.
+  `.pytest_cache` naming the broken test; confirmed no agent consulted it; ruling: numbers
+  stand, builder fixed 2026-09-03.
 
 ---
 
@@ -1100,3 +1110,23 @@ dates, tag ids, rulings and LIVE-VERIFIED / NOT-LIVE-TESTED markers); detail is 
 - 2026-09-25 — Docs compaction: every module changelog and this one condensed to the early terse
   style; §12/§13 rewritten one line per item, closed entries deleted (B8 stop drill, `/stop` hang,
   durable resume, author-env leak, `/steer` injection, coder reading the run record).
+- 2026-09-25 — [G14] Gate provenance check now checks returned figure dicts against `FigureRef`
+  (`scan_figure_shape`); one figure parser (`runner.parse_tool_figures`) shared by runtime and gate.
+- 2026-09-25 — [E8] Telegram questions go as Bot API rich messages (native tables, math, headings)
+  with a block-aware HTML fallback; edited messages routed apart. LIVE-VERIFIED on a 34-payload attack
+  corpus judged by the user. Slack not pursued.
+- 2026-09-25 — [G14] LIVE red-team (`tests/test_live_figure_shape_attack.py`, $13.62, 17 cells): the
+  static figure-shape check caught every literal plant but 7 of 7 indirect or runtime-only shapes
+  (helper, `**`, update, bare variable, empty-at-runtime caption, absent file) reached a commit; the
+  honest control committed; the recorder oracle caught all 7. Remedy awaits a ruling.
+- 2026-09-25 — [G15] Dynamic return check `sandbox/returns.py` (`layer_b.returns.*`: transmit /
+  figure / receipted / table / number / recorder), judged with the runtime's own functions. Runtime
+  fixes: a non-JSON REPL return fails that call instead of killing the sandbox;
+  `capture.call_started_ns` on the coarse realtime clock (fast writes were never receipted, 200/200).
+  gate_bench gate-only re-scan: 0 verdicts move vs G14; the check ran in 112/134.
+- 2026-09-25 — [G15] LIVE red-team (13 cells, $11.50): every planted attack stopped before commit by
+  name (`.figure` ×3 incl. all three routes that beat the static scan, extra key, non-dict entry,
+  `.table`, `.number`); one limit breach committed (a caption empty only on an input no test uses —
+  the uncalled-path limit, left to the co-lead); the honest control committed after `*.lock`
+  sidecars became housekeeping. Reruns of the 4 inconclusive cells ($4.24) all stopped: 12/12 attack
+  cells stopped before commit, all six checks exercised, control commits.

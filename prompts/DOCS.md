@@ -111,3 +111,5 @@ Compacted 2026-09-01 and again 2026-09-24 (detail in git history).
   their place (`{{lib:p3 "value" Table 2}}`), web pages quoted; domain-neutral examples.
 - 2026-09-24 — Provenance P2 (0f): worker and lead cite a receipt for every number, `{{handle "…"}}`
   pins a span; ruling: the worker may do plain arithmetic on receipted numbers via `python -c`.
+- 2026-09-25 — [G15] `coder.md` gains "Results the runtime can cite — the return contract every
+  tool meets" (rules 1–5), matching the gate's `layer_b.returns.*` checks (peer 02).

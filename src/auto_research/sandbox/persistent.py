@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import os
 import signal
@@ -40,6 +41,21 @@ def _descendant_pids(pid: int) -> list[int]:
                     queue.append(kid)
     return found
 
+def repl_payload(result):
+    """The protocol payload for one tool return: a dict as-is, anything else as its ``stdout``.
+
+    Defined once, as real code, and spliced into both the REPL below and the gate's return-check
+    recorder (``gate._RETURNS_RECORDER``), so the gate transmits a return exactly as the REPL does.
+    Stdlib-only for that reason: it runs in the analysis interpreter.
+    """
+    if isinstance(result, dict):
+        payload = dict(result)
+    else:
+        payload = {"stdout": str(result)}
+    payload.setdefault("exit_code", 0)
+    return payload
+
+
 # REPL script executed inside the persistent subprocess.
 #
 # Protocol integrity: tools (XSPEC, ixpeobssim) write large amounts of console
@@ -48,7 +64,7 @@ def _descendant_pids(pid: int) -> list[int]:
 # corrupts the parser and kills the sandbox.  We therefore (1) keep a private
 # copy of the original stdout fd for protocol responses only, and (2) redirect
 # fd 1/2 to a capture file at the OS level for the duration of each tool call.
-_REPL_SCRIPT = textwrap.dedent("""
+_REPL_SCRIPT = inspect.getsource(repl_payload) + "\n" + textwrap.dedent("""
     import sys, os, json, importlib, traceback, tempfile
 
     def _coerce(v):
@@ -111,11 +127,7 @@ _REPL_SCRIPT = textwrap.dedent("""
             fn = getattr(mod, cmd["fn"])
             args = {k: _coerce(v) for k, v in cmd.get("args", {}).items()}
             result = fn(**args)
-            if isinstance(result, dict):
-                payload = dict(result)
-            else:
-                payload = {"stdout": str(result)}
-            payload.setdefault("exit_code", 0)
+            payload = repl_payload(result)
         except Exception:
             payload = {
                 "exit_code": 1,
@@ -141,7 +153,19 @@ _REPL_SCRIPT = textwrap.dedent("""
         # Attach a truncated tail of captured console output for diagnosis.
         if _console:
             payload.setdefault("console_tail", _console[-8000:])
-        _proto.write(json.dumps(payload) + "\\n")
+        # A return that is not JSON fails its own call like any tool error; unguarded, the
+        # exception ended this loop and took the worker's sandbox with it (2026-09-25).
+        try:
+            _line = json.dumps(payload)
+        except Exception as _exc:
+            _line = json.dumps({
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": (f"the tool returned a value that is not JSON ({type(_exc).__name__}: "
+                           f"{_exc}). Return plain JSON types: float()/int() for numpy scalars, "
+                           ".tolist() for arrays, str() for paths."),
+            })
+        _proto.write(_line + "\\n")
         _proto.flush()
 """).strip()
 

@@ -548,5 +548,5 @@ Compacted 2026-09-01 and again 2026-09-24 (detail in git history).
   broken honest test in the 20 pruned defect worktrees only; `qwen3_8_max` cited it in two catches
   (`20260827T094057Z-swapclean`). Fix: `-p no:cacheprovider`; unfiltered pair-listing guard test.
 - 2026-09-03 — Scope: the 08-17 published table is clean; every swap batch from 08-26, incl. the
-  Table 3 / Fig. 4 source `20260831T172738Z-swapfix-*`, carried it. Open: re-run the swapfix legs or
-  exclude the 20 entries with the reason stated. `_NOT_BEHAVIOURAL` lists corrected.
+  Table 3 / Fig. 4 source `20260831T172738Z-swapfix-*`, carried it. Ruling 2026-09-25: no agent consulted
+  it; published numbers stand (builder fixed 09-03). `_NOT_BEHAVIOURAL` lists corrected.

@@ -88,6 +88,9 @@ class ToolCall(BaseModel):
     name: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
     provider_fields: dict[str, Any] = Field(default_factory=dict)
+    # Set when the provider's argument string did not parse. The loop answers such a call with
+    # an error result instead of running the tool on empty arguments ([I4]).
+    arguments_error: str | None = None
 
 
 class ToolResultPart(BaseModel):

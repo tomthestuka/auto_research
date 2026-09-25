@@ -618,9 +618,42 @@ All scan lists live in **`config/code_gate.yaml`** (tunable without a code edit)
 referencing a marked `synth…` ObsID is allowlisted so §9.5 fixtures stay legal.
 `GateReport.passed ⇔ all Layer-A hard checks pass ∧ ≥1 Layer-B test ran ∧ all pass`
 (an untested tool is never mergeable). `report_hash` seeds the §9.9 commit message.
-Provenance: a `FigureRef(...)` the tool constructs must pass `sha256` + `produced_by`.
+Provenance (`provenance.figure_shape`, Layer A, `scan_figure_shape`): every figure dict a tool returns
+that the source shows — a `"figures"` value within one function, inline, through a list/comprehension,
+a name built with `append`/`extend`/`+=`, or a name bound to a dict — must be one `FigureRef` accepts:
+`figures` a list, each entry a dict, exactly the schema's required keys (`path caption mime_type
+produced_by created_at sha256`, optional `thumbnail_b64`), literal values the schema validates. The key
+set and validators are read from `FigureRef` itself. Test files are exempt (fixtures, not returns).
+Limit: a figure assembled in a helper, via `update` or `**`, is unchecked; the runtime still drops it
+with a note.
 Deterministic coverage in `tests/test_gate.py` (pure scanners + a throwaway git worktree
 with an injected Layer-B runner — no live science stack).
+
+### `returns.py` — the gate's dynamic return check (G15)
+
+During the gate's Layer-B pytest run a recorder plugin (`-p ar_returns`, written into the JUnit temp
+dir, loaded in both runs) wraps every **new or changed** `TOOL_MANIFEST` tool (new = a key absent from
+HEAD's manifest; changed = its function body holds an added line; legacy tools are not judged). Per
+call it records the REPL payload, stats before/after for every argument-named path, files written
+during the call (a Python `open` audit hook) and copies of them. The gate process judges each record
+with the runtime's own functions, as Layer-B checks:
+- `layer_b.returns.transmit` — `persistent.repl_payload` + `json.dumps`;
+- `.figure` — `runner.parse_tool_figures` + the file exists;
+- `.receipted` — every written file is one `capture.data_products` receipts;
+- `.table` — every receipted `.csv`/`.tsv` parses with `render.parse_delimited`;
+- `.number` — every number in non-protocol keys appears in the result text or a receipted file
+  (`bindings.ungrounded_numbers`);
+- `.recorder` — the plugin never loaded, or a watched tool failed to import.
+
+A watched tool no test calls is `finding.returns_unobserved` (for the co-lead), not a failure.
+Housekeeping files are not judged as writes: `__pycache__`/`.pyc`, cache dirs, `*.lock` (the
+obs-db catalog writer opens a zero-byte `catalog.json.lock` only to hold an flock) and
+`/.catalog_history/` (the backup snapshot that writer copies on every update). The
+recorder is assembled from runtime source via `inspect.getsource` (`repl_payload`,
+`normalize_tool_raw`, `_named_paths`, `call_started_ns`), so gate and runtime cannot drift. Limits:
+only what the tests call; C-level writes (cfitsio/XSPEC) are invisible; it shares a process with the
+coder's tests. Public: `recorder_source`, `install`, `judge`, `judge_record`, `watched_tools`,
+`manifest_entries`.
 
 ### `review.make_review_hook` (Phase 2 step 4 — provider-decorrelated co-lead review)
 
@@ -714,7 +747,17 @@ the hook mapping a fake-model verdict — no live LLM).
 - `append_memory(path, text)` — append to memory.md.
 - `read_memory(path)` → `str` — read memory.md or return `""`.
 - `run_tool(module, fn, args, *, timeout_s, workdir, toolkit_root, analyze_env=None, analyze_ini_sh=None)` →
-  `ToolResult` — one-shot subprocess; kept for ad-hoc use.
+  `ToolResult` — one-shot subprocess; kept for ad-hoc use. Keeps the valid figures and appends drop
+  notes to `stderr`.
+- `normalize_tool_raw(raw)`, `PROTOCOL_KEYS`, `tool_text(raw) -> (text, exit_code)` (runner.py) — the
+  result-text rule shared by runtime and gate (moved from agents/react.py).
+- `repl_payload(result)` (persistent.py) — defined once and spliced into the REPL; a return
+  `json.dumps` cannot serialise fails that one call with exit 1 and a stderr naming the fix.
+- `_default_test_runner(..., returns_tools=)`, `_head_file` (gate.py) — `run_gate` binds
+  `returns.watched_tools(...)` and extends its findings from the runner.
+- `parse_tool_figures(raw) -> (figures, drop_notes)` — the one reading of the figure contract: validates
+  each entry into a `FigureRef`, drops a bad one with a reason, ignores a non-list with a note. Used by
+  `SandboxToolProvider` (react.py) and `run_tool`.
 - `_source_ini_env(ini_sh)` → `dict` — sources a bash init script, caches result. Raises `RuntimeError` on any failure (non-zero exit, empty env, or subprocess exception) — no fallback to `os.environ`.
 - `analyst_env.sh` — bash script setting HEADAS, CALDB, CALDBCONFIG, CALDBALIAS,
   GEOMAG_PATH. Sourced by `_source_ini_env()`. No interactive cruft.
@@ -824,7 +867,7 @@ the hook mapping a fake-model verdict — no live LLM).
   failing. `scan_python_source(rel, source, *, added=None, config=None)` → `(hard_fails,
   findings)` is the pure, unit-testable `.py` scan core; `scan_text_source` is its non-`.py`
   text counterpart (vocabulary only); binary/undecodable targets hard-fail without scanning.
-  `scan_provenance`, `check_structural`, `collect_targets` (now extension-agnostic under a
+  `scan_figure_shape`, `check_structural`, `collect_targets` (now extension-agnostic under a
   `*_utils` package), `_touched_packages` (the `*_utils` packages the changeset touched,
   derived from `collect_targets`), and `_manifest_keys` are its helpers. Scan lists load from
   `config/code_gate.yaml`. When no `test_runner` is injected, the default is the real
@@ -1039,4 +1082,26 @@ Compacted 2026-09-01 and 2026-09-24 (detail in git history).
   or the lead's `steer_event` (`watch_steers`); `send` queues by default, `mid_turn=True` steers;
   `_init_channel()`. LIVE-VERIFIED (`tests/test_live_coder_wait.py`). Open: a killed Codex turn books
   $0.00; `mcpServer/startupStatus/updated` is not recorded.
-
+- 2026-09-25 — [A13] The Claude backend appends `[harness error] the anthropic turn failed: …` when a
+  turn's `ResultMessage.is_error` is set, so a billing or session-limit reply no longer reads as coder
+  work (mirrors the Codex backend).
+- 2026-09-25 — [G14] Gate provenance check brought to the runtime spec: `scan_provenance`
+  (`FigureRef(...)` calls carry sha256/produced_by) replaced by `scan_figure_shape` (returned figure dicts
+  match `FigureRef`); `parse_tool_figures` moved from agents/react.py into runner.py and shared with
+  `run_tool`, fixing its drop-all. Tests: `tests/test_gate.py`; live red-team
+  `tests/test_live_figure_shape_attack.py`.
+- 2026-09-25 — [G14] LIVE red-team (`tests/test_live_figure_shape_attack.py`, $13.62, 17 cells): the
+  static figure-shape check caught every literal plant but 7 of 7 indirect or runtime-only shapes
+  (helper, `**`, update, bare variable, empty-at-runtime caption, absent file) reached a commit; the
+  honest control committed; the recorder oracle caught all 7. Remedy awaits a ruling.
+- 2026-09-25 — [G15] Dynamic return check `sandbox/returns.py` (`layer_b.returns.*`: transmit /
+  figure / receipted / table / number / recorder), judged with the runtime's own functions. Runtime
+  fixes: a non-JSON REPL return fails that call instead of killing the sandbox;
+  `capture.call_started_ns` on the coarse realtime clock (fast writes were never receipted, 200/200).
+  gate_bench gate-only re-scan: 0 verdicts move vs G14; the check ran in 112/134.
+- 2026-09-25 — [G15] LIVE red-team (13 cells, $11.50): every planted attack stopped before commit by
+  name (`.figure` ×3 incl. all three routes that beat the static scan, extra key, non-dict entry,
+  `.table`, `.number`); one limit breach committed (a caption empty only on an input no test uses —
+  the uncalled-path limit, left to the co-lead); the honest control committed after `*.lock`
+  sidecars became housekeeping. Reruns of the 4 inconclusive cells ($4.24) all stopped: 12/12 attack
+  cells stopped before commit, all six checks exercised, control commits.

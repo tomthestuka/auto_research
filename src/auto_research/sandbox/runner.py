@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from auto_research.config_paths import orchestration_yaml
+from auto_research.schemas.figures import FigureRef
 from auto_research.schemas.tools import ToolResult
 
 # Cache: ini_sh path → env dict sourced from that script.
@@ -102,6 +103,68 @@ def check_analyze_probe(*, config_path: str | Path | None = None) -> None:
         raise RuntimeError(
             f"analyze_probe `{probe}` exited {completed.returncode} under {python_exec}:\n{detail}"
         )
+
+
+PROTOCOL_KEYS: frozenset[str] = frozenset(
+    {"stdout", "stderr", "exit_code", "figures", "console_tail"}
+)
+
+
+def normalize_tool_raw(raw: dict) -> dict:
+    """Ensure every tool result has a non-empty ``stdout`` for the model to read — the text the
+    model sees and the call's result receipt holds. Shared by the analyst runtime and the gate.
+
+    Tools that return structured payloads without a ``stdout`` key (e.g.
+    ``list_dir`` → ``{path, entries}``, ``load_data`` → nested indices dict)
+    are invisible to the model otherwise.  When ``stdout`` is absent or empty,
+    serialize the non-protocol payload keys as compact JSON. Also folds any
+    captured ``console_tail`` (XSPEC/C-level prints) into ``stdout``.
+    """
+    stdout = raw.get("stdout") or ""
+    if not stdout:
+        extra = {k: v for k, v in raw.items() if k not in PROTOCOL_KEYS}
+        if extra:
+            stdout = json.dumps(extra, indent=2, default=str)
+
+    console = raw.get("console_tail") or ""
+    if console:
+        sep = "\n--- console ---\n"
+        stdout = (stdout + sep + console) if stdout else (sep.lstrip() + console)
+
+    return {**raw, "stdout": stdout}
+
+
+def tool_text(raw: dict) -> tuple[str, int]:
+    """``(text, exit_code)`` for one normalised tool return: the text the model reads and the call's
+    result receipt holds. Shared by the analyst runtime and the gate's return check."""
+    exit_code = raw.get("exit_code", 1)
+    if exit_code == 0:
+        return raw.get("stdout", "") or "(tool returned no output)", exit_code
+    return f"[exit {exit_code}]\n{raw.get('stderr') or raw.get('stdout') or '(no error detail)'}", exit_code
+
+
+def parse_tool_figures(raw_figures: object) -> tuple[list[FigureRef], list[str]]:
+    """Validate a tool's returned ``figures`` value into ``FigureRef``s, dropping each malformed
+    entry with a reason. The one reading of the figure contract, shared by every tool path.
+
+    A tool — most often a freshly authored plotter — that emits a slightly-off figure dict
+    (bad ``sha256``, an extra key under ``extra="forbid"``, a missing field, a bad
+    ``created_at``) costs only that figure: each bad entry is dropped and a short reason is
+    returned so the analyst learns its plotter is malformed and can fix or re-author it — what
+    ``coder.md`` promises ("that figure is dropped"). Returns ``(figures, drop_notes)``.
+    """
+    figures: list[FigureRef] = []
+    notes: list[str] = []
+    if not isinstance(raw_figures, list):
+        if raw_figures:
+            notes.append(f"'figures' is not a list ({type(raw_figures).__name__}); ignored")
+        return figures, notes
+    for index, entry in enumerate(raw_figures):
+        try:
+            figures.append(FigureRef.model_validate(entry))
+        except Exception as exc:  # noqa: BLE001 — any malformed figure is dropped, never fatal
+            notes.append(f"figure[{index}] dropped — invalid FigureRef: {exc}")
+    return figures, notes
 
 
 async def run_tool(
@@ -201,17 +264,17 @@ async def run_tool(
             elapsed_s=elapsed,
         )
 
-    # Parse any figures returned by the tool (list of {"path": ..., ...} dicts).
-    from auto_research.schemas.figures import FigureRef  # local import to avoid circularity
-
+    # A dict payload carries `figures` + `stdout`; anything else is plain text, left as-is.
     figures: list[FigureRef] = []
     try:
-        payload = json.loads(stdout) if stdout else {}
-        for fig_dict in payload.get("figures", []):
-            figures.append(FigureRef.model_validate(fig_dict))
+        payload = json.loads(stdout) if stdout else None
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        figures, notes = parse_tool_figures(payload.get("figures"))
         stdout = payload.get("stdout", stdout)
-    except (json.JSONDecodeError, Exception):  # noqa: BLE001
-        pass  # tool returned plain text; leave stdout as-is
+        if notes:
+            stderr = (stderr + "\n" if stderr else "") + "[figure capture] " + " | ".join(notes)
 
     return ToolResult(
         tool_name=f"{module}.{fn}",

@@ -46,6 +46,7 @@ from pathlib import Path
 import yaml
 
 from auto_research.config_paths import code_gate_yaml, orchestration_yaml
+from auto_research.sandbox import returns
 from auto_research.schemas import CheckResult, GateReport, ToolSpec
 
 
@@ -81,6 +82,13 @@ def _git(worktree: Path, *args: str) -> str:
         ["git", *args], cwd=str(worktree), capture_output=True, text=True, check=True
     )
     return out.stdout
+
+
+def _head_file(worktree: Path, rel: str) -> str:
+    """``rel`` as committed at HEAD, or ``""`` when HEAD has no such file."""
+    proc = subprocess.run(["git", "-C", str(worktree), "show", f"HEAD:{rel}"],
+                          capture_output=True, text=True)
+    return proc.stdout if proc.returncode == 0 else ""
 
 
 def collect_all_changes(worktree: Path) -> list[str]:
@@ -505,32 +513,196 @@ def scan_text_source(
 
 
 # ----------------------------------------------------------------------------
-# Layer A.2 — provenance (pure, AST): FigureRef must carry sha256 + produced_by
+# Layer A.2 — provenance (pure, AST): the figure dicts a tool returns match FigureRef
 # ----------------------------------------------------------------------------
+#
+# The runtime contract (prompts/coder.md): a tool returns a dict whose top-level "figures" is a list
+# of plain dicts, each validated into a `FigureRef` by `runner.parse_tool_figures`; an invalid entry
+# is dropped there. This check fails, at the gate, the entries the runtime would drop and that are
+# visible in the source: a literal dict (or `dict(...)` call) reached from a "figures" value within
+# one function — inline, through a list/comprehension, through a name the function builds with
+# `append`/`extend`/`+=`, or through a name bound to a dict. The keys and literal values are judged
+# against `FigureRef` itself, so the check follows the schema. A figure assembled elsewhere (a helper
+# function, `update`, `**` spread) is outside the check; the runtime still drops it if malformed.
 
 
-def scan_provenance(rel_path: str, source: str, *, added: set[int] | None = None) -> list[CheckResult]:
-    """A ``FigureRef(...)`` constructed by the tool must populate ``sha256`` and
-    ``produced_by`` so a downstream result computed on a bad upstream is detectable
-    (§7/§9.4). Vacuously passes when the tool produces no figures."""
+@lru_cache(maxsize=1)
+def _figure_contract() -> tuple[frozenset[str], frozenset[str], dict]:
+    """``(required keys, allowed keys, per-key validators)`` read off ``FigureRef``."""
+    from typing import Annotated
+
+    from pydantic import TypeAdapter
+
+    from auto_research.schemas.figures import FigureRef
+
+    fields = FigureRef.model_fields
+    required = frozenset(k for k, f in fields.items() if f.is_required())
+    adapters = {
+        k: TypeAdapter(Annotated[(f.annotation, *f.metadata)] if f.metadata else f.annotation)
+        for k, f in fields.items()
+    }
+    return required, frozenset(fields), adapters
+
+
+def _touches(node: ast.AST, added: set[int] | None) -> bool:
+    """Whether any line of ``node`` is in the diff's added lines (all lines when ``added`` is None)."""
+    if added is None:
+        return True
+    first = getattr(node, "lineno", 0)
+    last = getattr(node, "end_lineno", first) or first
+    return any(n in added for n in range(first, last + 1))
+
+
+def _figures_values(fn: ast.AST) -> list[ast.expr]:
+    """Every expression one function places under a ``"figures"`` key."""
+    out: list[ast.expr] = []
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Dict):
+            out.extend(v for k, v in zip(node.keys, node.values)
+                       if isinstance(k, ast.Constant) and k.value == "figures")
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if (isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant)
+                        and t.slice.value == "figures"):
+                    out.append(node.value)
+        elif isinstance(node, ast.Call) and _dotted_name(node.func) == "dict":
+            out.extend(kw.value for kw in node.keywords if kw.arg == "figures")
+    return out
+
+
+def _bindings(fn: ast.AST, name: str) -> tuple[list[ast.expr], list[ast.expr], set[str]]:
+    """What one function binds to ``name``: ``(assigned values, appended elements, subscript-set keys)``."""
+    assigned: list[ast.expr] = []
+    elements: list[ast.expr] = []
+    keys: set[str] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                if isinstance(t, ast.Name) and t.id == name:
+                    assigned.append(node.value)
+                elif (isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name)
+                        and t.value.id == name and isinstance(t.slice, ast.Constant)
+                        and isinstance(t.slice.value, str)):
+                    keys.add(t.slice.value)
+        elif (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
+                and node.target.id == name):
+            assigned.append(node.value)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == name):
+            if node.func.attr == "append" and node.args:
+                elements.append(node.args[0])
+            elif node.func.attr == "insert" and len(node.args) == 2:
+                elements.append(node.args[1])
+            elif node.func.attr == "extend" and node.args:
+                assigned.append(node.args[0])
+    return assigned, elements, keys
+
+
+def _list_elements(fn: ast.AST, value: ast.expr, rel: str, added, out: list[CheckResult]) -> list[ast.expr]:
+    """The figure entries a ``"figures"`` value holds, failing a literal that is not a list."""
+    if isinstance(value, (ast.List, ast.Tuple)):
+        return list(value.elts)
+    if isinstance(value, ast.ListComp):
+        return [value.elt]
+    if isinstance(value, ast.Name):
+        assigned, elements, _keys = _bindings(fn, value.id)
+        for v in assigned:
+            if isinstance(v, ast.Name):
+                continue
+            elements.extend(_list_elements(fn, v, rel, added, out))
+        return elements
+    kind = {ast.Dict: "a dict", ast.DictComp: "a dict", ast.Set: "a set", ast.SetComp: "a set",
+            ast.JoinedStr: "a string"}.get(type(value))
+    if kind is None and isinstance(value, ast.Constant) and value.value is not None:
+        kind = f"a {type(value.value).__name__}"
+    if kind and _touches(value, added):
+        out.append(CheckResult(
+            name="provenance.figure_shape", layer="A", passed=False,
+            detail=(f"{rel}:{value.lineno} — 'figures' is {kind}; return it as a list of figure "
+                    "dicts, one per PNG written"),
+        ))
+    return []
+
+
+def _check_figure_entry(fn: ast.AST, entry: ast.expr, rel: str, added, out: list[CheckResult]) -> None:
+    """Judge one figure entry against ``FigureRef``: a dict with exactly the schema's keys."""
+    required, allowed, adapters = _figure_contract()
+    extra_keys: set[str] = set()
+    if isinstance(entry, ast.Name):
+        assigned, _elements, extra_keys = _bindings(fn, entry.id)
+        dicts = [v for v in assigned if isinstance(v, (ast.Dict, ast.Call))]
+        if not dicts:
+            return
+        for d in dicts:
+            _check_figure_dict(d, extra_keys, rel, added, out, required, allowed, adapters)
+        return
+    if isinstance(entry, (ast.Dict, ast.Call)):
+        _check_figure_dict(entry, extra_keys, rel, added, out, required, allowed, adapters)
+        return
+    if isinstance(entry, (ast.Constant, ast.JoinedStr, ast.List, ast.Tuple)) and _touches(entry, added):
+        kind = "a string" if isinstance(entry, ast.JoinedStr) else (
+            "a list" if isinstance(entry, (ast.List, ast.Tuple)) else f"a {type(entry.value).__name__}")
+        out.append(CheckResult(
+            name="provenance.figure_shape", layer="A", passed=False,
+            detail=(f"{rel}:{entry.lineno} — a figure entry is {kind}; make each entry a dict with "
+                    f"the keys {sorted(required)}"),
+        ))
+
+
+def _check_figure_dict(node, set_keys, rel, added, out, required, allowed, adapters) -> None:
+    """Judge one literal figure dict (or ``dict(...)`` call): keys, then literal values."""
+    if isinstance(node, ast.Call):
+        if _dotted_name(node.func) != "dict" or node.args:
+            return
+        items = [(kw.arg, kw.value) for kw in node.keywords]
+    else:
+        items = [(k.value if isinstance(k, ast.Constant) else None, v)
+                 for k, v in zip(node.keys, node.values)]
+    if not _touches(node, added):
+        return
+    keys = {k for k, _v in items if isinstance(k, str)} | set_keys
+    opaque = any(not isinstance(k, str) for k, _v in items)   # a ** spread or a computed key
+    problems: list[str] = []
+    missing = set() if opaque else required - keys
+    if missing:
+        problems.append(f"missing {sorted(missing)}")
+    extra = keys - allowed
+    if extra:
+        problems.append(f"keys FigureRef rejects {sorted(extra)}")
+    for k, v in items:
+        if k in adapters and isinstance(v, ast.Constant):
+            try:
+                adapters[k].validate_python(v.value)
+            except Exception as exc:  # noqa: BLE001 — pydantic ValidationError, reported by its message
+                msg = exc.errors()[0]["msg"] if hasattr(exc, "errors") else str(exc)
+                problems.append(f"{k}={v.value!r} invalid ({msg})")
+    if problems:
+        out.append(CheckResult(
+            name="provenance.figure_shape", layer="A", passed=False,
+            detail=(f"{rel}:{node.lineno} — figure dict {'; '.join(problems)}. The runtime drops "
+                    f"this figure; give each figure exactly the keys {sorted(required)}"
+                    + (f" (optional: {sorted(allowed - required)})" if allowed - required else "")),
+        ))
+
+
+def scan_figure_shape(rel_path: str, source: str, *, added: set[int] | None = None) -> list[CheckResult]:
+    """Fail each figure a tool returns that ``FigureRef`` would reject, where the source shows it
+    (§7/§9.4): a ``"figures"`` value that is not a list, an entry that is not a dict, a dict with a
+    missing or extra key, or a literal value the schema refuses. Vacuously passes when the file
+    returns no figures. Scoped to the diff's added lines, like every other scan."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return []
     out: list[CheckResult] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and _dotted_name(node.func).endswith("FigureRef"):
-            lineno = getattr(node, "lineno", 0)
-            if not _in_scope(lineno, added):
-                continue
-            kw = {k.arg for k in node.keywords if k.arg}
-            missing = {"sha256", "produced_by"} - kw
-            if missing:
-                out.append(CheckResult(
-                    name="provenance.figure_ref", layer="A", passed=False,
-                    detail=f"{rel_path}:{lineno} — FigureRef missing {sorted(missing)}",
-                ))
-    return out
+    functions = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for fn in functions or [tree]:
+        for value in _figures_values(fn):
+            for entry in _list_elements(fn, value, rel_path, added, out):
+                _check_figure_entry(fn, entry, rel_path, added, out)
+    # A nested function is walked from its parent too; report each problem once.
+    return list({c.detail: c for c in out}.values())
 
 
 # ----------------------------------------------------------------------------
@@ -707,7 +879,8 @@ def _layer_b_verdict(rc1: int, outcomes: dict[str, str], out1: str) -> tuple[boo
 
 
 async def _default_test_runner(
-    worktree: Path, test_paths: list[str], *, timeout_s: int = 900
+    worktree: Path, test_paths: list[str], *, timeout_s: int = 900,
+    returns_tools: dict[str, tuple[str, str]] | None = None,
 ) -> dict:
     """Run the worktree's tests twice and compare **per-test outcomes** for determinism.
 
@@ -740,7 +913,12 @@ async def _default_test_runner(
     env = {**base_env, "PYTHONPATH": str(worktree) + (":" + existing if existing else "")}
 
     def _run(junit_path: str) -> tuple[int, str, dict[str, str]]:
-        argv = [python_exec, "-m", "pytest", "-p", "no:cacheprovider", "-q",
+        # The return check's recorder (G15) loads in both runs, so the two argvs stay identical for
+        # the determinism compare; each run records into its own directory beside its JUnit file.
+        plugin_args, run_env = returns.install(
+            Path(junit_path).with_suffix(".returns"), returns_tools or {}, env,
+        )
+        argv = [python_exec, "-m", "pytest", "-p", "no:cacheprovider", *plugin_args, "-q",
                 f"--junitxml={junit_path}", *test_paths]
         # The OS jail, with **no network** (§12): a mergeability verdict that can reach the network
         # is a verdict that depends on something other than the data on disk, and §9.4's premise is
@@ -749,7 +927,7 @@ async def _default_test_runner(
         try:
             proc = subprocess.run(
                 argv,
-                cwd=str(worktree), capture_output=True, text=True, env=env, timeout=timeout_s,
+                cwd=str(worktree), capture_output=True, text=True, env=run_env, timeout=timeout_s,
             )
         except subprocess.TimeoutExpired as exc:
             # A test that runs longer than the cap is a Layer-B *failure* (rework, then honest
@@ -767,12 +945,17 @@ async def _default_test_runner(
     with tempfile.TemporaryDirectory() as td:
         rc1, out1, map1 = _run(str(Path(td) / "junit1.xml"))
         _rc2, _out2, map2 = _run(str(Path(td) / "junit2.xml"))
+        return_checks, return_findings = (
+            returns.judge(Path(td) / "junit1.returns", returns_tools) if returns_tools else ([], [])
+        )
 
     passed, detail = _layer_b_verdict(rc1, map1, out1)
     results = [CheckResult(name="layer_b.pytest", layer="B", passed=passed, detail=detail)]
+    results.extend(return_checks)
     deterministic, detail = _outcomes_determinism(map1, map2)
     return {
         "results": results,
+        "findings": return_findings,
         "deterministic": deterministic,
         "determinism_detail": detail,
     }
@@ -924,7 +1107,10 @@ async def run_gate(
         # Bind the per-package timeout into the default runner only; an injected runner keeps
         # its (worktree, test_paths) signature untouched. Derived from the touched changeset
         # (like every other check), so it no longer depends on the brief's advisory field.
-        test_runner = partial(_default_test_runner, timeout_s=_gate_test_timeout(worktree, targets))
+        test_runner = partial(
+            _default_test_runner, timeout_s=_gate_test_timeout(worktree, targets),
+            returns_tools=returns.watched_tools(worktree, targets, partial(_head_file, worktree)),
+        )
 
     layer_a: list[CheckResult] = []
     findings: list[CheckResult] = []
@@ -954,7 +1140,8 @@ async def run_gate(
             hard, finds = scan_python_source(rel, source, added=added, config=cfg)
             layer_a.extend(hard)
             findings.extend(finds)
-            layer_a.extend(scan_provenance(rel, source, added=added))
+            if not _TEST_RE.search(rel):   # a test's figure dicts are fixtures, not tool returns
+                layer_a.extend(scan_figure_shape(rel, source, added=added))
         else:
             hard, finds = scan_text_source(rel, source, added=added, config=cfg)
             layer_a.extend(hard)
@@ -975,6 +1162,7 @@ async def run_gate(
         test_paths = sorted(str(p.relative_to(worktree)) for p in targets if _TEST_RE.search(str(p)))
         outcome = await test_runner(worktree, test_paths)
         layer_b.extend(outcome.get("results", []))
+        findings.extend(outcome.get("findings", []))
         layer_a.append(CheckResult(
             name="determinism", layer="A", passed=bool(outcome.get("deterministic", True)),
             detail=outcome.get("determinism_detail", ""),

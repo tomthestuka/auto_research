@@ -9,7 +9,8 @@ The system also **extends its own analysis reach**: when a task needs a capabili
 domain tool library (`research_toolkit`, a separate repo) lacks, the analyst team
 authors the tool itself — through a deterministic mergeability gate (three Layer-A jobs: the
 tests run twice, a no-fabrication scan, and an allow-list check that every changed path sits
-under a `*_utils` package) plus a provider-decorrelated code review, landing
+under a `*_utils` package; Layer B runs the tool's own tests and checks what each new tool returns)
+plus a provider-decorrelated code review, landing
 one atomic commit per tool on a working branch. The design goal is **verifiability, not
 trust**: every authored tool ships a human-runnable interface and tests a human can
 rerun, honest failure is a first-class outcome, and nothing reaches the toolkit's trusted
@@ -118,8 +119,9 @@ smoke test.
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`, `ZAI_API_KEY`,
 `DASHSCOPE_API_KEY`, `ADS_DEV_KEY` (NASA ADS),
 `TAVILY_API_KEY`; optional LangSmith tracing (`LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`);
-optional raise-to-human connectors (only when selected) — **Telegram** (recommended:
-`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`), Slack
+optional raise-to-human connectors (only when selected) — **Telegram** (recommended; questions render
+as rich messages with tables and math: `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`), Slack (not recommended:
+Socket Mode can stop delivering after idle)
 (`SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN`/`SLACK_HUMAN_CHANNEL`), or the deprecated Twilio WhatsApp
 (`TWILIO_ACCOUNT_SID`/`TWILIO_API_KEY_SID`/`TWILIO_API_KEY_SECRET`/`TWILIO_WHATSAPP_FROM`/`WHATSAPP_TO`);
 the terminal (`cli`) channel needs none.

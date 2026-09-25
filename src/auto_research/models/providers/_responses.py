@@ -728,6 +728,10 @@ class ResponsesProvider:
                         # `namespace`, which addresses a tool discovered through tool search,
                         # and whatever OpenAI adds next.
                         provider_fields=_as_input_item(item),
+                        arguments_error=(
+                            None if arg_fault is None
+                            else f"{arg_fault}; raw arguments: {str(raw_arguments)[:2000]}"
+                        ),
                     )
                 )
             elif itype not in _UNCARRIED_ITEM_TYPES:

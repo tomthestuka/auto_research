@@ -546,3 +546,9 @@ Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
   never quoted (option A), then per-number attribution with a locator (`attributed_values`).
 - 2026-09-24 — Reviewer `review_report` without `tex` uses `reviewer_text_view` (crash fix); prompt
   asks for located paper attributions. Shape `attribution_without_locator` LIVE-VERIFIED.
+- 2026-09-25 — [I4] `_react` answers a call carrying `arguments_error` with an `is_error` result asking
+  for valid JSON, and never executes the tool on empty arguments.
+- 2026-09-25 — [G14] `_parse_tool_figures` moved to `sandbox.runner.parse_tool_figures`;
+  `SandboxToolProvider` imports it (behaviour unchanged).
+- 2026-09-25 — [G15] `_normalize_tool_raw`, `_PROTOCOL_KEYS` and the result-text rule moved to
+  `sandbox.runner` (`normalize_tool_raw`, `PROTOCOL_KEYS`, `tool_text`); behaviour unchanged.

@@ -344,10 +344,11 @@ turns on one distinction:
   `cache_read_tokens` served from cache (~0.1x); `cache_write_tokens` cache-creation (~1.25x, 0 where
   the provider caches implicitly); `output_tokens` includes reasoning/thinking; `reasoning_tokens` is
   the reasoning subset of output, informational only (already priced within `output_tokens`).
-- `ToolCall(id: str = "", name: str, arguments: dict[str, Any] = {})` — one
-  provider-native tool/function call extracted from a model response. ``id`` is the
-  provider tool-call id, used to correlate a result back to the call when replaying
-  a ReAct trajectory.
+- `ToolCall(id: str = "", name: str, arguments: dict[str, Any] = {}, provider_fields: dict = {},
+  arguments_error: str | None = None)` — one provider-native tool/function call extracted from a
+  model response. ``id`` is the provider tool-call id, used to correlate a result back to the call
+  when replaying a ReAct trajectory. ``arguments_error`` is set when the argument string did not
+  parse (Responses dialect); ``_react`` answers such a call with an error result instead of running it.
 - `ToolResultPart(tool_call_id: str = "", name: str = "", content: str = "",
   is_error: bool = False, figures: list[FigureRef] = [])` — one tool result fed back
   to the model. Carries both ``tool_call_id`` (Anthropic/OpenAI) and ``name`` (Google)
@@ -631,3 +632,5 @@ Compacted 2026-09-01 and again 2026-09-24 (detail in git history).
 - 2026-09-14 — An emit-tool call carrying nothing usable raises a `ValueError` naming `status`,
   `incomplete_details`, `raw_argument_chars`, `json_fault` and the raw string (capped at
   `_RAW_ARGUMENTS_CAP` = 2000), where it was silently `{}`. No control-flow change.
+- 2026-09-25 — [I4] A non-JSON function-call argument string sets `ToolCall.arguments_error` (fault +
+  raw text, capped 2000) instead of silently becoming `{}`; the loop returns it as an error result.

@@ -643,7 +643,7 @@ def test_telegram_render_chunks_header_hint_and_split():
     from auto_research.hitl.telegram import _TG_MSG_LIMIT, _render_chunks
 
     chunks = _render_chunks(_query(kind="clarify_science", message="para.\n\n" * 4000))
-    assert chunks[0].startswith("<b>Human input needed · clarify_science</b>")
+    assert chunks[0].startswith("<b>Human input needed</b> · <code>clarify_science</code>")
     assert chunks[-1].endswith("<i>Reply to this message to answer.</i>")
     assert len(chunks) >= 2 and all(len(c) <= _TG_MSG_LIMIT for c in chunks)
 
@@ -767,3 +767,154 @@ def test_telegram_publishes_the_command_menu():
 
 async def _noop_answer(*a, **k):
     return None
+
+
+# ── Telegram rich messages + fallback rendering (E8, 2026-09-25) ─────────────
+
+
+class _FakeRichBot(_FakeTGBot):
+    """A bot that also speaks `sendRichMessage` through `do_api_request`, optionally refusing."""
+
+    def __init__(self, refuse: bool = False):
+        super().__init__()
+        self.rich = []
+        self.refuse = refuse
+
+    async def do_api_request(self, endpoint, api_kwargs=None, return_type=None, **_):
+        from telegram.error import BadRequest
+
+        assert endpoint == "sendRichMessage"
+        if self.refuse:
+            raise BadRequest("can't parse rich message")
+        self._id += 1
+        self.rich.append(api_kwargs)
+        return SimpleNamespace(message_id=self._id)
+
+
+def _rich_handler(refuse=False):
+    app = _FakeTGApp()
+    app.bot = _FakeRichBot(refuse=refuse)
+    return TelegramHandler(app=app, chat_id="555")
+
+
+_TABLE_MD = "## Bands\n\n| Band | PD |\n|---|---:|\n| 2-3 keV | 3.5 |\n| 3-4 keV | 3.5 |\n\n$$E = mc^2$$"
+
+
+def test_telegram_sends_a_query_as_one_rich_message_with_markdown_intact():
+    handler = _rich_handler()
+
+    async def _run():
+        task = asyncio.create_task(handler(_query(message=_TABLE_MD)))
+        for _ in range(200):
+            if handler._pending:
+                break
+            await asyncio.sleep(0)
+        mid = next(iter(handler._pending))
+        handler.on_message(_tg_update("ok", reply_to_id=mid))
+        return await task
+
+    assert asyncio.run(_run()).answer == "ok"
+    (sent,) = handler.app.bot.rich
+    md = sent["rich_message"]["markdown"]
+    assert "| 2-3 keV | 3.5 |" in md and "$$E = mc^2$$" in md  # the table and math travel natively
+    assert handler.app.bot.sent == []  # no HTML fallback message
+
+
+def test_telegram_refused_rich_message_falls_back_to_html():
+    handler = _rich_handler(refuse=True)
+    asyncio.run(handler._send_md(_TABLE_MD))
+    (html_msg,) = handler.app.bot.sent
+    assert html_msg["parse_mode"] == "HTML" and "<pre>" in html_msg["text"]
+    assert handler._rich  # a content refusal does not disable rich messages for later sends
+
+
+def test_telegram_without_the_rich_method_stops_trying_it():
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")  # the fake bot has no do_api_request
+    asyncio.run(handler._send_md("hello"))
+    assert handler._rich is False and len(handler.app.bot.sent) == 1
+
+
+def test_telegram_rich_messages_follow_the_config_flag(monkeypatch):
+    monkeypatch.setattr("auto_research.hitl.telegram._rich_messages_enabled", lambda: False)
+    handler = _rich_handler()
+    asyncio.run(handler._send_md(_TABLE_MD))
+    assert handler.app.bot.rich == [] and len(handler.app.bot.sent) == 1
+
+
+def test_chunk_md_never_ends_a_chunk_on_a_heading_and_reopens_fences():
+    from auto_research.hitl.telegram import _chunk_md
+
+    doc = ("## Section\n\n" + "a sentence of text\n" * 40 + "\n") * 20
+    doc += "```\n" + "code line\n" * 600 + "```"
+    chunks = _chunk_md(doc, 1000)
+    for chunk in chunks:
+        assert len(chunk) <= 1000
+        assert not chunk.rstrip().split("\n")[-1].lstrip().startswith("#")
+        assert chunk.count("```") % 2 == 0  # every fenced piece is closed in its own chunk
+
+
+def test_md_to_html_turns_a_narrow_table_into_pre_and_a_wide_one_into_bullets():
+    from auto_research.hitl.telegram import _md_to_html
+
+    narrow = _md_to_html("| a | b |\n|---|---|\n| 1 | **2** |")
+    assert narrow.startswith("<pre>") and "**" not in narrow
+    wide = _md_to_html(
+        "| quantity | value | reference |\n|---|---|---|\n"
+        "| polarization degree 2-8 keV | 4.0 +/- 0.2 per cent | Krawczynski et al. 2022 Table 2 |"
+    )
+    assert "<pre>" not in wide and "• <b>quantity</b>: polarization degree 2-8 keV" in wide
+
+
+def test_md_to_html_groups_quote_lines_and_collapses_long_ones():
+    from auto_research.hitl.telegram import _md_to_html
+
+    assert _md_to_html("> a\n> b") == "<blockquote>a\nb</blockquote>"
+    assert _md_to_html("> a\n> b\n> c\n> d").startswith("<blockquote expandable>")
+
+
+def test_telegram_routes_edits_apart_from_new_messages_and_commands():
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
+    names = [str(getattr(h, "filters", "")) for h in handler.app.handlers]
+    assert any("EDITED_MESSAGE" in n for n in names)
+    command = [n for n in names if "COMMAND" in n and "~" not in n]
+    assert command and all("UpdateType.MESSAGE" in n for n in command)  # an edited /stop is not re-run
+
+
+def test_telegram_edit_to_a_taken_answer_gets_a_notice():
+    handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
+
+    async def _run():
+        task = asyncio.create_task(handler(_query(message="q")))
+        for _ in range(200):
+            if handler._pending:
+                break
+            await asyncio.sleep(0)
+        mid = next(iter(handler._pending))
+        reply = _tg_update("first answer", reply_to_id=mid)
+        reply.effective_message.message_id = 900
+        handler.on_message(reply)
+        answer = await task
+        before = len(handler.app.bot.sent)
+        edit = _tg_update("amended answer")
+        edit.effective_message.message_id = 900
+        await handler.handle_edit(edit)
+        other = _tg_update("unrelated")
+        other.effective_message.message_id = 901
+        await handler.handle_edit(other)
+        return answer, handler.app.bot.sent[before:]
+
+    answer, after = asyncio.run(_run())
+    assert answer.answer == "first answer"
+    assert len(after) == 1 and "already taken as the answer" in after[0]["text"]
+
+
+def test_chunk_md_repeats_a_split_tables_header_in_every_part():
+    from auto_research.hitl.telegram import _chunk_md
+
+    table = "| n | value |\n|---|---|\n" + "".join(f"| {i} | v{i} |\n" for i in range(450))
+    parts = _chunk_md(table, 2000)
+    assert len(parts) > 1
+    for part in parts:
+        assert part.startswith("| n | value |\n|---|---|\n")
+    rows = [l for p in parts for l in p.split("\n")[2:]]
+    assert rows == [f"| {i} | v{i} |" for i in range(450)]  # nothing lost or duplicated

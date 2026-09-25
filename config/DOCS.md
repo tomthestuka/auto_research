@@ -186,6 +186,8 @@ uninstalled configuration rather than silently falling back here.
   (library/non-TTY) run with no explicit channel: `cli|slack|whatsapp|none`. Default `none`
   (headless) so unattended runs and tests never block; an interactive CLI auto-detects the
   terminal regardless. Consumed by `hitl.resolve_handler` (§9.8).
+- `orchestration.yaml.telegram_rich_messages` (default `true`) — send Telegram questions as Bot API
+  rich messages (native tables/math); `false` keeps the HTML-subset rendering.
 - `orchestration.yaml.human_channel_ping_timeout_s` — how long the launch-time preflight
   channel ping waits for a reply before failing the run (green only when a reply arrives).
 - `code_gate.yaml.hard_fail_vocabulary` — explicit fabrication phrases that, in a
@@ -312,3 +314,4 @@ Compacted 2026-09-01 and 2026-09-24 (detail in git history).
   `agent_os_jail` + `agent_fs_readonly` added (default off); HEASoft release root joins the list.
 - 2026-09-24 — `librarian_react_loop_cap` 1 → 40; `io_search_max_iterations` removed.
   `check_coder_min_interval_s` replaced by `coder_wait_floor_s`/`_default_s`/`_max_s` (`wait_coder`).
+- 2026-09-25 — Added `telegram_rich_messages` (default `true`).

@@ -182,6 +182,27 @@ one figure per file, and close each figure after saving. A plotter is not a *sci
 reproducibility sense — its Layer-B test asserts the file was written and the returned dict carries the
 required keys (and, where it matters, that the figure reflects its input), not a within-tolerance value.
 
+## Results the runtime can cite — the return contract every tool meets
+
+A report may state a number only when a **receipt** carries it: the runtime receipts each call's
+`stdout` and the data files the call writes, and a finding cites those. The gate runs your tests with
+a recorder on every tool you add or change and applies these rules exactly as the runtime does, so
+write each tool to meet all five:
+
+1. **Return plain JSON types.** The tool REPL sends the returned dict with `json.dumps`. Convert
+   numpy scalars with `float()`/`int()`, arrays with `.tolist()`, paths with `str()`.
+2. **Receipt every file the tool writes.** Take the output path as an argument (e.g. `out_path`),
+   or print the file's **absolute** path in `stdout`. A file written any other way is uncitable.
+3. **Write tables as delimited text with a header.** A `.csv`/`.tsv` output has a header row and at
+   least one data row, so the reviewer can typeset it straight from its receipt.
+4. **Return figures by the FigureRef convention above,** with each PNG on disk when the call returns.
+5. **Carry every returned number in a receipt.** Each number the tool returns under a key other than
+   `stdout`/`stderr`/`exit_code`/`figures` also appears in `stdout` — printed at the full precision
+   it is returned with — or in a file the call wrote and receipted. A tool that returns no `stdout` has its other
+   keys shown as its result text, which meets this by construction.
+
+Call each tool you add from its tests with a real input, so the recorder sees what it returns.
+
 ## What the brief tells you, and what is yours to decide
 
 - The brief's **disposition** — extend an existing package vs. scaffold a new one — and its

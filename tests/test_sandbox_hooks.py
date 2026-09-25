@@ -124,3 +124,23 @@ def test_repl_init_py_absent_is_bare_repl(tmp_path):
         return res
 
     assert asyncio.run(_run()).get("exit_code") == 0
+
+
+def test_non_json_return_fails_its_call_and_the_sandbox_survives(tmp_path):
+    """A return the REPL cannot serialise fails that one call; the next call is still served."""
+    (tmp_path / "badret.py").write_text("def f():\n    return {'stdout': 'x', 's': {1, 2}}\n")
+    ini = tmp_path / "env.sh"
+    ini.write_text("#!/bin/bash\nexport AR_TEST=1\n", encoding="utf-8")
+
+    async def _run():
+        sb = PersistentSandbox(toolkit_root=str(tmp_path), workdir=str(tmp_path / "wd"),
+                               analyze_env=None, analyze_ini_sh=str(ini))
+        await sb.start()
+        bad = await sb.call_tool("badret", "f", {})
+        good = await sb.call_tool("os", "getcwd", {})
+        await sb.shutdown()
+        return bad, good
+
+    bad, good = asyncio.run(_run())
+    assert bad.get("exit_code") == 1 and "not JSON" in bad.get("stderr", "")
+    assert good.get("exit_code") == 0

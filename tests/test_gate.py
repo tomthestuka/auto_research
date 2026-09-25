@@ -15,7 +15,7 @@ from auto_research.sandbox.gate import (
     check_structural,
     collect_targets,
     run_gate,
-    scan_provenance,
+    scan_figure_shape,
     scan_python_source,
     scan_text_source,
 )
@@ -193,23 +193,103 @@ def test_literal_arrays_are_findings_not_fails():
     assert all(c.passed for c in findings)  # findings do not fail
 
 
-# ── pure scanner: provenance ────────────────────────────────────────────────────
+# ── pure scanner: provenance (the figure dicts a tool returns match FigureRef) ──
+
+_FIG = ('"path": save_path, "caption": "c", "mime_type": "image/png", "produced_by": "t", '
+        '"created_at": "2026-01-01T00:00:00Z", "sha256": sha')
+
+# The plotter shapes the toolkit's own templates use (xspec_utils plot_fit / plot_iqu): clean.
+CLEAN_FIGURE_SHAPES = {
+    "inline": f"def p(save_path, sha):\n    return {{'figures': [{{{_FIG}}}], 'stdout': 'x'}}\n",
+    "appended": (f"def p(paths, sha):\n    figures = []\n    for save_path in paths:\n"
+                 f"        figures.append({{{_FIG}}})\n    return {{'figures': figures}}\n"),
+    "named_dict": (f"def p(save_path, sha):\n    fig = {{{_FIG}}}\n"
+                   f"    return {{'figures': [fig]}}\n"),
+    "comprehension": f"def p(paths, sha):\n    return {{'figures': [{{{_FIG}}} for save_path in paths]}}\n",
+    "subscript_set": (f"def p(save_path, sha):\n    out = {{}}\n    out['figures'] = [{{{_FIG}}}]\n"
+                      f"    return out\n"),
+    "thumbnail": f"def p(save_path, sha):\n    return {{'figures': [{{{_FIG}, 'thumbnail_b64': None}}]}}\n",
+    "no_figures": "def p():\n    return {'stdout': 'x', 'figures': []}\n",
+    "opaque_spread": "def p(base):\n    return {'figures': [{**base, 'caption': 'c'}]}\n",
+}
+
+# Every problem kind the check reports, one seeded breach each: (source, detail substring). Each
+# seeded tool is `p(save_path, sha)`, so the runtime half of the contract can call it too.
+SEEDED_FIGURE_BREACHES = {
+    "figures_not_a_list": ("def p(save_path, sha):\n    return {'figures': {" + _FIG + "}}\n",
+                           "'figures' is a dict"),
+    "figures_a_string": ("def p(save_path, sha):\n    return {'figures': f'{save_path}'}\n",
+                         "'figures' is a string"),
+    "named_not_a_list": ("def p(save_path, sha):\n    figures = {" + _FIG + "}\n"
+                         "    return {'figures': figures}\n", "'figures' is a dict"),
+    "entry_not_a_dict": ("def p(save_path, sha):\n    return {'figures': [f'{save_path}']}\n",
+                         "a figure entry is a string"),
+    "missing_key": ("def p(save_path, sha):\n    return {'figures': [{'path': save_path, 'caption': 'c'}]}\n",
+                    "missing ['created_at', 'mime_type', 'produced_by', 'sha256']"),
+    "missing_key_appended": ("def p(save_path, sha):\n    figs = []\n    for q in [save_path]:\n"
+                             "        figs.append({'path': q, 'caption': 'c', 'mime_type': 'image/png',"
+                             " 'produced_by': 't', 'created_at': 'x'})\n    return {'figures': figs}\n",
+                             "missing ['sha256']"),
+    "extra_key": ("def p(save_path, sha):\n    return {'figures': [{" + _FIG + ", 'dpi': 150}]}\n",
+                  "keys FigureRef rejects ['dpi']"),
+    "extra_key_dict_call": ("def p(save_path, sha):\n    return dict(figures=[dict(path=save_path, caption='c', "
+                            "mime_type='m', produced_by='t', created_at='2026-01-01T00:00:00Z', "
+                            "sha256=sha, label='x')])\n", "keys FigureRef rejects ['label']"),
+    "bad_literal_value": ("def p(save_path, sha):\n    return {'figures': [{'path': save_path, 'caption': '',"
+                          " 'mime_type': 'image/png', 'produced_by': 't', 'created_at': 'soon',"
+                          " 'sha256': 'abc'}]}\n", "sha256='abc' invalid"),
+}
 
 
-def test_figureref_missing_provenance_fails():
-    src = 'def g():\n    return FigureRef(path="p.png", caption="c")\n'
-    out = scan_provenance("lib/x.py", src)
-    assert out and not out[0].passed
-    assert "sha256" in out[0].detail and "produced_by" in out[0].detail
+@pytest.mark.parametrize("name", sorted(CLEAN_FIGURE_SHAPES))
+def test_figure_shape_clean(name):
+    assert scan_figure_shape("lib/x.py", CLEAN_FIGURE_SHAPES[name]) == []
 
 
-def test_figureref_with_provenance_passes():
-    src = 'def g():\n    return FigureRef(path="p.png", sha256="ab", produced_by="g")\n'
-    assert scan_provenance("lib/x.py", src) == []
+@pytest.mark.parametrize("name", sorted(SEEDED_FIGURE_BREACHES))
+def test_figure_shape_breach_is_caught(name):
+    src, needle = SEEDED_FIGURE_BREACHES[name]
+    out = scan_figure_shape("lib/x.py", src)
+    assert out and not any(c.passed for c in out)
+    assert all(c.name == "provenance.figure_shape" for c in out)
+    assert any(needle in c.detail for c in out), [c.detail for c in out]
 
 
-def test_no_figureref_is_vacuously_clean():
-    assert scan_provenance("lib/x.py", "def g():\n    return 1\n") == []
+def test_every_seeded_breach_is_one_the_runtime_drops():
+    """The gate fails exactly what `parse_tool_figures` drops: evaluate each seeded tool's return
+    and confirm the runtime keeps none of its figures (or ignores a non-list `figures`)."""
+    from auto_research.sandbox.runner import parse_tool_figures
+
+    for name, (src, _needle) in SEEDED_FIGURE_BREACHES.items():
+        ns: dict = {}
+        exec(compile(src, name, "exec"), ns)
+        payload = ns["p"]("/tmp/a.png", "a" * 64)
+        figures, notes = parse_tool_figures(payload["figures"])
+        assert figures == [] and notes, name
+
+
+def test_figure_shape_scoped_to_added_lines():
+    src, _needle = SEEDED_FIGURE_BREACHES["missing_key"]
+    assert scan_figure_shape("lib/x.py", src, added={1}) == []      # the dict is on line 2
+    assert scan_figure_shape("lib/x.py", src, added={2})
+
+
+def test_figure_shape_nested_function_reported_once():
+    src = "def outer():\n    def p(q):\n        return {'figures': [{'path': q}]}\n    return p\n"
+    assert len(scan_figure_shape("lib/x.py", src)) == 1
+
+
+def test_toolkit_plotters_are_clean():
+    """The real template plotters (`plot_fit`, `plot_iqu`) pass, when the toolkit is on this host."""
+    from pathlib import Path
+
+    from auto_research.graph.runtime import load_orchestration_config
+
+    root = load_orchestration_config().get("toolkit_root")
+    session = Path(root or "/nonexistent") / "xspec_utils" / "skills" / "session.py"
+    if not session.is_file():
+        pytest.skip("research_toolkit not on this host")
+    assert scan_figure_shape("xspec_utils/skills/session.py", session.read_text()) == []
 
 
 # ── added-line scoping ──────────────────────────────────────────────────────────
@@ -396,6 +476,28 @@ def test_run_gate_fabrication_fails_with_reason(tmp_path):
     report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
     assert not report.passed
     assert "synthetic" in report.reason or "vocabulary" in report.reason
+
+
+def test_run_gate_malformed_figure_fails_with_reason(tmp_path):
+    """A tool returning a figure dict the runtime would drop is rejected, naming file and key."""
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo, lib_body="    return {'figures': [{'path': obsid, 'caption': 'c'}]}\n")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert not report.passed
+    bad = [c for c in report.layer_a if c.name == "provenance.figure_shape"]
+    assert bad and "demo_utils/lib/demo_help.py:2" in bad[0].detail and "sha256" in bad[0].detail
+
+
+def test_run_gate_test_file_figure_fixtures_are_exempt(tmp_path):
+    """A test may build a deliberately partial figure dict to assert on; it is not a tool return."""
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    (repo / "demo_utils" / "lib" / "test_demo.py").write_text(
+        "def test_my_tool():\n    bad = {'figures': [{'path': 'x'}]}\n"
+        "    assert my_tool('synth240611-aa') is not None and bad\n"
+    )
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert report.passed, report.reason
 
 
 def test_run_gate_rng_passes_with_finding(tmp_path):

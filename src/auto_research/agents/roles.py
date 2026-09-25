@@ -34,6 +34,7 @@ from auto_research.agents.react import (
     SUBMIT_TOOL,
     WAIT_CODER_TOOL,
     SandboxToolProvider,
+    ToolOutcome,
     _written_report,
 )
 from auto_research.env import react_grace_rounds, ledger_caps
@@ -595,7 +596,17 @@ class AgentRole:
                         ),
                     },
                 )
-                outcome = await tools.execute(call.name, dict(call.arguments))
+                if call.arguments_error:
+                    # A garbled call is answered, never run on empty arguments ([I4]).
+                    outcome = ToolOutcome(
+                        text=(
+                            f"{call.name} was not run: its arguments were not valid JSON "
+                            f"({call.arguments_error}). Re-issue the call with valid JSON arguments."
+                        ),
+                        is_error=True,
+                    )
+                else:
+                    outcome = await tools.execute(call.name, dict(call.arguments))
                 result_parts.append(
                     ToolResultPart(
                         tool_call_id=call.id,

@@ -55,6 +55,21 @@ _STORES: dict[Path, "ReceiptStore"] = {}
 _REGISTRY_LOCK = threading.Lock()
 
 
+def checkable_text(raw: bytes) -> str | None:
+    """The text a quote or a number is checked against in a stored file's bytes, or ``None``.
+
+    Shared by ``ReceiptStore.text`` and the gate's return check, so both read a file the same way.
+    """
+    # A PDF is never checkable text, even one whose bytes happen to decode (human ruling
+    # 2026-09-24: papers are cited, not quoted).
+    if raw[:5] == b"%PDF-":
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 class ReceiptStore:
     """Append-only receipts for one run, keyed by handle."""
 
@@ -240,14 +255,7 @@ class ReceiptStore:
             raw = Path(receipt.path).read_bytes()
         except OSError:
             return None
-        # A PDF is never checkable text, even one whose bytes happen to decode (human ruling
-        # 2026-09-24: papers are cited, not quoted).
-        if raw[:5] == b"%PDF-":
-            return None
-        try:
-            return raw.decode("utf-8")
-        except UnicodeDecodeError:
-            return None
+        return checkable_text(raw)
 
     def verify(self, handle: str) -> str | None:
         """Re-hash the stored bytes; return a problem sentence, or ``None`` when they match."""

@@ -28,6 +28,7 @@ from auto_research.provenance.capture import inputs_before, receipt_call
 from auto_research.env import coder_wait_limits_s, tool_search_config
 from auto_research.observations import load_observations_config
 from auto_research.sandbox.fs_guard import GOVERNANCE_BASENAMES, PathGuard
+from auto_research.sandbox.runner import normalize_tool_raw, parse_tool_figures, tool_text
 
 
 def _jail_supersedes_command_check() -> bool:
@@ -2418,11 +2419,6 @@ async def execute_author_chain(cycle: LeadCycle, arguments: Mapping[str, Any]) -
 # Analyst science tools — the existing ToolkitRegistry + PersistentSandbox.
 # ----------------------------------------------------------------------------
 
-_PROTOCOL_KEYS: frozenset[str] = frozenset(
-    {"stdout", "stderr", "exit_code", "figures", "console_tail"}
-)
-
-
 def _observation_path_args() -> dict[str, str]:
     """Map tool path-args to configured observation roots, e.g. ``ixpe_path`` →
     the IXPE ``obs_db_path`` from ``config/observations.yaml``.
@@ -2435,54 +2431,6 @@ def _observation_path_args() -> dict[str, str]:
     except Exception:  # noqa: BLE001
         return {}
     return {f"{mission}_path": str(c.obs_db_path) for mission, c in cfg.missions.items()}
-
-
-def _normalize_tool_raw(raw: dict) -> dict:
-    """Ensure every tool result has a non-empty ``stdout`` for the model to read.
-
-    Tools that return structured payloads without a ``stdout`` key (e.g.
-    ``list_dir`` → ``{path, entries}``, ``load_data`` → nested indices dict)
-    are invisible to the model otherwise.  When ``stdout`` is absent or empty,
-    serialize the non-protocol payload keys as compact JSON. Also folds any
-    captured ``console_tail`` (XSPEC/C-level prints) into ``stdout``.
-    """
-    stdout = raw.get("stdout") or ""
-    if not stdout:
-        extra = {k: v for k, v in raw.items() if k not in _PROTOCOL_KEYS}
-        if extra:
-            stdout = json.dumps(extra, indent=2, default=str)
-
-    console = raw.get("console_tail") or ""
-    if console:
-        sep = "\n--- console ---\n"
-        stdout = (stdout + sep + console) if stdout else (sep.lstrip() + console)
-
-    return {**raw, "stdout": stdout}
-
-
-def _parse_tool_figures(raw_figures: Any) -> tuple[list[FigureRef], list[str]]:
-    """Validate returned figure dicts into ``FigureRef``s, **dropping** (never crashing on)
-    malformed entries.
-
-    A tool — most often a freshly authored plotter — that emits a slightly-off figure dict
-    (bad ``sha256``, an extra key under ``extra="forbid"``, a missing field, a bad
-    ``created_at``) must not abort the whole run. Each bad entry is dropped and a short reason
-    is returned so the analyst learns its plotter is malformed and can fix/re-author it — this
-    is what ``coder.md`` already promises ("that figure is dropped"). Returns
-    ``(figures, drop_notes)``.
-    """
-    figures: list[FigureRef] = []
-    notes: list[str] = []
-    if not isinstance(raw_figures, list):
-        if raw_figures:
-            notes.append(f"'figures' is not a list ({type(raw_figures).__name__}); ignored")
-        return figures, notes
-    for index, entry in enumerate(raw_figures):
-        try:
-            figures.append(FigureRef.model_validate(entry))
-        except Exception as exc:  # noqa: BLE001 — any malformed figure is dropped, never fatal
-            notes.append(f"figure[{index}] dropped — invalid FigureRef: {exc}")
-    return figures, notes
 
 
 class SandboxToolProvider:
@@ -2681,13 +2629,9 @@ class SandboxToolProvider:
             )
         elapsed = time.monotonic() - t0
 
-        raw = _normalize_tool_raw(raw)
-        figures, figure_notes = _parse_tool_figures(raw.get("figures"))
-        exit_code = raw.get("exit_code", 1)
-        if exit_code == 0:
-            text = raw.get("stdout", "") or "(tool returned no output)"
-        else:
-            text = f"[exit {exit_code}]\n{raw.get('stderr') or raw.get('stdout') or '(no error detail)'}"
+        raw = normalize_tool_raw(raw)
+        figures, figure_notes = parse_tool_figures(raw.get("figures"))
+        text, exit_code = tool_text(raw)
         header = ""
         provenance_notes: list[str] = []
         if self.receipts is not None and self.receipt_source is not None:

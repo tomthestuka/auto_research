@@ -1150,3 +1150,28 @@ def test_a_populated_emit_answer_is_untouched(monkeypatch):
     )
     assert response.parsed == {"accepted": True, "rationale": "sound"}
 
+
+
+def test_a_garbled_function_call_carries_its_fault(monkeypatch):
+    """[I4]: a non-JSON argument string reaches the loop flagged, with the raw text, not as {}."""
+
+    class _R:
+        async def create(self, **kw):
+            item = SimpleNamespace(type="function_call", name="read_file",
+                                   arguments='{"path": "a', call_id="c1")
+            return SimpleNamespace(output=[item], output_text="", status="completed",
+                                   incomplete_details=None,
+                                   usage=SimpleNamespace(input_tokens=1, output_tokens=1))
+
+    class _C:
+        def __init__(self, *a, **k):
+            self.responses = _R()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", _C)
+    tools = [{"name": "read_file", "description": "d",
+              "input_schema": {"type": "object", "properties": {}, "required": []}}]
+    out = asyncio.run(DeepSeekProvider().call(_messages(), _cfg(DeepSeekProvider), tools=tools))
+    (call,) = out.tool_calls
+    assert call.arguments == {}
+    assert call.arguments_error and "JSONDecodeError" in call.arguments_error
+    assert '{"path": "a' in call.arguments_error

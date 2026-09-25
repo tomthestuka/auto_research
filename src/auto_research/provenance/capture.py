@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import re
 import subprocess
-import time
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -52,6 +51,24 @@ class CallReceipts:
         return " · ".join(parts)
 
 
+def call_started_ns():
+    """A call's start time on the clock the kernel stamps file mtimes with.
+
+    Linux stamps an mtime from the coarse realtime clock, which lags ``time.time_ns()`` by up to a
+    tick: measured 2026-09-25, 200 of 200 files written right after ``time.time_ns()`` carried an
+    earlier mtime, so a fast tool's output read as older than its own call and was never receipted.
+    Stdlib-only: the gate's return-check recorder runs this same source in the analysis interpreter.
+    """
+    import sys
+    import time
+
+    # Python exposes no constant for it; 5 is CLOCK_REALTIME_COARSE in the Linux ABI (measured
+    # 0 of 500 out of order in both interpreters, against 200 of 200 for ``time.time_ns()``).
+    if sys.platform.startswith("linux"):
+        return time.clock_gettime_ns(5)
+    return time.time_ns()
+
+
 def _stat(path: Path) -> tuple[int, int] | None:
     try:
         st = path.stat()
@@ -85,7 +102,7 @@ def inputs_before(
     skip_keys: Iterable[str] = (),
 ) -> CallInputs:
     """Hash every existing path the arguments name (skipping ``skip_keys``: data roots, outputs)."""
-    state = CallInputs(started_ns=time.time_ns())
+    state = CallInputs(started_ns=call_started_ns())
     for path in _named_paths(args, cwd, ()):
         state.before[str(path)] = _stat(path)
     for path in _named_paths(args, cwd, skip_keys):
@@ -149,7 +166,7 @@ def receipt_call(
     product is a file named in the arguments that the call created or changed, or an absolute path
     in the output written after the call started.
     """
-    state = state or CallInputs(started_ns=time.time_ns())
+    state = state or CallInputs(started_ns=call_started_ns())
     call_id = uuid.uuid4().hex
     commit = toolkit_commit(toolkit_root)
     common = dict(
@@ -180,22 +197,44 @@ def receipt_call(
         out.products.append(receipt)
         out.figures.append(fig.model_copy(update={"sha256": receipt.sha256, "path": receipt.path}))
 
+    for path in data_products(state, text, failed=failed, figure_paths=figure_paths):
+        out.products.append(store.mint(kind="data", path=path, **common))
+    return out
+
+
+def data_products(
+    state: CallInputs,
+    text: str,
+    *,
+    failed: bool,
+    figure_paths: Iterable[str] = (),
+    stat: Callable[[Path], tuple[int, int] | None] = _stat,
+    is_file: Callable[[Path], bool] = Path.is_file,
+) -> list[Path]:
+    """The data files a call produced, in the order they are receipted: a path the arguments name
+    that the call created or changed, then an absolute path in its output written after it started.
+
+    The one statement of the rule, shared by `receipt_call` and the gate's return check, which
+    passes ``stat``/``is_file`` over what the tool's test run recorded instead of the live disk.
+    """
     candidates: list[Path] = []
     for raw, before in state.before.items():
         path = Path(raw)
-        now = _stat(path)
-        if now is not None and now != before and path.is_file():
+        now = stat(path)
+        if now is not None and now != before and is_file(path):
             candidates.append(path)
     for match in _PATH_IN_TEXT.finditer(text if not failed else ""):
         path = Path(match.group(1).rstrip("."))
-        now = _stat(path)
-        if now is not None and now[1] >= state.started_ns and path.is_file():
+        now = stat(path)
+        if now is not None and now[1] >= state.started_ns and is_file(path):
             candidates.append(path)
-    seen: set[str] = set(figure_paths)
+    figures = set(figure_paths)
+    seen: set[str] = set(figures)
+    products: list[Path] = []
     for path in candidates:
         key = str(path.resolve())
-        if key in seen or len(seen) - len(figure_paths) >= _MAX_PRODUCTS:
+        if key in seen or len(seen) - len(figures) >= _MAX_PRODUCTS:
             continue
         seen.add(key)
-        out.products.append(store.mint(kind="data", path=path, **common))
-    return out
+        products.append(path)
+    return products

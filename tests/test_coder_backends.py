@@ -204,6 +204,38 @@ def test_claude_backend_drives_its_injected_client():
     assert not client.connected
 
 
+class _ScriptedSdkClient(_FakeSdkClient):
+    """Replays one turn: an assistant text block, then the turn's ResultMessage."""
+
+    def __init__(self, text: str, *, is_error: bool, result: str | None = None) -> None:
+        super().__init__()
+        self._text, self._is_error, self._result = text, is_error, result
+
+    async def receive_response(self):
+        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+        yield AssistantMessage(content=[TextBlock(text=self._text)], model="m")
+        yield ResultMessage(
+            subtype="error_during_execution" if self._is_error else "success",
+            duration_ms=1, duration_api_ms=1, is_error=self._is_error, num_turns=1,
+            session_id="s", result=self._result,
+        )
+
+
+def test_claude_failed_turn_is_marked_as_a_harness_error():
+    # 2026-09-09: the CLI's "Credit balance is too low" arrived as a text block with
+    # is_error on the result, and the lead read it as the coder's reply for three drives.
+    client = _ScriptedSdkClient("Credit balance is too low", is_error=True,
+                                result="Credit balance is too low")
+    reply = asyncio.run(ClaudeSdkBackend(client).drive("go"))
+    assert reply.endswith("[harness error] the anthropic turn failed: Credit balance is too low")
+
+
+def test_claude_successful_turn_carries_no_error_marker():
+    client = _ScriptedSdkClient("done", is_error=False, result="done")
+    assert asyncio.run(ClaudeSdkBackend(client).drive("go")) == "done"
+
+
 class _AllowAll:
     def is_allowed(self, path: str) -> bool:
         return True

@@ -369,6 +369,13 @@ async def _drive_author(
                       "cost_usd_turn": turn_usd,
                       "is_error": bool(getattr(msg, "is_error", False))},
             )
+            if getattr(msg, "is_error", False):
+                # A failed turn must not read as a reply. The CLI's billing or session-limit text
+                # arrives as an ordinary text block, so without this marker the lead steers a dead
+                # session as if it were working (the Codex backend marks the same case).
+                error = cap_text(str(getattr(msg, "result", None) or getattr(msg, "subtype", "")
+                                     or "unknown error"), 600)
+                chunks.append(f"[harness error] the anthropic turn failed: {error}")
     return "\n".join(chunks)
 
 

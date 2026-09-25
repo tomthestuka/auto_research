@@ -943,3 +943,37 @@ def test_compose_declares_the_tools_the_loop_ACTUALLY_had():
         "the compose dropped a tool the loop had; the replayed trajectory names it"
     )
     assert compose_call["tools"] == loop_call["tools"]
+
+
+def test_react_answers_a_garbled_call_instead_of_running_it():
+    """[I4]: an unparseable argument string is returned to the model as an error, never run on {}."""
+
+    class _CountingTools(_LoopTools):
+        def __init__(self):
+            self.executed = 0
+
+        async def execute(self, name, arguments):
+            self.executed += 1
+            return ToolOutcome(text="ok")
+
+    class _GarbledOnce:
+        def __init__(self):
+            self.seen: list = []
+
+        async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
+                       images=(), documents=(), cache_prefix=False):
+            self.seen.append(list(messages))
+            if len(self.seen) == 1:
+                return ModelResponse(tool_calls=[ToolCall(
+                    id="c1", name="t", arguments={},
+                    arguments_error="JSONDecodeError: x; raw arguments: {\"n\": ")])
+            return ModelResponse(content="done")
+
+    tools, model = _CountingTools(), _GarbledOnce()
+    agent = ReviewerAgent(model=model, prompt="p")
+    asyncio.run(agent._react(seed_messages=[], tools=tools, action="a", cap=3))
+
+    assert tools.executed == 0
+    results = [p for m in model.seen[1] for p in getattr(m, "results", []) or []]
+    assert results and results[0].is_error
+    assert "not valid JSON" in results[0].content and '{"n": ' in results[0].content

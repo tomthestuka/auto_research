@@ -323,20 +323,20 @@ class TestSandboxToolProvider:
         assert "2 dropped" in out.text and "plotted" in out.text      # drop surfaced, output kept
 
     def test_parse_tool_figures_helper(self) -> None:
-        """_parse_tool_figures keeps valid figures, drops bad ones with a reason, and
+        """parse_tool_figures keeps valid figures, drops bad ones with a reason, and
         never chokes on a non-list `figures` value."""
         from datetime import UTC, datetime
 
-        from auto_research.agents.react import _parse_tool_figures
+        from auto_research.sandbox.runner import parse_tool_figures
         good = {
             "path": "/tmp/ok.png", "caption": "ok", "mime_type": "image/png",
             "produced_by": "t", "created_at": datetime.now(UTC).isoformat(), "sha256": "a" * 64,
         }
-        figs, notes = _parse_tool_figures([good, {"caption": "missing everything else"}])
+        figs, notes = parse_tool_figures([good, {"caption": "missing everything else"}])
         assert len(figs) == 1 and len(notes) == 1
-        figs2, notes2 = _parse_tool_figures({"path": "x"})   # not a list → ignored, noted
+        figs2, notes2 = parse_tool_figures({"path": "x"})   # not a list → ignored, noted
         assert figs2 == [] and len(notes2) == 1
-        assert _parse_tool_figures(None) == ([], [])          # absent → clean empty
+        assert parse_tool_figures(None) == ([], [])          # absent → clean empty
 
 
 def _script_model():
@@ -457,63 +457,63 @@ class TestWorkerReactLoop:
 
 
 # ---------------------------------------------------------------------------
-# _normalize_tool_raw and _append_tool_results_to_memory
+# normalize_tool_raw and _append_tool_results_to_memory
 # ---------------------------------------------------------------------------
 
 class TestNormalizeToolRaw:
-    """Unit tests for _normalize_tool_raw."""
+    """Unit tests for normalize_tool_raw."""
 
     def test_bash_exec_passthrough(self) -> None:
         """A result that already has stdout is returned unchanged."""
-        from auto_research.agents.react import _normalize_tool_raw
+        from auto_research.sandbox.runner import normalize_tool_raw
         raw = {"stdout": "hello", "stderr": "", "exit_code": 0}
-        result = _normalize_tool_raw(raw)
+        result = normalize_tool_raw(raw)
         assert result["stdout"] == "hello"
 
     def test_list_dir_entries_serialized(self) -> None:
         """list_dir's {path, entries} payload is serialized into stdout."""
-        from auto_research.agents.react import _normalize_tool_raw
+        from auto_research.sandbox.runner import normalize_tool_raw
         raw = {"path": "/foo", "entries": ["a", "b", "c"], "exit_code": 0}
-        result = _normalize_tool_raw(raw)
+        result = normalize_tool_raw(raw)
         assert result["stdout"]
         assert "entries" in result["stdout"]
         assert "a" in result["stdout"]
 
     def test_load_data_indices_dict_serialized(self) -> None:
         """load_data's nested indices dict is serialized into stdout as JSON."""
-        from auto_research.agents.react import _normalize_tool_raw
+        from auto_research.sandbox.runner import normalize_tool_raw
         indices = {"IXPE": {"02008401": {"DU1": [1, 2, 3]}}, "NICER": {}}
         raw = {**indices, "exit_code": 0}
-        result = _normalize_tool_raw(raw)
+        result = normalize_tool_raw(raw)
         assert "02008401" in result["stdout"]
 
     def test_none_return_coerced(self) -> None:
         """A tool returning None (fit_tbabs_hss) produces no extra stdout."""
-        from auto_research.agents.react import _normalize_tool_raw
+        from auto_research.sandbox.runner import normalize_tool_raw
         raw = {"stdout": "None", "exit_code": 0}
-        result = _normalize_tool_raw(raw)
+        result = normalize_tool_raw(raw)
         assert result["stdout"] == "None"
 
     def test_console_tail_folded_into_stdout(self) -> None:
         """console_tail is appended to stdout so model sees XSPEC console prints."""
-        from auto_research.agents.react import _normalize_tool_raw
+        from auto_research.sandbox.runner import normalize_tool_raw
         raw = {"stdout": "fit done", "console_tail": "XSPEC: stat=1.23", "exit_code": 0}
-        result = _normalize_tool_raw(raw)
+        result = normalize_tool_raw(raw)
         assert "fit done" in result["stdout"]
         assert "stat=1.23" in result["stdout"]
 
     def test_console_tail_only(self) -> None:
         """console_tail alone (no stdout) is surfaced without a leading separator."""
-        from auto_research.agents.react import _normalize_tool_raw
+        from auto_research.sandbox.runner import normalize_tool_raw
         raw = {"console_tail": "loading spectra", "exit_code": 0}
-        result = _normalize_tool_raw(raw)
+        result = normalize_tool_raw(raw)
         assert "loading spectra" in result["stdout"]
 
     def test_protocol_keys_excluded_from_serialization(self) -> None:
         """exit_code/stderr/figures/console_tail are not re-serialized into stdout."""
-        from auto_research.agents.react import _normalize_tool_raw
+        from auto_research.sandbox.runner import normalize_tool_raw
         raw = {"exit_code": 0, "stderr": "warn", "figures": [], "console_tail": "log"}
-        result = _normalize_tool_raw(raw)
+        result = normalize_tool_raw(raw)
         # Only console_tail → stdout; stderr/figures/exit_code must not appear as JSON keys
         assert "stderr" not in result["stdout"]
         assert "exit_code" not in result["stdout"]

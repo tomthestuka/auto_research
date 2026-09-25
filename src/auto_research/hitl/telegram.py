@@ -11,8 +11,16 @@ Design mirrors :mod:`auto_research.hitl.slack`:
   by Telegram's native **reply-to** (``reply_to_message.message_id`` → the pending Future); a plain
   reply resolves the query only when a single one is open. This keeps concurrent raises (future
   parallel analysts) routable without a protocol change.
-* **HTML rendering** — the Markdown body is converted to Telegram's small HTML tag subset; a parse
-  rejection falls back to plain text so a message always sends.
+* **Rich messages first** — Bot API 10.1 ``sendRichMessage`` renders the agents' Markdown natively
+  (headings, tables, ``$…$`` math, details; 32768 chars / 500 blocks), sent through
+  ``Bot.do_api_request`` because python-telegram-bot 22.8 does not wrap it yet
+  (``orchestration.yaml: telegram_rich_messages``, default on).
+* **HTML fallback** — when a rich send is refused, the Markdown is chunked at block boundaries (a
+  heading stays with its section, a fence or table is never cut) and converted to Telegram's small
+  HTML subset; tables become an aligned ``<pre>`` block, or a bullet list when too wide for a phone.
+  A parse rejection falls back to plain text so a message always sends.
+* **Edits** — an edited message is routed on its own, so editing a command never re-runs it; an edit
+  to a reply already taken as the answer gets a notice asking for a new message.
 * The ``python-telegram-bot`` ``Application`` is injectable so the send + reply-resolution logic is
   unit-testable without the library installed or any network. The library is imported lazily (only
   in ``start``/``_build_telegram_app``) so importing this module never hard-requires it.
@@ -34,6 +42,18 @@ from auto_research.schemas import HumanQuery, HumanResponse
 # message is self-contained valid HTML (a cut never splits a tag). Room left for header/hint.
 _TG_MSG_LIMIT = 4096
 _CHUNK = 3000  # headroom under the 4096 cap for HTML-tag expansion + header/hint
+# Rich messages: 32768 chars and 500 blocks per message (Bot API "Rich Message Limits"). A
+# non-blank line is at most one block, so capping lines keeps a part under the block limit.
+_RICH_CHUNK = 30000
+_RICH_MAX_LINES = 400
+_TABLE_PRE_WIDTH = 60  # the widest aligned table row that still reads on a phone
+_ANSWERED_KEEP = 200  # reply message ids remembered for the edit notice
+
+
+def _rich_messages_enabled() -> bool:
+    from auto_research.hitl.resolve import _orchestration_config
+
+    return bool(_orchestration_config().get("telegram_rich_messages", True))
 
 
 class TelegramHandler:
@@ -56,6 +76,12 @@ class TelegramHandler:
         # Map every posted message_id -> the Future awaiting its reply. All chunks of one query
         # point at the same Future, so a reply-to any chunk resolves it.
         self._pending: dict[int, asyncio.Future[str]] = {}
+        # Message ids of replies that resolved a question (insertion-ordered, bounded), so an
+        # edit to one can be answered with a notice instead of being silently dropped.
+        self._answered: dict[int, None] = {}
+        # False once the server or library lacks sendRichMessage, so later sends skip straight
+        # to HTML instead of paying a refused call each time.
+        self._rich = True
         # HITL slash-command context (§12 Stage 3), wired by run_research via attach_commands.
         # When set, a leading-'/' message is dispatched as a command (never a reply), and a
         # pending ask is released when /stop fires.
@@ -73,8 +99,12 @@ class TelegramHandler:
         # Replies (plain text, NOT commands) resolve pending queries; slash-commands are a
         # separate handler — so a command is structurally never taken as a reply to an LLM.
         # A button tap arrives as a callback query, a third channel again distinct from both.
-        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_update))
-        self.app.add_handler(MessageHandler(filters.COMMAND, self._on_command))
+        # `filters.TEXT` alone also matches EDITED messages, which re-ran an edited command;
+        # new messages and edits are therefore routed separately.
+        new = filters.UpdateType.MESSAGE
+        self.app.add_handler(MessageHandler(new & filters.TEXT & ~filters.COMMAND, self._on_update))
+        self.app.add_handler(MessageHandler(new & filters.COMMAND, self._on_command))
+        self.app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, self._on_edit))
         self.app.add_handler(CallbackQueryHandler(self._on_callback))
 
     async def _on_update(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
@@ -85,6 +115,28 @@ class TelegramHandler:
 
     async def _on_callback(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
         await self.handle_callback(update)
+
+    async def _on_edit(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
+        await self.handle_edit(update)
+
+    async def handle_edit(self, update: Any) -> None:
+        """Answer an edit to a reply that was already taken as an answer; ignore every other edit.
+
+        The answer was consumed the moment the original reply arrived, so the edit cannot change
+        it; the notice tells the human to send a new message instead. Edits to commands and to
+        unrelated messages do nothing."""
+        msg = getattr(update, "edited_message", None) or getattr(update, "effective_message", None)
+        if msg is None:
+            return
+        chat = getattr(update, "effective_chat", None) or getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", "") or "")
+        if self.chat_id and chat_id and chat_id != self.chat_id:
+            return
+        if getattr(msg, "message_id", None) in self._answered:
+            await self._send(
+                "<i>That reply was already taken as the answer before the edit. "
+                "Send a new message to amend it.</i>"
+            )
 
     def attach_commands(self, ctx: Any) -> None:
         """Wire the run-scoped HITL command context (§12 Stage 3); enables /help,/status,/steer,/stop."""
@@ -108,7 +160,7 @@ class TelegramHandler:
         from auto_research.hitl.commands import dispatch_command
 
         reply = await dispatch_command(text, self._cmd_ctx)
-        await self._send(_md_to_html(reply), buttons=getattr(reply, "buttons", ()))
+        await self._send_md(str(reply), buttons=getattr(reply, "buttons", ()))
 
     async def handle_callback(self, update: Any) -> None:
         """Handle a button tap: run the action, acknowledge it, and post the result.
@@ -130,7 +182,7 @@ class TelegramHandler:
             await query.answer()
         except Exception:  # noqa: BLE001 — an un-answered tap must not lose the action
             pass
-        await self._send(_md_to_html(reply))
+        await self._send_md(str(reply))
 
     def on_message(self, update: Any) -> None:
         """Resolve a pending Future from a human reply.
@@ -164,6 +216,11 @@ class TelegramHandler:
             fut = open_futs[0] if len(open_futs) == 1 else None
         if fut is not None and not fut.done():
             fut.set_result(text)
+            mid = getattr(msg, "message_id", None)
+            if mid is not None:
+                self._answered[mid] = None
+                while len(self._answered) > _ANSWERED_KEEP:
+                    self._answered.pop(next(iter(self._answered)))
 
     async def start(self) -> None:
         if self._started:
@@ -232,19 +289,74 @@ class TelegramHandler:
             plain = _html.unescape(re.sub(r"<[^>]+>", "", text_html))
             return await self.app.bot.send_message(chat_id=self.chat_id, text=plain, **extra)
 
+    async def _send_rich(self, md: str, *, buttons: tuple = ()) -> Any | None:
+        """Send ``md`` as one rich message; return the sent message, or ``None`` when refused.
+
+        A refusal (content the rich parser rejects, or a server/library without the method)
+        returns ``None`` so the caller falls back to HTML; any other error propagates exactly
+        as a plain send's would."""
+        if not (self._rich and _rich_messages_enabled()):
+            return None
+        try:
+            from telegram import Message
+            from telegram.error import BadRequest, EndPointNotFound
+        except Exception:  # noqa: BLE001 - library absent in unit tests
+            return None
+        kwargs: dict[str, Any] = {"chat_id": self.chat_id, "rich_message": {"markdown": md}}
+        markup = _inline_keyboard(buttons) if buttons else None
+        if markup is not None:
+            kwargs["reply_markup"] = markup.to_dict()
+        try:
+            return await self.app.bot.do_api_request(
+                "sendRichMessage", api_kwargs=kwargs, return_type=Message
+            )
+        except (AttributeError, EndPointNotFound):
+            self._rich = False
+            return None
+        except BadRequest:
+            return None
+
+    async def _send_md(self, md: str, *, buttons: tuple = (), on_posted: Any = None) -> list[Any]:
+        """Send Markdown as rich message(s), falling back to HTML chunks part by part.
+
+        ``on_posted(message)`` runs the instant each message exists, so a fast reply can resolve
+        a question while later parts are still being sent ([E4]). Buttons ride on the last message."""
+        parts = _chunk_md(md, _RICH_CHUNK, max_lines=_RICH_MAX_LINES) if self._rich else [md]
+        posted_all: list[Any] = []
+        for p_i, part in enumerate(parts):
+            last_part = p_i == len(parts) - 1
+            posted = await self._send_rich(part, buttons=buttons if last_part else ())
+            if posted is not None:
+                sent = [posted]
+            else:
+                sent = []
+                html_chunks = _html_chunks(part)
+                for c_i, chunk in enumerate(html_chunks):
+                    last = last_part and c_i == len(html_chunks) - 1
+                    sent.append(await self._send(chunk, buttons=buttons if last else ()))
+                    if on_posted is not None:
+                        on_posted(sent[-1])
+                posted_all.extend(sent)
+                continue
+            if on_posted is not None:
+                on_posted(posted)
+            posted_all.extend(sent)
+        return posted_all
+
     async def __call__(self, query: HumanQuery) -> HumanResponse:
         await self.start()
-        chunks = _render_chunks(query)
         loop = asyncio.get_event_loop()
         fut: asyncio.Future[str] = loop.create_future()
         ids: list[int] = []
+
         # Register each message_id -> Future the instant its message exists, so a fast reply-to
         # (or a single-open plain reply) arriving mid-send resolves the query rather than being
         # dropped — which would otherwise block the run to the full response timeout ([E4]).
-        for chunk in chunks:
-            posted = await self._send(chunk)
+        def _register(posted: Any) -> None:
             self._pending[posted.message_id] = fut
             ids.append(posted.message_id)
+
+        await self._send_md(_query_markdown(query), on_posted=_register)
         from auto_research.hitl.commands import wait_reply_or_stop
 
         rc = getattr(self._cmd_ctx, "run_control", None)
@@ -302,6 +414,8 @@ def _md_to_html(md: str) -> str:
         return f"\x00C{len(spans) - 1}\x00"
 
     md = re.sub(r"```[^\n]*\n(.*?)```", _stash_fence, md, flags=re.DOTALL)
+    md = _convert_tables(md)  # a table becomes a fence (stashed next) or a bullet list
+    md = re.sub(r"```[^\n]*\n(.*?)```", _stash_fence, md, flags=re.DOTALL)
     md = re.sub(r"`([^`]+)`", _stash_span, md)
 
     md = _html.escape(md, quote=False)  # placeholders (control chars) survive unescaped
@@ -316,6 +430,16 @@ def _md_to_html(md: str) -> str:
     md = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<i>\1</i>", md)
 
     out: list[str] = []
+    quote: list[str] = []
+
+    def flush_quote() -> None:
+        # Consecutive quoted lines are one quotation; a long one collapses so the question
+        # around it stays readable.
+        if quote:
+            tag = "<blockquote expandable>" if len(quote) > 3 else "<blockquote>"
+            out.append(f"{tag}{chr(10).join(quote)}</blockquote>")
+            quote.clear()
+
     for line in md.split("\n"):
         h = re.match(r"\s{0,3}#{1,6}\s+(.*)$", line)
         if h:
@@ -328,9 +452,11 @@ def _md_to_html(md: str) -> str:
         # the leading '>' was HTML-escaped to '&gt;' by the escape pass above, so match that
         q = re.match(r"\s{0,3}&gt;\s?(.*)$", line)
         if q:
-            out.append(f"<blockquote>{q.group(1)}</blockquote>")
+            quote.append(q.group(1))
             continue
+        flush_quote()
         out.append(line)
+    flush_quote()
     text = "\n".join(out)
 
     text = re.sub(
@@ -346,35 +472,213 @@ def _md_to_html(md: str) -> str:
     return text
 
 
-def _chunk_md(text: str, size: int = _CHUNK) -> list[str]:
-    """Split Markdown into chunks of at most ``size`` chars at paragraph/line breaks, so each
-    chunk renders to self-contained HTML (no tag spans a message boundary)."""
-    text = text.strip()
+_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
+_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
+
+
+def _md_blocks(text: str) -> list[str]:
+    """Split Markdown into blocks: a fenced code block, or a run of non-blank lines (a paragraph,
+    list or table). A heading is glued to the block after it, so no split ever orphans one."""
+    lines = text.strip().split("\n")
+    blocks: list[str] = []
+    cur: list[str] = []
+
+    def flush() -> None:
+        if cur:
+            blocks.append("\n".join(cur))
+            cur.clear()
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        fence = _FENCE_RE.match(line)
+        if fence:
+            flush()
+            mark = fence.group(1)
+            j = i + 1
+            while j < len(lines) and not lines[j].strip().startswith(mark):
+                j += 1
+            blocks.append("\n".join(lines[i : j + 1]))
+            i = j + 1
+            continue
+        if not line.strip():
+            flush()
+        elif _HEADING_RE.match(line):
+            flush()
+            blocks.append(line)
+        else:
+            cur.append(line)
+        i += 1
+    flush()
+
+    glued: list[str] = []
+    heading: str | None = None
+    for block in blocks:
+        if _HEADING_RE.match(block) and "\n" not in block:
+            heading = block if heading is None else f"{heading}\n\n{block}"
+            continue
+        glued.append(block if heading is None else f"{heading}\n\n{block}")
+        heading = None
+    if heading is not None:
+        glued.append(heading)
+    return glued
+
+
+def _split_block(block: str, size: int, max_lines: int | None) -> list[str]:
+    """Split one oversized block by lines; a fenced block is re-opened in every piece."""
+    lines = block.split("\n")
+    fence = _FENCE_RE.match(lines[0])
+    if fence:
+        max_lines = None  # a fenced block is ONE rich block however many lines it holds
+    if len(block) <= size and (max_lines is None or len(lines) <= max_lines):
+        return [block]
+    opener, closer = (lines[0], fence.group(1)) if fence else ("", "")
+    body = lines[1:-1] if fence and len(lines) > 1 and lines[-1].strip().startswith(closer) else (
+        lines[1:] if fence else lines
+    )
+    if not fence and len(lines) > 2 and _TABLE_ROW_RE.match(lines[0]) and _TABLE_SEP_RE.match(lines[1]):
+        # A split table repeats its header and separator in every piece, so each part renders
+        # as a table rather than as bare pipe rows.
+        head = lines[:2]
+        pieces = _split_block("\n".join(lines[2:]), size - len("\n".join(head)) - 1,
+                              None if max_lines is None else max_lines - 2)
+        return ["\n".join(head + [p]) for p in pieces]
+    budget = size - (len(opener) + len(closer) + 2 if fence else 0)
+    line_cap = (max_lines - 2) if (max_lines and fence) else max_lines
+    pieces: list[list[str]] = [[]]
+    used = 0
+    for line in body:
+        while len(line) > budget:  # a single line longer than the whole budget is hard-sliced
+            if pieces[-1]:
+                pieces.append([])
+            pieces[-1].append(line[:budget])
+            pieces.append([])
+            line = line[budget:]
+            used = 0
+        if pieces[-1] and (used + len(line) + 1 > budget or (line_cap and len(pieces[-1]) >= line_cap)):
+            pieces.append([])
+            used = 0
+        pieces[-1].append(line)
+        used += len(line) + 1
+    out = ["\n".join(p) for p in pieces if p]
+    return [f"{opener}\n{p}\n{closer}" for p in out] if fence else out
+
+
+def _block_lines(md: str) -> int:
+    """Lines that can each become a rich block: non-blank lines outside fences, a fence counting 1."""
+    count, in_fence = 0, False
+    for line in md.split("\n"):
+        if _FENCE_RE.match(line):
+            if not in_fence:
+                count += 1
+            in_fence = not in_fence
+        elif not in_fence and line.strip():
+            count += 1
+    return count
+
+
+def _chunk_md(text: str, size: int = _CHUNK, *, max_lines: int | None = None) -> list[str]:
+    """Pack Markdown blocks into chunks of at most ``size`` chars (and ``max_lines`` lines).
+
+    Cuts fall only between blocks, so a heading stays with its section and a fence or table is
+    never cut; a single block larger than a chunk is split by lines (a fence re-opened)."""
     chunks: list[str] = []
-    while len(text) > size:
-        window = text[:size]
-        cut = window.rfind("\n\n")
-        if cut <= 0:
-            cut = window.rfind("\n")
-        if cut <= 0:
-            cut = size
-        chunks.append(text[:cut].rstrip())
-        text = text[cut:].lstrip("\n")
-    if text:
-        chunks.append(text)
+    cur = ""
+    for block in _md_blocks(text):
+        for piece in _split_block(block, size, max_lines):
+            cand = f"{cur}\n\n{piece}" if cur else piece
+            too_many = max_lines is not None and _block_lines(cand) > max_lines
+            if cur and (len(cand) > size or too_many):
+                chunks.append(cur)
+                cur = piece
+            else:
+                cur = cand
+    if cur:
+        chunks.append(cur)
     return chunks
 
 
-def _render_chunks(query: HumanQuery) -> list[str]:
-    """Render a :class:`HumanQuery` as one-or-more HTML messages: a header on the first, the
-    Markdown body (chunked + converted), and a reply hint on the last."""
-    md_chunks = _chunk_md(query.message) or ["(no message)"]
-    html_chunks = [_md_to_html(c) for c in md_chunks]
-    header = (
-        f"<b>Human input needed · {_html.escape(query.kind)}</b>\n"
-        f"from <b>{_html.escape(query.sender_label)}</b>\n\n"
+def _html_chunks(md: str, size: int = _CHUNK) -> list[str]:
+    """Render Markdown to HTML messages that each fit Telegram's cap, measured AFTER rendering
+    (escaping can grow a chunk past the limit); an overflowing chunk is re-split smaller."""
+    out: list[str] = []
+    for chunk in _chunk_md(md, size) or ["(no message)"]:
+        html_text = _md_to_html(chunk)
+        if len(html_text) > _TG_MSG_LIMIT and size > 200:
+            out.extend(_html_chunks(chunk, size // 2))
+        else:
+            out.append(html_text)
+    return out
+
+
+def _query_markdown(query: HumanQuery) -> str:
+    """A :class:`HumanQuery` as one Markdown document: header, body, reply hint.
+
+    Identifiers go in inline code so an underscore in a role name reads literally on both paths."""
+    return (
+        f"**Human input needed** · `{query.kind}`\nfrom `{query.sender_label}`\n\n"
+        f"{query.message.strip() or '(no message)'}\n\n"
+        "*Reply to this message to answer.*"
     )
-    hint = "\n\n<i>Reply to this message to answer.</i>"
-    html_chunks[0] = header + html_chunks[0]
-    html_chunks[-1] = html_chunks[-1] + hint
-    return html_chunks
+
+
+def _render_chunks(query: HumanQuery) -> list[str]:
+    """The HTML fallback rendering of a query (header on the first message, hint on the last)."""
+    return _html_chunks(_query_markdown(query))
+
+
+# ── Tables: the fallback ladder (aligned <pre>, else a bullet list) ─────────────────────
+
+
+def _table_cells(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _plain_cell(cell: str) -> str:
+    return re.sub(r"(\*\*|__|`)", "", cell)
+
+
+def _table_to_md(lines: list[str]) -> str:
+    """Rewrite a GFM table for a surface without tables: an aligned monospace block when it fits
+    on a phone, otherwise one bullet per row with the header as each value's label."""
+    header = _table_cells(lines[0])
+    rows = [_table_cells(l) for l in lines[2:]]
+    widths = [
+        max([len(_plain_cell(h))] + [len(_plain_cell(r[k])) for r in rows if k < len(r)])
+        for k, h in enumerate(header)
+    ]
+    if sum(widths) + 2 * (len(widths) - 1) <= _TABLE_PRE_WIDTH:
+        def fmt(cells: list[str]) -> str:
+            padded = [_plain_cell(c).ljust(w) for c, w in zip(cells, widths)]
+            return "  ".join(padded).rstrip()
+
+        body = [fmt(header), "  ".join("-" * w for w in widths)] + [fmt(r) for r in rows]
+        return "```\n" + "\n".join(body) + "\n```"
+    bullets = []
+    for r in rows:
+        pairs = [f"**{h}**: {v}" for h, v in zip(header, r) if v]
+        bullets.append("- " + " · ".join(pairs))
+    return "\n".join(bullets)
+
+
+def _convert_tables(md: str) -> str:
+    lines = md.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if (
+            _TABLE_ROW_RE.match(lines[i])
+            and i + 1 < len(lines)
+            and _TABLE_SEP_RE.match(lines[i + 1])
+        ):
+            j = i + 2
+            while j < len(lines) and _TABLE_ROW_RE.match(lines[j]):
+                j += 1
+            out.append(_table_to_md(lines[i:j]))
+            i = j
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
