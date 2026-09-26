@@ -64,17 +64,16 @@ def test_loader_rejects_governance_references(tmp_path: Path) -> None:
 
 # --------------------------------------------------------- HITL tools are offered conditionally
 
-# The tools that exist only when a human is attending: every role's provider appends them to its
-# tool definitions solely when a `human_handler` is wired (`react.py` ReadOnly/Sandbox providers,
-# and `roles.py` for the lead's authoring loop). A prompt that names one unconditionally instructs
-# an unattended role to use a tool it was never given — which is what both published benchmark
-# batches ran with.
-_CONDITIONAL_TOOLS = ("ask_human", "plan_and_debate")
+# The address that exists only when a human is attending: `human` is among `message`'s addresses
+# solely when the run has a human handler (E12, `hitl.router.SeatRouter.directory`). A prompt that
+# names it unconditionally instructs an unattended role to text nobody — which is what both
+# published benchmark batches ran with, when the address was a tool (`ask_human`).
+_CONDITIONAL_TOOLS = ('`to: "human"`', "`message` to `human`", "`human` is among")
 
 # The phrasings that make the instruction conditional. Positive-action form throughout (CLAUDE.md
 # §3), so this is "when it is offered, do X; otherwise do Y" rather than a prohibition.
-_CONDITIONAL_MARKERS = ("is offered", "are offered", "unattended", "when it is absent",
-                        "no such tool", "when they are offered")
+_CONDITIONAL_MARKERS = ("is among", "is not among", "unattended", "when it is absent",
+                        "is reachable", "no human reachable")
 
 
 @pytest.mark.parametrize("role", PROMPT_FILENAMES)

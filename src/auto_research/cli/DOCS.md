@@ -52,3 +52,4 @@ the run, and prints the final `ReviewVerdict`.
 - 2026-07-29 -> 2026-07-31 — `--format text` leads with `ResearchRun.summary()`. Ctrl-C/SIGTERM
   route through `RunControl.interrupt` (`install_signal_handlers=True`); `UserInterruptionError`
   writes `result.json` status `interrupted` and exits 130.
+- 2026-09-25 — [R1] Text output prints `Assigned to:` in place of the two removed verdict flags.

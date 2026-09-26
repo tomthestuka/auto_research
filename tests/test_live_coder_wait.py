@@ -156,19 +156,50 @@ def _preserve(cell: str, clone: Path, observed: dict, monitor) -> Path:
     return record
 
 
+class _LeadInbox:
+    """The lead's side of the channel, and nothing else: the coder's ``message(to="lead")`` posts
+    here (E12) and wakes a pending wait. The cells read the question back from this inbox."""
+
+    def __init__(self) -> None:
+        from auto_research.run_control import RunControl
+
+        self.agent_key = "analyst_lead"
+        self.channel = None
+        self.control = RunControl()
+
+    def ensure_run_control(self):
+        return self.control
+
+    def questions(self) -> list[str]:
+        return [e.text for e in self.control.drain_inbox(self.agent_key) if e.sender == "coder"]
+
+
+async def execute_drive_coder(session, arguments):
+    """The lead's ``message(to="coder")`` as these cells drive it: the production executor."""
+    from auto_research.agents.react import execute_coder_message
+
+    return await execute_coder_message(
+        session, str(arguments.get("instructions") or ""), mid_turn=bool(arguments.get("mid_turn"))
+    )
+
+
 def _build_session(clone: Path, monitor):
     """The production session builder, configured coder member, the frozen real brief."""
     from auto_research.sandbox.merge_flow import build_authoring_session
     from benchmarks.author_bench.brief import load_brief
 
-    return build_authoring_session(
+    lead = _LeadInbox()
+    session = build_authoring_session(
         load_brief(),
-        lead=None,
+        lead=lead,
         toolkit_root=clone,
         worktree_base=clone.parent / "authoring",
         direct_branch="ai",
         monitor=monitor,
     )
+    session.watch_steers(lead.control.steer_event(lead.agent_key))
+    session.test_lead = lead  # the cells read the coder's questions from its inbox
+    return session
 
 
 def _mechanism(cell: str, scenario) -> dict:
@@ -218,7 +249,7 @@ def _seconds_after(later: datetime, earlier: datetime) -> float:
 
 def test_mechanism_turn_end_wakes_the_wait():
     """The coder's turn ends → the wait returns at once with that turn's narration."""
-    from auto_research.agents.react import execute_drive_coder, execute_wait_coder
+    from auto_research.agents.react import execute_wait_coder
 
     async def scenario(session, monitor, observed):
         sent = await execute_drive_coder(
@@ -238,18 +269,19 @@ def test_mechanism_turn_end_wakes_the_wait():
 
 
 def test_mechanism_question_wakes_the_wait_and_the_answer_goes_mid_turn():
-    """`ask_lead` → the wait returns with the question; a plain reply is delivered mid-turn."""
-    from auto_research.agents.react import execute_drive_coder, execute_wait_coder
+    """`message(to="lead")` → the wait returns on the question; a plain reply is delivered mid-turn."""
+    from auto_research.agents.react import execute_wait_coder
 
     async def scenario(session, monitor, observed):
         await execute_drive_coder(session, {"instructions": (
-            "Call your ask_lead tool with exactly this question: 'WAIT-PROBE: should the band be "
-            "PI or ENERGY?'. After it returns, run the shell command `sleep 45`, then end your "
-            "turn by stating the answer the lead gave you."
+            "Call your message tool with to='lead' and exactly this text: 'WAIT-PROBE: should the "
+            "band be PI or ENERGY?'. After it returns, run the shell command `sleep 45`, then end "
+            "your turn by writing ANSWER=<the lead's answer>, or ANSWER=NONE if none reached you."
         )})
         first = await execute_wait_coder(session, {"timeout_s": 600})
         observed["first_wait_returned_at"] = _now()
         observed["first_wait_text"] = first.text
+        observed["inbox_questions"] = session.test_lead.questions()
         answer = await execute_drive_coder(session, {"instructions": "PI."})
         observed["answer_reply"] = answer.text
         final = await execute_wait_coder(session, {"timeout_s": 600})
@@ -258,17 +290,20 @@ def test_mechanism_question_wakes_the_wait_and_the_answer_goes_mid_turn():
     obs = _mechanism("question", scenario)
     ledger = _read_ledger("question")
     asks = [e for e in ledger if e["event"] == "coder.ask_lead"]
-    assert asks, "the coder never called ask_lead, so the question wake was not exercised"
-    assert "[coder asks]" in obs["first_wait_text"] and "WAIT-PROBE" in obs["first_wait_text"]
+    assert asks, "the coder never messaged the lead, so the question wake was not exercised"
+    assert "A message for you has arrived" in obs["first_wait_text"], obs["first_wait_text"]
+    assert any("WAIT-PROBE" in q for q in obs["inbox_questions"]), obs["inbox_questions"]
     latency = _seconds_after(_parse(obs["first_wait_returned_at"]), _parse(asks[0]["created_at"]))
     assert latency < WAKE_SLACK_S, f"the wait returned {latency:.1f}s after the question"
     assert "as the answer to its question" in obs["answer_reply"], obs["answer_reply"]
     assert any(e["event"] == "coder.steer" for e in ledger), "the answer never reached the turn"
+    # The coder's own words: the answer must have reached its model, not only its harness.
+    assert "ANSWER=PI" in obs["final_wait_text"].replace("*", "").replace(" ", ""), obs["final_wait_text"]
 
 
 def test_mechanism_short_timeout_is_raised_to_the_floor_and_times_out():
     """`wait_coder(5)` on a busy coder holds for the floor and returns 'still working'."""
-    from auto_research.agents.react import execute_drive_coder, execute_wait_coder
+    from auto_research.agents.react import execute_wait_coder
     from auto_research.env import coder_wait_limits_s
 
     floor, _, _ = coder_wait_limits_s()
@@ -293,7 +328,7 @@ def test_mechanism_short_timeout_is_raised_to_the_floor_and_times_out():
 
 def test_mechanism_plain_message_is_queued_and_mid_turn_steers():
     """A plain `drive_coder` becomes the next turn; `mid_turn=true` reaches the running one."""
-    from auto_research.agents.react import execute_drive_coder, execute_wait_coder
+    from auto_research.agents.react import execute_wait_coder
 
     async def scenario(session, monitor, observed):
         await execute_drive_coder(session, {"instructions": (
@@ -332,7 +367,7 @@ def test_mechanism_plain_message_is_queued_and_mid_turn_steers():
 
 def test_mechanism_submit_waits_for_the_coder_before_the_gate():
     """`submit_for_review` on a working coder: the gate starts only after the turn ends."""
-    from auto_research.agents.react import execute_drive_coder, execute_submit
+    from auto_research.agents.react import execute_submit
 
     async def scenario(session, monitor, observed):
         await execute_drive_coder(session, {"instructions": (
@@ -396,7 +431,7 @@ def test_mechanism_waiting_on_an_idle_coder_returns_at_once():
 def test_mechanism_a_dead_coder_wakes_the_wait_as_a_failure():
     """The author process is SIGKILLed mid-turn: the wait must return FAILED, not hang or read
     as narration (the 2026-09-09 corpse-steering defect, now on the waiting path)."""
-    from auto_research.agents.react import execute_drive_coder, execute_wait_coder
+    from auto_research.agents.react import execute_wait_coder
 
     async def scenario(session, monitor, observed):
         await execute_drive_coder(session, {"instructions": (
@@ -420,23 +455,25 @@ def test_mechanism_a_dead_coder_wakes_the_wait_as_a_failure():
 def test_mechanism_submit_hands_back_a_question_instead_of_gating():
     """A coder that asks while a submit waits would never stop; the submit returns the question
     and the gate never runs."""
-    from auto_research.agents.react import execute_drive_coder, execute_submit
+    from auto_research.agents.react import execute_submit
 
     async def scenario(session, monitor, observed):
         await execute_drive_coder(session, {"instructions": (
-            "Call your ask_lead tool with exactly this question: 'SUBMIT-PROBE: which band?'. "
-            "After it returns, run the shell command `sleep 60`, then reply DONE."
+            "Call your message tool with to='lead' and exactly this text: 'SUBMIT-PROBE: which "
+            "band?'. After it returns, run the shell command `sleep 60`, then reply DONE."
         )})
         out = await execute_submit(session, None)
         observed["submit_text"] = out.text
+        observed["inbox_questions"] = session.test_lead.questions()
         observed["submits_used"] = session.submits_used
 
     obs = _mechanism("submit_question", scenario)
     ledger = _read_ledger("submit_question")
     if not any(e["event"] == "coder.ask_lead" for e in ledger):
-        pytest.skip("the coder never reached ask_lead (it reported the tool missing — see the "
+        pytest.skip("the coder never messaged the lead (it reported the tool missing — see the "
                     "record), so the hand-back path was not exercised")
-    assert "Not submitted" in obs["submit_text"] and "SUBMIT-PROBE" in obs["submit_text"]
+    assert "Not submitted" in obs["submit_text"] and "message" in obs["submit_text"]
+    assert any("SUBMIT-PROBE" in q for q in obs["inbox_questions"]), obs["inbox_questions"]
     assert not any(e["event"] == "gate.start" for e in ledger), "the gate ran anyway"
     assert obs["submits_used"] == 0, "a handed-back submit spent a submission"
     _assert_cell_left_nothing_behind(obs)
@@ -445,7 +482,7 @@ def test_mechanism_submit_hands_back_a_question_instead_of_gating():
 def test_mechanism_submit_with_a_coder_that_dies_while_it_waits():
     """The coder is killed while a submit is waiting on it: the submit reports the failure and
     never gates a tree nobody finished."""
-    from auto_research.agents.react import execute_drive_coder, execute_submit
+    from auto_research.agents.react import execute_submit
 
     async def scenario(session, monitor, observed):
         await execute_drive_coder(session, {"instructions": (
@@ -473,7 +510,7 @@ def test_mechanism_submit_with_a_coder_that_dies_while_it_waits():
 def test_mechanism_a_stop_during_a_submit_wait_cancels_it():
     """`/stop` (RunControl.interrupt on the run task) while a submit is waiting on the coder:
     the task cancels promptly, the gate never runs, and closing leaves a clean tree."""
-    from auto_research.agents.react import execute_drive_coder, execute_submit
+    from auto_research.agents.react import execute_submit
     from auto_research.run_control import RunControl
 
     async def scenario(session, monitor, observed):
@@ -547,7 +584,7 @@ def _pending_wait(monitor) -> tuple[str, datetime] | None:
     calls = {}
     for event in _events(monitor, prefix="analyst_lead.run_cycle.tool_"):
         data = getattr(event, "data", {}) or {}
-        if data.get("tool") != "wait_coder":
+        if data.get("tool") != "wait_for_reply":
             continue
         if event.event.endswith("tool_call"):
             calls[data.get("tool_call_id")] = event.created_at
@@ -659,7 +696,7 @@ def _lead_pacing(ledger: list[dict]) -> dict:
     turns = [e for e in in_window if e["event"] == "analyst_lead.run_cycle.tools"]
     calls = [e for e in in_window if e["event"] == "analyst_lead.run_cycle.tool_call"]
     results = [e for e in ledger if e["event"] == "analyst_lead.run_cycle.tool_result"]
-    waits = [r for r in results if (r.get("data") or {}).get("tool") == "wait_coder"]
+    waits = [r for r in results if (r.get("data") or {}).get("tool") == "wait_for_reply"]
     session_waits = [e.get("data") or {} for e in ledger if e["event"] == "coder.wait"]
     coder_events = sum(e["event"] in ("coder.turn_end", "coder.ask_lead") for e in in_window)
     by_tool: dict[str, int] = {}
@@ -682,10 +719,21 @@ def _lead_pacing(ledger: list[dict]) -> dict:
     }
 
 
+def _assert_lead_messaged_its_coder(ledger: list[dict]) -> None:
+    """E12: the lead reaches its coder with `message(to="coder")`, in its own tool call."""
+    to_coder = [
+        e for e in ledger if e["event"] == "channel.message"
+        and (e.get("data") or {}).get("from") == "analyst_lead"
+        and (e.get("data") or {}).get("to") == "coder"
+    ]
+    assert to_coder, "the lead never messaged its coder, so the coder address was not exercised"
+    assert not any((e.get("data") or {}).get("is_error") for e in to_coder), to_coder
+
+
 def _assert_lead_waited(obs: dict) -> None:
     pacing = obs["pacing"]
     assert pacing.get("authoring_window_s"), "no coder turn was recorded, so nothing was measured"
-    assert pacing["lead_calls_by_tool"].get("wait_coder"), "the lead never used wait_coder"
+    assert pacing["lead_calls_by_tool"].get("wait_for_reply"), "the lead never used wait_for_reply"
     assert pacing["unknown_tool_results"] == 0
     for wait in pacing["session_waits"]:
         # Mechanical: a wait with no news can only return at or after the floor.
@@ -710,8 +758,9 @@ def test_lead_waits_instead_of_polling_and_a_steer_wakes_it():
     obs, clone, _ = _lead_run("lead_cycle", on_parked)
     ledger = _read_ledger("lead_cycle")
     _assert_lead_waited(obs)
+    _assert_lead_messaged_its_coder(ledger)
     if not obs.get("fired"):
-        pytest.skip("the lead was never parked in wait_coder while its coder worked; "
+        pytest.skip("the lead was never parked in wait_for_reply while its coder worked; "
                     "the steer wake was not exercised (pacing above was still asserted)")
     call_id = obs["parked_call_id"]
     result = next(
@@ -721,7 +770,7 @@ def test_lead_waits_instead_of_polling_and_a_steer_wakes_it():
     )
     latency = _seconds_after(_parse(result["created_at"]), _parse(obs["steer_sent_at"]))
     assert latency < WAKE_SLACK_S, f"the parked wait returned {latency:.1f}s after the steer"
-    assert "human steer" in result["data"]["text"].lower()
+    assert "a message for you has arrived" in result["data"]["text"].lower()
     assert any(e["event"] == "analyst_lead.run_cycle.steer" for e in ledger), (
         "the wait woke but the steer never reached the lead's conversation"
     )
@@ -736,7 +785,7 @@ def test_lead_stop_while_parked_in_the_wait_cancels_cleanly():
 
     obs, clone, base = _lead_run("lead_stop", on_parked)
     if not obs.get("fired"):
-        pytest.skip("the lead was never parked in wait_coder while its coder worked")
+        pytest.skip("the lead was never parked in wait_for_reply while its coder worked")
     assert obs.get("interrupted"), "the stop landed but cancelled nothing"
     assert obs["outcome"] == "cancelled", obs["outcome"]
     latency = _seconds_after(_parse(obs["cancelled_at"]), _parse(obs["fired_at"]))

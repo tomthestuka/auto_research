@@ -250,9 +250,13 @@ def test_run_summary_derives_cost_tools_and_reports_from_the_event_stream() -> N
         event(7, "review.result", data={"approved": True}, minutes=6),
         event(8, "commit", data={"tool": "ixpe_qu_dcf", "commit_sha": "abcdef1234567"}, minutes=7),
         event(9, "analyst.tool_result", data={"tool": "run_fit", "is_error": True}, minutes=8),
-        event(10, "analyst.tool_call", data={"tool": "ask_human"}, minutes=9),
-        event(11, "reviewer.analysis_review.verdict",
-              data={"verdict": {"accepted": True, "rationale": "sound"}}, minutes=10),
+        event(10, "channel.message", data={"from": "analyst_lead", "to": "human"}, minutes=9),
+        event(11, "reviewer.review.verdict",
+              data={"verdict": {"accepted": False, "assign_to": "analysts", "rationale": "rework"}},
+              minutes=10),
+        event(11, "reviewer.review.verdict",
+              data={"verdict": {"accepted": True, "assign_to": "human", "rationale": "sound"}},
+              minutes=10),
         event(12, "run.report", data={"report_pdf": "/runs/x/report.pdf"}, minutes=11),
         event(13, "run.finish", data={"lit_iterations": 1, "analysis_iterations": 2},
               cost=5.0, minutes=12),
@@ -398,12 +402,15 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path, mon
             raise NotImplementedError
 
     class Reviewer:
-        async def review(self, request, *, stage, report=None, **_):
-            return ReviewerReport(
-                accepted=report is not None,
-                rationale="analysis done" if report is not None else "literature ok",
-                follow_up="" if report is not None else "analyse",
-            )
+        async def review(self, request, *, arrived="request", report=None, **_):
+            if arrived == "request":
+                return ReviewerReport(rationale="search first", assign_to="librarian",
+                                      follow_up="search")
+            if arrived == "librarian":
+                return ReviewerReport(rationale="literature ok", assign_to="analysts",
+                                      follow_up="analyse")
+            return ReviewerReport(accepted=True, rationale="analysis done", assign_to="human",
+                                  title="T", abstract="A", key_findings=["K"])
 
     class Consensus:
         async def run(self, workers, lead, task):
@@ -430,7 +437,7 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path, mon
     events = [event.event for event in run.monitor.events]
     assert events[0] == "run.start"
     assert "librarian.literature.report" in events
-    assert "reviewer.analysis_review.verdict" in events
+    assert "reviewer.review.verdict" in events
     # The run closes on the derived digest, one event after the finish record.
     assert events[-2:] == ["run.finish", "run.summary"]
     assert "## Reviewer" in run.markdown()

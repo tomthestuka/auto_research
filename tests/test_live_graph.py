@@ -137,10 +137,10 @@ class LoggingReviewer:
         self.events = events
         self.calls = 0
 
-    async def review(self, request, *, stage, **kwargs):
+    async def review(self, request, **kwargs):
         self.calls += 1
-        verdict = await self.agent.review(request, stage=stage, **kwargs)
-        stage = f"review_{stage}"
+        verdict = await self.agent.review(request, **kwargs)
+        stage = f"review_to_{verdict.assign_to}"
         self.events.append(
             _event(
                 f"{stage}_{self.calls}",

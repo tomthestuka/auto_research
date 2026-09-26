@@ -192,8 +192,6 @@ def readonly_tools_for(
     roots: Sequence[Path],
     retrieval: RetrievalBackend | None = None,
     web_source: Any = None,
-    human_handler: HumanHandler | None = None,
-    model: str = "",
 ) -> ReadOnlyToolProvider:
     """The read-only inspection loop production gives ``role``.
 
@@ -211,17 +209,48 @@ def readonly_tools_for(
         retrieval=retrieval,
         web_source=web_source,
         include_data_catalog=lead,
-        # Only the lead gets plan_and_debate, and only when a human is actually reachable:
-        # headless, a role must not be handed a channel that cannot answer.
-        include_plan_and_debate=lead and human_handler is not None,
         include_text_search=not lead,
         # The reviewer reads papers through its own receipted `read_paper` (the Docling text its
         # quotes are checked against), so the native-PDF `open_paper` is not declared for it.
         include_open_paper=False,
-        human_handler=human_handler,
-        asked_by=role,
-        model=model,
     )
+
+
+def attach_channel(
+    seats: Sequence[Any],
+    *,
+    run_id: str,
+    run_control: RunControl,
+    human_handler: HumanHandler | None = None,
+    monitor: RunMonitor | None = None,
+) -> Any:
+    """Put ``seats`` on one quick channel (E12) and return its ``SeatRouter``.
+
+    Every seat passed can text every other and, when ``human_handler`` is wired, the human. Only
+    the graph seats are passed: the co-lead and the status monitor are never registered, so no
+    seat can reach them and they receive nothing. A seat needs its ``agent_key`` first (its
+    address); one without it is skipped.
+    """
+    from auto_research.hitl.router import SeatRouter
+
+    orch = load_orchestration_config()
+    router = SeatRouter(
+        run_control, human_handler, monitor=monitor,
+        mirror=bool(orch.get("channel_mirror", True)),
+        store=ReceiptStore.for_run(run_dir(run_id)),
+    )
+    for seat in seats:
+        key = getattr(seat, "agent_key", None)
+        if not key:
+            continue
+        try:
+            seat.channel = router
+            if getattr(seat, "run_control", None) is None:
+                seat.run_control = run_control
+            router.register(key, seat)
+        except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it
+            pass
+    return router
 
 
 def readonly_roots_for(run_id: str, toolkit_root: Path) -> list[Path]:
@@ -281,8 +310,6 @@ def attach_reviewer_runtime(
                 roots=readonly_roots_for(run_id, toolkit_root),
                 retrieval=retrieval,
                 web_source=web_source,
-                human_handler=human_handler,
-                model=_model_label(getattr(reviewer, "model", None)) or "",
             )
         except Exception:  # noqa: BLE001 — tools are optional; never block the run
             pass
@@ -340,8 +367,6 @@ def attach_lead_runtime(
                 roots=readonly_roots_for(run_id, toolkit_root),
                 retrieval=retrieval,
                 web_source=web_source,
-                human_handler=human_handler,
-                model=_model_label(getattr(lead, "model", None)) or "",
             )
         except Exception:  # noqa: BLE001 — tools are optional; never block the run
             pass
@@ -800,6 +825,12 @@ async def run_research(
         run_control=run_control,
     )
 
+    # The quick channel (E12): every graph seat on one router (the co-lead and status monitor never).
+    attach_channel(
+        (reviewer, io_agent, lead, *workers), run_id=run_id, run_control=run_control,
+        human_handler=human_handler, monitor=run_monitor,
+    )
+
     await run_monitor.record(
         "run",
         "run.start",
@@ -831,6 +862,8 @@ async def run_research(
         "report": None,
         "verdict": None,
         "verdicts": [],
+        "arrived": "request",
+        "human_rounds": 0,
         "lit_iterations": 0,
         "analysis_iterations": 0,
         "max_iterations": max_iterations,
@@ -854,6 +887,7 @@ async def run_research(
             receipts=ReceiptStore.for_run(run_dir(run_id)),
             report_formats=resolved_formats,
             checkpointer=saver,
+            human_handler=human_handler,
         )
 
         try:
@@ -861,6 +895,7 @@ async def run_research(
             if resume:
                 existing = await saver.aget_tuple(config)
                 if existing is not None:
+                    _refuse_pre_sole_io_checkpoint(existing)
                     graph_input = None  # None → LangGraph continues from the latest snapshot
                     await run_monitor.record(
                         "run",
@@ -940,6 +975,7 @@ async def run_research(
             "verdict": verdict,
             "lit_iterations": final_state.get("lit_iterations", 0),
             "analysis_iterations": final_state.get("analysis_iterations", 0),
+            "human_rounds": final_state.get("human_rounds", 0),
             "cost_usd": cost_meter.total_usd,
         },
     )
@@ -954,6 +990,22 @@ async def run_research(
         report_latex=final_state.get("report_latex"),
         report_pdf=final_state.get("report_pdf"),
     )
+
+
+def _refuse_pre_sole_io_checkpoint(existing: Any) -> None:
+    """Refuse, loudly, to resume a run checkpointed before the reviewer became the sole I/O.
+
+    That graph (before 2026-09-25) had other nodes (``review_literature``, ``review_analysis``) and
+    held one literature report where this one accumulates a list, so LangGraph would fail deep
+    inside a node, or resume into a node that no longer exists. Every state this graph writes
+    carries ``arrived``; one without it came from the old graph.
+    """
+    values = (getattr(existing, "checkpoint", None) or {}).get("channel_values") or {}
+    if values and "arrived" not in values:
+        raise RuntimeError(
+            "this run was checkpointed on the graph before the reviewer became the sole I/O "
+            "(2026-09-25) and cannot resume on this one; start it again as a new run"
+        )
 
 
 # Per-step bounds on interrupt cleanup. Generous enough for a real kill or connector close, short
@@ -1035,7 +1087,10 @@ async def _interrupt_cleanup(
                           summary=f"Interrupt cleanup step '{name}' failed — continuing",
                           data={"step": name, "error": repr(exc)})
 
-    # 1 — kill everything that can still write to disk.
+    # 1 — kill everything that can still write to disk. Resumed seats first (E12): a seat resumed
+    # by a message runs its own loop beside the run task, so cancelling the run task alone would
+    # leave it calling tools into the sandboxes this step kills.
+    await _step("cancel_resumed_seats", run_control.cancel_resumed())
     for index, sandbox in enumerate(sandboxes):
         await _step(f"kill_sandbox_{index}", sandbox.kill_now())
 

@@ -10,7 +10,7 @@ from auto_research.schemas.figures import (
     FiguredReport,
     document_from_file,
 )
-from auto_research.schemas.hitl import HumanQuery, HumanQueryKind, HumanResponse
+from auto_research.schemas.hitl import HumanAttachment, HumanQuery, HumanQueryKind, HumanResponse
 from auto_research.schemas.merge import (
     CheckResult,
     GateReport,
@@ -46,6 +46,7 @@ __all__ = [
     "DocumentRef",
     "FullTextLink",
     "GateReport",
+    "HumanAttachment",
     "HumanQuery",
     "HumanQueryKind",
     "HumanResponse",

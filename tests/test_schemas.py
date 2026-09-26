@@ -131,16 +131,18 @@ def test_protocol_rejects_extra_fields():
         ReviewerReport(accepted=True, rationale="Looks sound.", surprise="nope")
 
 
-def test_review_verdict_flags_feedback_edges():
+def test_review_verdict_names_who_receives_it():
     verdict = ReviewerReport(
         accepted=False,
         rationale="Literature is stale.",
-        needs_more_literature=True,
+        assign_to="librarian",
         follow_up="Search papers from 2025 onward.",
     )
 
-    assert verdict.needs_more_literature is True
-    assert verdict.needs_analysis_rework is False
+    assert verdict.assign_to == "librarian"
+    assert ReviewerReport().assign_to is None
+    with pytest.raises(ValidationError):
+        ReviewerReport(rationale="r", assign_to="lead")
 
 
 def test_tool_call_request_is_report_independent():

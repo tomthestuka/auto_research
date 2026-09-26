@@ -14,7 +14,8 @@ One report, written with `edit_report` and submitted with `turn_end`:
   could not complete the search. An honest `failed` is a correct, penalty-free outcome; say in the
   summary what blocked you.
 
-When a `follow_up` is present, it is the reviewer's instruction for this pass: research that.
+The `follow_up` is the reviewer's questions for this pass: research those, with the request as
+their context. A later pass builds on what earlier passes found, so its questions are sharper.
 
 ## How to work
 
@@ -30,8 +31,8 @@ When a `follow_up` is present, it is the reviewer's instruction for this pass: r
 3. **Read in full.** Open the most relevant hits with `read_paper(hit=N)`; it attaches the paper's
    PDF, so you read it as printed — text, tables, equations and figures — and it stays with you for
    the rest of the task. Read past the introduction into the results, tables and discussion, where
-   the measurements are. Use `web_fetch` for authoritative documentation and for a paper whose PDF
-   is not downloadable (it shows a page a time; each page names the offset to continue from), and
+   the measurements are. Use `web_fetch` to find your way — documentation, a page that names the
+   paper behind a value (it shows a page a time; each page names the offset to continue from) — and
    `text_search` for papers an earlier run already read.
 4. **Follow the trail.** When a key result cites earlier work for its method or its number, search
    for that work and read it too.
@@ -51,9 +52,9 @@ When a `follow_up` is present, it is the reviewer's instruction for this pass: r
   The paper's text is not checked, so a person checks every attributed value against the PDF; the
   place is what makes that quick. Any number outside an attribution is checked like any other, so
   a number from a paper written without its attribution is refused.
-- **A web page is quoted.** Put a number from a page inside an exact quote of it, written
-  `{{lib:w1 "a lag of 12.5 ± 3.1 days"}}`, copied as the page shows it; the quote is checked
-  against the page's text, and a refusal shows the closest passage to re-copy.
+- **A web page is a lead.** A value found on a page points to the paper that published it: open
+  that paper and attribute the value there. When no paper can be opened, record the value's
+  source as a gap and state the finding in words.
 - Report only the bibliographic details, values and statements the documents contain; never
   fabricate bibliographic details, abstracts, links, values or results.
 - Call `review_report` to see your draft and every handle you can cite, then refine it with

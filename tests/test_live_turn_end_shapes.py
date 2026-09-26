@@ -204,14 +204,6 @@ SHAPES: dict[str, dict] = {
         "expect": "without saying where",
         "why": "a paper value is attributed with where in the paper it is, never text-matched.",
     },
-    "shell_echoed_quote": {
-        "accepts": False,
-        "judgment": False,
-        "problem_key": "shell_echoed_quote",
-        "expect": "only repeats it",
-        "why": "a number typed into a shell command cannot be grounded by that shell's output.",
-        "unreachable": "the lead has no shell tool; pinned in tests/test_provenance.py",
-    },
     "flagged_quote": {
         "accepts": False,
         "judgment": False,
@@ -273,7 +265,7 @@ def _figure(path, caption="A plot the report cites"):
     from auto_research.schemas import FigureRef
 
     return FigureRef(
-        path=path, caption=caption, mime_type="image/png", produced_by="stub_tool",
+        path=path, caption=caption, mime_type="image/png", produced_by="research_toolkit.t.stub_tool",
         created_at=datetime.now().astimezone(), sha256="0" * 64,
     )
 
@@ -316,16 +308,16 @@ def _worker_reports(shape: str, store=None):
                           findings=["PD ~ 3.4%"], status="succeeded"),
         ]
     # Real receipts behind the workers' numbers, as a live run has them.
-    r0 = store.mint(source="analyst_worker_0", kind="result", produced_by="xspec_utils.fit_pol",
+    r0 = store.mint(source="analyst_worker_0", kind="result", produced_by="research_toolkit.xspec_utils.fit_pol",
                     data="PD = 4.0 +/- 0.2 %, PA = -20.7 +/- 1.4 deg")
-    r1 = store.mint(source="analyst_worker_1", kind="result", produced_by="xspec_utils.fit_pol",
+    r1 = store.mint(source="analyst_worker_1", kind="result", produced_by="research_toolkit.xspec_utils.fit_pol",
                     data="PD = 3.4 +/- 0.2 %, PA = -21.0 +/- 1.6 deg")
     extra0: list[str] = []
     extra1: list[str] = []
     if shape == "quote_without_text":
         png = store.root.parent / "pd_vs_energy.png"
         png.write_bytes(b"\x89PNG stub")
-        fig = store.mint(source="analyst_worker_0", kind="figure", produced_by="xspec_utils.plot",
+        fig = store.mint(source="analyst_worker_0", kind="figure", produced_by="research_toolkit.xspec_utils.plot",
                          path=png, caption="PD versus energy", mime_type="image/png")
         extra0.append(f"The energy dependence is shown in [{fig.handle}].")
     if shape == "attribution_without_locator":
@@ -338,7 +330,7 @@ def _worker_reports(shape: str, store=None):
                            source_sha256=sha256_file(pdf))
         extra0.append(f"The published value it is compared with is in [{paper.handle}].")
     if shape == "flagged_quote":
-        bad = store.mint(source="analyst_worker_1", kind="result", produced_by="xspec_utils.fit_pol",
+        bad = store.mint(source="analyst_worker_1", kind="result", produced_by="research_toolkit.xspec_utils.fit_pol",
                          data="[exit 1]\nfit diverged; last iterate PD = 9.9 %", failed=True)
         extra1.append(f"A first fit attempt failed [{bad.handle}].")
     return [
@@ -678,7 +670,7 @@ def test_shape_coder_still_running(tmp_path, monkeypatch):
     into the next test would make a later shape refuse for a reason that is not its own.
     """
     from auto_research.agents.react import (
-        SUBMIT_TOOL, TURN_END_TOOL, WAIT_CODER_TOOL, LeadCycle, ReadOnlyToolProvider,
+        SUBMIT_TOOL, TURN_END_TOOL, WAIT_FOR_REPLY_TOOL, LeadCycle, ReadOnlyToolProvider,
     )
 
     original = LeadCycle.__init__
@@ -700,7 +692,7 @@ def test_shape_coder_still_running(tmp_path, monkeypatch):
         outcome = await inner_execute(self, name, arguments)
         cycle = getattr(self, "cycle", None)
         if cycle is not None:
-            if name in (WAIT_CODER_TOOL, SUBMIT_TOOL):
+            if name in (WAIT_FOR_REPLY_TOOL, SUBMIT_TOOL):
                 cycle.session_open = False
             elif name == TURN_END_TOOL and outcome.is_error and "coding session" in outcome.text:
                 named["n"] += 1
@@ -775,11 +767,6 @@ def test_shape_attribution_without_locator(tmp_path):
     _assert_refused_then_recovered("attribution_without_locator", outcome, refusals, handle)
 
 
-def test_shape_shell_echoed_quote(tmp_path):
-    """Unreachable for the lead (its read-only tools include no shell); the clause is the
-    workers', pinned deterministically by
-    `tests/test_provenance.py::test_a_shell_call_cannot_ground_a_number_the_role_typed`."""
-    pytest.skip(SHAPES["shell_echoed_quote"]["unreachable"])
 
 
 def test_shape_flagged_quote(tmp_path):

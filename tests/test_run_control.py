@@ -21,7 +21,7 @@ from auto_research.run_control import STOP_SENTINEL, RunControl
 
 
 def test_a_steer_sets_its_role_event_and_draining_clears_it():
-    """What a blocking wait (the lead's `wait_coder`) watches, per key, never across keys."""
+    """What a blocking wait (the lead's `wait_for_reply`) watches, per key, never across keys."""
     rc = RunControl()
     assert not rc.steer_event("analyst_lead").is_set()
     rc.add_steer("analyst_lead", "wrap up")
@@ -527,7 +527,7 @@ def _coder_notes(sent) -> list[str]:
 
 def test_a_stopped_coder_reaches_the_lead_as_its_own_user_turn():
     """The lead does not have to poll: when the coder stops, the loop tells it at the next legal
-    boundary — and points at wait_coder rather than pasting a transcript into the turn."""
+    boundary — and points at wait_for_reply rather than pasting a transcript into the turn."""
     model = _FakeModel([_resolved_turn(), ModelResponse(content="done")])
     role = _bare_role(model, agent_key="w")
 
@@ -537,7 +537,7 @@ def test_a_stopped_coder_reaches_the_lead_as_its_own_user_turn():
 
     notes = [n for sent in model.calls for n in _coder_notes(sent)]
     assert notes, "the coder stopped and the lead was never told"
-    assert "wait_coder" in notes[0]
+    assert "wait_for_reply" in notes[0]
     assert "ixpe_pcube_bands" in notes[0], "the notice must name which link stopped"
 
 

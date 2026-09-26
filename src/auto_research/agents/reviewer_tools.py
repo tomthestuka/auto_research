@@ -9,17 +9,19 @@ rather than a step after it (CLAUDE.md §2b: a role's artifact is validated at i
 What ``turn_end`` refuses, and why each is here:
 
 * **No report.** Nothing is composed on the reviewer's behalf.
-* **A decision with nothing to hand on.** A rework or dispatch report is handed verbatim to the next
-  team, so an empty ``follow_up`` is not a decision.
-* **A switch that does nothing at this stage.** The graph reads ``needs_more_literature`` only after
-  the literature review and ``needs_analysis_rework`` only after the analysis review; a flag set at
-  the other stage used to be silently ignored.
-* **A rework with no iterations left**, naming the cap, which is Python's.
-* **A final report missing its parts** (title, abstract, a section, a finding).
-* **A number no receipt grounds**, anywhere in the report, ``follow_up`` included (human
-  2026-09-24: a request for more work is a report too). Any receipt the reviewer can read grounds
-  any field, except an input (the request, a dispatched task), which grounds a text only when that
-  text cites it (:func:`reviewer_scope`).
+* **No assignee.** The graph routes on ``assign_to``; a report that names no team goes nowhere.
+* **A task with nothing to hand on.** A report to the librarian or the analysts is handed to that
+  team verbatim, so an empty ``follow_up`` is not a decision.
+* **An assignment with no passes left**, naming the cap, which is Python's.
+* **A report to the human missing its parts** (title, abstract, a section, a finding).
+* **A number no evidence grounds**, anywhere in the report except the brief (``follow_up``: a
+  prescription, not a claim, human 2026-09-25). Evidence is what the analysis produced — toolkit
+  results, commits, papers by attribution — never what a role read (``is_evidence``). Any receipt the reviewer can read grounds
+  any field, except an input (the request, a dispatched task, a file the human sent), which grounds
+  a text only when that text cites it (:func:`reviewer_scope`). The human's reply text is a nudge,
+  never a receipt, so it grounds nothing.
+* **A citation of anything that is not evidence** — a file read, a search, a web page, the shell,
+  a brief, a file the human sent, an earlier published report — named by what it is.
 * **A report the renderer cannot place** (an unparseable table receipt, a figure handle that is not
   a figure) and a character the font cannot typeset. Any other compile failure is the renderer's
   bug: it is recorded on :class:`ReviewerRender` for the graph to report loudly, and it does not
@@ -31,11 +33,10 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
 
 from auto_research.provenance import ReceiptLookup, check_report_fields
 from auto_research.report.render import CompileResult, RenderResult, compile_report, render_report
@@ -48,13 +49,14 @@ REVIEWER_SOURCE = "rev"
 #: The fields the reviewer's ``edit_report`` declares, every one a real ``ReviewerReport`` field
 #: whose prose the tool reads from that model's own ``Field(description=...)``.
 REVIEWER_REPORT_FIELDS: tuple[str, ...] = (
-    "accepted", "rationale", "needs_more_literature", "needs_analysis_rework", "follow_up",
+    "accepted", "rationale", "assign_to", "follow_up",
     "title", "abstract", "sections", "key_findings", "figures", "tables",
 )
 #: The reviewer files no ``status``: its decision is the verdict fields themselves.
 REVIEWER_STATUS_VALUES: tuple[str, ...] = ()
 
-ReviewStage = Literal["literature", "analysis"]
+#: What each team's pass is called when its cap is named in a refusal.
+_PASS_NAMES = {"librarian": "literature passes", "analysts": "analysis passes"}
 
 
 def reviewer_scope(lookup: ReceiptLookup) -> list[str]:
@@ -67,6 +69,17 @@ def reviewer_scope(lookup: ReceiptLookup) -> list[str]:
     """
     handles = getattr(lookup, "handles", None)
     return [h for h in (handles() if callable(handles) else []) if not h.startswith("input:")]
+
+
+#: The reviewer's brief to the next team (human ruling 2026-09-25): a prescription, not a claim,
+#: so its numbers are not grounded — and, dispatched, it grounds nothing downstream
+#: (``provenance.store.is_evidence``: a ``dispatch`` input is not evidence).
+BRIEF_FIELDS = frozenset({"follow_up"})
+
+
+def reviewer_claims(report: ReviewerReport) -> dict[str, str | list[str]]:
+    """The report's prose the grounding check reads: every field but the brief."""
+    return {k: v for k, v in report.prose_fields().items() if k not in BRIEF_FIELDS}
 
 
 @dataclass
@@ -107,15 +120,14 @@ def reviewer_turn_problems(
     *,
     lookup: ReceiptLookup,
     scope: Sequence[str],
-    stage: ReviewStage,
-    iterations_left: int,
+    budgets: Mapping[str, int],
     render: ReviewerRender | None = None,
 ) -> list[str]:
     """Everything that stands between the reviewer's report and the end of its turn.
 
-    ``scope`` is every handle the reviewer can read (``ScopedLookup.handles()``); ``iterations_left``
-    is the graph's remaining budget for the loop edge this stage controls. ``render`` runs only for
-    a finalizing analysis review, and only once every other problem is fixed.
+    ``scope`` is every handle the reviewer can read (``ScopedLookup.handles()``); ``budgets`` is
+    how many passes remain for each team the graph caps (``librarian``, ``analysts``). ``render``
+    runs only for a report to the human, and only once every other problem is fixed.
     """
     if report is None:
         return [
@@ -126,64 +138,44 @@ def reviewer_turn_problems(
     if not report.rationale.strip():
         problems.append("rationale is empty. State the evidence the decision rests on.")
 
-    if stage == "literature":
-        if report.needs_analysis_rework:
-            problems.append(
-                "needs_analysis_rework applies at the analysis review. At the literature review, "
-                "set needs_more_literature for another search, or leave both false to dispatch the "
-                "analysts with follow_up as their task."
-            )
-        if report.needs_more_literature and iterations_left <= 0:
-            problems.append(
-                "No literature passes remain, so another search cannot be granted. Leave "
-                "needs_more_literature false, dispatch the analysts, and carry the literature gap "
-                "as a stated limitation."
-            )
+    to_human = report.assign_to == "human"
+    if report.assign_to is None:
+        problems.append(
+            "assign_to is empty. Set it to 'librarian' (follow_up is the literature questions), "
+            "'analysts' (follow_up is the analysis task) or 'human' (the report is sent to the "
+            "human to discuss)."
+        )
+    elif not to_human:
+        team = report.assign_to
         if not report.follow_up.strip():
             problems.append(
-                "follow_up is empty. It is handed verbatim to the next team: the literature "
-                "questions for another search, or the analysts' task."
+                f"follow_up is empty. It is handed to the {team} verbatim as their task: write the "
+                "questions to answer or the steps to run."
             )
-        finalizing = False
-    else:
-        if report.needs_more_literature:
+        if budgets.get(team, 0) <= 0:
             problems.append(
-                "needs_more_literature applies at the literature review; after the analysis the run "
-                "has no further literature pass. State the gap in the report as a limitation, or "
-                "set needs_analysis_rework to send the analysts back."
+                f"No {_PASS_NAMES[team]} remain in this run, so the {team} cannot be assigned. "
+                "Assign another team, or send the report to the human with the open question "
+                "stated as a limitation."
             )
-        if report.needs_analysis_rework:
-            if not report.follow_up.strip():
+    else:
+        for name, present in (
+            ("title", report.title.strip()),
+            ("abstract", report.abstract.strip()),
+            ("sections", report.sections),
+            ("key_findings", report.key_findings),
+        ):
+            if not present:
                 problems.append(
-                    "Your report asks for analysis rework but follow_up is empty. That text is "
-                    "handed to the analyst team verbatim as their next task."
+                    f"This report goes to the human, and {name} is empty. Write it — for an "
+                    "incomplete analysis, say what was attempted and what blocked it."
                 )
-            if iterations_left <= 0:
-                problems.append(
-                    "No analysis iterations remain, so rework cannot be granted. Finalize on the "
-                    "evidence you have (needs_analysis_rework=false) — an honest 'this is not "
-                    "settled' is a correct outcome."
-                )
-        finalizing = not report.needs_analysis_rework
-        if finalizing:
-            for name, present in (
-                ("title", report.title.strip()),
-                ("abstract", report.abstract.strip()),
-                ("sections", report.sections),
-                ("key_findings", report.key_findings),
-            ):
-                if not present:
-                    problems.append(
-                        f"You are finalizing, so this report is the run's report, and {name} is "
-                        "empty. Write it — for an incomplete analysis, say what was attempted and "
-                        "what blocked it."
-                    )
 
     checked = check_report_fields(
-        report.prose_fields(), lookup, own_source=REVIEWER_SOURCE, itemised=(), scope=scope,
+        reviewer_claims(report), lookup, own_source=REVIEWER_SOURCE, itemised=(), scope=scope,
     )
     problems.extend(checked.problems)
-    if finalizing and render is not None and not problems:
+    if to_human and render is not None and not problems:
         problems.extend(render(report, lookup))
     return problems
 

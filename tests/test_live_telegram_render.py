@@ -10,6 +10,10 @@ to judge in the chat.
 
 With ``AUTO_RESEARCH_LIVE_TELEGRAM_REPLY=1`` it also waits (up to 10 min) for a reply to a real
 question, so the round trip and the edit notice can be exercised by hand: reply, then edit it.
+
+``test_live_telegram_attachments`` (E11) sends a figure and a PDF embedded in one rich message and
+again as photo/document replies; with ``…_REPLY=1`` it asks for a photo or file back and checks the
+connector saved it under ``logs/dev/hitl/replies/``.
 """
 
 from __future__ import annotations
@@ -104,3 +108,74 @@ def test_live_telegram_rich_and_fallback_renders():
 
     assert results["rich"]["accepted"], results["rich"]
     assert results["fallback"]["message_ids"]
+
+
+def _attachments(tmp: Path) -> list:
+    from PIL import Image, ImageDraw
+
+    from auto_research.schemas import HumanAttachment
+
+    tmp.mkdir(parents=True, exist_ok=True)
+    img = Image.new("RGB", (800, 500), "white")
+    draw = ImageDraw.Draw(img)
+    draw.line([(60, 440), (740, 60)], fill="navy", width=5)
+    draw.text((70, 30), "E11 render check: PD vs energy", fill="black")
+    png = tmp / "pd_vs_energy.png"
+    img.save(png)
+    pdf = tmp / "e11_check.pdf"
+    img.save(pdf, "PDF")
+    return [
+        HumanAttachment(handle="analyst_worker_0:f1", path=png, filename=png.name,
+                        mime_type="image/png", caption="PD vs energy (test figure)"),
+        HumanAttachment(handle="lib:p1", path=pdf, filename=pdf.name,
+                        mime_type="application/pdf", caption="test PDF"),
+    ]
+
+
+def test_live_telegram_attachments(tmp_path):
+    load_dotenv()
+    from auto_research.hitl.telegram import TelegramHandler
+
+    results: dict = {}
+    atts = _attachments(tmp_path)
+
+    async def _run() -> None:
+        handler = TelegramHandler()
+        await handler.start()
+        try:
+            rich = await handler._send_rich(
+                "**E11 check** · attachments embedded in one rich message", attachments=tuple(atts)
+            )
+            results["embedded"] = {"accepted": rich is not None,
+                                   "message_id": getattr(rich, "message_id", None)}
+            head = await handler._send("<b>E11 check</b> · attachments as replies (fallback path)")
+            sent = await handler._send_files(tuple(atts), head)
+            results["replies"] = {"message_ids": [m.message_id for m in sent]}
+            if os.getenv("AUTO_RESEARCH_LIVE_TELEGRAM_REPLY") == "1":
+                handler.timeout_s = 600
+                reply_dir = Path("logs/dev/hitl/replies")
+                answer = await handler(HumanQuery(
+                    kind="clarify_science", asked_by="analyst_lead", reply_dir=reply_dir,
+                    message="Reply to this message with a photo or a file (add a caption).",
+                    attachments=atts[:1],
+                ))
+                results["round_trip"] = {
+                    "answer": answer.answer, "notes": answer.notes,
+                    "files": [str(a.path) for a in answer.attachments],
+                }
+        finally:
+            await handler.aclose()
+
+    asyncio.run(_run())
+
+    log_dir = Path("logs/dev/hitl")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    (log_dir / f"telegram_attachments_{stamp}.json").write_text(json.dumps(results, indent=2))
+    print("\nTelegram attachment results:", json.dumps(results, indent=2))
+
+    assert results["embedded"]["accepted"], results
+    assert len(results["replies"]["message_ids"]) == 2
+    if "round_trip" in results:
+        assert results["round_trip"]["files"], results["round_trip"]
+        assert all(Path(f).is_file() for f in results["round_trip"]["files"])

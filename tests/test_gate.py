@@ -830,7 +830,7 @@ def test_f2_a_change_outside_a_utils_package_fails_changes_allowed(tmp_path):
     check = out["structural.changes_allowed"]
     assert not check.passed
     assert "obsdb_catalog/neutral.py" in check.detail
-    assert "ask_lead" in check.detail, "the rejection must name the route, not just the rule"
+    assert "message the lead" in check.detail, "the rejection must name the route, not just the rule"
 
 
 def test_f2_the_check_defaults_to_asking_the_tree(tmp_path):

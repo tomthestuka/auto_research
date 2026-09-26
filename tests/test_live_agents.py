@@ -107,8 +107,7 @@ def test_live_role_wrappers_on_research_jobs(tmp_path, monkeypatch):
             "reviewer",
             reviewer,
             reviewer.review(
-                stage="literature",
-                iterations_left=1,
+                budgets={"librarian": 1, "analysts": 1},
                 request=ResearchRequest(
                     question=(
                         "IXPE has done consecutive observations on Cyg X-1 in its 2024 soft states. "

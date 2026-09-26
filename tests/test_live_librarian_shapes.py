@@ -142,10 +142,6 @@ SHAPES: dict[str, dict] = {
 #: Clauses of the shared check that cannot arise for the librarian, and why. Asserted against the
 #: validator by the contract test, so a clause that becomes reachable must gain a cell.
 UNREACHABLE: dict[str, str] = {
-    "shell_echoed_number": (
-        "the librarian has no shell tool, so no receipt in its scope is a shell call whose command it "
-        "typed a number into"
-    ),
     "quote_without_text": (
         "a paper takes the attribution form (its own clause), and a web page always carries text, so "
         "no receipt in the librarian's scope is quotable-but-textless"
@@ -332,7 +328,7 @@ def _drive(shape, tmp_path, monkeypatch, *, instructions, seed=None, cap=None):
         agent.report_dir = tmp_path / "librarian_io"
         agent.receipts = ReceiptStore.for_run(tmp_path)
         if shape == "cites_another_roles_receipt":
-            agent.receipts.mint(source="analyst_worker_0", kind="result", produced_by="fit",
+            agent.receipts.mint(source="analyst_worker_0", kind="result", produced_by="research_toolkit.xspec_utils.fit",
                                 data="The fitted lag is 7.7 +/- 0.4 days.")
         try:
             report = await agent.research(

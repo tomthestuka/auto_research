@@ -1,9 +1,9 @@
-"""Serve ``ask_lead`` and ``ask_human`` to an author harness that connects over HTTP.
+"""Serve the coder's ``message`` tool (to the lead or the human) to a harness that connects over HTTP.
 
 The Claude Agent SDK can host these two tools in-process, so its backend hands them straight to
 the SDK. Codex takes MCP servers by command or by URL, and the handlers must not move out of this
-process: ``ask_lead`` calls the live analyst-lead object mid-run, and ``ask_human`` reaches the
-run's actual HITL connector. A subprocess server would need both proxied back, so instead the
+process: a text to the lead lands in the live lead's inbox mid-run, and one to the human reaches
+the run's actual HITL connector. A subprocess server would need both proxied back, so instead the
 server runs here and the author is given a localhost URL.
 
 Bound to the loopback interface on an ephemeral port, and gated on a per-session bearer token
@@ -20,12 +20,34 @@ from typing import Any
 
 
 _MESSAGE_SCHEMA_DESCRIPTION = (
-    "Your question, in Markdown — the ask first, then any needed facts."
+    "Your text, in Markdown — the ask first, then any needed facts."
+)
+
+#: The coder's one channel tool (E12), identical on both harnesses.
+MESSAGE_DESCRIPTION = (
+    "Send a text to the analyst lead (to='lead': a code, convention or which-library-function "
+    "question) or to the real human (to='human': a genuine expert-science unknown), in Markdown, "
+    "and keep working: it returns at once, and the answer reaches you inside your turn, or as "
+    "your next turn if you have stopped."
 )
 
 
+async def route_message(
+    ask_lead: Callable[..., Awaitable[str]],
+    ask_human: Callable[..., Awaitable[str]],
+    to: str,
+    text: str,
+) -> str:
+    """Dispatch the coder's ``message`` to the handler its address names."""
+    if to == "lead":
+        return await ask_lead(text)
+    if to == "human":
+        return await ask_human(text)
+    raise ValueError(f"'{to}' is not an address: send to 'lead' or 'human'.")
+
+
 class EscalationServer:
-    """A running Streamable-HTTP MCP endpoint exposing the two escalation tools.
+    """A running Streamable-HTTP MCP endpoint exposing the coder's ``message`` tool.
 
     ``url`` and ``token_env`` are what a harness needs: the endpoint to connect to, and the name
     of the environment variable its process will read the bearer token from.
@@ -54,6 +76,9 @@ class EscalationServer:
             raise RuntimeError("EscalationServer.url read before start()")
         return f"http://{self._host}:{self.port}/mcp"
 
+    async def route(self, to: str, text: str) -> str:
+        return await route_message(self._ask_lead, self._ask_human, to, text)
+
     def env(self) -> dict[str, str]:
         """The environment entry the harness needs to authenticate."""
         return {self.token_env: self.token}
@@ -63,15 +88,10 @@ class EscalationServer:
 
         mcp = FastMCP("escalation")
 
-        @mcp.tool(description="Ask the analyst lead a code/convention/which-lib-function question.")
-        async def ask_lead(message: str) -> str:
+        @mcp.tool(description=MESSAGE_DESCRIPTION)
+        async def message(to: str, text: str) -> str:
             f"""{_MESSAGE_SCHEMA_DESCRIPTION}"""
-            return await self._ask_lead(message)
-
-        @mcp.tool(description="Escalate a genuine expert-science unknown to the real human.")
-        async def ask_human(message: str) -> str:
-            f"""{_MESSAGE_SCHEMA_DESCRIPTION}"""
-            return await self._ask_human(message)
+            return await self.route(to, text)
 
         app = mcp.streamable_http_app()
         return _with_bearer_auth(app, self.token)

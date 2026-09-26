@@ -68,7 +68,8 @@ class Receipt(MessageModel):
     flags: list[ReceiptFlag] = Field(default_factory=list)
     arg_numbers: list[str] = Field(
         default_factory=list,
-        description="For a shell call: the numbers typed into its command, which its output cannot ground.",
+        description="Legacy (before 2026-09-25): the numbers typed into a shell call. Kept so old stores replay; "
+        "the shell grounds nothing now (`provenance.store.is_evidence`).",
     )
     # figure
     caption: str | None = None

@@ -21,7 +21,7 @@ def store(tmp_path):
 
 
 def _result(store, text, source="analyst_worker_0", **kw):
-    return store.mint(source=source, kind="result", produced_by="xspec_utils.fit", data=text, **kw)
+    return store.mint(source=source, kind="result", produced_by="research_toolkit.xspec_utils.fit", data=text, **kw)
 
 
 # -- store ------------------------------------------------------------------------------------
@@ -31,7 +31,7 @@ def test_handles_count_per_source_and_kind(store, tmp_path):
     b = _result(store, "two")
     png = tmp_path / "p.png"
     png.write_bytes(b"\x89PNG")
-    f = store.mint(source="analyst_worker_0", kind="figure", produced_by="plot", path=png,
+    f = store.mint(source="analyst_worker_0", kind="figure", produced_by="research_toolkit.t.plot", path=png,
                    caption="c", mime_type="image/png")
     other = _result(store, "three", source="lib")
     assert [a.handle, b.handle, f.handle, other.handle] == [
@@ -48,7 +48,7 @@ def test_store_replays_its_ledger_so_handles_survive_a_resume(store):
 def test_sha_is_runtime_computed_and_verify_catches_tampering(store, tmp_path):
     data = tmp_path / "t.csv"
     data.write_text("a,b\n1,2\n")
-    r = store.mint(source="w", kind="data", produced_by="tool", path=data)
+    r = store.mint(source="w", kind="data", produced_by="research_toolkit.t.tool", path=data)
     assert store.verify(r.handle) is None
     data.write_text("a,b\n1,3\n")
     assert "no longer match" in store.verify(r.handle)
@@ -59,7 +59,7 @@ def test_sha_is_runtime_computed_and_verify_catches_tampering(store, tmp_path):
 def test_input_hash_links_parent_and_flags_propagate(store, tmp_path):
     produced = tmp_path / "prod.csv"
     produced.write_text("x\n")
-    parent = store.mint(source="w", kind="data", produced_by="reduce", path=produced, failed=True)
+    parent = store.mint(source="w", kind="data", produced_by="research_toolkit.t.reduce", path=produced, failed=True)
     child = _result(store, "derived", inputs=[store.hash_input(produced)])
     assert child.parents == [parent.handle]
     assert child.flags == ["failed"]
@@ -84,7 +84,7 @@ def test_directory_inputs_hash_by_listing(store, tmp_path):
 
 def test_receipt_rejects_a_handle_naming_another_kind(tmp_path):
     with pytest.raises(ValueError):
-        Receipt(handle="w:f1", kind="result", path=tmp_path, sha256="0" * 64, produced_by="t",
+        Receipt(handle="w:f1", kind="result", path=tmp_path, sha256="0" * 64, produced_by="research_toolkit.t.t",
                 created_at="2026-09-24T00:00:00Z")
 
 
@@ -191,7 +191,7 @@ def test_render_replaces_quotes_and_cites(store):
 def test_a_broken_scope_receipt_grounds_nothing_and_raises_nothing(store, tmp_path):
     data = tmp_path / "gone.csv"
     data.write_text("PD 9.9\n")
-    stale = store.mint(source="w", kind="data", produced_by="t", path=data)
+    stale = store.mint(source="w", kind="data", produced_by="research_toolkit.t.t", path=data)
     data.unlink()
     good = _result(store, "PD=3.453")
     res = check_report_fields({"summary": "PD 3.453."}, store, itemised=(),
@@ -306,7 +306,7 @@ def test_the_closest_passage_is_itself_quotable(store):
 
     text = ("The PA is -20.7 ◦ ± 1.4 ◦ in the soft state, and -20 ◦.7 ± 1◦.4 in the hard state, respec-\n"
             "tively, with PD = 4.01 ± 0.20% overall.")
-    r = store.mint(source="lib", kind="web", produced_by="read_paper", data=text, title="T")
+    r = store.mint(source="lib", kind="result", produced_by="research_toolkit.t.extract", data=text, title="T")
     for bad in ('-20.7 ± 1.4 in the hard state, respectively', 'PD = 4.1 ± 0.20%', 'soft state, and -21'):
         res = check_bindings(f'{{{{{r.handle} "{bad}"}}}}', store)
         hint = _re.search(r'closest passage in \S+ reads: "(.*)"\.', res.problems[0])
@@ -315,20 +315,26 @@ def test_the_closest_passage_is_itself_quotable(store):
             assert again.problems == [], (bad, hint.group(1), again.problems)
 
 
-def test_a_line_broken_word_matches_in_raw_and_collapsed_form(store):
-    r = store.mint(source="lib", kind="web", produced_by="read_paper",
-                   data="in the hard state, respec-\ntively, with PD", title="T")
+def test_a_line_broken_word_matches_in_raw_and_collapsed_form():
+    # Page/PDF text normalisation, kept at the function level: since 2026-09-25 no web or paper
+    # text grounds a number (``is_evidence``), so the check itself never reaches this path.
+    from auto_research.provenance.bindings import bounded_find, normalise
+
+    hay = normalise("in the hard state, respec-\ntively, with PD", "web")
     for q in ("hard state, respec- tively, with", "hard state, respectively, with"):
-        assert check_bindings(f'{{{{{r.handle} "{q}"}}}}', store).problems == []
+        assert bounded_find(hay, normalise(q, "web")), q
 
 
 def test_a_signed_value_in_a_table_row_is_not_read_as_a_range(store):
-    r = store.mint(source="lib", kind="web", produced_by="read_paper",
-                   data="Cyg X-1 4.1 ± 0.2 −22 ± 2 [31]\nband 2 - 8 keV", title="T")
+    from auto_research.provenance.bindings import bounded_find, normalise
+
+    r = store.mint(source="lib", kind="result", produced_by="research_toolkit.t.extract",
+                   data="Cyg X-1 4.1 ± 0.2 −22 ± 2 [31]\nband 2 - 8 keV")
     assert check_bindings(f'{{{{{r.handle} "−22 ± 2"}}}}', store).problems == []
     assert check_bindings(f"PA = −22 ± 2 [{r.handle}]", store).problems == []
+    hay = normalise("band 2 - 8 keV", "web")  # page text spaces a range; normalised both ways
     for q in ("2 - 8 keV", "2-8 keV"):
-        assert check_bindings(f'{{{{{r.handle} "{q}"}}}}', store).problems == [], q
+        assert bounded_find(hay, normalise(q, "web")), q
 
 
 def test_enumerators_identifiers_and_status_codes_are_not_numbers(store):
@@ -343,16 +349,16 @@ def test_enumerators_identifiers_and_status_codes_are_not_numbers(store):
 def test_quote_hint_names_the_receipt_that_holds_it(store):
     from auto_research.provenance import ScopedLookup
 
-    a = store.mint(source="lib", kind="web", produced_by="r", data="lag of 12.5 ± 3.1 days", title="A")
-    b = store.mint(source="lib", kind="web", produced_by="r", data="virial factor 4.3 ± 1.1 here", title="B")
+    a = store.mint(source="lib", kind="result", produced_by="research_toolkit.t.r", data="lag of 12.5 ± 3.1 days")
+    b = store.mint(source="lib", kind="result", produced_by="research_toolkit.t.r", data="virial factor 4.3 ± 1.1 here")
     view = ScopedLookup(store, own_source="lib")
     res = check_bindings(f'{{{{{a.handle} "4.3 ± 1.1"}}}}', view)
     assert f"It does appear in {b.handle}" in res.problems[0]
 
 
 def test_quote_hint_never_offers_a_text_that_lost_the_sign(store):
-    r = store.mint(source="rev", kind="web", produced_by="r",
-                   data="Cyg X-3 8.3 ± 0.5 22 ± 2 [44]", title="T")
+    r = store.mint(source="rev", kind="result", produced_by="research_toolkit.t.r",
+                   data="Cyg X-3 8.3 ± 0.5 22 ± 2 [44]")
     res = check_bindings(f'{{{{{r.handle} "−22 ± 2"}}}}', store)
     assert "without the sign" in res.problems[0] and "closest passage" not in res.problems[0]
 
@@ -414,25 +420,56 @@ def test_the_run_store_lives_outside_the_readable_workspace(tmp_path):
     assert run not in store.root.parents and "ledgers" in store.root.parts
 
 
-def test_a_shell_call_cannot_ground_a_number_the_role_typed(store):
+def test_the_shell_grounds_nothing_even_arithmetic(store):
+    """Human ruling 2026-09-25: bash_exec is not evidence at all — a derived number comes from a
+    toolkit tool the analysts request. Echo, write-then-read and ``python -c`` are all refused."""
     from auto_research.provenance.capture import receipt_call
 
     shell = "mcp.builtin.bash_exec"
-    echo = receipt_call(store, source="analyst_worker_0", produced_by=shell,
-                        args={"command": "echo 'PD = 3.7'"}, text="PD = 3.7", failed=False).result
-    assert check_bindings(f"PD is 3.7 [{echo.handle}]", store).problems
-    assert check_bindings(f'{{{{{echo.handle} "PD = 3.7"}}}}', store).problems
-    # write-then-read in two calls: the number was typed in the first, so the second cannot ground it
-    receipt_call(store, source="analyst_worker_0", produced_by=shell,
-                 args={"command": "echo 4.9 > /tmp/x"}, text="", failed=False)
-    cat = receipt_call(store, source="analyst_worker_0", produced_by=shell,
-                       args={"command": "cat /tmp/x"}, text="4.9", failed=False).result
-    assert check_bindings(f"value 4.9 [{cat.handle}]", store).problems
-    # arithmetic the shell computed does ground
-    calc = receipt_call(store, source="analyst_worker_0", produced_by=shell,
-                        args={"command": "python -c 'print(4.0-3.4)'"}, text="0.6", failed=False).result
-    assert check_bindings(f"the difference is 0.6 [{calc.handle}]", store).problems == []
-    # a toolkit tool echoing its own parameter (a band edge) is not affected
-    fit = receipt_call(store, source="analyst_worker_0", produced_by="xspec_utils.fit",
+    for command, out, prose in (
+        ("echo 'PD = 3.7'", "PD = 3.7", "PD is 3.7"),
+        ("cat /tmp/x", "4.9", "value 4.9"),
+        ("python -c 'print(4.0-3.4)'", "0.6", "the difference is 0.6"),
+    ):
+        r = receipt_call(store, source="analyst_worker_0", produced_by=shell,
+                         args={"command": command}, text=out, failed=False).result
+        problems = check_bindings(f"{prose} [{r.handle}]", store).problems
+        assert any("shell output" in p for p in problems), (command, problems)
+    # a toolkit tool echoing its own parameter (a band edge) grounds as ever
+    fit = receipt_call(store, source="analyst_worker_0", produced_by="research_toolkit.xspec_utils.fit",
                        args={"emin": 2, "emax": 8}, text="fit 2-8 keV: PD=4.0", failed=False).result
     assert check_bindings(f"PD 4.0 in 2-8 keV [{fit.handle}]", store).problems == []
+
+
+@pytest.mark.parametrize("producer,kind,what", [
+    ("read_file", "result", "a file you read"), ("list_dir", "result", "a directory listing"),
+    ("text_search", "result", "a search result"), ("web_search", "result", "a search result"),
+    ("web_fetch", "web", "a web page"), ("report_renderer", "data", "an earlier published report"),
+])
+def test_what_a_role_read_is_recorded_but_never_evidence(store, tmp_path, producer, kind, what):
+    """Human ruling 2026-09-25: only what the analysis produced backs a number."""
+    from auto_research.provenance.store import is_evidence
+
+    if kind == "data":
+        f = tmp_path / "x.jsonl"
+        f.write_text("PD = 4.4")
+        r = store.mint(source="rev", kind=kind, produced_by=producer, path=f)
+    else:
+        r = store.mint(source="rev", kind=kind, produced_by=producer, data="    31\tPD = 4.4", title="T")
+    assert not is_evidence(r)
+    cited = check_bindings(f"PD = 4.4 [{r.handle}]", store).problems
+    assert any(what in p and "not evidence" in p for p in cited), cited
+    # In scope it grounds nothing and raises nothing — including a line-number prefix (R7).
+    assert check_bindings("inclination 31 deg", store, scope=[r.handle]).problems
+
+
+def test_what_counts_as_evidence(store):
+    from auto_research.provenance.store import is_evidence
+
+    tool = store.mint(source="w", kind="result", produced_by="research_toolkit.xspec_utils.fit", data="x")
+    commit = store.mint(source="analyst_lead", kind="commit", produced_by="approve_edit", data="{}")
+    request = store.mint_input("Fit ObsID 1.", kind="human", produced_by="research_request")
+    brief = store.mint_input("Fit 2-8 keV.")
+    human_file = store.mint(source="input", kind="result", produced_by="human_reply", data="3.3")
+    assert is_evidence(tool) and is_evidence(commit) and is_evidence(request)
+    assert not is_evidence(brief) and not is_evidence(human_file)

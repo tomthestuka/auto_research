@@ -83,6 +83,15 @@ class _ScriptedLead:
 
     def __init__(self, log):
         self._log = log
+        self.agent_key = "analyst_lead"
+        self.channel = None
+        from auto_research.run_control import RunControl
+
+        self._control = RunControl()
+
+    def ensure_run_control(self):
+        """The coder's `message(to="lead")` posts to this inbox (E12); nothing drains it here."""
+        return self._control
 
     async def clarify_for_author(self, message, *, kind="clarify_code"):
         self._log("ask_lead", message)

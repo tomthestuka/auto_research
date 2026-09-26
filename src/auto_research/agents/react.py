@@ -15,7 +15,7 @@ import json
 import os
 import re
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -158,88 +158,252 @@ async def _web_receipted(
 
 
 # ----------------------------------------------------------------------------
-# Raise-to-human — one ask_human tool, shared by every ReAct role (§9.7/§9.8).
+# The quick channel (E12) — one `message` tool on every graph seat, the human one address.
 # ----------------------------------------------------------------------------
 
-ASK_HUMAN_TOOL = "ask_human"
-_ASK_HUMAN_KINDS = ("clarify_science", "clarify_code", "blocked")
+MESSAGE_TOOL = "message"
+VIEW_RECEIPT_TOOL = "view_receipt"
+WAIT_FOR_REPLY_TOOL = "wait_for_reply"
+LIST_PEERS_TOOL = "list_peers"
+#: The tools a seat's channel layer adds to its provider (see `agents.roles.ChannelTools`).
+CHANNEL_TOOLS: frozenset[str] = frozenset(
+    {MESSAGE_TOOL, VIEW_RECEIPT_TOOL, WAIT_FOR_REPLY_TOOL, LIST_PEERS_TOOL}
+)
+#: What each seat does, for list_peers.
+_PEER_ROLES = {
+    "reviewer": "reviews the research and assigns the team's work",
+    "librarian_io": "searches and reads the literature",
+    "analyst_lead": "judges the analysts' work and authors missing tools",
+    "analyst_worker": "runs the analysis with the toolkit",
+}
+_MESSAGE_KINDS = ("clarify_science", "clarify_code", "blocked")
+#: A text receipt shown by view_receipt past this many characters is cut, with a note.
+_VIEW_TEXT_CAP = 20_000
 
-# Lead-only design channel (§5.5): the analyst lead settles a toolkit design WITH the human
-# before authoring. It routes through the same human_handler as ask_human but is **budget-free**
-# in the ReAct loop (see AgentRole._react free_tools), so the lead can debate the design across
-# as many rounds as it needs to converge without starving its evidence-gathering iterations.
-PLAN_AND_DEBATE_TOOL = "plan_and_debate"
 
-
-def ask_human_tool_def() -> dict:
-    """The provider-neutral definition for the shared ``ask_human`` tool."""
+def message_tool_def(directory: Sequence[str]) -> dict:
+    """The provider-neutral definition of ``message``; ``directory`` is who this seat can reach."""
+    reach = ", ".join(directory) or "nobody"
+    human_note = (
+        " The human reads it on a phone: lead with the one question, then the few facts needed "
+        "to answer it."
+        if "human" in directory
+        else ""
+    )
+    coder_note = (
+        " To 'coder' — the coding agent writing the tool you briefed — a text is its instruction: "
+        "give concrete, algorithm-level steps (signature, the exact procedure, edge cases, the "
+        "tests to add), not a restated goal. It keeps the working files across your texts, so "
+        "iterate: inspect its diff with read_file, then text it again. An idle coder starts on "
+        "your text at once; a working one reads it as its next turn, and an answer to a question "
+        "it asked you reaches it inside the turn it is running. When the tool and its tests are "
+        "right, call submit_for_review."
+        if "coder" in directory
+        else ""
+    )
+    properties: dict[str, Any] = {}
+    if "coder" in directory:
+        properties["mid_turn"] = {
+            "type": "boolean",
+            "description": (
+                "Coder only: true delivers the text inside the turn the coder is running now, to "
+                "change its course before it finishes — for a correction that cannot wait. "
+                "Default false: the text waits for the coder's next turn."
+            ),
+        }
     return {
-        "name": ASK_HUMAN_TOOL,
+        "name": MESSAGE_TOOL,
         "description": (
-            "Reach a real human for one clarification: an expert science or code question, "
-            "or a hard block such as missing data, a broken dependency, or a contradictory "
-            "request. Blocks until the human replies, so ask early and specifically. The human "
-            "reads this on a phone — lead with the one question, then the few facts needed to "
-            "answer it. Write 'message' as Markdown (a heading, short bullets, or a fenced code "
-            "block when it helps); keep it brief."
+            "Send a short text to another member of this team, or to the human, and keep "
+            "working: it returns at once. Any reply arrives later as a message at your next step; "
+            "call wait_for_reply when you need it before going on. A member that has finished its "
+            "turn is resumed to read your text and can answer, though its filed report stays as "
+            "filed. Texts are informal: rest every claim in your report on your own evidence. "
+            "To show a receipt, name its handle in attachments — the human receives the file, and "
+            f"a team member can open it with view_receipt.{human_note}{coder_note} "
+            f"You can reach: {reach}."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "message": {
+                "to": {
+                    "type": "string",
+                    "enum": list(directory),
+                    "description": "Who receives the text.",
+                },
+                "text": {
                     "type": "string",
                     "description": (
-                        "Your question to the human, in Markdown. Lead with the question itself, "
-                        "then any supporting facts (what you observed, what you already tried)."
+                        "The text, in Markdown: the question or point first, then the facts it "
+                        "rests on."
                     ),
+                },
+                "attachments": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Receipt handles to show with the text, e.g. a figure you made.",
                 },
                 "kind": {
                     "type": "string",
-                    "enum": list(_ASK_HUMAN_KINDS),
+                    "enum": list(_MESSAGE_KINDS),
                     "description": (
-                        "Why you are asking: 'clarify_science' for an expert science point, "
-                        "'clarify_code' for a code or convention point, 'blocked' for a hard block."
+                        "For the human: 'clarify_science' for an expert science point, "
+                        "'clarify_code' for a code or convention point, 'blocked' for a hard block "
+                        "such as missing data or a contradictory request."
                     ),
                 },
+                **properties,
             },
-            "required": ["message"],
+            "required": ["to", "text"],
         },
     }
 
 
-def plan_and_debate_tool_def() -> dict:
-    """The definition for the lead-only, budget-free ``plan_and_debate`` design channel (§5.5).
-
-    Distinct from ``ask_human`` so the ReAct loop can treat it as budget-free: the lead settles
-    a toolkit design with the human before authoring, and these rounds do not count against the
-    loop's iteration cap (the human ending the discussion is the stop).
-    """
+def list_peers_tool_def() -> dict:
+    """Definition of ``list_peers`` — who this seat can message, and what each is doing now."""
     return {
-        "name": PLAN_AND_DEBATE_TOOL,
+        "name": LIST_PEERS_TOOL,
         "description": (
-            "Debate a toolkit-design decision with the human to settle it before authoring — "
-            "lay out the design report (proposal, options and their trade-offs, an interface "
-            "sketch) and ask the one thing you need decided (which package to extend vs. start, "
-            "the interface, the validation strategy, a trade-off). Blocks until the human "
-            "replies. Use it as many rounds as you need to converge: it does not consume your "
-            "tool-iteration budget. Write 'message' as Markdown — use headings, bullet lists, "
-            "and fenced code blocks so a longer design reads cleanly. Settle the design here, "
-            "then finalise the ToolSpec the coder will follow."
+            "List who you can message: each team member's address, role and model, and whether "
+            "it is working now, has finished its turn (a text resumes it), or has not started; "
+            "and the human, when one is attending. Free: calling it costs no tool budget."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    }
+
+
+def execute_list_peers(router: Any, sender: str | None, label: Callable[[Any], str]) -> ToolOutcome:
+    """The directory with each peer's role, model and state, from the router's live view."""
+    lines = []
+    for address in router.directory(sender):
+        if address == "human":
+            lines.append("- human — the person running this study; replies arrive as messages.")
+            continue
+        seat = router.seat(address)
+        role = getattr(seat, "role", "") or ""
+        model = label(getattr(seat, "model", None)) or "unknown model"
+        state = router.state(address)
+        lines.append(
+            f"- {address} — {_PEER_ROLES.get(role, role)} ({model}); {state}."
+        )
+    body = "\n".join(lines) or "Nobody else is on this run's channel."
+    return ToolOutcome(text=f"You can message:\n{body}")
+
+
+def view_receipt_tool_def() -> dict:
+    """Definition of ``view_receipt`` — show one receipt's content by handle."""
+    return {
+        "name": VIEW_RECEIPT_TOOL,
+        "description": (
+            "Show one receipt by its handle: a figure as an image, a text receipt (a tool output, "
+            "a page) as its text. Works for your own receipts, the ones you may cite, and any a "
+            "message you received named. Viewing shows you the content; your report still cites "
+            "only your own evidence."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "message": {
+                "handle": {
                     "type": "string",
-                    "description": (
-                        "Your design report and the decision you want settled, in Markdown — "
-                        "proposal, options/trade-offs, an interface sketch, and the explicit ask."
-                    ),
+                    "description": "The receipt handle, e.g. 'analyst_worker_0:f3'.",
                 },
             },
-            "required": ["message"],
+            "required": ["handle"],
         },
     }
+
+
+async def execute_view_receipt(
+    lookup: Any | None,
+    viewable: Iterable[str],
+    store: Any | None,
+    arguments: Mapping[str, Any],
+    *,
+    images_ok: bool = True,
+) -> ToolOutcome:
+    """Show a receipt this seat may see: in its citable scope, or named by a message it received.
+
+    Mints nothing and admits nothing — a peer's figure seen here stays the peer's evidence.
+    """
+    handle = str(arguments.get("handle") or "").strip()
+    visible = bool(handle) and (
+        (lookup is not None and lookup.visible(handle)) or handle in set(viewable)
+    )
+    store = store if store is not None else getattr(lookup, "store", None)
+    if not visible or store is None:
+        return ToolOutcome(
+            text=f"{handle or '(no handle)'} is not a receipt you can view: view your own receipts, "
+            "the ones you may cite, and any a message you received named.",
+            is_error=True,
+        )
+    receipt = store.get(handle)
+    problem = store.verify(handle) if receipt is not None else f"{handle} is not in this run."
+    if receipt is None or problem:
+        return ToolOutcome(text=problem or f"{handle} is not in this run.", is_error=True)
+    if receipt.kind == "figure":
+        caption = receipt.caption or ""
+        if not images_ok:
+            return ToolOutcome(
+                text=f"{handle} is a figure ({caption}); this seat reads text, so it is named "
+                "rather than shown."
+            )
+        return ToolOutcome(text=f"{handle}: {caption}", figures=[receipt.to_figure_ref()])
+    if receipt.kind == "paper":
+        return ToolOutcome(
+            text=f"{handle} is a paper ({receipt.title or 'untitled'}); open it with the paper "
+            "reader where you have one, or ask its owner to quote what you need."
+        )
+    if receipt.kind in ("data", "commit"):
+        return ToolOutcome(
+            text=f"{handle} is a {receipt.kind} receipt produced by {receipt.produced_by}; its "
+            "bytes are not text to show here."
+        )
+    text = store.text(handle) or ""
+    note = ""
+    if len(text) > _VIEW_TEXT_CAP:
+        text, note = text[:_VIEW_TEXT_CAP], f"\n\n[… cut at {_VIEW_TEXT_CAP} characters]"
+    return ToolOutcome(text=f"{handle} ({receipt.produced_by}):\n{text}{note}")
+
+
+async def execute_wait_for_reply(
+    run_control: Any,
+    agent_key: str | None,
+    arguments: Mapping[str, Any],
+    *,
+    outstanding: Callable[[], list[str]],
+) -> ToolOutcome:
+    """Park until a message reaches this seat, or ``timeout_s`` passes (a seat with no coder).
+
+    Returns at once when a message is already waiting, and when nothing is outstanding — no open
+    question to the human, no resumed seat still in its turn — so a wait can never be the idle
+    loop ``check_coder`` once was (A22).
+    """
+    timeout, note = _wait_timeout(arguments)
+    if run_control is None or not agent_key:
+        return ToolOutcome(text="Nothing can reach this seat: it has no inbox.", is_error=True)
+    started = time.monotonic()
+    event = run_control.steer_event(agent_key)
+    pending = outstanding()
+    if not run_control.has_inbox(agent_key) and pending:
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except (TimeoutError, asyncio.TimeoutError):
+            pass
+    waited = time.monotonic() - started
+    header = f"[waited {_fmt_s(waited)} of {_fmt_s(timeout)}{note}]"
+    if run_control.has_inbox(agent_key):
+        body = "A message for you has arrived; it is delivered right after this result."
+    elif not pending:
+        body = (
+            "Nothing is outstanding: no question to the human is open and no member you resumed "
+            "is still working, so there is nothing to wait for. Carry on with your turn."
+        )
+    else:
+        body = (
+            f"No reply yet from {', '.join(pending)}. Carry on with other work, or call "
+            "wait_for_reply again — a longer wait costs no more than a short one."
+        )
+    return ToolOutcome(text=f"{header}\n\n{body}")
 
 
 # ----------------------------------------------------------------------------
@@ -326,54 +490,6 @@ async def execute_data_catalog(arguments: Mapping[str, Any]) -> ToolOutcome:
     except Exception as exc:  # noqa: BLE001 — malformed catalog / missing toolkit → recoverable
         return ToolOutcome(text=f"{type(exc).__name__}: {exc}", is_error=True)
     return ToolOutcome(text=text)
-
-
-async def execute_ask_human(
-    human_handler: Any, asked_by: str, arguments: Mapping[str, Any], *, model: str = ""
-) -> ToolOutcome:
-    """Build a ``HumanQuery`` from a tool call and block on the injected handler.
-
-    Routes through ``hitl.resolve_human``, which raises ``HumanInputRequired`` when no
-    handler is wired (the §9.8 headless fail-safe) — propagated to fail the run loudly
-    rather than hang or fabricate.
-    """
-    from auto_research.hitl import resolve_human
-    from auto_research.schemas import HumanQuery
-
-    kind = str(arguments.get("kind") or "blocked")
-    if kind not in _ASK_HUMAN_KINDS:
-        kind = "blocked"
-    query = HumanQuery(
-        kind=kind,
-        message=str(arguments.get("message") or "(no message provided)"),
-        asked_by=asked_by or "agent",
-        model=model or "",
-    )
-    response = await resolve_human(human_handler, query)
-    return ToolOutcome(text=response.answer or "(human gave no answer)")
-
-
-async def execute_plan_and_debate(
-    human_handler: Any, asked_by: str, arguments: Mapping[str, Any], *, model: str = ""
-) -> ToolOutcome:
-    """Route a lead design-debate turn to the human (§5.5).
-
-    Delivers the lead's Markdown design report to the injected handler (same path as
-    ``ask_human`` — ``resolve_human`` raises ``HumanInputRequired`` headless). The budget-free
-    treatment lives in the ReAct loop, not here; this just delivers the turn. Reuses the
-    ``clarify_science`` HumanQuery kind.
-    """
-    from auto_research.hitl import resolve_human
-    from auto_research.schemas import HumanQuery
-
-    query = HumanQuery(
-        kind="clarify_science",
-        message=str(arguments.get("message") or "(no message provided)"),
-        asked_by=asked_by or "agent",
-        model=model or "",
-    )
-    response = await resolve_human(human_handler, query)
-    return ToolOutcome(text=response.answer or "(human gave no answer)")
 
 
 WEB_SEARCH_TOOL = "web_search"
@@ -1009,7 +1125,7 @@ def lead_turn_problems(cycle: "LeadCycle | None", workspace: "ReportWorkspace | 
         problems.extend(report_provenance_problems(workspace, report))
     if cycle is not None and cycle.session_open:
         problems.append(
-            "A coding session is still open. If the coder is still working, call wait_coder (a "
+            "A coding session is still open. If the coder is still working, call wait_for_reply (a "
             "blocking wait that returns when the coder stops); then finish the session with "
             "submit_for_review, or let its budget run out, before ending your turn."
         )
@@ -1481,54 +1597,13 @@ def _receipt_menu(lookup: Any | None) -> str:
 
 # ----------------------------------------------------------------------------
 # Lead-only tool-authoring tools (§9.3, B-topology). The analyst lead drives a live
-# AuthoringSession: it steers the coder (drive_coder), submits to the deterministic
+# AuthoringSession: it steers the coder (message to the coder, E12), submits to the deterministic
 # gate + provider-decorrelated co-lead review (submit_for_review), and — slice 4 — debates a review challenge
 # (respond_to_review). Masked to the lead alone (a session is wired only on its provider).
 # ----------------------------------------------------------------------------
 
-DRIVE_CODER_TOOL = "drive_coder"
 SUBMIT_TOOL = "submit_for_review"
 RESPOND_TO_REVIEW_TOOL = "respond_to_review"
-
-
-def drive_coder_tool_def() -> dict:
-    """Lead-only: instruct the coder and read back its work. The lead is the plan owner;
-    the coder executes. Budget-free in the lead's authoring loop (set via ``free_tools``)."""
-    return {
-        "name": DRIVE_CODER_TOOL,
-        "description": (
-            "Instruct the coder (a separate, less capable coding agent) to write or revise the tool, then "
-            "read back what it did. The coder executes your plan — give concrete, algorithm-level "
-            "instructions (signature, the exact procedure, edge cases, the tests to add), not a "
-            "restated goal. It keeps the working files across your instructions, so iterate: "
-            "inspect its diff with read_file, then drive_coder again. Returns at once. While the "
-            "coder is working, the message is queued and becomes its next turn when the current "
-            "one ends; an answer to a question the coder asked you reaches it inside the running "
-            "turn. Then call wait_coder to hear back. When the tool and its tests are right, call "
-            "submit_for_review. Write 'instructions' as Markdown."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "instructions": {
-                    "type": "string",
-                    "description": (
-                        "What the coder should do next, in Markdown — concrete and algorithm-level. "
-                        "On the first call, seed the full brief; afterwards, the specific change."
-                    ),
-                },
-                "mid_turn": {
-                    "type": "boolean",
-                    "description": (
-                        "true delivers the message inside the turn the coder is running now, to "
-                        "change its course before it finishes — for a correction that cannot wait. "
-                        "Default false: the message waits for the coder's next turn."
-                    ),
-                },
-            },
-            "required": ["instructions"],
-        },
-    }
 
 
 def submit_tool_def() -> dict:
@@ -1539,10 +1614,10 @@ def submit_tool_def() -> dict:
         "description": (
             "Submit the coder's current work to the deterministic gate and the independent "
             "co-lead review. The gate is mechanical (determinism, no-fabrication, structure, the "
-            "tool's own tests) — you can only satisfy it, by fixing the code via drive_coder. The "
+            "tool's own tests) — you can only satisfy it, by fixing the code through message to the coder. The "
             "review judges whether the plan and its tests are right and strict enough. On gate-pass "
             "AND review-pass the tool is committed automatically — you never self-approve. If the "
-            "gate fails, fix and submit again; if the review rejects, either drive_coder to address "
+            "gate fails, fix and submit again; if the review rejects, either message the coder to address "
             "it or respond_to_review to debate it. This is the ONLY way to finish: your authored "
             "tool is committed solely through this call — if your turn ends without calling it (or "
             "respond_to_review), the work is discarded as a failure. When the tool and its tests are "
@@ -1554,9 +1629,6 @@ def submit_tool_def() -> dict:
     }
 
 
-WAIT_CODER_TOOL = "wait_coder"
-
-
 def _fmt_s(seconds: float | None) -> str:
     """``95`` → ``1m35s``; the unit a lead reads to pace itself."""
     if seconds is None:
@@ -1566,32 +1638,33 @@ def _fmt_s(seconds: float | None) -> str:
     return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
 
 
-async def execute_drive_coder(session: Any, arguments: Mapping[str, Any]) -> ToolOutcome:
-    """Say one thing to the coder and **return at once** — the single lead->coder path (B3).
+async def execute_coder_message(
+    session: Any, text: str, *, mid_turn: bool = False
+) -> ToolOutcome:
+    """Deliver the lead's ``message(to="coder")`` and **return at once** — the one lead->coder
+    path (B3; ``drive_coder`` until E12 folded it into ``message``).
 
     The coder works beside the lead rather than under it. A real link's turn takes minutes, and
     the lead used to spend all of them blocked inside this call — unable to read the diff it had
-    just asked for, or to think about the next link. It now gets the instruction acknowledged and
-    keeps its turn; `wait_coder` parks until the coder has something to say, and
+    just asked for, or to think about the next link. It now gets the text acknowledged and keeps
+    its turn; `wait_for_reply` parks until the coder has something to say, and
     `submit_for_review` stays **blocking** by ruling (the gate runs pytest twice through a
     blocking `subprocess.run`, and the CI framing says you wait for the ticket).
 
-    **A working coder is reached too**, which keeps the lead<->coder channel symmetric, and the
-    session picks the primitive. By default the message is **queued** for the coder's next turn;
-    ``mid_turn=true`` steers it into the running one (Codex `turn_steer`, or a second `query()`
-    on the Claude SDK's live client), and so does any message sent while the coder has an open
-    question, because that message is most likely the answer. Queued is the default because slot
-    6 (2026-09-15) steered its coder 47 times mid-turn: steering had become the lead's way of
-    staying busy while it had no way to wait.
+    **A working coder is reached too**, and the session picks the primitive. By default the text is
+    **queued** for the coder's next turn; ``mid_turn`` steers it into the running one (Codex
+    `turn_steer`, or a second `query()` on the Claude SDK's live client), and so does any text sent
+    while the coder has an open question, because that text is most likely the answer. Queued is
+    the default because slot 6 (2026-09-15) steered its coder 47 times mid-turn: steering had
+    become the lead's way of staying busy while it had no way to wait.
 
-    A session that predates B — a benchmark's, or a test double's — has no `send`, so this falls
-    back to the blocking call. `drive_authoring` is deliberately on that path: it backs the
-    paper's published authoring measurements and must stay byte-identical.
+    A session that predates B — a test double's — has no `send`, so this falls back to the
+    blocking call.
     """
-    instructions = str(arguments.get("instructions") or "").strip()
+    instructions = (text or "").strip()
     if not instructions:
         return ToolOutcome(
-            text="drive_coder needs 'instructions': what the coder should do next.", is_error=True
+            text="message to the coder needs text: what the coder should do next.", is_error=True
         )
     if not hasattr(session, "send"):
         response = await session.drive(instructions)
@@ -1600,43 +1673,49 @@ async def execute_drive_coder(session: Any, arguments: Mapping[str, Any]) -> Too
             or "(coder produced no narration; inspect the worktree with read_file, or "
             "submit_for_review to run the gate.)"
         )
-    outcome = await session.send(instructions, mid_turn=bool(arguments.get("mid_turn")))
+    outcome = await session.send(instructions, mid_turn=bool(mid_turn))
     if outcome == "answered":
         text = (
             "Delivered inside the turn the coder is running, as the answer to its question. "
-            "Call wait_coder to hear back."
+            "Call wait_for_reply to hear back."
         )
     elif outcome == "steered":
         text = (
             "Delivered inside the turn the coder is running; it changes course without stopping. "
-            "Call wait_coder to hear back."
+            "Call wait_for_reply to hear back."
         )
     elif outcome == "queued":
         text = (
             "Queued: the coder is mid-turn, so this becomes its next turn when the current one "
-            "ends. Call wait_coder to hear when that turn ends."
+            "ends. Call wait_for_reply to hear when that turn ends."
         )
     else:
         text = (
             "Sent; the coder is working on it now and you keep your turn. Read the library, plan "
-            "the next link or draft your report, and call wait_coder when you are ready to hear "
+            "the next link or draft your report, and call wait_for_reply when you are ready to hear "
             "back — it returns as soon as the coder stops or asks you something."
         )
     return ToolOutcome(text=text)
 
 
-def wait_coder_tool_def() -> dict:
-    """Definition for ``wait_coder`` — park until the coder has something for the lead."""
+def wait_for_reply_tool_def() -> dict:
+    """Definition for ``wait_for_reply`` — park until something reaches this seat (E12).
+
+    One wait for every seat. For the lead while a coder is working it also returns when the
+    coder's turn ends, which is what ``wait_coder`` was before the channel generalised it.
+    """
     floor, default, maximum = coder_wait_limits_s()
     return {
-        "name": WAIT_CODER_TOOL,
+        "name": WAIT_FOR_REPLY_TOOL,
         "description": (
-            "Wait for the coder. Returns as soon as its turn ends (with its narration), it asks "
-            "you a question, or a human steer arrives for you; otherwise after timeout_s, saying "
-            "how long it has been working. Waiting costs nothing while it waits, so prefer long "
-            f"waits: the default is {default}s, anything under {floor}s is raised to {floor}s, "
-            f"and the longest is {maximum}s. Call it when you have nothing else to do for this "
-            "link, and read the time it reports to pace yourself."
+            "Wait for a reply. Returns as soon as a message reaches you — the human's answer, "
+            "another member's text, a notice that a member you resumed ended its turn, a human "
+            "steer — or, while a coder is working for you, when its turn ends (with its "
+            "narration); otherwise after timeout_s, saying what is still outstanding. Waiting "
+            "costs nothing while it waits, so prefer long waits: the default is "
+            f"{default}s, anything under {floor}s is raised to {floor}s, and the longest is "
+            f"{maximum}s. Call it when you have nothing else to do, and read the time it reports "
+            "to pace yourself."
         ),
         "input_schema": {
             "type": "object",
@@ -1705,12 +1784,8 @@ def _read_coder_news(session: Any) -> tuple[list[str], bool, bool]:
                 "The coder's turn ended. Its narration:\n\n"
                 + ((text or "").strip() or "(no narration; inspect the worktree with read_file)")
             )
-    questions = session.take_questions() if hasattr(session, "take_questions") else []
-    for question in questions:
-        parts.append(
-            f"[coder asks] {question}\n\nAnswer with drive_coder — while the question is open, "
-            "your message reaches the coder inside the turn it is running."
-        )
+    # The coder's questions no longer ride this result: they reach the lead's inbox as messages
+    # (E12) and are delivered at its next boundary, like every other text a seat receives.
     return parts, failed, turn_read
 
 
@@ -1722,14 +1797,15 @@ async def execute_wait_coder(session: Any, arguments: Mapping[str, Any]) -> Tool
     31 refused submits and 9 refused ``turn_end`` calls at a 3-10 s cadence, because a loop with
     no way to let time pass emits a tool call to do it. The fix every harness that solved this
     converged on (Codex ``wait_agent``) is a **blocking wait with early wake**: parked, it costs
-    nothing; it returns the moment the coder's turn ends, the coder asks, or a human steer lands;
+    nothing; it returns the moment the coder's turn ends or a message lands (the coder's question
+    reaches the lead's inbox, E12);
     and a short timeout is raised to a floor instead of being refused, so no calling pattern can
     reintroduce a tight loop. Every return states elapsed time, which is the lead's clock.
     """
     if not hasattr(session, "wait_for_event"):
         return ToolOutcome(
-            text="This coder session does not run in the background; drive_coder returns its "
-            "narration directly.",
+            text="This coder session does not run in the background; a message to the coder returns "
+            "its narration directly.",
             is_error=True,
         )
     timeout, note = _wait_timeout(arguments)
@@ -1740,23 +1816,24 @@ async def execute_wait_coder(session: Any, arguments: Mapping[str, Any]) -> Tool
     parts, failed, turn_read = _read_coder_news(session)
     if reason == "steer":
         parts.append(
-            "A human steer for you has arrived; it is delivered right after this result."
+            "A message for you has arrived (the coder's question, the human, or another member); "
+            "it is delivered right after this result."
         )
     elif reason == "timeout":
         parts.append(
             f"No news in {_fmt_s(timeout)}: the coder is still working. Carry on with other work, "
-            "or call wait_coder again — a longer wait costs no more than a short one."
+            "or call wait_for_reply again — a longer wait costs no more than a short one."
         )
     elif reason == "idle" and not parts:
         parts.append(
             "The coder is not working and has nothing unread, so there is nothing to wait for. "
-            "Give it work with drive_coder, inspect the tree with read_file, or submit_for_review."
+            "Give it work with message to the coder, inspect the tree with read_file, or submit_for_review."
         )
     elif turn_read and not failed and getattr(session, "drive_status", None) == "working":
         parts.append("It has already started its next turn on the message(s) you queued.")
     elif turn_read and not failed:
         parts.append(
-            "It has stopped. Inspect the tree with read_file, drive_coder the next change, or "
+            "It has stopped. Inspect the tree with read_file, message the coder the next change, or "
             "submit_for_review."
         )
     return ToolOutcome(text=header + "\n\n" + "\n\n".join(parts), is_error=failed)
@@ -1766,7 +1843,7 @@ async def _wait_before_submit(session: Any) -> tuple[str, ToolOutcome | None]:
     """Hold a submit until the coder stops, so the gate never judges a half-written tree.
 
     Returns ``(narration_prefix, None)`` to proceed, or ``("", outcome)`` when the lead needs
-    to act first (the coder asked something, a steer arrived, it failed, or it is still working
+    to act first (a message arrived — the coder's question among them — it failed, or it is still working
     at the maximum wait). Nothing here spends a submission.
     """
     _, _, maximum = coder_wait_limits_s()
@@ -1778,17 +1855,18 @@ async def _wait_before_submit(session: Any) -> tuple[str, ToolOutcome | None]:
             return "", ToolOutcome(
                 text=(
                     f"Not submitted: the coder is still working after {_fmt_s(maximum)} "
-                    f"({_coder_clock(session)}). Call wait_coder, then submit once it stops."
+                    f"({_coder_clock(session)}). Call wait_for_reply, then submit once it stops."
                     + ("\n\n" + "\n\n".join(narration) if narration else "")
                 )
             )
         reason = await session.wait_for_event(remaining)
         parts, failed, _ = _read_coder_news(session)
-        if failed or reason in ("question", "steer") or (
-            parts and any(p.startswith("[coder asks]") for p in parts)
-        ):
+        if failed or reason == "steer":
             if reason == "steer":
-                parts.append("A human steer for you has arrived; it is delivered right after this.")
+                parts.append(
+                    "A message for you has arrived (the coder's question, the human, or another "
+                    "member); it is delivered right after this."
+                )
             return "", ToolOutcome(
                 text=(
                     "Not submitted yet — something needs you first:\n\n"
@@ -1810,8 +1888,8 @@ async def _wait_before_submit(session: Any) -> tuple[str, ToolOutcome | None]:
 async def execute_submit(session: Any, cycle: "LeadCycle | None" = None) -> ToolOutcome:
     """Run the gate, then (gate-pass) the co-lead review, over the session's current tree; commit
     on gate-pass ∧ review-pass (§9.9 commit ⇔ gate ∧ review — the lead never self-approves).
-    Returns a verdict the lead diagnoses: a gate failure (fix via drive_coder), a review rejection
-    (drive_coder or respond_to_review), or a successful commit. Bounded by ``session.submit_cap``
+    Returns a verdict the lead diagnoses: a gate failure (fix by messaging the coder), a review
+    rejection (message the coder, or respond_to_review), or a successful commit. Bounded by ``session.submit_cap``
     (each submit runs the gate twice + a co-lead review — expensive).
 
     **Waits for a working coder first.** The gate reads the WORKING TREE, so a gate run while
@@ -1852,7 +1930,7 @@ async def _submit_now(session: Any, cycle: "LeadCycle | None") -> ToolOutcome:
             text=(
                 f"{session.tool_spec.proposed_tool_name} is already committed "
                 f"({(session.last_commit_sha or '')[:10]}) and nothing has changed since. "
-                "Authoring for this tool is done — move on to the next link, or drive_coder "
+                "Authoring for this tool is done — move on to the next link, or message the coder "
                 "first if you want to change something and then submit that."
             )
         )
@@ -1882,8 +1960,8 @@ async def _submit_now(session: Any, cycle: "LeadCycle | None") -> ToolOutcome:
         body = "\n".join(failed) or gate.reason
         return ToolOutcome(
             text=(
-                "GATE FAILED — mechanical checks you can only satisfy. Fix the underlying cause via "
-                f"drive_coder (never weaken a check to pass), then submit_for_review again:\n{body}"
+                "GATE FAILED — mechanical checks you can only satisfy. Fix the underlying cause by "
+                f"messaging the coder (never weaken a check to pass), then submit_for_review again:\n{body}"
             )
         )
     review = await session.run_review_step(gate)
@@ -1892,7 +1970,7 @@ async def _submit_now(session: Any, cycle: "LeadCycle | None") -> ToolOutcome:
         return ToolOutcome(
             text=(
                 "GATE PASSED, but the independent co-lead REVIEW REJECTED the tool:\n"
-                f"{issues}\n\n{review.rationale}\n\nEither drive_coder to address these, or "
+                f"{issues}\n\n{review.rationale}\n\nEither message the coder to address these, or "
                 "respond_to_review to defend the design if you believe a challenge is unfounded."
             )
         )
@@ -1942,8 +2020,8 @@ def respond_to_review_tool_def() -> dict:
             "independent co-lead reconsiders your argument and re-issues its verdict: it concedes "
             "only if genuinely persuaded (a sound argument, or evidence the issue is already handled) "
             "and holds firm against pressure. If it is persuaded and the gate still passes, the tool "
-            "commits. Use this for a genuine disagreement; when the co-lead is right, fix the code via "
-            "drive_coder instead. Write 'message' as Markdown."
+            "commits. Use this for a genuine disagreement; when the co-lead is right, fix the code by messaging "
+            "the coder instead. Write 'message' as Markdown."
         ),
         "input_schema": {
             "type": "object",
@@ -1979,7 +2057,7 @@ async def execute_respond_to_review(session: Any, arguments: Mapping[str, Any]) 
         return ToolOutcome(
             text=(
                 f"You have used all {session.debate_cap} debate turns. Either address the issues "
-                "via drive_coder, or conclude — an honest failure is an acceptable outcome."
+                "by messaging the coder, or conclude — an honest failure is an acceptable outcome."
             )
         )
     session.debates_used += 1
@@ -1989,7 +2067,7 @@ async def execute_respond_to_review(session: Any, arguments: Mapping[str, Any]) 
         return ToolOutcome(
             text=(
                 "The co-lead HELD its position after your rebuttal:\n"
-                f"{issues}\n\n{review.rationale}\n\nAddress these via drive_coder, or accept the "
+                f"{issues}\n\n{review.rationale}\n\nAddress these by messaging the coder, or accept the "
                 "challenge and conclude (an honest failure is acceptable)."
             )
         )
@@ -2004,7 +2082,7 @@ async def execute_respond_to_review(session: Any, arguments: Mapping[str, Any]) 
         return ToolOutcome(
             text=(
                 "The co-lead is persuaded, but the gate no longer passes (did the tree change?):\n"
-                f"{failed}\nFix via drive_coder, then submit_for_review."
+                f"{failed}\nFix it by messaging the coder, then submit_for_review."
             )
         )
     sha = await session.commit(
@@ -2319,7 +2397,7 @@ def author_chain_tool_def() -> dict:
             "in the same chain. Read the target lib/ source with read_file/list_dir before filing, "
             "so each link's target_domain and disposition reflect what is already there. The links "
             "are authored back-to-back, each coder seeing the previous link's committed code; you "
-            "then steer each one with drive_coder and finish it with submit_for_review. File "
+            "then steer each one with message to the coder and finish it with submit_for_review. File "
             "If the request resolves without new code, write your report and end your turn."
         ),
         "strict": True,
@@ -2456,10 +2534,7 @@ class SandboxToolProvider:
         *,
         cwd: Path | None = None,
         timeout_s: int = 300,
-        human_handler: Any | None = None,
         web_source: Any | None = None,
-        asked_by: str = "analyst_worker",
-        model: str = "",
         figure_sink: list[FigureRef] | None = None,
         report_workspace: ReportWorkspace | None = None,
         receipts: Any | None = None,
@@ -2474,8 +2549,6 @@ class SandboxToolProvider:
         self.receipts = receipts
         self.receipt_source = receipt_source
         self.extra_tools = list(extra_tools)
-        # When a human_handler is wired, expose the shared ask_human tool (§9.7).
-        self.human_handler = human_handler
         # V-4: the agent's append-only figure catalog (its "self" source). Figures produced by
         # tool calls are appended here (deduped by path+sha), so they persist across debate rounds
         # and the agent can cite them by [self:index] via review_report/edit_report.
@@ -2487,8 +2560,6 @@ class SandboxToolProvider:
         # the worker can confirm an authoritative-doc point (mission threads, calibration memos)
         # rather than guessing (its prompt promises this). In-process, never in the sandbox.
         self.web_source = web_source
-        self.asked_by = asked_by
-        self.model = model
         # Figures land in <worker scratch>/figures (under the runtime data dir),
         # never in /tmp or a repo. See _redirect_figure_args.
         self.figures_dir = (Path(cwd) / "figures") if cwd is not None else None
@@ -2516,8 +2587,6 @@ class SandboxToolProvider:
             ({**d, "defer_loading": True} if defer else d)
             for d in self.registry.tool_definitions()
         ]
-        if self.human_handler is not None:
-            defs.append(ask_human_tool_def())
         if self.web_source is not None:
             defs.append(web_search_tool_def())
             defs.append(web_fetch_tool_def())
@@ -2542,10 +2611,6 @@ class SandboxToolProvider:
         extra = await _run_extra_tool(getattr(self, "extra_tools", ()), name, arguments)
         if extra is not None:
             return extra
-        if name == ASK_HUMAN_TOOL:
-            return _receipted(self.receipts, self.receipt_source, name, arguments, await execute_ask_human(
-                self.human_handler, self.asked_by, arguments, model=self.model
-            ), kind="human")
         if name == WEB_SEARCH_TOOL:
             return _receipted(self.receipts, self.receipt_source, name, arguments,
                               await execute_web_search(self.web_source, arguments))
@@ -3140,21 +3205,18 @@ class ReadOnlyToolProvider:
         include_text_search: bool = True,
         include_open_paper: bool = True,
         include_data_catalog: bool = False,
-        include_plan_and_debate: bool = False,
         authoring_session: Any | None = None,
         cycle: LeadCycle | None = None,
         report_workspace: ReportWorkspace | None = None,
-        human_handler: Any | None = None,
-        asked_by: str = "agent",
-        model: str = "",
         editable_file: Path | None = None,
         turn_end_validator: Callable[[], list[str]] | None = None,
         receipts: Any | None = None,
         receipt_source: str | None = None,
         extra_tools: Sequence[ExtraTool] = (),
     ) -> None:
-        # Provenance (P1): read results are receipted like any tool output, so what a role read
-        # can ground what it writes. Role-specific tools arrive through `extra_tools`.
+        # Provenance (P1): read results are receipted like any tool output, as the record of where
+        # a role looked; only a toolkit tool's return or a commit is evidence (`is_evidence`, human
+        # ruling 2026-09-25). Role-specific tools arrive through `extra_tools`.
         self.receipts = receipts
         self.receipt_source = receipt_source
         self.extra_tools = list(extra_tools)
@@ -3178,7 +3240,7 @@ class ReadOnlyToolProvider:
         # None outside adjudication (so decide_authoring/drive_authoring never see the report tools).
         self.report_workspace = report_workspace
         # The analyst lead (only) drives tool authoring via a live AuthoringSession (§9.3
-        # B-topology): drive_coder / submit_for_review. Masked to the lead alone — a session is
+        # B-topology): message to the coder / submit_for_review. Masked to the lead alone — a session is
         # wired here only on the lead's provider; no other role sees the tools. None ⇒ disabled.
         self.authoring_session = authoring_session
         # The analyst lead's one-cycle form desk (§9.3). When set, the five cycle forms are
@@ -3191,13 +3253,6 @@ class ReadOnlyToolProvider:
         # The analyst lead (not the reviewer) gets the read-only data_catalog tool so it can
         # check local data availability before deciding to author an acquire tool (§9.10).
         self.include_data_catalog = include_data_catalog
-        # The analyst lead (only) gets the budget-free plan_and_debate design channel (§5.5),
-        # so it can settle a toolkit design with the human before authoring. Needs human_handler.
-        self.include_plan_and_debate = include_plan_and_debate
-        # When a human_handler is wired, expose the shared ask_human tool (§9.7).
-        self.human_handler = human_handler
-        self.asked_by = asked_by
-        self.model = model
         # Optional Tavily/web QuerySource — when supplied (analyst lead), exposes a
         # web_search tool so the lead can consult authoritative documentation (mission
         # threads, calibration memos) before triaging a tool request or answering the
@@ -3323,13 +3378,8 @@ class ReadOnlyToolProvider:
             catalog_def = data_catalog_tool_def()  # sourced from research_toolkit.catalog_utils
             if catalog_def is not None:
                 definitions.append(catalog_def)
-        if self.human_handler is not None:
-            definitions.append(ask_human_tool_def())
-            if self.include_plan_and_debate:
-                definitions.append(plan_and_debate_tool_def())
         if self.authoring_session is not None or self._authoring_declared():
-            definitions.append(drive_coder_tool_def())
-            definitions.append(wait_coder_tool_def())
+            definitions.append(wait_for_reply_tool_def())
             definitions.append(submit_tool_def())
             definitions.append(respond_to_review_tool_def())
         if self.cycle is not None and self.cycle.authoring_enabled:
@@ -3356,7 +3406,7 @@ class ReadOnlyToolProvider:
         """Whether the drive tools are declared for the whole cycle.
 
         Declared from the cycle's start, not from the first live session: the chain's links each
-        get their own ``AuthoringSession``, and a set that gained then lost ``drive_coder`` between
+        get their own ``AuthoringSession``, and a set that gained then lost the ``coder`` address between
         links would replay a trajectory naming an undeclared tool (the 2026-07-29 run-killer).
         """
         return self.cycle is not None and self.cycle.authoring_enabled
@@ -3384,38 +3434,58 @@ class ReadOnlyToolProvider:
     _RECEIPTED: dict[str, str] = {
         "read_file": "result", "list_dir": "result", "text_search": "result",
         DATA_CATALOG_TOOL: "result", WEB_SEARCH_TOOL: "result", WEB_FETCH_TOOL: "web",
-        ASK_HUMAN_TOOL: "human", PLAN_AND_DEBATE_TOOL: "human",
     }
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
         extra = await _run_extra_tool(getattr(self, "extra_tools", ()), name, arguments)
         if extra is not None:
             return extra
+        session = self.authoring_session if name == SUBMIT_TOOL else None
+        committed_before = getattr(session, "last_commit_sha", None)
         outcome = await self._execute(name, arguments)
+        if session is not None:
+            return self._commit_receipted(session, committed_before, outcome)
         kind = self._RECEIPTED.get(name)
         if kind is None or outcome.is_error:
             return outcome
         if kind == "web":
             return await _web_receipted(self.receipts, self.receipt_source, arguments, outcome)
-        return _receipted(self.receipts, self.receipt_source, name, arguments, outcome, kind=kind)
+        # A toolkit tool the lead runs in-process is receipted under its registry kind, so it is
+        # evidence like the same tool run in a worker's sandbox (`provenance.store.is_evidence`).
+        producer = _CATALOG_UTILS_KIND if name == DATA_CATALOG_TOOL else name
+        return _receipted(self.receipts, self.receipt_source, producer, arguments, outcome, kind=kind)
+
+    def _commit_receipted(self, session: Any, before: str | None, outcome: ToolOutcome) -> ToolOutcome:
+        """A submit that committed becomes a ``commit`` receipt the runtime writes from the session.
+
+        The coding pipeline's outcome is evidence the lead may cite (human ruling 2026-09-25): the
+        SHA, the tool, and that the gate and the co-lead review both passed — which is what a
+        commit means (§9.9). Written from the session's own state, never from anything the model
+        typed; a submit that did not commit mints nothing.
+        """
+        sha = getattr(session, "last_commit_sha", None)
+        if sha is None or sha == before or self.receipts is None or self.receipt_source is None:
+            return outcome
+        spec = getattr(session, "tool_spec", None)
+        record = {
+            "tool": getattr(spec, "proposed_tool_name", None), "commit_sha": sha,
+            "branch": getattr(session, "branch", None), "gate_passed": True, "review_approved": True,
+            "submissions_used": getattr(session, "submits_used", None),
+            "submit_cap": getattr(session, "submit_cap", None),
+        }
+        minted = self.receipts.mint(
+            source=self.receipt_source, kind="commit", produced_by="approve_edit",
+            data=json.dumps(record, sort_keys=True),
+        )
+        return replace(outcome, text=f"[receipt {minted.handle}] (commit)\n{outcome.text}")
 
     async def _execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
         if name == DATA_CATALOG_TOOL:
             return await execute_data_catalog(arguments)
-        if name == ASK_HUMAN_TOOL:
-            return await execute_ask_human(
-                self.human_handler, self.asked_by, arguments, model=self.model
-            )
-        if name == PLAN_AND_DEBATE_TOOL:
-            return await execute_plan_and_debate(
-                self.human_handler, self.asked_by, arguments, model=self.model
-            )
-        if name in (DRIVE_CODER_TOOL, WAIT_CODER_TOOL, SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL):
+        if name in (WAIT_FOR_REPLY_TOOL, SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL):
             if self.authoring_session is None:
                 return ToolOutcome(text=self._no_session_text(), is_error=True)
-            if name == DRIVE_CODER_TOOL:
-                return await execute_drive_coder(self.authoring_session, arguments)
-            if name == WAIT_CODER_TOOL:
+            if name == WAIT_FOR_REPLY_TOOL:
                 return await execute_wait_coder(self.authoring_session, arguments)
             if name == SUBMIT_TOOL:
                 return await execute_submit(self.authoring_session, self.cycle)

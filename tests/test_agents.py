@@ -72,8 +72,12 @@ class _ScriptedModel:
         self.turn += 1
         if self.turn > len(self.script):
             return ModelResponse(content="done")
-        name, arguments = self.script[self.turn - 1]
-        return ModelResponse(tool_calls=[ToolCall(id=f"c{self.turn}", name=name, arguments=arguments)])
+        step = self.script[self.turn - 1]
+        batch = step if isinstance(step, list) else [step]  # a list is one turn's batch of calls
+        return ModelResponse(tool_calls=[
+            ToolCall(id=f"c{self.turn}_{i}", name=name, arguments=arguments)
+            for i, (name, arguments) in enumerate(batch)
+        ])
 
 
 def _reviewer(tmp_path, script):
@@ -92,18 +96,19 @@ def test_reviewer_writes_and_files_one_report_in_its_loop(tmp_path):
     from auto_research.agents.react import EDIT_REPORT_TOOL, TURN_END_TOOL
 
     agent, fake = _reviewer(tmp_path, [
-        (EDIT_REPORT_TOOL, {"rationale": "The literature is adequate.", "follow_up": "Fit the data."}),
+        (EDIT_REPORT_TOOL, {"rationale": "The literature is adequate.", "assign_to": "analysts",
+                            "follow_up": "Fit the data."}),
         (TURN_END_TOOL, {"summary": "dispatched"}),
     ])
-    report = asyncio.run(agent.review(ResearchRequest(question="Check this."), stage="literature",
-                                      iterations_left=1))
-    assert report.follow_up == "Fit the data." and report.rework is False
+    report = asyncio.run(agent.review(ResearchRequest(question="Check this."),
+                                      budgets={"librarian": 1, "analysts": 1}))
+    assert report.follow_up == "Fit the data." and report.assign_to == "analysts"
     assert fake.messages[0].content == "reviewer prompt"
-    assert _user_payload(fake)["review_stage"] == "literature"
+    assert _user_payload(fake)["arrived"] == "request"
     names = {t["name"] for t in fake.tools}
     assert {"edit_report", "review_report", "turn_end", "read_paper"} <= names
     assert "open_paper" not in names
-    assert (tmp_path / "reviewer" / "review1_literature.jsonl").is_file()
+    assert (tmp_path / "reviewer" / "review1.jsonl").is_file()
 
 
 def test_reviewer_turn_end_refuses_until_the_report_is_complete(tmp_path):
@@ -111,19 +116,36 @@ def test_reviewer_turn_end_refuses_until_the_report_is_complete(tmp_path):
 
     agent, fake = _reviewer(tmp_path, [
         (TURN_END_TOOL, {"summary": "nothing written"}),
-        (EDIT_REPORT_TOOL, {"rationale": "Adequate.", "follow_up": ""}),
+        (EDIT_REPORT_TOOL, {"rationale": "Adequate.", "assign_to": "analysts", "follow_up": ""}),
         (TURN_END_TOOL, {"summary": "no dispatch"}),
-        (EDIT_REPORT_TOOL, {"rationale": "Adequate.", "follow_up": "Fit it."}),
+        (EDIT_REPORT_TOOL, {"rationale": "Adequate.", "assign_to": "analysts", "follow_up": "Fit it."}),
         (TURN_END_TOOL, {"summary": "ok"}),
     ])
-    report = asyncio.run(agent.review(ResearchRequest(question="q"), stage="literature"))
+    report = asyncio.run(agent.review(ResearchRequest(question="q"),
+                                      budgets={"librarian": 1, "analysts": 1}))
     assert report.follow_up == "Fit it." and fake.turn == 5
+
+
+def test_a_call_after_an_accepted_turn_end_in_the_same_batch_is_not_run(tmp_path):
+    # Found 2026-09-25 by an adversarial review: an edit after turn_end in one batch replaced the
+    # filed report with an unvalidated one. The shared loop answers it and runs nothing.
+    from auto_research.agents.react import EDIT_REPORT_TOOL, TURN_END_TOOL
+
+    agent, fake = _reviewer(tmp_path, [[
+        (EDIT_REPORT_TOOL, {"rationale": "Adequate.", "assign_to": "analysts", "follow_up": "Fit it."}),
+        (TURN_END_TOOL, {"summary": "ok"}),
+        (EDIT_REPORT_TOOL, {"rationale": "PD is 9.99.", "assign_to": "librarian", "follow_up": "12.345"}),
+    ]])
+    report = asyncio.run(agent.review(ResearchRequest(question="q"),
+                                      budgets={"librarian": 0, "analysts": 1}))
+    assert report.assign_to == "analysts" and report.follow_up == "Fit it."
+    assert fake.turn == 1
 
 
 def test_a_reviewer_that_never_files_raises_rather_than_returning(tmp_path):
     agent, _ = _reviewer(tmp_path, [])
     with pytest.raises(Exception):
-        asyncio.run(agent.review(ResearchRequest(question="q"), stage="literature"))
+        asyncio.run(agent.review(ResearchRequest(question="q")))
 
 
 def test_call_fails_loudly_when_no_structured_output():

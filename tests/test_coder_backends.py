@@ -468,7 +468,7 @@ def test_codex_drive_before_connect_is_an_explicit_error():
 # --------------------------------------------------------------------------- escalation endpoint
 
 
-def test_escalation_server_serves_both_tools_over_localhost_and_needs_the_token():
+def test_escalation_server_serves_the_message_tool_over_localhost_and_needs_the_token():
     """The handlers stay in this process, which is the whole reason for an HTTP endpoint: a
     subprocess server could not reach the live lead object or the run's HITL connector."""
     import httpx
@@ -499,8 +499,10 @@ def test_escalation_server_serves_both_tools_over_localhost_and_needs_the_token(
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         tools = await session.list_tools()
-                        assert {tool.name for tool in tools.tools} == {"ask_lead", "ask_human"}
-                        result = await session.call_tool("ask_lead", {"message": "which helper?"})
+                        assert {tool.name for tool in tools.tools} == {"message"}
+                        result = await session.call_tool(
+                            "message", {"to": "lead", "text": "which helper?"}
+                        )
                         assert "lead:which helper?" in result.content[0].text
 
             wrong = httpx.AsyncClient(headers={"Authorization": "Bearer wrong"}, timeout=30)
@@ -629,7 +631,7 @@ def test_unattended_ask_human_tells_the_author_what_to_do_instead_of_echoing_it(
     assert text == UNATTENDED_GUIDANCE
     assert question not in text, "the author's own question came back as the answer"
     lowered = text.lower()
-    assert "search the web" in lowered and "ask_lead" in lowered
+    assert "search the web" in lowered and 'message(to="lead")' in lowered
     # Domain-neutral: `prompts/coder.md` and the toolkit are not tied to one field, so the
     # guidance names channels rather than kinds of document.
     for domain_word in ("mission", "calibration memo", "observation", "spectra"):
@@ -640,54 +642,77 @@ def test_unattended_ask_human_tells_the_author_what_to_do_instead_of_echoing_it(
     assert "coder.ask_human.answer" not in events, "an unanswered question was recorded as answered"
 
 
+def _delivered(handler_factory, question: str) -> tuple[str, list[str]]:
+    """Run the coder's ``message(to="human")`` and collect what reaches the coder's turn later."""
+    from types import SimpleNamespace
+
+    sent: list[str] = []
+
+    async def send(text, *, mid_turn=False):
+        sent.append(text)
+        return "steered"
+
+    session = SimpleNamespace(send=send)
+
+    async def go() -> str:
+        handler = handler_factory(lambda: session)
+        out = await handler(question)
+        for _ in range(100):
+            if sent:
+                break
+            await asyncio.sleep(0.01)
+        return out
+
+    return asyncio.run(go()), sent
+
+
 def test_a_broken_human_channel_is_classified_apart_from_an_absent_one():
     """Every MCP stack turns a handler exception into an ``isError`` result carrying only
-    ``str(exc)``, so a *missing* handler, a *broken connector* and a *wrong-typed* handler used
-    to be one indistinguishable string — to the author and in the ledger alike. A live channel
-    fault looked exactly like a healthy unattended run."""
-    from auto_research.hitl import HumanInputRequired
+    ``str(exc)``, so a *missing* handler and a *broken connector* used to be one string. The call
+    is non-blocking now (E12): unattended still raises at once with its guidance, while a channel
+    fault arrives later as a notice in the coder's turn — never as an answer."""
     from auto_research.sandbox.merge_flow import _make_ask_human_handler
 
     def broken(query):
         raise ConnectionError("slack socket closed")
 
     monitor = _Monitor()
-    handler = _make_ask_human_handler(broken, model="matrix", monitor=monitor)
-    with pytest.raises(RuntimeError) as excinfo:
-        asyncio.run(handler("Which epoch?"))
-
-    # A fault, not the headless fail-safe — the two must not share a type.
-    assert not isinstance(excinfo.value, HumanInputRequired)
-    text = str(excinfo.value)
-    assert "ConnectionError" in text and "slack socket closed" in text
-    assert "ask_lead" in text, "the author was not told what is still reachable"
-
+    out, sent = _delivered(
+        lambda ref: _make_ask_human_handler(broken, session_ref=ref, monitor=monitor),
+        "Which epoch?",
+    )
+    assert out.startswith("Sent to the human")
+    assert len(sent) == 1 and sent[0].startswith("[Notice]")
+    assert "slack socket closed" in sent[0]
     events = dict(monitor.events)
-    assert "coder.ask_human.error" in events
+    assert "channel.reply.error" in events and "ConnectionError" in events["channel.reply.error"]["error"]
     assert "coder.ask_human.unattended" not in events
     assert "coder.ask_human.answer" not in events
-    assert "ConnectionError" in events["coder.ask_human.error"]["error"]
 
 
 def test_a_wrong_typed_handler_is_a_channel_fault_not_an_absent_human():
     from auto_research.sandbox.merge_flow import _make_ask_human_handler
 
     monitor = _Monitor()
-    handler = _make_ask_human_handler(lambda query: 42, model="matrix", monitor=monitor)
-    with pytest.raises(RuntimeError) as excinfo:
-        asyncio.run(handler("Which epoch?"))
-    assert "TypeError" in str(excinfo.value)
-    assert "coder.ask_human.error" in dict(monitor.events)
+    _, sent = _delivered(
+        lambda ref: _make_ask_human_handler(lambda query: 42, session_ref=ref, monitor=monitor),
+        "Which epoch?",
+    )
+    assert sent and sent[0].startswith("[Notice]")
+    assert "channel.reply.error" in dict(monitor.events)
 
 
-def test_ask_human_with_a_handler_returns_its_answer_verbatim():
+def test_ask_human_with_a_handler_delivers_its_answer_verbatim():
     from auto_research.sandbox.merge_flow import _make_ask_human_handler
 
     def answer(query):
         return "Use epoch 2 and state the assumption."
 
-    handler = _make_ask_human_handler(answer, model="matrix", monitor=_Monitor())
-    assert asyncio.run(handler("Which epoch?")) == "Use epoch 2 and state the assumption."
+    _, sent = _delivered(
+        lambda ref: _make_ask_human_handler(answer, session_ref=ref, monitor=_Monitor()),
+        "Which epoch?",
+    )
+    assert sent == ["[Reply from the human] Use epoch 2 and state the assumption."]
 
 def test_codex_audit_resolves_a_relative_read_against_the_command_cwd():
     """The regression the live matrix found: Codex's command parse yields paths relative to the

@@ -19,6 +19,11 @@ Design mirrors :mod:`auto_research.hitl.slack`:
   heading stays with its section, a fence or table is never cut) and converted to Telegram's small
   HTML subset; tables become an aligned ``<pre>`` block, or a bullet list when too wide for a phone.
   A parse rejection falls back to plain text so a message always sends.
+* **Attachments** — a query's files go inside its rich message (Bot API 10.2 ``media`` with
+  ``tg://photo?id=`` / ``tg://document?id=`` links, each uploaded as its own multipart field); when
+  the rich send is refused they follow the text as photo/document replies to it. A reply to any of
+  a query's messages answers it. The human may answer with a photo, a document or an album; the
+  connector downloads them into the query's ``reply_dir``.
 * **Edits** — an edited message is routed on its own, so editing a command never re-runs it; an edit
   to a reply already taken as the answer gets a notice asking for a new message.
 * The ``python-telegram-bot`` ``Application`` is injectable so the send + reply-resolution logic is
@@ -31,12 +36,15 @@ from __future__ import annotations
 import asyncio
 import html as _html
 import logging
+import mimetypes
 import os
 import re
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from auto_research.hitl.resolve import response_timeout_s
-from auto_research.schemas import HumanQuery, HumanResponse
+from auto_research.schemas import HumanAttachment, HumanQuery, HumanResponse
 
 # Telegram caps a message at 4096 chars; chunk the Markdown *before* rendering so each posted
 # message is self-contained valid HTML (a cut never splits a tag). Room left for header/hint.
@@ -48,6 +56,27 @@ _RICH_CHUNK = 30000
 _RICH_MAX_LINES = 400
 _TABLE_PRE_WIDTH = 60  # the widest aligned table row that still reads on a phone
 _ANSWERED_KEEP = 200  # reply message ids remembered for the edit notice
+# Media limits, all from the Bot API docs: sendPhoto (10 MB; width + height <= 10000; ratio <= 20),
+# sendDocument (50 MB), getFile (bots download up to 20 MB), captions (1024), rich messages (50 media).
+_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+_PHOTO_MAX_SIDES = 10000
+_PHOTO_MAX_RATIO = 20
+_PHOTO_MIME_TYPES = ("image/png", "image/jpeg")
+_DOCUMENT_MAX_BYTES = 50 * 1024 * 1024
+_DOWNLOAD_MAX_BYTES = 20 * 1024 * 1024
+_CAPTION_LIMIT = 1024
+_RICH_MAX_MEDIA = 50
+# An album arrives as one update per item; wait this long after the last item before answering.
+_ALBUM_SETTLE_S = 1.5
+
+
+@dataclass
+class _Reply:
+    """What resolves a pending question: the human's words and the files they sent."""
+
+    text: str
+    attachments: list[HumanAttachment] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
 
 def _rich_messages_enabled() -> bool:
@@ -75,7 +104,14 @@ class TelegramHandler:
         self._started = False
         # Map every posted message_id -> the Future awaiting its reply. All chunks of one query
         # point at the same Future, so a reply-to any chunk resolves it.
-        self._pending: dict[int, asyncio.Future[str]] = {}
+        self._pending: dict[int, asyncio.Future[Any]] = {}
+        # Each open question's reply_dir (keyed by its Future), and albums still arriving.
+        self._reply_dirs: dict[asyncio.Future[Any], Path | None] = {}
+        self._albums: dict[str, dict[str, Any]] = {}
+        # Albums whose first item matched no single question (noticed once, rest ignored), and
+        # the notice tasks scheduled from the synchronous text path (kept so they are not collected).
+        self._unrouted_albums: dict[str, None] = {}
+        self._tasks: set[asyncio.Task[Any]] = set()
         # Message ids of replies that resolved a question (insertion-ordered, bounded), so an
         # edit to one can be answered with a notice instead of being silently dropped.
         self._answered: dict[int, None] = {}
@@ -103,12 +139,16 @@ class TelegramHandler:
         # new messages and edits are therefore routed separately.
         new = filters.UpdateType.MESSAGE
         self.app.add_handler(MessageHandler(new & filters.TEXT & ~filters.COMMAND, self._on_update))
+        self.app.add_handler(MessageHandler(new & (filters.PHOTO | filters.Document.ALL), self._on_media))
         self.app.add_handler(MessageHandler(new & filters.COMMAND, self._on_command))
         self.app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, self._on_edit))
         self.app.add_handler(CallbackQueryHandler(self._on_callback))
 
     async def _on_update(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
         self.on_message(update)
+
+    async def _on_media(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
+        await self.handle_media(update)
 
     async def _on_command(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
         await self.handle_command(update)
@@ -192,18 +232,38 @@ class TelegramHandler:
         question when exactly one is pending. Ignores other chats, the bot's own messages, and
         empty text. Separated from the handler wiring so tests can drive it with a fake update.
         """
-        msg = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        msg = self._human_message(update)
         if msg is None:
             return
-        chat = getattr(update, "effective_chat", None) or getattr(msg, "chat", None)
-        chat_id = str(getattr(chat, "id", "") or "")
-        if self.chat_id and chat_id and chat_id != self.chat_id:
-            return  # only our chat
-        if getattr(getattr(msg, "from_user", None), "is_bot", False):
-            return  # our own posts
         text = (getattr(msg, "text", None) or "").strip()
         if not text:
             return
+        fut = self._route(msg)
+        if fut is not None:
+            self._resolve(fut, _Reply(text), [msg])
+        elif self._open_count() > 1:
+            try:
+                task = asyncio.get_running_loop().create_task(self._ambiguous_notice())
+            except RuntimeError:  # no running loop (a synchronous test drive): nothing to post
+                return
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
+    def _human_message(self, update: Any) -> Any | None:
+        """The update's message when it is a human's message in our chat, else ``None``."""
+        msg = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        if msg is None:
+            return None
+        chat = getattr(update, "effective_chat", None) or getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", "") or "")
+        if self.chat_id and chat_id and chat_id != self.chat_id:
+            return None  # only our chat
+        if getattr(getattr(msg, "from_user", None), "is_bot", False):
+            return None  # our own posts
+        return msg
+
+    def _route(self, msg: Any) -> asyncio.Future[Any] | None:
+        """The open question ``msg`` answers: the one it replies to, else the single open one."""
         reply_to = getattr(msg, "reply_to_message", None)
         rid = getattr(reply_to, "message_id", None) if reply_to is not None else None
         if rid is not None and rid in self._pending:
@@ -214,13 +274,109 @@ class TelegramHandler:
             # multi-chunk question as "many open" and refuse a plain reply (forcing reply-to).
             open_futs = list({id(f): f for f in self._pending.values() if not f.done()}.values())
             fut = open_futs[0] if len(open_futs) == 1 else None
-        if fut is not None and not fut.done():
-            fut.set_result(text)
+        return fut if fut is not None and not fut.done() else None
+
+    def _open_count(self) -> int:
+        return len({id(f) for f in self._pending.values() if not f.done()})
+
+    async def _ambiguous_notice(self) -> None:
+        """Tell the human a plain message matched no single question, so it was not an answer."""
+        await self._send(
+            f"<i>{self._open_count()} questions are open, so that message was not taken as an "
+            "answer. Reply to the question you mean (long-press it, then Reply).</i>"
+        )
+
+    def _resolve(self, fut: asyncio.Future[Any], reply: _Reply, msgs: list[Any]) -> None:
+        if fut.done():
+            return
+        fut.set_result(reply)
+        for msg in msgs:
             mid = getattr(msg, "message_id", None)
             if mid is not None:
                 self._answered[mid] = None
-                while len(self._answered) > _ANSWERED_KEEP:
-                    self._answered.pop(next(iter(self._answered)))
+        while len(self._answered) > _ANSWERED_KEEP:
+            self._answered.pop(next(iter(self._answered)))
+
+    async def handle_media(self, update: Any) -> None:
+        """Answer an open question with the photo or document the human sent (caption = words).
+
+        An album arrives as one update per item sharing a ``media_group_id``: its first item picks
+        the question, and the whole album answers it once no new item has come for
+        ``_ALBUM_SETTLE_S``. Separated from the handler wiring so tests can drive it."""
+        msg = self._human_message(update)
+        if msg is None:
+            return
+        group = getattr(msg, "media_group_id", None)
+        if group is None:
+            fut = self._route(msg)
+            if fut is not None:
+                self._resolve(fut, await self._collect(fut, [msg]), [msg])
+            elif self._open_count() > 1:
+                await self._ambiguous_notice()
+            return
+        if group in self._unrouted_albums:
+            return  # the album's first item already got the notice
+        album = self._albums.get(group)
+        if album is None:
+            fut = self._route(msg)
+            if fut is None:
+                if self._open_count() > 1:
+                    self._unrouted_albums[group] = None
+                    while len(self._unrouted_albums) > _ANSWERED_KEEP:
+                        self._unrouted_albums.pop(next(iter(self._unrouted_albums)))
+                    await self._ambiguous_notice()
+                return
+            album = self._albums[group] = {"fut": fut, "msgs": [], "timer": None}
+        album["msgs"].append(msg)
+        if album["timer"] is not None:
+            album["timer"].cancel()
+        album["timer"] = asyncio.ensure_future(self._settle_album(group))
+
+    async def _settle_album(self, group: str) -> None:
+        await asyncio.sleep(_ALBUM_SETTLE_S)
+        album = self._albums.pop(group, None)
+        if album is not None and not album["fut"].done():
+            self._resolve(album["fut"], await self._collect(album["fut"], album["msgs"]), album["msgs"])
+
+    async def _collect(self, fut: asyncio.Future[Any], msgs: list[Any]) -> _Reply:
+        """Download the files in ``msgs`` into the question's ``reply_dir``; captions are the words."""
+        reply_dir = self._reply_dirs.get(fut)
+        words = [(getattr(m, "caption", None) or getattr(m, "text", None) or "").strip() for m in msgs]
+        reply = _Reply(text="\n\n".join(w for w in words if w))
+        for msg in msgs:
+            mid = getattr(msg, "message_id", 0)
+            doc = getattr(msg, "document", None)
+            photos = getattr(msg, "photo", None) or ()
+            if doc is not None:
+                name = getattr(doc, "file_name", None) or f"document_{mid}"
+                mime = getattr(doc, "mime_type", None) or mimetypes.guess_type(name)[0]
+                item = doc
+            elif photos:
+                item, name, mime = photos[-1], f"photo_{mid}.jpg", "image/jpeg"  # the largest size
+            else:
+                continue
+            size = getattr(item, "file_size", None) or 0
+            if reply_dir is None:
+                reply.notes.append(f"The human sent {name}; this question had nowhere to store files, so it was not saved.")
+                continue
+            if size > _DOWNLOAD_MAX_BYTES:
+                reply.notes.append(
+                    f"The human sent {name} ({size / 1e6:.1f} MB); bots can download at most 20 MB, so it was not saved."
+                )
+                continue
+            dest = Path(reply_dir) / f"{mid}_{_safe_filename(name)}"
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                tg_file = await self.app.bot.get_file(item.file_id)
+                await tg_file.download_to_drive(dest)
+            except Exception as exc:  # noqa: BLE001 — a failed download is reported, never fatal
+                reply.notes.append(f"The human sent {name}, but downloading it failed ({type(exc).__name__}).")
+                continue
+            reply.attachments.append(HumanAttachment(
+                path=dest, filename=name, mime_type=mime or "application/octet-stream",
+                caption=(getattr(msg, "caption", None) or "").strip(),
+            ))
+        return reply
 
     async def start(self) -> None:
         if self._started:
@@ -269,7 +425,7 @@ class TelegramHandler:
                 await self.app.shutdown()
             self._started = False
 
-    async def _send(self, text_html: str, *, buttons: tuple = ()) -> Any:
+    async def _send(self, text_html: str, *, buttons: tuple = (), silent: bool = False) -> Any:
         """Send one message as HTML; on a parse rejection, retry as plain text (tags stripped)
         so a malformed-render never blocks the human channel.
 
@@ -280,7 +436,9 @@ class TelegramHandler:
             from telegram.error import BadRequest
         except Exception:  # noqa: BLE001 - library absent in unit tests
             BadRequest = ()  # type: ignore[assignment]
-        extra = {"reply_markup": _inline_keyboard(buttons)} if buttons else {}
+        extra: dict[str, Any] = {"reply_markup": _inline_keyboard(buttons)} if buttons else {}
+        if silent:
+            extra["disable_notification"] = True
         try:
             return await self.app.bot.send_message(
                 chat_id=self.chat_id, text=text_html, parse_mode="HTML", **extra
@@ -289,8 +447,15 @@ class TelegramHandler:
             plain = _html.unescape(re.sub(r"<[^>]+>", "", text_html))
             return await self.app.bot.send_message(chat_id=self.chat_id, text=plain, **extra)
 
-    async def _send_rich(self, md: str, *, buttons: tuple = ()) -> Any | None:
+    async def _send_rich(
+        self, md: str, *, buttons: tuple = (), attachments: tuple = (), silent: bool = False
+    ) -> Any | None:
         """Send ``md`` as one rich message; return the sent message, or ``None`` when refused.
+
+        ``attachments`` are embedded after the text: each is a ``tg://photo?id=`` or
+        ``tg://document?id=`` link named in ``rich_message.media`` and uploaded as its own multipart
+        field (python-telegram-bot uploads only top-level ``InputFile`` arguments, so the media entry
+        names its field by ``attach://``).
 
         A refusal (content the rich parser rejects, or a server/library without the method)
         returns ``None`` so the caller falls back to HTML; any other error propagates exactly
@@ -302,7 +467,21 @@ class TelegramHandler:
             from telegram.error import BadRequest, EndPointNotFound
         except Exception:  # noqa: BLE001 - library absent in unit tests
             return None
-        kwargs: dict[str, Any] = {"chat_id": self.chat_id, "rich_message": {"markdown": md}}
+        rich: dict[str, Any] = {"markdown": md}
+        kwargs: dict[str, Any] = {"chat_id": self.chat_id, "rich_message": rich}
+        if silent:
+            kwargs["disable_notification"] = True
+        if attachments:
+            from telegram import InputFile
+
+            links, media = [], []
+            for i, att in enumerate(attachments, 1):
+                kind = "photo" if _is_photo(att) else "document"
+                links.append(f'![](tg://{kind}?id=a{i} "{_rich_title(_caption(att))}")')
+                media.append({"id": f"a{i}", "media": {"type": kind, "media": f"attach://a{i}"}})
+                kwargs[f"a{i}"] = InputFile(Path(att.path).read_bytes(), filename=att.filename)
+            rich["markdown"] = md.rstrip() + "\n\n**Attachments**\n\n" + "\n\n".join(links)
+            rich["media"] = media
         markup = _inline_keyboard(buttons) if buttons else None
         if markup is not None:
             kwargs["reply_markup"] = markup.to_dict()
@@ -316,16 +495,25 @@ class TelegramHandler:
         except BadRequest:
             return None
 
-    async def _send_md(self, md: str, *, buttons: tuple = (), on_posted: Any = None) -> list[Any]:
+    async def _send_md(
+        self, md: str, *, buttons: tuple = (), on_posted: Any = None, attachments: tuple = (),
+        silent: bool = False,
+    ) -> list[Any]:
         """Send Markdown as rich message(s), falling back to HTML chunks part by part.
 
         ``on_posted(message)`` runs the instant each message exists, so a fast reply can resolve
-        a question while later parts are still being sent ([E4]). Buttons ride on the last message."""
+        a question while later parts are still being sent ([E4]). Buttons ride on the last message.
+        ``attachments`` ride inside the last rich part; when that part falls back to HTML they
+        follow it as photo/document messages replying to its first message."""
         parts = _chunk_md(md, _RICH_CHUNK, max_lines=_RICH_MAX_LINES) if self._rich else [md]
+        embed = tuple(attachments) if len(attachments) <= _RICH_MAX_MEDIA else ()
         posted_all: list[Any] = []
         for p_i, part in enumerate(parts):
             last_part = p_i == len(parts) - 1
-            posted = await self._send_rich(part, buttons=buttons if last_part else ())
+            posted = await self._send_rich(
+                part, buttons=buttons if last_part else (), attachments=embed if last_part else (),
+                silent=silent,
+            )
             if posted is not None:
                 sent = [posted]
             else:
@@ -333,15 +521,65 @@ class TelegramHandler:
                 html_chunks = _html_chunks(part)
                 for c_i, chunk in enumerate(html_chunks):
                     last = last_part and c_i == len(html_chunks) - 1
-                    sent.append(await self._send(chunk, buttons=buttons if last else ()))
+                    sent.append(await self._send(chunk, buttons=buttons if last else (), silent=silent))
                     if on_posted is not None:
                         on_posted(sent[-1])
+                if last_part and attachments:
+                    sent.extend(await self._send_files(attachments, sent[0], on_posted))
                 posted_all.extend(sent)
                 continue
             if on_posted is not None:
                 on_posted(posted)
+            if last_part and attachments and not embed:
+                sent.extend(await self._send_files(attachments, posted, on_posted))
             posted_all.extend(sent)
         return posted_all
+
+    async def notify(self, text: str) -> None:
+        """Post ``text`` (Markdown) as a read-only notice: delivered silently, answering nothing.
+
+        The seat-to-seat mirror (``orchestration.yaml: channel_mirror``) calls this for every text
+        one seat sends another. It registers no pending question, so a reply to it is not taken as
+        an answer and it never makes a plain reply ambiguous."""
+        await self.start()
+        await self._send_md(text, silent=True)
+
+    async def _send_files(self, attachments: tuple, reply_to: Any, on_posted: Any = None) -> list[Any]:
+        """Send each attachment as its own photo/document message, replying to ``reply_to``.
+
+        A photo Telegram rejects (dimensions it will not accept) is re-sent as a document, which
+        also keeps the original bytes."""
+        try:
+            from telegram import InputFile, ReplyParameters
+            from telegram.error import BadRequest
+        except Exception:  # noqa: BLE001 - library absent in unit tests
+            InputFile = ReplyParameters = None  # type: ignore[assignment]
+            BadRequest = ()  # type: ignore[assignment]
+        reply = {}
+        rid = getattr(reply_to, "message_id", None)
+        if rid is not None and ReplyParameters is not None:
+            reply = {"reply_parameters": ReplyParameters(message_id=rid)}
+        sent: list[Any] = []
+        for att in attachments:
+            data = Path(att.path).read_bytes()
+            upload = InputFile(data, filename=att.filename) if InputFile is not None else data
+            caption = _caption(att)[:_CAPTION_LIMIT]
+            posted = None
+            if _is_photo(att):
+                try:
+                    posted = await self.app.bot.send_photo(
+                        chat_id=self.chat_id, photo=upload, caption=caption, **reply
+                    )
+                except BadRequest:
+                    upload = InputFile(data, filename=att.filename) if InputFile is not None else data
+            if posted is None:
+                posted = await self.app.bot.send_document(
+                    chat_id=self.chat_id, document=upload, caption=caption, **reply
+                )
+            sent.append(posted)
+            if on_posted is not None:
+                on_posted(posted)
+        return sent
 
     async def __call__(self, query: HumanQuery) -> HumanResponse:
         await self.start()
@@ -356,16 +594,26 @@ class TelegramHandler:
             self._pending[posted.message_id] = fut
             ids.append(posted.message_id)
 
-        await self._send_md(_query_markdown(query), on_posted=_register)
+        sendable, notes = _sendable(query.attachments)
+        self._reply_dirs[fut] = query.reply_dir
         from auto_research.hitl.commands import wait_reply_or_stop
 
         rc = getattr(self._cmd_ctx, "run_control", None)
         try:
-            answer = await wait_reply_or_stop(fut, rc, self.timeout_s)
+            await self._send_md(
+                _query_markdown(query, notes), on_posted=_register, attachments=tuple(sendable)
+            )
+            reply = await wait_reply_or_stop(fut, rc, self.timeout_s)
         finally:
             for mid in ids:
                 self._pending.pop(mid, None)
-        return HumanResponse(query_id=query.id, answer=answer)
+            self._reply_dirs.pop(fut, None)
+        if not isinstance(reply, _Reply):  # the /stop sentinel, or a bare text answer
+            reply = _Reply(str(reply))
+        return HumanResponse(
+            query_id=query.id, answer=reply.text, attachments=reply.attachments,
+            notes=notes + reply.notes,
+        )
 
 
 def _inline_keyboard(buttons: tuple) -> Any:
@@ -613,15 +861,71 @@ def _html_chunks(md: str, size: int = _CHUNK) -> list[str]:
     return out
 
 
-def _query_markdown(query: HumanQuery) -> str:
-    """A :class:`HumanQuery` as one Markdown document: header, body, reply hint.
+def _query_markdown(query: HumanQuery, notes: list[str] | tuple = ()) -> str:
+    """A :class:`HumanQuery` as one Markdown document: header, body, notes, reply hint.
 
-    Identifiers go in inline code so an underscore in a role name reads literally on both paths."""
+    Identifiers go in inline code so an underscore in a role name reads literally on both paths.
+    ``notes`` say which attachments could not be sent."""
+    note_md = "".join(f"_{n}_\n\n" for n in notes)
+    hint = "*Reply to this message to answer"
+    hint += " (a photo, file or album with a caption works too).*" if query.reply_dir else ".*"
     return (
         f"**Human input needed** · `{query.kind}`\nfrom `{query.sender_label}`\n\n"
-        f"{query.message.strip() or '(no message)'}\n\n"
-        "*Reply to this message to answer.*"
+        f"{query.message.strip() or '(no message)'}\n\n{note_md}{hint}"
     )
+
+
+def _sendable(attachments: list[HumanAttachment]) -> tuple[list[HumanAttachment], list[str]]:
+    """The attachments Telegram will take, and a note for each one it will not."""
+    ok: list[HumanAttachment] = []
+    notes: list[str] = []
+    for att in attachments:
+        label = att.handle or att.filename
+        try:
+            size = Path(att.path).stat().st_size
+        except OSError:
+            notes.append(f"Attachment {label} was not sent: its file is not on disk.")
+            continue
+        if size > _DOCUMENT_MAX_BYTES:
+            notes.append(f"Attachment {label} was not sent: {size / 1e6:.1f} MB exceeds Telegram's 50 MB limit.")
+            continue
+        ok.append(att)
+    return ok, notes
+
+
+def _is_photo(att: HumanAttachment) -> bool:
+    """Whether ``att`` fits ``sendPhoto``: PNG/JPEG within the size, side-sum and ratio limits.
+
+    Anything else goes as a document (which also keeps the original bytes)."""
+    if att.mime_type not in _PHOTO_MIME_TYPES:
+        return False
+    try:
+        if Path(att.path).stat().st_size > _PHOTO_MAX_BYTES:
+            return False
+        from PIL import Image
+
+        with Image.open(att.path) as img:
+            w, h = img.size
+    except Exception:  # noqa: BLE001 — unreadable dimensions: send the file as it is
+        return False
+    return w + h <= _PHOTO_MAX_SIDES and max(w, h) <= _PHOTO_MAX_RATIO * max(1, min(w, h))
+
+
+def _caption(att: HumanAttachment) -> str:
+    """The label a human sees under an attachment: its handle, then its caption."""
+    parts = [p for p in (att.handle, att.caption.strip()) if p]
+    return " — ".join(parts) or att.filename
+
+
+def _rich_title(text: str) -> str:
+    """A caption safe inside a rich-Markdown link title (one line, no double quotes)."""
+    return " ".join(text.split()).replace('"', "'")[:_CAPTION_LIMIT]
+
+
+def _safe_filename(name: str) -> str:
+    """A file name from the human, reduced to one safe path component."""
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(name).name).strip("._")
+    return base[:120] or "file"
 
 
 def _render_chunks(query: HumanQuery) -> list[str]:

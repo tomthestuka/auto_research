@@ -14,7 +14,7 @@ Four wires are worth naming because they are the ones a second harness has to re
   fires for every tool call, consulting the shared ``PathGuard`` allow-list in-process.
 * **Git ban** — a ``Bash`` deny-rule, best-effort by construction; the robust backstops are the
   gate-entry auto-revert and the per-attempt base-ref reset (§9.9).
-* **Escalation** — an in-process SDK MCP server, so ``ask_lead`` and ``ask_human`` run against
+* **Escalation** — an in-process SDK MCP server, so the coder's ``message`` tool runs against
   the live lead object and the real HITL connector rather than a copy.
 * **Cost** — the SDK reports a session-cumulative dollar figure, so spend enters the run's meter
   as a per-turn delta keyed by session.
@@ -32,39 +32,29 @@ from auto_research.sandbox.coder.events import cap_text, coder_text_cap, emit
 def _make_escalation_server(
     ask_lead: Callable[..., Awaitable[str]], ask_human: Callable[..., Awaitable[str]]
 ):
-    """Build the in-process MCP server exposing ``ask_lead`` and ``ask_human`` (§9.7)."""
+    """Build the in-process MCP server exposing the coder's ``message`` tool (§9.7, E12)."""
     from claude_agent_sdk import create_sdk_mcp_server, tool
+
+    from auto_research.sandbox.coder.escalation_server import MESSAGE_DESCRIPTION, route_message
 
     _msg_schema = {
         "type": "object",
         "properties": {
-            "message": {
+            "to": {"type": "string", "enum": ["lead", "human"], "description": "Who receives it."},
+            "text": {
                 "type": "string",
-                "description": "Your question, in Markdown — the ask first, then any needed facts.",
-            }
+                "description": "Your text, in Markdown — the ask first, then any needed facts.",
+            },
         },
-        "required": ["message"],
+        "required": ["to", "text"],
     }
 
-    @tool(
-        "ask_lead",
-        "Ask the analyst lead a code/convention/which-lib-function question (Markdown).",
-        _msg_schema,
-    )
-    async def _ask_lead(args: dict[str, Any]) -> dict[str, Any]:
-        answer = await ask_lead(args["message"])
+    @tool("message", MESSAGE_DESCRIPTION, _msg_schema)
+    async def _message(args: dict[str, Any]) -> dict[str, Any]:
+        answer = await route_message(ask_lead, ask_human, str(args.get("to")), args["text"])
         return {"content": [{"type": "text", "text": answer}]}
 
-    @tool(
-        "ask_human",
-        "Escalate a genuine expert-science unknown to the real human (Markdown).",
-        _msg_schema,
-    )
-    async def _ask_human(args: dict[str, Any]) -> dict[str, Any]:
-        answer = await ask_human(args["message"])
-        return {"content": [{"type": "text", "text": answer}]}
-
-    return create_sdk_mcp_server("escalation", tools=[_ask_lead, _ask_human])
+    return create_sdk_mcp_server("escalation", tools=[_message])
 
 
 def _make_path_confiner(worktree: Path):
@@ -224,7 +214,7 @@ def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, esca
         allowed_tools=[
             "Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep",
             "WebSearch", "WebFetch",
-            "mcp__escalation__ask_lead", "mcp__escalation__ask_human",
+            "mcp__escalation__message",
         ],
         # The coder never issues git (§9.9): staging/commit is the runtime's job
         # (``approve_edit`` only, after gate-pass ∧ review-pass). Deny-rules are evaluated

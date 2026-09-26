@@ -412,7 +412,7 @@ async def _run_leg(leg: Leg, root: Path, monitor: _Monitor, escalations: Escalat
         )
         results["ask_lead"] = {
             "handler_calls": len(escalations.lead),
-            "tool_offered": "ask_lead" in text,
+            "tool_offered": "message" in text,
         }
 
         # 9 — the other escalation tool, same transport, different handler. The headless case (no

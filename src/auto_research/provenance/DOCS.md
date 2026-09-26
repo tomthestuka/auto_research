@@ -24,12 +24,21 @@ report prose ──► check_bindings / check_report_fields ──► problems (
 - **Inputs are hashed once per run** (cache key: path, size, mtime); a directory is hashed by its
   listing. An input whose bytes an in-run receipt produced links to it as a parent (the in-toto
   materials→products chain), so ancestry is walkable.
+- **Evidence vs record** (human ruling 2026-09-25: "citing in a report must be to sth it has
+  produced, not just read"). Every receipt is a record; only `store.is_evidence(receipt)` receipts
+  back a number: a toolkit tool's return and its files/figures (producer `research_toolkit.*`), a
+  `commit`, a paper (attributed), and the request (`input:`, `research_request`, cite-only).
+  `_Resolved.entry` is the one gate: a cited non-evidence receipt is refused by name
+  (`NOT_EVIDENCE_NAMES`: "a file you read", "a web page", "shell output", "a task brief", …); in
+  scope it is skipped silently. This closes line-number grounding (`read_file`'s `cat -n`) and the
+  existence-over-everything-read coincidence class, and makes the shell typed-number rule
+  unnecessary (deleted).
 - **Flags propagate.** `failed` (the producing call failed) and `synthetic` (an input under a
   marked `synth<YYMMDD>-<sha>` directory, §9.5) pass to every descendant. A flagged receipt can be
   cited to describe what happened; it cannot ground a number.
 - **Scoped grounding** (human ruling 2026-09-24, replacing "every number quoted"): a text cites
   `[src:r12]`; every number in that text must appear, on token boundaries, in a receipt it cites.
-  Findings are scoped per item; other report fields by everything the report cites. A pinned quote
+  Findings are scoped per item; other report fields by all the evidence the report cites. A pinned quote
   `{{src:r12 "…"}}` must be a bounded substring of that receipt. Measured before the ruling over
   231 real reports: 98% of decimals already appear verbatim in the run's tool outputs; quoting
   every number would have meant hundreds of quotes per report.
@@ -56,6 +65,8 @@ report prose ──► check_bindings / check_report_fields ──► problems (
 - `render_bindings(prose, *, own_source, quote, cite) -> str`.
 - `ReceiptStore.for_run(run_dir) -> ReceiptStore` — the one store per run in this process; every
   role gets its store here (two instances on one directory would mint duplicate handles).
+- `store.is_evidence(receipt) -> bool`; `TOOLKIT_PRODUCER_PREFIX = "research_toolkit."`,
+  `REQUEST_PRODUCER = "research_request"`, `NOT_EVIDENCE_NAMES` (producer → how a refusal names it).
 - `ScopedLookup(store, *, own_source, admitted=())` — what one agent may cite: its own receipts
   (live) plus admitted handles and their ancestors; `.admit(handles)`, `.handles()`.
 - `capture.inputs_before(store, args, *, cwd, skip_keys) -> CallInputs` and
@@ -93,7 +104,7 @@ report renderer.
   of the data-product rule, used by `receipt_call` and the gate.
 - `capture.call_started_ns()` — call start on `CLOCK_REALTIME_COARSE` so it compares with mtimes.
 - `store.checkable_text(raw)` — the decode rule behind `ReceiptStore.text`.
-- `bindings.ungrounded_numbers(prose, usable, *, echoes, masked)` — the number-grounding loop, used
+- `bindings.ungrounded_numbers(prose, usable, *, masked)` — the number-grounding loop, used
   by `check_bindings` and the gate.
 
 ## Changelog
@@ -127,3 +138,8 @@ report renderer.
 - 2026-09-25 — [G15] `data_products`, `checkable_text`, `ungrounded_numbers` factored out for the
   gate's return check; `call_started_ns` moved to the coarse realtime clock (200/200 fast writes had
   read as older than their own call, so were never receipted).
+- 2026-09-25 — [R7] `is_evidence` (human ruling): only toolkit returns, commits, papers and the
+  request ground; `_Resolved.entry` refuses a cited record by name and skips it in scope. Deleted
+  the shell typed-number machinery (`_Resolved.typed`, `echoes`, `ReceiptStore.typed_numbers`,
+  `capture.typed_numbers_in`); `Receipt.arg_numbers` kept as a legacy field. `store.text` reads
+  `commit` receipts.

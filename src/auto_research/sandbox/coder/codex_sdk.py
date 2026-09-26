@@ -25,7 +25,7 @@ Where the two harnesses genuinely differ, and how each difference is handled her
 * **Cost.** Codex reports token counts per turn (``ThreadTokenUsage.last``), which map onto our
   own usage classes, so its spend is priced through the same path as every chat role rather than
   arriving as an opaque session dollar figure.
-* **Escalation.** ``ask_lead`` and ``ask_human`` are served over a Streamable-HTTP MCP endpoint
+* **Escalation.** The coder's ``message`` tool (to the lead or the human) is served over a Streamable-HTTP MCP endpoint
   running in this process, so their handlers still reach the live lead object and the real HITL
   connector. See :mod:`auto_research.sandbox.coder.escalation_server`.
 """

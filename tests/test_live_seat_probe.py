@@ -521,7 +521,8 @@ def test_the_reviewer_seat_files_a_rendered_report(tmp_path):
         render = ReviewerRender(report_dir=tmp_path / "report", run_id=run_id)
         filed = asyncio.run(reviewer.review(
             ResearchRequest(question="Reproduce the Cyg X-1 May-2022 IXPE polarization."),
-            stage="analysis", report=report, iterations_left=0, render=render,
+            arrived="analysts", report=report, budgets={"librarian": 0, "analysts": 0},
+            render=render,
         ))
 
     tex = render.render.tex_path if render.render is not None else None
@@ -546,7 +547,7 @@ def test_the_reviewer_seat_files_a_rendered_report(tmp_path):
     assert not schemas, f"the reviewer still composed through a schema: {schemas}"
 
     # Per-actor capability: it filed a final report, and the harness rendered what it filed.
-    assert not filed.needs_analysis_rework, "no iterations were left, so it had to finalize"
+    assert filed.assign_to == "human", "no passes were left, so it had to report to the human"
     assert render.attempts >= 1 and tex is not None and tex.is_file()
     # A compile failure here is the renderer's defect, never the seat's.
     assert not render.renderer_errors, render.renderer_errors

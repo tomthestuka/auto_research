@@ -257,7 +257,7 @@ def test_figures_nest_inside_the_tool_result_not_after_it(tmp_path):
     ))
     fig = FigureRef(
         path=str(png), caption="PD(E)", mime_type="image/png",
-        produced_by="t.plot", sha256="a" * 64, created_at=datetime.now(UTC),
+        produced_by="research_toolkit.t.plot", sha256="a" * 64, created_at=datetime.now(UTC),
     )
     turn = ToolResultMessage(results=[
         ToolResultPart(tool_call_id="1", name="plot", content="wrote 1 figure", figures=[fig]),

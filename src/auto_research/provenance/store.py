@@ -26,13 +26,46 @@ _SYNTH_RE = re.compile(r"^synth\d{6}-[0-9a-f]+$")
 #: Every unit may cite it, since what a role was asked is part of what it may repeat.
 INPUT_SOURCE = "input"
 
-#: Tools whose arguments are code the role typed. A number a role typed into any of them cannot be
-#: grounded by their output: ``echo 3.7``, or writing 3.7 to a file and reading it back, would
-#: otherwise mint a receipt for a number nothing computed.
+#: The harness shell. Its output is recorded like any call's and is never evidence
+#: (:func:`is_evidence`): a derived number comes from a toolkit tool (human ruling 2026-09-25).
 SHELL_TOOLS = frozenset({"mcp.builtin.bash_exec"})
 
 #: Kinds whose bytes are text a quote or a grounded number can be checked against.
 TEXT_KINDS = frozenset({"result", "web", "paper", "human"})
+
+#: The producer prefix of every toolkit tool (its registry kind, ``research_toolkit.<pkg>.<tool>``).
+TOOLKIT_PRODUCER_PREFIX = "research_toolkit."
+
+#: The one input that grounds (where cited): the human's research request, restating the question.
+REQUEST_PRODUCER = "research_request"
+
+
+def is_evidence(receipt: Receipt) -> bool:
+    """Whether a receipt can back a number: what the analysis produced, never what a role read.
+
+    Human ruling 2026-09-25: "citing in a report must be to sth it has produced, not just read."
+    Evidence is a toolkit tool's return and the files and figures it produced; a ``commit`` the
+    coding pipeline minted; a paper (attributed with its place, never text-matched); and the
+    human's research request, which grounds only where cited. Everything else is the record of
+    where a role looked or what it was told — ``read_file``, ``list_dir``, searches, web pages,
+    the shell, a dispatched brief, a file the human sent, a published report — and grounds nothing.
+    """
+    if receipt.kind in ("commit", "paper"):
+        return True
+    if receipt.source == INPUT_SOURCE:
+        return receipt.produced_by == REQUEST_PRODUCER
+    return receipt.produced_by.startswith(TOOLKIT_PRODUCER_PREFIX)
+
+
+#: How a refusal names a receipt that is not evidence, by producer (the rest: "a tool return").
+NOT_EVIDENCE_NAMES = {
+    "read_file": "a file you read", "list_dir": "a directory listing",
+    "text_search": "a search result", "web_search": "a search result", "web_fetch": "a web page",
+    "mcp.builtin.bash_exec": "shell output", "mcp.builtin.read_file": "a file you read",
+    "mcp.builtin.list_dir": "a directory listing", "dispatch": "a task brief",
+    "human_reply": "a file the human sent", "report_renderer": "an earlier published report",
+    "search_literature": "a search result",
+}
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -190,9 +223,10 @@ class ReceiptStore:
     ) -> Receipt:
         """The receipt of a text a unit was handed (idempotent: one receipt per distinct text).
 
-        The research request is ``kind="human", produced_by="research_request"``; a task a role
-        dispatches (a reviewer's follow-up, a lead's probe) is the default. Its numbers were grounded
-        where it was written, so the unit receiving it may repeat them.
+        The research request is ``kind="human", produced_by="research_request"`` and grounds where a
+        text cites it (restating the question). A task a role dispatches (a reviewer's follow-up, a
+        lead's probe) is the default: a brief, recorded as what the unit was handed, which grounds
+        nothing (:func:`is_evidence`, human ruling 2026-09-25).
         """
         digest = sha256_bytes(text.encode("utf-8"))
         for receipt in self.receipts(source=INPUT_SOURCE):
@@ -236,20 +270,12 @@ class ReceiptStore:
     def get(self, handle: str) -> Receipt | None:
         return self._receipts.get(handle)
 
-    def typed_numbers(self, source: str) -> frozenset[str]:
-        """Every number ``source`` typed into a shell command this run (see :data:`SHELL_TOOLS`)."""
-        typed: set[str] = set()
-        for receipt in self._receipts.values():
-            if receipt.source == source and receipt.produced_by in SHELL_TOOLS:
-                typed.update(receipt.arg_numbers)
-        return frozenset(typed)
-
     def text(self, handle: str) -> str | None:
         """The text a quote in this receipt is checked against, or ``None`` for binary kinds."""
         receipt = self._receipts.get(handle)
         if receipt is None:
             return None
-        if receipt.kind not in TEXT_KINDS and receipt.kind != "data":
+        if receipt.kind not in TEXT_KINDS and receipt.kind not in ("data", "commit"):
             return None
         try:
             raw = Path(receipt.path).read_bytes()
@@ -330,8 +356,6 @@ class ScopedLookup:
     def get(self, handle: str) -> Receipt | None:
         return self.store.get(handle) if self.visible(handle) else None
 
-    def typed_numbers(self, source: str) -> frozenset[str]:
-        return self.store.typed_numbers(source)
 
     def text(self, handle: str) -> str | None:
         return self.store.text(handle) if self.visible(handle) else None

@@ -1,6 +1,6 @@
-"""The report the reviewer files once per review; the graph routes on its verdict fields."""
+"""The report the reviewer files once per turn; the graph routes on its ``assign_to``."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field
 
@@ -56,14 +56,19 @@ class ReviewerTable(MessageModel):
     )
 
 
-class ReviewerReport(MessageModel):
-    """The one report the reviewer files per review, through ``edit_report`` and ``turn_end``.
+#: Where the reviewer sends its report (human 2026-09-25). The reviewer is the sole I/O: every
+#: team's work starts from a reviewer turn and returns to one.
+Assignee = Literal["librarian", "analysts", "human"]
 
-    The same form serves every decision, and what the content means follows the decision (the
-    webform shape, human 2026-09-24): with a rework flag set, ``rationale`` and ``follow_up`` are
-    the verdict so far and the nudges handed to the flagged team as its next task; with neither
-    set at the analysis review, the header, sections, findings, figures and tables are the final
-    report the harness renders. Every prose field is checked against receipts either way.
+
+class ReviewerReport(MessageModel):
+    """The one report the reviewer files per turn, through ``edit_report`` and ``turn_end``.
+
+    The same form serves every decision, and what the content means follows ``assign_to`` (the
+    webform shape, human 2026-09-24): to the librarian or the analysts, ``rationale`` and
+    ``follow_up`` are the verdict so far and the task handed to that team; to the human, the
+    header, sections, findings, figures and tables are the report the harness renders and sends.
+    Every prose field is checked against receipts either way.
 
     The schema is **permissive** so a partial write mid-loop is legal; what each decision requires
     is ``turn_end``'s job (``agents/reviewer_tools.reviewer_turn_problems``). There is no
@@ -82,28 +87,22 @@ class ReviewerReport(MessageModel):
         default="",
         description="The evidence-grounded basis for the decision, citing the receipts it rests on.",
     )
-    needs_more_literature: bool = Field(
-        default=False,
+    assign_to: Assignee | None = Field(
+        default=None,
         description=(
-            "At the literature review only: true sends follow_up to the librarian for another pass, "
-            "for a genuine gap another search would close. False advances to analysis, with "
-            "follow_up as the analysts' task."
-        ),
-    )
-    needs_analysis_rework: bool = Field(
-        default=False,
-        description=(
-            "At the analysis review only: true sends follow_up to the analyst team for more data "
-            "work or revision. False finalizes, and the report below becomes the run's report."
+            "Who receives this report. 'librarian': follow_up is the literature questions for a "
+            "search. 'analysts': follow_up is the analysis task, or the revision to make. 'human': "
+            "the title, abstract, sections, findings, figures and tables are the report the human "
+            "receives and discusses with you."
         ),
     )
     follow_up: str = Field(
         default="",
         description=(
-            "The task handed verbatim to the next team: the literature questions to answer or the "
-            "analysis steps to run, with the targets and the data-source priority. For a "
-            "capability the toolkit lacks, state what to measure and on which data, and leave the "
-            "build choice to the analyst team."
+            "For the librarian or the analysts: the task handed to them verbatim — the literature "
+            "questions to answer, or the analysis steps to run with the targets and the "
+            "data-source priority. For a capability the toolkit lacks, state what to measure and "
+            "on which data, and leave the build choice to the analyst team."
         ),
     )
     title: str = Field(default="", description="The final report's title, in plain text.")
@@ -137,11 +136,6 @@ class ReviewerReport(MessageModel):
         default_factory=list,
         description="Tables for the final report, referred to in the prose as 'Table 1', 'Table 2', ….",
     )
-
-    @property
-    def rework(self) -> bool:
-        """Whether this report sends work back to a team rather than closing the stage."""
-        return self.needs_more_literature or self.needs_analysis_rework
 
     def prose_fields(self) -> dict[str, str | list[str]]:
         """Every piece of prose in the report, keyed by the label a problem names it with.

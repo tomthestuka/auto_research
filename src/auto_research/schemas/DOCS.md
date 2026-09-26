@@ -80,16 +80,10 @@ carried by **reference** (`FigureRef`), never embedded
 - `SearchResult.local_path` (`Path | None`) is set only for records with a downloaded
   local file. Online/external search results usually leave it `None`; local retrieval
   returns stored PDF paths separately for reviewer `DocumentRef` attachments.
-- `ReviewerReport.needs_more_literature` and
-  `ReviewerReport.needs_analysis_rework` are the schema-level flags used by the
-  Phase 1 feedback edges. Each controls **one** loop edge: `needs_more_literature`
-  is the literature **re-loop** switch (the graph always runs an initial literature
-  pass before the first verdict, so it is set true only to close a real literature
-  gap; left false it advances to analysis), and `needs_analysis_rework` is the
-  analysis **re-loop** switch. The dispatch text rides in `follow_up` regardless of
-  flag — `graph._build_task` hands it to the analysis stage even on the first verdict —
-  so dispatching the analysts means writing `follow_up` and keeping
-  `needs_more_literature` false.
+- `ReviewerReport.assign_to` (`Assignee = Literal["librarian", "analysts", "human"]`, default
+  `None`) is the one field the graph routes on (human 2026-09-25: the reviewer is the sole I/O).
+  To the librarian or the analysts, `follow_up` is their task; to the human, the report parts are
+  what is rendered and sent. The schema stays permissive; `turn_end` requires an assignee.
 - `AnalystToolRequest` (Phase 2) is the **worker→lead** message an analyst worker raises on
   its `AnalystReport.tool_request` when the toolkit lacks a capability or an in-use tool
   misbehaves (CLAUDE.md §9.3). It carries only what the worker is qualified to state:
@@ -182,13 +176,13 @@ carried by **reference** (`FigureRef`), never embedded
   `figures: list[FigureRef]` (V-4). Worker or lead output. `tool_request` (Phase 2) is set when
   the worker raises a toolkit gap/defect. Figures are placed by citation, not attached directly.
 - `ReviewerReport` (`review.py`, 2026-09-24) — the one report the reviewer files per review
-  through `edit_report`/`turn_end`: verdict fields (`accepted`, `rationale`,
-  `needs_more_literature`, `needs_analysis_rework`, `follow_up`, the names the graph routes on)
+  through `edit_report`/`turn_end`: verdict fields (`accepted`, `rationale`, `assign_to` — the
+  name the graph routes on — and `follow_up`)
   + `title`, `abstract`, `sections:
   list[ReviewerSection(heading, body)]`, `key_findings`, `figures: list[Handle]` (figure receipts,
   in 'Figure k' order), `tables: list[ReviewerTable(caption, receipt | columns+rows)]`. Permissive
   (every field defaulted); what each decision requires is checked at `turn_end`
-  (`agents/reviewer_tools`). `rework` = either flag. `prose_fields() -> dict[label, str | list[str]]`
+  (`agents/reviewer_tools`). `prose_fields() -> dict[label, str | list[str]]`
   is the single enumeration of its prose, in reading order, walked by both the quote check and the
   renderer; table rows are joined per row with `" | "`. No references field: the bibliography is
   built from the cited paper/web receipts.
@@ -261,8 +255,9 @@ carried by **reference** (`FigureRef`), never embedded
   `merge_flow.propose_and_pr`. `committed` ⇔ gate-pass ∧ co-lead review-pass.
 - `AnalystReport.status: "ok"|"failed"|"needs_human"` (default `"ok"`) — §9.6 terminal
   state; an honest failure is a correct outcome, never a reason to fabricate.
-- `HumanQuery(id, kind: "clarify_science"|"clarify_code"|"blocked", message: str,
-  asked_by: str, model: str = "", created_at)` — a blocked role's raise-to-human
+- `HumanQuery(id, kind: "clarify_science"|"clarify_code"|"blocked"|"report", message: str,
+  asked_by: str, model: str = "", attachments: list[HumanAttachment] = [], reply_dir: Path | None =
+  None, created_at)` — a blocked role's raise-to-human
   clarification (§9.7); no `approve` kind (the runtime never asks a human to merge). `message`
   is the body in **Markdown** (the raising LLM composes it — the clarification channels carry
   free-form NL, so Markdown is the container, not a fixed question/context shape; connectors
@@ -271,8 +266,16 @@ carried by **reference** (`FigureRef`), never embedded
   the role when `model` is blank. The `headline` property is a one-line summary of `message`
   (first meaningful line, capped) for notifications, the Slack thread label, the monitor, and the
   headless fail-safe.
-- `HumanResponse(query_id: str, answer: str, created_at)` — the human's reply. Both are the
-  typed contract behind the injectable `human_handler` and the `ask_human` tools.
+  `report` is a filed report sent for discussion. `attachments` are receipted files built only by
+  `hitl.attachments.resolve_attachments` (a model names handles, never paths); `reply_dir` is where
+  a connector saves the files the human answers with (`None` = it saves none).
+- `HumanAttachment(handle: Handle | None, path: Path, filename: str, mime_type: str, caption: str =
+  "")` — one file by reference. Outbound: `handle` names the receipt, `path` the runtime's copy of
+  its bytes. Inbound: `handle` is `None` until `mint_reply_attachments` mints it.
+- `HumanResponse(query_id: str, answer: str, attachments: list[HumanAttachment] = [], notes:
+  list[str] = [], created_at)` — the human's reply. `answer` holds only the human's words; `notes`
+  are the connector's own (an attachment too large to send or download). Both are the typed
+  contract behind the injectable `human_handler`.
 - `LiteratureFinding(claim: str, support: list[str] = [])` — one claim and the handles of the
   documents behind it. Every number in `claim` sits inside a quote binding.
 - `LiteratureReport(summary: str = "", findings: list[LiteratureFinding] = [], gaps: list[str] = [],
@@ -314,3 +317,9 @@ carried by **reference** (`FigureRef`), never embedded
 - 2026-09-24 — `PaperAttribution` (`handle`, `value`, `locator`), the one shape of every verify-against-
   the-PDF list (ruling: papers cited, never text-checked): `ResearchReport.paper_attributions`,
   `LiteratureReport.attributed_values`; the interim `AttributedValue` removed.
+- 2026-09-25 — [E11] `HumanAttachment`; `HumanQuery.attachments`/`reply_dir`, `HumanResponse.attachments`/
+  `notes`; `HumanQueryKind` gains `report` (for R1's human node).
+- 2026-09-25 — [R1] `ReviewerReport`: `needs_more_literature`/`needs_analysis_rework` and the
+  `rework` property replaced by `assign_to: Assignee | None` (`librarian | analysts | human`).
+- 2026-09-25 — [R7] `Receipt.arg_numbers` is legacy (kept for replay); the shell grounds nothing
+  (`provenance.store.is_evidence`).

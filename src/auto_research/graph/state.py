@@ -16,24 +16,38 @@ from auto_research.schemas.report import ResearchReport
 from auto_research.schemas.artifacts import Receipt
 
 
+def _merge(left: dict[str, Receipt] | None, right: dict[str, Receipt] | None) -> dict[str, Receipt]:
+    """Union of two handle maps (a handle names the same receipt everywhere in a run)."""
+    return {**(left or {}), **(right or {})}
+
+
 class ResearchState(TypedDict, total=False):
     """State carried through the orchestration graph."""
 
     request: ResearchRequest
-    # The librarian's latest filed report, and the documents it read by handle (lib:pN / lib:wN).
-    # Each literature pass replaces both: a re-loop researches the reviewer's follow-up afresh.
-    literature: LiteratureReport | None
-    literature_receipts: dict[str, Receipt]
+    # Every literature report of the run and the documents they read by handle (lib:pN / lib:wN).
+    # Accumulated, not replaced: a second search round builds on the first (human 2026-09-25).
+    literature: Annotated[list[LiteratureReport], operator.add]
+    literature_receipts: Annotated[dict[str, Receipt], _merge]
     report: AnalystReport | None
-    # The reviewer's filed reports, one per review; the latest routes the graph, and the final one
-    # is the run's report (its references are the paper receipts it cites).
+    # The reviewer's filed reports, one per turn; the latest routes the graph on its `assign_to`,
+    # and the one sent to the human is the run's report.
     verdict: ReviewerReport | None
     verdicts: Annotated[list[ReviewerReport], operator.add]
+    # What came back since the reviewer's last turn: request | librarian | analysts | human.
+    arrived: str
+    # The human's replies: their text as nudges (guidance, never receipts, human 2026-09-25) and
+    # their files as input: receipt handles; and how many reports went to the human.
+    human_nudges: Annotated[list[str], operator.add]
+    human_thread: Annotated[list[str], operator.add]
+    human_rounds: int
     lit_iterations: int
     analysis_iterations: int
     max_iterations: int
-    # Report artifacts: .tex/PDF rendered inside the reviewer's turn_end, JSONL by compose_report
+    # Report artifacts of the latest report to the human: .tex/PDF rendered inside the reviewer's
+    # turn_end, JSONL and the rev:dN handles by compose_report
     research_report: ResearchReport | None
+    report_artifacts: dict[str, str]
     report_jsonl: Path | None
     report_latex: Path | None
     report_pdf: Path | None

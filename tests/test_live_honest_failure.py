@@ -262,7 +262,7 @@ def test_live_reviewer_adjudicates_failed_analysis():
     log_path = dev_log_path("honest-failure", "live_reviewer_failed_analysis", ".jsonl")
 
     verdict = asyncio.run(reviewer.review(
-        request, stage="analysis", report=report, iterations_left=1,
+        request, arrived="analysts", report=report, budgets={"librarian": 1, "analysts": 1},
         render=ReviewerRender(report_dir=report_dir(run_id), run_id=run_id),
     ))
 
@@ -273,7 +273,7 @@ def test_live_reviewer_adjudicates_failed_analysis():
     _write(log_path, {"edge": "reviewer.review", "output": verdict.model_dump(mode="json")})
     print(
         f"\n[reviewer.review] accepted={verdict.accepted} "
-        f"needs_analysis_rework={verdict.needs_analysis_rework}\n"
+        f"assign_to={verdict.assign_to}\n"
         f"rationale={verdict.rationale}\nfollow_up={verdict.follow_up}\n→ {log_path}"
     )
 
@@ -281,4 +281,4 @@ def test_live_reviewer_adjudicates_failed_analysis():
     assert isinstance(verdict, ReviewerReport)
     assert verdict.rationale.strip()
     assert isinstance(verdict.accepted, bool)
-    assert isinstance(verdict.needs_analysis_rework, bool)
+    assert verdict.assign_to in ("librarian", "analysts", "human")

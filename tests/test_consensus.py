@@ -130,7 +130,7 @@ def _make_fig(name: str) -> FigureRef:
         path=Path(f"/tmp/{name}.png"),
         caption=name,
         mime_type="image/png",
-        produced_by="test",
+        produced_by="research_toolkit.t.test",
         created_at=datetime.now(UTC),
         sha256="a" * 64,
     )

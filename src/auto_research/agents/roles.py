@@ -15,7 +15,6 @@ from auto_research.agents.prompts import PromptRole, load_prompt
 from auto_research.agents.react import (
     TURN_END_TOOL,
     AUTHOR_CHAIN_TOOL,
-    DRIVE_CODER_TOOL,
     EDIT_REPORT_TOOL,
     LEAD_FORM_TOOLS,
     LEAD_REPORT_FIELDS,
@@ -25,16 +24,26 @@ from auto_research.agents.react import (
     LeadCycle,
     LeadCycleOutcome,
     MonitorToolProvider,
-    PLAN_AND_DEBATE_TOOL,
     REVIEW_REPORT_TOOL,
     RESPOND_TO_REVIEW_TOOL,
     ReadOnlyToolProvider,
     ReportWorkspace,
     lead_turn_problems,
     SUBMIT_TOOL,
-    WAIT_CODER_TOOL,
+    WAIT_FOR_REPLY_TOOL,
     SandboxToolProvider,
     ToolOutcome,
+    LIST_PEERS_TOOL,
+    MESSAGE_TOOL,
+    VIEW_RECEIPT_TOOL,
+    execute_coder_message,
+    execute_list_peers,
+    execute_view_receipt,
+    list_peers_tool_def,
+    execute_wait_for_reply,
+    message_tool_def,
+    view_receipt_tool_def,
+    wait_for_reply_tool_def,
     _written_report,
 )
 from auto_research.env import react_grace_rounds, ledger_caps
@@ -48,7 +57,12 @@ from auto_research.models import (
     ToolResultPart,
     resolve,
 )
-from auto_research.sandbox.workspace import append_memory, read_memory, round_report_path
+from auto_research.sandbox.workspace import (
+    append_memory,
+    read_memory,
+    report_record_path,
+    round_report_path,
+)
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
@@ -113,6 +127,11 @@ class AgentRole:
         # Both default off so a role built without them behaves exactly as before.
         self.run_control: Any | None = None
         self.agent_key: str | None = None
+        # The quick channel (E12): the run's SeatRouter, set by run_research on the graph seats
+        # only (never the co-lead or the status monitor), and the last finished turn kept so a
+        # message can resume it.
+        self.channel: Any | None = None
+        self._kept_turn: dict[str, Any] | None = None
 
     async def _call(
         self,
@@ -307,6 +326,100 @@ class AgentRole:
     async def _react(
         self,
         *,
+        tools: Any,
+        resumed: bool = False,
+        declared: list[dict] | None = None,
+        **kwargs: Any,
+    ) -> tuple[list, list[FigureRef], list[DocumentRef]]:
+        """Run :meth:`_react_loop`, as a seat of the quick channel when one is wired (E12).
+
+        With a router the provider is wrapped in :class:`ChannelTools`, the seat is marked live
+        for the loop's duration (so a text to it lands in its inbox rather than resuming it), and
+        a turn that ends on its terminal tool is kept, so a later message can resume it. Without
+        one this is exactly the loop.
+        """
+        if getattr(self, "channel", None) is None and _has_authoring_surface(tools):
+            # The lead reaches its coder only through `message(to="coder")`, so a lead that runs
+            # authoring must be on a channel however it was built — a one-seat channel (no human,
+            # no peers) when run_research did not put it on the team's.
+            from auto_research.hitl.router import SeatRouter
+
+            self.channel = SeatRouter(self.ensure_run_control(), monitor=self.monitor)
+            self.channel.register(self.agent_key, self)
+        if getattr(self, "channel", None) is None:
+            return await self._react_loop(tools=tools, **kwargs)
+        wrapped = ChannelTools(tools, role=self, resumed=resumed, declared=declared)
+        kwargs["free_tools"] = frozenset(kwargs.get("free_tools", frozenset())) | {
+            WAIT_FOR_REPLY_TOOL, LIST_PEERS_TOOL
+        }
+        control = getattr(self, "run_control", None)
+        if control is not None:
+            control.set_live(self.agent_key, True)
+        try:
+            result = await self._react_loop(tools=wrapped, **kwargs)
+        finally:
+            if control is not None:
+                control.set_live(self.agent_key, False)
+        if self.last_filed_form is not None and kwargs.get("terminal_tools"):
+            self._kept_turn = {
+                "messages": result[0],
+                "tools": tools,
+                "state": {
+                    name: getattr(tools, name)
+                    for name in _KEPT_PROVIDER_STATE
+                    if hasattr(tools, name)
+                },
+                "declared": wrapped.tool_definitions(),
+                "kwargs": {
+                    k: v for k, v in kwargs.items()
+                    if k in ("cap", "free_tools", "absolute_cap", "terminal_tools")
+                },
+            }
+        return result
+
+    def has_kept_turn(self) -> bool:
+        """Whether this seat finished a turn a message can resume (E12)."""
+        return getattr(self, "_kept_turn", None) is not None
+
+    async def resume(self) -> None:
+        """Resume the kept turn to read what reached the inbox: the seat's normal loop, normal
+        tools and cap, exit only by ``turn_end`` — with the filed report final (E12)."""
+        kept = getattr(self, "_kept_turn", None)
+        if kept is None:
+            return
+        tools = kept["tools"]
+        sandbox = getattr(tools, "sandbox", None)
+        if sandbox is not None and hasattr(sandbox, "is_alive") and not sandbox.is_alive:
+            await sandbox.start()
+        restore = {name: getattr(tools, name) for name in kept["state"]}
+        for name, value in kept["state"].items():
+            setattr(tools, name, value)
+        saved_form, saved_response = self.last_filed_form, self.last_response
+        try:
+            await self._react(
+                seed_messages=kept["messages"], share_messages=True, tools=tools,
+                action="resume", resumed=True, declared=kept["declared"],
+                require_terminal=True, **kept["kwargs"],
+            )
+        finally:
+            for name, value in restore.items():
+                setattr(tools, name, value)
+            self.last_filed_form, self.last_response = saved_form, saved_response
+
+    def ensure_run_control(self) -> Any:
+        """This seat's RunControl, creating one when the role runs without a run (a benchmark's
+        lead), so the coder's messages still reach its inbox."""
+        if self.run_control is None:
+            from auto_research.run_control import RunControl
+
+            self.run_control = RunControl()
+        if not self.agent_key:
+            self.agent_key = self.role
+        return self.run_control
+
+    async def _react_loop(
+        self,
+        *,
         seed_messages: Sequence[Any],
         tools: Any,  # ToolProvider — duck-typed to avoid import cycle
         action: str,
@@ -423,20 +536,17 @@ class AgentRole:
             # for this role. A no-op when run_control is unset. A /stop is NOT read here: it
             # cancels the run task outright (see ``RunControl.interrupt``), so there is nothing
             # for this loop to notice.
+            # Every text this seat receives — a human steer, the human's reply, another seat's
+            # message, the coder's question, a runtime notice — arrives through its inbox (E12).
             if self.run_control is not None:
-                for steer in self.run_control.drain_steer(self.agent_key):
-                    injections.append(("steer", f"[Human steer] {steer}"))
+                for entry in self.run_control.drain_inbox(self.agent_key):
+                    injections.append((entry.kind, entry.render()))
             # B4: the coder runs beside this loop, so when it stops the lead is TOLD rather than
             # having to poll. Same queue and the same hold rule as a human steer — a pushed event
             # is exactly what made the A2 race reachable, so it goes through the same gate.
             coder_note = _coder_event(tools)
             if coder_note is not None:
                 injections.append(("coder_event", coder_note))
-            # The coder's own questions, collected at the same boundary and under the same hold
-            # rule. `ask_lead` parks them and returns "delivered." at once; this is where they
-            # enter the lead's conversation — the one that wrote the brief being asked about.
-            for question in _coder_questions(tools):
-                injections.append(("coder_question", question))
             # ONE drain, here, and only at a legal boundary. An injected user turn is legal after
             # a COMPLETE assistant turn; it is not legal after one that left a provider-executed
             # tool call unresolved, where Anthropic documents that the following message "must
@@ -574,7 +684,7 @@ class AgentRole:
             # (observed 2026-07-29: two steers waited behind a pair of 25-minute downloads and
             # landed only when the batch broke). Collected here, appended as a user turn right
             # after this batch's results, so the very next model call sees them.
-            batch_steers: list[str] = []
+            batch_steers: list[Any] = []  # InboxEntry
             for call in response.tool_calls:
                 # Input event — written (and flushed) BEFORE the call runs, so a tool that
                 # hangs and never returns still leaves a record of exactly what was issued.
@@ -596,7 +706,18 @@ class AgentRole:
                         ),
                     },
                 )
-                if call.arguments_error:
+                if filed_terminal:
+                    # The turn ended at an accepted terminal earlier in this batch: what follows
+                    # is answered, never run, so nothing replaces the report the validator
+                    # accepted (found 2026-09-25: an `edit_report` after `turn_end` overwrote it).
+                    outcome = ToolOutcome(
+                        text=(
+                            f"{call.name} was not run: your turn already ended with an accepted "
+                            f"{self.last_filed_form[0]}, and the report it accepted stands."
+                        ),
+                        is_error=True,
+                    )
+                elif call.arguments_error:
                     # A garbled call is answered, never run on empty arguments ([I4]).
                     outcome = ToolOutcome(
                         text=(
@@ -654,7 +775,7 @@ class AgentRole:
                     self.last_filed_form = (call.name, dict(call.arguments))
                     filed_terminal = True
                 if self.run_control is not None:
-                    batch_steers.extend(self.run_control.drain_steer(self.agent_key))
+                    batch_steers.extend(self.run_control.drain_inbox(self.agent_key))
             if in_grace:
                 # The countdown rides the tool results rather than a separate user turn: a turn
                 # appended after tool results is the one position a provider forbids when the
@@ -673,7 +794,7 @@ class AgentRole:
             # unresolved. It now joins the single top-of-iteration drain, which runs after the
             # hold check — and by then this batch's results are complete, so an injected turn can
             # never split a `tool_use` from its `tool_result`.
-            injections.extend(("steer", f"[Human steer] {steer}") for steer in batch_steers)
+            injections.extend((entry.kind, entry.render()) for entry in batch_steers)
             # Budget accounting: an iteration consumes budget unless EVERY tool it called is
             # free (e.g. plan_and_debate). Free-only iterations advance `iteration` (so the
             # absolute backstop still bounds them) but not `budget_used`.
@@ -768,18 +889,17 @@ class AgentRole:
 
 
 class ReviewerAgent(AgentRole):
-    """Reviewer role: one loop per review, one report, filed through ``turn_end`` (§2b).
+    """Reviewer role: the sole I/O — one loop per turn, one report, filed through ``turn_end`` (§2b).
 
-    Each review — the literature review and the analysis review — is a single ReAct loop whose
-    only exit is ``turn_end``. The reviewer writes its :class:`ReviewerReport` inside the loop with
-    ``edit_report``; at the analysis review, a finalizing report is rendered to LaTeX and compiled
-    by the ``turn_end`` check itself, so the run's report is validated at the role's edge rather
-    than composed after it. Nothing is composed on the reviewer's behalf: a loop that ends without
-    an accepted ``turn_end`` raises.
+    Every turn is a single ReAct loop whose only exit is ``turn_end``. The reviewer writes its
+    :class:`ReviewerReport` inside the loop with ``edit_report`` and names who receives it
+    (``assign_to``, human 2026-09-25): the librarian or the analysts get its ``follow_up`` as their
+    task, and a report to the human is rendered to LaTeX and compiled by the ``turn_end`` check
+    itself, so it is validated at the role's edge rather than composed after it. Nothing is
+    composed on the reviewer's behalf: a loop that ends without an accepted ``turn_end`` raises.
 
-    What this replaced (2026-09-24): the verdict came from a structured call AFTER a loop whose
-    ``turn_end`` validated nothing (``lambda: []``), the JSONL from a second one-shot call, and the
-    LaTeX from a second loop — three conversations for one decision, two of them unvalidated.
+    What this replaced: 2026-09-24, a verdict from a structured call after an unvalidated loop;
+    2026-09-25, two stage-bound reviews (literature, analysis) each routing on its own flag.
     """
 
     role = "reviewer"
@@ -791,25 +911,35 @@ class ReviewerAgent(AgentRole):
         self,
         request: ResearchRequest,
         *,
-        stage: str = "analysis",
-        literature: LiteratureReport | None = None,
+        arrived: str = "request",
+        literature: Sequence[LiteratureReport] = (),
         literature_receipts: Mapping[str, Any] | None = None,
         report: AnalystReport | None = None,
-        iterations_left: int = 0,
+        previous: Sequence["ReviewerReport"] = (),
+        human_nudges: Sequence[str] = (),
+        human_files: Sequence[str] = (),
+        budgets: Mapping[str, int] | None = None,
+        human_attended: bool = False,
         render: Any | None = None,
     ) -> "ReviewerReport":
-        """Run one review and return the report the reviewer filed.
+        """Run one reviewer turn and return the report it filed.
 
-        ``stage`` is ``"literature"`` or ``"analysis"``; ``iterations_left`` is what remains of
-        the loop edge this stage controls; ``render`` (a ``ReviewerRender``) makes the analysis
-        review's final report part of its ``turn_end`` check. The reviewer may cite its own
-        receipts, the librarian's, and every receipt the lead's report cites, with their ancestors.
+        ``arrived`` names what came back since the last turn (``request``, ``librarian``,
+        ``analysts`` or ``human``); ``literature`` is every literature report of the run and
+        ``literature_receipts`` the documents they read; ``previous`` is the reviewer's own earlier
+        reports; ``human_nudges`` the human's replies (guidance, never receipts) and
+        ``human_files`` the handles of files the human sent; ``budgets`` the passes left per capped
+        team; ``render`` (a ``ReviewerRender``) makes a report to the human part of the
+        ``turn_end`` check. The reviewer may cite its own receipts, the librarian's, every receipt
+        the lead's report cites with their ancestors, and — only where it cites them — its inputs
+        (the request and the human's files).
         """
         from auto_research.agents.reviewer_tools import (
             REVIEWER_EDIT_DESCRIPTION,
             REVIEWER_REPORT_FIELDS,
             REVIEWER_SOURCE,
             REVIEWER_STATUS_VALUES,
+            reviewer_claims,
             reviewer_draft_view,
             reviewer_scope,
             reviewer_text_view,
@@ -832,11 +962,13 @@ class ReviewerAgent(AgentRole):
             *(literature_receipts or {}),
             *_cited_handles(report, REVIEWER_SOURCE),
             *figure_handles,
+            *human_files,
         ]
+        budgets = dict(budgets or {})
         lookup = ScopedLookup(store, own_source=REVIEWER_SOURCE, admitted=admitted)
         self._reviews = getattr(self, "_reviews", 0) + 1
         workspace = ReportWorkspace(
-            report_path=Path(self.report_dir) / f"review{self._reviews}_{stage}.jsonl",
+            report_path=report_record_path(Path(self.report_dir), f"review{self._reviews}.jsonl"),
             report_model=ReviewerReport,
             catalog={},
             own_source=REVIEWER_SOURCE,
@@ -846,12 +978,12 @@ class ReviewerAgent(AgentRole):
             receipt_source=REVIEWER_SOURCE,
             itemised=(),
             provenance_check=lambda r: check_report_fields(
-                r.prose_fields(), lookup, own_source=REVIEWER_SOURCE, itemised=(),
+                reviewer_claims(r), lookup, own_source=REVIEWER_SOURCE, itemised=(),
                 scope=reviewer_scope(lookup),
             ).problems,
             draft_view=(
                 reviewer_draft_view(render.report_dir, render.run_id, lookup)
-                if render is not None and "tex" in render.formats and stage == "analysis"
+                if render is not None and "tex" in render.formats
                 else reviewer_text_view(lookup)
             ),
             edit_description=REVIEWER_EDIT_DESCRIPTION,
@@ -860,8 +992,8 @@ class ReviewerAgent(AgentRole):
 
         def validator() -> list[str]:
             problems = reviewer_turn_problems(
-                workspace.written_report, lookup=lookup, scope=reviewer_scope(lookup), stage=stage,
-                iterations_left=iterations_left, render=render,
+                workspace.written_report, lookup=lookup, scope=reviewer_scope(lookup),
+                budgets=budgets, render=render,
             )
             if not problems:
                 accepted.append(True)
@@ -870,14 +1002,17 @@ class ReviewerAgent(AgentRole):
         payload = {
             "request": request.model_dump(mode="json"),
             "request_receipt": request_handle,
-            "review_stage": stage,
-            "your_turn": _review_instruction(stage, iterations_left),
-            "literature_report": literature.model_dump(mode="json") if literature else None,
+            "arrived": arrived,
+            "your_turn": _review_instruction(arrived, budgets, human_attended),
+            "your_earlier_reports": [_earlier_report(r) for r in previous],
+            "literature_reports": [lit.model_dump(mode="json") for lit in literature],
             "literature_documents": [
                 {"handle": h, "title": getattr(r, "title", None), "ids": getattr(r, "ids", {})}
                 for h, r in (literature_receipts or {}).items()
             ],
             "analysis_report": report.model_dump(mode="json") if report else None,
+            "human_nudges": list(human_nudges),
+            "human_files": [_human_file(store, h) for h in human_files],
             "figures_you_can_place": [
                 {"handle": h, "caption": store.get(h).caption} for h in figure_handles
             ],
@@ -909,7 +1044,7 @@ class ReviewerAgent(AgentRole):
             await self._react(
                 seed_messages=seed,
                 tools=provider,
-                action=f"review_{stage}",
+                action="review",
                 cap=_react_loop_cap(),
                 images=report.figures if report else (),
                 free_tools=frozenset({TURN_END_TOOL, EDIT_REPORT_TOOL, REVIEW_REPORT_TOOL}),
@@ -925,10 +1060,10 @@ class ReviewerAgent(AgentRole):
         if not accepted or filed is None:
             # A refusal or a transient provider stop ends the loop without a filed report; the
             # budget case already raised inside `_react`. Either way nothing is composed here.
-            raise RuntimeError(f"the reviewer's {stage} review ended without an accepted turn_end")
+            raise RuntimeError("the reviewer's turn ended without an accepted turn_end")
         await self._record(
-            f"reviewer.review_{stage}.filed", level=2,
-            summary=f"reviewer filed its {stage} review",
+            "reviewer.review.filed", level=2,
+            summary=f"reviewer filed its report to the {filed.assign_to}",
             data={"report": filed.model_dump(mode="json"), "path": str(workspace.report_path)},
         )
         return filed
@@ -944,28 +1079,53 @@ def _request_receipt(store: Any, request: ResearchRequest) -> str:
     return store.mint_input(text, kind="human", produced_by="research_request").handle
 
 
-def _review_instruction(stage: str, iterations_left: int) -> str:
-    """The reviewer's task for this review, with the budget the graph actually has left."""
-    if stage == "literature":
-        more = (
-            f"{iterations_left} further literature pass(es) remain."
-            if iterations_left > 0 else "No further literature passes remain."
-        )
-        return (
-            "Review the literature report and dispatch the next step. Write your report with "
-            "edit_report — rationale plus follow_up, which is the analysts' task (or, with "
-            f"needs_more_literature, the librarian's next questions) — then call turn_end. {more}"
-        )
-    more = (
-        f"{iterations_left} further analysis iteration(s) remain."
-        if iterations_left > 0 else "No further analysis iterations remain, so finalize."
+_ARRIVED = {
+    "request": (
+        "A new research request. Scope it and plan the work, then assign the first step."
+    ),
+    "librarian": "The librarian's report on your last questions has arrived (the newest in "
+                 "literature_reports).",
+    "analysts": "The analysts' report has arrived (analysis_report).",
+    "human": (
+        "The human replied to your report (the newest in human_nudges). Discuss it with them where "
+        "useful, then decide the next step."
+    ),
+}
+
+
+def _review_instruction(arrived: str, budgets: Mapping[str, int], human_attended: bool) -> str:
+    """The reviewer's task for this turn, with the budgets the graph actually has left."""
+    lit, ana = budgets.get("librarian", 0), budgets.get("analysts", 0)
+    human = (
+        "A report to the human is sent to them as a PDF, and their reply comes back to you."
+        if human_attended else
+        "No human is attending this run: a report to the human is published and ends the run."
     )
     return (
-        "Review the analysis report against the literature and decide. To send the analysts back, "
-        "set needs_analysis_rework with rationale and follow_up. To finalize, write the run's "
-        "report: title, abstract, sections, key_findings, figures and tables. Use review_report to "
-        f"see the draft as typeset, polish it once, then call turn_end. {more}"
+        f"{_ARRIVED[arrived]} Write your report with edit_report and set assign_to: 'librarian' or "
+        "'analysts' with follow_up as their task, or 'human' with the full report (title, "
+        "abstract, sections, key_findings, figures and tables; use review_report to see it "
+        f"typeset and polish it once). {human} {lit} literature pass(es) and {ana} analysis "
+        "pass(es) remain in this run. Then call turn_end."
     )
+
+
+def _earlier_report(report: "ReviewerReport") -> dict[str, Any]:
+    """One of the reviewer's own earlier reports, as its next turn reads it."""
+    entry: dict[str, Any] = {"assign_to": report.assign_to, "rationale": report.rationale}
+    if report.assign_to == "human":
+        entry.update(title=report.title, abstract=report.abstract, key_findings=report.key_findings)
+    else:
+        entry["follow_up"] = report.follow_up
+    return entry
+
+
+def _human_file(store: Any, handle: str) -> dict[str, Any]:
+    """A file the human sent, as the reviewer reads it: its handle, kind and caption."""
+    receipt = store.get(handle)
+    if receipt is None:
+        return {"handle": handle, "missing": True}
+    return {"handle": handle, "kind": receipt.kind, "caption": receipt.caption}
 
 
 def _receipt_handles_for_figures(store: Any, figures: Sequence[FigureRef]) -> list[str]:
@@ -1040,7 +1200,7 @@ class LibrarianIOAgent(AgentRole):
     ) -> LiteratureReport:
         """Research the literature for ``request`` and return the report the librarian filed.
 
-        ``follow_up`` is the reviewer's literature re-loop instruction, when there is one. The loop
+        ``follow_up`` is the reviewer's questions for this pass (every pass has them). The loop
         either files a report through ``turn_end`` or raises ``ReactBudgetExhausted``; nothing is
         composed on the librarian's behalf.
         """
@@ -1059,7 +1219,7 @@ class LibrarianIOAgent(AgentRole):
             self.sources,
             storage=self.storage,
             store=self.receipts,
-            report_path=work_dir / f"literature_pass{self._pass}.jsonl",
+            report_path=report_record_path(work_dir, f"literature_pass{self._pass}.jsonl"),
             papers_dir=papers_dir(),
             record=self._record,
         )
@@ -1230,10 +1390,7 @@ class AnalystWorkerAgent(AgentRole):
         _mint_task_input(self.receipts, task)
         workspace = self._make_report_workspace(peer_reports)
         provider = SandboxToolProvider(
-            self.registry, self.sandbox, cwd=cwd,
-            human_handler=self.human_handler, web_source=WebSource(),
-            asked_by="analyst_worker",
-            model=_model_label(self.model) or "",
+            self.registry, self.sandbox, cwd=cwd, web_source=WebSource(),
             figure_sink=self._figure_catalog["self"],
             report_workspace=workspace,
             receipts=self.receipts,
@@ -1350,7 +1507,8 @@ class AnalystWorkerAgent(AgentRole):
 
 
 def _mint_task_input(store: ReceiptStore | None, task: Any) -> None:
-    """Make the task a unit was handed a receipt, so the numbers it states may be repeated."""
+    """Record the task a unit was handed. A brief grounds nothing (``is_evidence``); the request's
+    own numbers are restated by citing the request's receipt."""
     if store is None or task is None:
         return
     text = "\n".join(filter(None, [getattr(task, "question", ""), getattr(task, "instructions", "")]))
@@ -1387,14 +1545,13 @@ _CYCLE_FREE_TOOLS: frozenset[str] = frozenset(
         # made a REFUSED turn_end cost a grace round — charging a role for trying to file inside
         # the window it was given to file in. The absolute ceiling still bounds the retries.
         TURN_END_TOOL,
-        PLAN_AND_DEBATE_TOOL,
         EDIT_REPORT_TOOL,
         REVIEW_REPORT_TOOL,
         SUBMIT_TOOL,
         RESPOND_TO_REVIEW_TOOL,
         # Waiting is not evidence-gathering, and it cannot be spammed: a short timeout is raised
         # to the configured floor, so the absolute ceiling bounds it at ceiling x floor seconds.
-        WAIT_CODER_TOOL,
+        WAIT_FOR_REPLY_TOOL,
     }
 )
 
@@ -1427,7 +1584,8 @@ def _cycle_instruction(cycle: LeadCycle, reports: Sequence[Any], rounds_left: in
             f"({', '.join(raised) or 'see the reports'}). Read the target lib/ source first, "
             "then brief the ordered chain with author_chain — one link is one capability is one "
             "commit. Briefing does not end your turn: the first coding session opens, you steer "
-            "it with drive_coder and submit_for_review, and when a link finishes the next one "
+            "it with message to the coder and submit_for_review, and when a link finishes the next "
+            "one "
             "opens automatically. A link that cannot be made mergeable simply ends and the chain "
             "moves on; you decide when to stop and write your report."
         )
@@ -1661,9 +1819,9 @@ class _ChainDriver:
             f"'{spec.proposed_tool_name}'. The coder has your brief and is working on it now — "
             "you keep your turn, and it will take minutes rather than seconds. Spend them on "
             "the library it is extending, the next link, or your report, and when you have "
-            "nothing else to do for this link call wait_coder: it returns the moment the coder "
+            "nothing else to do for this link call wait_for_reply: it returns the moment the coder "
             "stops or asks you something, and says how long it has been working. Messages you "
-            "send with drive_coder while it works are queued for its next turn. "
+            "send the coder while it works are queued for its next turn. "
             "submit_for_review waits for the coder to stop before the gate runs. If it cannot be "
             "made mergeable, let "
             "its submissions run out and the next link opens automatically — an honest failure "
@@ -1703,7 +1861,7 @@ class _ChainDriver:
         self.provider.authoring_session = session
         self.session, self.spec = session, spec
         self.cycle.session_open = True
-        # A human steer for the lead wakes a pending `wait_coder` at once, rather than at its
+        # A message for the lead (a human steer, the coder's question) wakes a pending `wait_for_reply` at once, rather than at its
         # timeout; the steer itself is still delivered by the loop's own drain (A2 hold rule).
         control, key = self.lead.run_control, getattr(self.lead, "agent_key", None)
         if control is not None and key and hasattr(session, "watch_steers"):
@@ -1722,7 +1880,7 @@ class _ChainDriver:
         # it re-send the whole brief. The first turn's narration was discarded here too, so the
         # lead re-read five files by hand to learn what its own coder had already told it.
         # A session predating B (a benchmark's, a test double's) has no `start_drive`; it keeps
-        # the blocking call, as `execute_drive_coder` does for the same reason.
+        # the blocking call, as `execute_coder_message` does for the same reason.
         if hasattr(session, "start_drive"):
             session.start_drive(session.initial_message)
         else:
@@ -2091,7 +2249,7 @@ class AnalystLeadAgent(AgentRole):
         """Drive one tool through authoring as the plan owner (§9.3 B-topology, A1).
 
         Builds + connects an ``AuthoringSession`` for ``tool_spec``, then runs the lead's ReAct
-        loop over it: the lead steers the Sonnet coder (``drive_coder``) and submits to the
+        loop over it: the lead steers the Sonnet coder (``message`` to ``coder``) and submits to the
         deterministic gate + GPT co-lead review (``submit_for_review``); the coder is seeded with
         the brief first. The commit happens inside ``submit`` on gate-pass ∧ review-pass (the lead
         never self-approves). Returns the terminal ``MergeFlowResult`` (committed → the strategy
@@ -2144,11 +2302,7 @@ class AnalystLeadAgent(AgentRole):
             retrieval=getattr(base, "retrieval", None),
             web_source=getattr(base, "web_source", None),
             include_text_search=False,  # authoring steers code, not the papers KB
-            include_plan_and_debate=human_handler is not None,
             authoring_session=session,
-            human_handler=human_handler,
-            asked_by="analyst_lead",
-            model=getattr(base, "model", "") or "",
         )
 
         # Seed the coder with the brief settled in decide_authoring, then steer it.
@@ -2162,14 +2316,15 @@ class AnalystLeadAgent(AgentRole):
             ),
             "tool_spec": session.tool_spec.model_dump(mode="json"),
             "loop_semantics": (
-                "Inspect the coder's work with read_file/list_dir. Steer it with drive_coder, "
+                "Inspect the coder's work with read_file/list_dir. Steer it with message to the coder, "
                 "giving concrete algorithm-level instructions (signature, exact procedure, edge "
                 "cases, the tests it must add). When you believe the tool and its tests are right, "
                 "call submit_for_review: it runs the deterministic gate, then the independent GPT "
                 "co-lead review, and commits automatically on gate-pass AND review-pass — you never "
-                "self-approve. On a gate failure (mechanical), fix the underlying cause via "
-                "drive_coder; never weaken a check to pass. On a review rejection, either steer the "
-                "coder to address it (drive_coder) or, when you believe a challenge is unfounded or "
+                "self-approve. On a gate failure (mechanical), fix the underlying cause by messaging "
+                "the coder; never weaken a check to pass. On a review rejection, either steer the "
+                "coder to address it (message to the coder) or, when you believe a challenge is "
+                "unfounded or "
                 "already handled, defend it with respond_to_review — the co-lead reconsiders and may "
                 "concede to a sound argument (it commits if persuaded and the gate still passes). "
                 "When the tool commits you are done; if it cannot be made mergeable within the "
@@ -2191,7 +2346,7 @@ class AnalystLeadAgent(AgentRole):
         # work — so a bare _react stop (no tool call) is a deliberate, honest give-up, not a missed
         # submit. (This replaced an earlier code-level nudge loop, dropped per CLAUDE.md §1 once a
         # live run showed the lead submits on its own and the backstop never fired.)
-        free = frozenset({SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL, PLAN_AND_DEBATE_TOOL})
+        free = frozenset({SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL, WAIT_FOR_REPLY_TOOL})
         await self._react(
             seed_messages=seed, tools=tools, action="drive_authoring",
             cap=_react_loop_absolute_cap(), free_tools=free,
@@ -2392,10 +2547,10 @@ def _coder_event(tools: Any) -> str | None:
     """A one-line notice that the background coder stopped, or ``None`` while it works (B4).
 
     Read from the provider's live session rather than pushed by it, because the loop is the only
-    place that knows when a turn boundary is safe. The narration itself is left for ``wait_coder``
+    place that knows when a turn boundary is safe. The narration itself is left for ``wait_for_reply``
     (which returns it at once when it is unread) — a notice is a nudge to look, not the looking —
     which also keeps a long coder transcript out of the injected turn. A lead parked in
-    ``wait_coder`` consumes the narration itself, so this fires only for a lead busy elsewhere.
+    ``wait_for_reply`` consumes the narration itself, so this fires only for a lead busy elsewhere.
     """
     session = getattr(tools, "authoring_session", None)
     if session is None or getattr(session, "drive_status", None) != "stopped":
@@ -2406,30 +2561,174 @@ def _coder_event(tools: Any) -> str | None:
     failed = getattr(session, "_drive_error", None) is not None
     if failed:
         return (
-            f"[coder] the session on '{name}' FAILED and is not usable. Call wait_coder for the "
+            f"[coder] the session on '{name}' FAILED and is not usable. Call wait_for_reply for the "
             "fault, then write your report and say what happened."
         )
     return (
-        f"[coder] the coder working on '{name}' has stopped. Call wait_coder to read what it "
+        f"[coder] the coder working on '{name}' has stopped. Call wait_for_reply to read what it "
         "did (it returns at once), then inspect the tree or submit_for_review."
     )
 
 
-def _coder_questions(tools: Any) -> list[str]:
-    """Questions the coder asked, collected once, for injection at a safe boundary.
+#: Provider fields a role installs for one loop and resets after it; a resumed turn reinstalls the
+#: values its loop ended with (the lead and reviewer restore them in a ``finally``).
+_KEPT_PROVIDER_STATE = (
+    "report_workspace", "turn_end_validator", "receipts", "receipt_source", "extra_tools", "cycle",
+)
+#: Tools a resumed turn answers without running: the report is filed and final, and the cycle a
+#: lead's authoring tools belonged to has ended.
+_RESUME_CLOSED = frozenset(
+    {EDIT_REPORT_TOOL, "file_edit", AUTHOR_CHAIN_TOOL, SUBMIT_TOOL,
+     RESPOND_TO_REVIEW_TOOL}
+)
 
-    Pulled by the loop rather than pushed by the session, for the reason `_coder_event` is: only
-    the loop knows when an injected user turn is legal, and one appended after a turn that left a
-    server-tool call unresolved is the 400 that killed a run at $42.11 (A2).
+
+def _has_authoring_surface(tools: Any) -> bool:
+    """Whether this loop's provider can author: a live session, or a cycle that enables it."""
+    declared = getattr(tools, "_authoring_declared", None)
+    return getattr(tools, "authoring_session", None) is not None or bool(
+        callable(declared) and declared()
+    )
+
+
+def _seat_scope(tools: Any) -> Any | None:
+    """The receipts this seat may cite — the librarian's own scope, else its report workspace's."""
+    scope = getattr(tools, "scope", None)
+    if scope is not None:
+        return scope
+    return getattr(getattr(tools, "report_workspace", None), "receipts", None)
+
+
+class ChannelTools:
+    """A seat's tool provider with the quick channel added (E12).
+
+    Wraps the provider for one loop: declares ``message``, ``view_receipt`` and (when the provider
+    does not already) ``wait_for_reply``; holds ``turn_end`` while a member this seat resumed is
+    still in its turn; and, in a **resumed** turn, declares exactly the set the finished turn ended
+    with (a declared set never shrinks mid-conversation) while answering the tools that would
+    re-file. Everything else is the provider's, read through unchanged.
     """
-    session = getattr(tools, "authoring_session", None)
-    if session is None or not hasattr(session, "take_questions"):
-        return []
-    return [
-        f"[coder asks] {question}\n\nAnswer it with drive_coder — that reaches the coder inside "
-        "the turn it is still running, so it does not have to stop and wait."
-        for question in session.take_questions()
-    ]
+
+    def __init__(
+        self, base: Any, *, role: "AgentRole", resumed: bool = False,
+        declared: list[dict] | None = None,
+    ) -> None:
+        self._base = base
+        self._role = role
+        self.resumed = resumed
+        self._declared = declared
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+    def _coder_declared(self) -> bool:
+        """The lead's ``coder`` address: declared for the whole cycle authoring is enabled in (or
+        the whole standalone authoring loop), never with the live session — a declared set that
+        shrinks mid-conversation is the 2026-07-29 run-killer."""
+        declared = getattr(self._base, "_authoring_declared", None)
+        return getattr(self._base, "authoring_session", None) is not None or bool(
+            callable(declared) and declared()
+        )
+
+    def _directory(self) -> list[str]:
+        directory = self._role.channel.directory(self._role.agent_key)
+        return directory + (["coder"] if self._coder_declared() else [])
+
+    def tool_definitions(self) -> list[dict]:
+        if self._declared is not None:
+            return list(self._declared)
+        defs = list(self._base.tool_definitions())
+        names = {d.get("name") for d in defs}
+        router = self._role.channel
+        defs.append(message_tool_def(self._directory()))
+        defs.append(list_peers_tool_def())
+        defs.append(view_receipt_tool_def())
+        if WAIT_FOR_REPLY_TOOL not in names:
+            defs.append(wait_for_reply_tool_def())
+        return defs
+
+    async def _to_coder(self, arguments: Mapping[str, Any]) -> ToolOutcome:
+        """The lead's text to its coder: the session's one send path, labelled with the sender."""
+        session = getattr(self._base, "authoring_session", None)
+        if self.resumed or not self._coder_declared():
+            return ToolOutcome(
+                text="The coder is reachable only from your own authoring turn.", is_error=True
+            )
+        if session is None:
+            no_session = getattr(self._base, "_no_session_text", lambda: "No coding session is open.")
+            return ToolOutcome(text=no_session(), is_error=True)
+        key = self._role.agent_key or self._role.role
+        text = str(arguments.get("text") or "")
+        outcome = await execute_coder_message(
+            session, f"[Message from {key}] {text}" if text.strip() else "",
+            mid_turn=bool(arguments.get("mid_turn")),
+        )
+        await self._role.channel.record_message(
+            key, "coder", text, route="coder", is_error=outcome.is_error
+        )
+        return outcome
+
+    async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
+        role, router = self._role, self._role.channel
+        key, control = role.agent_key, role.run_control
+        if name == MESSAGE_TOOL and str(arguments.get("to") or "") == "coder":
+            return await self._to_coder(arguments)
+        if name == MESSAGE_TOOL:
+            scope = _seat_scope(self._base)
+            text, is_error = await router.send(
+                key or role.role, str(arguments.get("to") or ""), str(arguments.get("text") or ""),
+                handles=[str(h) for h in (arguments.get("attachments") or [])],
+                scope=scope,
+                receipt_source=getattr(scope, "own_source", None)
+                or getattr(self._base, "receipt_source", None),
+                reply_dir=getattr(self._base, "cwd", None) or getattr(role, "report_dir", None),
+                kind=str(arguments.get("kind") or "clarify_science"),
+                model=_model_label(role.model) or "",
+            )
+            return ToolOutcome(text=text, is_error=is_error)
+        if name == LIST_PEERS_TOOL:
+            listed = execute_list_peers(router, key, _model_label)
+            if not self._coder_declared():
+                return listed
+            status = getattr(getattr(self._base, "authoring_session", None), "drive_status", None)
+            state = f"its session is {status}" if status else "no coding session is open yet"
+            return ToolOutcome(text=listed.text + (
+                f"\n- coder — the coding agent writing the tool you briefed; {state}."
+            ))
+        if name == VIEW_RECEIPT_TOOL:
+            return await execute_view_receipt(
+                _seat_scope(self._base), router.viewable(key), router.store, arguments,
+                images_ok=bool(getattr(getattr(role.model, "config", None), "vision", True)),
+            )
+        if name == WAIT_FOR_REPLY_TOOL:
+            session = getattr(self._base, "authoring_session", None)
+            if not self.resumed and session is not None and hasattr(session, "wait_for_event"):
+                return await self._base.execute(name, arguments)  # the coder is working: its wait
+            return await execute_wait_for_reply(
+                control, key, arguments, outstanding=lambda: router.outstanding(key)
+            )
+        if name == TURN_END_TOOL:
+            pending = control.resumed_by(key) if control is not None else []
+            if pending:
+                return ToolOutcome(
+                    text=(
+                        f"turn_end was not accepted yet: {', '.join(pending)} is still working on "
+                        "your message. Call wait_for_reply, then turn_end once it has ended."
+                    ),
+                    is_error=True,
+                )
+            if self.resumed:
+                return ToolOutcome(text="Turn ended. Your filed report stands as filed.")
+        if self.resumed and name in _RESUME_CLOSED:
+            return ToolOutcome(
+                text=(
+                    f"{name} is closed in this turn: your report is filed and final, and this turn "
+                    "is for reading and answering messages. Answer with message, then call "
+                    "turn_end."
+                ),
+                is_error=True,
+            )
+        return await self._base.execute(name, arguments)
 
 
 def _last_turn_has_unresolved_server_tool(messages: list) -> bool:

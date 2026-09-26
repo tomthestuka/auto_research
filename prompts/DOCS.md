@@ -22,9 +22,11 @@ runtime prompt text that names build-time governance files.
 
 ## Interfaces / Contracts
 Runtime prompt files:
-- `reviewer.md` — input portal for human or authorized upstream research
-  requests, work dispatch, result review, feedback decisions, and output portal
-  for triage plans or final verdicts.
+- `reviewer.md` — the sole I/O: scopes each request (science case, distinguishing observables,
+  staged plan with feasibility checks, every named resource confirmed), assigns each step with
+  `assign_to` (librarian as often as needed, analysts, or the human), follows up results that
+  open a sharper in-scope question, ends every report to the human with a Next steps section, and
+  reads the human's reply as a nudge (direction, not evidence).
 - `librarian_io.md` — the librarian's research loop: plan the literature questions, search
   (short keyword queries), read papers and pages in full, follow the citation trail, and file a
   `LiteratureReport` whose findings cite what was read by handle and quote every number exactly
@@ -35,7 +37,7 @@ Runtime prompt files:
   (real steps run through tools; `bash`/`python -c` is read-only inspection only; missing logic
   → `tool_request`), `tool_request` reporting for missing or broken toolkit capabilities, and
   **§9.6 failure handling** (wrong call → retry in the loop; broken tool → `fix_existing`
-  request; env/data/human-fault → `ask_human` / set `status=failed|needs_human`, never
+  request; env/data/human-fault → `message` to `human` / set `status=failed|needs_human`, never
   fabricate). Tool returns are not instantaneous (slow downloads/reductions, human pauses) —
   wait, never assume an output.
 - `analyst_lead.md` — convergence judgment, adjudication, synthesis, the same
@@ -43,7 +45,8 @@ Runtime prompt files:
   disposition + `fix_existing` wrongly-called vs buggy), **general-capability brief framing**
   (write `expected_behavior` as a parameterized capability serving the class of question — the
   run's concrete values become argument defaults — not this run's instance),
-  authoritative-doc consultation (`web_search`), and **raise-to-human** (`ask_human` / final
+  authoritative-doc consultation (`web_search`), the team channel (`message` / `wait_for_reply`),
+  and **raise-to-human** (`message` to `human` / final
   report `status`) on an honest failure or authoring exhaustion.
 - `analyst_colead.md` — the Phase-2 provider-decorrelated **co-lead code reviewer** (loaded
   by the `review` hook for the structured `ToolReviewVerdict`): code-review-only scope (never
@@ -65,7 +68,7 @@ Runtime prompt files:
   `call_timeout_s` in the package `tool_config.yaml` so the sandbox doesn't SIGTERM a legitimately
   long tool at ~300s), the
   README↔`TOOL_MANIFEST` audience split, `obsdb_catalog` as the sole catalog writer,
-  no-fabrication rules, the web/`ask_lead`/`ask_human` escalation ladder, and the committed-tests
+  no-fabrication rules, the web → `message` to `lead` → `message` to `human` escalation ladder, and the committed-tests
   requirement. The role name `coder` mirrors `config/models.yaml`.
 
 Each file is the complete system prompt for that role: identity, responsibilities,
@@ -113,3 +116,18 @@ Compacted 2026-09-01 and again 2026-09-24 (detail in git history).
   pins a span; ruling: the worker may do plain arithmetic on receipted numbers via `python -c`.
 - 2026-09-25 — [G15] `coder.md` gains "Results the runtime can cite — the return contract every
   tool meets" (rules 1–5), matching the gate's `layer_b.returns.*` checks (peer 02).
+- 2026-09-25 — [R1/R2] `reviewer.md` rewritten for `assign_to`: scoping section, following up
+  results, Next steps, human reply as a nudge; `librarian_io.md`: every pass carries the
+  reviewer's questions.
+- 2026-09-25 — [E12] `analyst_worker.md`, `analyst_lead.md`, `coder.md`: `ask_human`,
+  `plan_and_debate` and `ask_lead` became `message` (to a member, `lead` or `human`) with
+  `wait_for_reply`; worker and lead gain a short "your team is one message away" paragraph (texts
+  are informal, claims rest on own receipts, a finished member is resumed, a filed report stays
+  filed). The conditional-address check in `tests/test_prompts.py` now keys on the `human` address.
+- 2026-09-25 — [E12] `analyst_lead.md`: `drive_coder` → `message` to `coder` throughout (the fold);
+  `mid_turn` kept.
+- 2026-09-25 — [R7] Evidence is produced, not read: `reviewer.md` ("Every number comes from
+  evidence": toolkit results, commits, papers; reads and messages are navigation; gaps in words;
+  follow_up exempt), `analyst_lead.md` (commit receipts; code facts in words), `analyst_worker.md`
+  (no `python -c` arithmetic: derived values from a toolkit tool, requested via `tool_request`),
+  `librarian_io.md` (a web page is a lead to its paper).

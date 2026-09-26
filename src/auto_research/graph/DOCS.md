@@ -7,52 +7,48 @@ exposes async entry points for both monitored runs (`ResearchRun`) and verdict-o
 compatibility (`ReviewVerdict`).
 
 ## Architecture
-A LangGraph `StateGraph` with six nodes and two outer feedback edges (each
-capped at `max_iterations`, default 3). Tool execution is owned by analyst
-workers inside their `analyze()` ReAct loop via persistent per-worker sandboxes —
-not by graph nodes.
+A LangGraph `StateGraph` with six nodes. **The reviewer is the sole I/O** (human 2026-09-25):
+the run starts at it, every team's work returns to it, and it routes the graph with its report's
+`assign_to`. Tool execution is owned by analyst workers inside their `analyze()` ReAct loop via
+persistent per-worker sandboxes — not by graph nodes.
 
 ```
-START → literature → review_literature
-                        │  needs_more_literature & lit < cap
-                        ▼─────────────────────────────► literature   (loop ①)
-                        │
-                        ▼
-                     analysis → review_analysis
-                                  │  needs_rework & analysis < cap
-                                  ▼─────────────► analysis  (loop ②)
-                                  │
-                                  ▼
-                             finalize_run
-                                  │ accepted + report formats
-                                  ▼
-                             compose_report → END
+START ─► review ─assign_to─┬─ librarian ─► literature ─► review   (≤ max_iterations passes/run)
+           ▲               ├─ analysts  ─► analysis   ─► review   (≤ max_iterations passes/run)
+           │               └─ human ─► finalize_run ─► compose_report ─► human ─┬─ reply ─► review
+           │                                                                    └─ done / unattended / timeout ─► END
+           └────────────────────────────────────────────────────────────────────┘
 ```
 
-Reviewer nodes return state updates containing the newest `ReviewerReport` — the one report the
-reviewer filed through `turn_end` for that review (`ReviewerAgent.review(stage=…,
-iterations_left=…)`, each stage told what its loop edge has left).
-`add_conditional_edges()` then routes from `review_literature` back to
-`literature` or onward to `analysis`, and from `review_analysis` back to
-`analysis` or onward to `finalize_run`. `finalize_run` copies the latest
-accumulated verdict into `state["verdict"]`, then routes to `compose_report`
-whenever any report format is configured (else `END`).
-
-**The reviewer is the sole I/O (§9.6).** Every analysis result — success *or* an honest
-`failed`/`needs_human` outcome — is adjudicated by `review_analysis`: `analysis → review_analysis`
-is now an **unconditional** edge (the old `after_analysis` bypass that sent a failed report
-straight to `finalize_run` is gone; the analyst lead gets no bypass). The reviewer decides
-**finalize vs. bounded rework** (`needs_analysis_rework`, capped by `max_iterations`), and on
-finalize the report is **always** written (the final review's report is the run's report), so an
-honest failure is **documented, not silent**. With `tex` configured the `.tex`/PDF are rendered and
-compiled **inside the reviewer's `turn_end`** (a `ReviewerRender` built by `review_analysis_node`),
-and `review_analysis_node` records `report_latex`/`report_pdf` plus a level-1
-`reviewer.compose_report.renderer_error` when the report was accepted but no PDF came out. The
-`compose_report` node runs **no model**: `report.publish_report` mints `rev:dN` receipts for the
-published files and writes the JSONL when `jsonl` is configured.
-`finalize_run` only records the terminal (`run.honest_failure` for a `failed`/`needs_human`
-status) and forwards the reviewer's verdict. The no-fabrication guarantee lives in the reviewer's
-prompt and its `turn_end` check (every number grounded in a receipt), not in suppressing the report.
+- **`review`** runs one reviewer turn (`ReviewerAgent.review`): told what `arrived` since its last
+  turn (`request`, `librarian`, `analysts`, `human`), every literature report so far, the latest
+  analysis report, its own earlier reports, the human's nudges and files, and the passes left per
+  team. Its `turn_end` refuses an assignment past its cap, so `after_review` never reroutes: a
+  report it cannot route raises. A report to the human is rendered and compiled inside that
+  `turn_end` (a `ReviewerRender` over the round's `report/v<k>/`), and the node records
+  `report_latex`/`report_pdf` plus a level-1 `reviewer.compose_report.renderer_error` when no PDF
+  came out.
+- **`literature`** runs one librarian pass on the reviewer's `follow_up` and returns to review.
+  Literature reports and their receipts **accumulate** across passes (a second search builds on
+  the first).
+- **`analysis`** runs `DebateToConverge` on an `AnalysisTask` carrying the reviewer's `follow_up`,
+  and returns to review — an honest `failed`/`needs_human` outcome included (§9.6, no bypass).
+- **`finalize_run`** records the outcome (`run.honest_failure` for a failed analysis,
+  `run.report_without_analysis` when none ran) and forwards the report; **`compose_report`** runs
+  no model: `report.publish_report` mints `rev:dN` receipts for the files and writes the JSONL
+  when `jsonl` is configured. Each report to the human has its own `v<k>/` folder, so an earlier
+  `rev:dN` keeps its bytes.
+- **`human`** is an edge endpoint, not a unit: no model runs. It sends the report (title,
+  abstract, the PDF through `hitl.attachments.resolve_attachments`, `kind="report"`) through the
+  blocking `human_handler`. The reply's **text is a nudge** (human 2026-09-25): delivered to the
+  reviewer as guidance, never minted, so it grounds nothing. Files the human sends are minted by
+  `mint_reply_attachments` as `input:` receipts (cite-only), saved under the ledger (outside every
+  allow-list). The exact reply `done` (trimmed, any case) ends the run; so does an unattended run
+  once the report is published, and a handler `TimeoutError` (the report stands). Any other
+  handler error propagates. A resumed run re-enters this node, which re-sends and waits again.
+- The reviewer's report folder and every role's report JSONL live **beside the ledger**, outside
+  every allow-list (`sandbox/workspace.report_dir`, `report_record_path`), so no role can read a
+  report back and mint its own typed numbers as a receipt.
 
 **Tool execution inside `analysis_node`:** `analysis_node` calls
 `consensus_strategy.run(workers, lead, task)`. Each worker's
@@ -61,20 +57,10 @@ when sandbox + registry are attached, writes real `ToolResult`s to its private
 `memory_path`, and exposes `last_tool_results`. `DebateToConverge` injects a
 truncated cross-worker summary into `task.instructions` for the next round.
 
-The literature node runs **one librarian research pass**: `io_agent.research(request,
-follow_up=…)` searches, reads papers and pages in full, and files a `LiteratureReport` through
-`turn_end` (see `agents/DOCS.md`). The node writes `state["literature"]` (that report) and
-`state["literature_receipts"]` (handle → `Receipt` for every document it opened); each pass
-replaces both. Both reviews receive them; the reviewer also keeps `text_search` and its own
-receipted `read_paper`.
-
-The analysis node builds an `AnalysisTask` from the question and optional
-instructions (carrying the reviewer's `follow_up` on rework). References are built by the
-renderer from the paper/web receipts the final report cites.
-
-`ResearchState` carries: the request, the literature report and its receipts, the latest analyst
-report, the final reviewer report (`verdict`), the accumulated reviewer reports (`verdicts`), two
-iteration counters, the cap, and the published artifact paths.
+`ResearchState` carries: the request, the literature reports and their receipts, the latest analyst
+report, the reviewer's reports (`verdicts`, the latest in `verdict`), `arrived`, the human's nudges
+(`human_nudges`) and file handles (`human_thread`), `human_rounds`, two pass counters, the cap, and
+the published artifact paths and handles (`report_artifacts`).
 
 ## Interfaces / Contracts
 - `build_graph(*, reviewer, io_agent, retrieval=None, workers, lead,
@@ -108,8 +94,12 @@ iteration counters, the cap, and the published artifact paths.
   accumulated spend and names the run dir it belongs to; and it records a final `run.summary`
   event (derived from the ledger by `monitor.summary`) after `run.finish` **and** after
   `run.error`, so a crashed run ends on the same digest as a finished one.
-  The resolved handler is threaded to the analyst workers and the reviewer/lead tool providers
-  so any role can `ask_human`.
+  The resolved handler reaches the seats through the quick channel: `attach_channel(seats, *,
+  run_id, run_control, human_handler, monitor)` builds one `hitl.router.SeatRouter` over the
+  reviewer, librarian, lead and workers (never the co-lead or status monitor), so any seat can
+  `message` any other or the human. `_interrupt_cleanup` starts with
+  `run_control.cancel_resumed()`, which cancels resumed seats and awaited human replies before the
+  sandboxes are killed.
   Missing dependencies are constructed from `config/models.yaml`. Reads
   `tool_retry_cap`, `toolkit_root`, `analyze_env`, and `analyze_ini_sh` from
   `config/orchestration.yaml`.  Creates per-run workspace
@@ -150,11 +140,10 @@ iteration counters, the cap, and the published artifact paths.
   its checkpoint; `resume` and `overwrite` are mutually exclusive (overwrite wipes the checkpoint).
 - `RunDied(run_id, reason, *, log_path=None, partial='')` — a detached run ended without a
   usable result (process died mid-run, or the pipeline raised).
-- `ResearchState` — `TypedDict` with `request`, `cited_paths: list[Path]`,
-  `report`, `verdict`, `verdicts: Annotated[list[ReviewVerdict], operator.add]`,
-  `lit_iterations`, `analysis_iterations`, `max_iterations`.
-  `tool_queue` and `tool_results` removed — tool state is now private to each
-  worker's `memory_path` file and embedded in the final `AnalystReport`.
+- `ResearchState` — `TypedDict`; see the Architecture paragraph. `literature` and `verdicts`
+  accumulate (`operator.add`), `literature_receipts` merges by handle, `human_nudges` and
+  `human_thread` accumulate. A checkpoint without `arrived` came from the graph before 2026-09-25
+  and `run_research(resume=True)` refuses it (`_refuse_pre_sole_io_checkpoint`).
 - Monitor events are optional. When a monitor is supplied, graph nodes record
   node starts, search strategy/results, local retrieval paths, analyst reports,
   worker tool-result summaries (via consensus/agents), reviewer verdicts, and report
@@ -162,11 +151,10 @@ iteration counters, the cap, and the published artifact paths.
 - `IOAgentLike` / `ReviewerLike` — minimal protocols for dependency injection.
   `ToolWorkerLike` protocol removed from `builder.py` (tool execution moved to
   consensus/roles layers).
-- Both outer feedback edges are gated by the reviewer's structured verdict flags
-  (`needs_more_literature`, `needs_analysis_rework`). The reviewer's `follow_up`
-  text is fed back into the next `research(follow_up=…)` call and/or analysis
-  instructions. The routing is implemented with LangGraph conditional edges
-  after each reviewer node has appended its verdict to `state["verdicts"]`.
+- The graph routes on the reviewer's `assign_to` alone. Its `follow_up` becomes the librarian's
+  `research(follow_up=…)` or the analysts' instructions; a report to the human is published and
+  sent. `max_iterations` caps librarian and analysis passes per run; a human reply changes no
+  budget (the human nudges, the reviewer assigns).
 - Live graph verification is opt-in:
   `AUTO_RESEARCH_LIVE_GRAPH_TESTS=1 pytest tests/test_live_graph.py -s`. Writes
   JSONL plus Markdown logs under `logs/dev/step-10/`.
@@ -192,22 +180,28 @@ iteration counters, the cap, and the published artifact paths.
   workers and are recorded in per-worker `memory.md` files.
 - `IOAgentLike` — protocol with `async research(request, *, follow_up) -> LiteratureReport` and
   `last_receipts: dict[str, Receipt]`.
-- `ResearchState` literature keys: `literature: LiteratureReport | None`,
-  `literature_receipts: dict[str, Receipt]`.
-- `ReviewerLike` — protocol with `async review(request, *, stage, literature=None,
-  literature_receipts=None, report=None, iterations_left=0, render=None) -> ReviewerReport`.
+- `ResearchState` literature keys: `literature: list[LiteratureReport]` (accumulated),
+  `literature_receipts: dict[str, Receipt]` (merged).
+- `ReviewerLike` — protocol with `async review(request, *, arrived="request", literature=(),
+  literature_receipts=None, report=None, previous=(), human_nudges=(), human_files=(),
+  budgets=None, human_attended=False, render=None) -> ReviewerReport`.
+- `END_REPLY = "done"` — the whole human reply that ends the run.
+- `_version_dir(run_id, k)` — the k-th report-to-the-human folder `report/v<k>/` (with `figures/`).
+- `_report_message(report, *, attached)` — the human's message: title, abstract, how to reply;
+  the sections too when no PDF is attached.
+- `_refuse_pre_sole_io_checkpoint(existing)` (runtime) — raises on a pre-2026-09-25 checkpoint.
 - `attach_reviewer_runtime(reviewer, *, run_id, toolkit_root, run_monitor=None, retrieval=None,
   web_source=None, human_handler=None)` — the reviewer's production wiring (tools via
   `readonly_tools_for("reviewer")`, `report_dir`, the run's `ReceiptStore`), called by
   `run_research` and by live cells so they drive the same reviewer.
-- `readonly_tools_for(role, *, roots, retrieval=None, web_source=None, human_handler=None,
-  model="") -> ReadOnlyToolProvider` — the read-only inspection loop production gives the
+- `readonly_tools_for(role, *, roots, retrieval=None, web_source=None) -> ReadOnlyToolProvider` — the read-only inspection loop production gives the
   `reviewer` or the `analyst_lead`. The two differ on purpose: the lead gets the data catalog and,
   when a human is reachable, the budget-free design channel, and is denied the paper knowledge
   base, because it investigates toolkit source and the archive rather than literature. Any other
   role raises rather than receiving a default loop.
 - `readonly_roots_for(run_id, toolkit_root) -> list[Path]` — the three roots those two roles may
-  read: the run directory, the papers directory, the toolkit.
+  read: the run directory, the papers directory, the toolkit. Report files are not in it: they
+  live beside the ledger.
 - `attach_worker_runtime(workers, *, run_id, registry, toolkit_root, analyze_env=None,
   analyze_ini_sh=None, repl_init_py=None, mcp_client=None, run_control=None)
   -> list[PersistentSandbox]` — gives each `AnalystWorkerAgent` its stable key, memory path,
@@ -215,9 +209,8 @@ iteration counters, the cap, and the published artifact paths.
   so a human stop cancels an in-flight tool call. Returns the sandboxes for the caller to shut
   down. **Without it a worker has no tool loop**: `analyze()` runs its inner ReAct loop only when
   a sandbox and a registry are both attached, and otherwise falls back to a plain structured call.
-- `build_graph(...)` — constructs and compiles the six-node state graph
-  (`literature`, `review_literature`, `analysis`, `review_analysis`,
-  `finalize_run`, `compose_report`).
+- `build_graph(..., human_handler=None)` — constructs and compiles the six-node state graph
+  (`review`, `literature`, `analysis`, `finalize_run`, `compose_report`, `human`).
 - `run_request(request, ...)` — compatibility entry point; delegates to
   `run_research()` and returns the final `ReviewVerdict`.
 - `run_research(request, ...)` — monitored high-level entry point; returns
@@ -264,3 +257,14 @@ Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
 - 2026-09-24 (5c) — Reviewer is a unit: `ReviewVerdict` → `ReviewerReport`, rendering inside its
   `turn_end` (`ReviewerRender`), `compose_report` publishes with no model, new
   `attach_reviewer_runtime`; `build_graph(storage=, report_retry_cap=)` → `receipts=`.
+- 2026-09-25 — [R1] The reviewer is the sole I/O (human ruling): START → `review`; one router on
+  `ReviewerReport.assign_to ∈ {librarian, analysts, human}` replaces the two stage-bound reviews
+  and flags; librarian passes accumulate; new `human` edge endpoint (blocking handler, PDF attached
+  via E11's `resolve_attachments`, reply text a nudge never a receipt, files `input:` receipts,
+  `done`/unattended/timeout end the run); report folders versioned `v<k>/` and moved beside the
+  ledger with every role's report JSONL; `build_graph(human_handler=)`; pre-change checkpoints
+  refused on resume. Deterministic only; live adversarial cells pending.
+- 2026-09-25 — [E12] (wording from auto-research-3b) The human handler reaches the seats through
+  `attach_channel` / `hitl.router.SeatRouter`; `readonly_tools_for` dropped `human_handler`/`model`;
+  `_interrupt_cleanup` cancels resumed seats first.
+- 2026-09-25 — [R1] LIVE-TESTED: `tests/test_live_reviewer_paths.py` graph cell (real reviewer + librarian, stub analysis, attacking human): START → review, librarian pass, three reports to the human in `v1`–`v3` with earlier PDFs re-verified, nudges minted nothing, exact `done` ended the run.

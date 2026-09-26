@@ -270,46 +270,6 @@ def test_react_absolute_cap_defaults_to_cap_when_unset():
     assert model.calls == 3
 
 
-def test_plan_and_debate_exposed_only_with_flag_and_handler(tmp_path):
-    async def handler(query):
-        return HumanResponse(query_id=query.id, answer="ok")
-
-    lead = ReadOnlyToolProvider(
-        roots=[tmp_path], include_plan_and_debate=True, human_handler=handler
-    )
-    assert "plan_and_debate" in _names(lead)
-    # Flag set but no handler → absent (it needs the human channel).
-    assert "plan_and_debate" not in _names(
-        ReadOnlyToolProvider(roots=[tmp_path], include_plan_and_debate=True)
-    )
-    # Handler but no flag (the reviewer) → absent (lead-only).
-    assert "plan_and_debate" not in _names(
-        ReadOnlyToolProvider(roots=[tmp_path], human_handler=handler)
-    )
-
-
-def test_plan_and_debate_routes_message_to_human(tmp_path):
-    seen = {}
-
-    async def handler(query):
-        seen["query"] = query
-        return HumanResponse(query_id=query.id, answer="extend heasarc_utils")
-
-    provider = ReadOnlyToolProvider(
-        roots=[tmp_path], include_plan_and_debate=True, human_handler=handler,
-        asked_by="analyst_lead",
-    )
-    out = asyncio.run(provider.execute(
-        "plan_and_debate",
-        {"message": "## Plan\nextend the acquire package\n\nWhich package?"},
-    ))
-    assert not out.is_error
-    assert "extend heasarc_utils" in out.text
-    assert seen["query"].kind == "clarify_science"
-    assert seen["query"].asked_by == "analyst_lead"
-    assert "extend the acquire package" in seen["query"].message  # the Markdown body
-
-
 # --- web_search: shared tool wired to reviewer / lead / worker (§9.3, [I1]) -------------------
 
 from types import SimpleNamespace as _NS  # noqa: E402
@@ -530,14 +490,13 @@ def test_web_source_fetch_extracts_raw_content():
         asyncio.run(failed.fetch("https://x"))
 
 
-# --- Authoring tools (A1 slice 2): drive_coder / submit_for_review over an AuthoringSession ---
+# --- Authoring tools (A1 slice 2): message to the coder / submit_for_review over an AuthoringSession ---
 
 from types import SimpleNamespace  # noqa: E402
 
 from auto_research.agents.react import (  # noqa: E402
-    DRIVE_CODER_TOOL,
     SUBMIT_TOOL,
-    execute_drive_coder,
+    execute_coder_message,
     execute_submit,
 )
 
@@ -604,9 +563,8 @@ def _review(approved, *, issues=None, rationale="r", commit_summary="add my_tool
 def test_authoring_tools_masked_without_session(tmp_path):
     p = ReadOnlyToolProvider(roots=[tmp_path])
     names = [d["name"] for d in p.tool_definitions()]
-    assert DRIVE_CODER_TOOL not in names and SUBMIT_TOOL not in names
+    assert SUBMIT_TOOL not in names
     # dispatch is denied too, not just hidden
-    assert asyncio.run(p.execute(DRIVE_CODER_TOOL, {"instructions": "x"})).is_error
     assert asyncio.run(p.execute(SUBMIT_TOOL, {})).is_error
 
 
@@ -614,20 +572,20 @@ def test_authoring_tools_exposed_only_with_session(tmp_path):
     sess = _FakeSession(gate=_gate(True), review=_review(True))
     p = ReadOnlyToolProvider(roots=[tmp_path], authoring_session=sess)
     names = [d["name"] for d in p.tool_definitions()]
-    assert DRIVE_CODER_TOOL in names and SUBMIT_TOOL in names
+    assert SUBMIT_TOOL in names and "drive_coder" not in names  # the coder is a message address
 
 
-def test_drive_coder_routes_instructions_to_session():
+def test_a_message_to_the_coder_routes_to_the_session():
     sess = _FakeSession(gate=_gate(True), review=_review(True))
-    out = asyncio.run(execute_drive_coder(sess, {"instructions": "write pcube_timeseg"}))
+    out = asyncio.run(execute_coder_message(sess, "write pcube_timeseg"))
     assert not out.is_error
     assert sess.driven == ["write pcube_timeseg"]
     assert "coder did" in out.text
 
 
-def test_drive_coder_requires_instructions():
+def test_a_message_to_the_coder_requires_text():
     sess = _FakeSession(gate=_gate(True), review=_review(True))
-    assert asyncio.run(execute_drive_coder(sess, {})).is_error
+    assert asyncio.run(execute_coder_message(sess, "")).is_error
 
 
 def test_submit_gate_failure_reports_checks_and_does_not_commit():

@@ -188,8 +188,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # the verdict fields this CLI has always printed.
         print(run.summary())
         print(f"Accepted: {run.verdict.accepted}")
-        print(f"Needs more literature: {run.verdict.needs_more_literature}")
-        print(f"Needs analysis rework: {run.verdict.needs_analysis_rework}")
+        print(f"Assigned to: {run.verdict.assign_to}")
         if run.verdict.follow_up:
             print(f"Follow-up: {run.verdict.follow_up}")
         print("")

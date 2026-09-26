@@ -10,12 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from auto_research.agents.react import (
-    ReadOnlyToolProvider,
-    SandboxToolProvider,
-    ask_human_tool_def,
-    execute_ask_human,
-)
+from auto_research.agents.react import ReadOnlyToolProvider, SandboxToolProvider
 from auto_research.hitl import (
     HumanInputRequired,
     build_human_handler,
@@ -84,59 +79,16 @@ def test_resolve_human_bad_return_type_raises():
         asyncio.run(resolve_human(lambda q: 123, _query()))
 
 
-# ── ask_human tool on the providers ──────────────────────────────────────────
+# ── the providers carry no human tool: the seat's channel layer adds `message` (E12) ────────
 
 
-def test_execute_ask_human_builds_query_and_returns_answer():
-    seen = {}
-
-    def handler(query):
-        seen["kind"] = query.kind
-        seen["asked_by"] = query.asked_by
-        return HumanResponse(query_id=query.id, answer="the human answer")
-
-    outcome = asyncio.run(
-        execute_ask_human(handler, "reviewer", {"message": "ok?", "kind": "clarify_code"})
-    )
-    assert outcome.text == "the human answer" and outcome.is_error is False
-    assert seen == {"kind": "clarify_code", "asked_by": "reviewer"}
-
-
-def test_execute_ask_human_no_handler_raises():
-    with pytest.raises(HumanInputRequired):
-        asyncio.run(execute_ask_human(None, "reviewer", {"message": "ok?"}))
-
-
-def test_readonly_provider_offers_ask_human_only_with_handler(tmp_path):
-    no_handler = ReadOnlyToolProvider(roots=[tmp_path])
-    assert "ask_human" not in {d["name"] for d in no_handler.tool_definitions()}
-
-    with_handler = ReadOnlyToolProvider(
-        roots=[tmp_path], human_handler=lambda q: "hi", asked_by="analyst_lead"
-    )
-    assert "ask_human" in {d["name"] for d in with_handler.tool_definitions()}
-    out = asyncio.run(with_handler.execute("ask_human", {"message": "q?"}))
-    assert out.text == "hi"
-
-
-def test_sandbox_provider_offers_ask_human_only_with_handler():
+def test_providers_declare_no_human_tool(tmp_path):
+    readonly = {d["name"] for d in ReadOnlyToolProvider(roots=[tmp_path]).tool_definitions()}
     registry = SimpleNamespace(tool_definitions=lambda: [{"name": "xspec_fit"}])
-    no_handler = SandboxToolProvider(registry, sandbox=None)
-    assert "ask_human" not in {d["name"] for d in no_handler.tool_definitions()}
-
-    with_handler = SandboxToolProvider(registry, sandbox=None, human_handler=lambda q: "ok")
-    names = {d["name"] for d in with_handler.tool_definitions()}
-    # data_catalog is now a research_toolkit.catalog_utils registry tool (it arrives via
-    # registry.tool_definitions(), not a built-in add here); ask_human only with a handler.
-    assert names == {"xspec_fit", "ask_human"}
-    out = asyncio.run(with_handler.execute("ask_human", {"message": "blocked"}))
-    assert out.text == "ok"
-
-
-def test_ask_human_tool_def_shape():
-    d = ask_human_tool_def()
-    assert d["name"] == "ask_human"
-    assert d["input_schema"]["required"] == ["message"]
+    sandbox = {d["name"] for d in SandboxToolProvider(registry, sandbox=None).tool_definitions()}
+    for names in (readonly, sandbox):
+        assert not names & {"ask_human", "plan_and_debate", "message"}
+    assert sandbox == {"xspec_fit"}
 
 
 # ── cli handler ───────────────────────────────────────────────────────────────

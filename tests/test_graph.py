@@ -13,12 +13,15 @@ from auto_research.graph import build_graph
 from auto_research.retrieval import RetrievalBackend
 from auto_research.schemas.literature import LiteratureReport
 from auto_research.agents.react import TURN_END_TOOL, LeadCycleOutcome
+from auto_research.provenance import ReceiptStore
 from auto_research.schemas import (
     AnalysisTask,
     AnalystReport,
     ResearchRequest,
     ReviewerReport,
 )
+from auto_research.schemas.hitl import HumanResponse
+from auto_research.schemas.review import ReviewerSection
 
 
 class FakeIOAgent:
@@ -32,6 +35,7 @@ class FakeIOAgent:
     async def research(self, request: ResearchRequest, *, follow_up=None) -> LiteratureReport:
         self.research_calls += 1
         self.follow_ups.append(follow_up)
+        self.last_receipts = {f"lib:p{self.research_calls}": object()}
         return LiteratureReport(summary=f"Pass {self.research_calls}", status="succeeded")
 
 
@@ -60,35 +64,38 @@ class FakeRetrieval:
 
 
 class FakeReviewer:
-    """Reviewer fake: gates literature/analysis on a configurable schedule."""
+    """Reviewer fake: files the next assignment of a script, and records what each turn was given.
 
-    def __init__(self, *, lit_pass_after: int = 1, analysis_pass_after: int = 1):
-        self.lit_pass_after = lit_pass_after
-        self.analysis_pass_after = analysis_pass_after
-        self.lit_calls = 0
-        self.analysis_calls = 0
-        self.stages: list[tuple[str, int]] = []
+    A report to the human carries the parts a real ``turn_end`` would require. Past the script's
+    end it keeps sending the report to the human.
+    """
 
-    async def review(self, request, *, stage, literature=None, literature_receipts=None,
-                     report=None, iterations_left=0, render=None):
-        self.stages.append((stage, iterations_left))
-        if stage == "literature":
-            self.lit_calls += 1
-            need_more = self.lit_calls < self.lit_pass_after
+    def __init__(self, script=("librarian", "analysts", "human")):
+        self.script = list(script)
+        self.turns: list[dict] = []
+
+    async def review(self, request, *, arrived="request", literature=(), literature_receipts=None,
+                     report=None, previous=(), human_nudges=(), human_files=(), budgets=None,
+                     human_attended=False, render=None):
+        n = len(self.turns)
+        self.turns.append({
+            "arrived": arrived, "budgets": dict(budgets or {}), "literature": len(literature),
+            "documents": sorted(literature_receipts or {}), "previous": len(previous),
+            "human_nudges": list(human_nudges), "human_files": list(human_files),
+            "human_attended": human_attended,
+        })
+        target = self.script[n] if n < len(self.script) else "human"
+        if target == "human":
             return ReviewerReport(
-                accepted=False,
-                rationale=f"literature pass {self.lit_calls}",
-                needs_more_literature=need_more,
-                follow_up="search more" if need_more else "analyse",
+                accepted=report is not None and report.status == "succeeded",
+                rationale=f"turn {n + 1}", assign_to="human", title="T", abstract="A",
+                sections=[ReviewerSection(heading="H", body="B")], key_findings=["K"],
             )
-        self.analysis_calls += 1
-        need_rework = self.analysis_calls < self.analysis_pass_after
-        return ReviewerReport(
-            accepted=not need_rework,
-            rationale=f"analysis pass {self.analysis_calls}",
-            needs_analysis_rework=need_rework,
-            follow_up="address X" if need_rework else "",
-        )
+        return ReviewerReport(rationale=f"turn {n + 1}", assign_to=target, follow_up=f"task {n + 1}")
+
+    @property
+    def arrivals(self) -> list[str]:
+        return [t["arrived"] for t in self.turns]
 
 
 class FakeWorker:
@@ -111,7 +118,8 @@ class FakeLead:
         self.adjudications += 1
         return LeadCycleOutcome(
             filed=TURN_END_TOOL,
-            report=AnalystReport(summary=f"final {self.adjudications}", findings=["final"]),
+            report=AnalystReport(summary=f"final {self.adjudications}", findings=["final"],
+                                 status="succeeded"),
         )
 
 
@@ -122,6 +130,8 @@ def _invoke(graph, request: ResearchRequest, *, max_iterations: int = 3):
                 "request": request,
                 "report": None,
                 "verdict": None,
+                "arrived": "request",
+                "human_rounds": 0,
                 "lit_iterations": 0,
                 "analysis_iterations": 0,
                 "max_iterations": max_iterations,
@@ -130,95 +140,78 @@ def _invoke(graph, request: ResearchRequest, *, max_iterations: int = 3):
     )
 
 
-def test_graph_runs_full_loop_in_single_pass():
-    io_agent = FakeIOAgent()
-    retrieval = FakeRetrieval()
-    reviewer = FakeReviewer()
-    lead = FakeLead()
-    graph = build_graph(
+def _graph(reviewer, *, io_agent=None, consensus=None, max_iterations=3, **kwargs):
+    return build_graph(
         reviewer=reviewer,
-        io_agent=io_agent,
-        retrieval=retrieval,
-        workers=[FakeWorker("w1"), FakeWorker("w2")],
-        lead=lead,
+        io_agent=io_agent or FakeIOAgent(),
+        retrieval=FakeRetrieval(),
+        workers=[FakeWorker("w1")],
+        lead=FakeLead(),
+        consensus=consensus,
+        max_iterations=max_iterations,
         report_formats=[],
+        **kwargs,
     )
 
-    state = _invoke(graph, ResearchRequest(question="What is X?"))
 
-    assert state["lit_iterations"] == 1
-    assert state["analysis_iterations"] == 1
-    assert state["verdict"].accepted is True
+class ScriptedHuman:
+    """A human handler that answers from a script and records what it was sent."""
+
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.queries = []
+
+    async def __call__(self, query):
+        self.queries.append(query)
+        answer = self.answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return HumanResponse(query_id=query.id, answer=answer)
+
+
+def test_the_run_starts_at_the_reviewer_and_every_team_returns_to_it():
+    reviewer = FakeReviewer(("librarian", "analysts", "human"))
+    state = _invoke(_graph(reviewer), ResearchRequest(question="What is X?"))
+
+    assert reviewer.arrivals == ["request", "librarian", "analysts"]
+    assert state["lit_iterations"] == 1 and state["analysis_iterations"] == 1
+    assert state["verdict"].assign_to == "human" and state["verdict"].accepted is True
     assert state["report"].summary == "final 1"
-    assert reviewer.lit_calls == 1
-    assert reviewer.analysis_calls == 1
-    assert io_agent.research_calls == 1
-    # Each review is told its stage and what the graph has left for that stage's loop edge.
-    assert reviewer.stages == [("literature", 2), ("analysis", 2)]
+    # Each turn is told the passes left per team, and sees its own earlier reports.
+    assert [t["budgets"] for t in reviewer.turns] == [
+        {"librarian": 3, "analysts": 3}, {"librarian": 2, "analysts": 3},
+        {"librarian": 2, "analysts": 2},
+    ]
+    assert [t["previous"] for t in reviewer.turns] == [0, 1, 2]
 
 
-def test_graph_literature_feedback_capped_at_three():
+def test_the_reviewer_may_skip_the_librarian_and_report_straight_away():
+    reviewer = FakeReviewer(("human",))
     io_agent = FakeIOAgent()
-    retrieval = FakeRetrieval()
-    reviewer = FakeReviewer(lit_pass_after=99, analysis_pass_after=1)
-    graph = build_graph(
-        reviewer=reviewer,
-        io_agent=io_agent,
-        retrieval=retrieval,
-        workers=[FakeWorker()],
-        lead=FakeLead(),
-        report_formats=[],
-    )
-
-    state = _invoke(graph, ResearchRequest(question="What is X?"))
-
-    assert state["lit_iterations"] == 3
-    assert io_agent.research_calls == 3
-    # The reviewer's re-loop instruction reaches the librarian, and state holds the latest pass.
-    assert io_agent.follow_ups == [None, "search more", "search more"]
-    assert state["literature"].summary == "Pass 3"
-    assert state["analysis_iterations"] == 1
-    assert state["verdict"].accepted is True
+    state = _invoke(_graph(reviewer, io_agent=io_agent), ResearchRequest(question="q"))
+    assert io_agent.research_calls == 0 and state["human_rounds"] == 1
+    assert reviewer.arrivals == ["request"]
 
 
-def test_graph_analysis_feedback_capped_at_three():
+def test_the_librarian_can_be_assigned_again_and_its_reports_accumulate():
+    reviewer = FakeReviewer(("librarian", "librarian", "analysts", "human"))
     io_agent = FakeIOAgent()
-    reviewer = FakeReviewer(lit_pass_after=1, analysis_pass_after=99)
-    lead = FakeLead()
-    workers = [FakeWorker("w1")]
-    graph = build_graph(
-        reviewer=reviewer,
-        io_agent=io_agent,
-        retrieval=FakeRetrieval(),
-        workers=workers,
-        lead=lead,
-        report_formats=[],  # finalize now always routes to compose unless no formats are set
-    )
+    state = _invoke(_graph(reviewer, io_agent=io_agent), ResearchRequest(question="q"))
 
-    state = _invoke(graph, ResearchRequest(question="What is X?"))
-
-    assert state["analysis_iterations"] == 3
-    assert state["lit_iterations"] == 1
-    assert state["verdict"].needs_analysis_rework is True
-    assert state["verdict"].accepted is False
-    assert lead.adjudications == 3
+    # The reviewer's own questions reach the librarian each pass, never the raw request.
+    assert io_agent.follow_ups == ["task 1", "task 2"]
+    assert [lit.summary for lit in state["literature"]] == ["Pass 1", "Pass 2"]
+    assert sorted(state["literature_receipts"]) == ["lib:p1", "lib:p2"]
+    # The second search's turn sees both passes and both passes' documents.
+    assert reviewer.turns[2]["literature"] == 2
+    assert reviewer.turns[2]["documents"] == ["lib:p1", "lib:p2"]
 
 
-def test_graph_respects_custom_max_iterations():
-    reviewer = FakeReviewer(lit_pass_after=99, analysis_pass_after=1)
-    graph = build_graph(
-        reviewer=reviewer,
-        io_agent=FakeIOAgent(),
-        retrieval=FakeRetrieval(),
-        workers=[FakeWorker()],
-        lead=FakeLead(),
-        max_iterations=2,
-        report_formats=[],
-    )
-
-    state = _invoke(graph, ResearchRequest(question="q"), max_iterations=2)
-
-    assert state["lit_iterations"] == 2
+def test_an_assignment_past_its_cap_is_a_harness_defect_not_a_silent_reroute():
+    # A real reviewer's turn_end refuses this; a report that slipped through must not be routed.
+    reviewer = FakeReviewer(("librarian", "librarian"))
+    with pytest.raises(RuntimeError, match="cannot be routed"):
+        _invoke(_graph(reviewer, max_iterations=1), ResearchRequest(question="q"), max_iterations=1)
 
 
 class FailConsensus:
@@ -233,49 +226,62 @@ class FailConsensus:
         )
 
 
-def test_graph_routes_honest_failure_through_reviewer():
-    # §9.6 / handoff #4: the reviewer is the sole I/O — an honest failure is adjudicated by the
-    # reviewer, not bypassed straight to finalize. (report_formats=[] keeps the fake reviewer off
-    # the compose path; the routing is what matters here.)
-    reviewer = FakeReviewer()  # analysis_pass_after=1 → it accepts (finalizes) the failed report
-    graph = build_graph(
-        reviewer=reviewer,
-        io_agent=FakeIOAgent(),
-        retrieval=FakeRetrieval(),
-        workers=[FakeWorker()],
-        lead=FakeLead(),
-        consensus=FailConsensus("failed"),
-        report_formats=[],
-    )
-
-    state = _invoke(graph, ResearchRequest(question="What is X?"))
-
+def test_an_honest_failure_is_adjudicated_by_the_reviewer():
+    # §9.6: the reviewer is the sole I/O — an honest failure returns to it, never bypasses it.
+    reviewer = FakeReviewer(("analysts", "analysts", "human"))
+    state = _invoke(_graph(reviewer, consensus=FailConsensus("failed")), ResearchRequest(question="q"))
     assert state["report"].status == "failed"
-    # The reviewer DID review the failed analysis (no bypass) …
-    assert reviewer.analysis_calls == 1
-    # … and the terminal verdict is the reviewer's call, not a manufactured non-accept.
-    assert state["verdict"].rationale == "analysis pass 1"
+    assert reviewer.arrivals == ["request", "analysts", "analysts"]
+    assert state["analysis_iterations"] == 2
+    assert state["verdict"].accepted is False
 
 
-def test_graph_reviewer_can_rework_a_failed_analysis_bounded():
-    # The reviewer may send a failed analysis back for a different approach, bounded by the cap.
-    reviewer = FakeReviewer(analysis_pass_after=99)  # always asks for rework
-    graph = build_graph(
-        reviewer=reviewer,
-        io_agent=FakeIOAgent(),
-        retrieval=FakeRetrieval(),
-        workers=[FakeWorker()],
-        lead=FakeLead(),
-        consensus=FailConsensus("failed"),
-        report_formats=[],
-    )
+def test_an_unattended_run_ends_once_the_report_is_published():
+    reviewer = FakeReviewer(("human", "human", "human"))
+    state = _invoke(_graph(reviewer), ResearchRequest(question="q"))
+    assert len(reviewer.turns) == 1 and state["human_rounds"] == 1
+    assert reviewer.turns[0]["human_attended"] is False
 
-    state = _invoke(graph, ResearchRequest(question="What is X?"), max_iterations=3)
 
-    assert state["report"].status == "failed"
-    assert reviewer.analysis_calls == 3           # reviewed the failed report each round, capped
-    assert state["analysis_iterations"] == 3
-    assert state["verdict"].needs_analysis_rework is True
+def test_a_human_reply_returns_to_the_reviewer_as_a_nudge_never_a_receipt(tmp_path, monkeypatch):
+    monkeypatch.setattr("auto_research.graph.builder._ledger_dir", lambda run_id: tmp_path / "ledger")
+    store = ReceiptStore(tmp_path / "receipts")
+    human = ScriptedHuman("Check the 3-6 keV band.", "done")
+    reviewer = FakeReviewer(("analysts", "human", "analysts", "human"))
+    state = _invoke(_graph(reviewer, human_handler=human, receipts=store), ResearchRequest(question="q"))
+
+    assert reviewer.arrivals == ["request", "analysts", "human", "analysts"]
+    assert reviewer.turns[2]["human_nudges"] == ["Check the 3-6 keV band."]
+    assert reviewer.turns[2]["human_files"] == []
+    # The reply's text is guidance: nothing in the store carries it, so it grounds nothing.
+    assert not [r for r in store.receipts() if r.produced_by == "human_reply"]
+    assert state["human_rounds"] == 2 and state["human_nudges"] == ["Check the 3-6 keV band."]
+    assert human.queries[0].kind == "report" and human.queries[0].reply_dir.is_dir()
+    assert all(t["human_attended"] for t in reviewer.turns)
+    # The human is told how to answer, and the report's text travels when no PDF is attached.
+    assert "reply `done`" in human.queries[0].message and "**T**" in human.queries[0].message
+    assert human.queries[0].asked_by == "reviewer"
+
+
+@pytest.mark.parametrize("answer,ends", [("done", True), ("  Done \n", True), ("DONE", True),
+                                         ("DONE.", False), ("done please", False), ("", False)])
+def test_only_the_word_done_ends_the_run(tmp_path, monkeypatch, answer, ends):
+    monkeypatch.setattr("auto_research.graph.builder._ledger_dir", lambda run_id: tmp_path / "ledger")
+    store = ReceiptStore(tmp_path / "receipts")
+    human = ScriptedHuman(answer, "done")
+    reviewer = FakeReviewer(("human", "human"))
+    state = _invoke(_graph(reviewer, human_handler=human, receipts=store), ResearchRequest(question="q"))
+    assert state["human_rounds"] == (1 if ends else 2)
+    assert len(reviewer.turns) == (1 if ends else 2)
+
+
+def test_an_unanswered_report_stands_and_the_run_ends(tmp_path, monkeypatch):
+    monkeypatch.setattr("auto_research.graph.builder._ledger_dir", lambda run_id: tmp_path / "ledger")
+    human = ScriptedHuman(TimeoutError("12 h"))
+    reviewer = FakeReviewer(("human",))
+    state = _invoke(_graph(reviewer, human_handler=human, receipts=ReceiptStore(tmp_path / "r")),
+                    ResearchRequest(question="q"))
+    assert state["human_rounds"] == 1 and len(reviewer.turns) == 1
 
 
 def test_build_graph_rejects_zero_max_iterations():
@@ -288,3 +294,13 @@ def test_build_graph_rejects_zero_max_iterations():
             lead=FakeLead(),
             max_iterations=0,
         )
+
+
+def test_a_checkpoint_from_the_graph_before_sole_io_is_refused_not_resumed():
+    from auto_research.graph.runtime import _refuse_pre_sole_io_checkpoint
+
+    old = SimpleNamespace(checkpoint={"channel_values": {"request": "q", "lit_iterations": 1}})
+    with pytest.raises(RuntimeError, match="cannot resume"):
+        _refuse_pre_sole_io_checkpoint(old)
+    _refuse_pre_sole_io_checkpoint(SimpleNamespace(checkpoint={"channel_values": {"arrived": "librarian"}}))
+    _refuse_pre_sole_io_checkpoint(SimpleNamespace(checkpoint={"channel_values": {}}))

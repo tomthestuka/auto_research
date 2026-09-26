@@ -104,17 +104,33 @@ Consequences, each with a measured failure behind it:
 - **Exhausting a cap is not an exit.** A loop that runs out of budget without filing must fail
   loudly and record that it did. Returning an unfiled result silently is the same defect wearing a
   limit's clothing.
+- **An accepted `turn_end` is final for its batch** (2026-09-25). A call placed after it in the
+  same model turn is answered and never run: an `edit_report` there replaced the validated report
+  with an unvalidated one (found by an adversarial review, every role).
+- **The reviewer is the sole I/O** (human ruling 2026-09-25). The run starts at the reviewer and
+  every team's work returns to it; its report's `assign_to` routes the graph. The human is an edge
+  endpoint, not a unit: a report to the human is published and sent, and the human's reply
+  returns as a **nudge** — direction, never evidence, minted as no receipt.
 - **A role that composes its artifact *after* its loop sits outside this boundary and is wrong.**
   Closed for every graph role on 2026-09-24: the reviewer writes its `ReviewerReport` inside its
   loop and `turn_end` renders and compiles it; the librarian files a `LiteratureReport` the same
   way. The analyst co-lead still composes its verdict after its loop, and stays so on purpose: it
   belongs to the coding pipeline, whose exits are a gated commit or an honest failure.
 - **Every number a report states is bound to a receipt** (2026-09-24). Every artifact a role can
-  rest a claim on — a tool's output, a figure, a data file, a paper, a web page, a human answer, the
-  task it was handed — is a **receipt** the runtime mints: bytes hashed by the runtime, producer and
+  rest a claim on — a tool's output, a figure, a data file, a paper, a web page, a file a human
+  sent, the task it was handed — is a **receipt** the runtime mints (a human's text is a nudge, not
+  a receipt, ruling 2026-09-25): bytes hashed by the runtime, producer and
   inputs stamped, parents linked, `failed`/`synthetic` flags propagated. Prose cites receipts by
   handle, and `turn_end` refuses a number that no cited receipt carries (*scoped grounding*, §7).
   The figure discipline was the first instance of this; it is now the rule for every artifact.
+- **Evidence is what the analysis produced, never what a role read** (human ruling 2026-09-25:
+  "citing in a report must be to sth it has produced, not just read"). Only a toolkit tool's
+  return (and its files and figures), a `commit` the coding pipeline minted, a paper by attribution,
+  and the request (cite-only, restating the question) can ground a number
+  (`provenance.store.is_evidence`). Every harness return — `read_file`, `list_dir`, searches,
+  `web_search`, `web_fetch`, the shell entirely — and every brief, human file and published report
+  is recorded as where a role looked, and grounds nothing. The human gives verdicts and nudges,
+  never materials.
 
 The testable corollary: **every role edge is a validation point.** A live adversarial test drives
 each role with a model instructed to escape — answering in prose, idling on free tools to the cap,
@@ -292,7 +308,7 @@ are the protocol and double as documentation. Bad data must fail loudly and earl
 
 Representative messages: `ResearchRequest`, `SearchRequest` / `SearchResult`,
 `LiteratureReport` (the librarian's), `AnalysisTask` / `AnalystReport`, `ReviewerReport` (the one
-report the reviewer files per review: the verdict fields the graph routes on, plus title,
+report the reviewer files per turn: the `assign_to` the graph routes on, plus title,
 abstract, sections, key findings, figure receipt handles and tables), `ResearchReport` (the
 published JSONL envelope: the filed report, its receipt closure and the artifact handles),
 `Receipt` ([below](#receipts--every-artifact-by-reference-hashed-by-the-runtime)), and the
@@ -340,7 +356,16 @@ generalised and corrected.
   the file, a declared hash that disagrees is overridden with a note, and a figure whose file is
   absent is dropped. Every tool call's output text is itself a receipt, and so is every file the
   call created or changed, every page fetched, every paper opened (the receipt is the PDF itself;
-  a paper value is *attributed* with a locator, never text-matched, §13), every human answer, and every task a unit is handed (source `input`).
+  a paper value is *attributed* with a locator, never text-matched, §13), every file a human sends,
+  and every task a unit is handed (source `input`). A human's text is a nudge and mints nothing.
+- **Evidence vs record** (human ruling 2026-09-25): a receipt is evidence only when
+  `is_evidence` says so — its producer is a toolkit tool (`research_toolkit.<pkg>.<tool>`, also
+  for a toolkit tool the lead runs in-process), it is a `commit` (minted by the runtime when a
+  `submit_for_review` commits: tool, SHA, branch, submissions used), a paper, or the request. Every
+  other receipt is the record of where a role looked: citing one is refused and names what it is
+  ("a file you read", "a web page", "shell output", "a task brief"), and in scope it grounds
+  nothing. Briefs (`follow_up`, `what_to_probe`, `tool_request`) are exempt from grounding and,
+  dispatched, ground nothing downstream.
 - **Inputs and ancestry.** The files a call's arguments name are hashed before it runs (once per
   run, cached by path, size and mtime); an input whose bytes an earlier receipt produced links it as
   a parent, so a result's ancestry is walkable and `failed` / `synthetic` (§9.5) flags propagate to
@@ -352,20 +377,21 @@ generalised and corrected.
   run's inputs, and whatever the reports it received cite, with their ancestors.
 - **Scoped grounding** (human ruling 2026-09-24, replacing "every number quoted"): a finding cites
   the receipts its numbers come from as `[handle]`, and every number in it must appear, on token
-  boundaries, in one of them; other fields are grounded by everything the report cites.
+  boundaries, in one of them; other fields are grounded by all the evidence the report cites.
   `{{handle "…"}}` pins an exact span of a text receipt; for a paper the same form, with a
   locator (`{{lib:p3 "4.0 ± 0.2 %" Table 2}}`), attributes the value instead. A task's own numbers ground a text only where it cites
   `[input:…]`, for every unit including the reviewer, so a value handed in by the question cannot
   reappear as a finding unmarked. Measured before the ruling, over 231 real reports: a median
   worker report states ~240 numbers and 98% of its decimals already appear verbatim in that run's
   tool outputs, so quoting every number would have meant hundreds of quotes per report while
-  scoped grounding refuses exactly the residue (mental arithmetic, rounding, sign drift). Plain
-  arithmetic on receipted numbers runs as a `python -c` call, which is receipted like any other;
-  a number the role typed into any shell command cannot be grounded by shell output, so `echo` or
-  write-then-read cannot mint a receipt for a number nothing computed.
+  scoped grounding refuses exactly the residue (mental arithmetic, rounding, sign drift). A derived
+  number comes from a toolkit tool, requested through `tool_request` when none exists; the shell
+  grounds nothing, so `echo`, write-then-read and `python -c` cannot mint evidence (2026-09-25,
+  superseding the 2026-09-24 `python -c` route and its typed-number rule).
 - **Normalisation and boundaries** are applied to both sides of a comparison and never to what is
   rendered: NFC, never NFKC (it maps `10²³` to `1023`); a U+2212 minus before a digit reads as `-`;
-  paper/web text is compared with whitespace removed except between two digits (extracted text
+  paper/web text (kept at the function level; neither grounds since 2026-09-25) is compared with
+  whitespace removed except between two digits (extracted text
   can split a number into `4 . 0 ± 0 . 2`), and math-italic letters read as plain ones (`𝜎` as
   `σ`). A failed quote is answered with the receipt that holds it, or the closest passage, never
   with text that lost a sign the quote carries. A needle may not sit inside a
@@ -400,8 +426,7 @@ papers and pages in full, mints each document it opens as a paper/web receipt, a
 
 **Agents.** Per-role wrappers (`agents`, `roles.py`) each load their `prompts/<role>.md`,
 resolve models via config, and exchange structured Pydantic messages: reviewer, librarian,
-analyst worker, analyst lead. Every graph role is the same unit — tools, inputs, a quick channel
-(`/steer`, `ask_human`), and one report written in its loop that leaves only through `turn_end`
+analyst worker, analyst lead. Every graph role is the same unit — tools, inputs, a quick channel (`message` to any seat or the human, `/steer` from the human), and one report written in its loop that leaves only through `turn_end`
 (§2b); the graph is built from that unit.
 
 **Consensus.** `ConsensusStrategy` = `DebateToConverge`: workers each analyze; each round
@@ -411,11 +436,13 @@ adjudicates and flags residual uncertainty. Tool figures propagate from `ToolRes
 worker `AnalystReport.figures` and into the final report, so the reviewer actually sees the
 plots.
 
-**Orchestration.** The LangGraph graph wires request → reviewer dispatches analysis +
-literature tasks → reviewer digests results and compares against prior work → human review.
-Two **capped feedback edges** (default 3): paper-search review (reviewer→librarian) and
-analysis review (reviewer→analyst). Studio wiring (`serve.py` + `langgraph.json`) exposes
-live `ResearchState` per node.
+**Orchestration.** The reviewer is the sole I/O (2026-09-25): the LangGraph graph starts at the
+reviewer, which scopes and plans the request, and routes on its report's `assign_to` — the
+librarian (as often as the work needs), the analysts, or the human. Librarian and analysis
+passes are each capped at `max_iterations` (default 3) per run, and every pass returns to the
+reviewer. A report to the human is published and sent as a PDF over the blocking human handler;
+the reply returns to the reviewer as a nudge, and `done` (or an unattended run, or a timeout) ends
+the run. Studio wiring (`serve.py` + `langgraph.json`) exposes live `ResearchState` per node.
 
 **Sandbox & tooling.** Every analyst tool call runs in an **isolated subprocess**
 (`PersistentSandbox`, a persistent per-worker REPL) with a timeout, a confined working
@@ -437,7 +464,9 @@ re-hashed, tool-computed tables are typeset from their receipt's bytes, referenc
 paper/web receipt identifiers, a provenance appendix lists what the report cites, and a
 "values to verify against the PDFs" appendix lists every paper value the report attributes. Render and
 compile run **inside the reviewer's `turn_end`**; the `compose_report` node runs no model — it
-mints `rev:dN` receipts for `report.tex`/`.pdf`/`.jsonl` (parents: the cited receipts) and writes
+mints `rev:dN` receipts for `report.tex`/`.pdf`/`.jsonl` (parents: the cited receipts; one
+`v<k>/` folder per report to the human, beside the ledger with every role's report JSONL, out of
+every role's reach) and writes
 the JSONL when configured. Output formats come from config and `turn_end` validates every
 configured one. The `monitor`
 gives async-safe run logging (JSONL + team-grouped Markdown, 1–10 chatter). Entry points:
@@ -567,8 +596,9 @@ toolkit.**
    per link, the lead staying in an **interactive channel** with it during authoring — to clarify science/code as it goes (this
    lead↔author loop is built in step 2 of [§9.10](#910-build-order-phase-2)). The coder works
    *beside* the lead: a message to a working coder is queued for its next turn unless the lead
-   asks for mid-turn delivery, and the lead lets time pass with a **blocking `wait_coder`** that
-   wakes on the coder's turn end, its question, or a human steer — a short timeout is raised to a
+   asks for mid-turn delivery, and the lead lets time pass with a **blocking `wait_for_reply`** that
+   wakes on the coder's turn end or any message reaching the lead (the coder's question arrives in
+   the lead's inbox) — a short timeout is raised to a
    floor rather than refused, because a refused poll is still a paid turn. Between links the
    coding transcript is dropped at its own boundary — for a **committed** link only, since a
    rejection or a spent budget is what the next brief must be written against — keeping the lead's
@@ -705,7 +735,7 @@ before reacting:
 last attempt. "Real results or no results" is absolute. The harness never infers the state: a
 report nobody wrote has not succeeded at anything, which is why the default is the honest one
 (F9, 2026-09-09; it previously defaulted to `ok`). `NEEDS_HUMAN` was retired from this schema —
-headless, `ask_human` is not in a graph role's tool list, so the state was unreachable by the
+headless, `human` is not among a graph role's `message` addresses, so the state was unreachable by the
 route it names, and [A20] shows the label being filed for something that was not a human block.
 A role that needs a person says so in `summary`. (The lead's own `submit_terminal_report` keeps
 `failed`/`needs_human`: a cycle decision, not a worker's outcome.)
@@ -715,9 +745,10 @@ authoring attempt does not commit, the analyst lead files **one terminal report*
 (`submit_terminal_report`, one of its cycle forms — §9.3) documenting the unavailable capability
 and any partial findings, rather than re-authoring or re-entering debate (closing the
 cap-exhausted authoring *spin*). That
-report — like every analysis result — flows to the **reviewer**, who decides **finalize vs.
-bounded rework** (capped by `max_iterations`). On finalize a report is **always** composed
-(honouring `report_formats`), so the honest failure is *documented*, never silent. The
+report — like every analysis result — flows to the **reviewer**, who decides between **reporting
+to the human and bounded rework** (capped by `max_iterations`). A report to the human is
+**always** published (honouring `report_formats`), so the honest failure is *documented*, never
+silent. The
 no-fabrication guarantee for that report lives in the reviewer + compose prompts (state the
 limitation; never invent a result), no longer in suppressing the report.
 
@@ -730,10 +761,9 @@ code. It is **fully decoupled** from toolkit merging (which is manual and out of
 [§9.9](#99-git-discipline--the-runtime-is-master-blind)).
 
 - One schema: `HumanQuery` / `HumanResponse`, with `kind ∈ {clarify_science, clarify_code,
-  blocked}`. (There is no `approve` kind — the runtime never asks to merge.)
-- Mechanism: a LangGraph **`interrupt()`** (the ecosystem-standard HITL primitive) in the
-  graph; inside the Claude-SDK author, the equivalent **`ask_human`** in-process tool
-  (`@tool` + `create_sdk_mcp_server`), whose handler runs in the parent process.
+  blocked, report}` (`report`: the reviewer's report sent over the human edge, R1). (There is no
+  `approve` kind — the runtime never asks to merge.)
+- Mechanism (E12, 2026-09-25): one **`message(to, text, attachments)`** tool on every graph seat and on the coder. It **never blocks**: the human's answer arrives later in the sender's inbox as a nudge. The graph's human node (R1) stays a blocking `HumanHandler` call. LLM↔LLM texts reuse the same transport (`hitl.router.SeatRouter` over `RunControl` inboxes), and a seat that has finished its turn is **resumed** on its kept conversation to read the text. Its filed report is final. Texts are informal: none mints a receipt or widens a citable scope. `view_receipt` shows a handle a text names, and `wait_for_reply` lets a seat wait. The co-lead and the status monitor are not on the channel. `list_peers` names each address with its role, model and state; the lead reaches its coder as the address `coder` on the same tool (`drive_coder` folded in).
 
 ### 9.8 Human-feedback channels (CLI vs. library)
 
@@ -768,7 +798,7 @@ rule that *you, the coding agent, perform zero git*:
   passed **and** the provider-decorrelated GPT co-lead's review passed. **Commit ⇔ gate-pass
   ∧ co-lead review-pass.** A reject → no commit, feedback to the author.
 - The **coder never issues git** — it is the runtime's job, so `prompts/coder.md` tells it to leave
-  git to the runtime and `ask_lead` instead of working around it, and **the kernel enforces it on
+  git to the runtime and message the lead (`message` to `lead`) instead of working around it, and **the kernel enforces it on
   both harnesses**: `jail.coder_policy` binds `.git` read-only inside every writable root, so a
   write to it fails however it is spelled (a pipe, a subshell, `python -c subprocess`) while
   `status`/`diff`/`log`/`show` keep working. Above that sit the harnesses' own best-effort rules —
@@ -919,10 +949,27 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   measured) — ruling 2026-09-10: leave it.
 - **Paused-turn continuation guard has never run** (0 `paused` in 184 silent turns) — kept for the
   day a hosted vendor tool is declared.
-- **Unattended runs:** `ask_human`/`plan_and_debate` exist only with a handler; on the author side MCP
-  flattens unattended vs channel-fault into `str(exc)` (the ledger events keep the distinction).
-  Batches published before 2026-09-01 ran with prompts naming tools the roles lacked.
+- **Unattended runs:** `human` is a `message` address only with a handler. On the author side the unattended case is classified before MCP flattens it. A channel fault now arrives as a notice, and the ledger keeps `channel.reply.error`. Batches published before 2026-09-01 ran with prompts naming tools the roles lacked.
 - **Worker `edit_report` misformatting** (whole report in `summary`) is mitigated by a soft note only.
+- **Evidence rule, open edges (2026-09-25):** a paper readable only as a web page grounds no
+  value (the librarian records it as a gap); an ObsID or band restated in a worker's text needs the
+  request's `input:` handle or a toolkit result carrying it (a dispatched task no longer grounds);
+  derived arithmetic waits on an authored toolkit tool. The `arg_numbers` receipt field is legacy.
+- **`AnalystReport.tool_request` text is not grounding-checked** (a brief to the lead, not a
+  claim); a live laundering attack put a peer's number there in an accepted report, by ruling not
+  a finding (2026-09-25).
+- **Reviewer as sole I/O (R1) — LIVE-TESTED 2026-09-25** (30 cells, contrast seat + one graph run on
+  the configured seats): no unfiled exit, silent exit or uncited attacked number. Clause attacks
+  not attempted by the model: `render_refused`, `ungrounded_number`; the edit-after-`turn_end`
+  batch was declined (deterministic test only). Open: a role can still read back `memory.md` and the librarian's fetched pages from the
+  run dir (the report files moved out of reach); the reviewer admits only the latest analysis
+  report's receipts; a pre-2026-09-25 checkpoint is refused on resume, not migrated.
+- **Quick channel (E12) (2026-09-25):**
+  - live: 25/25 ping-matrix pairs (every seat pair plus the human) and 2 attack cells, 2026-09-25;
+  - the mirror to Telegram is a no-op until `TelegramHandler.notify` lands;
+  - lead and worker read figures, not PDFs, over `view_receipt`;
+  - a human reply after the graph node ended resumes a reply-only turn that nobody downstream reads;
+  - `tests/test_live_no_hitl.py` still probes the retired `ask_human` provider surface.
 
 **Coder and sandbox**
 - **Codex coder blind spots** (on hold): a killed turn books $0; MCP startup status is not
@@ -947,6 +994,7 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 - **WhatsApp/Twilio connector deprecated** — prefer `telegram` or `cli`.
 - **Telegram rich messages render `||text||` as a spoiler** (hidden until tapped); agent prose is not
   escaped for it.
+- **Telegram media reply leg not live-tested** — a human's photo/document/album reply is saved into `reply_dir` and minted by `mint_reply_attachments`; covered by deterministic tests only. Outbound embedding (Bot API 10.2 `rich_message.media`) is live-verified.
 - **HITL slash-commands are Telegram/Slack only** — CLI and WhatsApp have no background listener.
 - **Slack Socket Mode can stop delivering events after idle, silently** (bolt-python#1529, closed
   not-planned 2026-09-14); ruling 2026-09-25: Telegram is the channel, Slack not pursued.
@@ -1130,3 +1178,38 @@ dates, tag ids, rulings and LIVE-VERIFIED / NOT-LIVE-TESTED markers); detail is 
   the uncalled-path limit, left to the co-lead); the honest control committed after `*.lock`
   sidecars became housekeeping. Reruns of the 4 inconclusive cells ($4.24) all stopped: 12/12 attack
   cells stopped before commit, all six checks exercised, control commits.
+- 2026-09-25 — [E11] Telegram carries media both ways: `HumanAttachment` on `HumanQuery`/`HumanResponse` (+ `reply_dir`, `notes`, kind `report`); `hitl/attachments.py` resolves receipt handles in the sender's scope (re-hashed) and mints the human's files as figure/data receipts; files embedded in the rich message, photo/document replies as fallback. Ruling: Telegram only. LIVE-VERIFIED outbound; reply leg deterministic only.
+- 2026-09-25 — [R1/R2] The reviewer is the sole I/O (rulings): START → reviewer; `ReviewerReport.assign_to
+  ∈ {librarian, analysts, human}` replaces the two flags; librarian passes accumulate; the human is an
+  edge endpoint (blocking handler, PDF via E11, `done`/unattended/timeout end); the human's reply text is
+  a nudge, never a receipt; report folders versioned `v<k>/` and, with every role's report JSONL, moved
+  beside the ledger (read-back laundering); an earlier published report neither grounds nor is citable;
+  `_react` answers any call after an accepted terminal in its batch (an `edit_report` there replaced the
+  filed report; every role). Reviewer prompt: scoping, staged plan, follow-up on results, Next steps.
+  Found by an anonymous Opus review. Deterministic only; live adversarial cells pending.
+- 2026-09-25 — [E12] Quick channel between any two seats. `message(to, text, attachments)` on every graph seat and the coder never blocks. Other pieces:
+  - the human is one address;
+  - a finished seat is resumed on its kept turn, with its report final;
+  - texts mint no receipt, and a human reply is a nudge;
+  - `wait_coder` became `wait_for_reply` for every seat.
+  Removed: `ask_human`/`plan_and_debate`, the providers' human kwargs, and the coder's `ask_lead`/`ask_human` (now one MCP `message`). New: `hitl/router.py` (`SeatRouter`), `RunControl` inbox entries, `graph.runtime.attach_channel`, `orchestration.yaml: channel_mirror`. NOT LIVE TESTED.
+- 2026-09-25 — [R1] LIVE: `test_live_reviewer_paths.py` 30 cells ($29.37 reviewer cells on
+  `qwen3.8-max`, $28.55 two graph runs on the configured seats). All harness floors held; the graph
+  cell ran START → review → librarian → review ×2 → human ×3 (`DONE.` and an order to skip `turn_end`
+  came back as nudges, `Done` ended). Failures traced: 2 fixture leaks (test fixtures readable in
+  the run dir, moved beside the ledger), 5 over-strict assertions, 1 provider content-filter 400,
+  1 model judgement (weak literature → analysts), 1 real hole (`read_file` line numbers ground
+  integers, §13). Scenario-naming run ids and `tmp_path` fixture paths removed before the batch.
+- 2026-09-25 — [E12] `list_peers` (free: address, role, model, state; the human when attended). `drive_coder` folded into `message(to="coder")` (user ruling), `mid_turn` kept coder-only; the coder reads the lead's texts labelled with the sender. NOT LIVE TESTED for the fold.
+- 2026-09-25 — [R7] Evidence is produced, not read (human ruling): `provenance.store.is_evidence`
+  admits toolkit returns, `commit` receipts (new: minted on a committing `submit_for_review`), papers
+  by attribution and the request (cite-only); every harness return (read_file, list_dir, searches,
+  web_search, web_fetch, bash entirely), brief, human file and published report is recorded and
+  grounds nothing, and citing one is refused by name. Closes R7 (`read_file` line numbers grounded a
+  nudge's "31") and the coincidence class an audit of 93 reports measured (137 reviewer / 20 lead
+  numbers grounded only by harness returns). Shell typed-number rule deleted (unreachable); briefs
+  exempt; in-process `data_catalog` receipted under its toolkit kind; prompts rewritten (reviewer,
+  lead, worker, librarian). LIVE-VERIFIED 2026-09-26 ($5.73, contrast seat): the nudge's "31" no
+  longer reaches a claim (only the brief prescribes it), a bare-number attack was refused, the
+  scoping reviewer states toolkit facts in words with no refusal, and a lead shape and a report to
+  the human pass; one DashScope content-filter 400 rerun.

@@ -27,9 +27,8 @@ the assistant `tool_use` turn + the `tool_result` turn, and re-calls so the mode
 chains dependent calls; stop when it emits no calls or the budget is spent. **Budget
 (`free_tools`, §5.5):** `cap` (`react_loop_cap`, default 30) bounds the *budget-consuming*
 iterations — those calling ≥1 tool **not** in `free_tools` (default empty); a free-only
-iteration (e.g. the lead's `plan_and_debate`) does not count, so the lead can debate a toolkit
-design with the human across as many rounds as it needs without starving its evidence-gathering
-iterations. `absolute_cap` (`react_loop_absolute_cap`, default 60; passed only by the lead's
+iteration (e.g. `wait_for_reply`) does not count, so waiting on the coder or the human never
+starves the evidence-gathering iterations. `absolute_cap` (`react_loop_absolute_cap`, default 60; passed only by the lead's
 `decide_authoring`) is a hard ceiling on *total* iterations — the runaway-free-tool backstop;
 when unset it defaults to `cap`, so every other caller is unchanged (`free_tools` empty ⇒ the
 loop is identical to `range(cap)`). `_react` returns
@@ -123,53 +122,53 @@ the "last-round-only figures" leak. Round files are `<role>_round<n>_report.json
 budget-free in the loop (report authoring, not evidence gathering); a loop that ends without an
 `edit_report` write falls back to one terminal structured compose with the catalog figures attached.
 
-**Raise-to-human (`ask_human`, §9.7/§9.8).** When a `human_handler` is wired, both
-`SandboxToolProvider` and `ReadOnlyToolProvider` expose one shared `ask_human` tool
-(`ask_human_tool_def`/`execute_ask_human` in `react.py`): the role writes a Markdown `message`,
-which builds a `HumanQuery`, and **blocks** on the injected handler (via `hitl.resolve_human`)
-until the human replies — the same model the SDK author uses. With no handler the tool is not offered, and a direct call
-raises `HumanInputRequired` (the headless fail-safe). `run_research` threads the resolved
-handler to the workers (`SandboxToolProvider`) and to the reviewer/lead (`ReadOnlyToolProvider`,
-`asked_by` = the role). Each provider also carries the backing `model` id (resolved via
-`_model_label`), set on the `HumanQuery` so connector message bodies identify the sender as
-`"<role> (<model>)"`.
+**The quick channel (`message`, E12, 2026-09-25).** Every graph seat — reviewer, librarian, lead,
+workers — is on one `hitl.router.SeatRouter` (`graph.runtime.attach_channel`), and `AgentRole._react`
+wraps its provider in `ChannelTools`, which adds three tools: `message(to, text, attachments, kind)`
+(`message_tool_def`; the `to` enum is the directory — every other seat, then `human` only when a
+handler is wired), `view_receipt(handle)` (`execute_view_receipt`) and `wait_for_reply(timeout_s)`
+(`execute_wait_for_reply`, budget-free). **`message` never blocks**: to a live seat the text lands
+in its inbox (`RunControl`, drained at the loop's one boundary under A2's hold rule, rendered by
+`InboxEntry.render`); to a seat that finished its turn it lands there and **resumes that seat's normal
+loop** in the background (`AgentRole.resume` on the turn `_react` kept); to a seat that has not
+started it waits; to the human the router awaits the handler in the background and posts the reply
+to the sender's inbox. **Texts are informal**: none mints a receipt or widens a citable scope; a
+handle a text names becomes *viewable* by the recipient only. The human's text is a nudge (never a
+receipt); the files the human sends are the sender's receipts (`hitl.attachments`). `ChannelTools`
+also holds `turn_end` while a seat this one resumed is still in its turn, and in a resumed turn
+declares exactly the finished turn's tool set, refuses the tools that would re-file
+(`edit_report`, `file_edit`, the lead's cycle tools — the filed report is final) and accepts
+`turn_end` without touching the report. The co-lead and the status monitor get no router, so
+their loops are exactly `_react_loop`. The providers themselves carry no human tool.
 
-**Lead design channel (`plan_and_debate`, §5.5).** When `include_plan_and_debate=True` **and** a
-`human_handler` is wired, `ReadOnlyToolProvider` also exposes `plan_and_debate`
-(`plan_and_debate_tool_def`/`execute_plan_and_debate`) — set only for the **analyst lead** (in
-`graph/runtime.py`). It routes the lead's Markdown design report (proposal, options/trade-offs,
-interface sketch, the ask) to the human via the same `resolve_human` path (reusing the
-`clarify_science` `HumanQuery` kind), but is listed in the lead's `_react` `free_tools`, so the lead settles a toolkit design
-with the human across unbounded rounds **without consuming `react_loop_cap`** — only the
-`react_loop_absolute_cap` backstop bounds it; the human ending the discussion is the normal stop.
-The coder then follows the settled brief rather than re-opening the architecture.
-
-**Lead authoring tools (`drive_coder`/`submit_for_review`, §9.3 B-topology — A1 slice 2).** When an
-`authoring_session` (an `auto_research.sandbox.merge_flow.AuthoringSession`) is wired,
-`ReadOnlyToolProvider` exposes two **lead-only** tools — masked to the lead alone, because a session
-is attached only on its provider (no other role sees them; this is the mask). `drive_coder`
-(`execute_drive_coder`) steers the live Sonnet coder one turn (the lead is the plan owner, the coder
-executes); `submit_for_review` (`execute_submit`) runs the deterministic gate, then (on gate-pass)
+**Lead authoring tools (`message` to `coder` / `submit_for_review`, §9.3 B-topology — A1 slice
+2).** When an `authoring_session` (an `auto_research.sandbox.merge_flow.AuthoringSession`) is wired
+or the cycle enables authoring, the lead's channel layer adds the address `coder` to its `message`
+tool (with an optional coder-only `mid_turn`), and `ReadOnlyToolProvider` declares
+`submit_for_review` / `respond_to_review` — lead-only, because a session is attached only on its
+provider. A text to `coder` (`ChannelTools._to_coder` → `execute_coder_message`, labelled
+`[Message from analyst_lead]`) steers the live coder (the lead is the plan owner, the coder
+executes; `drive_coder` until E12 folded it in); `submit_for_review` (`execute_submit`) runs the deterministic gate, then (on gate-pass)
 the provider-decorrelated GPT co-lead review, and **commits on gate-pass ∧ review-pass** — the lead
 never self-approves (`commit ⇔ gate ∧ review`, §9.9). The gate is a mechanical wall the lead can only
-*satisfy* via `drive_coder`; the review is *debatable* (the slice-4 `respond_to_review`). Both will be
+*satisfy* by messaging the coder; the review is *debatable* (the slice-4 `respond_to_review`). Both will be
 listed in the lead's authoring-loop `free_tools` (slice 3), bounded by `submit_cap` +
 `react_loop_absolute_cap`. They drive the **same** `AuthoringSession` primitives `propose_and_pr`
 drives in its auto-loop — the difference is *who* diagnoses each verdict (the lead, vs. the coder).
 
-**The lead waits on its coder; it does not poll (`wait_coder`, 2026-09-24).** The coder runs beside
-the lead: `drive_coder` returns at once, **queueing** a message for a working coder as its next
-turn (`mid_turn=true`, or any reply to an open coder question, steers the running turn instead).
-`wait_coder(timeout_s)` (`execute_wait_coder`) parks inside the tool call on
-`AuthoringSession.wait_for_event` and returns when the coder's turn ends (with its narration), the
-coder asks (`[coder asks] …`), a human steer for the lead arrives (the steer itself is still
-delivered by `_react`'s own drain), or the timeout passes. A timeout under
-`coder_wait_floor_s` is **raised** to it, never refused, so no calling pattern gets an instant
-empty answer; every return starts `[waited X of Y; coder working, Z into its current turn]`,
-which is the lead's clock. `wait_coder` is in `_CYCLE_FREE_TOOLS`. `submit_for_review` on a
-working coder waits for it to stop (up to `coder_wait_max_s`) before the gate runs, and hands back
-a question or steer instead of gating. `_ChainDriver._open` wires the lead's
-`RunControl.steer_event(agent_key)` into each link's session.
+**The lead waits on its coder; it does not poll (`wait_for_reply`, 2026-09-24; renamed from
+`wait_coder` by E12).** The coder runs beside the lead: a text to `coder` returns at once, **queueing** a
+message for a working coder as its next turn (`mid_turn=true`, or any reply to an open coder
+question, steers the running turn instead). While a coder is working, `wait_for_reply(timeout_s)`
+(`execute_wait_coder`) parks inside the tool call on `AuthoringSession.wait_for_event` and returns
+when the coder's turn ends (with its narration), a message reaches the lead's inbox (the coder's own
+question arrives there as `[Message from the coder]`, as does a human steer — delivered by `_react`'s
+drain), or the timeout passes. A timeout under `coder_wait_floor_s` is **raised** to it, never
+refused; every return starts `[waited X of Y; coder working, Z into its current turn]`, the lead's
+clock. `wait_for_reply` is free in every seat's loop. `submit_for_review` on a working coder waits
+for it to stop (up to `coder_wait_max_s`) before the gate runs, and hands back a message instead of
+gating. `_ChainDriver._open` wires the lead's `RunControl.steer_event(agent_key)` into each link's
+session.
 
 **The lead's cycle (`LeadCycle`, §9.3).** The lead's turn is **one ReAct loop with no stages**,
 ending on `turn_end`, and **its report is its decision** — the same contract an analyst already
@@ -257,24 +256,30 @@ Prompt loading:
   the Phase-2 `coder` prompt used by `merge_flow`.
 
 Role wrappers:
-- `ReviewerAgent.review(request, *, stage, literature=None, literature_receipts=None,
-  report=None, iterations_left=0, render=None) -> ReviewerReport` — one review as ONE ReAct loop
+- `ReviewerAgent.review(request, *, arrived="request", literature=(), literature_receipts=None,
+  report=None, previous=(), human_nudges=(), human_files=(), budgets=None, human_attended=False,
+  render=None) -> ReviewerReport` — one reviewer turn as ONE ReAct loop
   whose only exit is `turn_end` (`require_terminal=True`, §2b). The reviewer writes its report with
   `edit_report` (surface `REVIEWER_REPORT_FIELDS` over `ReviewerReport`, description
   `REVIEWER_EDIT_DESCRIPTION`), reads papers with the shared `paper_tools.PaperReader` under source
   `rev` (via `extra_tools`: the PDF itself attached, quotes checked against its text layer, one
   handle per paper across roles; `open_paper` is not declared for it), sees its draft typeset through
-  `review_report` (`draft_view`), and `turn_end` runs `reviewer_turn_problems` — including render
-  + compile of a final analysis review through `render` (a `ReviewerRender`). Its scope is a
-  `ScopedLookup` over the run's store: its own `rev:` receipts, the request (`input:hN`, minted via
-  `store.mint_input`), the librarian's receipts, every handle the lead's report cites and the
+  `review_report` (`draft_view`, always the typeset preview when `tex` is configured, since any
+  turn may report to the human), and `turn_end` runs `reviewer_turn_problems` — including render +
+  compile of a report to the human through `render` (a `ReviewerRender`). The payload names what
+  `arrived`, the budgets (`_review_instruction`), its own earlier reports (`_earlier_report`),
+  every literature report so far, the latest analysis report, the human's nudges (reply text,
+  guidance only) and files (`_human_file`). Its scope is a `ScopedLookup` over the run's store: its
+  own `rev:` receipts, the request (`input:hN`, minted via `store.mint_input`), the human's files
+  (`input:`), the librarian's receipts across passes, every handle the lead's report cites and the
   lead's figures (matched to receipts by hash), with their ancestors. Requires `tools`, `receipts`
   and `report_dir` (the runtime sets all three, `graph/runtime.attach_reviewer_runtime`); raises
-  if the loop ends without an accepted `turn_end`. One JSONL per review under `report_dir`
-  (`review{n}_{stage}.jsonl`).
+  if the loop ends without an accepted `turn_end`. One JSONL per turn, `review{n}.jsonl`, beside
+  the ledger (`sandbox.workspace.report_record_path`), out of every role's reach.
 - `LibrarianIOAgent(*, sources=None, storage=None, model=None, ...)`. `sources` defaults to
   arXiv, NASA ADS and Tavily web; `storage` to `Storage()`. Attributes the runtime sets:
-  `report_dir` (its working folder; per-pass `literature_pass{n}.jsonl`), `agent_key`, and
+  `report_dir` (its working folder; per-pass `literature_pass{n}.jsonl` beside the ledger via
+  `report_record_path`), `agent_key`, and
   `receipts` (the run's one store, `ReceiptStore.for_run(run_dir)`; unwired, it takes
   `for_run(report_dir)`, so no second instance ever opens one directory).
   `last_receipts: dict[str, Receipt]` — the documents the last pass opened, by handle.
@@ -331,7 +336,7 @@ Role wrappers:
   answering rather than guessing. Used by `merge_flow.propose_and_pr`.
 - `AnalystLeadAgent.drive_authoring(tool_spec, *, toolkit_root, worktree_base, ...) ->
   MergeFlowResult` — **one** tool through authoring on its own conversation: build + connect an
-  `AuthoringSession`, seed the coder, run the lead's loop over `drive_coder` /
+  `AuthoringSession`, seed the coder, run the lead's loop over `message` to `coder` /
   `submit_for_review` / `respond_to_review`, read the terminal result, `aclose`. `run_cycle`'s
   `_ChainDriver` is the same lifecycle over the *cycle's* conversation; this standalone entry
   remains because `benchmarks/author_bench` measures exactly it (its published K=10 batches
@@ -364,15 +369,18 @@ Role wrappers:
 
 Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
 `ReviewerAgent.review`):
-- `REVIEWER_REPORT_FIELDS`, `REVIEWER_STATUS_VALUES` (empty: the verdict fields are the decision),
+- `REVIEWER_REPORT_FIELDS`, `REVIEWER_STATUS_VALUES` (empty: `assign_to` is the decision),
   `REVIEWER_SOURCE = "rev"` (the reviewer's own receipts: papers it opens, reports it renders).
-- `reviewer_turn_problems(report, *, lookup, scope, stage, iterations_left, render=None) ->
-  list[str]` — the reviewer's `turn_end` door. Refuses: no report; empty `rationale`; empty
-  `follow_up` on a dispatch or rework; a switch set at the stage that ignores it; a rework with no
-  iterations left (cap named); a finalizing report missing title/abstract/sections/key_findings;
-  any number no receipt grounds, anywhere, `follow_up` included (`check_report_fields(itemised=(),
-  scope=…)`, scope = every readable receipt); then, for a final report only,
-  whatever `render` returns.
+- `reviewer_turn_problems(report, *, lookup, scope, budgets, render=None) -> list[str]` — the
+  reviewer's `turn_end` door. Refuses: no report; empty `rationale`; no `assign_to`; a report to
+  the librarian or analysts with an empty `follow_up` or no passes left (`budgets`, cap named);
+  a report to the human missing title/abstract/sections/key_findings; a citation of an earlier
+  published report (`PUBLISHED_REPORT_PRODUCER`); any number no receipt grounds, anywhere,
+  `follow_up` included (`check_report_fields(itemised=(), scope=…)`); then, for a report to the
+  human only, whatever `render` returns.
+- `reviewer_scope(lookup)` — the handles that ground uncited: every readable receipt except
+  `input:` ones (the request, the human's files) and published reports (`report_renderer`), which
+  record a decision and carry the request, nudges and unlocated paper values.
 - `ReviewerRender(report_dir, run_id, formats=("tex",))` — callable used as `render`: renders and
   compiles when `tex` is configured, returns model-fixable problems, and keeps the last
   `render`/`compile` result and `renderer_errors` for the graph.
@@ -406,6 +414,23 @@ Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
   task JSON, validates JSON responses, and stores the most recent
   `ModelResponse` on `last_response` for logging. Optional `monitor` records
   model-call inputs, outputs, and errors.
+  Quick channel (E12): `channel` (the run's `SeatRouter`, set on graph seats only);
+  `_react(*, tools, resumed=False, declared=None, **loop_kwargs)` wraps `_react_loop` in
+  `ChannelTools`, marks the seat live for the loop and keeps a turn that filed its terminal;
+  `has_kept_turn()`; `resume()` reruns the kept turn's normal loop (report final);
+  `ensure_run_control()` makes a `RunControl` for a role run outside a run (a benchmark lead).
+- `ChannelTools(base, *, role, resumed=False, declared=None)` — a seat's provider plus the channel:
+  declares `message`/`list_peers`/`view_receipt`/`wait_for_reply`, adds the lead's `coder` address
+  while authoring is declared (`_coder_declared`, `_to_coder`), holds `turn_end` while a resumed
+  seat runs, and in a resumed turn replays the kept declaration and refuses `_RESUME_CLOSED` and
+  the coder address.
+- `react.py` channel symbols: `MESSAGE_TOOL`, `LIST_PEERS_TOOL`, `VIEW_RECEIPT_TOOL`,
+  `WAIT_FOR_REPLY_TOOL`, `CHANNEL_TOOLS`; `message_tool_def(directory)` (a `coder` address adds the
+  instruction note and `mid_turn`), `list_peers_tool_def()`, `execute_list_peers(router, sender,
+  label)`, `execute_coder_message(session, text, *, mid_turn=False)`, `view_receipt_tool_def()`,
+  `wait_for_reply_tool_def()`; `execute_view_receipt(lookup, viewable, store, arguments, *,
+  images_ok)` (mints and admits nothing); `execute_wait_for_reply(run_control, agent_key,
+  arguments, *, outstanding)` (a seat with no coder; `execute_wait_coder` serves the lead's coder).
 - `ReviewerAgent` — the reviewer as a unit. Method: `review(...)` (see Interfaces); attributes
   `receipts`, `report_dir`.
 - `LibrarianIOAgent(sources, storage, ...)` — the librarian. Method: `research()`.
@@ -552,3 +577,33 @@ Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
   `SandboxToolProvider` imports it (behaviour unchanged).
 - 2026-09-25 — [G15] `_normalize_tool_raw`, `_PROTOCOL_KEYS` and the result-text rule moved to
   `sandbox.runner` (`normalize_tool_raw`, `PROTOCOL_KEYS`, `tool_text`); behaviour unchanged.
+- 2026-09-25 — [R1] `ReviewerAgent.review` is one turn of the sole-I/O reviewer: `stage` and
+  `iterations_left` replaced by `arrived`, `previous`, `human_nudges`, `human_files`, `budgets`,
+  `human_attended`; `reviewer_turn_problems` routes on `assign_to` (cap per team), refuses citing
+  an earlier published report, and `reviewer_scope` drops published reports. Role report JSONLs
+  (reviewer, librarian, workers, lead) move beside the ledger (human ruling: out of reach, since a
+  read-back minted a role's own typed numbers). `_react`: a call after an accepted terminal in the
+  same batch is answered and not run (found by an adversarial review: an `edit_report` after
+  `turn_end` replaced the filed report; human ruling, every role).
+- 2026-09-25 — [E12] Quick channel between any two seats: `ChannelTools` (in `_react`, which now
+  wraps `_react_loop`) adds `message` / `view_receipt` / `wait_for_reply` for every graph seat on a
+  `SeatRouter`; `message` never blocks, a finished seat is resumed on its kept turn
+  (`AgentRole.resume`, report final), texts mint no receipt, the human's reply is a nudge. Deleted
+  `ask_human`/`plan_and_debate` (defs, executors, provider branches, `_RECEIPTED` entries) and the
+  providers' `human_handler`/`include_plan_and_debate`/`asked_by`/`model` params; `wait_coder` →
+  `wait_for_reply`; `_coder_questions` deleted (the coder's question reaches the inbox).
+- 2026-09-25 — [E12] `list_peers` (free): each address with its role, model and state (working /
+  finished, a text resumes it / not started), the human when attended, and for the lead its coder.
+  `drive_coder` folded into `message(to="coder")` (user ruling): the lead's `coder` address is
+  declared for the whole authoring cycle, `mid_turn` kept as a coder-only field, the coder reads
+  `[Message from analyst_lead]`; `drive_coder_tool_def`/`DRIVE_CODER_TOOL` deleted,
+  `execute_drive_coder` → `execute_coder_message`; every model-facing mention rewritten.
+- 2026-09-25 — [E12] A seat whose loop can author (`_has_authoring_surface`: a live session or a
+  cycle enabling authoring) and has no router gets a one-seat `SeatRouter` from `_react` itself, so
+  the lead reaches its coder with `message(to="coder")` however it was built (only `run_research`
+  attached the team channel; `attach_lead_runtime` alone left the coder unreachable).
+- 2026-09-25 — [R7] `ReadOnlyToolProvider`: a committing `submit_for_review` mints a `commit`
+  receipt (`_commit_receipted`: tool, SHA, branch, gate/review passed, submissions used/cap), and the
+  in-process `data_catalog` is receipted under `research_toolkit.catalog_utils.data_catalog`.
+  `reviewer_tools.reviewer_claims` / `BRIEF_FIELDS`: the reviewer's `follow_up` is exempt from
+  grounding (a brief); `reviewer_scope` excludes only `input:` (published reports are not evidence).

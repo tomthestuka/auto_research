@@ -96,10 +96,33 @@ def figures_dir(run_id: str, agent_key: str) -> Path:
 
 
 def report_dir(run_id: str) -> Path:
-    """Return (and ensure parent + figures/ exist for) the reviewer's report directory."""
-    d = agent_dir(run_id, "reviewer") / "report"
+    """Return (and ensure parent + figures/ exist for) the reviewer's report directory.
+
+    Beside the ledger, outside every role's allow-list (human 2026-09-25): a role that could read
+    a report back with ``read_file`` would mint its own typed numbers as a receipt of its own.
+    """
+    d = ledger_dir(run_id) / "reports" / "reviewer" / "report"
     (d / "figures").mkdir(parents=True, exist_ok=True)
     return d
+
+
+def report_record_path(agent_dir_path: Path, filename: str) -> Path:
+    """Where a role's report JSONL lives: beside the ledger, outside every allow-list.
+
+    A role's report is written by the harness from what the model typed. Inside the workspace it
+    could be read back (``read_file``) and the read minted as the role's own receipt, grounding
+    the very numbers the report check refuses (found 2026-09-25; human ruling: move the files out
+    of reach). Derived from the agent folder, like :func:`record_beside`, so a trial's private
+    runtime tree resolves to its own ledgers. An agent folder outside a ``runs/`` tree — a
+    standalone role with no allow-list to escape — keeps the file in that folder.
+    """
+    agent_dir_path = Path(agent_dir_path)
+    run = agent_dir_path.parent
+    if run.parent.name != "runs":
+        return agent_dir_path / filename
+    target = run.parent.parent / "ledgers" / run.name / "reports" / agent_dir_path.name / filename
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 def memory_path(run_id: str, agent_key: str) -> Path:
@@ -121,7 +144,7 @@ def create_run_workspace(run_id: str, agent_keys: list[str]) -> dict[str, Path]:
 
 
 def round_report_path(agent_dir_path: Path, *, role: str, model: str, round_n: int) -> Path:
-    """Path of one inter-LLM report JSONL inside an agent's working folder (V-4).
+    """Path of one inter-LLM report JSONL for an agent, beside the ledger (V-4, 2026-09-25).
 
     One file per debate round (``round_n`` counts monotonically across rework iterations, so
     nothing collides and the trail is continuous). The agent folder already disambiguates which
@@ -134,7 +157,7 @@ def round_report_path(agent_dir_path: Path, *, role: str, model: str, round_n: i
     the run dir returned ``analyst_lead_claude-opus-5_round1_report.jsonl`` on 2026-09-03. Which
     member wrote a report belongs in the ledger, the human's record.
     """
-    return Path(agent_dir_path) / f"{role}_round{round_n}_report.jsonl"
+    return report_record_path(Path(agent_dir_path), f"{role}_round{round_n}_report.jsonl")
 
 
 def append_memory(path: Path, text: str) -> None:

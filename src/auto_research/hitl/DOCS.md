@@ -10,12 +10,31 @@ human to merge.
 
 ## Architecture
 
-A blocked role calls its `ask_human` tool (in-graph roles via
-`auto_research.agents.react`; the SDK author via `sandbox.merge_flow`). The call builds a
-`HumanQuery` and **blocks** on the resolved `HumanHandler` until the connector returns a
-`HumanResponse` (decision #1 — blocking direct-handler; no LangGraph checkpointer / durable
-suspend-resume, which stays the §12 TODO). No fabrication, no silent hang: with no handler
-wired, `resolve_human` raises `HumanInputRequired` (the §9.8 headless fail-safe).
+A role reaches the human with `message(to="human")` (E12: in-graph seats via
+`agents.roles.ChannelTools`, the coder via `sandbox.merge_flow`), routed by **`router.py`**'s
+`SeatRouter`. The call builds a `HumanQuery` and returns at once; the router awaits the resolved
+`HumanHandler` in a background task (the connector still blocks on its reply — decision #1, no
+durable suspend-resume, §12) and delivers the `HumanResponse` to the sender's inbox as a nudge. No
+fabrication, no silent hang: with no handler wired `human` is not an address, and
+`resolve_human` raises `HumanInputRequired` (the §9.8 headless fail-safe) for a direct call.
+
+- **`router.py`** — the quick channel between any two seats, the human one endpoint (E12).
+  `SeatRouter(run_control, human_handler=None, *, monitor=None, mirror=True, store=None)`:
+  `register(key, seat)`, `directory(sender)` (every other seat, then `human` when attended),
+  `seat(key)`, `state(key)` (working / finished / not started, for `list_peers`),
+  `record_message(sender, to, text, *, route)` (ledgers the lead's text to its coder),
+  `send(sender, to, text, *, handles, scope, receipt_source, reply_dir, kind, model) -> (text,
+  is_error)` (never blocks), `ask_human(query, *, deliver, receipt_source)` (the background wait;
+  raises `HumanInputRequired` unattended), `viewable(key)`, `outstanding(key)`. Routes: live seat →
+  its `RunControl` inbox; a seat with a kept turn → inbox + resume task (registered on
+  `RunControl.register_resumed`, a notice to the sender when it ends); not started → inbox; human →
+  background wait, reply (`kind="reply"`) or notice (timeout/fault) to the sender's inbox, a filed
+  sender resumed reply-only. Texts mint no receipt; handles a text names are recorded as viewable
+  (only those the sender itself can see). The human's files are minted with
+  `attachments.mint_reply_attachments(..., parent=None)` — the reply text is never a receipt.
+  Mirror: seat-to-seat texts are posted with the handler's `notify(text)` when it has one and
+  `orchestration.yaml: channel_mirror` is on. Ledger: `channel.message`, `channel.reply`,
+  `channel.reply.timeout`/`.error`, `channel.resume`/`.end`/`.error`, `channel.mirror.error`.
 
 - **`base.py`** — `HumanHandler` type, `HumanInputRequired`, and `resolve_human` (the one
   chokepoint that calls a handler, normalizes sync/async + bare-`str` returns, and enforces
@@ -30,6 +49,13 @@ wired, `resolve_human` raises `HumanInputRequired` (the §9.8 headless fail-safe
   The Slack/Telegram/Twilio clients are injectable so the send/reply logic is unit-tested without
   those libraries or any network; the real clients are imported lazily inside their `_build_*`
   helpers, so `import auto_research.hitl` never requires `python-telegram-bot`/`twilio`/`slack_bolt`.
+- **`attachments.py`** — files on the channel, by receipt ([E11]). `resolve_attachments` turns a
+  role's receipt handles into `HumanAttachment`s inside that role's citable view, re-hashing each
+  one first, so a connector only ever sees paths the runtime vouched for; `mint_reply_attachments`
+  turns the files a connector saved from the human's reply into receipts a role can view; they ground
+  nothing (`produced_by="human_reply"` is not evidence under `provenance.store.is_evidence`, R7).
+  The caller (the human-bound `message` router, R1's human node) owns both calls; connectors never
+  touch the receipt store.
 - **`commands.py`** — the channel-agnostic HITL **slash-command** dispatcher (§12 Stage 3). A
   command-capable connector recognizes a leading-`/` message and calls `dispatch_command(text, ctx)`
   instead of routing it as a reply, so a human drives the run *any time*: `/help` (commands +
@@ -40,7 +66,7 @@ wired, `resolve_human` raises `HumanInputRequired` (the §9.8 headless fail-safe
   unknown command, an unknown/out-of-range id, a role *name* where an id belongs, or a missing
   message answers with ⚠️ plus the valid options and queues nothing. `CommandContext` carries the run-scoped `run_control`/roster/JSONL/status
   hook, wired by `run_research` via each connector's `attach_commands`. `wait_reply_or_stop` is the
-  shared reply-wait so `/stop` releases a role blocked on `ask_human` (returns
+  shared reply-wait so `/stop` releases a connector awaiting a human reply (returns
   `run_control.STOP_SENTINEL`). **Command-capable connectors are Telegram + Slack** (always
   listening); CLI/WhatsApp have no background listener so commands don't fit cleanly there (§13).
   `RunControl` itself lives in the leaf module `auto_research.run_control` (imported by agents,
@@ -111,6 +137,20 @@ directly) so the preflight can import it without pulling the graph/LLM stack.
   HTML. **Edits** are routed apart (`filters.UpdateType.EDITED_MESSAGE` → `handle_edit`): new-message
   handlers match only `UpdateType.MESSAGE`, so an edited command is never re-run, and an edit to a reply
   already taken as an answer (`_answered`, last 200 ids) gets a notice asking for a new message.
+  **Attachments** ([E11]): the query's `attachments` go inside its last rich part — a
+  `**Attachments**` section of `![](tg://photo?id=aN "handle — caption")` / `tg://document?id=aN`
+  links, `rich_message.media` naming each `attach://aN`, and each file uploaded as its own top-level
+  `InputFile` field (python-telegram-bot uploads only top-level files). A PNG/JPEG within `sendPhoto`'s
+  limits (10 MB, width + height ≤ 10000, ratio ≤ 20; `_is_photo`) goes as a photo, anything else as a
+  document; over 50 MB it is not sent and a note goes both into the message and into
+  `HumanResponse.notes` (`_sendable`). When the rich part falls back to HTML (or there are more than
+  50 media), the files follow as `send_photo`/`send_document` replies to it (`_send_files`; a rejected
+  photo is re-sent as a document), each registered so a reply to any of them answers the question.
+  **Inbound**: photos and documents route like text (`_route`: reply-to, else the single open
+  question; `handle_media`); the caption is the answer; an album (shared `media_group_id`) answers
+  once, `_ALBUM_SETTLE_S` after its last item. Files download (`getFile`, ≤ 20 MB) into the query's
+  `reply_dir` as `<message_id>_<safe name>` (`_safe_filename`); no `reply_dir`, an oversize file or a
+  failed download becomes a note, never an error. The reply hint offers files only when `reply_dir` is set.
   `start()`/`aclose()` manage the `Application` + polling; `timeout_s` defaults to the shared
   `response_timeout_s()`. Live: `tests/test_live_telegram_render.py` (opt-in,
   `AUTO_RESEARCH_LIVE_TELEGRAM=1`; `…_REPLY=1` adds a round trip) and the cross-channel
@@ -124,17 +164,19 @@ directly) so the preflight can import it without pulling the graph/LLM stack.
   `TWILIO_API_KEY_SID` + `TWILIO_API_KEY_SECRET`), not the root Auth Token, so a leaked key is
   revoked on its own. Live-tested via `tests/test_live_whatsapp.py` (opt-in).
 
-The schemas `HumanQuery` (`id`, `kind ∈ {clarify_science, clarify_code, blocked}`, Markdown
-`message`, `asked_by`, `model`, `created_at`; `sender_label`/`headline` properties) and
-`HumanResponse` (`query_id`, `answer`, `created_at`) live in `auto_research.schemas` (the
+The schemas `HumanQuery` (`id`, `kind ∈ {clarify_science, clarify_code, blocked, report}`, Markdown
+`message`, `asked_by`, `model`, `attachments`, `reply_dir`, `created_at`; `sender_label`/`headline`
+properties), `HumanAttachment`, and `HumanResponse` (`query_id`, `answer`, `attachments`, `notes`, `created_at`) live in `auto_research.schemas` (the
 protocol, §7).
 
 ## Dependencies
 
 - Internal: `auto_research.schemas` (`HumanQuery`/`HumanResponse`); reads
   `config/orchestration.yaml` directly. Imported by `auto_research.preflight` (channel check),
-  `auto_research.graph.runtime` (resolve + thread), `auto_research.agents.react`
-  (`ask_human` tool), `auto_research.sandbox.merge_flow` (author `ask_human`).
+  `auto_research.graph.runtime` (resolve + thread; `attach_channel` builds the `SeatRouter`),
+  `auto_research.agents.roles` (`ChannelTools` → `SeatRouter.send`), `auto_research.sandbox.merge_flow`
+  (the coder's `message`). `router.py` imports `auto_research.hitl.attachments` and, lazily,
+  `auto_research.schemas`.
 - External: `rich` (CLI Markdown rendering — a hard dep, in `environment.yml`). Optional, lazy:
   `python-telegram-bot` (Telegram — the recommended channel), `slack_bolt` (Slack), `twilio`
   (WhatsApp — deprecated).
@@ -157,6 +199,20 @@ protocol, §7).
 - `_read_stdin_line() -> str` — one line of stdin, read on a daemon thread so an
   unanswered prompt cannot hold the process open past the timeout.
 - `SlackHandler` / `TelegramHandler` / `WhatsAppHandler` — connector classes (see contracts above).
+- `resolve_attachments(lookup, handles) -> (list[HumanAttachment], list[str])` — resolve handles in
+  the sender's `ScopedLookup`; the second list is one model-readable sentence per handle not attached
+  (not citable, or bytes no longer matching). A paper/page sends its original file (`source_path`); a
+  text receipt is named `<handle>.txt`.
+- `mint_reply_attachments(store, *, source, response, parent) -> list[Receipt]` — one receipt per
+  saved file (`FIGURE_MIME_TYPES` → `figure`, else `data`; `produced_by="human_reply"`, parent =
+  the reply's receipt); fills each attachment's `handle` in place. Missing files are skipped.
+- `TelegramHandler.handle_media(update)` — answer an open question with a photo/document/album.
+- `TelegramHandler.notify(text)` — post Markdown as a read-only notice (`disable_notification`, rich
+  then HTML); registers no pending question, so a reply to it answers nothing. Called by E12's seat
+  router for each seat-to-seat text when `orchestration.yaml: channel_mirror` is on.
+- Ambiguous replies — a plain (non-reply-to) text, file or album that matches no single question
+  while two or more are open gets one notice (`_ambiguous_notice`) and answers nothing; an album is
+  noticed once (`_unrouted_albums`).
 
 ## Changelog
 Compacted 2026-09-01 and 2026-09-24 (detail in git history).
@@ -183,3 +239,17 @@ Compacted 2026-09-01 and 2026-09-24 (detail in git history).
   no longer re-runs; an edited taken answer gets a notice). `telegram_rich_messages` flag. LIVE-VERIFIED
   (both sends accepted; 34-payload attack corpus `tests/test_live_telegram_attack.py`: 30 rich, 4
   fell back, 0 errors). Slack dropped by ruling (bolt-python#1529).
+- 2026-09-25 — [E11] Media on the Telegram channel, both directions: `hitl/attachments.py`
+  (`resolve_attachments`, `mint_reply_attachments`); files embedded in the rich message (Bot API 10.2
+  `media`), photo/document replies as the fallback, inbound photos/documents/albums saved into
+  `reply_dir`, notes for what could not travel. CLI/Slack/WhatsApp unchanged (ruling: Telegram only).
+  LIVE: embedded rich message and both replies accepted by the Bot API; the reply leg is by hand.
+- 2026-09-25 — [E12] `router.py`: `SeatRouter`, the quick channel between any two seats with the
+  human one endpoint; `message` never blocks (the human's reply arrives in the sender's inbox as a
+  nudge), a finished seat is resumed, texts mint no receipt, seat-to-seat texts mirrored via
+  `notify` (`channel_mirror`). `ask_human` retired everywhere.
+- 2026-09-25 — [E12] `SeatRouter.seat`/`state` (for `list_peers`) and `record_message` (the lead's
+  `message(to="coder")`, routed by the lead's channel layer, is ledgered as `channel.message`).
+- 2026-09-25 — `TelegramHandler.notify` (silent, answers nothing) for the seat-to-seat mirror; a plain
+  reply matching no single open question now gets a notice instead of being dropped (rulings: both).
+  LIVE: one silent notify accepted.

@@ -32,7 +32,6 @@ import pytest
 
 from auto_research.agents.react import (
     AUTHOR_CHAIN_TOOL,
-    DRIVE_CODER_TOOL,
     EDIT_REPORT_TOOL,
     LEAD_FORM_TOOLS,
     LEAD_REPORT_FIELDS,
@@ -40,7 +39,7 @@ from auto_research.agents.react import (
     RESPOND_TO_REVIEW_TOOL,
     SUBMIT_TOOL,
     TURN_END_TOOL,
-    WAIT_CODER_TOOL,
+    WAIT_FOR_REPLY_TOOL,
     LeadCycle,
     ReadOnlyToolProvider,
     ReportWorkspace,
@@ -155,30 +154,55 @@ def test_a_malformed_link_comes_back_as_a_correction_naming_the_field():
     assert cycle.brief is None
 
 
+# The lead reaches its coder with `message(to="coder")` (E12); these read that address off the
+# lead's channel layer, built as `_react` builds it.
+_CODING_CALL = "message"
+
+
+def _lead_channel(provider):
+    from types import SimpleNamespace
+
+    from auto_research.agents.roles import ChannelTools
+    from auto_research.hitl.router import SeatRouter
+    from auto_research.run_control import RunControl
+
+    seat = SimpleNamespace(
+        channel=SeatRouter(RunControl()), agent_key="analyst_lead", role="analyst_lead",
+        run_control=None, model=None,
+    )
+    return ChannelTools(provider, role=seat)
+
+
+def _message_addresses(provider) -> list[str]:
+    defs = {d["name"]: d for d in _lead_channel(provider).tool_definitions()}
+    return list(defs["message"]["input_schema"]["properties"]["to"]["enum"])
+
+
 def test_the_drive_tools_are_declared_before_any_session_exists():
     """Declared from the cycle's start, so the set does not grow when a link opens."""
-    declared = set(_names(ReadOnlyToolProvider(roots=[], cycle=_cycle())))
-    assert {DRIVE_CODER_TOOL, SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL} <= declared
+    provider = ReadOnlyToolProvider(roots=[], cycle=_cycle())
+    assert {SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL} <= set(_names(provider))
+    assert "coder" in _message_addresses(provider), "the coder address is declared from the start"
 
 
 def test_swapping_the_authoring_session_never_changes_the_declared_set():
-    """Each chain link gets its own session; a set that gained then lost drive_coder between
+    """Each chain link gets its own session; a set that gained then lost the coder address between
     links would replay a trajectory naming an undeclared tool (run-killer 2026-07-29)."""
     cycle = _cycle()
     provider = ReadOnlyToolProvider(roots=[], cycle=cycle)
-    before = _names(provider)
+    before = (_names(provider), _message_addresses(provider))
     provider.authoring_session = object()
-    during = _names(provider)
+    during = (_names(provider), _message_addresses(provider))
     provider.authoring_session = None
-    after = _names(provider)
+    after = (_names(provider), _message_addresses(provider))
     assert before == during == after
 
 
 def test_a_drive_tool_with_no_open_session_points_at_author_chain():
     cycle = _cycle()
-    out = _run(
-        ReadOnlyToolProvider(roots=[], cycle=cycle).execute(DRIVE_CODER_TOOL, {"instructions": "x"})
-    )
+    out = _run(_lead_channel(ReadOnlyToolProvider(roots=[], cycle=cycle)).execute(
+        "message", {"to": "coder", "text": "x"}
+    ))
     assert out.is_error and AUTHOR_CHAIN_TOOL in out.text
 
 
@@ -339,7 +363,7 @@ def _conversation_through_one_link(monkeypatch, status="committed"):
     aio.run(driver.advance())                      # the handler: opens link 1, records the mark
     messages.append(_results_for(opening))         # the loop answers the opening call
 
-    coding = _assistant(DRIVE_CODER_TOOL)
+    coding = _assistant(_CODING_CALL)
     messages.extend([coding, _results_for(coding)])
     reading = _assistant("read_file")
     messages.extend([reading, _results_for(reading)])
@@ -369,7 +393,7 @@ def test_the_coding_middle_goes_and_the_opening_call_carries_the_outcome(monkeyp
     _, messages = _conversation_through_one_link(monkeypatch)
     names = [c.name for m in messages for c in (getattr(m, "tool_calls", None) or ())]
     assert AUTHOR_CHAIN_TOOL in names and SUBMIT_TOOL in names
-    assert DRIVE_CODER_TOOL not in names and "read_file" not in names
+    assert _CODING_CALL not in names and "read_file" not in names
     answer = next(
         part
         for m in messages
@@ -462,7 +486,9 @@ def test_author_chain_is_the_only_form_and_it_is_not_a_terminal():
 def test_a_run_without_authoring_declares_no_form_at_all():
     declared = set(_names(ReadOnlyToolProvider(roots=[], cycle=_cycle(authoring=False))))
     assert AUTHOR_CHAIN_TOOL not in declared
-    assert DRIVE_CODER_TOOL not in declared
+    assert "coder" not in _message_addresses(
+        ReadOnlyToolProvider(roots=[], cycle=_cycle(authoring=False))
+    )
 
 
 def test_briefing_a_chain_does_not_end_the_loop():
@@ -569,7 +595,7 @@ def test_turn_end_stats_every_cited_figures_path(tmp_path):
     def _ref(path):
         return FigureRef(
             path=path, caption=f"{path.name} caption", mime_type="image/png",
-            produced_by="tool", created_at=datetime.now().astimezone(), sha256="0" * 64,
+            produced_by="research_toolkit.t.tool", created_at=datetime.now().astimezone(), sha256="0" * 64,
         )
 
     ok = AnalystReport(summary="s", findings=["f"], figures=[_ref(real)])
@@ -692,7 +718,7 @@ def test_both_arms_compact_and_the_chain_still_advances(monkeypatch):
         messages.append(opening)
         aio.run(driver.advance())
         messages.append(_results_for(opening))
-        coding = _assistant(DRIVE_CODER_TOOL)
+        coding = _assistant(_CODING_CALL)
         messages.extend([coding, _results_for(coding)])
 
     closing = _assistant(SUBMIT_TOOL)
@@ -704,7 +730,7 @@ def test_both_arms_compact_and_the_chain_still_advances(monkeypatch):
         "a failed link must not end the chain (F9)"
     )
     names = [c.name for m in messages for c in (getattr(m, "tool_calls", None) or ())]
-    assert DRIVE_CODER_TOOL not in names, "both arms compact, so no coding turn survives"
+    assert _CODING_CALL not in names, "both arms compact, so no coding turn survives"
     assert _unanswered_call_ids(messages) == []
 
 
@@ -762,7 +788,7 @@ def test_every_declared_authoring_tool_is_actually_ROUTED():
     """
     cycle = _cycle()
     provider = ReadOnlyToolProvider(roots=[], cycle=cycle)
-    authoring = {DRIVE_CODER_TOOL, WAIT_CODER_TOOL, SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL}
+    authoring = {WAIT_FOR_REPLY_TOOL, SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL}
     declared = set(_names(provider)) & authoring
     assert declared == authoring, f"an authoring tool is not declared at all: {authoring - declared}"
 
@@ -886,7 +912,7 @@ def test_submitting_while_a_legacy_coder_is_still_writing_is_refused():
 
 
 class _AskingSession:
-    """A session double with the question park and the one send path."""
+    """A session double with the one send path."""
 
     initial_message = "brief"
 
@@ -896,13 +922,6 @@ class _AskingSession:
         self.sent: list[str] = []
         self.steered: list[str] = []
         self.started: list[str] = []
-
-    def park_question(self, message: str) -> None:
-        self.questions.append(message)
-
-    def take_questions(self) -> list[str]:
-        pending, self.questions = self.questions, []
-        return pending
 
     async def send(self, message: str, *, mid_turn: bool = False) -> str:
         self.sent.append(message)
@@ -916,59 +935,56 @@ class _AskingSession:
         return "started"
 
 
-def test_a_parked_question_is_collected_once_for_injection():
-    """The loop PULLS the question at a boundary it knows is safe; the session never pushes.
+def test_the_coders_question_reaches_the_leads_inbox_and_opens_the_question():
+    """E12: ``message(to="lead")`` posts to the lead's inbox — the one queue every text a seat
+    receives travels, drained at a boundary the loop knows is safe (A2) — and marks the question
+    open, so the lead's answer (``message`` to ``coder``) lands inside the coder's running turn."""
+    from types import SimpleNamespace
 
-    Same seam and same hold rule as the background-coder notice, for the reason A2 exists: an
-    injected user turn appended after an assistant turn that left a server-tool call unresolved
-    is the 400 that killed a run at $42.11 with four tools committed.
-    """
-    from auto_research.agents.roles import _coder_questions
+    from auto_research.run_control import RunControl
+    from auto_research.sandbox.merge_flow import _make_ask_lead_handler
 
-    cycle = _cycle()
-    provider = ReadOnlyToolProvider(roots=[], cycle=cycle)
-    session = _AskingSession()
-    provider.authoring_session = session
-    session.park_question("ENERGY or PI?")
+    control = RunControl()
+    lead = SimpleNamespace(agent_key="analyst_lead", run_control=control)
+    lead.ensure_run_control = lambda: control
+    session = SimpleNamespace(
+        _steer_event=None, opened=0,
+        watch_steers=lambda event: setattr(session, "_steer_event", event),
+    )
+    session.mark_question_open = lambda: setattr(session, "opened", session.opened + 1)
+    handler = _make_ask_lead_handler(lambda: session, lead=lead)
 
-    first = _coder_questions(provider)
-    assert len(first) == 1 and "ENERGY or PI?" in first[0]
-    assert WAIT_CODER_TOOL not in first[0], "the lead is pointed at the reply path, not at waiting"
-    assert DRIVE_CODER_TOOL in first[0], "the lead must be told how to answer"
-    assert _coder_questions(provider) == [], "a collected question must not be re-injected"
-
-
-def test_a_session_with_no_question_park_is_simply_quiet():
-    """A benchmark's session or an older double predates the channel and must not crash the loop."""
-    from auto_research.agents.roles import _coder_questions
-
-    cycle = _cycle()
-    provider = ReadOnlyToolProvider(roots=[], cycle=cycle)
-    provider.authoring_session = object()
-    assert _coder_questions(provider) == []
+    out = _run(handler("ENERGY or PI?"))
+    assert out.startswith("delivered.")
+    assert session.opened == 1 and session._steer_event is control.steer_event("analyst_lead")
+    [entry] = control.drain_inbox("analyst_lead")
+    rendered = entry.render()
+    assert "ENERGY or PI?" in rendered and 'message(to="coder")' in rendered
+    assert WAIT_FOR_REPLY_TOOL not in rendered, "the lead is pointed at the reply path"
+    assert control.drain_inbox("analyst_lead") == [], "a delivered question is not re-injected"
 
 
-def test_drive_coder_reports_what_the_session_did_with_the_message():
+def test_a_message_to_the_coder_reports_what_the_session_did_with_it():
     """ONE lead->coder path; the session picks the primitive and the tool says which it was.
 
     Queued is the default for a working coder (slot 6, 2026-09-15: 47 mid-turn steers), so the
     lead is told the message waits for the next turn; ``mid_turn`` reaches the running turn.
     """
-    from auto_research.agents.react import execute_drive_coder
+    from auto_research.agents.react import execute_coder_message
 
     working = _AskingSession(status="working")
-    out = _run(execute_drive_coder(working, {"instructions": "use PI"}))
+    out = _run(execute_coder_message(working, "use PI"))
     assert not out.is_error and working.mid_turn is False
-    assert "Queued" in out.text and WAIT_CODER_TOOL in out.text
+    assert "Queued" in out.text and WAIT_FOR_REPLY_TOOL in out.text
 
-    out = _run(execute_drive_coder(working, {"instructions": "stop, use PI", "mid_turn": True}))
+    out = _run(execute_coder_message(working, "stop, use PI", mid_turn=True))
     assert working.steered == ["stop, use PI"] and working.mid_turn is True
     assert "inside the turn the coder is running" in out.text
 
     idle = _AskingSession(status="idle")
-    out = _run(execute_drive_coder(idle, {"instructions": "next link"}))
+    out = _run(execute_coder_message(idle, "next link"))
     assert not out.is_error and idle.started == ["next link"]
-    assert WAIT_CODER_TOOL in out.text
+    assert WAIT_FOR_REPLY_TOOL in out.text
 
 
 # ── wait_coder replaces polling ───────────────────────────────────────────────────────────
@@ -982,15 +998,17 @@ def test_drive_coder_reports_what_the_session_did_with_the_message():
 
 def test_no_model_visible_string_tells_the_lead_to_poll():
     """The declared surface: wait_coder is free, advertises long waits, and nothing says 'check'."""
-    from auto_research.agents.react import drive_coder_tool_def, wait_coder_tool_def
+    from auto_research.agents.react import message_tool_def, wait_for_reply_tool_def
     from auto_research.agents.roles import _CYCLE_FREE_TOOLS
 
-    desc = wait_coder_tool_def()["description"].lower()
+    desc = wait_for_reply_tool_def()["description"].lower()
     assert "prefer long waits" in desc
     assert "check again" not in desc
-    assert WAIT_CODER_TOOL in _CYCLE_FREE_TOOLS, "the wait costs nothing, and says so"
-    assert "check_coder" not in drive_coder_tool_def()["description"]
-    assert "mid_turn" in drive_coder_tool_def()["input_schema"]["properties"]
+    assert WAIT_FOR_REPLY_TOOL in _CYCLE_FREE_TOOLS, "the wait costs nothing, and says so"
+    coder = message_tool_def(["coder"])
+    assert "check_coder" not in coder["description"]
+    assert "mid_turn" in coder["input_schema"]["properties"]
+    assert "mid_turn" not in message_tool_def(["reviewer"])["input_schema"]["properties"]
 
 
 def test_the_wait_limits_are_read_from_config_and_kept_ordered(monkeypatch):
@@ -1227,7 +1245,7 @@ def test_require_terminal_defaults_off():
 
     from auto_research.agents.roles import AgentRole
 
-    sig = inspect.signature(AgentRole._react)
+    sig = inspect.signature(AgentRole._react_loop)  # `_react` is its channel wrapper (E12)
     assert sig.parameters["require_terminal"].default is False
 
 

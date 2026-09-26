@@ -20,8 +20,9 @@ from pathlib import Path
 from typing import Any
 
 
-# Tool names that mean "a human was asked something" (ReAct roles surface these as *.tool_call).
-_HITL_TOOLS = ("ask_human", "plan_and_debate")
+# Events that mean "a human was asked something": a seat's `message(to="human")` (the router's
+# `channel.message` with to=human, E12) and the coder's own raise.
+_HITL_TOOLS = ("channel.message", "coder.ask_human")
 
 
 def _as_dict(event: Any) -> dict[str, Any]:
@@ -125,18 +126,18 @@ def build_run_summary(events: Iterable[Any]) -> dict[str, Any]:
             summary["error"] = str(data.get("error", ""))
         elif name == "run.honest_failure":
             summary["status"] = "honest_failure"
-        elif name == "reviewer.analysis_review.verdict":
+        elif name == "reviewer.review.verdict":
             verdict = data.get("verdict")
-            if isinstance(verdict, Mapping):
+            if isinstance(verdict, Mapping) and verdict.get("assign_to") == "human":
                 accepted = bool(verdict.get("accepted"))
                 summary["verdict_rationale"] = str(verdict.get("rationale", ""))
         elif name == "run.finish":
             summary["lit_iterations"] = data.get("lit_iterations")
             summary["analysis_iterations"] = data.get("analysis_iterations")
+            summary["human_rounds"] = data.get("human_rounds")
 
-        if name.endswith(".tool_call"):
-            if str(data.get("tool", "")) in _HITL_TOOLS:
-                summary["hitl_raises"] += 1
+        if name in _HITL_TOOLS and (name != "channel.message" or data.get("to") == "human"):
+            summary["hitl_raises"] += 1
         elif name.endswith(".tool_result"):
             summary["tool_calls"] += 1
             if data.get("is_error"):
@@ -212,6 +213,7 @@ def render_run_summary(summary: Mapping[str, Any]) -> str:
     lines.append(
         f"  iterations   literature {summary.get('lit_iterations', '?')} · "
         f"analysis {summary.get('analysis_iterations', '?')} · "
+        f"reports to the human {summary.get('human_rounds', '?')} · "
         f"HITL raises {summary.get('hitl_raises', 0)}"
     )
     lines.append(

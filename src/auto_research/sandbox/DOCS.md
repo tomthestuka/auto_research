@@ -194,6 +194,8 @@ def memory_path(run_id: str, agent_key: str) -> Path
 def figures_dir(run_id: str, agent_key: str) -> Path
 def run_dir(run_id: str) -> Path
 def round_report_path(agent_dir_path: Path, *, role: str, model: str, round_n: int) -> Path
+def report_record_path(agent_dir_path: Path, filename: str) -> Path
+def report_dir(run_id: str) -> Path
 def append_memory(path: Path, text: str) -> None
 def read_memory(path: Path) -> str
 ```
@@ -201,9 +203,15 @@ def read_memory(path: Path) -> str
 - `create_run_workspace()` creates `<runtime_dir>/runs/{run_id}/{key}/figures/`
   for each agent key and returns `{key: agent_dir}`.
 - `memory_path()` returns `{agent_dir}/memory.md` (parent created if absent).
-- `round_report_path()` returns `{agent_dir}/<role>_round<n>_report.jsonl` — the per-round
-  inter-LLM report JSONL an analyst writes via `edit_report` (V-4), distinct from the private
-  `memory.md`. `n` is the monotonic debate round. `model` is accepted and unused: a filename is
+- `report_record_path(agent_dir, filename)` — where a role's report JSONL lives: for an agent
+  folder `runs/<run>/<key>/`, `ledgers/<run>/reports/<key>/<filename>` (created), outside every
+  allow-list (human 2026-09-25: a report read back with `read_file` minted the role's own typed
+  numbers as a receipt). An agent folder outside a `runs/` tree keeps the file in that folder.
+- `report_dir(run_id)` — the reviewer's report folder, `ledgers/<run>/reports/reviewer/report/`
+  (with `figures/`); each report to the human gets `v<k>/` under it (`graph/builder`).
+- `round_report_path()` returns `report_record_path(agent_dir, "<role>_round<n>_report.jsonl")` —
+  the per-round inter-LLM report JSONL an analyst writes via `edit_report` (V-4), distinct from
+  the private `memory.md`. `n` is the monotonic debate round. `model` is accepted and unused: a filename is
   readable by any agent whose allow-list covers the run directory, so the member stays in the
   ledger (2026-09-03).
 - `append_memory()` appends bare terminal text; `read_memory()` returns contents or `""`.
@@ -329,7 +337,7 @@ environment and verifies both boot with `Fit.query == "no"` and
 async def propose_and_pr(
     tool_spec: ToolSpec,
     *,
-    lead,                       # AnalystLeadAgent — ask_lead handler (clarify_for_author)
+    lead,                       # AnalystLeadAgent — the coder's message(to="lead") lands in its inbox
     toolkit_root: Path,
     worktree_base: Path,        # isolated worktree location (under the runtime data dir)
     colead=None,                # AnalystColeadAgent — the GPT co-lead reviewer (step 4); built from config if None
@@ -349,9 +357,11 @@ Spawns the Sonnet author (Claude Agent SDK) in an isolated git **worktree/branch
 drives the bounded rework loop:
 
 - **L0** author self-correction inside the SDK session (`max_turns`).
-- **L1** escalation: SDK `WebSearch`/`WebFetch`, plus two in-process MCP tools — `ask_lead`
-  (→ `lead.clarify_for_author`) and `ask_human` (→ injected `human_handler`; none + headless
-  → typed `HumanInputRequired`), so the lead is never the sole oracle.
+- **L1** escalation: SDK `WebSearch`/`WebFetch`, plus one in-process MCP tool, `message(to, text)`
+  (E12; `escalation_server.route_message`): `to="lead"` posts to the lead's inbox and marks the
+  question open (`_make_ask_lead_handler`); `to="human"` goes through the run's `SeatRouter` and
+  returns at once, the reply steered into the coder's turn by `session.send` (none + headless →
+  typed `HumanInputRequired` carrying `UNATTENDED_GUIDANCE`), so the lead is never the sole oracle.
 - **L2** gate rejection → `GateReport` fed back into the warm session (`gate_rework_cap`).
 - **L3** co-lead review rejection → `ToolReviewVerdict` fed back; a code change re-runs the
   gate before re-review (`review_rework_cap`).
@@ -528,7 +538,7 @@ resolves — asked of each SDK rather than probed on `PATH`).
 **Live coverage is a matrix over the legs** (`tests/test_live_coder_matrix.py`, env-gated). One warm
 session per `(vendor, harness)` pair is walked through every stimulus the flow can send — the seed
 brief, a gate rejection, a co-lead rejection, a free-text lead instruction, a governance-file read,
-a git attempt, an `ask_lead` escalation, and a lengthening trajectory — in the order a real attempt
+a git attempt, a `message` to the lead, and a lengthening trajectory — in the order a real attempt
 produces them, because the history is part of the state under test. The stimuli are **recorded, not
 invented**: `tests/fixtures/coder_history.json` is frozen out of real run ledgers by
 `tmp_scripts/extract_coder_history.py`. Assertions sit on our side of the boundary (ledger event
@@ -805,16 +815,17 @@ the hook mapping a fake-model verdict — no live LLM).
   `pending_changes()` rather than on `committed` — see the 2026-09-09 F1 entry). `propose_and_pr` drives
   these in the auto-loop; the analyst lead's authoring ReAct tools drive the *same* primitives
   directly (so the lead diagnoses each verdict rather than the run terminating).
-  **The lead<->coder channel** (the lead's `drive_coder` / `wait_coder` / `submit_for_review`):
+  **The lead<->coder channel** (the lead's `message` to `coder` / `wait_for_reply` / `submit_for_review`):
   `start_drive(message)` runs one instruction in a background task and returns at once (a second
   one while it runs raises); `send(message, *, mid_turn=False)` → `"started"` | `"queued"` |
   `"steered"` | `"answered"` — an idle coder gets a new turn; a working one has the message
   **queued** and run as its next turn in the same task (`coder.queued` / `coder.queued.delivered`),
   unless `mid_turn` is set or the coder has an open question, in which case it is steered into the
-  running turn (`CoderBackend.steer`); `park_question(message)` (the `ask_lead` handler) /
-  `take_questions()`; `wait_for_event(timeout_s)` → `"turn_ended"` | `"failed"` | `"question"` |
-  `"steer"` | `"idle"` | `"timeout"` — parks on the session's wake event (set by a finished turn,
-  a failure or a question) and on the lead's `RunControl.steer_event` (`watch_steers(event)`),
+  running turn (`CoderBackend.steer`); `mark_question_open()` (the coder's `message(to="lead")`,
+  whose text is in the lead's inbox, E12); `wait_for_event(timeout_s)` → `"turn_ended"` |
+  `"failed"` | `"steer"` (a message reached the lead's inbox, the coder's question among them) |
+  `"idle"` | `"timeout"` — parks on the session's wake event (set by a finished turn, a failure or
+  an opened question) and on the lead's `RunControl.steer_event` (`watch_steers(event)`),
   returns at once when something is already waiting, consumes nothing, and records `coder.wait`;
   `drive_status` (`idle` | `working` | `stopped` | `cancelled`), `take_drive_result()` →
   `(text, error)` consumed once (narrations of consecutive queued turns are joined),
@@ -859,8 +870,8 @@ the hook mapping a fake-model verdict — no live LLM).
   script); no AST, so code patterns/placeholder/provenance do not apply and `findings` is always empty.
 - `HumanInputRequired(RuntimeError)` — typed headless fail-safe raised when the author
   needs a human but no `human_handler` is wired (§9.8). Now defined in `auto_research.hitl`
-  and re-exported here for back-compat; the author's `ask_human` builds a typed `HumanQuery`
-  and routes through `hitl.resolve_human` (the same channel every in-graph role uses).
+  and re-exported here for back-compat; the author's `message(to="human")` builds a typed
+  `HumanQuery` and routes through `hitl.router.SeatRouter` (the channel every in-graph seat uses).
 - `gate.run_gate(worktree, tool_spec, *, test_runner=None, config=None)` → `GateReport` —
   the deterministic gate (§9.4). Runs the no-fabrication scan + structural + determinism +
   provenance (Layer A) and the tool's tests (Layer B); records Tier-3 findings without
@@ -984,8 +995,8 @@ the hook mapping a fake-model verdict — no live LLM).
     inherited value alone) and `_login`, and shared with the launch checks so a probe cannot report
     on a credential the run does not use.
 - `coder.escalation_server.EscalationServer(ask_lead, ask_human)` — a Streamable-HTTP MCP endpoint
-  serving the two escalation tools from **this** process (the handlers must reach the live lead
-  object and the run's HITL connector). Loopback, ephemeral port, per-session bearer token;
+  serving the coder's one `message(to, text)` tool (`MESSAGE_DESCRIPTION`, `route_message`) from
+  **this** process (the handlers must reach the live lead's inbox and the run's HITL connector). Loopback, ephemeral port, per-session bearer token;
   `url`, `env()` and `token_env` are what a harness needs, `start()`/`aclose()` its lifecycle.
 - `coder.events.emit` / `cap_text` / `coder_text_cap()` — the shared ledger emission, so a backend
   records without importing the flow that drives it. `merge_flow._emit`/`_cap_text` alias them.
@@ -1105,3 +1116,12 @@ Compacted 2026-09-01 and 2026-09-24 (detail in git history).
   the uncalled-path limit, left to the co-lead); the honest control committed after `*.lock`
   sidecars became housekeeping. Reruns of the 4 inconclusive cells ($4.24) all stopped: 12/12 attack
   cells stopped before commit, all six checks exercised, control commits.
+- 2026-09-25 — [R1] `report_record_path` added; `round_report_path` and `report_dir` now resolve
+  beside the ledger, out of every role's reach (human ruling).
+- 2026-09-25 — [E12] The coder's `ask_lead`/`ask_human` became one MCP tool `message(to=lead|human,
+  text)` on both harnesses (`escalation_server.route_message`, `MESSAGE_DESCRIPTION`; Claude
+  allow-list `mcp__escalation__message`). `to=lead` posts to the lead's `RunControl` inbox and calls
+  `AuthoringSession.mark_question_open()` (`park_question`/`take_questions`/the `question` wait
+  reason deleted); `to=human` is non-blocking through the run's `SeatRouter`, the reply delivered by
+  `session.send(..., mid_turn=True)`; unattended still raises `UNATTENDED_GUIDANCE` before the MCP
+  boundary, a channel fault now arrives as a notice. Gate rejection names "message the lead".

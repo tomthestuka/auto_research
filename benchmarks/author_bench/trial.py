@@ -363,8 +363,8 @@ async def run_trial(index: int, cfg: TrialConfig) -> dict:
         else:
             lead = AnalystLeadAgent(monitor=monitor)
         # The lead's investigation surface, wired as runtime.py wires it: the toolkit it is
-        # authoring into, the papers dir, and its own run directory. plan_and_debate needs a
-        # human and is off here, which is the unattended production shape.
+        # authoring into, the papers dir, and its own run directory. No human is reachable here,
+        # which is the unattended production shape.
         #
         # `workdir` rather than `trial_dir`: the latter is `…/<leg.slug>/trial-NN`, organised by
         # experimental arm for the human reading results, and putting it here published the arm to
@@ -374,11 +374,16 @@ async def run_trial(index: int, cfg: TrialConfig) -> dict:
             roots=[clone, papers_dir(), workdir],
             web_source=WebSource(),
             include_data_catalog=True,
-            include_plan_and_debate=False,
             include_text_search=False,
-            asked_by="analyst_lead",
-            model=getattr(getattr(lead, "model", None), "name", "") or "",
         )
+        # The lead steers its coder with `message(to="coder")` (E12), so it is put on a quick
+        # channel through production's seam: a one-seat channel, no human (unattended), keyed by
+        # the opaque token so no path names the arm.
+        from auto_research.graph.runtime import attach_channel
+
+        lead.agent_key = "analyst_lead"
+        attach_channel([lead], run_id=f"ar_{opaque}", run_control=lead.ensure_run_control(),
+                       human_handler=None, monitor=monitor)
 
         leg = cfg.leg
         # A leg supplies the author member, and for a pinned-reviewer leg the co-lead too.

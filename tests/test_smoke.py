@@ -133,8 +133,7 @@ def test_sandbox_env_smoke() -> None:
 
     verdict = run.verdict
     print(f"\nAccepted:               {verdict.accepted}")
-    print(f"Needs more literature:  {verdict.needs_more_literature}")
-    print(f"Needs analysis rework:  {verdict.needs_analysis_rework}")
+    print(f"Assigned to:  {verdict.assign_to}")
     if verdict.follow_up:
         print(f"Follow-up:              {verdict.follow_up}")
     print(f"\nRationale:\n{verdict.rationale}")

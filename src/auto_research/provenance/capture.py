@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from auto_research.provenance.store import SHELL_TOOLS, ReceiptStore
+from auto_research.provenance.store import ReceiptStore
 from auto_research.schemas.artifacts import InputFile, Receipt
 from auto_research.schemas.figures import FigureRef
 
@@ -115,20 +115,6 @@ def inputs_before(
     return state
 
 
-def typed_numbers_in(args: Mapping[str, Any]) -> list[str]:
-    """The numbers in a call's arguments, signed and unsigned, normalised as the checker compares."""
-    import json as _json
-
-    from auto_research.provenance.bindings import NUMBER_RE, normalise
-
-    text = _json.dumps(dict(args), default=str)
-    found: set[str] = set()
-    for m in NUMBER_RE.finditer(text):
-        token = normalise(m.group(), "result")
-        found.update({token, token.lstrip("+-")})
-    return sorted(found)
-
-
 def toolkit_commit(root: Path | None) -> str | None:
     """The toolkit commit a call ran against (read-only ``rev-parse``; ``None`` when unknown)."""
     if root is None:
@@ -174,8 +160,6 @@ def receipt_call(
         args=dict(args), inputs=state.inputs, failed=failed,
     )
     extra = dict(fields or {})
-    if produced_by in SHELL_TOOLS:
-        extra.setdefault("arg_numbers", typed_numbers_in(args))
     result = store.mint(kind=kind, data=text, **common, **extra)
     out = CallReceipts(result=result)
 

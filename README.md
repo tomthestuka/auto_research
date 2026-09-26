@@ -120,7 +120,7 @@ smoke test.
 `DASHSCOPE_API_KEY`, `ADS_DEV_KEY` (NASA ADS),
 `TAVILY_API_KEY`; optional LangSmith tracing (`LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`);
 optional raise-to-human connectors (only when selected) — **Telegram** (recommended; questions render
-as rich messages with tables and math: `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`), Slack (not recommended:
+as rich messages with tables and math, and carry figures and files both ways: `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`), Slack (not recommended:
 Socket Mode can stop delivering after idle)
 (`SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN`/`SLACK_HUMAN_CHANNEL`), or the deprecated Twilio WhatsApp
 (`TWILIO_ACCOUNT_SID`/`TWILIO_API_KEY_SID`/`TWILIO_API_KEY_SECRET`/`TWILIO_WHATSAPP_FROM`/`WHATSAPP_TO`);
@@ -156,6 +156,8 @@ in the run ledger, so a rejected command, a queued steer and a delivered steer a
 the fact. A queued steer reaches its role at that role's next step. CLI/WhatsApp have no background
 listener, so commands aren't wired there. *(Command dispatch is tested; live command use is
 observational.)*
+
+**Quick texts between seats.** Every agent on the team has a `message` tool that reaches any other agent (reviewer, librarian, lead, analysts) or you. `list_peers` shows who is on the team, what each does and whether it is working, finished or not started; the lead steers its coder the same way, as `message(to="coder")`. It never blocks: your answer, or a teammate's, arrives at the sender's next step, and `wait_for_reply` holds until one does. An agent that has already filed its report is resumed to read a text and answer, and its filed report stays as filed. Texts are informal and back no number in a report. With `channel_mirror: true` (default) the agents' texts to each other are copied to your chat, read-only, so you can follow along and `/steer` in.
 
 **`/stop` is Ctrl-C** — the interrupt a run has no terminal to receive. It cancels the run task
 where it stands, then cleans up deterministically: kill the sandbox processes *and their
@@ -310,15 +312,17 @@ and reviewer narrative.
 ## The loop
 
 ```
-research request  →  reviewer dispatches literature + analysis tasks
-               →  librarians search · analysts analyze (debate to converge)
-               →  reviewer digests results, cross-checks prior publications
-               →  human review
+research request  →  reviewer scopes it and plans the stages
+               →  reviewer assigns: librarian (search, as often as needed) · analysts (debate to converge)
+               →  every result returns to the reviewer, cross-checked against prior publications
+               →  report to the human (PDF) → the human's reply nudges the next step, or `done`
 ```
 
-with two feedback edges (each capped at 3 iterations): the reviewer can send literature
-back to the librarians ("insufficient / obsolete — search again") and analyses back to
-the analysts ("rework this").
+The reviewer is the sole I/O: its report's `assign_to` (`librarian`, `analysts`, `human`) routes
+every step, and librarian and analysis passes are each capped at `max_iterations` (default 3) per
+run. The human nudges; the reviewer assigns. A reply's text is guidance, never evidence: it grounds
+no number, while files the human sends become receipts. With no human attending, the first report
+to the human is published and the run ends.
 
 For now the request enters from the human. The lead-scientist planning team is deferred
 beyond Phase 2 and will route requests through the same reviewer gate when built.
@@ -343,7 +347,7 @@ beyond Phase 2 and will route requests through the same reviewer gate when built
                                       ▼
       ┌────────────────────────────────────────────────────────────────────┐
       │                        REVIEWER group (top)                        │
-      │              triage · dispatch · digest · cross-check              │
+      │           sole I/O · scope · plan · assign · cross-check           │
       └───────────────┬────────────────────────────────────┬───────────────┘
                       │ literature tasks                    │ analysis tasks
                       ▼                                     ▼
@@ -372,13 +376,14 @@ beyond Phase 2 and will route requests through the same reviewer gate when built
                                            ▼                ▼
       ┌────────────────────────────────────────────────────────────────────┐
       │                  REVIEWER receives evidence/results                │
-      │              capped feedback to librarians / analysts              │
+      │          assign_to: librarian · analysts · human (capped)          │
       │        report rendered + compiled inside its turn_end              │
       └───────────────────────────────┬────────────────────────────────────┘
-                                      │ final verdict + report → publish (no model)
+                                      │ report to the human → publish (no model) → PDF sent
                                       ▼
       ┌────────────────────────────────────────────────────────────────────┐
       │                               HUMAN                                │
+      │      reply = nudge back to the reviewer · `done` ends the run      │
       └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -446,7 +451,7 @@ Current role/tool surfaces:
 | Analyst worker | `SandboxToolProvider`: `research_toolkit` manifest tools (including `catalog_utils`'s read-only `data_catalog`) + MCP tools in a persistent sandbox, plus `web_search`, `web_fetch`, and the report tools `edit_report`/`review_report`. | `analyze()` chains load→fit→run→plot or other tools, self-corrects in-loop, then **writes its report via `edit_report`**, citing figures from its catalog. |
 | Analyst lead | `ReadOnlyToolProvider`: run artifacts, figures, memory, papers dir, full `research_toolkit` source, the `data_catalog` tool (from `research_toolkit`'s `catalog_utils`, run in-process for the sandbox-less lead), `web_search` + `web_fetch` (`include_text_search=False` — knowledge-base search is the reviewer's), `edit_report`/`review_report`, the three authoring tools, `author_chain`, and `turn_end`. | **One cycle** (`run_cycle`): one ReAct loop with **no stages** — investigate, brief a coding chain if the analysts hit a missing capability, drive and submit each link, write the report, end on `turn_end`. **The report is the decision**: `rework=true` sends the analysts back with a probe, `rework=false` makes it the analysis result. `author_chain` is a *brief*, not a terminal — a finished link advances the chain on a tool result, so a dead link is a sentence in the conversation rather than the end of the turn. A cycle that commits anything ends before judging, so the committed tools are reloaded and the workers rerun on them first. Also answers author clarifications. |
 | Analyst co-lead | `ReadOnlyToolProvider`: the authored toolkit worktree + `web_search` + `web_fetch` (`include_text_search=False`). | Provider-decorrelated **code review** of one authored tool — brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs → `ToolReviewVerdict`. |
-| Reviewer | `ReadOnlyToolProvider`: run artifacts, figures, memory, `web_search` + `web_fetch`, `text_search`, and the shared `read_paper` (attaches the PDF itself; papers are cited by handle and never text-matched, each paper value attributed with its place in the paper and listed for verification), `edit_report`/`review_report` (the draft shown as rendered pages), `turn_end`. | Reviews the analysis against the literature and files one `ReviewerReport` per review (its PDF carries a "values to verify against the PDFs" appendix) — the verdict fields the graph routes on plus the report body — which the harness renders; requests capped rework through the same report. |
+| Reviewer | `ReadOnlyToolProvider`: run artifacts, figures, memory, `web_search` + `web_fetch`, `text_search`, and the shared `read_paper` (attaches the PDF itself; papers are cited by handle and never text-matched, each paper value attributed with its place in the paper and listed for verification), `edit_report`/`review_report` (the draft shown as rendered pages), `turn_end`. | The sole I/O: scopes and plans each request, then files one `ReviewerReport` per turn whose `assign_to` routes the graph (librarian, analysts, or the human). A report to the human is rendered by the harness (its PDF carries a "values to verify against the PDFs" appendix) and sent as a PDF; the human's reply returns as a nudge. |
 
 
 **Provenance: every number is bound to a receipt.** Every artifact a claim can rest on — each tool

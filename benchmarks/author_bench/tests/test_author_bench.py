@@ -104,6 +104,15 @@ class _FakeLead:
         self._result = result
         self._raises = raises
         self.seen: dict = {}
+        self.run_control = None
+        self.agent_key = None
+        self.channel = None
+
+    def ensure_run_control(self):
+        from auto_research.run_control import RunControl
+
+        self.run_control = self.run_control or RunControl()
+        return self.run_control
 
     async def drive_authoring(self, spec, **kwargs):
         self.seen = {"spec": spec, **kwargs}
@@ -387,9 +396,18 @@ def test_a_rerun_replaces_the_trial_it_repairs_rather_than_joining_it(tmp_path):
 # ── the trial surface matches production ────────────────────────────────────
 
 
-def _surface(*, human_handler, tmp_path):
-    """The lead's tool names, built exactly as runtime.py and the authoring loop build them."""
+def _surface(*, tmp_path, attended: bool):
+    """The lead's tool names, built exactly as runtime.py and the authoring loop build them.
+
+    Attended production wraps the lead's provider in its seat's channel layer (E12); a trial runs
+    the bare provider, with no router and no human.
+    """
+    from types import SimpleNamespace
+
     from auto_research.agents.react import ReadOnlyToolProvider
+    from auto_research.agents.roles import ChannelTools
+    from auto_research.hitl.router import SeatRouter
+    from auto_research.run_control import RunControl
 
     class _Session:  # only its presence matters to the provider
         worktree = tmp_path
@@ -397,29 +415,34 @@ def _surface(*, human_handler, tmp_path):
     provider = ReadOnlyToolProvider(
         roots=[tmp_path], retrieval=None, web_source=object(),
         include_data_catalog=True,
-        include_plan_and_debate=human_handler is not None,
         include_text_search=False, authoring_session=_Session(),
-        human_handler=human_handler, asked_by="analyst_lead", model="m",
     )
-    return [d["name"] for d in provider.tool_definitions()]
+    if not attended:
+        return [d["name"] for d in provider.tool_definitions()]
+    seat = SimpleNamespace(
+        channel=SeatRouter(RunControl(), human_handler=object()), agent_key="analyst_lead",
+        role="analyst_lead", run_control=None, model=None,
+    )
+    return [d["name"] for d in ChannelTools(provider, role=seat).tool_definitions()]
 
 
 def test_the_trial_surface_differs_from_attended_production_only_by_the_human_channel(tmp_path):
     """The measurement is only about authoring if the surface is production's.
 
-    Trials run unattended, so the lead loses `ask_human` and the budget-free `plan_and_debate`
-    design channel. Everything else it can do must be identical, and this pins that: a tool added
-    to (or removed from) the production loop fails here until the benchmark's label is revisited.
-    A lead that cannot spend a question can only spend another rework round, which is why the
-    honest-failure rate these trials produce is an unattended figure.
+    Trials run unattended with no team around the lead, so it lacks the seat channel (`message`,
+    `list_peers`, and `view_receipt` for what a message shows). Everything else it can do must be identical,
+    and this pins that: a tool added to (or removed from) the production loop fails here until
+    the benchmark's label is revisited. A lead that cannot spend a question can only spend another
+    rework round, which is why the honest-failure rate these trials produce is an unattended figure.
     """
 
-    attended = _surface(human_handler=object(), tmp_path=tmp_path)
-    unattended = _surface(human_handler=None, tmp_path=tmp_path)
+    attended = _surface(tmp_path=tmp_path, attended=True)
+    unattended = _surface(tmp_path=tmp_path, attended=False)
 
-    assert set(attended) - set(unattended) == {"ask_human", "plan_and_debate"}
+    assert set(attended) - set(unattended) == {"message", "list_peers", "view_receipt"}
     assert not set(unattended) - set(attended)
-    for name in ("drive_coder", "submit_for_review", "respond_to_review", "read_file", "list_dir"):
+    for name in ("wait_for_reply", "submit_for_review", "respond_to_review",
+                 "read_file", "list_dir"):
         assert name in unattended
 
 

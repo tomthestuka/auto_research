@@ -5,6 +5,8 @@ analyst lead, and stub gate/review hooks — so no live LLM or git is involved.
 """
 
 import asyncio
+
+from auto_research.run_control import RunControl
 import pathlib
 import types
 
@@ -188,8 +190,13 @@ def test_ask_lead_handler_records_the_question_to_monitor():
     It cannot be: the handler returns before the lead has seen the question. The reply is a
     `drive_coder` steer later in the lead's own turn, and the ledger records it there.
     """
+    from types import SimpleNamespace
+
     mon = _RecordingMonitor()
-    handler = _make_ask_lead_handler(lambda: _QuestionParkingSession(), monitor=mon)
+    control = RunControl()
+    lead = SimpleNamespace(agent_key="analyst_lead", ensure_run_control=lambda: control)
+    session = SimpleNamespace(_steer_event=object(), mark_question_open=lambda: None)
+    handler = _make_ask_lead_handler(lambda: session, lead=lead, monitor=mon)
     asyncio.run(handler("which lib fn?"))
     ev = mon.of("coder.ask_lead")
     assert ev and ev[0]["data"]["message"] == "which lib fn?"
@@ -336,28 +343,28 @@ def test_review_cap_exhaustion_returns_failed(tmp_path):
     assert result.review is not None and result.review.approved is False
 
 
-class _QuestionParkingSession:
-    def __init__(self) -> None:
-        self.parked: list[str] = []
-
-    def park_question(self, message: str) -> None:
-        self.parked.append(message)
-
-
-def test_ask_lead_parks_the_question_and_returns_at_once():
-    """`ask_lead` is NON-BLOCKING: it parks and returns, it does not answer.
+def test_ask_lead_posts_to_the_leads_inbox_and_returns_at_once():
+    """The coder's ``message(to="lead")`` is NON-BLOCKING: it posts and returns, it does not answer.
 
     It used to call `lead.clarify_for_author`, opening a second ReAct conversation on the lead
     concurrently with the lead's own turn. Measured live 2026-09-12: that loop held the
     coder-control tools and spent 85 calls polling the very coder blocked waiting for it, and its
     answer landed 326 s later, after the coder had timed out. Nobody waits on anybody now — the
-    lead's own loop collects the question at its next safe injection point.
+    question lands in the lead's inbox (E12) and its own loop delivers it at a safe boundary.
     """
-    session = _QuestionParkingSession()
-    handler = _make_ask_lead_handler(lambda: session)
+    from types import SimpleNamespace
+
+    from auto_research.run_control import RunControl
+
+    control = RunControl()
+    lead = SimpleNamespace(agent_key="analyst_lead", ensure_run_control=lambda: control)
+    session = SimpleNamespace(_steer_event=object(), opened=False)
+    session.mark_question_open = lambda: setattr(session, "opened", True)
+    handler = _make_ask_lead_handler(lambda: session, lead=lead)
     answer = asyncio.run(handler("which lib fn?"))
-    assert answer == "delivered."
-    assert session.parked == ["which lib fn?"]
+    assert answer.startswith("delivered.")
+    assert session.opened
+    assert control.drain_steer("analyst_lead") == ["which lib fn?"]
 
 
 def test_ask_lead_without_a_session_says_so_rather_than_dropping_the_question():
@@ -366,20 +373,40 @@ def test_ask_lead_without_a_session_says_so_rather_than_dropping_the_question():
     assert "not reachable" in answer
 
 
-def test_ask_human_handler_routes_to_injected_handler():
+def test_ask_human_handler_returns_at_once_and_delivers_the_reply_into_the_coders_turn():
+    """E12: the coder's ``message(to="human")`` never blocks — the human's answer is steered
+    into the coder's turn later, through ``session.send``."""
+    from types import SimpleNamespace
+
     seen = {}
 
-    def human(query):  # query is a HumanQuery (typed §9.8 contract)
+    async def human(query):  # query is a HumanQuery (typed §9.8 contract)
         seen["kind"] = query.kind
         seen["message"] = query.message
         seen["asked_by"] = query.asked_by
         return "human-says-go"
 
-    handler = _make_ask_human_handler(human)
-    answer = asyncio.run(handler("response convention?"))
-    assert answer == "human-says-go"
+    sent: list[tuple[str, bool]] = []
+
+    async def send(text, *, mid_turn=False):
+        sent.append((text, mid_turn))
+        return "steered"
+
+    session = SimpleNamespace(send=send)
+
+    async def scenario():
+        handler = _make_ask_human_handler(human, session_ref=lambda: session)
+        answer = await handler("response convention?")
+        assert answer.startswith("Sent to the human")
+        for _ in range(50):
+            if sent:
+                break
+            await asyncio.sleep(0.01)
+
+    asyncio.run(scenario())
     assert seen["kind"] == "blocked" and seen["message"] == "response convention?"
     assert seen["asked_by"] == "coder"
+    assert sent == [("[Reply from the human] human-says-go", True)]
 
 
 def test_ask_human_handler_without_handler_raises_fail_safe():
@@ -1410,7 +1437,7 @@ def test_an_answer_to_an_open_question_goes_mid_turn_without_the_flag():
         session = _bg_session([], delay=0.2)
         session.start_drive("first")
         await asyncio.sleep(0.02)
-        session.park_question("ENERGY or PI?")
+        session.mark_question_open()
         assert await session.send("PI") == "answered"
         assert session._backend.steered == ["PI"]
         assert await session.send("and add a test") == "queued", "only the answer skips the queue"
@@ -1449,19 +1476,6 @@ def test_the_wait_returns_when_the_turn_ends_not_at_its_timeout():
         session.start_drive("go")
         reason, waited = await _timed_wait(session, 30)
         assert reason == "turn_ended" and waited < 1.0, (reason, waited)
-
-    asyncio.run(scenario())
-
-
-def test_the_wait_returns_when_the_coder_asks():
-    async def scenario():
-        session = _bg_session([], delay=5.0)
-        session.start_drive("go")
-        asyncio.get_running_loop().call_later(0.1, session.park_question, "which epoch?")
-        reason, waited = await _timed_wait(session, 30)
-        assert reason == "question" and waited < 1.0, (reason, waited)
-        assert session.take_questions() == ["which epoch?"]
-        await session.aclose()
 
     asyncio.run(scenario())
 
@@ -1598,6 +1612,13 @@ def test_submit_waits_for_the_coder_to_stop_before_the_gate(monkeypatch):
     asyncio.run(scenario())
 
 
+def _coder_asks(session, rc, text):
+    """What the coder's ``message(to="lead")`` does: the text to the lead's inbox, the question
+    marked open (``sandbox.merge_flow._make_ask_lead_handler``)."""
+    rc.add_steer("analyst_lead", text, sender="coder")
+    session.mark_question_open()
+
+
 def test_submit_returns_a_question_instead_of_gating(monkeypatch):
     """A coder waiting on the lead would never stop; the submit hands the question back."""
     import auto_research.agents.react as react
@@ -1610,11 +1631,14 @@ def test_submit_returns_a_question_instead_of_gating(monkeypatch):
     monkeypatch.setattr(react, "_submit_now", never)
 
     async def scenario():
+        rc = RunControl()
         session = _bg_session([], delay=5.0)
+        session.watch_steers(rc.steer_event("analyst_lead"))
         session.start_drive("go")
-        asyncio.get_running_loop().call_later(0.1, session.park_question, "PI or ENERGY?")
+        asyncio.get_running_loop().call_later(0.1, _coder_asks, session, rc, "PI or ENERGY?")
         out = await react.execute_submit(session, None)
-        assert not out.is_error and "Not submitted" in out.text and "PI or ENERGY?" in out.text
+        assert not out.is_error and "Not submitted" in out.text and "message" in out.text
+        assert rc.drain_steer("analyst_lead") == ["PI or ENERGY?"], "the question waits in the inbox"
         await session.aclose()
 
     asyncio.run(scenario())
@@ -1629,11 +1653,13 @@ def test_a_question_wake_does_not_claim_the_coder_started_a_next_turn(monkeypatc
     monkeypatch.setattr(react, "coder_wait_limits_s", lambda: (1, 2, 3))
 
     async def scenario():
+        rc = RunControl()
         session = _bg_session([], delay=5.0)
+        session.watch_steers(rc.steer_event("analyst_lead"))
         session.start_drive("go")
-        asyncio.get_running_loop().call_later(0.1, session.park_question, "PI or ENERGY?")
+        asyncio.get_running_loop().call_later(0.1, _coder_asks, session, rc, "PI or ENERGY?")
         out = await react.execute_wait_coder(session, {})
-        assert "[coder asks] PI or ENERGY?" in out.text
+        assert "A message for you has arrived" in out.text
         assert "next turn" not in out.text and "has stopped" not in out.text, out.text
         await session.aclose()
 

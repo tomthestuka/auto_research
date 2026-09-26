@@ -104,4 +104,5 @@ tool_author_cap: 12                   # authoring attempts per analysis (bounds 
 #   terminal regardless. Pass run_research(human_channel=...) to wire a library run.
 human_channel: none
 human_channel_ping_timeout_s: 60      # preflight wait for the channel to reply before failing launch
+channel_mirror: true                  # copy seat-to-seat texts to the human's chat, read-only
 human_response_timeout_s: 43200       # 12h — mid-run wait for a human reply before failing (all channels, in-process blocking)

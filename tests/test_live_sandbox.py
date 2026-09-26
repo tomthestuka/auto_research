@@ -81,8 +81,7 @@ def test_xspec_local() -> None:
         "request": request.question,
         "accepted": verdict.accepted,
         "rationale": verdict.rationale,
-        "needs_more_literature": verdict.needs_more_literature,
-        "needs_analysis_rework": verdict.needs_analysis_rework,
+        "assign_to": verdict.assign_to,
         "monitor_jsonl": str(monitor_jsonl),
         "monitor_markdown": str(monitor_md),
     }
@@ -120,8 +119,7 @@ def test_heasarc_selfcorrect() -> None:
         "request": request.question,
         "accepted": verdict.accepted,
         "rationale": verdict.rationale,
-        "needs_more_literature": verdict.needs_more_literature,
-        "needs_analysis_rework": verdict.needs_analysis_rework,
+        "assign_to": verdict.assign_to,
         "monitor_jsonl": str(monitor_jsonl),
         "monitor_markdown": str(monitor_md),
     }

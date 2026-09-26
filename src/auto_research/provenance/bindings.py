@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from auto_research.provenance.store import INPUT_SOURCE, SHELL_TOOLS
+from auto_research.provenance.store import INPUT_SOURCE, NOT_EVIDENCE_NAMES, is_evidence
 from auto_research.schemas.artifacts import HANDLE_PATTERN, PaperAttribution, Receipt
 
 _H = rf"(?:self|{HANDLE_PATTERN.split(':', 1)[0]}):[frdpwhc][1-9][0-9]*"
@@ -209,27 +209,24 @@ def ungrounded_numbers(
     prose: str,
     usable: Mapping[str, str],
     *,
-    echoes: Mapping[str, frozenset[str]] | None = None,
     masked: Sequence[tuple[int, int]] = (),
 ) -> list[re.Match]:
     """Each number in ``prose`` that no normalised text in ``usable`` carries on token boundaries.
 
     The one grounding rule for a number, shared by ``check_bindings`` (a report against its receipts)
     and the gate's return check (a tool's returned values against its own receipted output). A
-    number inside ``masked`` or an exempt shape (Figure/Table/Eq. numbers, years, …) is skipped;
-    ``echoes`` names numbers a receipt only repeats back, which ground nothing.
+    number inside ``masked`` or an exempt shape (Figure/Table/Eq. numbers, years, …) is skipped.
     """
     spans = list(masked)
     for pattern in _EXEMPT_RES:
         spans.extend(m.span() for m in pattern.finditer(prose))
-    echoes = echoes or {}
     missing: list[re.Match] = []
     for m in NUMBER_RE.finditer(prose):
         if any(s <= m.start() < e for s, e in spans):
             continue
         token = normalise(m.group(), "result")
         if not any(
-            bounded_find(hay, token) and token not in echoes.get(h, ())
+            bounded_find(hay, token)
             for h, hay in usable.items()
         ):
             missing.append(m)
@@ -351,19 +348,22 @@ class _Resolved:
         self.lookup = lookup
         self._entries: dict[str, tuple[Receipt | None, str | None, str | None]] = {}
 
-    def typed(self, receipt: Receipt) -> frozenset[str]:
-        """Numbers this receipt cannot ground: what its source typed into shell commands."""
-        if receipt.produced_by not in SHELL_TOOLS:
-            return frozenset()
-        typed = getattr(self.lookup, "typed_numbers", None)
-        return typed(receipt.source) if callable(typed) else frozenset(receipt.arg_numbers)
-
     def entry(self, handle: str) -> tuple[Receipt | None, str | None, str | None]:
         """``(receipt, problem, normalised text)``; ``receipt`` is None when it cannot be used."""
         if handle not in self._entries:
             receipt = self.lookup.get(handle)
             if receipt is None:
                 self._entries[handle] = (None, f"cites {handle}, which is not a receipt you can cite.", None)
+            elif not is_evidence(receipt):
+                # Recorded, never evidence (human ruling 2026-09-25): what a role read, searched,
+                # was told or ran in the shell shows where to look; only what the analysis produced
+                # backs a number. In scope it is skipped silently; cited, it is named.
+                what = NOT_EVIDENCE_NAMES.get(receipt.produced_by, f"a {receipt.produced_by} return")
+                self._entries[handle] = (None, (
+                    f"cites {handle}, {what}: it shows where to look, not evidence. Cite the toolkit "
+                    "result the value came from, or attribute the paper with its place in it; state "
+                    "anything else in words."
+                ), None)
             else:
                 problem = self.lookup.verify(handle)
                 if problem:
@@ -397,7 +397,6 @@ def check_bindings(
     resolved = _resolved or _Resolved(lookup)
     result = BindingResult(bindings=parse_bindings(prose, own_source=own_source))
     usable: dict[str, str] = {}  # handle -> normalised text, for receipts that may ground numbers
-    echoes: dict[str, frozenset[str]] = {}  # handle -> numbers that receipt only repeats
     cited_here: list[str] = []
 
     for binding in result.bindings:
@@ -416,7 +415,6 @@ def check_bindings(
             continue
         if hay is not None:
             usable[binding.handle] = hay
-            echoes[binding.handle] = resolved.typed(receipt)
             cited_here.append(binding.handle)
         if binding.quote is None:
             continue
@@ -433,15 +431,6 @@ def check_bindings(
                 f"{label} quotes {binding.handle}, a {receipt.kind} with no text to quote. Cite it "
                 f"as [{binding.handle}] instead."
             )
-        elif typed_in := [
-            t for m in NUMBER_RE.finditer(binding.quote)
-            if (t := normalise(m.group(), "result")) in resolved.typed(receipt)
-        ]:
-            result.problems.append(
-                f'{label}: the quote "{binding.quote}" takes {", ".join(typed_in)} from a shell call '
-                f"({binding.handle}) whose command you typed that number into, so the output only "
-                "repeats it. Cite the receipt that computed or measured it."
-            )
         elif not bounded_find(hay, normalise(binding.quote, receipt.kind)):
             hint = _quote_hint(resolved, binding.handle, binding.quote, receipt.kind)
             result.problems.append(
@@ -454,7 +443,6 @@ def check_bindings(
         receipt, _, hay = resolved.entry(handle)
         if receipt is not None and not receipt.flags and hay is not None:
             usable[handle] = hay
-            echoes[handle] = resolved.typed(receipt)
 
     # ``support``: handles backing the text as a whole (a finding's support list); they ground its
     # numbers like scope. A paper in it grounds nothing (it has no text) and exempts nothing: each
@@ -464,11 +452,10 @@ def check_bindings(
         receipt, _, hay = resolved.entry(handle)
         if receipt is not None and not receipt.flags and hay is not None:
             usable.setdefault(handle, hay)
-            echoes.setdefault(handle, resolved.typed(receipt))
     masked = [(b.start, b.end) for b in result.bindings] + list(exempt_spans)
     missing: list[str] = [
         f'"{m.group()}" (…{_context(prose, m.start(), m.end())}…)'
-        for m in ungrounded_numbers(prose, usable, echoes=echoes, masked=masked)
+        for m in ungrounded_numbers(prose, usable, masked=masked)
     ]
     if missing:
         named = list(dict.fromkeys(cited_here))

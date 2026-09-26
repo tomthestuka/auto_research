@@ -41,7 +41,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from auto_research.graph.runtime import readonly_tools_for
+from auto_research.graph.runtime import attach_channel, readonly_tools_for
 from auto_research.agents.roles import AnalystLeadAgent
 from auto_research.monitor import RunMonitor
 from auto_research.observability.costs import install_cost_meter
@@ -200,11 +200,12 @@ async def _run_authoring(fake_tk: Path, ts: str):
     lead = AnalystLeadAgent(monitor=monitor)
     # Production's own factory, not a look-alike (the 2026-09-08 seams lesson): getting one of
     # these flags wrong does not fail, it silently measures a role the pipeline does not have.
-    # `readonly_tools_for` derives `include_plan_and_debate` from the handler, so passing the
-    # handler is what opens the design channel — the same derivation `run_research` uses.
-    lead.tools = readonly_tools_for(
-        "analyst_lead", roots=[run_dir(run_id), fake_tk], human_handler=handler,
-    )
+    # The design channel is `message(to="human")`, opened by putting the lead on a quick channel
+    # with the handler — `attach_channel`, the same seam `run_research` uses (E12).
+    lead.tools = readonly_tools_for("analyst_lead", roots=[run_dir(run_id), fake_tk])
+    lead.agent_key = "analyst_lead"
+    attach_channel([lead], run_id=run_id, run_control=lead.ensure_run_control(),
+                   human_handler=handler, monitor=monitor)
 
     request = AnalystToolRequest(
         request_kind="new_capability",
@@ -365,9 +366,10 @@ def test_chain_planning_returns_ordered_chain(tmp_path, monkeypatch):
         )
 
     lead = AnalystLeadAgent(monitor=monitor)
-    lead.tools = readonly_tools_for(
-        "analyst_lead", roots=[run_dir(run_id), fake_tk], human_handler=neutral_handler,
-    )
+    lead.tools = readonly_tools_for("analyst_lead", roots=[run_dir(run_id), fake_tk])
+    lead.agent_key = "analyst_lead"
+    attach_channel([lead], run_id=run_id, run_control=lead.ensure_run_control(),
+                   human_handler=neutral_handler, monitor=monitor)
     request = AnalystToolRequest(
         request_kind="new_capability",
         science_context=_CHAIN_SCIENCE_CONTEXT,
@@ -432,10 +434,10 @@ def test_chain_planning_returns_ordered_chain(tmp_path, monkeypatch):
 # faked configuration directory and resolved by the ordinary registry, so the run states what it
 # measured instead of inheriting it.
 #
-# Human channel OFF (unattended): `human_handler=None`, so `readonly_tools_for` withholds the design
-# channel — the derivation production makes, not a flag set by hand here.
+# Human channel OFF (unattended): `human_handler=None`, so no human address is offered — the
+# derivation production makes, not a flag set by hand here.
 _UNATTENDED = (
-    "UNATTENDED SESSION — no human is available. Do not use plan_and_debate or ask_human, and "
+    "UNATTENDED SESSION — no human is available. Do not message the human, and "
     "ignore any instruction to debate the design with a human; proceed with this brief as-is and "
     "author the tool directly. An honest failure is acceptable; never fabricate a result."
 )
@@ -625,7 +627,8 @@ def _drive_coder_results(events: list[dict]) -> list[dict]:
     return [
         event for event in events
         if event.get("event", "").endswith(".tool_result")
-        and (event.get("data") or {}).get("tool") == "drive_coder"
+        and (event.get("data") or {}).get("tool") == "message"
+        and "the coder" in str((event.get("data") or {}).get("text", ""))
     ]
 
 

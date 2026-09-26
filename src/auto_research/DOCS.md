@@ -117,6 +117,13 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   Steer is cooperative (queued, delivered at the target's next ReAct turn); **stop is an
   interrupt**: `interrupt(reason, by)` flags the run and cancels the registered run task, so it
   needs no cooperation from the pipeline.
+  **Per-seat inboxes (E12):** every text a seat receives — a `/steer`, the human's reply, another
+  seat's `message`, the coder's question, a runtime notice — is an `InboxEntry(sender, text,
+  handles, kind)` queued by `add_steer(key, text, *, sender="human", kind="steer", handles=())`
+  and drained once by `drain_inbox(key)` (`drain_steer` returns the texts); `render()` is the user
+  turn the seat reads. `set_live`/`is_live` mark a running loop; `register_resumed(sender, seat,
+  task)` / `resumed_by(sender)` track seats a message resumed; `register_background(task)` holds
+  awaited human replies; `cancel_resumed()` cancels both (the interrupt cleanup's first step).
 - `run_control.UserInterruptionError` — raised in place of the `CancelledError` that carried a
   human stop. Carries `reason`/`by`/`where` and the paths that exist (`artifacts`); no report is
   composed on that path, and `resume=True` continues from the last completed node.
@@ -205,3 +212,6 @@ Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
   100k), read at call time; constants `_EVENT_ARG_CAP`/`_EVENT_RESULT_CAP`/`CODER_TEXT_CAP` deleted.
 - 2026-09-12 — New `env.provider_key_aliases(provider)` derives the key variable from
   `models.keys.env_var_names`, replacing the hand-written table, so every reader agrees.
+- 2026-09-25 — [E12] `RunControl` inboxes carry `InboxEntry` (sender, kind, handles) for every text a
+  seat receives; seat liveness, resumed-task and background-task registries, `cancel_resumed()`
+  called first in the interrupt cleanup.

@@ -470,7 +470,7 @@ def test_arxiv_sends_field_syntax_as_written():
 def test_a_librarian_cannot_cite_another_roles_receipt(tmp_path):
     """Its scope is what it opened; a worker's receipt in the same store grounds nothing."""
     p = _read_one(tmp_path)
-    other = p.store.mint(source="analyst_worker_0", kind="result", produced_by="fit",
+    other = p.store.mint(source="analyst_worker_0", kind="result", produced_by="research_toolkit.xspec_utils.fit",
                          data="The fitted lag is 7.7 days.")
     report = _report()
     report["findings"].append({"claim": f"A fit gives 7.7 days [{other.handle}].", "support": ["lib:p1"]})

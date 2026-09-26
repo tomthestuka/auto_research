@@ -45,7 +45,7 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   passes `author_budget` into the cycle and the **lead's own loop** opens at its `decide` stage: it
   reads the relevant `lib/`, then files `author_chain` (the whole ordered dependency chain) or
   `hold_authoring`. Filing the chain authors **each link sequentially inside that same
-  conversation** — the lead drives the coder + gate + GPT review through `drive_coder` /
+  conversation** — the lead drives the coder + gate + GPT review through `message` to `coder` /
   `submit_for_review`, diagnosing each verdict, and each link's `AuthoringSession` lifecycle is
   owned by `run_cycle`. The strategy never calls `propose_and_pr` (that auto-loop is kept for tests
   / non-lead callers); the LLM never issues git — `build_authoring_session`/`approve_edit` do
@@ -138,3 +138,4 @@ Compacted 2026-08-05 and again 2026-09-24 (every entry); detail in git history.
   commit, charged to an author credit.
 - 2026-09-24 — `IODebateToConverge` and its `IOAbstraction*` protocols deleted (the librarian is
   one loop).
+- 2026-09-25 — [E12] Wording only: the lead steers its coder with `message(to="coder")`.

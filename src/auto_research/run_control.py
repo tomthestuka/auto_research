@@ -76,8 +76,49 @@ class UserInterruptionError(RuntimeError):
         )
 
 
+class InboxEntry:
+    """One text waiting for a seat: who sent it, what it says, and the receipt handles it names.
+
+    The same queue carries a human ``/steer``, a human's reply to a seat's ``message``, and a text
+    from another seat (E12). A text is informal: it is never a receipt, and the handles it names
+    only become *viewable* for the recipient, never citable.
+    """
+
+    __slots__ = ("sender", "text", "handles", "kind")
+
+    def __init__(
+        self, sender: str, text: str, handles: tuple[str, ...] = (), kind: str = "message"
+    ) -> None:
+        self.sender = sender
+        self.text = text
+        self.handles = tuple(handles)
+        # "steer" (a human /steer), "reply" (the human answering a seat's message), "message"
+        # (a seat's text), "notice" (the runtime: a resumed seat ended its turn, a reply timed out).
+        self.kind = kind
+
+    def render(self) -> str:
+        """The user turn the recipient reads."""
+        if self.kind == "steer":
+            return f"[Human steer] {self.text}"
+        if self.kind == "reply":
+            return f"[Reply from the human] {self.text}"
+        if self.kind == "notice":
+            return f"[Notice] {self.text}"
+        if self.sender == "coder":
+            return (
+                f"[Message from the coder] {self.text}\n\nAnswer it with message(to=\"coder\") — that "
+                "reaches the coder inside the turn it is still running, so it does not have to stop "
+                "and wait."
+            )
+        return (
+            f"[Message from {self.sender}] {self.text}\n\n"
+            f"(Reply with message(to=\"{self.sender}\") when an answer helps; texts are informal, so "
+            "rest every claim on your own evidence.)"
+        )
+
+
 class RunControl:
-    """Mutable run-wide flags: a human stop request and per-role steer inboxes."""
+    """Mutable run-wide flags: a human stop request and per-seat inboxes."""
 
     def __init__(self) -> None:
         self.stop_requested: bool = False
@@ -86,7 +127,12 @@ class RunControl:
         # Set alongside ``stop_requested`` so a blocked HITL wait (``wait_reply_or_stop``) wakes at
         # once. Constructed without a running loop is fine on Python ≥3.10 (Event binds lazily).
         self.stop_event: asyncio.Event = asyncio.Event()
-        self._steer: dict[str, list[str]] = {}
+        self._steer: dict[str, list[InboxEntry]] = {}
+        # E12: seats whose loop is running right now, and the background tasks that resumed a
+        # dormant seat, keyed by the seat that sent the message (so its turn_end can wait for them).
+        self._live: set[str] = set()
+        self._resumed: dict[str, dict[str, asyncio.Task]] = {}
+        self._background: set[asyncio.Task] = set()
         # agent_key → set while that role has an undelivered steer, so a role parked in a
         # blocking wait (the lead's `wait_coder`) wakes the moment one arrives rather than at its
         # next timeout. Cleared by `drain_steer`, which is where the steer is actually delivered.
@@ -133,13 +179,27 @@ class RunControl:
         return True
 
     # ── steer ─────────────────────────────────────────────────────────────────
-    def add_steer(self, agent_key: str, message: str) -> None:
-        """Queue a human steer message for ``agent_key`` (delivered at its next ReAct iteration).
+    def add_steer(
+        self,
+        agent_key: str,
+        message: str,
+        *,
+        sender: str = "human",
+        kind: str = "steer",
+        handles: tuple[str, ...] = (),
+    ) -> None:
+        """Queue a text for ``agent_key``'s inbox (delivered at its next ReAct boundary).
+
+        With the defaults this is a human ``/steer``. The seat router (E12) posts a seat's
+        ``message``, a human reply and runtime notices through the same call, so every text a seat
+        receives reaches it at the one drain that knows when an injected turn is legal.
 
         ``/steer all`` is expanded to per-key adds by the command handler (which knows the
         roster), so there is no shared "all" bucket to race — each role owns its own inbox.
         """
-        self._steer.setdefault(agent_key, []).append(message)
+        self._steer.setdefault(agent_key, []).append(
+            InboxEntry(sender, message, handles=handles, kind=kind)
+        )
         self.steer_event(agent_key).set()
 
     def steer_event(self, agent_key: str) -> asyncio.Event:
@@ -173,8 +233,8 @@ class RunControl:
             busy += await _fire(aborter)
         return busy
 
-    def drain_steer(self, agent_key: str | None) -> list[str]:
-        """Pop and return the pending steer messages for ``agent_key`` (empty if none/unkeyed)."""
+    def drain_inbox(self, agent_key: str | None) -> list[InboxEntry]:
+        """Pop and return every entry waiting for ``agent_key`` (empty if none/unkeyed)."""
         if not agent_key:
             return []
         msgs = self._steer.get(agent_key)
@@ -186,5 +246,63 @@ class RunControl:
         self._steer[agent_key] = []
         return list(msgs)
 
+    def drain_steer(self, agent_key: str | None) -> list[str]:
+        """Pop the pending entries for ``agent_key`` and return their texts (``/steer``'s view)."""
+        return [entry.text for entry in self.drain_inbox(agent_key)]
 
-__all__ = ["RunControl", "STOP_SENTINEL", "UserInterruptionError"]
+    def has_inbox(self, agent_key: str | None) -> bool:
+        """Whether ``agent_key`` has an undelivered entry."""
+        return bool(agent_key) and bool(self._steer.get(agent_key))
+
+    # ── seats (E12) ───────────────────────────────────────────────────────────
+    def set_live(self, agent_key: str | None, live: bool) -> None:
+        """Record whether ``agent_key``'s loop is running (set by the loop itself)."""
+        if not agent_key:
+            return
+        if live:
+            self._live.add(agent_key)
+        else:
+            self._live.discard(agent_key)
+
+    def is_live(self, agent_key: str) -> bool:
+        return agent_key in self._live
+
+    def register_resumed(self, sender: str, seat: str, task: asyncio.Task) -> None:
+        """Record that ``sender``'s message resumed ``seat`` in ``task``; forgotten when it ends."""
+        tasks = self._resumed.setdefault(sender, {})
+        tasks[seat] = task
+
+        def _forget(done: asyncio.Task) -> None:
+            if tasks.get(seat) is done:
+                del tasks[seat]
+
+        task.add_done_callback(_forget)
+
+    def resumed_by(self, sender: str | None) -> list[str]:
+        """The seats ``sender`` resumed that are still in their turn."""
+        if not sender:
+            return []
+        return [seat for seat, task in self._resumed.get(sender, {}).items() if not task.done()]
+
+    def register_background(self, task: asyncio.Task) -> None:
+        """Record a channel task that no turn waits on (a human reply being awaited), so an
+        interrupt cancels it; forgotten when it ends."""
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def cancel_resumed(self) -> int:
+        """Cancel and await every channel task — resumed seats and awaited human replies — for
+        the interrupt cleanup; return how many were running."""
+        tasks = [t for group in self._resumed.values() for t in group.values() if not t.done()]
+        tasks += [t for t in self._background if not t.done()]
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except BaseException:  # noqa: BLE001 — a stop must not be defeated by what it stops
+                pass
+        return len(tasks)
+
+
+__all__ = ["InboxEntry", "RunControl", "STOP_SENTINEL", "UserInterruptionError"]

@@ -4,15 +4,17 @@ A :class:`HumanQuery` is what *any* role emits when it is blocked and needs a re
 the cross-cutting clarification channel, decoupled from toolkit merging. A
 :class:`HumanResponse` is the human's reply. They are the typed contract behind the
 injectable ``human_handler`` (and the connectors in :mod:`auto_research.hitl`); the SDK
-author's ``ask_human`` and every in-graph role's ``ask_human`` tool route through them.
+author's ``ask_human`` and the roles' human-bound messages route through them.
 """
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated, Literal
 from uuid import uuid4
 
 from pydantic import Field
 
+from auto_research.schemas.artifacts import Handle
 from auto_research.schemas.base import MessageModel
 
 
@@ -20,8 +22,25 @@ NonEmptyStr = Annotated[str, Field(min_length=1)]
 
 # Why a role is raising (CLAUDE.md §9.7): a science clarification, a code/convention
 # clarification, or a hard block (missing data, broken dependency, contradictory request).
-# There is no ``approve`` kind — the runtime never asks a human to merge.
-HumanQueryKind = Literal["clarify_science", "clarify_code", "blocked"]
+# ``report`` is a filed report sent to the human for discussion. There is no ``approve`` kind —
+# the runtime never asks a human to merge.
+HumanQueryKind = Literal["clarify_science", "clarify_code", "blocked", "report"]
+
+
+class HumanAttachment(MessageModel):
+    """One file travelling with a query or a reply, by reference (never the bytes).
+
+    Outbound, the runtime builds it from a receipt (``hitl.attachments.resolve_attachments``), so
+    ``handle`` names the receipt and ``path`` is the runtime's own copy of the bytes; a model
+    supplies only the handle. Inbound, a connector saves the human's file under the query's
+    ``reply_dir`` and leaves ``handle`` unset until the runtime mints it.
+    """
+
+    handle: Handle | None = None
+    path: Path
+    filename: NonEmptyStr  # what the human sees as the file name
+    mime_type: NonEmptyStr
+    caption: str = ""
 
 
 class HumanQuery(MessageModel):
@@ -40,6 +59,9 @@ class HumanQuery(MessageModel):
     message: NonEmptyStr  # the body, in Markdown — what the role wants to tell/ask the human
     asked_by: NonEmptyStr  # the role raising it: "analyst_worker", "analyst_lead", "coder", …
     model: str = ""  # the model backing that role, e.g. "claude-sonnet-4-6" (blank if unknown)
+    attachments: list[HumanAttachment] = Field(default_factory=list)
+    # Where a connector saves the files the human replies with; None = it saves none.
+    reply_dir: Path | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @property
@@ -64,5 +86,9 @@ class HumanResponse(MessageModel):
     """The human's reply to a :class:`HumanQuery`."""
 
     query_id: NonEmptyStr
-    answer: str
+    answer: str  # the human's own words only
+    attachments: list[HumanAttachment] = Field(default_factory=list)
+    # The connector's notes about what did not travel (an attachment too large to send or to
+    # download), kept apart from ``answer`` so the human's receipt holds only the human's words.
+    notes: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

@@ -726,7 +726,7 @@ def check_structural(
     # ``*_utils`` package, which is the layout `prompts/coder.md` already teaches and §9.2
     # specifies. Everything else is rejected and named, `obsdb_catalog` included — the toolkit's
     # hand-built trusted catalog writer is human + build-agent work (CLAUDE.md §3), never the
-    # runtime coder's, and a review that asks for a change inside it is an `ask_lead`.
+    # runtime coder's, and a review that asks for a change inside it is a message to the lead.
     #
     # Computed over `collect_all_changes`, NOT over `targets`: the old check filtered its input
     # through the very pattern it then tested, so it could not fail for any input (F2). An
@@ -743,7 +743,8 @@ def check_structural(
         detail="" if not stray else (
             f"changes outside a *_utils package: {stray}. Toolkit code lives in "
             "<domain>_utils/{lib,skills,tests} (§9.2). Anything else — the catalog writer, "
-            "repo-root files, scratch — is not the coder's to edit: ask_lead instead."
+            "repo-root files, scratch — is not the coder's to edit: message the lead "
+            "(message to='lead') instead."
         ),
     ))
 

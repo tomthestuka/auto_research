@@ -21,11 +21,11 @@ from auto_research.schemas.review import ReviewerReport, ReviewerSection, Review
 @pytest.fixture
 def store(tmp_path: Path) -> ReceiptStore:
     s = ReceiptStore(tmp_path / "receipts")
-    raw = s.mint(source="analyst_worker_0", kind="result", produced_by="xspec_fit", data="PD = 4.02 ± 0.21 %")
-    s.mint(source="analyst_lead", kind="result", produced_by="summarise", data="PD = 4.02", parents=[raw.handle])
+    raw = s.mint(source="analyst_worker_0", kind="result", produced_by="research_toolkit.xspec_utils.fit", data="PD = 4.02 ± 0.21 %")
+    s.mint(source="analyst_lead", kind="result", produced_by="research_toolkit.t.summarise", data="PD = 4.02", parents=[raw.handle])
     csv = tmp_path / "t.csv"
     csv.write_text("a,b\n1,2\n")
-    s.mint(source="analyst_lead", kind="data", produced_by="compare", path=csv)
+    s.mint(source="analyst_lead", kind="data", produced_by="research_toolkit.t.compare", path=csv)
     s.mint(source="lib", kind="paper", produced_by="read_paper", data="PD = 4.0 %", title="Paper")
     return s
 
@@ -34,6 +34,7 @@ def _report() -> ReviewerReport:
     return ReviewerReport(
         accepted=True,
         rationale="Agrees [lib:p1].",
+        assign_to="human",
         title="T",
         abstract='We find {{analyst_lead:r1 "PD = 4.02"}}.',
         sections=[ReviewerSection(heading="R", body="See [analyst_lead:r1].")],
@@ -87,7 +88,7 @@ def test_the_jsonl_is_written_only_when_configured(store, tmp_path):
 
 
 def test_a_flag_on_a_cited_receipt_marks_the_published_report(store, tmp_path):
-    store.mint(source="analyst_lead", kind="result", produced_by="fit", data="PD = 9.9", failed=True)
+    store.mint(source="analyst_lead", kind="result", produced_by="research_toolkit.xspec_utils.fit", data="PD = 9.9", failed=True)
     report = _report().model_copy(update={"key_findings": ["Failed run [analyst_lead:r2]."]})
     result = publish_report(
         report, store=store, run_id="r1", request_question="Q?", report_dir=tmp_path / "report",
@@ -103,10 +104,9 @@ class _Reviewer:
     def __init__(self, store):
         self.receipts = store
 
-    async def review(self, request, *, stage, literature=None, literature_receipts=None,
-                     report=None, iterations_left=0, render=None):
-        if stage == "literature":
-            return ReviewerReport(rationale="ok [lib:p1]", follow_up="analyse")
+    async def review(self, request, *, arrived="request", report=None, **_):
+        if arrived == "request":
+            return ReviewerReport(rationale="ok [lib:p1]", assign_to="analysts", follow_up="analyse")
         return _report()
 
 
@@ -135,11 +135,13 @@ def test_the_graph_publishes_the_accepted_report_as_jsonl(store, tmp_path, monke
     )
     state = asyncio.run(graph.ainvoke({
         "request": ResearchRequest(question="Q?"), "report": None, "verdict": None,
+        "arrived": "request", "human_rounds": 0,
         "lit_iterations": 0, "analysis_iterations": 0, "max_iterations": 2,
     }))
     assert state["verdict"] == _report()
     assert state["research_report"].report == _report()
-    assert state["report_jsonl"] == tmp_path / "rep" / "report.jsonl"
+    # Each report to the human has its own folder, so an earlier version keeps its bytes.
+    assert state["report_jsonl"] == tmp_path / "rep" / "v1" / "report.jsonl"
 
 
 # -- TeX log reading --------------------------------------------------------------------------

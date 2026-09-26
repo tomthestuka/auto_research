@@ -124,3 +124,4 @@ Compacted 2026-08-05 and again 2026-09-24 (detail in git history).
 - 2026-09-01 — New events `coder.ask_human.unattended` (L3) and `coder.ask_human.error` (L1); neither is
   followed by `.answer`.
 
+- 2026-09-25 — [R1] Verdict line reads `assign_to=` (the two flags are gone); `summary.py` takes the verdict from `reviewer.review.verdict` when assigned to the human and prints `reports to the human` from `run.finish.human_rounds`.

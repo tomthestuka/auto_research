@@ -5,7 +5,7 @@ both toolkit halves (``lib/`` human-half + ``skills/TOOL_MANIFEST`` ai-half) and
 an **isolated git worktree** on ``research_toolkit``, then drives the bounded rework loop:
 
     L0  author self-correction (inside the SDK session, ``max_turns``)
-    L1  escalation when blocked — web search · ask_lead · ask_human (an independent path
+    L1  escalation when blocked — web search · message(to=lead|human) (an independent path
         to the human, so the lead is never the sole oracle)
     L2  deterministic gate rejection → re-drive the warm session (``gate_rework_cap``)
     L3  provider-decorrelated co-lead review rejection → re-drive (``review_rework_cap``)
@@ -323,35 +323,38 @@ _emit = emit
 
 
 def _make_ask_lead_handler(
-    session_ref: Callable[[], Any], *, monitor: Any | None = None
+    session_ref: Callable[[], Any], *, lead: Any | None = None, monitor: Any | None = None
 ) -> Callable[..., Awaitable[str]]:
-    """`ask_lead`: park the question for the lead and return at once.
+    """The coder's ``message(to="lead")``: post the text to the lead's inbox and return at once.
 
     **Non-blocking by design.** It used to call ``lead.clarify_for_author``, which opened a
     SECOND ReAct conversation on the lead — running concurrently with the lead's own turn, on the
     same shared tool provider, with none of the context of the brief it was answering about.
     Measured live 2026-09-12: 100 clarification tool calls interleaved with 76 cycle tool calls,
-    an answer 326 s later, and a coder that had timed out and moved on. Worse, that second loop
-    held the coder-control tools, so it spent 85 calls polling the very coder that was blocked
-    waiting for it — a circular wait.
+    an answer 326 s later, and a coder that had timed out and moved on.
 
-    Now nobody waits on anybody. The question is parked; the lead's own loop collects it at its
-    next safe injection point and answers with ``drive_coder``, which steers the turn the coder is
-    still running. The coder is free to keep working, or to stop and wait — both are fine, since
-    the answer arrives inside its turn either way.
+    Now nobody waits on anybody. The text lands in the lead's inbox (E12) — the same queue every
+    text a seat receives travels, drained at the lead's next safe boundary — and wakes a lead
+    parked in ``wait_for_reply``. The session marks the question open, so the lead's
+    ``drive_coder`` answer steers the turn the coder is still running.
     """
 
     async def handler(message: str, *, kind: str = "clarify_code") -> str:
         session = session_ref()
-        if session is None:
+        if session is None or lead is None:
             return "The lead is not reachable from this session."
-        session.park_question(message)
+        control = lead.ensure_run_control()
+        key = lead.agent_key
+        if getattr(session, "_steer_event", None) is None and hasattr(session, "watch_steers"):
+            session.watch_steers(control.steer_event(key))
+        control.add_steer(key, message, sender="coder", kind="message")
+        session.mark_question_open()
         await _emit(
             monitor, "coder.ask_lead", level=4,
             summary=f"coder asked the lead: {_cap_text(message, 80)}",
             data={"kind": kind, "message": _cap_text(message)},
         )
-        return "delivered."
+        return "delivered. The lead reads it at its next step; its answer reaches you in your turn."
 
     return handler
 
@@ -369,7 +372,7 @@ UNATTENDED_GUIDANCE = (
     "documentation of the library, format, tool or instrument involved. Read the primary source "
     "rather than a summary of it, and search again with different wording before concluding "
     "nothing exists.\n"
-    "2. Ask the analyst lead with `ask_lead` for the domain or convention call — the lead is "
+    "2. Ask the analyst lead with `message(to=\"lead\")` for the domain or convention call — the lead is "
     "reachable and knows this codebase.\n"
     "3. Reason to the best answer the evidence supports, and state the assumption you made — "
     "in the code, and in the test that covers it.\n"
@@ -378,25 +381,28 @@ UNATTENDED_GUIDANCE = (
 
 
 def _make_ask_human_handler(
-    human_handler: HumanHandler | None, *, model: str = "", monitor: Any | None = None
+    human_handler: HumanHandler | None,
+    *,
+    session_ref: Callable[[], Any] | None = None,
+    lead: Any | None = None,
+    model: str = "",
+    monitor: Any | None = None,
 ) -> Callable[..., Awaitable[str]]:
-    """Serve the author's ``ask_human`` and classify what happens when it cannot be answered.
+    """Serve the coder's ``message(to="human")``: send it, return at once, deliver the reply later.
 
-    Both harnesses expose ``ask_human`` over MCP, and every MCP stack turns an exception raised
-    in a tool handler into an ``isError`` result carrying only ``str(exc)``. That flattens three
-    different situations into one shape the author cannot tell apart, so the classification has
-    to happen HERE, before the boundary:
+    Non-blocking like every other text (E12). The question travels the run's seat router (the
+    lead's, or one made for this session), and the human's answer reaches the coder through
+    ``session.send`` — steered into the running turn, or as its next turn when it has stopped.
 
-    * **unattended** (no handler wired, the §9.8 headless fail-safe) — expected, and the author
-      is told what to do instead (``UNATTENDED_GUIDANCE``); ledger event ``coder.ask_human.unattended``.
-    * **channel fault** (the connector raised, or returned the wrong type) — a real fault that
-      used to be indistinguishable from an unattended run in both the author's view and the
-      ledger; ledger event ``coder.ask_human.error``, and the author is pointed at ``ask_lead``.
-
-    Both re-raise so the call stays a tool **error**: an unanswered question is never dressed up
-    as an answer, and no ``coder.ask_human.answer`` event is written for either.
+    **Unattended** (no handler wired, the §9.8 headless fail-safe) is still classified HERE,
+    before the MCP boundary flattens every exception to ``str(exc)``: the author is told what to
+    do instead (``UNATTENDED_GUIDANCE``), ledger event ``coder.ask_human.unattended``, and the call
+    stays a tool **error**, so nothing a human did not say is ever recorded as a reply. A channel
+    fault now arrives later, as a notice delivered the same way an answer would be.
     """
     async def handler(message: str, *, kind: str = "blocked") -> str:
+        from auto_research.hitl.router import SeatRouter
+
         query = HumanQuery(
             kind=kind if kind in ("clarify_science", "clarify_code", "blocked") else "blocked",
             message=message or "(no message provided)",
@@ -408,8 +414,26 @@ def _make_ask_human_handler(
             summary=f"coder raised to the human ({query.kind}): {_cap_text(message, 80)}",
             data={"kind": query.kind, "message": _cap_text(message)},
         )
+        router = getattr(lead, "channel", None) if lead is not None else None
+        if router is None or router.human_handler is None:
+            from auto_research.run_control import RunControl
+
+            control = lead.ensure_run_control() if lead is not None else RunControl()
+            router = SeatRouter(control, human_handler, monitor=monitor)
+
+        async def deliver(text: str, _handles: tuple[str, ...], entry_kind: str) -> None:
+            session = session_ref() if session_ref is not None else None
+            label = "[Reply from the human]" if entry_kind == "reply" else "[Notice]"
+            if entry_kind == "reply":
+                await _emit(
+                    monitor, "coder.ask_human.answer", level=3,
+                    summary="human answered the coder", data={"answer": _cap_text(text)},
+                )
+            if session is not None and hasattr(session, "send"):
+                await session.send(f"{label} {text}", mid_turn=True)
+
         try:
-            response = await resolve_human(human_handler, query)
+            router.ask_human(query, deliver=deliver)
         except HumanInputRequired as exc:
             await _emit(
                 monitor, "coder.ask_human.unattended", level=3,
@@ -417,25 +441,10 @@ def _make_ask_human_handler(
                 data={"kind": query.kind, "headline": query.headline},
             )
             raise HumanInputRequired(UNATTENDED_GUIDANCE) from exc
-        except Exception as exc:  # noqa: BLE001 — a broken channel is a fault, not an absent human
-            await _emit(
-                monitor, "coder.ask_human.error", level=1,
-                summary=f"the human channel failed for the coder: {type(exc).__name__}",
-                data={"kind": query.kind, "headline": query.headline,
-                      "error": f"{type(exc).__name__}: {_cap_text(str(exc), 500)}"},
-            )
-            raise RuntimeError(
-                f"the human channel failed ({type(exc).__name__}: {exc}), so this question "
-                "reached nobody. The analyst lead is still reachable — use `ask_lead` — and the "
-                "web search tools still work; ground the decision from those and state the "
-                "assumption you made."
-            ) from exc
-        await _emit(
-            monitor, "coder.ask_human.answer", level=3,
-            summary="human answered the coder",
-            data={"answer": _cap_text(response.answer)},
+        return (
+            "Sent to the human. Keep working: the reply reaches you inside your turn, or as your "
+            "next turn if you have stopped."
         )
-        return response.answer
 
     return handler
 
@@ -965,9 +974,6 @@ class AuthoringSession:
         self._direct_branch = direct_branch
         self._toolkit_root = toolkit_root
         self._worktree_base = worktree_base
-        # Questions the coder asked, waiting for the lead's loop to collect them at a boundary
-        # it knows is safe. See `park_question`.
-        self._pending_questions: list[str] = []
         self._monitor = monitor
         self._coder_model = coder_model  # attributes the SDK session's own spend on the cost meter
         # A prior interrupted attempt's latest submission, already applied to the working tree
@@ -1038,7 +1044,7 @@ class AuthoringSession:
         # running one: slot 6 (2026-09-15) steered its coder 47 times mid-turn, as a way of
         # staying busy while it could not wait.
         self._queued: list[str] = []
-        # True from the coder's `ask_lead` until something reaches it, so the lead's reply is
+        # True from the coder's `message(to="lead")` until something reaches it, so the lead's reply is
         # delivered inside the running turn however it is sent — the coder may be waiting on it.
         self._question_open = False
         # The lead's steer event on RunControl (see `watch_steers`), or None when unattended.
@@ -1086,22 +1092,12 @@ class AuthoringSession:
         self.start_drive(message)
         return "started"
 
-    def park_question(self, message: str) -> None:
-        """Hold the coder's question until the lead's loop collects it at a safe boundary.
-
-        Parked rather than pushed for the reason the whole A2 fix exists: only the loop knows
-        when an injected user turn is legal, and an injection appended after a turn that left a
-        server-tool call unresolved is a 400 that kills the run. Same seam and same hold rule as
-        the background-coder notice. It also wakes a lead parked in :meth:`wait_for_event`.
-        """
-        self._pending_questions.append(message)
+    def mark_question_open(self) -> None:
+        """The coder asked the lead something (its text is in the lead's inbox, E12): the lead's
+        next ``drive_coder`` is delivered inside the running turn, since it is most likely the
+        answer, and a lead parked in :meth:`wait_for_event` wakes."""
         self._question_open = True
         self._wake.set()
-
-    def take_questions(self) -> list[str]:
-        """Collect the parked questions, once."""
-        pending, self._pending_questions = self._pending_questions, []
-        return pending
 
     def start_drive(self, message: str) -> None:
         """Send one instruction and return immediately; the coder answers in the background.
@@ -1172,8 +1168,6 @@ class AuthoringSession:
             return "failed"
         if self._drive_result is not None:
             return "turn_ended"
-        if self._pending_questions:
-            return "question"
         if self._steer_event is not None and self._steer_event.is_set():
             return "steer"
         if self.drive_status != "working":
@@ -1183,10 +1177,11 @@ class AuthoringSession:
     async def wait_for_event(self, timeout_s: float) -> str:
         """Park until there is something for the lead, or ``timeout_s`` passes.
 
-        Returns ``"turn_ended"`` (narration unread), ``"failed"``, ``"question"``, ``"steer"``,
-        ``"idle"`` (nothing is running and nothing is unread) or ``"timeout"``. Returns at once
-        when something is already waiting. Consumes nothing: the caller reads what it needs with
-        :meth:`take_drive_result` / :meth:`take_questions`.
+        Returns ``"turn_ended"`` (narration unread), ``"failed"``, ``"steer"`` (a message reached
+        the lead's inbox — a human's, another seat's, or the coder's own question, E12), ``"idle"``
+        (nothing is running and nothing is unread) or ``"timeout"``. Returns at once when
+        something is already waiting. Consumes nothing: the caller reads what it needs with
+        :meth:`take_drive_result`, and the inbox is drained by the lead's loop.
 
         A cancel (``/stop``) propagates out of the awaited event as it does from any await.
         """
@@ -1616,8 +1611,11 @@ def build_authoring_session(
     # one-slot holder rather than a forward reference: the backend captures the handler at
     # construction and must not capture a session that does not exist yet.
     session_slot: list[Any] = [None]
-    ask_lead = _make_ask_lead_handler(lambda: session_slot[0], monitor=monitor)
-    ask_human = _make_ask_human_handler(human_handler, model=coder_model, monitor=monitor)
+    ask_lead = _make_ask_lead_handler(lambda: session_slot[0], lead=lead, monitor=monitor)
+    ask_human = _make_ask_human_handler(
+        human_handler, session_ref=lambda: session_slot[0], lead=lead, model=coder_model,
+        monitor=monitor,
+    )
     backend = _build_backend(
         member=coder,
         worktree=worktree,

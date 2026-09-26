@@ -20,7 +20,7 @@ LIBRARIAN_CLAUSES = (
 )
 BINDING_CLAUSES = (
     "unresolved", "flagged_quote", "attribution_without_locator", "quote_without_text",
-    "shell_echoed_number", "misquoted_span", "ungrounded_number",
+    "misquoted_span", "ungrounded_number",
 )
 
 

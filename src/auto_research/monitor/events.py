@@ -431,8 +431,7 @@ def _stream_detail(data: Mapping[str, Any]) -> str:
     if isinstance(verdict, Mapping):
         flags = [
             f"accepted={verdict.get('accepted')}",
-            f"more_lit={verdict.get('needs_more_literature')}",
-            f"analysis_rework={verdict.get('needs_analysis_rework')}",
+            f"assign_to={verdict.get('assign_to')}",
         ]
         parts.append(" ".join(flags))
 

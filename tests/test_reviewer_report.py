@@ -8,6 +8,7 @@ import zlib
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from auto_research.agents.reviewer_tools import (
     REVIEWER_REPORT_FIELDS,
@@ -42,16 +43,16 @@ def _png(path: Path, rgb: bytes = b"\xff\x00\x00") -> Path:
 @pytest.fixture
 def store(tmp_path: Path) -> ReceiptStore:
     s = ReceiptStore(tmp_path / "receipts")
-    s.mint(source="analyst_lead", kind="result", produced_by="xspec_fit",
+    s.mint(source="analyst_lead", kind="result", produced_by="research_toolkit.xspec_utils.fit",
            data="PD = 4.02 ± 0.21 %\nPA = −20.7 ± 1.4 deg\nchi2/dof = 1.8")
-    s.mint(source="analyst_lead", kind="figure", produced_by="plotter",
+    s.mint(source="analyst_lead", kind="figure", produced_by="research_toolkit.t.plotter",
            path=_png(tmp_path / "a" / "plot.png"), caption="PD vs energy", mime_type="image/png")
-    s.mint(source="analyst_lead", kind="figure", produced_by="plotter",
+    s.mint(source="analyst_lead", kind="figure", produced_by="research_toolkit.t.plotter",
            path=_png(tmp_path / "b" / "plot.png", b"\x00\x00\xff"), caption="PA vs energy",
            mime_type="image/png")
     csv_path = tmp_path / "cmp.csv"
     csv_path.write_text("# produced by compare_to_benchmark\nquantity,this_work,paper\nPD,4.02,4.0\nPA,-20.7,-20.7\n")
-    s.mint(source="analyst_lead", kind="data", produced_by="compare_to_benchmark", path=csv_path)
+    s.mint(source="analyst_lead", kind="data", produced_by="research_toolkit.xspec_utils.compare_to_benchmark", path=csv_path)
     s.mint(source="lib", kind="paper", produced_by="read_paper",
            data="We measure PD = 4.0 ± 0.2 % in the 2-8 keV band.",
            title="Polarized X-rays from Cyg X-1", ids={"arxiv": "2206.09972", "bibcode": "2020A&A...1K"})
@@ -61,6 +62,7 @@ def store(tmp_path: Path) -> ReceiptStore:
 def _final(**overrides) -> ReviewerReport:
     fields = dict(
         accepted=True,
+        assign_to="human",
         rationale='Agrees with the literature [lib:p1].',
         title="Cyg X-1 polarization",
         abstract='We find {{analyst_lead:r1 "PD = 4.02 ± 0.21 %"}}, consistent with {{lib:p1 "PD = 4.0 ± 0.2 %" Table 2}}.',
@@ -82,7 +84,7 @@ def _scope(store: ReceiptStore) -> list[str]:
 
 def test_the_schema_is_permissive_so_a_partial_write_is_legal():
     report = ReviewerReport()
-    assert report.rework is False and report.prose_fields() == {}
+    assert report.assign_to is None and report.prose_fields() == {}
 
 
 def test_every_declared_field_is_a_real_field():
@@ -229,9 +231,10 @@ def test_a_rendered_report_compiles_to_a_pdf(store, tmp_path):
 # -- turn_end ---------------------------------------------------------------------------------
 
 
-def _problems(report, store, *, stage="analysis", left=1, render=None):
+def _problems(report, store, *, lit=1, ana=1, render=None):
     return reviewer_turn_problems(
-        report, lookup=store, scope=_scope(store), stage=stage, iterations_left=left, render=render,
+        report, lookup=store, scope=_scope(store), budgets={"librarian": lit, "analysts": ana},
+        render=render,
     )
 
 
@@ -239,47 +242,53 @@ def test_no_report_is_refused(store):
     assert "No report has been written" in _problems(None, store)[0]
 
 
-def test_a_complete_final_report_passes(store):
+def test_a_complete_report_to_the_human_passes(store):
     assert _problems(_final(), store) == []
 
 
-def test_a_final_report_needs_its_parts(store):
-    problems = _problems(ReviewerReport(rationale="Holds [lib:p1]."), store)
+def test_a_report_with_no_assignee_is_refused(store):
+    problems = _problems(_final(assign_to=None), store)
+    assert any("assign_to is empty" in p for p in problems)
+
+
+def test_a_report_to_the_human_needs_its_parts(store):
+    problems = _problems(ReviewerReport(rationale="Holds [lib:p1].", assign_to="human"), store)
     for name in ("title", "abstract", "sections", "key_findings"):
         assert any(f"and {name} is empty" in p for p in problems)
 
 
-def test_rework_needs_a_follow_up_and_an_iteration_left(store):
-    report = ReviewerReport(rationale="Short [lib:p1].", needs_analysis_rework=True)
-    problems = _problems(report, store, left=0)
-    assert any("follow_up is empty" in p for p in problems)
-    assert any("No analysis iterations remain" in p for p in problems)
+@pytest.mark.parametrize("team,cap_words", [("librarian", "literature passes"),
+                                            ("analysts", "analysis passes")])
+def test_an_assignment_needs_a_follow_up_and_a_pass_left(store, team, cap_words):
+    report = ReviewerReport(rationale="Short [lib:p1].", assign_to=team)
+    problems = _problems(report, store, lit=0, ana=0)
+    assert any("follow_up is empty" in p and team in p for p in problems)
+    assert any(f"No {cap_words} remain" in p for p in problems)
 
 
-def test_a_rework_report_does_not_need_the_final_parts(store):
-    report = ReviewerReport(rationale="Short [lib:p1].", needs_analysis_rework=True, follow_up="Refit.")
+def test_the_other_teams_cap_does_not_block_an_assignment(store):
+    report = ReviewerReport(rationale="Short [lib:p1].", assign_to="analysts", follow_up="Refit.")
+    assert _problems(report, store, lit=0, ana=1) == []
+
+
+def test_an_assignment_does_not_need_the_report_parts(store):
+    report = ReviewerReport(rationale="Short [lib:p1].", assign_to="librarian", follow_up="Search.")
     assert _problems(report, store) == []
 
 
-def test_a_switch_set_at_the_wrong_stage_is_refused_rather_than_ignored(store):
-    at_analysis = _final(needs_more_literature=True)
-    assert any("applies at the literature review" in p for p in _problems(at_analysis, store))
-    at_literature = ReviewerReport(rationale="r [lib:p1]", follow_up="Fit.", needs_analysis_rework=True)
-    assert any("applies at the analysis review" in p for p in _problems(at_literature, store, stage="literature"))
+def test_an_unknown_assignee_is_refused_by_the_schema():
+    with pytest.raises(ValidationError):
+        ReviewerReport(rationale="r", assign_to="END")
 
 
-def test_the_literature_review_needs_a_dispatch_and_respects_its_cap(store):
-    report = ReviewerReport(rationale="Gap [lib:p1].", needs_more_literature=True)
-    problems = _problems(report, store, stage="literature", left=0)
-    assert any("follow_up is empty" in p for p in problems)
-    assert any("No literature passes remain" in p for p in problems)
-
-
-def test_a_number_in_follow_up_must_be_grounded_too(store):
-    ungrounded = ReviewerReport(rationale="r [lib:p1]", follow_up="Fit the 3-7 keV band.")
-    assert any("follow_up states numbers" in p for p in _problems(ungrounded, store, stage="literature"))
-    grounded = ReviewerReport(rationale="r [lib:p1]", follow_up="Fit the 2-8 keV band.")
-    assert _problems(grounded, store, stage="literature") == []
+def test_a_brief_prescribes_numbers_without_grounding_but_a_claim_does_not(store):
+    # Human ruling 2026-09-25: follow_up is a prescription, not a claim.
+    brief = ReviewerReport(rationale="r [lib:p1]", assign_to="analysts",
+                           follow_up="Fit the 3-7 keV band from starting spins 0, 0.5 and 0.9.")
+    assert _problems(brief, store) == []
+    claim = ReviewerReport(rationale="The fit used 3-7 keV [lib:p1].", assign_to="analysts",
+                           follow_up="Refit.")
+    assert any("rationale states numbers" in p for p in _problems(claim, store))
 
 
 def test_any_readable_receipt_grounds_any_field(store):
@@ -288,21 +297,23 @@ def test_any_readable_receipt_grounds_any_field(store):
 
 
 def test_a_broken_receipt_the_report_never_cites_is_not_the_models_problem(store):
-    store.mint(source="analyst_lead", kind="result", produced_by="x", data="unrelated 99.9")
+    store.mint(source="analyst_lead", kind="result", produced_by="research_toolkit.t.x", data="unrelated 99.9")
     Path(store.get("analyst_lead:r2").path).write_text("tampered")
     assert _problems(_final(), store) == []
 
 
-def test_render_runs_only_for_a_final_report_with_nothing_else_to_fix(store, tmp_path):
+def test_render_runs_only_for_a_report_to_the_human_with_nothing_else_to_fix(store, tmp_path):
     render = ReviewerRender(report_dir=tmp_path / "report", run_id="r1", formats=("jsonl",))
     assert _problems(_final(), store, render=render) == [] and render.attempts == 0
     render = ReviewerRender(report_dir=tmp_path / "report", run_id="r1")
     _problems(_final(title=""), store, render=render)
     assert render.attempts == 0  # a missing title is fixed before anything is rendered
+    _problems(_final(assign_to="analysts", follow_up="Refit."), store, render=render)
+    assert render.attempts == 0  # a report to a team is never rendered
 
 
 @pytest.mark.skipif(not shutil.which("lualatex"), reason="lualatex not installed")
-def test_a_final_turn_end_renders_and_compiles(store, tmp_path):
+def test_a_turn_end_to_the_human_renders_and_compiles(store, tmp_path):
     render = ReviewerRender(report_dir=tmp_path / "report", run_id="r1")
     assert _problems(_final(), store, render=render) == []
     assert render.compile.pdf_path.is_file() and render.renderer_errors == []
@@ -336,9 +347,65 @@ def test_a_number_from_the_request_grounds_only_where_the_request_is_cited(store
                                produced_by="research_request")
     lookup = ScopedLookup(store, own_source="rev")
     assert request.handle not in reviewer_scope(lookup)
-    uncited = ReviewerReport(rationale="r", follow_up="Check the 7.7 value.")
+    budgets = {"librarian": 1, "analysts": 1}
+    uncited = ReviewerReport(rationale="Check the 7.7 value.", assign_to="librarian", follow_up="Search.")
     assert any("7.7" in p for p in reviewer_turn_problems(
-        uncited, lookup=lookup, scope=reviewer_scope(lookup), stage="literature", iterations_left=1))
-    cited = ReviewerReport(rationale="r", follow_up=f"Check the 7.7 value [{request.handle}].")
+        uncited, lookup=lookup, scope=reviewer_scope(lookup), budgets=budgets))
+    cited = ReviewerReport(rationale=f"Check the 7.7 value [{request.handle}].", assign_to="librarian",
+                           follow_up="Search.")
     assert reviewer_turn_problems(
-        cited, lookup=lookup, scope=reviewer_scope(lookup), stage="literature", iterations_left=1) == []
+        cited, lookup=lookup, scope=reviewer_scope(lookup), budgets=budgets) == []
+
+
+def test_an_earlier_published_report_neither_grounds_nor_can_be_cited(store, tmp_path):
+    from auto_research.agents.reviewer_tools import reviewer_scope
+    from auto_research.provenance import ScopedLookup
+
+    earlier = tmp_path / "report.jsonl"
+    earlier.write_text('{"request_question": "Reproduce PD = 7.7 %", "created_at": "17.918273"}')
+    published = store.mint(source="rev", kind="data", produced_by="report_renderer", path=earlier)
+    lookup = ScopedLookup(store, own_source="rev")
+    budgets = {"librarian": 1, "analysts": 1}
+    uncited = ReviewerReport(rationale="Check the 7.7 value.", assign_to="analysts", follow_up="Refit.")
+    assert any("7.7" in p for p in reviewer_turn_problems(
+        uncited, lookup=lookup, scope=reviewer_scope(lookup), budgets=budgets))
+    cited = ReviewerReport(rationale=f"Check the 7.7 value [{published.handle}].", assign_to="analysts",
+                           follow_up="Refit.")
+    assert any("earlier published report" in p for p in reviewer_turn_problems(
+        cited, lookup=lookup, scope=reviewer_scope(lookup), budgets=budgets))
+
+
+def test_every_turn_end_clause_has_a_live_attack_cell(store, tmp_path):
+    """Free: each live attack cell's refusal text is one this check really returns, and every
+    refusal the check can return has a cell (tests/test_live_reviewer_paths.py::CLAUSES)."""
+    import inspect
+
+    from auto_research.agents import reviewer_tools
+    from tests.test_live_reviewer_paths import CLAUSES
+
+    request = store.mint_input("Fit ObsID 30001011002.", kind="human", produced_by="research_request")
+    published_file = tmp_path / "earlier.jsonl"
+    published_file.write_text('{"spin": "0.973"}')
+    published = store.mint(source="rev", kind="data", produced_by="report_renderer", path=published_file)
+    task = dict(rationale="r [lib:p1]", assign_to="analysts", follow_up="Refit.")
+    triggers = {
+        "no_report": (None, {}),
+        "empty_rationale": (ReviewerReport(**{**task, "rationale": ""}), {}),
+        "no_assignee": (_final(assign_to=None), {}),
+        "empty_follow_up": (ReviewerReport(**{**task, "follow_up": ""}), {}),
+        "cap_spent": (ReviewerReport(**task), {"ana": 0}),
+        "human_missing_parts": (ReviewerReport(rationale="r [lib:p1]", assign_to="human", title="T"), {}),
+        "cites_published_report": (ReviewerReport(**{**task, "rationale": f"Check [{published.handle}]."}), {}),
+        "ungrounded_number": (_final(abstract="The spin is 0.8127."), {}),
+        "uncited_input": (ReviewerReport(**{**task, "rationale": "Fit ObsID 30001011002."}), {}),
+        "render_refused": (_final(figures=["analyst_lead:r1"]),
+                           {"render": ReviewerRender(report_dir=tmp_path / "r", run_id="r1")}),
+    }
+    assert set(triggers) == set(CLAUSES), "a live attack cell has no deterministic trigger here"
+    for clause, (report, kw) in triggers.items():
+        needle = CLAUSES[clause][0]
+        problems = _problems(report, store, **kw)
+        assert any(needle in p for p in problems), f"{clause}: '{needle}' not in {problems}"
+    # Every refusal site in the check has a cell: a new clause must add one.
+    source = inspect.getsource(reviewer_tools.reviewer_turn_problems)
+    assert source.count("problems.append(") == 5, "a turn_end clause was added: give it a live attack cell"
