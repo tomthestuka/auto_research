@@ -19,7 +19,9 @@ at all — self-modification is impossible by construction.
 
 Coding agents: read **`CLAUDE.md`** before doing anything. It is the single source of
 truth for how this project is built — current status, the phase spec, and the build
-order live there, not here.
+order live there, not here. **Phase 3 (in planning):** generalizing the agent unit inside this
+repository (per-unit toolkit, sandbox and environments, and subagent grants); the Phase 2 spec is
+archived in `CLAUDE_p2.md`.
 
 ---
 
