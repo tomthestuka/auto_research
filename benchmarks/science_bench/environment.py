@@ -217,11 +217,15 @@ def orchestration_config(
     config["runtime_dir"] = str(runtime_dir)
     config["papers_dir"] = str(papers_dir)
 
-    private = [str(toolkit_root), str(runtime_dir), str(papers_dir), str(obs_root)]
+    # The runtime dir's `runs/` only, as in production: the rest of it holds the trial's ledgers
+    # (receipt blobs, filed reports), which no actor may read. The papers are read by actors and
+    # written only by the harness's own downloads, which run outside the jail, so they are
+    # read-only to every jailed process (F25, 2026-10-06).
+    private = [str(toolkit_root), str(Path(runtime_dir) / "runs"), str(papers_dir), str(obs_root)]
     for key in ("agent_fs_allow", "agent_fs_readonly"):
         roots = [str(Path(str(r)).expanduser()) for r in (config.get(key) or [])]
         kept = [r for r in roots if r not in old]
-        config[key] = (private + kept) if key == "agent_fs_allow" else kept
+        config[key] = (private + kept) if key == "agent_fs_allow" else [*kept, str(papers_dir)]
     return config
 
 

@@ -589,10 +589,30 @@ def _save_diff_and_reset(
 _BASE_REF_FILE = "current_base_ref"
 
 
+def _is_ancestor(root: Path, ref: str, head: str) -> bool:
+    """Whether ``ref`` names a commit that ``head`` descends from (or is)."""
+    proc = subprocess.run(
+        ["git", "-C", str(root), "merge-base", "--is-ancestor", ref, head],
+        capture_output=True, text=True,
+    )
+    return proc.returncode == 0
+
+
 def _base_ref_path(worktree_base: Path) -> Path:
-    """Where the per-attempt authoring base-ref is persisted (under the run's authoring dir), so a
-    resume after a hard-kill can reset the branch to exactly the killed attempt's start."""
-    return Path(worktree_base) / _BASE_REF_FILE
+    """Where the per-attempt authoring base-ref is persisted, so a resume after a hard-kill can
+    reset the branch to exactly the killed attempt's start.
+
+    **Beside the ledger** when the authoring dir is a run's (``runs/<run>/authoring``): that dir is
+    writable to the Claude author's jail, and a resume runs ``git reset`` to whatever this file
+    says, so a forged ref would move the branch outside the gate (F27, 2026-10-06). An authoring dir
+    outside a runs tree (a standalone benchmark trial) keeps it there.
+    """
+    base = Path(worktree_base)
+    if base.name == "authoring" and base.parent.parent.name == "runs":
+        from auto_research.sandbox.workspace import record_beside
+
+        return record_beside(base.parent, f"authoring_{_BASE_REF_FILE}", legacy_ok=False)
+    return base / _BASE_REF_FILE
 
 
 def _read_persisted_base_ref(run_directory: Path) -> str | None:
@@ -743,7 +763,7 @@ def heal_toolkit_branch_if_dirty(
     attempt does not die on :func:`check_toolkit_branch_clean` — the unrecoverable restart loop.
 
     Runs the **same** cleanup a failed authoring session runs: reset the branch to the per-attempt
-    base-ref persisted by :func:`build_authoring_session` (``run_dir/authoring/current_base_ref``;
+    base-ref persisted by :func:`build_authoring_session` (:func:`_base_ref_path`, beside the ledger;
     falls back to ``HEAD`` when absent), after saving the discarded work as a
     ``resume_heal_*.patch``. Resetting to the recorded base-ref (not blindly to ``HEAD``) drops the
     killed attempt's mess **and** any commit it slipped, while preserving tools committed earlier
@@ -765,6 +785,10 @@ def heal_toolkit_branch_if_dirty(
         if _current_branch(root) != branch:
             return BranchHealResult(False, "wrong_branch")
         base_ref = _read_persisted_base_ref(run_directory)
+        if base_ref is not None and not _is_ancestor(root, base_ref, "HEAD"):
+            # A base ref the branch never passed through is not an attempt's start: refuse it
+            # rather than reset the branch there (F27).
+            return BranchHealResult(False, f"refused: base ref {base_ref[:12]} is not an ancestor of HEAD")
         reset_to = base_ref or "HEAD"
         patch_path = _save_diff_and_reset(
             root, reset_to, Path(run_directory) / "authoring", patch_prefix="resume_heal",
@@ -788,7 +812,22 @@ _DEFAULT_APPROVE_EDIT = approve_edit
 _HOST_TOOLING_PREFIXES = ("CLAUDE", "COPILOT", "VSCODE")
 
 
-def _author_env(toolkit_root: Path) -> dict[str, str] | None:
+def _author_pfiles(worktree_base: Path | None, toolkit_root: Path) -> Path | None:
+    """The Claude author's private PFILES folder: in its artifacts dir, never inside the toolkit.
+
+    A caller with no artifacts dir falls back to the toolkit root as ``worktree_base``; a folder
+    there would dirty the tree the gate scans, so that case gets none.
+    """
+    if worktree_base is None:
+        return None
+    base = Path(worktree_base).resolve()
+    tree = Path(toolkit_root).resolve()
+    if base == tree or base.is_relative_to(tree):
+        return None
+    return base / "pfiles"
+
+
+def _author_env(toolkit_root: Path, pfiles_dir: Path | None = None) -> dict[str, str] | None:
     """The environment the SDK author's ``Bash`` runs in — **identical to how the analyst
     sandbox and the gate execute toolkit code** (CLAUDE.md §9.4): the analyst conda interpreter
     first on ``PATH`` (so ``python``/``pytest`` carry the full science stack — ``xspec`` via the
@@ -824,6 +863,11 @@ def _author_env(toolkit_root: Path) -> dict[str, str] | None:
         env["PATH"] = f"{Path(analyze_env) / 'bin'}:" + env.get("PATH", "")
     existing_pp = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(toolkit_root) + (":" + existing_pp if existing_pp else "")
+    if pfiles_dir is not None:
+        # Its own HEASoft parameter folder (F23), inside a place the author's jail lets it write.
+        from auto_research.sandbox.runner import with_private_param_dir
+
+        env = with_private_param_dir(env, pfiles_dir)
     return env
 
 
@@ -1484,7 +1528,8 @@ def _build_backend(
             system_prompt=system_prompt,
             guard=PathGuard.from_config(),
             escalation=EscalationServer(ask_lead, ask_human),
-            env=_author_env(toolkit_root),  # author's shell == analyst/gate execution env
+            env=_author_env(toolkit_root),  # author's shell == analyst/gate execution env;
+            # its private PFILES is set by the backend, which knows its own home (F23)
             writable_roots=roots,
             monitor=monitor,
         )
@@ -1492,7 +1537,8 @@ def _build_backend(
     options = _build_options(
         worktree=worktree, coder_model=coder_model, system_prompt=system_prompt,
         escalation_server=_make_escalation_server(ask_lead, ask_human), max_turns=max_turns,
-        env=_author_env(toolkit_root),  # author's Bash == analyst/gate code-execution env
+        # author's Bash == analyst/gate code-execution env; its PFILES in its writable artifacts dir
+        env=_author_env(toolkit_root, _author_pfiles(worktree_base, toolkit_root)),
         worktree_base=worktree_base,    # where the jail launcher is written, when the jail is on
     )
     return ClaudeSdkBackend(sdk_client_factory(options), monitor=monitor, coder_model=coder_model)

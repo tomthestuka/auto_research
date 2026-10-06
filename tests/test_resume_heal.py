@@ -125,3 +125,33 @@ def test_check_branch_clean_passes_when_clean(tmp_path):
     root = tmp_path / "toolkit"
     _init_repo(root, branch="ai")
     check_toolkit_branch_clean(root, "ai")              # no raise on a clean authoring branch
+
+
+def test_a_runs_base_ref_lives_beside_the_ledger_not_in_the_coder_writable_folder(tmp_path):
+    """F27: `runs/<run>/authoring` is writable to the Claude author's jail; a resume resets the
+    branch to whatever the base-ref file says, so it is kept beside the ledger."""
+    authoring = tmp_path / "runs" / "r1" / "authoring"
+    authoring.mkdir(parents=True)
+    path = _base_ref_path(authoring)
+    assert path.parent == tmp_path / "ledgers" / "r1"
+    assert authoring not in path.parents
+
+
+def test_heal_refuses_a_base_ref_the_branch_never_passed_through(tmp_path):
+    root = tmp_path / "toolkit"
+    _init_repo(root)
+    _git(root, "checkout", "-q", "--orphan", "elsewhere")
+    (root / "g.txt").write_text("unrelated\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "unrelated")
+    foreign = _git(root, "rev-parse", "HEAD")
+    _git(root, "checkout", "-q", "ai")
+    run_dir = tmp_path / "runs" / "r1"
+    _persist_base_ref(run_dir, foreign)
+    (root / "f.txt").write_text("dirty\n")
+    before = _git(root, "rev-parse", "HEAD")
+
+    res = heal_toolkit_branch_if_dirty(run_dir, root=root, branch="ai")
+
+    assert not res.healed and "not an ancestor" in res.reason
+    assert _git(root, "rev-parse", "HEAD") == before

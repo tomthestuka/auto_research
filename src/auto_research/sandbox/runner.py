@@ -87,6 +87,27 @@ def _source_ini_env(ini_sh: str) -> dict[str, str]:
     return env
 
 
+def with_private_param_dir(
+    env: dict[str, str], private: Path | str, *, create: Path | str | None = None,
+) -> dict[str, str]:
+    """``env`` with the writable half of ``PFILES`` replaced by a folder of this process's own.
+
+    HEASoft tools read their parameters from ``PFILES`` (``<user dir>;<system dir>``) and write the
+    last-used values back into the user dir. A user dir shared by every worker, run and the human
+    let one process's ``pset`` (or one call's learned value) silently change what the next call
+    used, anywhere, with no receipt (F23, 2026-10-06). The private dir starts empty, so every tool
+    starts from the system defaults. ``private`` is the path *as the process sees it* (``/tmp/...``
+    inside a jail whose ``/tmp`` is private); ``create`` is the same folder as the host sees it,
+    created here. An env without a two-part ``PFILES`` is returned unchanged.
+    """
+    value = env.get("PFILES", "")
+    if ";" not in value:
+        return env
+    Path(create if create is not None else private).mkdir(parents=True, exist_ok=True)
+    system = value.split(";", 1)[1]
+    return {**env, "PFILES": f"{private};{system}"}
+
+
 def check_analyze_probe(*, config_path: str | Path | None = None) -> None:
     """Preflight: run the configured stack smoke-test under ``analyze_env`` (skip if unset).
 

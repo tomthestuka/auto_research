@@ -336,9 +336,11 @@ async def execute_view_receipt(
             is_error=True,
         )
     receipt = store.get(handle)
-    problem = store.verify(handle) if receipt is not None else f"{handle} is not in this run."
-    if receipt is None or problem:
-        return ToolOutcome(text=problem or f"{handle} is not in this run.", is_error=True)
+    if receipt is None:
+        return ToolOutcome(text=f"{handle} is not in this run.", is_error=True)
+    # No refusal on changed bytes: the readers below (the media layer for a figure, `store.text`
+    # for text) check the bytes they use against the receipt and send a changed file with a
+    # model-visible note and a ledger alert (F26, human ruling 2026-10-06).
     if receipt.kind == "figure":
         caption = receipt.caption or ""
         if not images_ok:
@@ -357,7 +359,8 @@ async def execute_view_receipt(
             text=f"{handle} is a {receipt.kind} receipt produced by {receipt.produced_by}; its "
             "bytes are not text to show here."
         )
-    text = store.text(handle) or ""
+    text, changed = store.text_with_note(handle) if hasattr(store, "text_with_note") else (store.text(handle), None)
+    text = (f"{changed}\n" if changed else "") + (text or "")
     note = ""
     if len(text) > _VIEW_TEXT_CAP:
         text, note = text[:_VIEW_TEXT_CAP], f"\n\n[… cut at {_VIEW_TEXT_CAP} characters]"

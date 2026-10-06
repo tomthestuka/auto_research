@@ -110,8 +110,13 @@ def _builtin_server_config(
     toolkit_root: Path,
     cwd: Path | None = None,
     analyze_probe: str | None = None,
+    writable_dirs: Sequence[Path] | None = None,
 ) -> dict:
     """Build the default builtin-MCP-server config dict.
+
+    ``writable_dirs`` are the folders the shell may write (default: ``cwd``). The run path passes
+    each worker's own folder, so the shell cannot rename or replace a folder another process binds
+    (a worker folder swapped for a symlink would be bound writable by the next REPL start).
 
     When ``analyze_env`` is set, the server subprocess is spawned from that
     env's Python interpreter so ``bash_exec`` commands can import astropy and
@@ -126,7 +131,7 @@ def _builtin_server_config(
     """
     from auto_research.sandbox.builtin_server import __file__ as _bs_file
     from auto_research.sandbox.jail import analysis_policy, jail_home, private_tmp, wrap
-    from auto_research.sandbox.runner import _source_ini_env
+    from auto_research.sandbox.runner import _source_ini_env, with_private_param_dir
 
     builtin_source = Path(_bs_file).read_text(encoding="utf-8")
     if analyze_env:
@@ -175,15 +180,23 @@ def _builtin_server_config(
     scratch = Path(cwd) if cwd is not None else jail_home("shell")
     authoring = scratch / "authoring"
     authoring.mkdir(parents=True, exist_ok=True)  # an overlay binds only an existing directory
+    writable = [Path(d) for d in writable_dirs] if writable_dirs is not None else [scratch]
+    for folder in writable:
+        folder.mkdir(parents=True, exist_ok=True)
     tmp = private_tmp("shell", scratch)
     argv = wrap(
         # -P: no cwd on sys.path, so a module planted in the run folder cannot hijack the server.
         [python, "-P", "-c", builtin_source],
         analysis_policy(
             label="shell", toolkit_root=toolkit_root,
-            writable=(str(scratch),), readonly=(str(authoring),),
-            tmp=tmp,
+            writable=tuple(str(folder) for folder in writable), readonly=(str(authoring),),
+            tmp=tmp, home=private_tmp("shell-home", scratch),  # this run's own, outside its folder
         ),
+    )
+
+    # Its own HEASoft parameter folder (F23): /tmp is private when jailed.
+    env = with_private_param_dir(
+        env, "/tmp/pfiles" if argv[0] != python else tmp / "pfiles", create=tmp / "pfiles",
     )
 
     return {
@@ -437,10 +450,11 @@ def attach_worker_runtime(
         worker.memory_path = memory_path(run_id, key)
         worker.agent_key = key
         worker.report_dir = agent_dir(run_id, key)
+        worker.report_dir.mkdir(parents=True, exist_ok=True)
         worker.receipts = ReceiptStore.for_run(run_dir(run_id))
         sandbox = PersistentSandbox(
             toolkit_root=toolkit_root,
-            workdir=memory_path(run_id, key).parent,
+            workdir=worker.report_dir,
             analyze_env=settings.analyze_env,
             analyze_ini_sh=settings.analyze_ini_sh,
             repl_init_py=settings.repl_init_py,
@@ -626,12 +640,19 @@ async def run_research(
     # — the preflight checklist included — carries the running total. The monitor ledger is the
     # only cost record there is (§J1); nothing writes a separate cost log.
     cost_meter = install_cost_meter(run_id=run_id, monitor=run_monitor)
+    # Receipted files read back changed (F26) are alerted on the run's own ledger.
+    from auto_research.provenance.store import install_drift_alert
+
+    install_drift_alert(run_monitor)
     if getattr(run_monitor, "cost_meter", None) is None:
         run_monitor.cost_meter = cost_meter
-    if resume and heal_result is not None and heal_result.healed:
+    if resume and heal_result is not None and heal_result.reason not in ("clean", "not_git"):
+        # Recorded whatever the outcome: a refused heal (e.g. a base ref the branch never passed
+        # through) is a tampering signal, not only a dirty tree.
         await run_monitor.record(
             "run", "run.resume.heal", level=1,
-            summary="Resume: healed a dirty authoring branch left by a prior hard-kill",
+            summary=("Resume: healed a dirty authoring branch left by a prior hard-kill"
+                     if heal_result.healed else f"Resume: authoring branch NOT healed ({heal_result.reason})"),
             data={
                 "reason": heal_result.reason,
                 "base_ref": heal_result.base_ref,
@@ -819,6 +840,12 @@ async def run_research(
             _builtin_server_config(
                 analyze_env, analyze_ini_sh, toolkit_root,
                 cwd=run_dir(run_id), analyze_probe=analyze_probe,
+                # The workers' own folders only (the shell runs each command in the caller's).
+                writable_dirs=[
+                    agent_dir(run_id, f"analyst_worker_{index}")
+                    for index, worker in enumerate(workers)
+                    if isinstance(worker, AnalystWorkerAgent)
+                ],
             )
         ]
     mcp_client = MCPToolClient(servers=mcp_server_configs)

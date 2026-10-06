@@ -48,14 +48,37 @@ def test_resolve_attaches_what_the_sender_may_cite_and_names_the_rest(tmp_path):
     assert problems == [f"{peer.handle} is not a receipt you can cite, so it was not attached."]
 
 
-def test_resolve_refuses_bytes_that_no_longer_match_their_receipt(tmp_path):
+def test_bytes_changed_after_their_receipt_are_still_sent_with_an_alert(tmp_path):
+    """F26, human ruling 2026-10-06: a changed file is sent as it is now, and alerted."""
+    from auto_research.provenance import store as S
+
+    alerts = []
+    token = S._DRIFT_SINK.set(lambda summary, data: alerts.append(summary))
+    try:
+        store = ReceiptStore(tmp_path / "receipts")
+        path = _png(tmp_path / "pd.png")
+        fig = store.mint(source="s", kind="figure", produced_by="t", path=path, caption="c",
+                         mime_type="image/png")
+        _png(path, size=(41, 30))  # rewritten after the receipt
+        (att,), problems = resolve_attachments(ScopedLookup(store, own_source="s"), [fig.handle])
+    finally:
+        S._DRIFT_SINK.reset(token)
+    assert problems == [] and att.path.read_bytes() == path.read_bytes()
+    assert store.root in att.path.parents  # a copy out of the agent's reach, not the live file
+    assert alerts and "differs from its receipt" in alerts[0]
+
+
+def test_a_receipted_file_swapped_for_a_symlink_is_not_attached(tmp_path):
     store = ReceiptStore(tmp_path / "receipts")
     path = _png(tmp_path / "pd.png")
     fig = store.mint(source="s", kind="figure", produced_by="t", path=path, caption="c",
                      mime_type="image/png")
-    _png(path, size=(41, 30))  # rewritten after the receipt
+    secret = tmp_path / "secret"
+    secret.write_bytes(b"token")
+    path.unlink()
+    path.symlink_to(secret)
     atts, problems = resolve_attachments(ScopedLookup(store, own_source="s"), [fig.handle])
-    assert atts == [] and "no longer match" in problems[0]
+    assert atts == [] and "symlink" in problems[0]
 
 
 def test_resolve_sends_a_papers_original_pdf(tmp_path):
@@ -66,7 +89,8 @@ def test_resolve_sends_a_papers_original_pdf(tmp_path):
                        source_path=pdf, source_sha256=__import__("hashlib").sha256(pdf.read_bytes()).hexdigest(),
                        title="Krawczynski+2022")
     (att,), problems = resolve_attachments(ScopedLookup(store, own_source="lib"), [paper.handle])
-    assert problems == [] and att.path == pdf and att.mime_type == "application/pdf"
+    assert problems == [] and att.path.read_bytes() == pdf.read_bytes()
+    assert att.filename == "paper.pdf" and att.mime_type == "application/pdf"
     assert att.caption == "Krawczynski+2022"
 
 
@@ -399,3 +423,16 @@ def test_an_unmatched_album_gets_one_notice(tmp_path):
     first, _ = asyncio.run(_two_open(handler, tmp_path)(drive))
     assert first.attachments == []
     assert sum(m == "send_message" for m, _ in handler.app.bot.calls) == 1
+
+
+def test_an_attachment_over_the_chat_ceiling_is_refused_before_it_is_read(tmp_path, monkeypatch):
+    from auto_research.hitl import attachments as A
+
+    store = ReceiptStore(tmp_path / "receipts")
+    path = _png(tmp_path / "big.png")
+    fig = store.mint(source="s", kind="figure", produced_by="t", path=path, caption="c",
+                     mime_type="image/png")
+    monkeypatch.setattr(A, "MAX_ATTACHMENT_BYTES", 10)
+    monkeypatch.setattr(A, "read_receipted", lambda *a, **k: pytest.fail("read before the size check"))
+    atts, problems = resolve_attachments(ScopedLookup(store, own_source="s"), [fig.handle])
+    assert atts == [] and "MB" in problems[0]

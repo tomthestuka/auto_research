@@ -22,6 +22,14 @@ from tests.test_sandbox import _FakeRegistry, _FakeSandbox
 
 
 @pytest.fixture(autouse=True)
+def _allow_list_is_the_test_folder(monkeypatch, tmp_path):
+    """Receipt minting only admits files inside the allow-list (F22); pin it, not the host's."""
+    from auto_research.sandbox import fs_guard
+
+    monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [tmp_path.resolve()])
+
+
+@pytest.fixture(autouse=True)
 def _no_data_roots(monkeypatch):
     monkeypatch.setattr(react, "_observation_path_args", lambda: {})
 

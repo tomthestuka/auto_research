@@ -190,7 +190,10 @@ class PaperReader:
                 f"[{receipt.handle}]."
             ),
             documents=[
-                document_from_file(Path(receipt.source_path), title=f"[{receipt.handle}] {receipt.title}")
+                document_from_file(
+                    Path(receipt.source_path), title=f"[{receipt.handle}] {receipt.title}",
+                    sha256=receipt.source_sha256,  # the receipted hash, not the file's current one
+                )
             ],
         )
 

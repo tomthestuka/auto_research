@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import io
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -443,3 +444,24 @@ def test_an_unserializable_tool_call_argument_still_contributes_weight():
         tool_calls=[ToolCall(id="t1", name="tool", arguments={"blob": _Opaque()})]
     )
     assert nonmedia_weight([turn]) > 3_000
+
+
+def test_a_document_changed_after_its_receipt_is_sent_with_a_note_in_the_request(tmp_path, monkeypatch):
+    """F26 end to end through the adapter: the PDF goes out, and the model is told it changed."""
+    import anthropic
+
+    from auto_research.models.providers.anthropic import AnthropicProvider
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", _CaptureAnthropic)
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4 original")
+    document = _document(pdf)
+    pdf.write_bytes(b"%PDF-1.4 swapped after the receipt")
+    convo = [ModelMessage(role="user", content="read this")]
+    cfg = RoleModelConfig(name="m", provider="anthropic", model="fake", vision=True)
+
+    asyncio.run(AnthropicProvider().call(convo, cfg, documents=[document]))
+
+    request = json.dumps(_CaptureAnthropic.store["request"]["messages"])
+    assert "differs from its receipt" in request
+    assert '"document"' in request  # still sent

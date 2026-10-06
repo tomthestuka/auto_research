@@ -433,15 +433,22 @@ def test_the_allow_list_names_the_private_roots_and_drops_the_shared_ones(monkey
     not even mounted."""
     monkeypatch.setattr(environment, "_source_obs_roots", lambda config: ["/shared/obsdb"])
     allow = _orchestration()["agent_fs_allow"]
-    assert allow[:4] == ["/trial/toolkit", "/trial/runtime", "/trial/papers", "/trial/obs"]
+    assert allow[:4] == ["/trial/toolkit", "/trial/runtime/runs", "/trial/papers", "/trial/obs"]
     assert not [entry for entry in allow if entry.startswith("/shared")]
     # The machine's own roots -- the science stack and its calibration data -- are untouched.
     assert "/opt/conda/envs/astropy" in allow and "/man1/CALDB" in allow
 
 
-def test_the_read_only_roots_survive_and_gain_nothing_private():
+def test_the_read_only_roots_survive_and_the_papers_are_read_only():
     readonly = _orchestration()["agent_fs_readonly"]
-    assert readonly == ["/opt/conda/envs/astropy", "/opt/heasoft", "/man1/CALDB"]
+    assert readonly == ["/opt/conda/envs/astropy", "/opt/heasoft", "/man1/CALDB", "/trial/papers"]
+
+
+def test_the_trial_ledgers_are_outside_every_actor_root():
+    """Receipt blobs and filed reports live beside the ledger, under the runtime dir but not `runs/`."""
+    allow = _orchestration()["agent_fs_allow"]
+    assert "/trial/runtime" not in allow
+    assert not any("/trial/runtime/ledgers".startswith(r.rstrip("/") + "/") for r in allow)
 
 
 def test_the_source_configuration_is_not_mutated():
@@ -1434,3 +1441,19 @@ def test_the_cycle_summary_carries_rework_and_status(tmp_path):
     assert cycles == [
         {"filed": "turn_end", "committed": 3, "rework": True, "status": "failed"}
     ]
+
+
+def test_a_trial_reads_the_result_the_backend_writes_and_never_a_planted_one(tmp_path, monkeypatch):
+    """The backend's writer (cli) and the trial's reader must agree on where result.json lives,
+    and a copy planted in the run folder (writable to the jailed shell) is never read (F22)."""
+    import importlib
+
+    backend_cli = importlib.import_module("auto_research.cli.main")
+
+    run_directory = tmp_path / "runtime" / "runs" / "rid1"
+    run_directory.mkdir(parents=True)
+    trial.record_path(run_directory, "backend.log").write_text("")  # written at launch
+    monkeypatch.setattr(backend_cli, "run_dir", lambda run_id: tmp_path / "runtime" / "runs" / run_id)
+    (run_directory / "result.json").write_text('{"status": "ok", "forged": true}')
+    backend_cli._write_result("rid1", {"status": "ok", "accepted": True})
+    assert trial.read_result(run_directory) == {"status": "ok", "accepted": True}

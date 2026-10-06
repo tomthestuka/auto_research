@@ -8,12 +8,16 @@ stay where they are and are hashed in place.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import re
+import stat
 import threading
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -80,6 +84,148 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+@dataclass(frozen=True)
+class ReceiptedRead:
+    """The bytes a reader actually uses, and what checking them against the receipt found.
+
+    ``data`` is ``None`` only when the file could not be read without following a symlink, or is
+    not a regular file: the case where reading would mean reading something else entirely.
+    """
+
+    data: bytes | None
+    note: str | None = None
+    changed: bool = False
+
+
+#: The run's alert sink (``install_drift_alert``): called with a summary and a payload whenever a
+#: receipted file is read back and no longer matches its receipt.
+_DRIFT_SINK: ContextVar[Callable[[str, dict], None] | None] = ContextVar(
+    "auto_research_receipt_drift", default=None
+)
+
+
+def install_drift_alert(monitor: object | None) -> None:
+    """Make ``monitor`` the run's receipt-drift alert sink (set beside the cost meter)."""
+    if monitor is None:
+        _DRIFT_SINK.set(None)
+        return
+
+    import asyncio
+
+    try:
+        home_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        home_loop = None
+    seen: set[tuple[str, str | None]] = set()
+    lock = threading.Lock()
+    pending: set = set()  # strong references, so a scheduled alert is not collected before it runs
+
+    def sink(summary: str, data: dict) -> None:
+        # Once per run per (file, bytes): the media layer re-reads the whole history on every
+        # model call, and one changed figure would otherwise alert on every later request.
+        key = (str(data.get("path")), data.get("actual_sha256"))
+        with lock:
+            if key in seen:
+                return
+            seen.add(key)
+        coro = monitor.record(  # type: ignore[attr-defined]
+            "provenance", "receipt.drift", level=2, summary=summary, data=data,
+        )
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not None and running is home_loop:
+            task = running.create_task(coro)
+            pending.add(task)
+            task.add_done_callback(pending.discard)
+        elif home_loop is not None and not home_loop.is_closed():
+            # Raised from a worker thread (e.g. asyncio.to_thread): hand it to the run's loop.
+            future = asyncio.run_coroutine_threadsafe(coro, home_loop)
+            pending.add(future)
+            future.add_done_callback(pending.discard)
+        else:
+            coro.close()
+
+    _DRIFT_SINK.set(sink)
+
+
+def read_receipted(path: Path | str, expected_sha256: str | None, *, label: str = "") -> ReceiptedRead:
+    """Read a receipted file once and check those very bytes against its receipt (F26).
+
+    A receipt records a file's hash when it is minted; the file itself stays where the producing
+    agent can still write it. Every later reader — figures and documents sent to a model, report
+    staging, files sent to the human, receipt text — goes through here. The path (canonical, as
+    recorded at mint) is opened **one component at a time without following any symlink**, so a
+    file or a folder on its path swapped for a link since is refused, not followed; the file is read
+    once and the bytes that will be used are hashed. Human ruling 2026-10-06: a changed file is
+    **still used, with an alert** (a model-visible note, a ``receipt.drift`` ledger event). A
+    symlink anywhere on the path, or a non-regular file, is not read at all — reading it would read
+    something else — and is alerted the same way. ``expected_sha256=None`` (an unreceipted file)
+    only gets the symlink protection.
+    """
+    name = label or Path(path).name
+    try:
+        fd = _open_without_symlinks(Path(path))
+    except FileNotFoundError:
+        return ReceiptedRead(None, f"[unreadable] {name}: the file is no longer on disk.", changed=True)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            note = f"[changed] {name}: its path now runs through a symlink; not read."
+        else:
+            note = f"[unreadable] {name}: {exc.strerror or exc}."
+        _alert(note, path, expected_sha256, None)
+        return ReceiptedRead(None, note, changed=True)
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            note = f"[changed] {name} is no longer a regular file; not read."
+            _alert(note, path, expected_sha256, None)
+            return ReceiptedRead(None, note, changed=True)
+        try:
+            data = handle.read()
+        except OSError as exc:
+            return ReceiptedRead(None, f"[unreadable] {name}: {exc.strerror or exc}.", changed=True)
+    actual = sha256_bytes(data)
+    if expected_sha256 is not None and actual != expected_sha256:
+        note = (f"[changed] {name} differs from its receipt (receipted {expected_sha256[:12]}, "
+                f"now {actual[:12]}): it was modified after it was produced.")
+        _alert(note, path, expected_sha256, actual)
+        return ReceiptedRead(data, note, changed=True)
+    return ReceiptedRead(data)
+
+
+def _open_without_symlinks(path: Path) -> int:
+    """An fd for ``path``, opened component by component with ``O_NOFOLLOW`` from ``/``.
+
+    ``O_NOFOLLOW`` alone checks only the last component; a folder on the path replaced by a link
+    would still be followed. Walking with ``openat`` makes each step refuse a link, so the file
+    reached is the one at the canonical path recorded at mint, or nothing.
+    """
+    path = Path(os.path.abspath(path))
+    parts = path.parts
+    # O_PATH for the folders: it needs only search permission, so a traverse-only folder (mode
+    # 711) on the way is walked, not refused; the file itself is opened for reading.
+    walk = getattr(os, "O_PATH", os.O_RDONLY)
+    fd = os.open("/", walk | os.O_DIRECTORY)
+    try:
+        for part in parts[1:-1]:
+            next_fd = os.open(part, walk | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=fd)
+    finally:
+        os.close(fd)
+
+
+def _alert(note: str, path: Path | str, expected: str | None, actual: str | None) -> None:
+    sink = _DRIFT_SINK.get()
+    if sink is not None:
+        try:
+            sink(note, {"path": str(path), "expected_sha256": expected, "actual_sha256": actual})
+        except Exception:  # noqa: BLE001 — an alert never breaks the read it reports on
+            pass
+
+
 def is_synthetic_path(path: Path) -> bool:
     return any(_SYNTH_RE.match(part) for part in Path(path).parts)
 
@@ -135,7 +281,7 @@ class ReceiptStore:
         """
         from auto_research.sandbox.workspace import record_beside
 
-        root = record_beside(Path(run_directory), "receipts").resolve()
+        root = record_beside(Path(run_directory), "receipts", legacy_ok=False).resolve()
         with _REGISTRY_LOCK:
             store = _STORES.get(root)
             if store is None:
@@ -277,11 +423,31 @@ class ReceiptStore:
             return None
         if receipt.kind not in TEXT_KINDS and receipt.kind not in ("data", "commit"):
             return None
-        try:
-            raw = Path(receipt.path).read_bytes()
-        except OSError:
+        text, _note = self.text_with_note(handle)
+        return text
+
+    def read(self, handle: str) -> ReceiptedRead | None:
+        """The receipt's bytes, read once and checked (see :func:`read_receipted`)."""
+        receipt = self._receipts.get(handle)
+        if receipt is None:
             return None
-        return checkable_text(raw)
+        return read_receipted(receipt.path, receipt.sha256, label=handle)
+
+    def text_with_note(self, handle: str) -> tuple[str | None, str | None]:
+        """The receipt's text and, when its bytes changed since the receipt, the note to show.
+
+        The text is what a quote is checked against, so the note is returned beside it, never
+        mixed into it; a reader that shows the text to a model or a human shows the note too.
+        """
+        receipt = self._receipts.get(handle)
+        if receipt is None:
+            return None, None
+        if receipt.kind not in TEXT_KINDS and receipt.kind not in ("data", "commit"):
+            return None, None
+        read = read_receipted(receipt.path, receipt.sha256, label=handle)
+        if read.data is None:
+            return None, read.note
+        return checkable_text(read.data), read.note
 
     def verify(self, handle: str) -> str | None:
         """Re-hash the stored bytes; return a problem sentence, or ``None`` when they match."""
@@ -359,6 +525,12 @@ class ScopedLookup:
 
     def text(self, handle: str) -> str | None:
         return self.store.text(handle) if self.visible(handle) else None
+
+    def text_with_note(self, handle: str) -> tuple[str | None, str | None]:
+        return self.store.text_with_note(handle) if self.visible(handle) else (None, None)
+
+    def read(self, handle: str) -> "ReceiptedRead | None":
+        return self.store.read(handle) if self.visible(handle) else None
 
     def verify(self, handle: str) -> str | None:
         if not self.visible(handle):

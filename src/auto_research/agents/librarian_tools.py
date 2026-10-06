@@ -513,7 +513,8 @@ class LibrarianToolProvider:
 
     def _page(self, receipt: Receipt, offset: int, tool: str) -> str:
         """One page of a receipt's reading copy, ending at a line break, with where to continue."""
-        text = self.store.text(receipt.handle) or ""
+        text, changed = self.store.text_with_note(receipt.handle)
+        text = (f"{changed}\n" if changed else "") + (text or "")
         total = len(text)
         start = max(0, min(offset, total))
         end = min(total, start + READ_WINDOW_CHARS)

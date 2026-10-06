@@ -116,3 +116,5 @@ Compacted 2026-08-05 and again 2026-09-24 (detail in git history).
   applies (litellm had priced `qwen3.7-plus` at $0).
 - 2026-09-09 — N6: `traced_model_call` records `billed_usage` from an exception (set by
   `_responses._raise_billed`) and re-raises.
+- 2026-10-06 — `usage.default_sources` reads each run's ledger where it lives (ledger-side since
+  2026-09-14; the run folder only for a pre-split run) and creates nothing (F22).

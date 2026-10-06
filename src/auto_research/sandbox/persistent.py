@@ -15,7 +15,7 @@ from pathlib import Path
 
 from typing import Any
 
-from auto_research.sandbox.runner import _source_ini_env
+from auto_research.sandbox.runner import _source_ini_env, with_private_param_dir
 
 
 def _descendant_pids(pid: int) -> list[int]:
@@ -240,13 +240,27 @@ class PersistentSandbox:
         # -P: `python -c` would put the cwd first on sys.path, so a package written into the workdir
         # would shadow the toolkit one and its results be stamped as toolkit evidence. A flag, not
         # PYTHONSAFEPATH, so the REPL's own child processes keep their normal path rules.
+        # Fresh at every start (incl. a restart after a timeout): nothing the agent left in its /tmp
+        # survives into the next launch's mounts.
+        import shutil
+
+        shutil.rmtree(private_tmp("repl", self._workdir), ignore_errors=True)
         self._private_tmp = private_tmp("repl", self._workdir)
         argv = wrap(
             [python_exec, "-P", "-c", _REPL_SCRIPT],
             analysis_policy(
                 label="repl", toolkit_root=self._toolkit_root,
                 writable=(str(self._workdir),), tmp=self._private_tmp,
+                # This worker's own home, outside every agent-writable folder (a planted symlink there
+                # became a writable bind of its target), checked like the private /tmp.
+                home=private_tmp("repl-home", self._workdir),
             ),
+        )
+        # Its own HEASoft parameter folder (F23): /tmp is private when jailed.
+        jailed = argv[0] != python_exec
+        env = with_private_param_dir(
+            env, "/tmp/pfiles" if jailed else self._private_tmp / "pfiles",
+            create=self._private_tmp / "pfiles",
         )
         self._proc = await asyncio.create_subprocess_exec(
             *argv,

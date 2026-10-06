@@ -277,7 +277,7 @@ def _rasterize(
     pages: list[FigureRef] = []
     for number, png in enumerate(sorted(out_dir.glob("page-*.png")), 1):
         pages.append(FigureRef(
-            path=png, caption=f"Draft page {number}", mime_type="image/png",
+            path=png.resolve(), caption=f"Draft page {number}", mime_type="image/png",
             produced_by="report_renderer", created_at=now,
             sha256=hashlib.sha256(png.read_bytes()).hexdigest(),
         ))

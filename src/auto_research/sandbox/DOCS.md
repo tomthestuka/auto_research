@@ -1193,3 +1193,39 @@ Compacted 2026-09-01 and 2026-09-24 (detail in git history).
   write-probe target and plant the host-`/tmp` marker in the real temp root. Findings outside this
   change are open in the handoff (host-side symlink following in jail-writable folders, the shared
   writable `PFILES` directory, the gate's full allow-list, science_bench's allow-list shape, F21).
+- 2026-10-06 — **[F22] the host no longer follows what an agent plants in its writable folder.**
+  `workspace.memory_path` is beside the ledger (`ledgers/<run>/memory/<agent>/memory.md`, no
+  carry-over from the old location); `append_memory`/`read_memory` open with `O_NOFOLLOW`;
+  `record_beside`/`resolve_record` use the legacy in-run-folder spelling only for a run with no
+  ledger directory (pre-split); `human_reply_dir` added. `analysis_policy` refuses a writable root
+  that is a symlink and takes a per-process `home` (REPL: `<workdir>/.home`; shell:
+  `<run>/.home-shell`). **[F23]** `runner.with_private_param_dir` gives the REPL, shell, gate and
+  both authors their own `PFILES` user dir (empty, so tools start from the system defaults);
+  `/grad/fzhou/pfiles` left `agent_fs_allow`. **[F24]** the gate's Layer-B jail is read-only except
+  its worktree, JUnit folder, its own home (inside the JUnit temp dir) and a private `/tmp`, with
+  `PYTHONNOUSERSITE=1`.
+- 2026-10-06 — **[F22] second review, fixes.** The REPL's and the shell's homes moved out of every
+  agent-writable folder (`private_tmp("repl-home"|"shell-home", ...)`; a planted `.home` symlink had
+  been bound writable — the toolkit, reproduced); `analysis_policy` refuses a symlinked `home` too.
+  The shell writes only the workers' own folders (`_builtin_server_config(writable_dirs=)`), not the
+  run folder, so it cannot swap a folder another process binds. `record_beside`/`resolve_record`
+  decide "pre-split run" by where the ledger markers (`backend.log`, `monitor.jsonl`) are, and a
+  read never creates an old run's ledger directory. `write_launcher` writes with `O_NOFOLLOW`.
+  `human_reply_dir` keeps a standalone agent's replies in its own folder. Tests pin each rule.
+- 2026-10-06 — **[F22] third review, fixes.** Analysis and gate homes are mounted at
+  `jail.JAIL_HOME_AT` (`/home/ar`, `JailPolicy.home_at`) instead of their host path under the
+  temp root, which inside the jail is the process's own writable `/tmp` (a planted symlink there
+  could redirect the mount). The REPL's private `/tmp` is recreated empty at every start.
+  `write_launcher` writes a fresh temp file (`O_EXCL`) and renames it into place, so a planted
+  FIFO cannot block the host. science_bench's trial driver writes `backend.pid` and reads
+  `result.json` through `record_path` (it still used the run folder).
+- 2026-10-06 — **[F27] the authoring base ref a resume resets to lives beside the ledger**
+  (`merge_flow._base_ref_path`: `ledgers/<run>/authoring_current_base_ref` for a run's authoring
+  dir, which the Claude author's jail can write), and `heal_toolkit_branch_if_dirty` refuses a base
+  ref that is not an ancestor of the branch head. **Gate:** run 1's pytest scratch
+  (`pytest-of-*` in the private `/tmp`) is removed before run 2 (human ruling 2026-10-06; a toolkit
+  suite left 65 GB in 10 minutes and two runs filled the disk).
+- 2026-10-06 — Gate: both Layer-B runs pass one `--basetemp` (`/tmp/pytest-gate` jailed, the
+  private tmp's `pytest-gate` otherwise), which pytest wipes when each run starts, so run 1's
+  scratch is gone before run 2 with the jail on or off. A resume records `run.resume.heal` for
+  every outcome but clean (a refused heal is a tampering signal).

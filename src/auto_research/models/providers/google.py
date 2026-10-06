@@ -360,6 +360,8 @@ class GoogleProvider:
                 # Withheld, never silent — the model is told which document it lost and why.
                 extra_parts.append(types.Part.from_text(text=resolved.note or ""))
                 continue
+            if resolved.note:  # sent, but changed since its receipt (F26): say so
+                extra_parts.append(types.Part.from_text(text=resolved.note))
             extra_parts.append(
                 types.Part.from_bytes(data=resolved.data, mime_type=resolved.mime)
             )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from auto_research.env import runtime_data_dir
@@ -42,7 +43,21 @@ def ledger_dir(run_id: str) -> Path:
     return runtime_data_dir() / "ledgers" / run_id
 
 
-def record_beside(run_directory: Path, name: str) -> Path:
+#: Files every run's ledger has from its first moments (the backend log, the event ledger).
+_LEDGER_MARKERS = ("backend.log", "monitor.jsonl")
+
+
+def _pre_split(run_directory: Path, ledger: Path) -> bool:
+    """Whether a run predates the 2026-09-14 ledger split: its run folder holds the record and its
+    ledger directory does not. A newer run writes those markers ledger-side before any agent runs,
+    so one planted in its run folder cannot make it look old; and reading never creates the ledger
+    directory of an old run, which would otherwise flip it to the new layout."""
+    in_ledger = any((ledger / marker).exists() for marker in _LEDGER_MARKERS)
+    in_folder = any((run_directory / marker).exists() for marker in _LEDGER_MARKERS)
+    return in_folder and not in_ledger
+
+
+def record_beside(run_directory: Path, name: str, *, legacy_ok: bool = True) -> Path:
     """Where a record file lives, derived from the RUN DIRECTORY rather than from config.
 
     `run_dir` and `ledger_dir` are siblings under the runtime dir, so the record directory is
@@ -56,10 +71,15 @@ def record_beside(run_directory: Path, name: str) -> Path:
     under `…/ws/<id>/runtime/`. The code it replaced took the directory it was given and
     appended a filename, depending on nothing.
     """
-    legacy = run_directory / name
-    if legacy.exists():
-        return legacy
-    target = run_directory.parent.parent / "ledgers" / run_directory.name / name
+    ledger = run_directory.parent.parent / "ledgers" / run_directory.name
+    # The legacy spelling only for a run from before the split. For any newer run the run folder
+    # is writable to the jailed shell, so a record "found" there was planted: a forged result.json,
+    # a receipt store, or a symlink redirecting the harness's own write (F22 review, 2026-10-06).
+    if _pre_split(run_directory, ledger):
+        if legacy_ok:
+            return run_directory / name
+        return ledger / name  # no mkdir: creating it would flip the old run to the new layout
+    target = ledger / name
     # The directory is created HERE, by the function that decides the location, so a caller
     # cannot get the path right and the directory wrong. Two separate launchers made exactly
     # that mistake within an hour of the split (`graph.detached._default_launcher` and
@@ -79,9 +99,8 @@ def resolve_record(run_id: str, name: str) -> Path:
     them long after the run. So a reader resolves to the legacy path when that is the one that
     exists, and to the new path otherwise (which is also the path a fresh run will create).
     """
-    legacy = run_dir(run_id) / name
-    if legacy.exists():
-        return legacy
+    if _pre_split(run_dir(run_id), ledger_dir(run_id)):  # see record_beside
+        return run_dir(run_id) / name
     return ledger_dir(run_id) / name
 
 
@@ -126,10 +145,19 @@ def report_record_path(agent_dir_path: Path, filename: str) -> Path:
 
 
 def memory_path(run_id: str, agent_key: str) -> Path:
-    """Return (and ensure parent exists for) the agent's memory.md path."""
-    d = agent_dir(run_id, agent_key)
-    d.mkdir(parents=True, exist_ok=True)
-    return d / "memory.md"
+    """Return (and ensure parent exists for) the agent's memory.md path — **beside the ledger**.
+
+    Not in the agent's folder (F22, 2026-10-06). The harness appends tool output to this file and
+    reads it into the next prompt, outside the jail; inside the agent's own writable folder, the
+    agent's shell could replace it with a symlink and have the harness append model-chosen text to
+    any host file (measured in a synthetic repro) or read any host file into the prompt. Out of every
+    allow-list, as report records already are. A run resumed from before the move starts with no
+    memory: the old location is agent-writable and is never read. The agent's working folder is
+    :func:`agent_dir`.
+    """
+    target = ledger_dir(run_id) / "memory" / agent_key / "memory.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 def create_run_workspace(run_id: str, agent_keys: list[str]) -> dict[str, Path]:
@@ -161,15 +189,37 @@ def round_report_path(agent_dir_path: Path, *, role: str, model: str, round_n: i
 
 
 def append_memory(path: Path, text: str) -> None:
-    """Append text to an agent's memory.md (bare terminal recording)."""
-    with path.open("a", encoding="utf-8") as fh:
+    """Append text to an agent's memory.md (bare terminal recording). A symlink is not followed."""
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(text)
         if not text.endswith("\n"):
             fh.write("\n")
 
 
 def read_memory(path: Path) -> str:
-    """Return the full contents of memory.md, or empty string if absent."""
-    if not path.exists():
+    """Return the full contents of memory.md, or empty string if absent. A symlink is not followed."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
         return ""
-    return path.read_text(encoding="utf-8")
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+def human_reply_dir(agent_folder: Path) -> Path:
+    """Where the harness saves files a human sends this agent: beside the ledger, out of reach.
+
+    The harness writes there outside the jail; inside the agent's own writable folder a planted
+    symlink would redirect that write (F22 review, 2026-10-06). The files reach the agent as
+    receipts. Derived from the agent folder, like :func:`report_record_path`.
+    """
+    agent_folder = Path(agent_folder)
+    run = agent_folder.parent
+    if run.parent.name != "runs":  # a standalone agent outside a runs tree keeps its own folder
+        target = agent_folder / "replies"
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+    target = run.parent.parent / "ledgers" / run.name / "replies" / agent_folder.name
+    target.mkdir(parents=True, exist_ok=True)
+    return target

@@ -81,7 +81,9 @@ def cache_root() -> Path:
     """Where parsed documents are kept. Under the runtime dir, never inside either repo."""
     from auto_research.env import runtime_data_dir
 
-    return runtime_data_dir() / "parsed_docs"
+    # Resolved: crops cached here are read back component by component without following a link
+    # (provenance.store.read_receipted), so a configured spelling through a symlink would refuse them.
+    return (runtime_data_dir() / "parsed_docs").resolve()
 
 
 def parse_document(document: DocumentRef, *, root: Path | None = None) -> ParsedDocument | None:
@@ -93,15 +95,27 @@ def parse_document(document: DocumentRef, *, root: Path | None = None) -> Parsed
     Never raises: a parser failure is a note to the model and an event in the ledger, not a dead
     run. The caller decides how to say so.
     """
-    base = (root or cache_root()) / document.sha256
-    cached = _read_cache(base)
-    if cached is not None:
-        return cached
-    try:
-        parsed = _run_docling(document, base)
-    except Exception:  # noqa: BLE001 — an unparseable attachment degrades, never crashes
-        shutil.rmtree(base, ignore_errors=True)
+    # The bytes parsed are the bytes checked (F26): read once without following a symlink, and
+    # cached under THEIR hash -- a document changed after its receipt is parsed as it is now, with
+    # a note, and never cached under the receipted hash.
+    from dataclasses import replace
+
+    from auto_research.provenance.store import read_receipted
+
+    read = read_receipted(document.path, document.sha256, label=document.title or document.path.name)
+    if read.data is None:
         return None
+    actual = hashlib.sha256(read.data).hexdigest()
+    base = Path(root).resolve() / actual if root is not None else cache_root() / actual
+    parsed = _read_cache(base)
+    if parsed is None:
+        try:
+            parsed = _run_docling(document, base, data=read.data)
+        except Exception:  # noqa: BLE001 — an unparseable attachment degrades, never crashes
+            shutil.rmtree(base, ignore_errors=True)
+            return None
+    if read.note:
+        parsed = replace(parsed, text=f"{read.note}\n\n{parsed.text}")
     return parsed
 
 
@@ -169,7 +183,7 @@ def _quiet_third_party_logs() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
-def _run_docling(document: DocumentRef, base: Path) -> ParsedDocument:
+def _run_docling(document: DocumentRef, base: Path, *, data: bytes) -> ParsedDocument:
     """Convert with Docling and write the cache entry. Import is local: the orchestration
     environment must load without this dependency for every path that does not use it."""
     from docling.datamodel.pipeline_options import PdfPipelineOptions
@@ -191,7 +205,11 @@ def _run_docling(document: DocumentRef, base: Path) -> ParsedDocument:
     converter = DocumentConverter(
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
     )
-    result = converter.convert(document.path)
+    # Parse the verified bytes from a private copy, never the live file the reference names.
+    base.mkdir(parents=True, exist_ok=True)
+    source = base / f"source{document.path.suffix.lower() or '.pdf'}"
+    source.write_bytes(data)
+    result = converter.convert(source)
     doc = result.document
 
     figures_dir = base / "figures"

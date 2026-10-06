@@ -85,3 +85,4 @@ The graph's `compose_report` node calls `publish_report`; the `.tex`/PDF already
   `compile_latex`, and `config: report_retry_cap`.
 - 2026-09-24 — Ruling: paper values are attributed, not quoted; the renderer adds the verify-against-
   the-PDFs list and `publish_report` writes it as `ResearchReport.paper_attributions`.
+- 2026-10-06 — [F26] receipted files read through `provenance.store.read_receipted` (read once, no symlink, hash-checked; a changed file is sent with a note and a `receipt.drift` alert). See `provenance/DOCS.md`.

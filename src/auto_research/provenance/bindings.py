@@ -271,7 +271,8 @@ def _quote_hint(resolved: "_Resolved", handle: str, quote: str, kind: str) -> st
                 hay, normalise(quote, receipt.kind)
             ):
                 return f" It does appear in {other}; cite that receipt instead."
-    closest = _closest_passage(resolved.lookup.text(handle) or "", quote, kind)
+    resolved.entry(handle)  # the checked read; the hint is drawn from those bytes, not a re-read
+    closest = _closest_passage(resolved.raw.get(handle) or "", quote, kind)
     if not closest:
         return ""
     quoted, shown = normalise(quote, kind), normalise(closest, kind)
@@ -347,6 +348,8 @@ class _Resolved:
     def __init__(self, lookup: ReceiptLookup) -> None:
         self.lookup = lookup
         self._entries: dict[str, tuple[Receipt | None, str | None, str | None]] = {}
+        #: The raw text each entry was checked against: hints are drawn from these same bytes (F26).
+        self.raw: dict[str, str] = {}
 
     def entry(self, handle: str) -> tuple[Receipt | None, str | None, str | None]:
         """``(receipt, problem, normalised text)``; ``receipt`` is None when it cannot be used."""
@@ -365,14 +368,42 @@ class _Resolved:
                     "anything else in words."
                 ), None)
             else:
-                problem = self.lookup.verify(handle)
+                problem, text = self._checked_text(handle, receipt)
                 if problem:
                     self._entries[handle] = (None, problem, None)
                 else:
-                    text = self.lookup.text(handle)
+                    if text is not None:
+                        self.raw[handle] = text
                     hay = normalise(text, receipt.kind) if text is not None else None
                     self._entries[handle] = (receipt, None, hay)
         return self._entries[handle]
+
+    def _checked_text(self, handle: str, receipt) -> tuple[str | None, str | None]:
+        """The problem refusing this citation, or the text it is checked against.
+
+        One read: the bytes checked against the receipt are the bytes the quote is matched in
+        (F26), so nothing can be swapped between the two. A citation whose bytes changed since its
+        receipt is refused -- it would ground a number on bytes no receipt vouches for.
+        """
+        from auto_research.provenance.store import TEXT_KINDS, checkable_text
+
+        if receipt.source_path is not None:  # a paper/page: its original file is checked too
+            problem = self.lookup.verify(handle)
+            if problem:
+                return problem, None
+        read_fn = getattr(self.lookup, "read", None)
+        if read_fn is None:  # a duck-typed lookup without the one-read path
+            problem = self.lookup.verify(handle)
+            return (problem, None) if problem else (None, self.lookup.text(handle))
+        read = read_fn(handle)
+        if read is None or read.data is None:
+            return (read.note if read is not None else f"{handle} is not a receipt in this run."), None
+        if read.changed:
+            return (f"{handle}: the bytes at {receipt.path} no longer match the hash recorded when "
+                    "it was produced."), None
+        if receipt.kind in TEXT_KINDS or receipt.kind in ("data", "commit"):
+            return None, checkable_text(read.data)
+        return None, None
 
 
 def check_bindings(

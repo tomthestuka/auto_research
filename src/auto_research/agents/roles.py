@@ -1386,7 +1386,9 @@ class AnalystWorkerAgent(AgentRole):
             await self.sandbox.start()
 
         self._round += 1
-        cwd = self.memory_path.parent if self.memory_path is not None else None
+        # The agent's own folder (report_dir), never memory.md's: memory lives beside the ledger,
+        # out of the jail's reach (F22).
+        cwd = self.report_dir or (self.memory_path.parent if self.memory_path is not None else None)
         _mint_task_input(self.receipts, task)
         workspace = self._make_report_workspace(peer_reports)
         provider = SandboxToolProvider(
@@ -2681,7 +2683,7 @@ class ChannelTools:
                 scope=scope,
                 receipt_source=getattr(scope, "own_source", None)
                 or getattr(self._base, "receipt_source", None),
-                reply_dir=getattr(self._base, "cwd", None) or getattr(role, "report_dir", None),
+                reply_dir=_reply_dir_for(getattr(self._base, "cwd", None) or getattr(role, "report_dir", None)),
                 kind=str(arguments.get("kind") or "clarify_science"),
                 model=_model_label(role.model) or "",
             )
@@ -2949,3 +2951,12 @@ def _append_tool_results_to_memory(path: Path, results: Sequence[ToolResult]) ->
         if r.figures:
             lines.append(f"figures: {[str(f.path) for f in r.figures]}")
     append_memory(path, "\n".join(lines) + "\n")
+
+
+def _reply_dir_for(agent_folder):
+    """Files a human sends land beside the ledger, never in the agent's writable folder (F22)."""
+    if agent_folder is None:
+        return None
+    from auto_research.sandbox.workspace import human_reply_dir
+
+    return human_reply_dir(agent_folder)

@@ -141,11 +141,21 @@ def test_figures_are_staged_by_content_hash_so_shared_basenames_never_collide(st
         assert (tmp_path / "report" / rel).read_bytes() == Path(receipt.path).read_bytes()
 
 
-def test_a_figure_whose_bytes_changed_is_refused_before_staging(store, tmp_path):
-    Path(store.get("analyst_lead:f1").path).write_bytes(b"not the plot")
-    result = render_report(_final(), store, tmp_path / "report", run_id="r1")
-    assert result.tex_path is None
-    assert any("analyst_lead:f1" in p and "no longer match" in p for p in result.problems)
+def test_a_figure_whose_bytes_changed_is_staged_as_it_is_now_with_an_alert(store, tmp_path):
+    """F26, human ruling 2026-10-06: changed after its receipt → still staged, alerted."""
+    from auto_research.provenance import store as S
+
+    alerts = []
+    token = S._DRIFT_SINK.set(lambda summary, data: alerts.append(summary))
+    try:
+        Path(store.get("analyst_lead:f1").path).write_bytes(b"not the plot")
+        result = render_report(_final(), store, tmp_path / "report", run_id="r1")
+    finally:
+        S._DRIFT_SINK.reset(token)
+    assert not any("analyst_lead:f1" in p for p in result.problems), result.problems
+    assert alerts and any("analyst_lead:f1" in a for a in alerts)
+    staged = list((tmp_path / "report" / "figures").glob("*"))
+    assert any(f.read_bytes() == b"not the plot" for f in staged)
 
 
 def test_a_non_figure_in_figures_is_refused(store, tmp_path):

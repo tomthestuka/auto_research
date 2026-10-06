@@ -120,7 +120,10 @@ class MediaPlan:
         found = self._by_ref.get(id(ref))
         if found is not None:
             return found
-        return Resolved(data=Path(ref.path).read_bytes(), mime=ref.mime_type)
+        from auto_research.provenance.store import read_receipted
+
+        read = read_receipted(ref.path, getattr(ref, "sha256", None), label=Path(ref.path).name)
+        return Resolved(data=read.data, mime=ref.mime_type, note=read.note)
 
 
 def iter_media(
@@ -224,12 +227,37 @@ def _resolve_one(
     return _resolve_document(item, limits)
 
 
-def _resolve_image(item: MediaItem, limits: MediaLimits, max_edge: int) -> Resolved:
-    try:
-        data = item.path.read_bytes()
-    except OSError as exc:
-        return Resolved(None, item.mime, f"[withheld] {item.path.name}: unreadable ({exc}).")
+def _read_item(item: MediaItem) -> tuple[bytes | None, str | None]:
+    """The item's bytes, read once without following a symlink and checked against its receipt.
 
+    A figure's file stays where the agent that produced it can still write it; the bytes sent are
+    the bytes hashed here, and a mismatch with the recorded hash is sent with a model-visible note
+    and a ledger alert (F26, human ruling 2026-10-06). See ``provenance.store.read_receipted``.
+    """
+    from auto_research.provenance.store import read_receipted
+
+    try:
+        read = read_receipted(item.path, getattr(item.ref, "sha256", None), label=item.path.name)
+    except OSError as exc:
+        return None, f"[withheld] {item.path.name}: unreadable ({exc})."
+    return read.data, read.note
+
+
+def _with_note(resolved: Resolved, note: str | None) -> Resolved:
+    if not note:
+        return resolved
+    joined = f"{note} {resolved.note}" if resolved.note else note
+    return Resolved(resolved.data, resolved.mime, joined)
+
+
+def _resolve_image(item: MediaItem, limits: MediaLimits, max_edge: int) -> Resolved:
+    data, note = _read_item(item)
+    if data is None:
+        return Resolved(None, item.mime, note)
+    return _with_note(_resolve_image_bytes(item, data, limits, max_edge), note)
+
+
+def _resolve_image_bytes(item: MediaItem, data: bytes, limits: MediaLimits, max_edge: int) -> Resolved:
     width, height = _dimensions(data)
     too_wide = bool(max_edge) and max(width, height) > max_edge
     too_big = bool(limits.max_image_bytes) and len(data) > limits.max_image_bytes
@@ -262,11 +290,13 @@ def _resolve_image(item: MediaItem, limits: MediaLimits, max_edge: int) -> Resol
 
 
 def _resolve_document(item: MediaItem, limits: MediaLimits) -> Resolved:
-    try:
-        data = item.path.read_bytes()
-    except OSError as exc:
-        return Resolved(None, item.mime, f"[withheld] {item.path.name}: unreadable ({exc}).")
+    data, note = _read_item(item)
+    if data is None:
+        return Resolved(None, item.mime, note)
+    return _with_note(_resolve_document_bytes(item, data, limits), note)
 
+
+def _resolve_document_bytes(item: MediaItem, data: bytes, limits: MediaLimits) -> Resolved:
     if limits.max_doc_bytes and len(data) > limits.max_doc_bytes:
         return Resolved(
             None,

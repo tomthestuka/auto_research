@@ -237,3 +237,33 @@ def test_recorder_is_assembled_from_runtime_source():
 def test_every_check_has_a_seeded_breach():
     names = {c for _t, _s, c in BREACHES.values()}
     assert names == {f"layer_b.returns.{k}" for k in ("transmit", "figure", "receipted", "table", "number")}
+
+
+def test_run_ones_pytest_scratch_is_gone_before_run_two(tmp_path, monkeypatch):
+    """Human ruling 2026-10-06: a toolkit suite left 65 GB of pytest scratch in 10 min and two
+    determinism runs filled the disk; run 1's scratch is removed before run 2. Under the real jail
+    (the private /tmp is where the scratch goes): run 1 leaves a marker in its scratch, and run 2
+    finds it anywhere under /tmp only if that scratch survived -- then its outcome flips."""
+    from auto_research.sandbox import jail
+
+    if not jail.jail_available()[0]:
+        pytest.skip("bwrap cannot run on this host")
+    repo = _make_repo(tmp_path)
+    pkg = repo / "demo_utils" / "tests"
+    pkg.mkdir(parents=True)
+    (repo / "demo_utils" / "__init__.py").write_text("")
+    (pkg / "test_scratch.py").write_text(
+        "def test_session_scratch_is_fresh(tmp_path):\n"
+        "    import glob, tempfile\n"
+        "    leftovers = glob.glob(tempfile.gettempdir() + '/**/ar_marker', recursive=True)\n"
+        "    (tmp_path / 'ar_marker').write_text('left by an earlier run')\n"
+        "    assert not leftovers, leftovers\n"
+    )
+    prefix = sys.prefix  # its configured spelling: the jail links it to the resolved path
+    monkeypatch.setattr(jail, "_config", lambda: {
+        "agent_os_jail": True, "agent_fs_allow": [prefix], "agent_fs_readonly": [prefix],
+    })
+    monkeypatch.setattr(gate, "_orchestration_config", lambda: {"analyze_env": sys.prefix})
+    result = asyncio.run(gate._default_test_runner(repo, [str(pkg)], timeout_s=120))
+    assert result["results"][0].passed, result["results"][0].detail
+    assert result["deterministic"], result.get("determinism_detail")

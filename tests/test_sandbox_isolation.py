@@ -66,7 +66,7 @@ def test_persistent_sandboxes_do_not_share_xspec_state(monkeypatch, tmp_path: Pa
     from auto_research.graph.runtime import load_orchestration_config
     from auto_research.observations import load_observations_config
     from auto_research.sandbox.persistent import PersistentSandbox
-    from auto_research.sandbox.workspace import create_run_workspace, memory_path
+    from auto_research.sandbox.workspace import agent_dir, create_run_workspace
 
     monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path / "runtime"))
 
@@ -83,13 +83,13 @@ def test_persistent_sandboxes_do_not_share_xspec_state(monkeypatch, tmp_path: Pa
 
     loader = PersistentSandbox(
         toolkit_root=toolkit_root,
-        workdir=memory_path(run_id, keys[0]).parent,
+        workdir=agent_dir(run_id, keys[0]),
         analyze_env=analyze_env,
         analyze_ini_sh=analyze_ini_sh,
     )
     observer = PersistentSandbox(
         toolkit_root=toolkit_root,
-        workdir=memory_path(run_id, keys[1]).parent,
+        workdir=agent_dir(run_id, keys[1]),
         analyze_env=analyze_env,
         analyze_ini_sh=analyze_ini_sh,
     )
@@ -120,8 +120,8 @@ def test_persistent_sandboxes_do_not_share_xspec_state(monkeypatch, tmp_path: Pa
                 "run_id": run_id,
                 "loader_pid": loader_pid,
                 "observer_pid": observer_pid,
-                "loader_workdir": memory_path(run_id, keys[0]).parent,
-                "observer_workdir": memory_path(run_id, keys[1]).parent,
+                "loader_workdir": agent_dir(run_id, keys[0]),
+                "observer_workdir": agent_dir(run_id, keys[1]),
                 "ixpe_path": ixpe_path,
                 "load_result": load_result,
                 "observer_status": observer_status,

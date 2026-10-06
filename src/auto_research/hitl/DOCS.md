@@ -253,3 +253,4 @@ Compacted 2026-09-01 and 2026-09-24 (detail in git history).
 - 2026-09-25 — `TelegramHandler.notify` (silent, answers nothing) for the seat-to-seat mirror; a plain
   reply matching no single open question now gets a notice instead of being dropped (rulings: both).
   LIVE: one silent notify accepted.
+- 2026-10-06 — [F26] receipted files read through `provenance.store.read_receipted` (read once, no symlink, hash-checked; a changed file is sent with a note and a `receipt.drift` alert). See `provenance/DOCS.md`.

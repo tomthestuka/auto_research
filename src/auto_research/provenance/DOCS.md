@@ -143,3 +143,34 @@ report renderer.
   the shell typed-number machinery (`_Resolved.typed`, `echoes`, `ReceiptStore.typed_numbers`,
   `capture.typed_numbers_in`); `Receipt.arg_numbers` kept as a legacy field. `store.text` reads
   `commit` receipts.
+- 2026-10-06 — **[F22] A figure or data file is receipted only if it is not itself a symlink and
+  resolves inside the allow-list** (`capture.receipt_call(reachable=)`, default `_allow_listed`; the
+  host `/tmp` excluded while the jail is on, since a jailed process sees a private one). A tool's
+  output or a planted symlink could otherwise put any host file's bytes behind a viewable handle.
+  `ReceiptStore.for_run` never uses a legacy in-run-folder store (`record_beside(..., legacy_ok=False)`):
+  receipts postdate the ledger split, so one found there was planted. Open for a ruling: snapshotting
+  receipted bytes so later reads (figures to models, rendering, attachments) never re-read the live
+  file.
+- 2026-10-06 — **[F26] Receipted files are read once and checked when used** (human ruling
+  2026-10-06: alert, still send). `provenance.store.read_receipted(path, sha256)` opens without
+  following a symlink, reads once and hashes the bytes it returns; a mismatch returns the bytes
+  with a model-visible `[changed]` note and a `receipt.drift` ledger event (sink installed by
+  `run_research` via `install_drift_alert`); a symlink or non-regular file is not read. Used by the
+  model media layer (figures/documents), report figure staging, human attachments (sent from a
+  ledger-side copy) and `store.text`; `view_receipt` no longer refuses changed bytes. Citations
+  checked at `turn_end` still refuse a receipt whose bytes changed.
+- 2026-10-06 — **[F26] review fixes.** `read_receipted` opens the canonical path one component
+  at a time with `O_NOFOLLOW` (`_open_without_symlinks`): a folder on the path swapped for a link is
+  refused, not followed. The note reaches every reader: kept documents in all three adapters,
+  `ReceiptStore.text_with_note` / `ScopedLookup.text_with_note` for `view_receipt`, the librarian's
+  pages and report tables; a changed figure is staged with its actual hash and a marked caption; a
+  file sent to the human carries the note in its caption (and one over 50 MB is refused before it
+  is read). Citations read once (`ReceiptStore.read`) and refuse changed bytes. The alert sink
+  captures the run's loop (alerts from worker threads reach the ledger) and records each
+  (file, bytes) once per run. `document_from_file` resolves its path and takes the receipted
+  `sha256`; Docling parses the verified bytes and caches them under their own hash.
+- 2026-10-06 — **[F26] second review, fixes.** `_open_without_symlinks` walks folders with
+  `O_PATH` (search permission only, so a traverse-only folder is not refused); the parsed-document
+  cache root is resolved, so its crops are not refused by the component walk; a failed quote's hint
+  is drawn from the bytes that were checked (`_Resolved.raw`), not a second read; the drift sink
+  keeps a reference to each scheduled alert.

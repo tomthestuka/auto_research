@@ -473,3 +473,199 @@ def test_what_counts_as_evidence(store):
     human_file = store.mint(source="input", kind="result", produced_by="human_reply", data="3.3")
     assert is_evidence(tool) and is_evidence(commit) and is_evidence(request)
     assert not is_evidence(brief) and not is_evidence(human_file)
+
+
+def test_a_file_resolving_outside_the_allow_list_is_never_receipted(store, tmp_path, monkeypatch):
+    """F22: a tool's output -- or a symlink planted in a writable folder -- can name any host file;
+    receipting it would put its bytes behind a handle any role can view."""
+    from auto_research.provenance import capture
+    from auto_research.sandbox import fs_guard
+
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    secret = tmp_path / "outside" / "credentials.json"
+    secret.parent.mkdir()
+    secret.write_text("{}")
+    planted = allowed / "result.csv"
+    planted.symlink_to(secret)
+    honest = allowed / "honest.csv"
+    monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [allowed.resolve()])
+
+    state = capture.CallInputs(started_ns=0)
+    honest.write_text("a,b\n")
+    out = capture.receipt_call(
+        store, source="analyst_worker_0", produced_by="research_toolkit.x_utils.t",
+        args={}, text=f"wrote {planted} and {honest}", failed=False, state=state,
+    )
+    receipted = {str(r.path) for r in out.products}
+    assert str(secret.resolve()) not in receipted
+    assert str(honest.resolve()) in receipted
+    assert any("outside the allow-list" in note for note in out.notes)
+
+
+def test_a_figure_that_is_a_symlink_is_dropped_not_receipted(store, tmp_path, monkeypatch):
+    from auto_research.provenance import capture
+    from auto_research.sandbox import fs_guard
+    from auto_research.schemas.figures import FigureRef
+
+    monkeypatch.setattr(fs_guard, "load_fs_allowlist", lambda config=None: [tmp_path.resolve()])
+    real = tmp_path / "real.png"
+    real.write_bytes(b"\x89PNG")
+    link = tmp_path / "plot.png"
+    link.symlink_to(real)
+    fig = FigureRef.model_validate({"path": str(link), "caption": "c", "mime_type": "image/png",
+                                    "produced_by": "t", "created_at": "2026-10-06T00:00:00Z",
+                                    "sha256": "0" * 64})
+    out = capture.receipt_call(store, source="w", produced_by="research_toolkit.x_utils.t",
+                               args={}, text="ok", failed=False, figures=[fig])
+    assert out.figures == [] and any("allow-list" in n for n in out.notes)
+
+
+def test_a_receipted_file_is_read_once_checked_and_a_change_is_sent_with_an_alert(tmp_path):
+    """F26 (human ruling 2026-10-06): read the bytes once, hash those; changed → still used,
+    with a model-visible note and an alert; a symlink → not read at all, alerted."""
+    from auto_research.provenance import store as S
+
+    alerts: list[tuple[str, dict]] = []
+    token = S._DRIFT_SINK.set(lambda summary, data: alerts.append((summary, data)))
+    try:
+        fig = tmp_path / "plot.png"
+        fig.write_bytes(b"original")
+        receipted = S.sha256_bytes(b"original")
+        same = S.read_receipted(fig, receipted)
+        assert same.data == b"original" and same.note is None and not alerts
+
+        fig.write_bytes(b"swapped after minting")
+        changed = S.read_receipted(fig, receipted, label="w0:f1")
+        assert changed.data == b"swapped after minting" and changed.changed
+        assert "w0:f1" in changed.note and len(alerts) == 1
+
+        secret = tmp_path / "secret"
+        secret.write_bytes(b"token")
+        fig.unlink()
+        fig.symlink_to(secret)
+        linked = S.read_receipted(fig, receipted)
+        assert linked.data is None and "symlink" in linked.note and len(alerts) == 2
+    finally:
+        S._DRIFT_SINK.reset(token)
+
+
+def test_a_figure_changed_after_its_receipt_reaches_the_model_with_a_note(tmp_path):
+    from auto_research.models.providers import _media
+    from auto_research.provenance.store import sha256_bytes
+    from auto_research.schemas.figures import FigureRef
+
+    png = tmp_path / "p.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\nAAAA")
+    ref = FigureRef.model_validate({"path": str(png), "caption": "c", "mime_type": "image/png",
+                                    "produced_by": "t", "created_at": "2026-10-06T00:00:00Z",
+                                    "sha256": sha256_bytes(b"something else")})
+    data, note = _media._read_item(_media.MediaItem(ref, True, png, "image/png"))
+    assert data == png.read_bytes() and note and "differs from its receipt" in note
+
+
+def test_a_folder_on_the_path_swapped_for_a_symlink_is_not_followed(tmp_path):
+    """O_NOFOLLOW alone checks only the last component; every folder on the path is checked."""
+    from auto_research.provenance import store as S
+
+    figs = tmp_path / "w" / "figs"
+    figs.mkdir(parents=True)
+    (figs / "a.png").write_bytes(b"plot")
+    receipted = S.sha256_bytes(b"plot")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "a.png").write_bytes(b"SECRET")
+    (figs / "a.png").unlink()
+    figs.rmdir()
+    figs.symlink_to(elsewhere)
+    read = S.read_receipted(figs / "a.png", receipted)
+    assert read.data is None and "symlink" in read.note
+
+
+def test_the_drift_alert_reaches_the_run_monitor_once_even_from_a_thread(tmp_path):
+    import asyncio
+    import json as _json
+
+    from auto_research.monitor import RunMonitor
+    from auto_research.provenance import store as S
+
+    ledger = tmp_path / "monitor.jsonl"
+    fig = tmp_path / "f.png"
+    fig.write_bytes(b"new")
+
+    async def run() -> None:
+        monitor = RunMonitor(run_id="r", jsonl_path=ledger)
+        S.install_drift_alert(monitor)
+        try:
+            S.read_receipted(fig, S.sha256_bytes(b"old"))  # on the loop
+            await asyncio.to_thread(S.read_receipted, fig, S.sha256_bytes(b"old"))  # off it
+            fig.write_bytes(b"newer")
+            await asyncio.to_thread(S.read_receipted, fig, S.sha256_bytes(b"old"))
+            await asyncio.sleep(0.05)
+        finally:
+            S.install_drift_alert(None)
+
+    asyncio.run(run())
+    events = [_json.loads(l) for l in ledger.read_text().splitlines() if "receipt.drift" in l]
+    assert len(events) == 2  # one per (file, bytes): the repeat of the same change is not re-alerted
+
+
+def test_a_citation_whose_bytes_changed_is_refused(store, tmp_path):
+    from auto_research.provenance import check_bindings
+
+    data = tmp_path / "t.csv"
+    data.write_text("PD,4.0\n")
+    r = store.mint(source="analyst_worker_0", kind="data",
+                   produced_by="research_toolkit.x_utils.t", path=data)
+    data.write_text("PD,9.9\n")
+    problems = check_bindings(f"PD is 9.9 [{r.handle}]", store).problems
+    assert any("no longer match" in p for p in problems), problems
+
+
+def test_a_citation_check_reads_the_receipt_once(store, tmp_path, monkeypatch):
+    """The bytes checked against the receipt are the bytes the quote is matched in (F26)."""
+    from auto_research.provenance import check_bindings
+
+    data = tmp_path / "t.csv"
+    data.write_text("PD,4.0\n")
+    r = store.mint(source="analyst_worker_0", kind="data",
+                   produced_by="research_toolkit.x_utils.t", path=data)
+    calls = []
+    real_read = store.read
+    monkeypatch.setattr(store, "read", lambda h: calls.append(h) or real_read(h))
+    monkeypatch.setattr(store, "verify", lambda h: pytest.fail("a second, separate check"))
+    monkeypatch.setattr(store, "text", lambda h: pytest.fail("a second, separate read"))
+    assert check_bindings(f"PD is 4.0 [{r.handle}]", store).problems == []
+    assert calls == [r.handle]
+
+
+def test_a_parsed_document_cache_under_a_symlinked_root_keeps_its_figures(tmp_path, monkeypatch):
+    """Crops cached under a configured spelling through a link (/data -> /nfsdata1) are read back
+    component by component; the cache root is resolved so they are not refused."""
+    from auto_research.models.providers import _doc_parse, _media
+    from auto_research.provenance.store import sha256_bytes
+    from auto_research.schemas import DocumentRef
+    from auto_research.schemas.figures import FigureRef
+
+    real = tmp_path / "real_cache"
+    real.mkdir()
+    link = tmp_path / "linked_cache"
+    link.symlink_to(real)
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4 x")
+    doc = DocumentRef(path=pdf, title="p", mime_type="application/pdf",
+                      created_at="2026-10-06T00:00:00Z", sha256=sha256_bytes(pdf.read_bytes()))
+
+    def fake_docling(document, base, *, data):
+        base.mkdir(parents=True, exist_ok=True)
+        crop = base / "fig_001.png"
+        crop.write_bytes(b"\x89PNG crop")
+        ref = FigureRef(path=crop, caption="c", mime_type="image/png", produced_by="docling",
+                        created_at="2026-10-06T00:00:00Z", sha256=sha256_bytes(crop.read_bytes()))
+        return _doc_parse.ParsedDocument(text="t", figures=(ref,), truncated=False)
+
+    monkeypatch.setattr(_doc_parse, "_run_docling", fake_docling)
+    parsed = _doc_parse.parse_document(doc, root=link)
+    (crop,) = parsed.figures
+    data, note = _media._read_item(_media.MediaItem(crop, True, crop.path, "image/png"))
+    assert data == b"\x89PNG crop" and note is None

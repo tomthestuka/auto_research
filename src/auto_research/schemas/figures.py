@@ -81,11 +81,19 @@ class DocumentRef(MessageModel):
     sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
-def document_from_file(path: str | Path, *, title: str | None = None) -> DocumentRef:
-    """Build a document reference for a local attachment."""
+def document_from_file(
+    path: str | Path, *, title: str | None = None, sha256: str | None = None,
+) -> DocumentRef:
+    """Build a document reference for a local attachment.
 
-    file_path = Path(path)
-    digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
+    The path is resolved here, so the reference names the canonical file a later reader checks
+    component by component (``provenance.store.read_receipted``). ``sha256`` is the hash recorded
+    in a receipt, when there is one: a reader then compares the bytes it sends against *that*, not
+    against whatever the file holds when the reference is built.
+    """
+
+    file_path = Path(path).resolve()
+    digest = sha256 or hashlib.sha256(file_path.read_bytes()).hexdigest()
     mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
     return DocumentRef(
         path=file_path,

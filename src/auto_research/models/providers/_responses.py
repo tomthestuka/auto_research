@@ -555,6 +555,8 @@ class ResponsesProvider:
                 # Withheld, never silent — the model is told which document it lost and why.
                 attachment_content.append({"type": "input_text", "text": resolved.note or ""})
                 continue
+            if resolved.note:  # sent, but changed since its receipt (F26): say so
+                attachment_content.append({"type": "input_text", "text": resolved.note})
             attachment_content.append(
                 {
                     "type": "input_file",

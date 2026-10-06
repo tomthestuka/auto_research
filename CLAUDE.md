@@ -920,8 +920,8 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 - **Reviewer as sole I/O (R1) — LIVE-TESTED 2026-09-25** (30 cells, contrast seat + one graph run on
   the configured seats): no unfiled exit, silent exit or uncited attacked number. Clause attacks
   not attempted by the model: `render_refused`, `ungrounded_number`; the edit-after-`turn_end`
-  batch was declined (deterministic test only). Open: a role can still read back `memory.md` and the librarian's fetched pages from the
-  run dir (the report files moved out of reach); the reviewer admits only the latest analysis
+  batch was declined (deterministic test only). Open: a role can still read back the librarian's fetched pages from the run dir (the
+  report files and, 2026-10-06, `memory.md` moved out of reach); the reviewer admits only the latest analysis
   report's receipts; a pre-2026-09-25 checkpoint is refused on resume, not migrated.
 - **Quick channel (E12) (2026-09-25):**
   - live: 25/25 ping-matrix pairs (every seat pair plus the human) and 2 attack cells, 2026-09-25;

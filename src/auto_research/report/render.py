@@ -188,7 +188,11 @@ def _table(table: ReviewerTable, number: int, ctx: _Context, problems: list[str]
             )
             return None
         receipt = ctx.lookup.get(table.receipt)
-        text = ctx.lookup.text(table.receipt) if receipt is not None else None
+        text, changed = (
+            ctx.lookup.text_with_note(table.receipt)
+            if receipt is not None and hasattr(ctx.lookup, "text_with_note")
+            else ((ctx.lookup.text(table.receipt), None) if receipt is not None else (None, None))
+        )
         parsed = parse_delimited(text) if text is not None else None
         if parsed is None:
             problems.append(
@@ -199,9 +203,10 @@ def _table(table: ReviewerTable, number: int, ctx: _Context, problems: list[str]
             return None
         ctx.note(table.receipt)
         header, *data = parsed
-        note = ""
+        note = latex_escape(changed) if changed else ""  # changed since its receipt (F26): say so
         if len(data) > MAX_TABLE_ROWS:
-            note = latex_escape(f"{len(data) - MAX_TABLE_ROWS} further rows are in {table.receipt}.")
+            more = latex_escape(f"{len(data) - MAX_TABLE_ROWS} further rows are in {table.receipt}.")
+            note = f"{note} {more}".strip()
             data = data[:MAX_TABLE_ROWS]
         source = f"{caption} (from \\protect\\hyperlink{{{_anchor(table.receipt)}}}{{[{latex_escape(table.receipt)}]}})"
         return _longtable(

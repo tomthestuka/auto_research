@@ -100,7 +100,10 @@ def build_parser() -> argparse.ArgumentParser:
 def _write_result(run_id: str, payload: dict) -> None:
     """Write the detached run's terminal ``result.json`` (the marker run_research_nohup
     tails for). ``run_id`` is auto/path-safe by the time it reaches here."""
-    target = run_dir(run_id) / "result.json"
+    from auto_research.sandbox.workspace import record_beside
+
+    # Beside the ledger: the run folder is writable to the jailed shell (F22 review, 2026-10-06).
+    target = record_beside(run_dir(run_id), "result.json")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(payload, default=jsonable), encoding="utf-8")
 

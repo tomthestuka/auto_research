@@ -39,7 +39,16 @@ def _parse_since(value: str | None) -> datetime | None:
 def default_sources(data_dir: str | Path | None = None) -> list[Path]:
     """Return the monitor JSONLs a plain rollup reads: every run dir plus the default monitor dir."""
     root = Path(data_dir).expanduser() if data_dir is not None else runtime_data_dir()
-    return sorted(root.glob("runs/*/monitor.jsonl")) + sorted(root.glob("monitors/*.jsonl"))
+    from auto_research.sandbox.workspace import _pre_split
+
+    # Each run's ledger wherever it lives (beside the ledger since 2026-09-14, in the run folder
+    # before); never a run-folder file of a newer run, which the jailed shell could have planted.
+    # A read: nothing is created.
+    runs = {
+        run / "monitor.jsonl"
+        for run in root.glob("runs/*") if run.is_dir() and _pre_split(run, root / "ledgers" / run.name)
+    } | set(root.glob("ledgers/*/monitor.jsonl"))
+    return sorted(p for p in runs if p.is_file()) + sorted(root.glob("monitors/*.jsonl"))
 
 
 def load_cost_records(

@@ -608,3 +608,6 @@ Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
   `reviewer_tools.reviewer_claims` / `BRIEF_FIELDS`: the reviewer's `follow_up` is exempt from
   grounding (a brief); `reviewer_scope` excludes only `input:` (published reports are not evidence).
 - 2026-10-06 — **[F20] The `bash_exec` command-path scan stands down only for a server launched inside the OS jail**: `_jail_supersedes_command_check(registry, kind)` reads `ToolkitRegistry.mcp_jailed(kind)` (recorded at launch) instead of the config's `agent_os_jail`, so a configured `mcp_servers` entry, a host without `bwrap` or a config edited mid-run keeps the scan.
+- 2026-10-06 — **[F22] A worker's cwd is its own folder (`report_dir`), not memory.md's**, which
+  moved beside the ledger; files a human sends land in `workspace.human_reply_dir` (beside the
+  ledger), not in the agent's writable folder.

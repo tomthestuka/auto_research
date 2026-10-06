@@ -737,11 +737,12 @@ class TestShellServerJail:
                 f'python -c "{probe}; import ar_probe_utils"',
                 f"touch {runs / 'old_run' / 'x'}",
                 f"touch {cwd / 'authoring' / 'current_base_ref'}",
+                'echo "$PFILES"',
             )
         finally:
             leaked = (toolkit / ".ar_f20_probe").exists()
         (repo_ls, host_tmp, toolkit_write, toolkit_read, cwd_write, secret, capability,
-         old_run, authoring) = results
+         old_run, authoring, pfiles) = results
         assert repo_ls["exit_code"] != 0, "the jailed shell can list this repository"
         assert host_tmp["exit_code"] != 0, "the jailed shell sees the host /tmp"
         assert toolkit_write["exit_code"] != 0 and not leaked, "the jailed shell can write the toolkit"
@@ -751,6 +752,36 @@ class TestShellServerJail:
         assert capability["exit_code"] == 0, capability  # the analysis stack still imports
         assert old_run["exit_code"] != 0, "the shell can write another run's folder"
         assert authoring["exit_code"] != 0, "the shell can write the run's authoring control files"
+        if ";" in (server["env"].get("PFILES") or ""):  # a HEASoft-style stack is configured
+            assert pfiles["stdout"].startswith("/tmp/pfiles;"), pfiles  # its own, not a shared one
+
+    def test_the_shell_writes_only_the_workers_folders_not_the_run_folder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A folder another process binds (a worker's) must not be replaceable by the shell."""
+        from auto_research.graph.runtime import _builtin_server_config
+        from auto_research.sandbox import jail
+
+        if not jail.jail_available()[0]:
+            pytest.skip("bwrap cannot run on this host")
+        orch = self._orch()
+        runs = tmp_path / "runs"
+        toolkit = self._synthetic_toolkit(tmp_path)
+        self._synthetic_jail(monkeypatch, orch, runs, toolkit)
+        run = runs / "run1"
+        worker = run / "analyst_worker_0"
+        worker.mkdir(parents=True)
+        server = _builtin_server_config(
+            Path(orch["analyze_env"]), orch["analyze_ini_sh"], toolkit, cwd=run,
+            writable_dirs=[worker],
+        )
+        own, root, rename = self._bash(
+            server, f"touch {worker / 'ok'}", f"touch {run / 'planted'}",
+            f"mv {worker} {run / 'moved'}",
+        )
+        assert own["exit_code"] == 0 and (worker / "ok").exists(), own
+        assert root["exit_code"] != 0 and not (run / "planted").exists(), root
+        assert rename["exit_code"] != 0 and worker.is_dir(), rename
 
     def test_shell_server_launches_unwrapped_when_the_jail_is_off(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -805,12 +836,13 @@ class TestShellServerJail:
                     await sandbox.call_tool("importlib", "import_module", {"name": toolkit_pkg}),
                     await sandbox.call_tool("os", "makedirs", {"name": str(workdir / "ok")}),
                     await sandbox.call_tool("os", "makedirs", {"name": str(sibling / "x")}),
+                    await sandbox.call_tool("os", "getenv", {"key": "PFILES"}),
                 ]
             finally:
                 await sandbox.shutdown()
 
         try:
-            write_tk, host_tmp, secret, imported, write_cwd, write_sibling = asyncio.run(go())
+            write_tk, host_tmp, secret, imported, write_cwd, write_sibling, pfiles = asyncio.run(go())
         finally:
             leaked = (toolkit / ".ar_f20_dir").exists()
         assert write_tk["exit_code"] != 0 and not leaked, "the jailed REPL can write the toolkit"
@@ -821,6 +853,8 @@ class TestShellServerJail:
             f"the toolkit package was shadowed by the cwd: {imported['stdout']}")
         assert write_cwd["exit_code"] == 0 and (workdir / "ok").is_dir(), write_cwd
         assert write_sibling["exit_code"] != 0, "a REPL can write another worker's folder"
+        if ";" in pfiles["stdout"]:  # a HEASoft-style stack is configured
+            assert pfiles["stdout"].startswith("/tmp/pfiles;"), pfiles
 
     def test_the_gate_runs_tests_with_a_private_tmp_and_its_worktree_bound(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -998,3 +1032,110 @@ def test_a_denied_path_is_still_denied_when_no_jail_is_running(monkeypatch, tmp_
     prov._guard = react.PathGuard(roots=[tmp_path])
     out = asyncio.run(prov.execute("mcp.builtin.bash_exec", {"command": "cat /etc/shadow"}))
     assert out.is_error and "path not permitted" in out.text
+
+
+def test_memory_lives_beside_the_ledger_and_is_never_followed_through_a_symlink(tmp_path, monkeypatch):
+    """F22: the harness appends tool output to memory.md and reads it into the next prompt,
+    outside the jail; inside the agent's own writable folder a planted symlink redirected both."""
+    from auto_research.sandbox import workspace
+
+    monkeypatch.setattr(workspace, "runtime_data_dir", lambda: tmp_path / "runtime")
+    path = workspace.memory_path("r1", "analyst_worker_0")
+    agent_folder = workspace.agent_dir("r1", "analyst_worker_0")
+    assert workspace.ledger_dir("r1") in path.parents
+    assert agent_folder not in path.parents
+
+    victim = tmp_path / "victim.txt"
+    victim.write_text("host\n")
+    path.unlink(missing_ok=True)
+    path.symlink_to(victim)
+    with pytest.raises(OSError):
+        workspace.append_memory(path, "model-chosen text")
+    with pytest.raises(OSError):
+        workspace.read_memory(path)
+    assert victim.read_text() == "host\n"
+
+
+def test_memory_at_the_old_agent_folder_location_is_never_read(tmp_path, monkeypatch):
+    """The old location is agent-writable: a file, a symlink, a FIFO there is never read (F22)."""
+    import os
+
+    from auto_research.sandbox import workspace
+
+    monkeypatch.setattr(workspace, "runtime_data_dir", lambda: tmp_path / "runtime")
+    folder = workspace.agent_dir("r1", "w0")
+    folder.mkdir(parents=True)
+    (folder / "memory.md").write_text("planted prior results\n")
+    assert workspace.read_memory(workspace.memory_path("r1", "w0")) == ""
+    folder2 = workspace.agent_dir("r1", "w1")
+    folder2.mkdir(parents=True)
+    os.mkfifo(folder2 / "memory.md")  # would hang a reader that opened it
+    assert workspace.read_memory(workspace.memory_path("r1", "w1")) == ""
+
+def test_a_private_param_dir_replaces_only_the_writable_half(tmp_path):
+    from auto_research.sandbox.runner import with_private_param_dir
+
+    env = {"PFILES": "/home/u/pfiles;/opt/heasoft/syspfiles", "X": "1"}
+    out = with_private_param_dir(env, "/tmp/pfiles", create=tmp_path / "p")
+    assert out["PFILES"] == "/tmp/pfiles;/opt/heasoft/syspfiles" and out["X"] == "1"
+    assert (tmp_path / "p").is_dir()
+    assert with_private_param_dir({"X": "1"}, tmp_path / "q") == {"X": "1"}
+
+
+def test_a_record_planted_in_a_new_runs_folder_is_never_read(tmp_path):
+    """A run with a ledger reads its records ledger-side only (F22): the run folder is writable."""
+    from auto_research.graph import detached as d
+    from auto_research.sandbox.workspace import record_beside
+
+    run = tmp_path / "runs" / "r"
+    run.mkdir(parents=True)
+    ledger = tmp_path / "ledgers" / "r"
+    ledger.mkdir(parents=True)
+    (ledger / "backend.log").write_text("")
+    (run / "monitor.jsonl").write_text("{}\n")  # a planted marker must not make it look pre-split
+    (run / "result.json").write_text('{"status": "ok", "forged": true}')
+    assert record_beside(run, "result.json") == ledger / "result.json"
+    assert d.run_status(run) != "done"
+
+
+def test_reading_an_old_run_never_flips_it_to_the_new_layout(tmp_path):
+    from auto_research.sandbox.workspace import record_beside, resolve_record  # noqa: F401
+
+    run = tmp_path / "runs" / "old"
+    run.mkdir(parents=True)
+    (run / "monitor.jsonl").write_text("{}\n")
+    assert record_beside(run, "result.json") == run / "result.json"
+    assert record_beside(run, "receipts", legacy_ok=False) == tmp_path / "ledgers" / "old" / "receipts"
+    assert not (tmp_path / "ledgers" / "old").exists()
+    assert record_beside(run, "monitor.jsonl") == run / "monitor.jsonl"
+
+
+def test_a_symlinked_writable_root_or_home_is_refused(tmp_path, monkeypatch):
+    from auto_research.sandbox import jail
+
+    monkeypatch.setattr(jail, "_config", lambda: {"agent_os_jail": True, "agent_fs_allow": [], "agent_fs_readonly": []})
+    target = tmp_path / "toolkit"
+    target.mkdir()
+    link = tmp_path / "worker"
+    link.symlink_to(target)
+    with pytest.raises(RuntimeError, match="symlink"):
+        jail.analysis_policy(label="repl", toolkit_root=target, writable=(str(link),), tmp=tmp_path / "t")
+    real = tmp_path / "real_worker"
+    real.mkdir()
+    with pytest.raises(RuntimeError, match="symlink"):
+        jail.analysis_policy(label="repl", toolkit_root=target, writable=(str(real),), tmp=tmp_path / "t",
+                             home=link)
+
+
+def test_an_analysis_home_is_mounted_outside_tmp(tmp_path, monkeypatch):
+    """Homes live under the host temp root, which is the process's own /tmp inside the jail; a
+    destination there could be redirected by a symlink planted earlier (F22 review)."""
+    from auto_research.sandbox import jail
+
+    monkeypatch.setattr(jail, "_config", lambda: {"agent_os_jail": True, "agent_fs_allow": [], "agent_fs_readonly": []})
+    monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")
+    home = tmp_path / "home"
+    policy = jail.analysis_policy(label="repl", toolkit_root=tmp_path / "tk", tmp=tmp_path / "t", home=home)
+    argv = jail.jail_argv(policy)
+    assert ("--bind", str(home.resolve()), jail.JAIL_HOME_AT) in list(zip(argv, argv[1:], argv[2:]))
+    assert ("--setenv", "HOME", jail.JAIL_HOME_AT) in list(zip(argv, argv[1:], argv[2:]))

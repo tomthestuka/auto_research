@@ -68,7 +68,6 @@ agent_fs_allow:
                                                              # files symlink out of HEADAS into
                                                              # Xspec/… , so the jail needs both
   - /man1/CALDB                           # CALDB
-  - /grad/fzhou/pfiles                    # local PFILES (HEASoft parameter files)
   - /data/fzhou/ar_runtime/test_runtime/runs   # run WORKSPACES only — the ledger,
                                               # backend.log and checkpoint live in
                                               # ../ledgers/, deliberately out of reach

@@ -634,3 +634,4 @@ Compacted 2026-09-01 and again 2026-09-24 (detail in git history).
   `_RAW_ARGUMENTS_CAP` = 2000), where it was silently `{}`. No control-flow change.
 - 2026-09-25 — [I4] A non-JSON function-call argument string sets `ToolCall.arguments_error` (fault +
   raw text, capped 2000) instead of silently becoming `{}`; the loop returns it as an error result.
+- 2026-10-06 — [F26] receipted files read through `provenance.store.read_receipted` (read once, no symlink, hash-checked; a changed file is sent with a note and a `receipt.drift` alert). See `provenance/DOCS.md`.

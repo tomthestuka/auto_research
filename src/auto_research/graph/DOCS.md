@@ -269,3 +269,8 @@ Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
   `_interrupt_cleanup` cancels resumed seats first.
 - 2026-09-25 — [R1] LIVE-TESTED: `tests/test_live_reviewer_paths.py` graph cell (real reviewer + librarian, stub analysis, attacking human): START → review, librarian pass, three reports to the human in `v1`–`v3` with earlier PDFs re-verified, nudges minted nothing, exact `done` ended the run.
 - 2026-10-06 — **[F20] `_builtin_server_config` launches the shell server inside the OS jail**: server source via `-c`, `jail.analysis_policy` (toolkit read-only, private `/tmp`, cwd writable), `PYTHONNOUSERSITE=1`, and a `"jailed"` flag on the returned config recording what the launch actually produced (read by the shell guard). See `sandbox/DOCS.md` changelog.
+- 2026-10-06 — **[F22] Detached-run records live beside the ledger**: `backend.pid`, `result.json`
+  (`detached._record`, `cli._write_result`) and the monitor the streamer tails; an `overwrite=True`
+  erases the run's ledger directory too. A run folder is writable to the jailed shell, so a record
+  read from it could be forged. **[F23]** the shell server's `PFILES` is private; its home is the
+  run's own (`.home-shell`). Workers' REPL workdir is `agent_dir`, no longer memory.md's folder.

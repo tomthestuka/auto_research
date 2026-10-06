@@ -74,6 +74,11 @@ class JailPolicy:
     lives in the real home, and the jail hands the process a fresh home, so binding the file at its
     own path puts it somewhere the process will never look. Carrying one file to the address the
     process actually reads keeps the narrow exposure and makes the subscription path work."""
+    home_at: str | None = None
+    """Where ``home`` appears inside the jail, when not at its own path. Analysis and gate
+    processes mount theirs at a fixed path outside ``/tmp``: their homes live under the host temp
+    root, which inside the jail is the process's own writable ``/tmp``, so a mount destination
+    there could be redirected by a symlink planted in an earlier session (F22 review)."""
     tmp: str | None = None
     """A private directory bound at ``/tmp``, in place of the host's. The host temp root holds
     other processes' scratch — another session's working copy of this repository, an author
@@ -178,6 +183,10 @@ def policy_from_config(*, network: bool = True, label: str = "") -> JailPolicy:
     )
 
 
+#: Where an analysis or gate process sees its home: outside /tmp, on bwrap's own root.
+JAIL_HOME_AT = "/home/ar"
+
+
 def private_tmp(label: str, workspace: Path | str) -> Path:
     """A private ``/tmp`` for one jailed process: on **local** disk, mode 0700.
 
@@ -219,7 +228,7 @@ def _owned_private_dir(path: Path) -> Path:
 
 def analysis_policy(
     *, label: str, toolkit_root: Path | str, writable: tuple[str, ...] = (),
-    readonly: tuple[str, ...] = (), tmp: Path | str,
+    readonly: tuple[str, ...] = (), tmp: Path | str, home: Path | str | None = None,
 ) -> JailPolicy:
     """The jail for an analysis process — the worker REPL and the shell server.
 
@@ -236,8 +245,16 @@ def analysis_policy(
     * ``readonly`` overlays (e.g. the run's ``authoring/`` inside a writable run folder) are bound
       read-only on top of whatever contains them;
     * **the host ``/tmp`` is replaced** by ``tmp``, a private directory (see ``JailPolicy.tmp``);
-    * a per-label home is added.
+    * ``home``, the process's own (default: a per-label home under the runtime dir). Per process,
+      not shared: a home holds state later runs would inherit (an XSPEC ``Xspec.init`` changing
+      default abundances or the fit statistic, a user ``site-packages``).
+
+    A ``writable`` entry that is a symlink is refused: the folder belongs to an agent, which can
+    replace it with a link to the toolkit, and bwrap would bind the link's target writable.
     """
+    for entry in (*writable, *((str(home),) if home is not None else ())):
+        if Path(entry).is_symlink():
+            raise RuntimeError(f"refusing a writable jail root that is a symlink: {entry}")
     base = policy_from_config(network=True, label=label)
     toolkit = Path(toolkit_root).resolve()
     host_tmp = Path("/tmp").resolve()
@@ -252,7 +269,8 @@ def analysis_policy(
             mine != root and mine.is_relative_to(root) for mine in own
         )
 
-    home = jail_home(label)
+    home = Path(home) if home is not None else jail_home(label)
+    home.mkdir(parents=True, exist_ok=True)
     rw = tuple(e for e in base.rw if resolved(e) != host_tmp and not demoted(e))
     ro = tuple(e for e in base.ro if resolved(e) != host_tmp)
     demoted_ro = tuple(e for e in base.rw if resolved(e) != host_tmp and demoted(e))
@@ -261,7 +279,7 @@ def analysis_policy(
     return JailPolicy(
         ro=(*ro, *demoted_ro, str(toolkit), *readonly),
         rw=(*rw, *writable, str(home)),
-        network=True, home=str(home), label=label, tmp=str(tmp),
+        network=True, home=str(home), label=label, tmp=str(tmp), home_at=JAIL_HOME_AT,
     )
 
 
@@ -313,7 +331,8 @@ def jail_argv(policy: JailPolicy) -> list[str]:
 
     if policy.home:
         home = str(Path(policy.home).resolve())
-        argv += ["--bind", home, home, "--setenv", "HOME", home]
+        inside = policy.home_at or home
+        argv += ["--bind", home, inside, "--setenv", "HOME", inside]
 
     # After the home bind on purpose: a later bind lands on top of an earlier one, and every
     # re-addressed file is destined *inside* the home, so emitting these first would let the home
@@ -382,12 +401,21 @@ def write_launcher(path: Path, target: str, policy: JailPolicy) -> Path:
         ro=(*policy.ro, target_dir) if target_dir not in policy.ro else policy.ro,
         rw=policy.rw, network=policy.network, home=policy.home, label=policy.label,
         ro_files=policy.ro_files, ro_files_at=policy.ro_files_at, tmp=policy.tmp,
+        home_at=policy.home_at,
     )
     prefix = jail_argv(policy)
     command = [*prefix, "--", resolved_target] if prefix else [resolved_target]
     body = "#!/bin/sh\nexec " + " ".join(_quote(part) for part in command)
-    path.write_text(body + ' "$@"\n', encoding="utf-8")
-    path.chmod(0o755)
+    # Not through a symlink: the launcher's folder can be writable to the author it launches, which
+    # could plant one there and have this write (and chmod 755) land on a host file of its choice.
+    # Written to a fresh temp name (O_EXCL) and renamed into place: a planted FIFO or symlink at
+    # `path` is replaced rather than opened, so it can neither block nor redirect this write.
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o755)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(body + ' "$@"\n')
+        os.fchmod(handle.fileno(), 0o755)
+    os.replace(tmp_path, path)
     return path
 
 

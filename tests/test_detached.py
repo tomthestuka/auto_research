@@ -60,7 +60,7 @@ def sleeper():
 
 def _write_pid(rd: Path, pid: int, create_time) -> None:
     rd.mkdir(parents=True, exist_ok=True)
-    (rd / "backend.pid").write_text(json.dumps({"pid": pid, "create_time": create_time}))
+    d._record(rd, "backend.pid").write_text(json.dumps({"pid": pid, "create_time": create_time}))
 
 
 def _done_result(rationale: str, accepted: bool = True) -> str:
@@ -87,7 +87,7 @@ def test_resolve_run_id_named_and_validated():
 # --- liveness: process existence, not log freshness ---
 
 def test_liveness_real_pid(tmp_path, sleeper):
-    rd = tmp_path / "r"
+    rd = tmp_path / "runs" / "r"
     p = sleeper()
     _write_pid(rd, p.pid, _proc_create_time(p.pid))
     assert is_run_alive(rd) and run_status(rd) == "alive"
@@ -97,7 +97,7 @@ def test_liveness_real_pid(tmp_path, sleeper):
 
 def test_liveness_pid_reuse_guarded(tmp_path, sleeper):
     p = sleeper()
-    rd = tmp_path / "r"
+    rd = tmp_path / "runs" / "r"
     _write_pid(rd, p.pid, (_proc_create_time(p.pid) or 0) + 999)  # pid alive, start-time mismatched
     assert not is_run_alive(rd)   # a recycled pid must not read as the original run
 
@@ -123,7 +123,7 @@ def test_liveness_zombie_is_dead(tmp_path, sleeper):
     # it; /proc/<pid>/stat still exists with a matching start-time, but the run is dead and
     # must not block overwrite=True.
     p = sleeper()
-    rd = tmp_path / "r"
+    rd = tmp_path / "runs" / "r"
     _write_pid(rd, p.pid, _proc_create_time(p.pid))
     p.kill()
     deadline = time.time() + 5.0
@@ -138,23 +138,23 @@ def test_liveness_zombie_is_dead(tmp_path, sleeper):
 
 
 def test_status_absent_and_done(tmp_path):
-    rd = tmp_path / "r"
+    rd = tmp_path / "runs" / "r"
     assert run_status(rd) == "absent"
     rd.mkdir(parents=True)
-    (rd / "result.json").write_text("{}")
+    d._record(rd, "result.json").write_text("{}")
     assert run_status(rd) == "done"   # result.json wins even with no live process
 
 
 # --- reconstruction from disk ---
 
 def test_reconstruct_done(tmp_path):
-    rd = tmp_path / "r"; rd.mkdir(parents=True)
-    (rd / "result.json").write_text(json.dumps({
+    rd = tmp_path / "runs" / "r"; rd.mkdir(parents=True)
+    d._record(rd, "result.json").write_text(json.dumps({
         "status": "done",
         "verdict": ReviewerReport(accepted=True, rationale="looks good").model_dump(mode="json"),
         "final_state": {"analysis_iterations": 2},
     }))
-    (rd / "monitor.jsonl").write_text("")
+    d._record(rd, "monitor.jsonl").write_text("")
     run = reconstruct_run("cyg x-1", rd, "rid")
     assert run.verdict.accepted and run.verdict.rationale == "looks good"
     assert run.final_state["analysis_iterations"] == 2
@@ -162,8 +162,8 @@ def test_reconstruct_done(tmp_path):
 
 
 def test_reconstruct_failed_raises(tmp_path):
-    rd = tmp_path / "r"; rd.mkdir(parents=True)
-    (rd / "result.json").write_text(json.dumps({"status": "failed", "error": "boom"}))
+    rd = tmp_path / "runs" / "r"; rd.mkdir(parents=True)
+    d._record(rd, "result.json").write_text(json.dumps({"status": "failed", "error": "boom"}))
     with pytest.raises(RunDied) as exc:
         reconstruct_run("q", rd, "rid")
     assert "boom" in str(exc.value)
@@ -192,7 +192,7 @@ def test_overwrite_erases_when_dead(rundir, sleeper):
 
     def _fake_launch(request, run_id, run_directory, **kw):
         run_directory.mkdir(parents=True, exist_ok=True)
-        (run_directory / "result.json").write_text(_done_result("fresh", accepted=False))
+        d._record(run_directory, "result.json").write_text(_done_result("fresh", accepted=False))
         return 4242
 
     run = asyncio.run(run_research_nohup("q2", overwrite=True, poll_s=0.01, _launcher=_fake_launch))
@@ -207,14 +207,14 @@ def test_attach_alive_does_not_relaunch(rundir, sleeper):
     rid = resolve_run_id("q3"); rd = rundir(rid)
     p = sleeper()
     _write_pid(rd, p.pid, _proc_create_time(p.pid))
-    (rd / "monitor.jsonl").write_text("")
+    d._record(rd, "monitor.jsonl").write_text("")
     launched: list = []
 
     async def _drive():
         task = asyncio.create_task(run_research_nohup(
             "q3", poll_s=0.02, _launcher=lambda *a, **k: launched.append(1)))
         await asyncio.sleep(0.1)   # let it observe "alive" and start tailing
-        (rd / "result.json").write_text(_done_result("done"))
+        d._record(rd, "result.json").write_text(_done_result("done"))
         return await task
 
     run = asyncio.run(_drive())
@@ -225,7 +225,7 @@ def test_attach_alive_does_not_relaunch(rundir, sleeper):
 def test_absent_launches_then_tails(rundir):
     def _fake_launch(request, run_id, run_directory, **kw):
         run_directory.mkdir(parents=True, exist_ok=True)
-        (run_directory / "result.json").write_text(_done_result("ok"))
+        d._record(run_directory, "result.json").write_text(_done_result("ok"))
         return 1
 
     run = asyncio.run(run_research_nohup("q4", poll_s=0.01, _launcher=_fake_launch))
@@ -236,7 +236,7 @@ def test_dead_at_entry_raises_rundied(rundir, sleeper):
     rid = resolve_run_id("q5"); rd = rundir(rid)
     p = sleeper(); pid, ct = p.pid, _proc_create_time(p.pid); p.kill(); p.wait()
     _write_pid(rd, pid, ct)
-    (rd / "monitor.jsonl").write_text("")
+    d._record(rd, "monitor.jsonl").write_text("")
     with pytest.raises(RunDied):
         asyncio.run(run_research_nohup("q5", poll_s=0.01, _launcher=lambda *a, **k: None))
 
@@ -306,8 +306,8 @@ def test_stream_relays_events_during_run(rundir):
 
     def _fake_launch(request, run_id, run_directory, **kw):
         run_directory.mkdir(parents=True, exist_ok=True)
-        _emit_events(run_directory / "monitor.jsonl")
-        (run_directory / "result.json").write_text(_done_result("ok"))
+        _emit_events(d._record(run_directory, "monitor.jsonl"))
+        d._record(run_directory, "result.json").write_text(_done_result("ok"))
         return 1
 
     run = asyncio.run(run_research_nohup(

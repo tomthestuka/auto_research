@@ -138,7 +138,7 @@ def rundir(tmp_path, monkeypatch):
 
 def _write_pid(rd: Path, pid: int, create_time) -> None:
     rd.mkdir(parents=True, exist_ok=True)
-    (rd / "backend.pid").write_text(json.dumps({"pid": pid, "create_time": create_time}))
+    d._record(rd, "backend.pid").write_text(json.dumps({"pid": pid, "create_time": create_time}))
 
 
 def _done_result(rationale: str) -> str:
@@ -156,13 +156,13 @@ def test_overwrite_and_resume_mutually_exclusive():
 def test_dead_backend_plus_resume_relaunches(rundir):
     rid = resolve_run_id("q_resume"); rd = rundir(rid)
     _write_pid(rd, 2, 1)                    # pid 2 with a bogus start-time → dead, no result.json
-    (rd / "monitor.jsonl").write_text("")
+    d._record(rd, "monitor.jsonl").write_text("")
     calls: list[dict] = []
 
     def _fake_launch(request, run_id, run_directory, **kw):
         calls.append(kw)
         run_directory.mkdir(parents=True, exist_ok=True)
-        (run_directory / "result.json").write_text(_done_result("resumed"))
+        d._record(run_directory, "result.json").write_text(_done_result("resumed"))
         return 4242
 
     run = asyncio.run(run_research_nohup("q_resume", resume=True, poll_s=0.01,
@@ -174,7 +174,7 @@ def test_dead_backend_plus_resume_relaunches(rundir):
 def test_dead_backend_without_resume_still_raises(rundir):
     rid = resolve_run_id("q_dead"); rd = rundir(rid)
     _write_pid(rd, 2, 1)                    # dead, no result.json
-    (rd / "monitor.jsonl").write_text("")
+    d._record(rd, "monitor.jsonl").write_text("")
     with pytest.raises(RunDied):
         asyncio.run(run_research_nohup("q_dead", resume=False, poll_s=0.01,
                                        _launcher=lambda *a, **k: None))
@@ -182,13 +182,13 @@ def test_dead_backend_without_resume_still_raises(rundir):
 
 def test_failed_result_plus_resume_recovers(rundir):
     rid = resolve_run_id("q_failed"); rd = rundir(rid); rd.mkdir(parents=True)
-    (rd / "result.json").write_text(json.dumps({"status": "failed", "error": "boom"}))
-    (rd / "monitor.jsonl").write_text("")
+    d._record(rd, "result.json").write_text(json.dumps({"status": "failed", "error": "boom"}))
+    d._record(rd, "monitor.jsonl").write_text("")
     calls: list[dict] = []
 
     def _fake_launch(request, run_id, run_directory, **kw):
         calls.append(kw)
-        (run_directory / "result.json").write_text(_done_result("recovered"))
+        d._record(run_directory, "result.json").write_text(_done_result("recovered"))
         return 111
 
     run = asyncio.run(run_research_nohup("q_failed", resume=True, poll_s=0.01,

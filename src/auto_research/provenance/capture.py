@@ -144,6 +144,7 @@ def receipt_call(
     toolkit_root: Path | None = None,
     kind: str = "result",
     fields: Mapping[str, Any] | None = None,
+    reachable: Callable[[Path], bool] | None = None,
 ) -> CallReceipts:
     """Mint the call's result receipt and one receipt per figure / data file it produced.
 
@@ -151,7 +152,13 @@ def receipt_call(
     runtime's hash, never the tool's; a figure whose file is absent is dropped with a note. A data
     product is a file named in the arguments that the call created or changed, or an absolute path
     in the output written after the call started.
+
+    A figure or data file is receipted only where ``reachable`` says its **resolved** path lies
+    (default: the configured allow-list). A tool's output, or a symlink planted in a writable
+    folder, can name any host file; receipting one would put its bytes behind a handle any role
+    can view (F22, 2026-10-06). Dropped with a note.
     """
+    reachable = reachable or _allow_listed
     state = state or CallInputs(started_ns=call_started_ns())
     call_id = uuid.uuid4().hex
     commit = toolkit_commit(toolkit_root)
@@ -169,6 +176,9 @@ def receipt_call(
         if not path.is_file():
             out.notes.append(f"figure '{fig.caption}' dropped: {path} is not a file")
             continue
+        if not reachable(path):
+            out.notes.append(f"figure '{fig.caption}' dropped: {path} resolves outside the allow-list")
+            continue
         receipt = store.mint(
             kind="figure", path=path, caption=fig.caption, mime_type=fig.mime_type, **common,
         )
@@ -182,8 +192,30 @@ def receipt_call(
         out.figures.append(fig.model_copy(update={"sha256": receipt.sha256, "path": receipt.path}))
 
     for path in data_products(state, text, failed=failed, figure_paths=figure_paths):
+        if not reachable(path):
+            out.notes.append(f"data file {path} not receipted: it resolves outside the allow-list")
+            continue
         out.products.append(store.mint(kind="data", path=path, **common))
     return out
+
+
+def _allow_listed(path: Path) -> bool:
+    """Whether ``path`` may be receipted: not itself a symlink, and resolving inside the allow-list.
+
+    The host ``/tmp`` is excluded while the OS jail is on: a jailed process sees a private ``/tmp``,
+    so a host ``/tmp`` path in its output can only be a planted reference to someone else's file
+    (an author home's credential lives there). With no allow-list configured, everything is in.
+    """
+    from auto_research.sandbox.fs_guard import PathGuard, load_fs_allowlist
+    from auto_research.sandbox.jail import jail_enabled
+
+    if Path(path).is_symlink():
+        return False
+    roots = load_fs_allowlist()
+    if jail_enabled():
+        host_tmp = Path("/tmp").resolve()
+        roots = [root for root in roots if root != host_tmp]
+    return PathGuard(roots=roots).is_allowed(path)
 
 
 def data_products(

@@ -13,6 +13,11 @@ import mimetypes
 from pathlib import Path
 from typing import Any, Iterable
 
+from auto_research.provenance.store import read_receipted
+
+#: Telegram's bot upload ceiling; a larger file is refused before it is read into memory.
+MAX_ATTACHMENT_BYTES = 50 * 2**20
+
 from auto_research.schemas import HumanAttachment, HumanResponse, Receipt
 
 #: Image types a human's file is minted as a figure for; everything else is a data receipt.
@@ -46,17 +51,32 @@ def resolve_attachments(
         if receipt is None:
             problems.append(f"{handle} is not a receipt you can cite, so it was not attached.")
             continue
-        problem = lookup.verify(handle)
-        if problem:
-            problems.append(f"{problem} It was not attached.")
-            continue
         path, filename = _file_for(receipt)
+        # The bytes sent are the bytes checked (F26): read once without following a symlink, kept
+        # beside the ledger for the connector, never re-read from the agent's folder. Changed since
+        # it was receipted → still sent, with an alert (human ruling 2026-10-06).
+        expected = receipt.source_sha256 if receipt.source_path is not None else receipt.sha256
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        if size > MAX_ATTACHMENT_BYTES:
+            problems.append(f"{handle} is {size / 2**20:.0f} MB, over the {MAX_ATTACHMENT_BYTES // 2**20} MB "
+                            "a chat attachment can carry; it was not attached.")
+            continue
+        read = read_receipted(path, expected, label=handle)
+        if read.data is None:
+            problems.append(f"{handle}: {read.note} It was not attached.")
+            continue
+        path = _outbox_copy(lookup, read.data, filename)
         mime = (
             receipt.mime_type if receipt.source_path is None and receipt.mime_type else None
         ) or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        caption = receipt.caption or receipt.title or ""
         attachments.append(HumanAttachment(
             handle=handle, path=path, filename=filename, mime_type=mime,
-            caption=receipt.caption or receipt.title or "",
+            # The human is told too when it changed since its receipt (F26).
+            caption=f"{read.note} {caption}".strip() if read.note else caption,
         ))
     return attachments, problems
 
@@ -90,3 +110,16 @@ def mint_reply_attachments(
         response.attachments[i] = attachment.model_copy(update={"handle": receipt.handle})
         minted.append(receipt)
     return minted
+
+
+def _outbox_copy(lookup: Any, data: bytes, filename: str) -> Path:
+    """The verified bytes, written where no agent can reach (the run's receipt store)."""
+    from auto_research.provenance.store import sha256_bytes
+
+    store = getattr(lookup, "store", lookup)
+    folder = Path(store.root) / "outbox" / sha256_bytes(data)[:16]
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / filename
+    if not target.is_file():
+        target.write_bytes(data)
+    return target

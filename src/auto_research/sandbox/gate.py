@@ -36,6 +36,7 @@ import ast
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -902,7 +903,7 @@ async def _default_test_runner(
     """
     import os
 
-    from auto_research.sandbox.runner import _source_ini_env
+    from auto_research.sandbox.runner import _source_ini_env, with_private_param_dir
 
     cfg = _orchestration_config()
     analyze_env = cfg.get("analyze_env")
@@ -924,7 +925,20 @@ async def _default_test_runner(
         # The OS jail, with **no network** (§12): a mergeability verdict that can reach the network
         # is a verdict that depends on something other than the data on disk, and §9.4's premise is
         # real local input. Verified against all 30 existing Layer-B suites before being turned on.
+        run_env = {**run_env, "PYTHONNOUSERSITE": "1"}
+        unjailed = list(argv)
         argv = _jailed_pytest(argv, junit_path=junit_path, worktree=worktree)
+        # Its own HEASoft parameter folder (F23), shared by both runs like the private /tmp.
+        private = _gate_private_tmp(junit_path)
+        jailed = argv != unjailed
+        run_env = with_private_param_dir(
+            run_env, "/tmp/pfiles" if jailed else private / "pfiles",
+            create=private / "pfiles",
+        )
+        # One pytest scratch folder for both runs, which pytest wipes when each run starts: run 1's
+        # scratch is gone before run 2 with the jail on or off, whatever TMPDIR says.
+        basetemp = "/tmp/pytest-gate" if jailed else str(private / "pytest-gate")
+        argv = [*argv, f"--basetemp={basetemp}"]
         try:
             proc = subprocess.run(
                 argv,
@@ -945,6 +959,10 @@ async def _default_test_runner(
     # changeset (collect_targets) or survive a later git clean.
     with tempfile.TemporaryDirectory() as td:
         rc1, out1, map1 = _run(str(Path(td) / "junit1.xml"))
+        # Run 1's pytest scratch goes before run 2 (human ruling 2026-10-06): a toolkit suite can
+        # leave tens of GB there (measured: 65 GB in 10 min), and two runs' worth filled the disk.
+        for scratch in _gate_private_tmp(str(Path(td) / "junit1.xml")).glob("pytest-of-*"):
+            shutil.rmtree(scratch, ignore_errors=True)
         _rc2, _out2, map2 = _run(str(Path(td) / "junit2.xml"))
         return_checks, return_findings = (
             returns.judge(Path(td) / "junit1.returns", returns_tools) if returns_tools else ([], [])
@@ -982,22 +1000,33 @@ def _jailed_pytest(argv: list[str], *, junit_path: str, worktree: Path | None = 
     is bound writable explicitly: a benchmark trial's tree lives under the host ``/tmp``, which the
     private ``/tmp`` below no longer exposes.
     """
-    from auto_research.sandbox.jail import JailPolicy, jail_home, policy_from_config, wrap
+    from auto_research.sandbox.jail import JAIL_HOME_AT, JailPolicy, policy_from_config, wrap
 
     base = policy_from_config(network=False, label="gate")
-    home = jail_home("gate")
+    # Its own home, inside the JUnit temporary folder and removed with it: a shared one let a
+    # coder-written test leave a `.pth` or an `Xspec.init` for every later gate (F22 review).
+    home = Path(junit_path).parent / "home"
+    home.mkdir(parents=True, exist_ok=True)
     host_tmp = Path("/tmp").resolve()
-    # A private /tmp, not the host's: it holds other sessions' trees and credential files, and this
-    # process runs coder-authored code whose output flows back to the coder (F20 review 2026-10-06).
-    # The JUnit directory, usually under the host /tmp, is still bound on top of it.
+    tree = Path(worktree).resolve() if worktree else None
+    # Writable: the worktree under test, the JUnit folder and its own home -- nothing else. This
+    # process runs coder-authored code nobody has reviewed yet, so every other allow-listed root
+    # (the observation data, every run's folders and authoring control files) is read-only to it
+    # (F24, 2026-10-06), and the host /tmp is replaced by a private one (F20 review): it holds other
+    # sessions' trees and credential files. The JUnit folder, usually under the host /tmp, is still
+    # bound on top of the private one.
+    others = tuple(
+        e for e in (*base.ro, *base.rw)
+        if Path(e).resolve() != host_tmp and (tree is None or Path(e).resolve() != tree)
+    )
     policy = JailPolicy(
-        ro=tuple(e for e in base.ro if Path(e).resolve() != host_tmp),
-        rw=(*(e for e in base.rw if Path(e).resolve() != host_tmp),
-            str(Path(junit_path).parent), *((str(worktree),) if worktree else ()), str(home)),
+        ro=others,
+        rw=(str(Path(junit_path).parent), *((str(worktree),) if worktree else ()), str(home)),
         network=False,
         home=str(home),
         label="gate",
         tmp=str(_gate_private_tmp(junit_path)),
+        home_at=JAIL_HOME_AT,
     )
     return wrap(argv, policy)
 

@@ -333,15 +333,17 @@ def test_detached_reconstruct_raises_interruption_not_run_died(tmp_path):
     notebook sees the same exception an in-process run raises."""
     import json
 
-    from auto_research.graph.detached import reconstruct_run
+    from auto_research.graph.detached import _record, reconstruct_run
 
-    (tmp_path / "result.json").write_text(
+    run_directory = tmp_path / "runs" / "run-a"
+    run_directory.mkdir(parents=True)
+    _record(run_directory, "result.json").write_text(
         json.dumps({"status": "interrupted", "error": "run interrupted by human"}),
         encoding="utf-8",
     )
 
     with pytest.raises(UserInterruptionError) as caught:
-        reconstruct_run("q", tmp_path, "run-a")
+        reconstruct_run("q", run_directory, "run-a")
     assert "monitor.jsonl" in str(caught.value)
 
 

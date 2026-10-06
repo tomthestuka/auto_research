@@ -202,6 +202,8 @@ class AnthropicProvider:
                     # why, so it cites from metadata rather than reasoning as if it had read it.
                     document_blocks.append({"type": "text", "text": resolved.note or ""})
                     continue
+                if resolved.note:  # sent, but changed since its receipt (F26): say so
+                    document_blocks.append({"type": "text", "text": resolved.note})
                 document_blocks.append(
                     {
                         "type": "document",

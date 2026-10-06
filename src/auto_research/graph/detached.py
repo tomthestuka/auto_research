@@ -113,7 +113,7 @@ def _proc_create_time(pid: int) -> int | None:
 
 def _read_backend(run_directory: Path) -> dict | None:
     try:
-        return json.loads((run_directory / _PID_FILE).read_text(encoding="utf-8"))
+        return json.loads(_record(run_directory, _PID_FILE).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
 
@@ -133,9 +133,9 @@ def run_status(run_directory: Path) -> str:
 
     ``result.json`` is checked first: the CLI writes it just before exit, so a finished run
     reads ``'done'`` even though its process is now gone."""
-    if (run_directory / _RESULT_FILE).exists():
+    if _record(run_directory, _RESULT_FILE).exists():
         return "done"
-    if (run_directory / _PID_FILE).exists():
+    if _record(run_directory, _PID_FILE).exists():
         return "alive" if is_run_alive(run_directory) else "dead"
     return "absent"
 
@@ -175,7 +175,7 @@ def reconstruct_run(request: ResearchRequest | str, run_directory: Path, run_id:
     """Rebuild a `ResearchRun` from ``result.json`` + the monitor JSONL. Raises `RunDied`
     if the result records a pipeline failure (status != 'done' or no verdict), or
     `UserInterruptionError` if a human stopped it."""
-    result = json.loads((run_directory / _RESULT_FILE).read_text(encoding="utf-8"))
+    result = json.loads(_record(run_directory, _RESULT_FILE).read_text(encoding="utf-8"))
     if result.get("status") == "interrupted":
         # A human stop is not a death: the backend cleaned up and exited on purpose, so the
         # detached caller sees the same exception an in-process run raises rather than `RunDied`.
@@ -287,7 +287,7 @@ def _default_launcher(
         argv += ["--resume"]
     backend_log = _record(run_directory, _BACKEND_LOG)
     pid = _spawn_orphaned(argv, backend_log)
-    (run_directory / _PID_FILE).write_text(
+    _record(run_directory, _PID_FILE).write_text(
         json.dumps({"pid": pid, "create_time": _proc_create_time(pid)}),
         encoding="utf-8",
     )
@@ -386,8 +386,11 @@ async def run_research_nohup(
                 f"use a different run_id."
             )
         shutil.rmtree(rdir, ignore_errors=True)
+        # And its record beside the ledger (pid, result, monitor, checkpoint): an erased run that
+        # kept its old record would read as that run, dead or done, instead of a fresh one.
+        shutil.rmtree(rdir.parent.parent / "ledgers" / rdir.name, ignore_errors=True)
 
-    jsonl = rdir / _MONITOR_JSONL
+    jsonl = _record(rdir, _MONITOR_JSONL)  # beside the ledger, never the agent-writable run folder
     offset = 0
 
     def _pump() -> None:
@@ -403,7 +406,7 @@ async def run_research_nohup(
             raise RuntimeError(
                 f"refusing to resume run {rid}: it is still alive (pid {record.get('pid')})."
             )
-        (rdir / _RESULT_FILE).unlink(missing_ok=True)  # clear a stale terminal marker
+        _record(rdir, _RESULT_FILE).unlink(missing_ok=True)  # clear a stale terminal marker
         _launcher(request, rid, rdir, chatter=chatter, report_formats=formats,
                   human_channel=human_channel, max_iterations=max_iterations, resume=True)
 

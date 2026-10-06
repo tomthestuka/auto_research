@@ -193,7 +193,7 @@ def launch(
         record_path(run_directory, "backend.log"),
         env=child_env,
     )
-    (run_directory / "backend.pid").write_text(
+    record_path(run_directory, "backend.pid").write_text(
         json.dumps({"pid": pid, "create_time": _proc_create_time(pid)}), encoding="utf-8"
     )
     return pid
@@ -401,7 +401,7 @@ def summarise_ledger(path: Path) -> dict[str, Any]:
 def read_result(run_directory: Path) -> dict[str, Any]:
     """The run's own terminal marker, or an empty dict if it never wrote one."""
     try:
-        return json.loads((run_directory / "result.json").read_text(encoding="utf-8"))
+        return json.loads(record_path(run_directory, "result.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
 

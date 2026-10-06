@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import shutil
 from collections.abc import Sequence
 from pathlib import Path
 
 from auto_research.provenance import ReceiptLookup
+from auto_research.provenance.store import read_receipted, sha256_bytes
 from auto_research.schemas.artifacts import Receipt
 
 
@@ -40,14 +40,24 @@ def stage_figure_receipts(
                 f"figures lists {handle}, a {receipt.kind}, not a figure. List figure receipts only."
             )
             continue
-        mismatch = lookup.verify(handle)
-        if mismatch:
-            problems.append(f"figures lists {handle}: {mismatch} Cite a different figure.")
-            continue
         source = Path(receipt.path)
-        target = figs_dir / f"{receipt.sha256[:12]}{source.suffix.lower()}"
+        # The bytes staged are the bytes checked (F26): read once, without following a symlink. A
+        # figure changed after it was receipted is still staged, with an alert (human ruling
+        # 2026-10-06); one that can no longer be read as itself is not.
+        read = read_receipted(source, receipt.sha256, label=handle)
+        if read.data is None:
+            problems.append(f"figures lists {handle}: {read.note} Cite a different figure.")
+            continue
+        actual = sha256_bytes(read.data)
+        target = figs_dir / f"{actual[:12]}{source.suffix.lower()}"
         if not target.is_file():
             figs_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
+            target.write_bytes(read.data)
+        if read.note:
+            # The report shows what it staged: the bytes' own hash and a marked caption, so no
+            # reader takes the figure for the receipted one (F26).
+            receipt = receipt.model_copy(update={
+                "sha256": actual, "caption": f"{read.note} {receipt.caption or ''}".strip(),
+            })
         staged.append((receipt, f"figures/{target.name}"))
     return staged, problems

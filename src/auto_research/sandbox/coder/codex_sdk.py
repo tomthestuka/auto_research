@@ -295,6 +295,11 @@ class CodexBackend:
 
         if jail_enabled():
             env["CODEX_HOME"] = str(codex_settings_home(self._jail_label()))
+        # Its own HEASoft parameter folder (F23), in its own home, which its jail lets it write.
+        from auto_research.sandbox.jail import coder_home
+        from auto_research.sandbox.runner import with_private_param_dir
+
+        env = with_private_param_dir(env, coder_home(self._jail_label()) / "pfiles")
         overrides = [
             "preferred_auth_method=apikey",
             "forced_login_method=api",
