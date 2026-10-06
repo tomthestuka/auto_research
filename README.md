@@ -20,7 +20,8 @@ at all — self-modification is impossible by construction.
 Coding agents: read **`CLAUDE.md`** before doing anything. It is the single source of
 truth for how this project is built — current status, the phase spec, and the build
 order live there, not here. **Phase 3 (in planning):** generalizing the agent unit inside this
-repository (per-unit toolkit, sandbox and environments, and subagent grants); the Phase 2 spec is
+repository (per-unit toolkit and sandbox, subagent grants, and software environments built only by
+the coding pipeline); the Phase 2 spec is
 archived in `CLAUDE_p2.md`.
 
 ---
@@ -525,7 +526,6 @@ review, and the `approve_edit()` atomic branch commit all exist now; merges to
 ## Beyond Phase 2 (deferred stubs)
 
 Vector retrieval (ChromaDB; embedding column reserved) · durable HITL suspend/resume
-(LangGraph checkpointer) · OS-level sandbox jailing (bind-mounts / seccomp — every agent's file
-access is already confined to the `agent_fs_allow` allow-list via `sandbox.fs_guard.PathGuard`; the
-OS jail would also gate a shell subprocess's implicit reads) ·
+(LangGraph checkpointer) · egress control for jailed processes (the `bwrap` jail itself is built
+and on: worker REPL, shell, author harnesses and the gate's test run) ·
 `bash_exec` figure capture (diff worker cwd → `FigureRef`s) · the lead-scientist group that mines the knowledge base to propose new research requests.

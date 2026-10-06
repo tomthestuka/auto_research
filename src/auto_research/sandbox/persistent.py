@@ -232,15 +232,21 @@ class PersistentSandbox:
             env["AR_REPL_INIT_PY"] = self._repl_init_py
         # The OS jail (§12) when configured: the REPL is where toolkit tools and ``bash_exec`` run,
         # and a shell command's implicit reads are exactly what the command-string guard cannot see.
-        # Network stays on — acquisition tools download observations.
-        from auto_research.sandbox.jail import JailPolicy, jail_home, policy_from_config, wrap
+        # Network stays on — acquisition tools download observations. The toolkit is read-only and
+        # /tmp private (``jail.analysis_policy``, F20 review 2026-10-06).
+        from auto_research.sandbox.jail import analysis_policy, private_tmp, wrap
 
-        _base = policy_from_config(network=True, label="repl")
-        _home = jail_home("repl")
+        env["PYTHONNOUSERSITE"] = "1"  # the jail home persists; a user site there would run at boot
+        # -P: `python -c` would put the cwd first on sys.path, so a package written into the workdir
+        # would shadow the toolkit one and its results be stamped as toolkit evidence. A flag, not
+        # PYTHONSAFEPATH, so the REPL's own child processes keep their normal path rules.
+        self._private_tmp = private_tmp("repl", self._workdir)
         argv = wrap(
-            [python_exec, "-c", _REPL_SCRIPT],
-            JailPolicy(ro=_base.ro, rw=(*_base.rw, str(self._workdir), str(_home)),
-                       network=True, home=str(_home), label="repl"),
+            [python_exec, "-P", "-c", _REPL_SCRIPT],
+            analysis_policy(
+                label="repl", toolkit_root=self._toolkit_root,
+                writable=(str(self._workdir),), tmp=self._private_tmp,
+            ),
         )
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -399,3 +405,8 @@ class PersistentSandbox:
                 self._proc.kill()
                 await self._proc.communicate()
             self._alive = False
+            tmp = getattr(self, "_private_tmp", None)
+            if tmp is not None:
+                import shutil
+
+                shutil.rmtree(tmp, ignore_errors=True)  # the REPL's private /tmp dies with it

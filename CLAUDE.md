@@ -93,10 +93,11 @@ Consequences:
   side, with this `CLAUDE.md` at the workspace root.
 
 **Phase 3 adds no package.** The generalized unit lives in `auto_research`. Software environments
-that agents build (handoff [F18], [§9.6](#96-execution-sandbox-and-environments-per-unit)) are
-**runtime state** under the runtime data dir — never inside either repository. The same
-boundary extends to the human's own conda environments and package cache, which every unit sees
-read-only at most and no agent ever writes.
+(handoff [F18], [§9.6](#96-execution-sandbox-and-environments-per-unit)) are **defined** in
+`research_toolkit` and changed only by the gated coding pipeline; their built prefixes, package
+cache and locks are **runtime state** under the runtime data dir, never inside either repository.
+The boundary extends to the human's own conda environments and package cache: units use them
+read-only, and no agent ever writes them.
 
 ---
 
@@ -249,8 +250,9 @@ only read ([§9.3](#93-invariants-the-unit-enforces-and-no-definition-turns-off)
 - **Behaviour parity is the acceptance test.** Every step lands with the deterministic suite
   green and the invariant tests ([§9.10](#910-build-order-phase-3) step 0) unchanged, plus one live
   cell for each role whose wiring moved.
-- **The execution layer is shared with the environments work.** Agent-built environments
-  (handoff [F18], plan in the gitignored `tmp_agent_envs_plan.md`) are a separate work stream that
+- **The execution layer is shared with the environments work.** Software environments
+  (handoff [F18]; the gitignored `tmp_agent_envs_plan.md` is the authoritative record of its
+  rulings, plan approved by the human 2026-10-06) are a separate work stream that
   touches the same sandbox/execution code; claim symbols on the coordination board before editing
   there, and keep its settled decisions ([§9.6](#96-execution-sandbox-and-environments-per-unit)).
 
@@ -530,7 +532,9 @@ registry and reruns the workers.
 **Sandbox and reach.** One allow-list (`agent_fs_allow`, `agent_fs_readonly`) enforced by a path
 guard and, with `agent_os_jail: true` (on), a `bwrap` jail for the analyst REPL, both author
 harnesses and the gate's network-denied Layer-B run; `.git` bound read-only for the coder.
-Known hole: worker `bash_exec` runs outside the jail (handoff F20).
+The worker REPL and the builtin shell server run under one analysis jail policy (`jail.analysis_policy`;
+F20 closed 2026-10-06): toolkit read-only, a private `/tmp`, the init script sourced in a clean
+environment without credentials.
 
 **HITL and control.** Handler injection (`human_handler`), Telegram (rich messages, media both
 ways) and CLI connectors, `/stop` as cancellation with a shielded cleanup, `/steer`, `/status`,
@@ -553,8 +557,7 @@ analyst lead become definitions of it. What this buys the repository:
 - the analyst workers stop being a special case — any unit may have an execution backend;
 - each unit can carry its own toolkit (the librarian's literature toolkit, P2 §9.2's planned
   `lib_utils`, becomes expressible);
-- the jail is a per-unit choice, and the worker's shell running outside it (handoff F20) is closed
-  by construction;
+- the jail is a per-unit choice, applied by one launcher to every process a unit starts;
 - any unit can be granted the coding pipeline, not only the lead;
 - a new role costs a definition, not a class.
 
@@ -653,8 +656,8 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
   toolkit and its commit, and the evidence predicate asks whether that toolkit is registered for
   the citing scope. A toolkit with uncommitted changes refuses at launch, because a receipt stamps
   a commit.
-- The toolkit contract (P2 §9.2) is unchanged. A package may also commit an environment lock
-  derived by the pipeline (§9.6).
+- The toolkit contract (P2 §9.2) gains **environment definitions**, committed beside the packages
+  and named per package in its `tool_config.yaml` (§9.6).
 - A toolkit is writable only through a coding pipeline granted to a unit that declares it, one
   pipeline per toolkit at a time.
 
@@ -667,23 +670,59 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
   timeout, plus the shell) is available to any unit. A unit that declares a toolkit needs one.
 - **One launcher.** Every process started for a unit — the REPL, the builtin server carrying the
   shell, an author harness, the gate's test runner — goes through one function that applies that
-  unit's policy. This closes F20; the environments work stream also fixes F20 first, so whichever
-  lands first, the other builds on it.
-- **Environments** (handoff [F18], owned by its own work stream; settled with the human
-  2026-10-05/06, plan in `tmp_agent_envs_plan.md`):
-  - An environment is **runtime state** of the execution backend, built and changed mid-loop by
-    any unit that has one, with conda. Each environment is owned by a unit: the owner writes,
-    other units read, the human administers.
-  - **Human environments are read-only to every unit; no agent writes the human's conda
-    environments or package cache.** Agent environments and packages live under the runtime data
-    dir.
-  - **Every receipt stamps an environment fingerprint**, and a lock store rebuilds any recorded
-    state.
-  - A toolkit package may commit an environment lock, derived by the pipeline, gated and reviewed.
-    That package's tools run in an environment built from it, read-only to units; other tools run
-    in the unit's default.
+  unit's policy. F20 is closed (2026-10-06): the REPL (`sandbox/persistent.py`) and the shell
+  server (`graph.runtime._builtin_server_config`) already share `jail.analysis_policy`
+  (`sandbox/jail.py`), which the launcher step absorbs.
+- **Environments** (handoff [F18], its own work stream; rulings 2026-10-05/06 recorded in
+  `tmp_agent_envs_plan.md`):
+  - **Owned only by the coding pipeline.** Agent environments are named `ar-<name>` and are created
+    or changed only by a gated, reviewed commit. Every unit lists and uses environments and never
+    modifies them. A missing environment is a `tool_request` to the lead, then to the pipeline.
+  - **Defined in the toolkit.** A definition lives at
+    `research_toolkit/envs/<name>/{env.lock, env.pip, activate.sh, boot.py, env.yaml}`, and a
+    package names its environment in `tool_config.yaml`. Activation changes only through the
+    pipeline: the coder writes `activate.sh` / `boot.py`, gated and reviewed. A derived
+    environment may layer activation over a human prefix, read-only.
+  - **What an environment is:** a conda prefix (built with conda; pip only for what conda-forge
+    lacks, pinned `name==version`), plus activation (init script, REPL boot file), plus
+    human-declared externals (HEASoft, CALDB), which are stamped but cannot be rebuilt.
+  - **Routing.** A toolkit call takes an optional environment; the default is the package's tested
+    environment, named in the tool description. An override runs, and its receipt is flagged
+    "untested env" (still evidence, fingerprint stamped). Every result names its environment.
+    `use_env` switches only the unit's own REPL and shell (navigation).
+  - **Human environments** (today `astropy`) are ordinary environments units use read-only. After
+    the toolkit step they serve only a unit's own REPL and shell.
+  - **Provenance.** Every receipt stamps an environment fingerprint, a lock store rebuilds any
+    recorded version, and trajectories replay with their environment.
   - **No model-filled environment field in a brief.** The source environment is derived from the
     fingerprints of the receipts a brief cites.
+  - **Drift** (an `ar-` environment no longer matching its definition) is rebuilt visibly:
+    - the drifted prefix is kept as `ar-<name>.drift-<fp8>`;
+    - the environment is rebuilt from its unchanged definition;
+    - units are notified with the diff;
+    - a change worth adopting goes through `tool_request` → pipeline, and a significant one (a
+      changed science output) is raised, not absorbed;
+    - a changed external produces a notice only.
+  - **Storage.** Agent environments, packages and locks live under the runtime data dir, apart from
+    the human's conda cache (human environments hardlink into `~/.conda/pkgs`, measured). No agent
+    writes a human environment or that cache.
+  - **Sequencing.** Until the toolkit step — scheduled after this repository's work — the analysis
+    environment stays config-defined (`analyze_env`, `analyze_ini_sh`, `repl_init_py`). At that
+    step:
+    - its activation moves into the toolkit as an environment definition;
+    - `xspec_utils` gets its own environment and stops using the human `astropy` one;
+    - that environment's lock must be ABI-matched to the HEASoft build of PyXspec, which was built
+      against the system copy `/opt/anaconda/anaconda3/envs/astropy` (Python 3.13), not the
+      configured `analyze_env` `/grad/fzhou/.conda/envs/astropy`.
+  - **Accepted residual risks:**
+    - an upstream package removed;
+    - in-place edits that escape the fingerprint;
+    - externals that cannot be rebuilt;
+    - a user `.so` outside any environment, which is not hashed;
+    - a human activating an `ar-` environment.
+  - **Open:** F21 — the REPL boot file lives in this repository, which the jail does not mount, so it
+    has never run in jailed runs. Also open: a notice when a human environment changes between a
+    unit's calls or runs.
 
 ### 9.7 Subagents per unit — on/off, two kinds
 
@@ -726,8 +765,8 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
 | `SandboxToolProvider` / `ReadOnlyToolProvider` / `LibrarianToolProvider` | tool sets composed per definition: toolkit, harness, sources, report, channel, spawn |
 | global `toolkit_root`, `*_utils` glob, `research_toolkit.` producer prefix | toolkits per unit; producer = toolkit + commit |
 | global `agent_os_jail`, `agent_fs_allow`, `agent_fs_readonly` | sandbox per unit |
-| `PersistentSandbox` for workers only; the worker shell outside the jail (F20) | execution for any unit, through one launcher |
-| one human analysis environment, human-configured only (F18) | agent environments per unit, fingerprinted on every receipt |
+| `PersistentSandbox` for workers only (REPL and shell jailed by one policy since F20) | execution for any unit, through one launcher |
+| one human analysis environment, human-configured only (F18) | environments defined in the toolkit, built only by the pipeline, chosen per toolkit call, fingerprinted on every receipt |
 | `merge_flow` reading toolkit root, branch and caps from config for the lead | the coding pipeline granted per unit, targeting that unit's toolkit |
 | `author_chain` on the lead only | kind-B spawn for any granted unit |
 | per-role `*_turn_problems` functions | validators attached to a definition |
@@ -742,8 +781,8 @@ before moving on, and stop to verify the checkpoint. Statuses: **Todo** · **Don
 | 0 | Todo | **Invariant freeze** — §9.3 collected as one deterministic test module over today's code, from the existing per-role tests. | Green on the current tree; it is the parity oracle for every later step. |
 | 1 | Todo | **One unit** — `_react` + channel + report tools + `turn_end` as one unit; the four roles become definitions with validators; exceptions contained at the unit boundary (§9.3.8). | Each role's tests pass through the unit; one live cell per role. |
 | 2 | Todo | **Toolkits per unit** + the generalised evidence predicate. | Two units with different toolkits in one run; a tool of an unregistered toolkit grounds nothing. |
-| 3 | Todo | **Sandbox + execution per unit; one launcher** (coordinated with F18's F20 fix). | Jail on/off per unit; the worker's shell runs jailed; a unit with no backend has no shell. |
-| 4 | Todo | **Environments per unit** — the F18 work stream's build list, plugged into the execution backend. | Receipts carry environment fingerprints; human environments untouched. |
+| 3 | Todo | **Sandbox + execution per unit; one launcher** (absorbs `jail.analysis_policy`, landed with F20). | Jail on/off per unit; every process a unit starts goes through the launcher; a unit with no backend has no shell. |
+| 4 | Todo | **Environments** — the F18 work stream's build list, plugged into the execution backend and the coding pipeline. | Receipts carry environment fingerprints; a toolkit call runs in its package's tested environment; human environments untouched. |
 | 5 | Todo | **Subagents, kind A** — grants, monotone reach, depth and count caps. | A parent spawns a child and cites its receipts; a child asking for more reach is refused. |
 | 6 | Todo | **Coding pipeline as kind B** — `author_chain` → a grant any unit may hold. | A non-lead unit authors a tool into its toolkit's branch; a `commit` receipt; registry reload. |
 | 7 | Todo | **Live parity run** — one PI question end to end on the generalized unit. | Accepted, with a ledger of the same shape as Phase 2's. |
@@ -757,7 +796,8 @@ before moving on, and stop to verify the checkpoint. Statuses: **Todo** · **Don
 3. **Jail default when `bwrap` is missing:** fail the launch, or warn and run (today: warn).
 4. **The librarian's toolkit:** relocate literature search into a toolkit package now (P2 §9.2
    `lib_utils`), or keep `auto_research/sources` and give the librarian no toolkit.
-5. **Ordering with F18:** which stream lands the launcher and F20.
+5. **F21:** how the REPL boot file reaches a jailed REPL before the toolkit step moves it into an
+   environment definition (handoff; awaiting a ruling).
 
 
 ---
@@ -896,9 +936,11 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 - **Qwen coder pairing** (`dashscope`+`codex`) unprobed since account activation, flagged in
   `UNVERIFIED_PAIRINGS`. Only a pay-as-you-go `sk-ws-` key on `dashscope-intl` serves; Coding Plan
   keys speak Chat Completions only. Re-check: `tmp_scripts/check_qwen_entitlement.py`.
-- **Shell commands are best-effort confined** — `PathGuard` sees only paths named in a command, and
-  its token extractor false-denies (`1/2`, URLs) [F3]; with `agent_os_jail` off there is no kernel
-  layer. Toolkit-tool path arguments are not allow-listed.
+- **Shell commands are best-effort confined with `agent_os_jail` off** — `PathGuard` sees only paths
+  named in a command, and its token extractor false-denies (`1/2`, URLs) [F3]; there is no kernel
+  layer. With the jail on, the guard stands down only for a server whose launch recorded `jailed`
+  (`ToolkitRegistry.mcp_jailed`); a configured `mcp_servers` entry keeps the scan. Toolkit-tool
+  path arguments are not allow-listed.
 - **Coder git ban** is kernel-enforced when jailed (`.git` read-only); otherwise the Claude
   deny-rule is prefix-matched. Backstops either way: gate-entry `reset --mixed`, failure reset to
   the base ref.
@@ -976,3 +1018,13 @@ entry 2026-09-25, [R7] evidence rule, LIVE-VERIFIED 2026-09-26).
     summarised); two subagent kinds; validators; the dissolution table; build order 0–7; five open
     questions.
   - §10 SDK notes removed; §12 records the SDK and the conformance suite as parked.
+- 2026-10-06 — **Environment rulings and F20 folded in** (from the F18 work stream's plan,
+  approved by the human 2026-10-06; confirmed with that stream before editing).
+  - §2 and §9.6: environments are defined in the toolkit, built only by the coding pipeline, and
+    used read-only by every unit. Also: routing per toolkit call (tested default, "untested env"
+    flag on an override), visible rebuild on drift, storage apart from the human conda cache, the
+    sequencing of the toolkit step, accepted residual risks.
+  - §8, §9.1, §9.6, §9.9, §9.10 step 3 and §13: F20 closed — the REPL and the shell server share
+    `jail.analysis_policy`; the shell guard stands down only for a server recorded jailed.
+  - §9.5: the toolkit contract gains environment definitions.
+  - §9.11 q5 replaced by F21 (the REPL boot file is not mounted in the jail).

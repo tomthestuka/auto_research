@@ -72,6 +72,7 @@ class ToolkitRegistry:
         self._tools: dict[str, ToolSpec] = {}
         self._mcp_tools: dict[str, str] = {}  # kind -> description
         self._mcp_schemas: dict[str, dict] = {}  # kind -> input JSON schema
+        self._mcp_jailed: dict[str, bool] = {}  # kind -> its server runs inside the OS jail
         self._disabled: set[str] = set(disabled_tools or [])
         # Per-tool sandbox call-timeout ceiling (seconds), from each package's
         # ``tool_config.yaml``; absent tools fall back to the global default
@@ -163,9 +164,14 @@ class ToolkitRegistry:
             self._mcp_tools[kind] = client.describe(kind)
             schema = client.schema(kind) if hasattr(client, "schema") else None
             self._mcp_schemas[kind] = schema or {"type": "object", "properties": {}}
+            self._mcp_jailed[kind] = bool(getattr(client, "is_jailed", lambda _k: False)(kind))
 
     def is_mcp(self, kind: str) -> bool:
         return kind in self._mcp_tools
+
+    def mcp_jailed(self, kind: str) -> bool:
+        """Whether the MCP server serving ``kind`` was launched inside the OS jail."""
+        return self._mcp_jailed.get(kind, False)
 
     def is_known(self, tool_name: str) -> bool:
         self.load()

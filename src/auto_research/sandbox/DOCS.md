@@ -87,7 +87,12 @@ so the single `tool_catalogue()` string given to workers describes both.
 the same ReAct and memory-recording path as manifest tools.
 
 **Analyst env script:** `analyst_env.sh` is a minimal bash script sourced by
-`_source_ini_env()` before each persistent subprocess is spawned.  It sets only
+`_source_ini_env()` before each persistent subprocess is spawned. The script is sourced in a
+**clean environment** (identity, locale and proxy variables plus a system `PATH`, from `/`, under
+`bash --norc --noprofile` with stdin from `/dev/null` — bash sources `~/.bashrc` when stdin is a
+socket), so the REPL, the shell and the gate's test run never carry the parent's credentials or its
+`PWD`: before 2026-10-06 every API key `load_dotenv` had loaded reached them. The author harnesses
+are not covered: both SDKs merge their `env` over the parent's `os.environ`.  It sets only
 the analysis variables needed headlessly (HEADAS, CALDB, CALDBCONFIG, CALDBALIAS,
 GEOMAG_PATH) with no SSH agent, gnome-keyring, or interactive conda activation.
 `config/orchestration.yaml::analyze_ini_sh` points at this file.
@@ -227,11 +232,13 @@ class MCPToolClient:
     def schema(self, kind: str) -> dict    # input JSON schema for a kind
     async def call_tool(self, kind: str, arguments: dict, *, timeout_s: float | None = 900.0) -> dict
     async def shutdown(self) -> None       # close all sessions; terminate servers
+    def is_jailed(self, kind: str) -> bool # the server config's "jailed" flag, set by whoever built it
 ```
 
 - `servers` is a list of `{"name": str, "command": str, "args": list[str]}` dicts.
   Defaults to a single `builtin` server running `builtin_server.py` via
-  `sys.executable`.
+  `sys.executable` (a bare default for tests); the run path always passes the config
+  `graph.runtime._builtin_server_config` builds (analysis interpreter, jailed when on).
 - Tool kinds follow the convention `mcp.<server_name>.<tool_name>`.
 - `call_tool()` returns a dict with at minimum `stdout`, `stderr`, `exit_code`.
   Non-zero `exit_code` or `result.isError=True` is surfaced in the same `ToolResult`
@@ -242,10 +249,14 @@ class MCPToolClient:
 
 ### Built-in MCP server (`builtin_server.py`)
 
-Currently exposes shell execution plus file-tree exploration. Runs in the
-`auto_research` Python env (not the analysis env) and inherits the parent
-process environment so HEADAS/CALDB paths are visible to `bash_exec` commands.
-Restricting MCP to read-only filesystem tools is a documented P2 task.
+Currently exposes shell execution plus file-tree exploration. Built by
+`graph.runtime._builtin_server_config`: it runs on the **analysis env's interpreter** (which carries
+`mcp`), with the environment the analyst init script produces (HEADAS/CALDB visible to `bash_exec`),
+`{analyze_env}/bin` first on `PATH`, and the toolkit on `PYTHONPATH`. **With `agent_os_jail` on it
+runs inside the OS jail** under the same allow-list as the REPL (writable: the allow-list's writable
+roots, its cwd, its own jail home `jail-home/shell`; network on), its source passed with `-c` so the
+jail never mounts this repository (F20, 2026-10-06). The module is therefore kept stdlib + `mcp`
+only. Restricting MCP to read-only filesystem tools is a documented P2 task.
 
 Tools:
 - `bash_exec(command, cwd=None, timeout_s=60)` → `{"stdout": str, "stderr": str, "exit_code": int}`
@@ -291,6 +302,7 @@ layer — the MCP session itself handles it.
 ```python
 def load_mcp(self, client: MCPToolClient) -> None  # index MCP tools into registry
 def is_mcp(self, kind: str) -> bool                # True if kind is an MCP tool
+def mcp_jailed(self, kind: str) -> bool            # True if kind's server was launched inside the OS jail
 ```
 
 Call `load_mcp(client)` after `client.start()` to merge MCP kinds into the registry.
@@ -414,6 +426,7 @@ enforced by the kernel.
 bwrap, unprivileged (user namespaces + Landlock)
   --ro-bind   agent_fs_readonly            conda env · HEASoft · CALDB
   --bind      agent_fs_allow minus those   toolkit · obs-db · pfiles · runtime dir · /tmp
+              (analysis_policy: toolkit demoted to --ro-bind, host /tmp replaced by a private dir)
   --symlink   configured → resolved        so /data/… spellings work inside
   --proc --dev --unshare-{user,pid,ipc,uts} --die-with-parent
   --unshare-net                            gate only
@@ -423,8 +436,9 @@ bwrap, unprivileged (user namespaces + Landlock)
 |---|---|---|
 | Claude coder | `ClaudeAgentOptions(cli_path=…)` → a generated launcher | yes |
 | Codex coder | `CodexConfig(codex_bin=…)` → a generated launcher | yes |
-| analyst REPL | argv prefix in `persistent.py` | yes (acquisition downloads) |
-| gate's Layer-B pytest | argv prefix in `gate.py` | **no** |
+| analyst REPL | argv prefix in `persistent.py`, `analysis_policy` | yes (acquisition downloads) |
+| builtin shell server (`bash_exec`) | argv prefix in `graph.runtime._builtin_server_config`, `analysis_policy`; source via `-c` | yes |
+| gate's Layer-B pytest | argv prefix in `gate.py`; private `/tmp`, the worktree bound explicitly | **no** |
 
 Wrapping each harness's *binary* rather than its command line keeps us out of the vendors'
 argv: whatever they pass next release still lands inside the jail.
@@ -768,7 +782,9 @@ the hook mapping a fake-model verdict — no live LLM).
 - `parse_tool_figures(raw) -> (figures, drop_notes)` — the one reading of the figure contract: validates
   each entry into a `FigureRef`, drops a bad one with a reason, ignores a non-list with a note. Used by
   `SandboxToolProvider` (react.py) and `run_tool`.
-- `_source_ini_env(ini_sh)` → `dict` — sources a bash init script, caches result. Raises `RuntimeError` on any failure (non-zero exit, empty env, or subprocess exception) — no fallback to `os.environ`.
+- `_source_ini_env(ini_sh)` → `dict` — sources a bash init script in a clean environment
+  (`_INI_BASE_VARS` + a system `PATH`, cwd `/`; bash's `PWD`/`OLDPWD`/`SHLVL`/`_` dropped from the
+  result), caches result. Raises `RuntimeError` on any failure (non-zero exit, empty env, or subprocess exception) — no fallback to `os.environ`.
 - `analyst_env.sh` — bash script setting HEADAS, CALDB, CALDBCONFIG, CALDBALIAS,
   GEOMAG_PATH. Sourced by `_source_ini_env()`. No interactive cruft.
   `config/orchestration.yaml::analyze_ini_sh` points at this file.
@@ -904,6 +920,27 @@ the hook mapping a fake-model verdict — no live LLM).
   from the worktree. Derived from the diff, not the brief's advisory `target_domain` ([A12]).
 - `jail.wrap(argv, policy)` → `list[str]` — `argv` prefixed with the jail, or unchanged when the
   jail is off or unavailable. The one call every insertion point makes.
+  - `jail.analysis_policy(*, label, toolkit_root, writable, readonly, tmp)` → `JailPolicy` — the
+    policy for the worker REPL and the shell server: the allow-list with every root under
+    `toolkit_root` read-only (a writable toolkit let a shell command edit a tool and then call it
+    for evidence); **a configured writable root that contains one of `writable` demoted to
+    read-only**, with `writable` bound on top (a REPL writes its own worker folder, not every
+    worker's, every past run's, or the run's `authoring/` control files a resume trusts);
+    `readonly` overlays bound on top (the shell's run folder keeps `authoring/` read-only); the host
+    `/tmp` dropped and `tmp` bound at `/tmp` instead (the host one held another session's repo copy
+    and an author home's credential file); the toolkit itself always overlaid read-only (an
+    allow-listed ancestor would otherwise leave it writable); a per-label home; network on. The REPL
+    and the shell server run `python -P` (`python -c` otherwise puts its cwd first on `sys.path`, so
+    a planted package would shadow the toolkit's and its results be stamped as evidence).
+  - `jail.private_tmp(label, workspace)` → `Path` — a private `/tmp` per process kind and
+    workspace, on **local** disk under the host temp root, mode 0700 (NFS breaks
+    `TemporaryDirectory` cleanup while a file is open). An existing directory is used only if it is
+    a plain directory, owned by this uid, mode 0700 (`_owned_private_dir`); otherwise it raises.
+    Removed when its process ends: the REPL's by `PersistentSandbox.shutdown`, the shell server's by
+    `MCPToolClient.shutdown` (server config key `private_tmp`), the gate's lives inside the JUnit
+    `TemporaryDirectory`.
+  - `JailPolicy.tmp` — a directory bound at `/tmp` before the roots, so a root nested under `/tmp`
+    still lands on top.
   - `jail.policy_from_config(*, network, label)` → `JailPolicy` — `agent_fs_allow` split by
     `agent_fs_readonly` into writable and read-only roots.
   - `jail.coder_policy(*, label, extra_rw)` → `JailPolicy` — the author-harness policy. An author
@@ -1125,3 +1162,34 @@ Compacted 2026-09-01 and 2026-09-24 (detail in git history).
   reason deleted); `to=human` is non-blocking through the run's `SeatRouter`, the reply delivered by
   `session.send(..., mid_turn=True)`; unattended still raises `UNATTENDED_GUIDANCE` before the MCP
   boundary, a channel fault now arrives as a notice. Gate rejection names "message the lead".
+- 2026-10-06 — **[F20] closed: the builtin shell server runs inside the OS jail**, plus the fixes a
+  stateless adversarial review of that change found. `graph.runtime._builtin_server_config` passes
+  the server source with `-c` (the jail never mounts this repo) and wraps it in the new
+  `jail.analysis_policy`, which the worker REPL now uses too: toolkit read-only, a private `/tmp`
+  (`JailPolicy.tmp`), `PYTHONNOUSERSITE=1`. `runner._source_ini_env` sources the init script in a
+  clean environment (21 key/token variables had reached the network-enabled shell). The shell
+  guard's stand-down now reads how the server was launched — `"jailed"` on the server config →
+  `MCPToolClient.is_jailed(kind)` → `ToolkitRegistry.mcp_jailed(kind)` — instead of the config
+  file, so a configured `mcp_servers` entry or a host without `bwrap` keeps the command scan. Tests
+  (`TestShellServerJail`) drive the production builder, the real MCP client and `PersistentSandbox`
+  against a synthetic allow-list; each guarantee was mutation-checked.
+- 2026-10-06 — **[F20] second stateless review, fixes.** `_source_ini_env` now runs
+  `bash --norc --noprofile` with stdin from `/dev/null` (with a socket on stdin bash had sourced
+  `~/.bashrc`: 66 variables instead of 35), resolves the script path, and fails when the script file
+  is missing (a missing `source` had failed silently). `analysis_policy` demotes a configured writable root containing the process's own folder
+  to read-only and takes `readonly` overlays; the shell keeps the run's `authoring/` read-only; the
+  REPL sets `PYTHONSAFEPATH=1`. The private `/tmp` moved to local disk (`jail.private_tmp`), and the
+  gate's Layer-B run gets one too, with its worktree bound explicitly. **Correction to the previous
+  entry:** its `/tmp` assertions were vacuous (the synthetic allow-list lacked `/tmp`, so a mutant
+  without the replacement passed) and the clean env does not reach the author harnesses. The tests
+  now put `/tmp` and a shared runs root in the synthetic allow-list; five mutants (ancestor
+  demotion, `/tmp` replacement, `authoring/` overlay, `PYTHONSAFEPATH`, and `--norc`, the last
+  shown by reproducing the leak in the test's own scenario) are each caught.
+- 2026-10-06 — **[F20] third stateless review, fixes.** `private_tmp` refuses a pre-existing
+  directory that is a symlink, foreign-owned or not 0700; private `/tmp`s are removed when their
+  process ends (REPL shutdown, MCP client shutdown, the gate's inside its JUnit temp dir); REPL and
+  shell server run `python -P` instead of setting `PYTHONSAFEPATH` (inherited by children);
+  `analysis_policy` always overlays the toolkit read-only. Tests use a synthetic toolkit as the
+  write-probe target and plant the host-`/tmp` marker in the real temp root. Findings outside this
+  change are open in the handoff (host-side symlink following in jail-writable folders, the shared
+  writable `PFILES` directory, the gate's full allow-list, science_bench's allow-list shape, F21).

@@ -31,17 +31,16 @@ from auto_research.sandbox.fs_guard import GOVERNANCE_BASENAMES, PathGuard
 from auto_research.sandbox.runner import normalize_tool_raw, parse_tool_figures, tool_text
 
 
-def _jail_supersedes_command_check() -> bool:
-    """Whether an OS jail is actually running, making the shell-command path scan redundant.
+def _jail_supersedes_command_check(registry: Any, kind: str) -> bool:
+    """Whether the server running ``kind`` was launched inside the OS jail.
 
-    Both halves are required: configured **and** available. A host without ``bwrap``, or with user
-    namespaces denied, keeps the old best-effort scan rather than losing confinement entirely --
-    that host has no kernel enforcement to fall back on.
+    Read from how that server was actually started (recorded at launch, F20 review 2026-10-06),
+    never from the config file: a server built without the jail -- a configured ``mcp_servers``
+    entry, the jail off, ``bwrap`` absent, a config edited mid-run -- keeps the best-effort
+    command scan, because nothing in the kernel stands behind it.
     """
     try:
-        from auto_research.sandbox.jail import jail_available, jail_enabled
-
-        return bool(jail_enabled()) and bool(jail_available()[0])
+        return bool(registry.mcp_jailed(kind))
     except Exception:  # noqa: BLE001 — a guard that cannot decide keeps the stricter behaviour
         return False
 from auto_research.schemas import (
@@ -2649,7 +2648,7 @@ class SandboxToolProvider:
             # checker is indistinguishable from one that could not do the work.
             # `None` means "nothing denied" here -- an empty list would be a *rejection* with an
             # empty reason, i.e. every shell command blocked. The suite caught exactly that.
-            denied = None if _jail_supersedes_command_check() else \
+            denied = None if _jail_supersedes_command_check(self.registry, kind) else \
                 self._guard.forbidden_in_command(args.get("command", ""))
         elif kind in ("mcp.builtin.read_file", "mcp.builtin.list_dir"):
             target = args.get("path")

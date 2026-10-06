@@ -1,8 +1,10 @@
 """Built-in MCP stdio server: bash_exec, list_dir, read_file.
 
-Run as a subprocess by MCPToolClient. Uses the auto_research Python env (mcp
-installed); does NOT need the analysis env (XSPEC/HEASoft).  Inherits the
-parent process environment so HEADAS/CALDB are available to bash_exec commands.
+Run as a subprocess by MCPToolClient, from the analysis env's interpreter (which carries ``mcp``),
+with the environment the analyst init script produces so HEADAS/CALDB are available to bash_exec
+commands. Launched inside the OS jail when it is on (``graph.runtime._builtin_server_config``), its
+source passed with ``-c``: keep this module stdlib + ``mcp`` only, since nothing else is importable
+from inside the jail.
 """
 
 from __future__ import annotations

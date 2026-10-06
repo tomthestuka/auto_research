@@ -118,11 +118,17 @@ def _builtin_server_config(
     xspec_utils.  The subprocess environment is populated from the analyst init
     script (HEADAS, CALDB, LD_LIBRARY_PATH) plus PYTHONPATH=toolkit_root so the
     research_toolkit packages are importable without the REPL.
+
+    **The server runs inside the OS jail** when ``agent_os_jail`` is on, with the same allow-list
+    the REPL gets (F20: it used to be launched unwrapped, so ``bash_exec`` reached the whole disk
+    while the command-string guard stood down as "superseded by the jail"). Its source is passed
+    with ``-c``, as the REPL's is, so the jail never needs to mount this repository to run it.
     """
     from auto_research.sandbox.builtin_server import __file__ as _bs_file
+    from auto_research.sandbox.jail import analysis_policy, jail_home, private_tmp, wrap
     from auto_research.sandbox.runner import _source_ini_env
 
-    builtin_path = str(Path(_bs_file).resolve())
+    builtin_source = Path(_bs_file).read_text(encoding="utf-8")
     if analyze_env:
         python = str(analyze_env / "bin" / "python")
     else:
@@ -130,9 +136,9 @@ def _builtin_server_config(
         python = sys.executable
 
     # Build env from the analyst ini script — same pattern as PersistentSandbox.
-    # Do NOT inherit os.environ: production envs may have conda activations or
-    # other PATH/PYTHONPATH state we don't want.  analyze_ini_sh is the
-    # authoritative source; its bash subprocess captures the clean HEASoft env
+    # os.environ is NOT inherited: `_source_ini_env` sources the script in a clean
+    # environment, so no credential, conda activation or launching-shell state rides
+    # along.  analyze_ini_sh is the authoritative source; it captures the HEASoft env
     # (headas-init.sh sets PATH with HEASoft's Python first, LD_LIBRARY_PATH,
     # etc.).  PYTHONPATH covers toolkit_root (import xspec_utils) and its parent
     # (from research_toolkit import xspec_utils).
@@ -160,10 +166,35 @@ def _builtin_server_config(
     if analyze_probe:
         env["AR_ANALYZE_PROBE"] = analyze_probe
 
+    # A user site-packages under the (persistent) jail home would run code at the next start.
+    env["PYTHONNOUSERSITE"] = "1"
+
+    # The analysis policy, as for the REPL: allow-list with the toolkit read-only, a private /tmp,
+    # the run folder writable (one server serves every worker of the run) but its `authoring/`
+    # read-only — a resume trusts the base ref recorded there — and network on.
+    scratch = Path(cwd) if cwd is not None else jail_home("shell")
+    authoring = scratch / "authoring"
+    authoring.mkdir(parents=True, exist_ok=True)  # an overlay binds only an existing directory
+    tmp = private_tmp("shell", scratch)
+    argv = wrap(
+        # -P: no cwd on sys.path, so a module planted in the run folder cannot hijack the server.
+        [python, "-P", "-c", builtin_source],
+        analysis_policy(
+            label="shell", toolkit_root=toolkit_root,
+            writable=(str(scratch),), readonly=(str(authoring),),
+            tmp=tmp,
+        ),
+    )
+
     return {
         "name": "builtin",
-        "command": python,
-        "args": [builtin_path],
+        "command": argv[0],
+        "args": argv[1:],
+        # What the launch actually produced, not what config asked for: `wrap` leaves the argv
+        # unchanged when the jail is off or bwrap is absent, and the shell guard reads this flag.
+        "jailed": argv[0] != python,
+        # Removed by `MCPToolClient.shutdown`, so the server's private /tmp dies with it.
+        "private_tmp": str(tmp),
         "env": env,
         # Pin the server process cwd under the runtime data dir so nothing it does
         # relative to its own cwd can touch either repo (per-call bash_exec still

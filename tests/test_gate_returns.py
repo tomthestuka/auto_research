@@ -129,7 +129,7 @@ BREACHES = {
 def analysis_env(monkeypatch):
     """This interpreter as the analysis env, the jail off; the gate otherwise untouched."""
     monkeypatch.setattr(gate, "_orchestration_config", lambda: {"analyze_env": sys.prefix})
-    monkeypatch.setattr(gate, "_jailed_pytest", lambda argv, *, junit_path: argv)
+    monkeypatch.setattr(gate, "_jailed_pytest", lambda argv, *, junit_path, worktree=None: argv)
     monkeypatch.setattr(gate, "_gate_test_timeout", lambda worktree, targets: 120)
 
 

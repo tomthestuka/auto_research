@@ -74,6 +74,11 @@ class JailPolicy:
     lives in the real home, and the jail hands the process a fresh home, so binding the file at its
     own path puts it somewhere the process will never look. Carrying one file to the address the
     process actually reads keeps the narrow exposure and makes the subscription path work."""
+    tmp: str | None = None
+    """A private directory bound at ``/tmp``, in place of the host's. The host temp root holds
+    other processes' scratch — another session's working copy of this repository, an author
+    home's credential file, IDE sockets (measured 2026-10-06, F20 review) — so a process that
+    only needs *a* ``/tmp`` gets its own, on disk rather than in RAM."""
 
 
 def _config() -> dict:
@@ -173,6 +178,93 @@ def policy_from_config(*, network: bool = True, label: str = "") -> JailPolicy:
     )
 
 
+def private_tmp(label: str, workspace: Path | str) -> Path:
+    """A private ``/tmp`` for one jailed process: on **local** disk, mode 0700.
+
+    Local rather than under the runtime data dir, because that is NFS here, where a
+    ``TemporaryDirectory`` whose files are still open fails its cleanup with ``ENOTEMPTY``
+    (silly-rename; measured 2026-10-06) — and reductions hold FITS memmaps open. Mode 0700 so
+    other users of the host cannot read it. One per process kind (``label``) and workspace.
+
+    The host temp root is shared with every local user and the name is predictable, so an
+    existing directory is accepted only if it is ours: a real directory (not a symlink), owned by
+    this uid, with no group/other permission bits. Anything else raises rather than handing the
+    jail a ``/tmp`` someone else controls.
+    """
+    import hashlib
+    import tempfile
+
+    root = _owned_private_dir(Path(tempfile.gettempdir()) / "auto_research-jail-tmp")
+    digest = hashlib.sha256(str(Path(workspace).resolve()).encode()).hexdigest()[:12]
+    return _owned_private_dir(root / f"{label or 'default'}-{digest}")
+
+
+def _owned_private_dir(path: Path) -> Path:
+    """``path`` created mode 0700 if absent, and verified to be ours and private if present."""
+    import stat
+
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(f"private tmp {path} is not a plain directory; refusing to use it")
+    if info.st_uid != os.getuid():
+        raise RuntimeError(f"private tmp {path} is owned by uid {info.st_uid}; refusing to use it")
+    if info.st_mode & 0o077:
+        raise RuntimeError(f"private tmp {path} is readable by others; refusing to use it")
+    return path
+
+
+def analysis_policy(
+    *, label: str, toolkit_root: Path | str, writable: tuple[str, ...] = (),
+    readonly: tuple[str, ...] = (), tmp: Path | str,
+) -> JailPolicy:
+    """The jail for an analysis process — the worker REPL and the shell server.
+
+    The configured allow-list, changed where these processes, which run model-chosen commands with
+    the network on, would otherwise reach too far (F20 reviews, 2026-10-06):
+
+    * **the toolkit is read-only.** A writable toolkit lets a shell command edit a tool's source and
+      then call that tool, whose result counts as evidence — the gated pipeline bypassed. Only the
+      pipeline's own worktree writes toolkit code (CLAUDE.md §2);
+    * **a process writes only its own directory inside a shared root.** A configured writable root
+      that contains one of ``writable`` (the runs root contains a worker's folder) is demoted to
+      read-only, and ``writable`` is bound writable on top. Without this every REPL could write
+      every worker's folder, every past run, and the authoring control files a resume trusts;
+    * ``readonly`` overlays (e.g. the run's ``authoring/`` inside a writable run folder) are bound
+      read-only on top of whatever contains them;
+    * **the host ``/tmp`` is replaced** by ``tmp``, a private directory (see ``JailPolicy.tmp``);
+    * a per-label home is added.
+    """
+    base = policy_from_config(network=True, label=label)
+    toolkit = Path(toolkit_root).resolve()
+    host_tmp = Path("/tmp").resolve()
+    own = [Path(entry).resolve() for entry in writable]
+
+    def resolved(entry: str) -> Path:
+        return Path(entry).resolve()
+
+    def demoted(entry: str) -> bool:
+        root = resolved(entry)
+        return root.is_relative_to(toolkit) or any(
+            mine != root and mine.is_relative_to(root) for mine in own
+        )
+
+    home = jail_home(label)
+    rw = tuple(e for e in base.rw if resolved(e) != host_tmp and not demoted(e))
+    ro = tuple(e for e in base.ro if resolved(e) != host_tmp)
+    demoted_ro = tuple(e for e in base.rw if resolved(e) != host_tmp and demoted(e))
+    # The toolkit is bound read-only on top whatever contains it: an allow-listed *ancestor* of the
+    # toolkit (a whole data directory) would otherwise leave it writable.
+    return JailPolicy(
+        ro=(*ro, *demoted_ro, str(toolkit), *readonly),
+        rw=(*rw, *writable, str(home)),
+        network=True, home=str(home), label=label, tmp=str(tmp),
+    )
+
+
 def jail_argv(policy: JailPolicy) -> list[str]:
     """The ``bwrap`` prefix for one process, or ``[]`` when there is nothing to prefix.
 
@@ -197,6 +289,10 @@ def jail_argv(policy: JailPolicy) -> list[str]:
             argv += ["--ro-bind", entry, entry]
     for target, link in _SYSTEM_SYMLINKS:
         argv += ["--symlink", target, link]
+
+    # Before the roots: a root nested under /tmp (a test's scratch) still lands on top of it.
+    if policy.tmp:
+        argv += ["--bind", str(Path(policy.tmp).resolve()), "/tmp"]
 
     # Outermost first, so a nested entry with a different mode still takes effect: a later bind
     # lands on top of an earlier one, which is how a read-only subtree inside a writable root (or
@@ -285,7 +381,7 @@ def write_launcher(path: Path, target: str, policy: JailPolicy) -> Path:
     policy = JailPolicy(
         ro=(*policy.ro, target_dir) if target_dir not in policy.ro else policy.ro,
         rw=policy.rw, network=policy.network, home=policy.home, label=policy.label,
-        ro_files=policy.ro_files, ro_files_at=policy.ro_files_at,
+        ro_files=policy.ro_files, ro_files_at=policy.ro_files_at, tmp=policy.tmp,
     )
     prefix = jail_argv(policy)
     command = [*prefix, "--", resolved_target] if prefix else [resolved_target]

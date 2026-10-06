@@ -604,6 +604,322 @@ class TestBashExecInterpreterConsistency:
         )
 
 
+class TestShellServerJail:
+    """F20: the builtin shell server runs inside the OS jail, under the analysis policy.
+
+    Driven through the run path's own builder (``_builtin_server_config``) and the real
+    ``MCPToolClient``. The jail reads a **synthetic** allow-list (the machine's analysis stack,
+    read-only, plus the toolkit) so the assertions do not depend on what this host's
+    ``agent_fs_allow`` happens to contain -- in particular ``/tmp`` is absent from it, so a write
+    that lands proves the cwd bind, not a broad root.
+    """
+
+    @staticmethod
+    def _orch() -> dict:
+        from auto_research.graph.runtime import load_orchestration_config
+
+        try:
+            orch = load_orchestration_config()
+        except RuntimeError:
+            pytest.skip("orchestration.yaml not configured (unprovisioned machine)")
+        env, ini, root = orch.get("analyze_env"), orch.get("analyze_ini_sh"), orch.get("toolkit_root")
+        if not (env and ini and root and (Path(env) / "bin" / "python").exists()):
+            pytest.skip("analysis env not configured on this machine")
+        return orch
+
+    @classmethod
+    def _server(cls, orch: dict, cwd: Path, toolkit: Path | None = None) -> dict:
+        from auto_research.graph.runtime import _builtin_server_config
+
+        return _builtin_server_config(
+            Path(orch["analyze_env"]), orch["analyze_ini_sh"], toolkit or Path(orch["toolkit_root"]),
+            cwd=cwd, analyze_probe=orch.get("analyze_probe"),
+        )
+
+    @staticmethod
+    def _synthetic_toolkit(tmp_path: Path) -> Path:
+        """A toolkit of our own: a write probe that ever lands, lands here, not in the real one."""
+        toolkit = tmp_path / "toolkit"
+        (toolkit / "ar_probe_utils").mkdir(parents=True)
+        (toolkit / "ar_probe_utils" / "__init__.py").write_text("ORIGIN = 'toolkit'\n")
+        return toolkit
+
+    @staticmethod
+    def _host_tmp_marker(request: pytest.FixtureRequest) -> Path:
+        """A file in the host's real temp root, whatever pytest's basetemp is."""
+        import tempfile
+        import uuid
+
+        marker = Path(tempfile.gettempdir()) / f"ar_f20_marker_{uuid.uuid4().hex}"
+        marker.write_text("host")
+        request.addfinalizer(lambda: marker.unlink(missing_ok=True))
+        return marker
+
+    @staticmethod
+    def _stack_probe(orch: dict) -> str:
+        """The configured stack probe minus toolkit packages (the synthetic toolkit has none)."""
+        import re
+
+        probe = (orch.get("analyze_probe") or "").strip()
+        names = [n.strip() for group in re.findall(r"import\s+([\w., ]+)", probe)
+                 for n in group.split(",")]
+        stack = [n for n in names if n and not n.endswith("_utils")]
+        return f"import {', '.join(stack)}" if stack else "import sys"
+
+    @staticmethod
+    def _bash(server: dict, *commands: str) -> list[dict]:
+        from auto_research.sandbox.mcp_client import MCPToolClient
+
+        async def go() -> list[dict]:
+            client = MCPToolClient(servers=[server])
+            await client.start()
+            try:
+                assert client.is_jailed("mcp.builtin.bash_exec") == server["jailed"]
+                return [
+                    await client.call_tool("mcp.builtin.bash_exec", {"command": command})
+                    for command in commands
+                ]
+            finally:
+                await client.shutdown()
+
+        return asyncio.run(go())
+
+    @staticmethod
+    def _synthetic_jail(
+        monkeypatch: pytest.MonkeyPatch, orch: dict, runs_root: Path, toolkit: Path,
+    ) -> None:
+        """The machine's analysis stack read-only, plus -- as production has them -- the toolkit,
+        a shared runs root and the host ``/tmp``, all writable in config. What the analysis policy
+        then takes away is what the tests assert."""
+        from auto_research.sandbox import jail
+
+        readonly = [str(e) for e in (orch.get("agent_fs_readonly") or [orch["analyze_env"]])]
+        allow = [*readonly, str(toolkit), str(runs_root), "/tmp"]
+        monkeypatch.setattr(jail, "_config", lambda: {
+            "agent_os_jail": True, "agent_fs_allow": allow, "agent_fs_readonly": readonly,
+        })
+
+    def test_the_jailed_shell_is_confined_clean_and_still_capable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+    ) -> None:
+        from auto_research.sandbox import jail, runner
+
+        if not jail.jail_available()[0]:
+            pytest.skip("bwrap cannot run on this host")
+        orch = self._orch()
+        runs = tmp_path / "runs"
+        toolkit = self._synthetic_toolkit(tmp_path)
+        self._synthetic_jail(monkeypatch, orch, runs, toolkit)
+        # A credential in the launching process must not reach the shell.
+        monkeypatch.setenv("AR_F20_FAKE_API_KEY", "sk-should-never-arrive")
+        monkeypatch.setattr(runner, "_ini_env_cache", {})
+
+        cwd = runs / "run1"  # the shell's cwd is the run folder, as in production
+        cwd.mkdir(parents=True)
+        (runs / "old_run").mkdir()
+        outside = self._host_tmp_marker(request)
+        repo = Path(__file__).resolve().parents[1]
+        server = self._server(orch, cwd, toolkit)
+        assert server["jailed"] is True and Path(server["command"]).name == "bwrap"
+        assert "AR_F20_FAKE_API_KEY" not in server["env"]
+        assert not any(k.endswith(("_API_KEY", "_TOKEN")) for k in server["env"]), sorted(server["env"])
+
+        probe = self._stack_probe(orch)
+        try:
+            results = self._bash(
+                server,
+                f"ls {repo}",
+                f"cat {outside}",
+                f"touch {toolkit}/.ar_f20_probe",
+                f"ls {toolkit}",
+                "touch inside_cwd && echo ok",
+                "echo ${AR_F20_FAKE_API_KEY:-absent}",
+                f'python -c "{probe}; import ar_probe_utils"',
+                f"touch {runs / 'old_run' / 'x'}",
+                f"touch {cwd / 'authoring' / 'current_base_ref'}",
+            )
+        finally:
+            leaked = (toolkit / ".ar_f20_probe").exists()
+        (repo_ls, host_tmp, toolkit_write, toolkit_read, cwd_write, secret, capability,
+         old_run, authoring) = results
+        assert repo_ls["exit_code"] != 0, "the jailed shell can list this repository"
+        assert host_tmp["exit_code"] != 0, "the jailed shell sees the host /tmp"
+        assert toolkit_write["exit_code"] != 0 and not leaked, "the jailed shell can write the toolkit"
+        assert toolkit_read["exit_code"] == 0, toolkit_read
+        assert cwd_write["exit_code"] == 0 and (cwd / "inside_cwd").exists(), cwd_write
+        assert secret["stdout"].strip() == "absent", "a parent credential reached the shell"
+        assert capability["exit_code"] == 0, capability  # the analysis stack still imports
+        assert old_run["exit_code"] != 0, "the shell can write another run's folder"
+        assert authoring["exit_code"] != 0, "the shell can write the run's authoring control files"
+
+    def test_shell_server_launches_unwrapped_when_the_jail_is_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from auto_research.sandbox import jail
+
+        orch = self._orch()
+        monkeypatch.setattr(jail, "_config", lambda: {"agent_os_jail": False})
+        server = self._server(orch, tmp_path)
+        assert server["jailed"] is False
+        assert Path(server["command"]).name.startswith("python"), server["command"]
+        assert server["args"][:2] == ["-P", "-c"]
+        (result,) = self._bash(server, "echo ok")
+        assert result["exit_code"] == 0 and "ok" in result["stdout"], result
+
+    def test_the_jailed_repl_has_the_same_confinement_and_still_runs_toolkit_code(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+    ) -> None:
+        """The worker REPL shares the shell's policy: toolkit read-only, private /tmp, no secrets."""
+        from auto_research.graph.runtime import SandboxSettings
+        from auto_research.sandbox import jail, runner
+
+        if not jail.jail_available()[0]:
+            pytest.skip("bwrap cannot run on this host")
+        orch = self._orch()
+        runs = tmp_path / "runs"
+        toolkit = self._synthetic_toolkit(tmp_path)
+        self._synthetic_jail(monkeypatch, orch, runs, toolkit)
+        monkeypatch.setenv("AR_F20_FAKE_API_KEY", "sk-should-never-arrive")
+        monkeypatch.setattr(runner, "_ini_env_cache", {})
+        settings = SandboxSettings.from_config(orch)
+        toolkit_pkg = "ar_probe_utils"
+        outside = self._host_tmp_marker(request)
+        workdir = runs / "run1" / "analyst_worker_0"
+        sibling = runs / "run1" / "analyst_worker_1"
+        sibling.mkdir(parents=True)
+        # A package of the toolkit's name planted in the REPL's cwd must not shadow the toolkit.
+        (workdir / toolkit_pkg).mkdir(parents=True)
+        (workdir / toolkit_pkg / "__init__.py").write_text("SHADOW = True\n")
+        sandbox = PersistentSandbox(
+            toolkit, workdir,
+            analyze_env=settings.analyze_env, analyze_ini_sh=settings.analyze_ini_sh,
+            repl_init_py=settings.repl_init_py,
+        )
+
+        async def go() -> list[dict]:
+            try:
+                return [
+                    await sandbox.call_tool("os", "makedirs", {"name": str(toolkit / ".ar_f20_dir")}),
+                    await sandbox.call_tool("os", "stat", {"path": str(outside)}),
+                    await sandbox.call_tool("os", "getenv", {"key": "AR_F20_FAKE_API_KEY"}),
+                    await sandbox.call_tool("importlib", "import_module", {"name": toolkit_pkg}),
+                    await sandbox.call_tool("os", "makedirs", {"name": str(workdir / "ok")}),
+                    await sandbox.call_tool("os", "makedirs", {"name": str(sibling / "x")}),
+                ]
+            finally:
+                await sandbox.shutdown()
+
+        try:
+            write_tk, host_tmp, secret, imported, write_cwd, write_sibling = asyncio.run(go())
+        finally:
+            leaked = (toolkit / ".ar_f20_dir").exists()
+        assert write_tk["exit_code"] != 0 and not leaked, "the jailed REPL can write the toolkit"
+        assert host_tmp["exit_code"] != 0, "the jailed REPL sees the host /tmp"
+        assert secret["exit_code"] == 0 and secret["stdout"] == "None", secret
+        assert imported["exit_code"] == 0, imported
+        assert str(toolkit.resolve()) in imported["stdout"], (
+            f"the toolkit package was shadowed by the cwd: {imported['stdout']}")
+        assert write_cwd["exit_code"] == 0 and (workdir / "ok").is_dir(), write_cwd
+        assert write_sibling["exit_code"] != 0, "a REPL can write another worker's folder"
+
+    def test_the_gate_runs_tests_with_a_private_tmp_and_its_worktree_bound(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Layer B runs coder-authored code: it gets a private /tmp, never the host's."""
+        from auto_research.sandbox import gate, jail
+
+        if not jail.bwrap_path():
+            pytest.skip("bwrap is not installed on this host")
+        monkeypatch.setattr(jail, "_config", lambda: {
+            "agent_os_jail": True, "agent_fs_allow": ["/tmp"], "agent_fs_readonly": [],
+        })
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        junit = tmp_path / "junit" / "junit1.xml"
+        junit.parent.mkdir()
+        argv = gate._jailed_pytest(["python", "-m", "pytest"], junit_path=str(junit), worktree=worktree)
+        pairs = list(zip(argv, argv[1:], argv[2:]))
+        assert ("--bind", str((junit.parent / "tmp").resolve()), "/tmp") in pairs
+        assert ("--bind", str(Path("/tmp").resolve()), str(Path("/tmp").resolve())) not in pairs
+        assert ("--bind", str(worktree.resolve()), str(worktree.resolve())) in pairs
+
+    def test_a_private_tmp_someone_else_could_control_is_refused(self, tmp_path: Path) -> None:
+        """The host temp root is shared and the name predictable: only our own 0700 dir is used."""
+        from auto_research.sandbox.jail import _owned_private_dir
+
+        ok = _owned_private_dir(tmp_path / "fresh")
+        assert ok.is_dir() and (ok.stat().st_mode & 0o777) == 0o700
+        loose = tmp_path / "loose"
+        loose.mkdir(mode=0o755)
+        loose.chmod(0o755)
+        with pytest.raises(RuntimeError, match="readable by others"):
+            _owned_private_dir(loose)
+        target = tmp_path / "elsewhere"
+        target.mkdir(mode=0o700)
+        (tmp_path / "planted").symlink_to(target)
+        with pytest.raises(RuntimeError, match="not a plain directory"):
+            _owned_private_dir(tmp_path / "planted")
+
+    def test_the_init_script_never_picks_up_bashrc_even_with_a_socket_on_stdin(
+        self, tmp_path: Path
+    ) -> None:
+        """bash sources ~/.bashrc when stdin is a socket (a detached backend's case)."""
+        import socket
+        import subprocess
+        import sys
+
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".bashrc").write_text("export AR_BASHRC_MARK=leaked\n")
+        ini = tmp_path / "ini.sh"
+        ini.write_text("export AR_INI_SET=1\n")
+        code = (
+            "from auto_research.sandbox.runner import _source_ini_env\n"
+            f"env = _source_ini_env({str(ini)!r})\n"
+            "print('AR_INI_SET' in env, 'AR_BASHRC_MARK' in env, 'PWD' in env)\n"
+        )
+        ours, theirs = socket.socketpair()
+        try:
+            out = subprocess.run(
+                [sys.executable, "-c", code], stdin=theirs, capture_output=True, text=True,
+                env={"HOME": str(home), "PATH": "/usr/bin:/bin", "AR_SECRET_API_KEY": "x"},
+                timeout=60,
+            )
+        finally:
+            ours.close()
+            theirs.close()
+        assert out.stdout.split() == ["True", "False", "False"], (out.stdout, out.stderr)
+
+    def test_the_command_guard_follows_how_the_server_was_launched(self, tmp_path: Path) -> None:
+        """An unjailed server (a configured ``mcp_servers`` entry, the jail off) keeps the scan."""
+        from auto_research.agents.react import SandboxToolProvider
+        from auto_research.sandbox.registry import ToolkitRegistry
+
+        class _Client:
+            def __init__(self, jailed: bool) -> None:
+                self._jailed = jailed
+
+            def list_kinds(self): return ["mcp.builtin.bash_exec"]
+            def describe(self, kind): return "shell"
+            def schema(self, kind): return {"type": "object", "properties": {}}
+            def is_jailed(self, kind): return self._jailed
+
+        for jailed in (False, True):
+            reg = ToolkitRegistry(tmp_path)
+            reg._loaded = True
+            reg.load_mcp(_Client(jailed))
+            assert reg.mcp_jailed("mcp.builtin.bash_exec") is jailed
+            sb = _FakeSandbox(mcp_fn=lambda k, a: {"exit_code": 0, "stdout": "ran", "stderr": ""})
+            prov = SandboxToolProvider(reg, sb, cwd=tmp_path)
+            from auto_research.agents import react
+            prov._guard = react.PathGuard(roots=[tmp_path])
+            out = asyncio.run(prov.execute("mcp.builtin.bash_exec", {"command": "cat /etc/shadow"}))
+            if jailed:
+                assert "path not permitted" not in out.text
+            else:
+                assert out.is_error and "path not permitted" in out.text
+
+
 # ---------------------------------------------------------------------------
 # bash_exec non-interactive isolation (regression guard for the MCP-transport hang)
 # ---------------------------------------------------------------------------
@@ -661,7 +977,7 @@ def test_the_jail_supersedes_the_command_scan_without_blocking_everything(monkey
     reg = _FakeRegistry(known={"mcp.builtin.bash_exec"}, mcp={"mcp.builtin.bash_exec"})
 
     for jailed in (True, False):
-        monkeypatch.setattr(react, "_jail_supersedes_command_check", lambda: jailed)
+        monkeypatch.setattr(react, "_jail_supersedes_command_check", lambda *_a: jailed)
         prov = SandboxToolProvider(reg, sb, cwd=tmp_path)
         out = asyncio.run(prov.execute("mcp.builtin.bash_exec", {"command": "echo hi"}))
         assert not out.is_error, f"a clean command was rejected with jail={jailed}"
@@ -675,7 +991,7 @@ def test_a_denied_path_is_still_denied_when_no_jail_is_running(monkeypatch, tmp_
     from auto_research.agents import react
     from auto_research.agents.react import SandboxToolProvider
 
-    monkeypatch.setattr(react, "_jail_supersedes_command_check", lambda: False)
+    monkeypatch.setattr(react, "_jail_supersedes_command_check", lambda *_a: False)
     sb = _FakeSandbox(mcp_fn=lambda k, a: {"exit_code": 0, "stdout": "", "stderr": ""})
     reg = _FakeRegistry(known={"mcp.builtin.bash_exec"}, mcp={"mcp.builtin.bash_exec"})
     prov = SandboxToolProvider(reg, sb, cwd=tmp_path)

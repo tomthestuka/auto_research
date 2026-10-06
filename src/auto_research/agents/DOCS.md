@@ -607,3 +607,4 @@ Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
   in-process `data_catalog` is receipted under `research_toolkit.catalog_utils.data_catalog`.
   `reviewer_tools.reviewer_claims` / `BRIEF_FIELDS`: the reviewer's `follow_up` is exempt from
   grounding (a brief); `reviewer_scope` excludes only `input:` (published reports are not evidence).
+- 2026-10-06 — **[F20] The `bash_exec` command-path scan stands down only for a server launched inside the OS jail**: `_jail_supersedes_command_check(registry, kind)` reads `ToolkitRegistry.mcp_jailed(kind)` (recorded at launch) instead of the config's `agent_os_jail`, so a configured `mcp_servers` entry, a host without `bwrap` or a config edited mid-run keeps the scan.

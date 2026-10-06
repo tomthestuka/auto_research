@@ -53,6 +53,11 @@ class MCPToolClient:
         self._tool_index: dict[str, tuple[str, str]] = {}
         self._tool_descs: dict[str, str] = {}
         self._tool_schemas: dict[str, dict] = {}  # kind -> input JSON schema
+        # server name -> launched inside the OS jail. Recorded by whoever built the server config
+        # (``graph.runtime._builtin_server_config`` sets it from the argv it actually produced), so
+        # a guard that stands down "because the jail confines it" asks how the server was started,
+        # not what the config file says now.
+        self._jailed: dict[str, bool] = {s["name"]: bool(s.get("jailed")) for s in self._servers}
         self._stack: contextlib.AsyncExitStack = contextlib.AsyncExitStack()
 
     async def start(self) -> None:
@@ -80,6 +85,11 @@ class MCPToolClient:
     def list_kinds(self) -> list[str]:
         """Return all registered MCP tool kinds."""
         return list(self._tool_index)
+
+    def is_jailed(self, kind: str) -> bool:
+        """Whether the server serving ``kind`` was launched inside the OS jail."""
+        server = self._tool_index.get(kind, (None, None))[0]
+        return bool(server is not None and self._jailed.get(server))
 
     def describe(self, kind: str) -> str:
         """Return a description string for a tool kind."""
@@ -129,5 +139,12 @@ class MCPToolClient:
         }
 
     async def shutdown(self) -> None:
-        """Close all sessions and terminate server subprocesses."""
-        await self._stack.aclose()
+        """Close all sessions, terminate server subprocesses, remove their private ``/tmp``s."""
+        import shutil
+
+        try:
+            await self._stack.aclose()
+        finally:
+            for server in self._servers:
+                if server.get("private_tmp"):
+                    shutil.rmtree(server["private_tmp"], ignore_errors=True)

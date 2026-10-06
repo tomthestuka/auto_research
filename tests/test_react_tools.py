@@ -72,7 +72,7 @@ def test_shell_commands_are_confined_by_whichever_layer_is_actually_running(tmp_
         def kind_for_function(self, name):
             return f"mcp.builtin.{name}"
 
-    monkeypatch.setattr(react, "_jail_supersedes_command_check", lambda: False)
+    monkeypatch.setattr(react, "_jail_supersedes_command_check", lambda *_a: False)
     p = SandboxToolProvider(_Reg(), sandbox=None, cwd=tmp_path)
     out = asyncio.run(p.execute(
         "bash_exec", {"command": "cat /data/fzhou/auto_research/src/auto_research/sandbox/gate.py"}))
@@ -80,7 +80,7 @@ def test_shell_commands_are_confined_by_whichever_layer_is_actually_running(tmp_
 
     # And with a jail running the same command is passed through to the sandbox, where the kernel
     # confines it -- the point being that it is no longer rejected *here*.
-    monkeypatch.setattr(react, "_jail_supersedes_command_check", lambda: True)
+    monkeypatch.setattr(react, "_jail_supersedes_command_check", lambda *_a: True)
     p2 = SandboxToolProvider(_Reg(), sandbox=None, cwd=tmp_path)
     try:
         out2 = asyncio.run(p2.execute(

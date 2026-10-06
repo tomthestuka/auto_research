@@ -19,24 +19,54 @@ from auto_research.schemas.tools import ToolResult
 _ini_env_cache: dict[str, dict[str, str]] = {}
 
 
-def _source_ini_env(ini_sh: str) -> dict[str, str]:
-    """Source a bash init script and return the resulting environment.
+#: The only variables the init script is sourced *with*: identity, locale and proxy settings a
+#: download may need. Everything else the parent holds — every API key ``load_dotenv`` put there,
+#: the launching shell's ``PWD`` (this repository), host-tooling variables — stays out, because the
+#: result becomes the environment of the analysis REPL, the jailed shell and the gate's test run.
+#: (The author harnesses also start from it, but both SDKs merge their ``env`` over the parent's
+#: ``os.environ``, so an author still inherits the parent's variables.) Measured 2026-10-06 (F20
+#: review): 21 key/token variables reached the jailed, network-enabled shell before this.
+_INI_BASE_VARS = (
+    "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    "http_proxy", "https_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+)
+_INI_BASE_PATH = "/usr/local/bin:/usr/bin:/bin"
+#: Bash's own bookkeeping, dropped from the result so nothing names the directory it ran in.
+_INI_SHELL_VARS = frozenset({"PWD", "OLDPWD", "SHLVL", "_"})
 
-    Uses ``env -0`` (NUL-separated output) for robustness.  Errors from
-    interactive shell components (gnome-keyring, SSH agent) are suppressed via
-    ``2>/dev/null``.  The result is cached so the script is only sourced once
-    per interpreter lifetime.
+
+def _source_ini_env(ini_sh: str) -> dict[str, str]:
+    """Source a bash init script in a **clean** environment and return the result.
+
+    The script starts from :data:`_INI_BASE_VARS` and a system ``PATH`` only (``env -i``
+    semantics), from ``/`` as its working directory, under ``bash --norc --noprofile`` with stdin
+    from ``/dev/null``: bash otherwise sources ``~/.bashrc`` whenever stdin is a socket (the
+    detached backend's case — measured 2026-10-06, 66 variables instead of 35, conda activation
+    and ``SSH_*`` among them). The result is exactly what the script sets plus that base, never a
+    credential of the parent process. A missing script is an error. Uses ``env -0``
+    (NUL-separated output) for robustness. Errors from interactive shell components
+    (gnome-keyring, SSH agent) are suppressed via ``2>/dev/null``. The result is cached so the
+    script is only sourced once per interpreter lifetime.
 
     Raises ``RuntimeError`` on any failure — no fallback to ``os.environ``.
     """
     if ini_sh in _ini_env_cache:
         return _ini_env_cache[ini_sh]
+    base = {name: os.environ[name] for name in _INI_BASE_VARS if name in os.environ}
+    base["PATH"] = _INI_BASE_PATH
+    script = str(Path(ini_sh).expanduser().resolve())  # cwd is "/", so a relative path would miss
+    if not Path(script).is_file():
+        # `source` of a missing file fails silently under 2>/dev/null and leaves only the base.
+        raise RuntimeError(f"Analyst env script {ini_sh!r} does not exist (resolved: {script})")
     try:
         result = subprocess.run(
-            ["bash", "-c", f"source {ini_sh!r} 2>/dev/null; env -0"],
+            ["bash", "--norc", "--noprofile", "-c", f"source {script!r} 2>/dev/null; env -0"],
             capture_output=True,
             text=True,
             timeout=15,
+            env=base,
+            cwd="/",
+            stdin=subprocess.DEVNULL,
         )
     except Exception as exc:
         raise RuntimeError(f"Failed to source analyst env from {ini_sh!r}: {exc}") from exc
@@ -49,7 +79,8 @@ def _source_ini_env(ini_sh: str) -> dict[str, str]:
     for entry in result.stdout.split("\0"):
         if "=" in entry:
             k, _, v = entry.partition("=")
-            env[k] = v
+            if k not in _INI_SHELL_VARS:
+                env[k] = v
     if not env:
         raise RuntimeError(f"Sourcing analyst env {ini_sh!r} produced an empty environment")
     _ini_env_cache[ini_sh] = env

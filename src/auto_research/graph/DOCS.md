@@ -268,3 +268,4 @@ Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
   `attach_channel` / `hitl.router.SeatRouter`; `readonly_tools_for` dropped `human_handler`/`model`;
   `_interrupt_cleanup` cancels resumed seats first.
 - 2026-09-25 — [R1] LIVE-TESTED: `tests/test_live_reviewer_paths.py` graph cell (real reviewer + librarian, stub analysis, attacking human): START → review, librarian pass, three reports to the human in `v1`–`v3` with earlier PDFs re-verified, nudges minted nothing, exact `done` ended the run.
+- 2026-10-06 — **[F20] `_builtin_server_config` launches the shell server inside the OS jail**: server source via `-c`, `jail.analysis_policy` (toolkit read-only, private `/tmp`, cwd writable), `PYTHONNOUSERSITE=1`, and a `"jailed"` flag on the returned config recording what the launch actually produced (read by the shell guard). See `sandbox/DOCS.md` changelog.

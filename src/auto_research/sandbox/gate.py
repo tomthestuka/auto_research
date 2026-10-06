@@ -924,7 +924,7 @@ async def _default_test_runner(
         # The OS jail, with **no network** (§12): a mergeability verdict that can reach the network
         # is a verdict that depends on something other than the data on disk, and §9.4's premise is
         # real local input. Verified against all 30 existing Layer-B suites before being turned on.
-        argv = _jailed_pytest(argv, junit_path=junit_path)
+        argv = _jailed_pytest(argv, junit_path=junit_path, worktree=worktree)
         try:
             proc = subprocess.run(
                 argv,
@@ -962,23 +962,42 @@ async def _default_test_runner(
     }
 
 
-def _jailed_pytest(argv: list[str], *, junit_path: str) -> list[str]:
+def _gate_private_tmp(junit_path: str) -> Path:
+    """The Layer-B run's private ``/tmp``: inside the JUnit ``TemporaryDirectory``, removed with it.
+
+    Both determinism runs share it (they share the JUnit directory), which is what lets a test that
+    leaves state behind in ``/tmp`` show up as an outcome flip rather than be hidden by a fresh one.
+    """
+    path = Path(junit_path).parent / "tmp"
+    path.mkdir(mode=0o700, exist_ok=True)
+    return path
+
+
+def _jailed_pytest(argv: list[str], *, junit_path: str, worktree: Path | None = None) -> list[str]:
     """Wrap the Layer-B pytest invocation in the OS jail, network denied.
 
     The JUnit report is written to a throwaway directory outside the worktree, so that directory
     has to be writable inside the jail too — otherwise the run succeeds and its outcome map comes
-    back empty, which the determinism compare would read as "no tests ran".
+    back empty, which the determinism compare would read as "no tests ran". The worktree under test
+    is bound writable explicitly: a benchmark trial's tree lives under the host ``/tmp``, which the
+    private ``/tmp`` below no longer exposes.
     """
     from auto_research.sandbox.jail import JailPolicy, jail_home, policy_from_config, wrap
 
     base = policy_from_config(network=False, label="gate")
     home = jail_home("gate")
+    host_tmp = Path("/tmp").resolve()
+    # A private /tmp, not the host's: it holds other sessions' trees and credential files, and this
+    # process runs coder-authored code whose output flows back to the coder (F20 review 2026-10-06).
+    # The JUnit directory, usually under the host /tmp, is still bound on top of it.
     policy = JailPolicy(
-        ro=base.ro,
-        rw=(*base.rw, str(Path(junit_path).parent), str(home)),
+        ro=tuple(e for e in base.ro if Path(e).resolve() != host_tmp),
+        rw=(*(e for e in base.rw if Path(e).resolve() != host_tmp),
+            str(Path(junit_path).parent), *((str(worktree),) if worktree else ()), str(home)),
         network=False,
         home=str(home),
         label="gate",
+        tmp=str(_gate_private_tmp(junit_path)),
     )
     return wrap(argv, policy)
 
