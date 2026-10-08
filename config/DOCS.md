@@ -295,7 +295,7 @@ The same numbers are kept in `tests/test_live_coder_matrix.py: _PRICES` for the 
 that file constructs, since a live leg needs them without being configured here.
 
 ## Changelog
-Compacted 2026-09-01 and 2026-09-24 (detail in git history).
+Compacted 2026-09-01, 2026-09-24 and 2026-10-07 (detail in git history).
 
 - 2026-05-26 -> 2026-06-24 — Config surface built: model groups/pricing, vision/document flags,
   `runtime_dir`, ReAct/structured caps, report formats, `coder` + non-Anthropic `analyst_colead`.
@@ -315,7 +315,7 @@ Compacted 2026-09-01 and 2026-09-24 (detail in git history).
 - 2026-09-24 — `librarian_react_loop_cap` 1 → 40; `io_search_max_iterations` removed.
   `check_coder_min_interval_s` replaced by `coder_wait_floor_s`/`_default_s`/`_max_s` (`wait_coder`).
 - 2026-09-25 — Added `telegram_rich_messages` (default `true`).
-- 2026-10-06 — `orchestration.yaml: env_externals` — `{name: {root, stamps}}`: software outside conda the analysis env uses (HEASoft, CALDB here); the stamp files are hashed into every receipt's environment fingerprint (env plan B1).
-- 2026-10-07 — `orchestration.yaml`: `/data/fzhou/XSPEC/relxill` added to `agent_fs_allow` and
-  `agent_fs_readonly` — `ar-xspec`'s boot file (`research_toolkit/envs/xspec/boot.py`) loads relxill
-  from it inside the jail.
+- 2026-10-06 -> 2026-10-07 — `orchestration.yaml`: `env_externals` (`{name: {root, stamps}}`,
+  HEASoft and CALDB here; stamp files hashed into every receipt's environment fingerprint, env plan
+  B1); `/data/fzhou/XSPEC/relxill` added to `agent_fs_allow` and `agent_fs_readonly` (`ar-xspec`'s
+  boot file loads relxill from it inside the jail).

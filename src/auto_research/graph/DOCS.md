@@ -233,7 +233,8 @@ the published artifact paths and handles (`report_artifacts`).
 - `DEFAULT_WORKER_COUNT` — default analyst worker count (currently 2).
 
 ## Changelog
-Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
+Compacted 2026-09-01 and again 2026-09-24 (every entry), and 2026-10-07 (the 2026-10-06/07
+entries); detail in git history.
 
 - 2026-05-26 -> 2026-06-26 — Six-node graph (`compose_report`, two capped feedback edges, Studio,
   per-run workspace, per-worker sandbox, MCP lifecycle); HITL channel, async preflight and consensus
@@ -268,11 +269,16 @@ Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
   `attach_channel` / `hitl.router.SeatRouter`; `readonly_tools_for` dropped `human_handler`/`model`;
   `_interrupt_cleanup` cancels resumed seats first.
 - 2026-09-25 — [R1] LIVE-TESTED: `tests/test_live_reviewer_paths.py` graph cell (real reviewer + librarian, stub analysis, attacking human): START → review, librarian pass, three reports to the human in `v1`–`v3` with earlier PDFs re-verified, nudges minted nothing, exact `done` ended the run.
-- 2026-10-06 — **[F20] `_builtin_server_config` launches the shell server inside the OS jail**: server source via `-c`, `jail.analysis_policy` (toolkit read-only, private `/tmp`, cwd writable), `PYTHONNOUSERSITE=1`, and a `"jailed"` flag on the returned config recording what the launch actually produced (read by the shell guard). See `sandbox/DOCS.md` changelog.
-- 2026-10-06 — **[F22] Detached-run records live beside the ledger**: `backend.pid`, `result.json`
-  (`detached._record`, `cli._write_result`) and the monitor the streamer tails; an `overwrite=True`
-  erases the run's ledger directory too. A run folder is writable to the jailed shell, so a record
-  read from it could be forged. **[F23]** the shell server's `PFILES` is private; its home is the
-  run's own (`.home-shell`). Workers' REPL workdir is `agent_dir`, no longer memory.md's folder.
-- 2026-10-06 — **Env plan B2b (`use_env`):** `SandboxSettings.catalogue` (`partial(env.env_catalogue, config)`) reaches each worker's sandbox through `attach_worker_runtime`; `_builtin_server_config` binds `<runtime>/conda/envs` and `activation/` read-only into the shell's jail (created if absent, so an environment built mid-run is visible).
-- 2026-10-06 — **Env plan B3c-5:** `run_research` reconciles the pipeline's environments right after preflight (`_reconcile_environments` → `merge_flow.reconcile_environments`): missing or stale builds made, a drifted prefix kept aside and rebuilt, changed externals reported; each a ledger event; a problem never stops the launch; a stop kills the builds.
+- 2026-10-06 — **[F20] [F22] [F23] Shell server and run records.** `_builtin_server_config` launches
+  the shell server inside the OS jail (`jail.analysis_policy`: toolkit read-only, private `/tmp`,
+  cwd writable; `PYTHONNOUSERSITE=1`; private `PFILES` and home) and records `"jailed"` on the
+  returned config (read by the shell guard). Detached-run records (`backend.pid`, `result.json`,
+  the monitor) live beside the ledger; `overwrite=True` erases the ledger directory too. Workers'
+  REPL workdir is `agent_dir`.
+- 2026-10-06 — **Environments (env plan B2b, B3c-5).** `SandboxSettings.catalogue`
+  (`partial(env.env_catalogue, config)`) reaches each worker's sandbox via `attach_worker_runtime`;
+  the shell's jail binds `<runtime>/conda/envs` and `activation/` read-only. `run_research`
+  reconciles the pipeline's environments after preflight (`_reconcile_environments` →
+  `merge_flow.reconcile_environments`): missing or stale builds made, a drifted prefix kept aside
+  and rebuilt, changed externals reported, each a ledger event; a problem never stops the launch; a
+  stop kills the builds.

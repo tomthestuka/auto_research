@@ -108,6 +108,7 @@ report renderer.
   by `check_bindings` and the gate.
 
 ## Changelog
+Compacted 2026-10-07 (the 2026-10-06/07 entries); detail in git history.
 
 - 2026-09-24 — Created (P0): `Receipt` schema, the run store, and the scoped-grounding check with its
   normalisation, boundary rule and exemptions. P1: `capture.py` (inputs hashed before a call; result,
@@ -143,50 +144,26 @@ report renderer.
   the shell typed-number machinery (`_Resolved.typed`, `echoes`, `ReceiptStore.typed_numbers`,
   `capture.typed_numbers_in`); `Receipt.arg_numbers` kept as a legacy field. `store.text` reads
   `commit` receipts.
-- 2026-10-06 — **[F22] A figure or data file is receipted only if it is not itself a symlink and
-  resolves inside the allow-list** (`capture.receipt_call(reachable=)`, default `_allow_listed`; the
-  host `/tmp` excluded while the jail is on, since a jailed process sees a private one). A tool's
-  output or a planted symlink could otherwise put any host file's bytes behind a viewable handle.
-  `ReceiptStore.for_run` never uses a legacy in-run-folder store (`record_beside(..., legacy_ok=False)`):
-  receipts postdate the ledger split, so one found there was planted. Open for a ruling: snapshotting
-  receipted bytes so later reads (figures to models, rendering, attachments) never re-read the live
-  file.
-- 2026-10-06 — **[F26] Receipted files are read once and checked when used** (human ruling
-  2026-10-06: alert, still send). `provenance.store.read_receipted(path, sha256)` opens without
-  following a symlink, reads once and hashes the bytes it returns; a mismatch returns the bytes
-  with a model-visible `[changed]` note and a `receipt.drift` ledger event (sink installed by
-  `run_research` via `install_drift_alert`); a symlink or non-regular file is not read. Used by the
-  model media layer (figures/documents), report figure staging, human attachments (sent from a
-  ledger-side copy) and `store.text`; `view_receipt` no longer refuses changed bytes. Citations
-  checked at `turn_end` still refuse a receipt whose bytes changed.
-- 2026-10-06 — **[F26] review fixes.** `read_receipted` opens the canonical path one component
-  at a time with `O_NOFOLLOW` (`_open_without_symlinks`): a folder on the path swapped for a link is
-  refused, not followed. The note reaches every reader: kept documents in all three adapters,
-  `ReceiptStore.text_with_note` / `ScopedLookup.text_with_note` for `view_receipt`, the librarian's
-  pages and report tables; a changed figure is staged with its actual hash and a marked caption; a
-  file sent to the human carries the note in its caption (and one over 50 MB is refused before it
-  is read). Citations read once (`ReceiptStore.read`) and refuse changed bytes. The alert sink
-  captures the run's loop (alerts from worker threads reach the ledger) and records each
-  (file, bytes) once per run. `document_from_file` resolves its path and takes the receipted
-  `sha256`; Docling parses the verified bytes and caches them under their own hash.
-- 2026-10-06 — **[F26] second review, fixes.** `_open_without_symlinks` walks folders with
-  `O_PATH` (search permission only, so a traverse-only folder is not refused); the parsed-document
-  cache root is resolved, so its crops are not refused by the component walk; a failed quote's hint
-  is drawn from the bytes that were checked (`_Resolved.raw`), not a second read; the drift sink
-  keeps a reference to each scheduled alert.
-- 2026-10-06 — **Env plan B1: every receipt names its environment.** `Receipt.env` (fingerprint;
-  `sandbox.envs`); `ReceiptStore.mint(env=)` with `ReceiptStore.default_env` for a call that names
-  none (the orchestrator's, set by `run_research`); `capture.receipt_call(env=)`. A worker's sandbox
-  calls stamp the REPL environment's fingerprint (`react._sandbox_env_fingerprint`), its lock
-  written under `<runtime>/conda/locks/` the first time that state is seen.
-- 2026-10-06 — B1 review: `mint(env_default=)` / `receipt_call(env_default=)`: a call whose
-  environment could not be fingerprinted is left unstamped (`env=None`), never given the run's
-  default; a configured non-builtin MCP server's calls are unstamped too. `run_research` now really
-  sets `default_env` (a shadowed import had made it fail into `env.fingerprint.error`; the fake-run
-  test pins it).
-- 2026-10-06 — `NOT_EVIDENCE_NAMES['list_env']`: an environment listing grounds nothing (B2a).
-- 2026-10-06 — Grounding exempts a hex identifier (12+ lowercase hex with a letter: an environment fingerprint, a commit SHA), which the runtime prints beside every result (B2a review).
-- 2026-10-06 — The hex-identifier exemption needs a letter a–d or f (`602214076000e12` is a number).
-- 2026-10-06 — Grounding also exempts `env:<hex>` (an environment fingerprint as the runtime prints it, whatever its digits); `CallReceipts.header` keeps captions on one line.
-- 2026-10-06 — **Env plan B3b:** `Receipt.env_untested` (a toolkit call run in an environment other than its package's tested one, by the caller's choice; still evidence) and `capture.receipt_call(env_untested=)`, set on every receipt of the call.
-- 2026-10-07 — **Input hashing never ends a call (B5 live cell):** `ReceiptStore.hash_input` lists a folder with `surrogateescape` (a non-UTF-8 file name had raised `UnicodeEncodeError` out of a worker's tool call and ended the run) and leaves a folder of more than `_MAX_LISTED_FILES` (20,000) files unhashed; `capture.inputs_before` skips any input whose hashing fails (§9.3.8).
+- 2026-10-06 — **[F22] [F26] Receipted files.** A figure or data file is receipted only if it is not
+  a symlink and resolves inside the allow-list (`capture.receipt_call(reachable=)`, default
+  `_allow_listed`; the host `/tmp` excluded while jailed). `ReceiptStore.for_run` never uses a
+  legacy in-run-folder store (`record_beside(..., legacy_ok=False)`). Human ruling 2026-10-06
+  (alert, still send): `store.read_receipted(path, sha256)` opens component by component without
+  following links (`_open_without_symlinks`), reads once and hashes what it returns; changed bytes
+  come back with a model-visible `[changed]` note and a `receipt.drift` ledger event
+  (`install_drift_alert`, once per file and bytes per run). Used by the media layer, report figure
+  staging, human attachments, `store.text` and `text_with_note` (`view_receipt`); citations at
+  `turn_end` refuse changed bytes.
+- 2026-10-06 — **Env plan B1–B3b: every receipt names its environment.** `Receipt.env`
+  (fingerprint) via `ReceiptStore.mint(env=)` / `capture.receipt_call(env=)`;
+  `ReceiptStore.default_env` (the orchestrator's, set by `run_research`) for a call naming none;
+  with `env_default=`, a call whose environment cannot be fingerprinted, or a configured
+  non-builtin MCP server's call, stays unstamped. Worker sandbox calls stamp the REPL's
+  fingerprint, its lock under `<runtime>/conda/locks/`. `Receipt.env_untested` /
+  `receipt_call(env_untested=)`: run outside the package's tested environment, still evidence.
+  `NOT_EVIDENCE_NAMES['list_env']`. Grounding exempts a hex identifier (12+ lowercase hex with a
+  letter a–d or f) and `env:<hex>`.
+- 2026-10-07 — **Input hashing never ends a call (B5 live cell).** `ReceiptStore.hash_input` lists a
+  folder with `surrogateescape` (a non-UTF-8 name had ended a run) and leaves one of more than
+  `_MAX_LISTED_FILES` (20,000) files unhashed; `capture.inputs_before` skips an input whose hashing
+  fails (§9.3.8).

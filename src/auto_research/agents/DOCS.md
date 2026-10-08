@@ -472,7 +472,8 @@ Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
   Method: `review_tool(tool_spec, *, diff, gate, tools=None) -> ToolReviewVerdict`.
 
 ## Changelog
-Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
+Compacted 2026-09-01 and again 2026-09-24 (every entry), and 2026-10-07 (the 2026-10-06/07
+entries); detail in git history.
 
 - 2026-05-26 -> 2026-06-18 — Reviewer, librarian, worker and lead wrappers (native structured
   output, bounded schema retries, `Sandbox`/`ReadOnly`/`SourceToolProvider`); Phase 2 added
@@ -607,28 +608,35 @@ Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
   in-process `data_catalog` is receipted under `research_toolkit.catalog_utils.data_catalog`.
   `reviewer_tools.reviewer_claims` / `BRIEF_FIELDS`: the reviewer's `follow_up` is exempt from
   grounding (a brief); `reviewer_scope` excludes only `input:` (published reports are not evidence).
-- 2026-10-06 — **[F20] The `bash_exec` command-path scan stands down only for a server launched inside the OS jail**: `_jail_supersedes_command_check(registry, kind)` reads `ToolkitRegistry.mcp_jailed(kind)` (recorded at launch) instead of the config's `agent_os_jail`, so a configured `mcp_servers` entry, a host without `bwrap` or a config edited mid-run keeps the scan.
-- 2026-10-06 — **[F22] A worker's cwd is its own folder (`report_dir`), not memory.md's**, which
-  moved beside the ledger; files a human sends land in `workspace.human_reply_dir` (beside the
-  ledger), not in the agent's writable folder.
-- 2026-10-06 — **Env plan B2a.** Workers get `list_env` (`react.list_env_tool_def`,
-  `execute_list_env`): with no argument, each environment's name, owner, Python version, fingerprint
-  and which is active; with `env`, its conda/pip packages, the variable names its activation sets
-  and its externals (`sandbox.envs.describe`). Receipted as navigation ("an environment listing").
-  Every sandbox tool result carries `[ran in <env> @ <fp12>]` after its receipt header, and the
-  worker's turn-start payload names its `environment` (`roles._environment_brief`). Until pipeline
-  environments exist (B3) the only environment listed is the sandbox's own.
-- 2026-10-06 — **Env plan B2b: `use_env`.** `react.use_env_tool_def` / `execute_use_env`: a worker points its own shell (`bash_exec`) at another environment from the catalogue (`sandbox.environments()`: its own first, then every pipeline-built one); no name returns it. The provider rewrites the command (`_in_environment`): `env -i` with that environment's clean activation, the toolkit on `PYTHONPATH`, the jail's `HOME`/`TMPDIR`/`PFILES`; the call records `shell_env` and its result carries `[shell in <env>]`. Toolkit tools are untouched (routing is B3b, after T1). `list_env` lists the catalogue with `active` (the REPL's) and `shell` flags.
-- 2026-10-06 — **B2b review fixes:** `_in_environment` sources the environment's activation inside the jailed shell (`env -i` with the jail's `HOME`/`TMPDIR`/`PFILES` and locale, then `source`, then `<prefix>/bin` first on `PATH`, the toolkit on `PYTHONPATH`; a failed activation ends the command with an error); a model-supplied `shell_env` argument is dropped; the chosen environment is looked up by name on every call (a rebuilt one is the current build; a vanished one is an error naming `use_env`).
-- 2026-10-06 — **B2b review 3 (clean) lows fixed:** `use_env` takes a pipeline environment only when the shell server's launch recorded `jailed`; `_in_environment` restores what an activation could change (functions, aliases, `set -e/-f`, `IFS`, the working folder), replaces only the writable half of `PFILES` (the whole of it when the activation sets none), and reports an activation that ends the shell before the command (a marker written just before it); `list_env`'s description says activation variables are listed for human environments.
-- 2026-10-06 — **Authoring (B3c-1 review 8):** `execute_respond_to_review` waits for a working coder before the re-review (as `execute_submit` does); both commit sites return `Not committed: <reason>` as an error when the session refuses (tree or HEAD changed after the gate or the review).
-- 2026-10-06 — A commit landed through `respond_to_review` mints a `commit` receipt like `submit_for_review`'s; the commit sites also catch `OSError`/`CalledProcessError` as `Not committed` errors.
-- 2026-10-06 — Both review calls (`submit_for_review`, `respond_to_review`) return an error result when the review cannot read the changeset (`OSError`/`ValueError`/`CalledProcessError`), never an exception that ends the lead's loop.
-- 2026-10-06 — **The lead's in-process `data_catalog` runs committed toolkit code only** (`react._toolkit_clean_head`): while the toolkit holds uncommitted changes (an authoring session's work) it returns an error asking to call again later, and its memo is keyed on the toolkit commit — a new commit re-imports `catalog_utils`/`obsdb_catalog` (B3c-1 review 31: an edited, later rejected module ran unjailed in the orchestrator, its output minted as evidence, and kept running from memory after the reset).
-- 2026-10-06 — `data_catalog`'s re-import purges the toolkit's bytecode first and imports with `sys.pycache_prefix` set to a private folder (git ignores bytecode, so the clean check could not see a forged `.pyc` matching the committed source's header; B3c-1 review 32).
-- 2026-10-06 — **B3c-3:** `_in_environment` now lives in `sandbox/envs.py` as `in_environment` (shared with the coder's candidate wrappers; react imports it under the old name). It calls `/usr/bin/env` by path and keeps `USER`, `LOGNAME`, `LC_*`, `TZ` and proxy variables when set.
-- 2026-10-06 — **B3c-4:** the lead's commit answers (`submit_for_review`, `respond_to_review`) append the session's `env_note`: which environments the commit built, or why one did not (the commit stands).
-- 2026-10-06 — **Env plan B3b: routing.** `SandboxToolProvider._route_environment`: a toolkit call runs in its package's tested environment (`registry.tool_env` → `ar-<id>`, resolved by name from the catalogue each call), or in the caller's `env` choice (popped, never sent to the tool; receipts marked `env_untested`); an unbuilt tested environment, or a pipeline environment with the jail off, is an error result. The result header names `sandbox.call_environment` and says "untested environment for this tool". `prompts/analyst_worker.md` says how to choose.
-- 2026-10-06 — **B3b review fixes:** an empty, `null` or `none` `env` is no choice; `_sandbox_env_fingerprint` falls back to the call's routed environment.
-- 2026-10-06 — **B3b review 2:** a call the sandbox never ran (an unregistered tool) is not stamped with an environment.
-- 2026-10-07 — **`read_paper(path=)` reads only the papers folder** (librarian and reviewer): a paper receipt is evidence, and a PDF a run wrote (a worker's scratch) had been mintable as one. Downloads land in the papers folder, outside every role's write reach; a human's file stays a `human` receipt. Test: a shell-written PDF in a worker folder is refused, a PDF in the papers folder opens.
+- 2026-10-06 -> 2026-10-07 — **Reach.** [F20] The `bash_exec` command-path scan stands down only
+  for a server whose launch recorded `jailed` (`_jail_supersedes_command_check` →
+  `ToolkitRegistry.mcp_jailed`), not on the config's `agent_os_jail`. [F22] A worker's cwd is its
+  own `report_dir`; memory.md moved beside the ledger; a human's files land in
+  `workspace.human_reply_dir`. 2026-10-07: `read_paper(path=)` (librarian, reviewer) reads only the
+  papers folder, where downloads land outside every role's write reach; a human's file stays a
+  `human` receipt.
+- 2026-10-06 — **Env plan B2a/B2b: workers see and choose environments.** `list_env`
+  (`list_env_tool_def`, `execute_list_env`; navigation): the catalogue with fingerprints and
+  `active`/`shell` flags, or one environment's packages, activation variable names and externals
+  (`sandbox.envs.describe`). Every sandbox result carries `[ran in <env> @ <fp12>]`; the turn-start
+  payload names the `environment` (`roles._environment_brief`). `use_env` (`use_env_tool_def`,
+  `execute_use_env`) points the worker's own shell at a catalogue environment (no name returns it;
+  a pipeline environment only when the shell server launched `jailed`); the result carries
+  `[shell in <env>]`. `sandbox.envs.in_environment` (shared with the coder) runs the command under
+  `/usr/bin/env -i` with the jail's `HOME`/`TMPDIR`/`PFILES`, sources the activation, puts the
+  prefix first on `PATH` and the toolkit on `PYTHONPATH`, restores shell state after it, and ends
+  the command with an error when activation fails. The environment is resolved by name every call;
+  a model-supplied `shell_env` is dropped.
+- 2026-10-06 — **Env plan B3b: routing.** `SandboxToolProvider._route_environment`: a toolkit call
+  runs in its package's tested environment (`registry.tool_env` → `ar-<id>`) or in the caller's
+  `env` choice (popped from the arguments; receipts `env_untested`; empty, `null` or `none` is no
+  choice). An unbuilt tested environment, or a pipeline one with the jail off, is an error result.
+  The header names `sandbox.call_environment` and flags an untested environment; a call the sandbox
+  never ran is unstamped. `prompts/analyst_worker.md` says how to choose.
+- 2026-10-06 — **Lead authoring (B3c-1, B3c-4).** `execute_respond_to_review` waits for a working
+  coder before the re-review, and a commit through it mints a `commit` receipt as
+  `submit_for_review` does. Both commit sites return `Not committed: <reason>` as an error, both
+  review calls return an error result on an unreadable changeset, and both answers append the
+  session's `env_note`. The in-process `data_catalog` runs committed toolkit code only
+  (`react._toolkit_clean_head`: an error while the toolkit is dirty; memo keyed on the toolkit
+  commit; re-import purges bytecode and imports under a private `sys.pycache_prefix`).

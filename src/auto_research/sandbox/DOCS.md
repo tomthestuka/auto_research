@@ -1334,7 +1334,7 @@ the hook mapping a fake-model verdict — no live LLM).
     via `select_decorrelated_member`. Registered in `auto_research.preflight`.
 
 ## Changelog
-Compacted 2026-09-01 and 2026-09-24 (detail in git history).
+Compacted 2026-09-01, 2026-09-24 and 2026-10-07 (the 10-06/07 entries); detail in git history.
 
 - 2026-05-26 -> 2026-06-16 — Phase 1: manifest `ToolkitRegistry`, persistent JSON-line sandbox,
   per-run workspace, built-in MCP server/client. Phase 2: `merge_flow.propose_and_pr()`,
@@ -1444,198 +1444,124 @@ Compacted 2026-09-01 and 2026-09-24 (detail in git history).
   reason deleted); `to=human` is non-blocking through the run's `SeatRouter`, the reply delivered by
   `session.send(..., mid_turn=True)`; unattended still raises `UNATTENDED_GUIDANCE` before the MCP
   boundary, a channel fault now arrives as a notice. Gate rejection names "message the lead".
-- 2026-10-06 — **[F20] closed: the builtin shell server runs inside the OS jail**, plus the fixes a
-  stateless adversarial review of that change found. `graph.runtime._builtin_server_config` passes
-  the server source with `-c` (the jail never mounts this repo) and wraps it in the new
-  `jail.analysis_policy`, which the worker REPL now uses too: toolkit read-only, a private `/tmp`
-  (`JailPolicy.tmp`), `PYTHONNOUSERSITE=1`. `runner._source_ini_env` sources the init script in a
-  clean environment (21 key/token variables had reached the network-enabled shell). The shell
-  guard's stand-down now reads how the server was launched — `"jailed"` on the server config →
-  `MCPToolClient.is_jailed(kind)` → `ToolkitRegistry.mcp_jailed(kind)` — instead of the config
-  file, so a configured `mcp_servers` entry or a host without `bwrap` keeps the command scan. Tests
-  (`TestShellServerJail`) drive the production builder, the real MCP client and `PersistentSandbox`
-  against a synthetic allow-list; each guarantee was mutation-checked.
-- 2026-10-06 — **[F20] second stateless review, fixes.** `_source_ini_env` now runs
-  `bash --norc --noprofile` with stdin from `/dev/null` (with a socket on stdin bash had sourced
-  `~/.bashrc`: 66 variables instead of 35), resolves the script path, and fails when the script file
-  is missing (a missing `source` had failed silently). `analysis_policy` demotes a configured writable root containing the process's own folder
-  to read-only and takes `readonly` overlays; the shell keeps the run's `authoring/` read-only; the
-  REPL sets `PYTHONSAFEPATH=1`. The private `/tmp` moved to local disk (`jail.private_tmp`), and the
-  gate's Layer-B run gets one too, with its worktree bound explicitly. **Correction to the previous
-  entry:** its `/tmp` assertions were vacuous (the synthetic allow-list lacked `/tmp`, so a mutant
-  without the replacement passed) and the clean env does not reach the author harnesses. The tests
-  now put `/tmp` and a shared runs root in the synthetic allow-list; five mutants (ancestor
-  demotion, `/tmp` replacement, `authoring/` overlay, `PYTHONSAFEPATH`, and `--norc`, the last
-  shown by reproducing the leak in the test's own scenario) are each caught.
-- 2026-10-06 — **[F20] third stateless review, fixes.** `private_tmp` refuses a pre-existing
-  directory that is a symlink, foreign-owned or not 0700; private `/tmp`s are removed when their
-  process ends (REPL shutdown, MCP client shutdown, the gate's inside its JUnit temp dir); REPL and
-  shell server run `python -P` instead of setting `PYTHONSAFEPATH` (inherited by children);
-  `analysis_policy` always overlays the toolkit read-only. Tests use a synthetic toolkit as the
-  write-probe target and plant the host-`/tmp` marker in the real temp root. Findings outside this
-  change are open in the handoff (host-side symlink following in jail-writable folders, the shared
-  writable `PFILES` directory, the gate's full allow-list, science_bench's allow-list shape, F21).
-- 2026-10-06 — **[F22] the host no longer follows what an agent plants in its writable folder.**
-  `workspace.memory_path` is beside the ledger (`ledgers/<run>/memory/<agent>/memory.md`, no
-  carry-over from the old location); `append_memory`/`read_memory` open with `O_NOFOLLOW`;
-  `record_beside`/`resolve_record` use the legacy in-run-folder spelling only for a run with no
-  ledger directory (pre-split); `human_reply_dir` added. `analysis_policy` refuses a writable root
-  that is a symlink and takes a per-process `home` (REPL: `<workdir>/.home`; shell:
-  `<run>/.home-shell`). **[F23]** `runner.with_private_param_dir` gives the REPL, shell, gate and
-  both authors their own `PFILES` user dir (empty, so tools start from the system defaults);
-  `/grad/fzhou/pfiles` left `agent_fs_allow`. **[F24]** the gate's Layer-B jail is read-only except
-  its worktree, JUnit folder, its own home (inside the JUnit temp dir) and a private `/tmp`, with
-  `PYTHONNOUSERSITE=1`.
-- 2026-10-06 — **[F22] second review, fixes.** The REPL's and the shell's homes moved out of every
-  agent-writable folder (`private_tmp("repl-home"|"shell-home", ...)`; a planted `.home` symlink had
-  been bound writable — the toolkit, reproduced); `analysis_policy` refuses a symlinked `home` too.
-  The shell writes only the workers' own folders (`_builtin_server_config(writable_dirs=)`), not the
-  run folder, so it cannot swap a folder another process binds. `record_beside`/`resolve_record`
-  decide "pre-split run" by where the ledger markers (`backend.log`, `monitor.jsonl`) are, and a
-  read never creates an old run's ledger directory. `write_launcher` writes with `O_NOFOLLOW`.
-  `human_reply_dir` keeps a standalone agent's replies in its own folder. Tests pin each rule.
-- 2026-10-06 — **[F22] third review, fixes.** Analysis and gate homes are mounted at
-  `jail.JAIL_HOME_AT` (`/home/ar`, `JailPolicy.home_at`) instead of their host path under the
-  temp root, which inside the jail is the process's own writable `/tmp` (a planted symlink there
-  could redirect the mount). The REPL's private `/tmp` is recreated empty at every start.
-  `write_launcher` writes a fresh temp file (`O_EXCL`) and renames it into place, so a planted
-  FIFO cannot block the host. science_bench's trial driver writes `backend.pid` and reads
-  `result.json` through `record_path` (it still used the run folder).
-- 2026-10-06 — **[F27] the authoring base ref a resume resets to lives beside the ledger**
-  (`merge_flow._base_ref_path`: `ledgers/<run>/authoring_current_base_ref` for a run's authoring
-  dir, which the Claude author's jail can write), and `heal_toolkit_branch_if_dirty` refuses a base
-  ref that is not an ancestor of the branch head. **Gate:** run 1's pytest scratch
-  (`pytest-of-*` in the private `/tmp`) is removed before run 2 (human ruling 2026-10-06; a toolkit
-  suite left 65 GB in 10 minutes and two runs filled the disk).
-- 2026-10-06 — Gate: both Layer-B runs pass one `--basetemp` (`/tmp/pytest-gate` jailed, the
-  private tmp's `pytest-gate` otherwise), which pytest wipes when each run starts, so run 1's
-  scratch is gone before run 2 with the jail on or off. A resume records `run.resume.heal` for
-  every outcome but clean (a refused heal is a tampering signal).
-- 2026-10-06 — **Env plan B1: environments as objects.** New `sandbox/envs.py` (`Environment`,
-  `External`, `fingerprint`, `lock`, `write_lock`, `fingerprint_and_lock`); `auto_research.env`
-  gains `analysis_environment`, `host_environment`, `env_lock_dir`; config gains `env_externals`
-  (HEASoft build record, CALDB indexes). The six readers of the analysis-env keys read the one
-  object; `PersistentSandbox(environment=)` (legacy kwargs build one). `_source_ini_env` caches on
-  the script's mtime too. Measured: the real analysis env fingerprints in 2.6 s cold, 1.5 ms cached
-  (176 conda + 5 pip packages, 29 activation vars, 2 externals).
-- 2026-10-06 — **B1 review fixes.** Fingerprint and lock come from one computation (`_state`), so a
-  lock always hashes to its name; lock temp files are unique per writer (threads raced); activation
-  values built from HOME/USER are normalised; locks embed the activation script and boot file text
-  and pip sources from `direct_url.json`; the cache key adds `conda-meta`'s own mtime;
-  `analysis_environment` expands `~`; the gate and preflight keep sourcing an init script that has
-  no prefix configured; the shell server is built from the environment object.
-- 2026-10-06 — **B1 second review fixes.** HOME is normalised only as a whole leading path (a raw
-  replace rewrote `libc` for USER `li`; USER/LOGNAME are no longer touched; sourcing under a
-  placeholder HOME was rejected because HEASoft's setup then stops early). A state whose activation
-  errored is not cached. `fingerprint_and_lock` checks the lock file each call (no in-process
-  memo). Pip locks spell a VCS install `name @ git+<url>@<commit>`. The task input and files a human
-  sends carry no environment. `run_research` fingerprints `SandboxSettings.environment`, the object
-  the REPL and shell run in. Known edge: a HOME that prefixes unrelated paths (`/opt`).
-- 2026-10-06 — B1 third review (clean): a HOME with a trailing slash normalises to the same
-  identity; `fingerprint_and_lock` raises for a state whose activation failed (the worker then
-  leaves its receipt unstamped); pip VCS locks keep `#subdirectory=`. Known edges recorded in
-  `_activation`: values built from USER, HOME embedded mid-value, a resolved HOME spelling.
-- 2026-10-06 — **Env plan B2a.** `PersistentSandbox` records the environment fingerprint it booted
-  on and, before each call, restarts first if the fingerprint changed (`_restart_if_environment_changed`),
-  so no call runs on old in-memory modules over new on-disk packages. `envs.describe(env, detail=)`
-  is what `list_env` shows.
-- 2026-10-06 — **B2a review fixes.** A restart the environment check starts is contained: a failure
-  comes back as the call's error (`_EnvironmentRestartFailed`), and a state whose activation failed
-  never triggers one (`_current_fingerprint` returns None). A restart is announced on that call
-  (`env_notice` → a `[environment changed …: the REPL was restarted and its session state cleared]`
-  line after the receipt header), since tools that build on a session (a loaded dataset, a fit)
-  lose it. The REPL records `booted_fingerprint` (lock written at boot), and its receipts stamp
-  that: the state it actually ran on, not one that changed during a long call.
-- 2026-10-06 — **B2a second review fixes.** The restart notice travels out of band
-  (`PersistentSandbox.take_notice()`, read once by the provider), never in the result dict — a tool
-  returning a key of that name had written into the runtime header; `env_notice` is not a protocol
-  key. The REPL fingerprints before sourcing its activation (`booted_fingerprint`) and stamps it only
-  once the lock is on disk (`booted_lock_written`), so an unwritable lock dir no longer disables the
-  restart check. Shell (MCP) receipts are unstamped: the shell server keeps the activation captured
-  at its launch and is shared by every worker.
-- 2026-10-06 — B2a third review (clean), lows applied: `start()` clears `booted_lock_written` first;
-  `call_tool` fixes `call_stamp` (the state the call runs in) before running, so a timeout restart
-  inside the call cannot restamp it; fingerprints print as `env:<hex12>` everywhere a model reads one
-  (header, notice, `list_env`, the turn-start brief); receipt headers collapse captions/file names
-  to one line.
-- 2026-10-06 — **Env plan B3a:** `sandbox/env_build.py` (definition read/validate, runtime builder with the safe layout and an install lock, lock verification); `env.agent_conda_dirs`, `env.conda_executable`. Live-verified build.
-- 2026-10-06 — **Env plan B3a hardened (review 1):** `env.pip` takes only `name==version --hash=sha256:…`, installed `--isolated --require-hashes --only-binary=:all:`; the build runs jailed (`build_policy`, `wrap=`) with an allow-listed environment and a private home (`CONDA_REGISTER_ENVS=false`); refuses a merged condarc `pkgs_dirs`; a completion marker `.ar-built` checked under the install lock (an interrupted prefix is rebuilt); `verify` checks pip pins and `sha256:` lock lines; locks refused for a foreign platform or a repeated package; `env.yaml` field types checked. Live: jailed rebuild exact, `~/.conda/environments.txt` untouched.
-- 2026-10-06 — **Env plan B3a hardened (review 2):** `build(conda_dir=…, jailed=…)` (required) replaces `envs_dir/pkgs_dir/wrap`; the definition is staged once and the copy validated/built/verified (TOCTOU); per-build cache, home and `/tmp`, only the target prefix writable; records in `<conda_dir>/built/` (`build_record`) and the install lock outside every jail, both `O_NOFOLLOW`; definition folders refuse links, hard links and stray files, rejected lines quoted short, lock/pip ASCII only; `conda_root` refuses a non-installation or one containing `$HOME`; conda safety checks pinned on; `verify` compares versions with `packaging` and refuses Python distributions nothing names. `env.agent_conda_dirs` → `agent_conda_dir`.
-- 2026-10-06 — **Env plan B3a hardened (review 3):** a jailed caller never reuses a prefix built unjailed; a derived definition with `env.pip` is refused; `validate` itself stages and checks a copy (no check-then-read on a live folder), YAML errors reported by line only; staging opens `O_NONBLOCK` (a FIFO cannot hang the lock) and is cleaned on every refusal; `conda_dir` folders must be real folders of this user; leftover read-only prefixes are removed; records store the full definition sha256; `verify` refuses malformed or linked conda records and unowned `*.egg-info`/`*.pth`/`sitecustomize.py`. The jail test asserts on the real `jail_argv`.
-- 2026-10-06 — **Env plan B3a hardened (review 4 + peer review):** `jail_argv` adds `--new-session` for every jailed process (TIOCSTI into the parent terminal reproduced with `legacy_tiocsti=1`; bwrap stays in the caller's group, so group kills and `--die-with-parent` still hold); `verify` stages the definition (a linked `env.lock` is never read or quoted) and reads records and dist-info files bounded, `O_NOFOLLOW | O_NONBLOCK`, regular only; pins matched by dist-info folder + METADATA; `sitecustomize*`/`usercustomize*` in the stdlib folder and as packages refused; `_remove_tree` handles untraversable folders (retry once per path); a sticky `built/unjailed.json` disables jailed reuse in a `conda_dir` an unjailed build ran in; derived environments come from one staged read; prefix id 16 hex; definition files capped at 4 MB; non-string YAML keys refused, not crashed on; build output quoted ≤400 chars. Reviewed (5).
-- 2026-10-06 — **Env plan B3a hardened (review 5):** a rebuild deletes the old build record before touching the prefix (an interrupted rebuild was reusable); `read_definition` reads `env.yaml` like staging (no link/FIFO, size cap) and `_load_yaml` refuses YAML anchors/aliases (alias bomb) and reports parse errors by line only; non-string values read as empty instead of `str()`; activation and boot file are a content-addressed runtime copy of the reviewed bytes (`<conda_dir>/activation/`), not the live toolkit file; duplicate-package check O(n); base/external names quoted short; docs: `<id16>`, staging layout, taint reset by hand.
-- 2026-10-06 — **Env plan B3a hardened (review 6):** staging moved to `build-*/def/<name>/` (a definition named `tmp` was staged into the folder bound writable at the jail's `/tmp` and could be rewritten between conda and pip — verified with real bwrap); the definition folder is read through one `O_DIRECTORY | O_NOFOLLOW` descriptor; build output goes to a log file and only its tail is quoted (`_call`); `verify` refuses a record count different from the lock before reading, caps bytes, precomputes owned folders, refuses linked dist-info and non-string record URLs; activation copies reused only when ours, single-link and read-only; YAML parse failures of every kind are short refusals.
-- 2026-10-06 — **Env plan B3a hardened (review 7):** `verify` indexes only the top entry of each owned path (the whole-ancestor index was quadratic: a 200 KB record hit `MemoryError`); record listing stops one past the lock's count; dist-info reads share the byte budget and several installs of one pin are refused before reading; caps lowered to 16 MB/record, 128 MB total from measured real environments; `env.yaml` capped at 16 KB and refused past 64 brackets; `build_record` reads bounded and non-blocking; a non-list `pkgs_dirs` and a `..` folder name are refusals, not crashes; `_read_plain`'s cap is read at call time. No CPU/memory/process limit on build processes: accepted by ruling 2026-10-06 (reviewed, hash-pinned conda-forge packages, jailed).
-- 2026-10-06 — **Env plan B3a hardened (review 8):** `verify` finds start-up candidates first and streams records against them (memory one record; constant work per path — the per-folder scan was quadratic in the number of `lib/python*` folders, and kept every record's file list: 3.2 GB measured); `lib-dynload` and `lib/python*.zip` covered; folder listings streamed and capped at 200,000 entries; more than 4 `lib/python*` folders refused; record budget 64 MB; non-string record paths skipped; `RecursionError` in a record is a mismatch; public `verify` checks the staged lock/pip first; `validate` problem lists capped at 20 (+ count), lock/pip checked one line at a time (a 4 MB bad lock made 2 M problems, 1 GB), unknown keys quoted short, a crowded definition folder one refusal.
-- 2026-10-06 — **Env plan B3a hardened (review 9):** `lib/python*` links counted with folders (≤4) before any is followed, and followed one `readlink` hop to a sibling by bare name (a chain of 4,000 links took 48 s to resolve); `pyvenv.cfg` and `bin/pyvenv.cfg` are start-up candidates (they move the standard library); `lib`, `site-packages` and `lib-dynload` refused as links; ≤10,000 candidates; records capped at 4 MB each; `conda-meta` listing capped; an unlistable folder or missing `conda-meta` is a `BuildMismatch`. Review loop stopped here by the user's instruction (2 rounds after review 7, not converged).
-- 2026-10-06 — **Env plan B3a: start-up-file hunt dropped (human ruling).** `verify` no longer lists start-up candidates or reads RECORD files; it checks the conda records against the lock, the pins (dist-info folder + METADATA, one install each), and refuses a `pyvenv.cfg`. Removed `_startup_candidates`, `_top_key`, `_SITE_ENTRIES`, `_MAX_CANDIDATES`; added `_pin_dist_infos`. A file a build drops outside its records is an accepted residual risk.
-- 2026-10-06 — **Env plan B3a final review (10):** a second dist-info claiming a pin is refused as soon as it is listed (decoys were gathered first: ~500 MB measured); `lib` and `site-packages` refused as links again (the refusal had gone with the hunt); `bin/python*._pth` joins `pyvenv.cfg`; a test pins `--new-session`. `envs.py` fingerprint reads are non-blocking, regular-file only and bounded (`_read_regular`; `_file_sha` streams, files over 64 MB identified as `size:<n>`): a FIFO in a dist-info passed `verify` and then hung the fingerprint.
-- 2026-10-06 — **Env plan B2b (`use_env`):** build records carry the environment's name, activation, boot file and externals; `env_build.built_environments` reads them back (the catalogue's pipeline half); `envs.shell_variables` gives a shell's clean start in an environment (never the runtime's own variables). `PersistentSandbox(environments=)` takes the catalogue callable and holds `shell_environment` (the worker's `use_env` choice, kept across rounds).
-- 2026-10-06 — **B2b review fix:** `envs.shell_variables` removed — a built environment's activation is now sourced inside the jailed shell at command time (`react._in_environment`), never in the runtime: sourced there, a coder-written activation's values could carry what it read outside the jail into the agent's shell (reproduced). `shell_environment` holds the chosen name, resolved again on every call.
-- 2026-10-06 — **B2b re-review fix:** a pipeline environment's activation is never sourced in the runtime — `list_env` → `describe` → fingerprint had run a coder-written `activate.sh` outside the jail with the user's reach, and its variable names could carry data out (reproduced: a secret hex-encoded into a name). Fingerprint by script bytes only, no `activation_sets` listed, `activation_env()` refuses. The shell wrapper traps an activation that exits and clears shell options it set.
-- 2026-10-06 — **B2b review 3 lows:** a pipeline prefix's files are read for the fingerprint without following links (`_read_regular`/`_file_sha` `follow=False`), so a link a build planted cannot bring an outside file into a listing.
-- 2026-10-06 — **Env plan B3c-1: the gate admits environment definitions.** `gate._gated` = a `*_utils` file or `envs/<name>/{env.yaml,env.lock,env.pip,activate.sh,boot.py}`; `collect_targets` (hence the review diff and `approve_edit`'s staging) and `structural.changes_allowed` use it. New Layer-A checks `structural.env_definition.<name>` (`check_env_definitions`): each touched definition validates (`env_build.validate` against the configured human base and declared externals) and ships with a touched package whose `tool_config.yaml` names it (`env: <name>`, read by `_package_env`). `env.lock`/`env.pip` skip the prose scan (pinned URL/hash lists, validated line by line). Layer B in the candidate environment is B3c-2.
-- 2026-10-06 — **Env plan B3c-1 (review fixes + naming ruling):** gated deletions are staged and shown (`gate.collect_deleted`; `approve_edit`, `review.build_diff_bundle`); the comment lines of `env.lock`/`env.pip` are scanned as prose; `structural.env_resolves`: every package the session works on (the brief's `target_domain` and every touched package) that names an env in `tool_config.yaml` must resolve to `envs/<env_id>/env.yaml`, or the gate fails naming the fix (a typo is retried like any gate failure). Built envs are `ar-<name>` with no id suffix (`EnvDefinition.build_id` removed); a rebuild moves the previous finished build aside to `.prev-<sha8>`.
-- 2026-10-06 — **B3c-1 re-review fixes:** an env name in `tool_config.yaml` must be a name (`env_build._NAME`), not a path (`../x`, `/abs`, `x/` resolved before); a non-string or unparseable value fails resolution visibly. The gate entry unstages everything (`reset --mixed <base_ref>` always, not only when HEAD moved): a change staged by the coder would otherwise be committed whole while the gate and review read the work tree. `structural.changes_allowed` refuses a symbolic link among the changes or on their path. Changes are read with `git status -z` (`gate._status`), so non-ASCII names are judged by their real name. A rebuild renames the finished build aside first (`.prev-<sha8>-<rand6>`), then drops the record, then clears older `.prev` folders, so a crash never destroys the current build.
-- 2026-10-06 — **B3c-1 review 3 fixes ([G3] closed):** the gate records `GateReport.manifest` (`{path: sha256 | "deleted"}` of every judged file, `gate.changeset_manifest`, bytecode caches excluded); `approve_edit(manifest=)` unstages the index, refuses if any judged file changed since, and stages exactly the manifest (`AuthoringSession.commit` passes the last gate's). A new Layer-A check `structural.tests_left_tree_unchanged` fails a gate whose tests changed the changeset. `changes_allowed` refuses a nested repository (`dir/` entry); `_TOOLKIT_PKG_RE` is anchored to top-level packages (`obsdb_catalog/x_utils/` is not a package); `_status` reads work-tree renames correctly; the gate entry unstages in worktree mode too, and a failed unstage is a failed gate; the failure reset cleans with `-ffd` (nested repositories too); the review bundle survives a binary file.
-- 2026-10-06 — **B3c-1 review 4 fixes:** Layer B runs on a clean export (`gate._export_judged`: `git archive HEAD` plus exactly the manifest's files, each re-checked), so an ignored file (a sourceless `.pyc`, a self-ignoring `.gitignore`, anything the toolkit's `.gitignore` hides) can no longer be imported by the tests while staying out of the commit — measured before: a hidden module ran and a clean checkout of the commit failed. Manifest entries carry the file mode (`<mode>:<sha256>`; a link is `link:<target>`), so a judged file swapped for a link or made executable stops the commit. Tests added for the unstaged index, the session passing its manifest, and a test reaching the real worktree by absolute path. Accepted: `commit()` without a manifest (only injected stub gates; the real gate never passes with an empty one) keeps the old staging.
-- 2026-10-06 — **B3c-1 review 5 fixes:** the Layer-B export writes `HEAD` from raw objects (`git ls-tree` + `cat-file --batch`), never `git archive`, so a committed `.gitattributes` (`export-ignore`, `export-subst`) cannot make the tested tree differ from the committed one; committed links are kept as links (no crash on one pointing outside). The gate's test jail masks the real worktree (`JailPolicy.masked`: an empty read-only tmpfs on top of every bind; `jail_argv` emits `--tmpfs … --remount-ro …`), so a test cannot import an unjudged file from it by absolute path. `tests_left_tree_unchanged`'s message now says what it catches (edits while the gate ran).
-- 2026-10-06 — **B3c-1 review 6 fixes:** the export replaces a committed link on a judged file's path with a real folder before writing (as `git add` sees it), so a write never follows a link out of the export; a link replaced by a folder is recorded `deleted` (`collect_deleted`) and committed as a removal (`approve_edit` uses `git rm --cached` for removals, never `git add` of a path that is now a folder); each exported file is hashed from the bytes actually copied (one read); a missing or non-blob HEAD object is a refusal, not a crash; `write_launcher` keeps every policy field (`dataclasses.replace`), the mask included. Tests pin the mask wiring (the default runner's `masked=worktree`, `--tmpfs … --remount-ro` in the argv), HEAD's executable bits, and the stale-entry refusal.
-- 2026-10-06 — **B3c-1 review 7 fixes:** a gated name holds no glob character (`*?[\\`; `changes_allowed` refuses it), and `approve_edit` stages with `git --literal-pathspecs` — a deleted `[ab].py` had removed `a.py` and `b.py` from the commit. Only `.pyc`/`.pyo` inside `__pycache__` count as interpreter caches (a `.py` placed there is judged). `GateReport.manifest` is `None` unless a real gate recorded it; `commit()` uses the strict path whenever one exists, even empty. Dead `rmtree` branch removed from the export. Tests pin a judged deletion committed from the manifest, a committed file link replaced by a file, and literal staging.
-- 2026-10-06 — **B3c-1 review 8 fixes:** `approve_edit(manifest=, base=)` stages the judged bytes with no git filters (`merge_flow._stage_judged`: each file read once, hash checked, `hash-object -w --no-filters`, `update-index --cacheinfo`; deletions `--force-remove`) — `git add` had applied a `.gitattributes` encoding and committed code where a comment was tested; `.gitattributes`/`.gitmodules` are never gated. `GateReport.base` is the HEAD the gate judged (the export is written from it) and the commit refuses if HEAD moved. `AuthoringSession` records the changeset the co-lead reviewed (`_reviewed_manifest`) and refuses a commit whose gated changeset differs; `respond_to_review` waits for the coder like a submit; a refused commit returns an error to the lead (no exception escapes). A folder replaced by a file can pass the export.
-- 2026-10-06 — **B3c-1 review 9 fixes:** `_stage_judged` applies deletions first (a file replacing a folder could never be committed); `merge_flow.purge_bytecode(toolkit_root)` deletes `*.pyc|*.pyo` inside the `*_utils` packages after every commit and every failure reset — git ignores bytecode, so a planted `.pyc` matching its source's header would have run in workers in place of the reviewed code (other ignored files, possibly the human's, are untouched); the commit runs no repository hook (`core.hooksPath=/dev/null`, `--no-verify`); a gate that cannot read the changeset (an unreadable file, a failed git call) is a failed `GateReport`, and a review whose changeset was unreadable can never be claimed by a commit. gate_bench's G3 probe (`commit_sweep`) now commits through the production path (`manifest` + `base`); a refusal counts as caught.
-- 2026-10-06 — **B3c-1 review 10 fixes:** `purge_bytecode` covers the whole toolkit tree (`.git` aside), not only `*_utils/` — a planted `obsdb_catalog/__pycache__/*.pyc` or a sourceless root `json.pyc` (the root is first on workers' `PYTHONPATH`) was imported after a commit; `gate._git` decodes with `surrogateescape` (and `core.quotePath=false`), so a latin-1 byte in a diff or a file name is a failed check, not a crash; `run_gate_step` also turns a `ValueError` into a failed gate; a review in a real repository whose changeset cannot be read can never be claimed by a commit. gate_bench's report renders a refused commit sweep.
-- 2026-10-06 — **B3c-1 review 11 fixes:** `purge_bytecode` resolves the toolkit root (it is a link on this host), makes each folder readable to its owner before listing it (a folder made unlistable hid a `.pyc` Python still loaded) and raises on any error; `commit()` purges **before** staging, so a purge that cannot finish is an honest no-commit (it had been a commit reported as "not committed" and then reset away). Worker REPLs and the shell keep bytecode in their own private folder (`PYTHONPYCACHEPREFIX`: the jail's `/tmp/ar-pycache`, or the process's private tmp when unjailed), so in-tree `__pycache__` is never read. gate_bench's `commit_sweep` records any commit error as refused.
-- 2026-10-06 — **B3c-1 review 12 fixes:** `merge_flow._git_in` decodes with `surrogateescape` (a non-UTF-8 byte in a rejected attempt's diff had stopped the failure reset before it cleaned the tree, leaving rejected code for workers to load); `_save_diff_and_reset` runs `reset --hard`, `clean -ffd` and `purge_bytecode` in a `finally`, so saving the patch can never stop the reset; patches are written byte-exact (`errors="surrogateescape"`), which `git apply` restores; `gate._head_file` decodes the same way.
-- 2026-10-06 — **B3c-1 review 13 fix:** the failure reset first makes every toolkit folder its owner's again (the `purge_bytecode` walk), then resets and cleans — a folder the coder made read-only or unlistable had stopped `git reset`/`git clean` and left rejected code where workers import it.
-- 2026-10-06 — **B3c-1 review 14 fix:** `purge_bytecode` walks with an explicit stack (a 1,200-deep folder chain had overflowed the recursion and stopped the reset); the reset's first purge cannot block the reset for any reason.
-- 2026-10-06 — **B3c-1 review 15 fix:** a direct-branch session purges bytecode on close even when no tracked file changed, and the resume heal purges before returning "clean" — a sourceless `numpy.pyc` left at the toolkit root (git-ignored, first on workers' `PYTHONPATH`) had survived both.
-- 2026-10-06 — **B3c-1 review 16 fix:** a `.gitignore` git does not track (`gate.untracked_ignore_files`; pytest's own `.pytest_cache/.gitignore` aside) is a stray change at the gate, and is deleted (`merge_flow.remove_untracked_ignores`) before every failure reset, on every direct-branch session close and in the heal — so what it hid becomes untracked, seen by `pending_changes`, and cleaned. A coder-written self-ignoring `json/.gitignore` had hidden a `json` package that shadowed the standard library for every worker.
-- 2026-10-06 — **B3c-1 review 17 fix:** `untracked_ignore_files` lists every untracked `.gitignore`, ignored or not (one that hides only its neighbour survived a reset whose `git add -A` failed), and a `.gitignore` is never a gated file (like `.gitattributes`): the coder cannot commit one that would hide future files from every check.
-- 2026-10-06 — **B3c-1 review 18 fix:** the `.gitignore` removal and the bytecode purge run as separate steps (removal first) in the reset, on close and in the heal — one purge failing on an over-long path had skipped the removal and left a hidden `json` package behind a successful-looking reset. `_dirty_paths` reports a failing `git status` as dirty, never clean.
-- 2026-10-06 — **B3c-1 review 19 fixes:** `remove_untracked_ignores` makes each folder on the way its owner's before unlinking (a hidden package in a folder made read-only had survived close and heal); `review._git` decodes with `surrogateescape` (a latin-1 byte crashed a rebuttal review); a gated name must be valid UTF-8.
-- 2026-10-06 — **B3c-1 review 20 fix:** `remove_untracked_ignores` first restores owner access across the tree (`_restore_owner_access`: explicit stack, skips what it cannot open, never raises) — git could not list a folder made unlistable (mode 000/100), so a self-ignoring `.gitignore` inside it went unfound and its package survived close, reset and heal.
-- 2026-10-06 — **B3c-1 review 21 fix:** the tree sweep (`_restore_owner_access`) also deletes FIFOs, sockets and devices (no toolkit holds one; a FIFO named `.gitignore` blocked every git call and hung the gate, the close and the heal) and runs at the gate's entry and in `pending_changes`; every git call has a timeout (`_GIT_TIMEOUT_S` = 300 s; `gate._git` likewise), a hang becoming an honest error.
-- 2026-10-06 — **B3c-1 review 22 fix:** the tree sweep deletes every nested `.git` below the root (a `.git` file pointing at a crafted git dir hung `git status`); `_dirty_paths` sweeps first and reads a timeout as dirty; every git subprocess in `merge_flow` and `gate` has a timeout, and a git call the runtime times out has its `index.lock` cleared (a stale lock had blocked the reset).
-- 2026-10-06 — **B3c-1 review 23 fix:** the review step sweeps the tree before git walks it (a rebuttal review had run on an unswept tree); `gate._clear_index_lock` (shared by `gate._git` and `merge_flow._git_in`) clears the lock of a timed-out call, also in a linked worktree; `review._git` has a timeout; `_added_lines` diffs with `--text` (a file over `core.bigFileThreshold` showed as binary and went unscanned); authoring handlers catch `SubprocessError` (timeouts included) as honest errors.
-- 2026-10-06 — **B3c-1 review 24 fix:** `_added_lines` is hunk-aware: a `\ No newline at end of file` marker no longer shifts the line numbers (appending to one of the eight real toolkit files without a final newline left the first added line unscanned), and an added line starting with `++` is counted. Untracked `.gitattributes` files are removed before resets like `.gitignore`; the review's diff uses `--text` and clears a timed-out call's lock.
-- 2026-10-06 — **B3c-1 review 25 fix:** the no-fabrication scans count lines as git does (`\n` only; `splitlines` also broke on form feeds, `\r`, U+2028, shifting added text out of scope), and a string constant is in scope when any physical line it spans was added, then scanned whole (a `\n` escape inside an added string let its second part escape). `returns.watched_tools` watches a tool whose source holds a lone CR (spans cannot be mapped to git's lines) and finds tools defined in a package `__init__.py`.
-- 2026-10-06 — **B3c-1 review 26 fix:** comments are scanned whole on their git line (a form feed, vertical tab, U+2028 or lone CR inside one had split it and hidden its tail), and bytes literals are scanned like strings. Accepted: whole-string scoping can fail an edit that touches one line of a long pre-existing string holding a banned phrase (none in today's toolkit, measured).
-- 2026-10-06 — **B3c-1 review 27 fix:** a lone carriage return in a gated file is a hard failure (`no_fabrication.line_endings`): Python reads it as a line break and git does not, so every AST scan scoped to added lines looked at the wrong lines. The real toolkit holds none.
-- 2026-10-06 — **B3c-1 review 28 fix:** the AST scans scope a node by every line it spans (`_touches`), not only its first — an added continuation line (`.random.normal(x)`) or a body replaced by `pass` under an unchanged `def` line escaped; a placeholder body is flagged when its `def` line or its body changed, never because some other line of a long function did.
-- 2026-10-06 — **B3c-1 review 29 fix:** a file nested too deeply to parse or walk (a `RecursionError`/`MemoryError` in a scan) is a failed `no_fabrication.syntax` check, and `run_gate_step` also turns those errors into a failed gate; `returns.watched_tools` watches a tool whose source cannot be parsed. Measured: 1,725 one-line edits across every real toolkit function produced no false hard-fail.
-- 2026-10-06 — **B3c-1 review 30 fixes:** `returns.watched_tools` watches a key re-pointed to another module or function and a tool whose decorator line was added (its span now starts at the first decorator); a submission `state.json` (in the coder-writable folder) of any shape other than a non-empty list of submission records is ignored, its patch must be a plain file name in its own folder, and `_update_last_submission` can never raise; `gate._git` decodes bytes itself (text mode turned a lone CR into a line break).
-- 2026-10-06 — **B3c-1 review 31 fixes:** a source-encoding declaration other than UTF-8 in a gated `.py` hard-fails (`no_fabrication.encoding`; Python decodes by the cookie at import, the scans read UTF-8, and under `utf-7` a comment is code); `returns.watched_tools` watches a tool with no top-level `def` (defined under `if`/`try`); a restored submission's notes accept only a list of issue texts.
-- 2026-10-06 — **B3c-1 closed.** Threat model made explicit: the gate defends against an honest coder under pressure (fabrication) and against the gate/commit inconsistencies real tooling produces; deliberate sabotage by a coder crafting artifacts (forged bytecode, FIFOs, nested-repository traps, encoding cookies) is bounded by the jail, the read-only `.git`, the co-lead review and the human merge, and is an accepted residual beyond the guards already built.
-- 2026-10-06 — **Env plan B3c-3: the coder's environment tools.** `env_build.solve` / `pin_wheels`; `coder/env_tools.CandidateEnvs` (`env_solve`, `env_pin_wheels`, `cand_env_activate`) on both escalation servers (Claude allow-list `mcp__escalation__env_solve|env_pin_wheels|cand_env_activate`); candidates built into `<worktree_base>/envs_cand/<tool>`, read-only in the author jail (`coder_policy(readonly=)`, `CodexBackend(jail_readonly=)`), `active/bin` first on the author's `PATH` (`_author_env(active_bin=)`), removed at session close. Seed lists environments (`_environment_context`); `prompts/coder.md` gains *Your package's software environment*. Live-verified.
-- 2026-10-06 — **B3c-3 review fixes:** candidate wrappers start from a clean environment and stub missing `python`/`pytest`/`pip` (exit 127) rather than inherit the analysis environment; a failed rebuild empties the wrappers; `CandidateEnvs.close()` (first in `aclose`) stops late writes into the reset tree; a new attempt clears stale wrappers; definition writes refuse a linked or outside folder and replace atomically; `SubprocessError` (timeouts) is a tool answer; activations serialised; Codex `tool_timeout_sec = 3600` on the escalation server; the Claude jail overlay is passed explicitly (`_build_options(jail_readonly=)`) and absent when the session has no env tools; `_author_env` keeps the candidate first on `PATH` when sourcing fails. Tool descriptions: a solve rewrites the whole lock; a wheel installs without dependencies.
-- 2026-10-06 — **B3c-3 review 2 fixes:** `react._in_environment` moved to `envs.in_environment` (react imports it) and gained `pass_args`; the candidate wrappers are built on it, so they report an activation that exits, restore the jail's `PFILES` half and reset shell state exactly as `use_env` does. The launcher calls `/usr/bin/env` by path (a candidate shipping `env` made every wrapper call itself) and keeps `USER`, `LOGNAME`, `LC_*`, `TZ` and proxies. A derived candidate without its own `activate.sh` sources the base activation. Each attempt gets its own candidate folder; solve, pin and activate share one lock; definition writes use a unique temp name.
-- 2026-10-06 — **B3c-3 review 3 fixes:** `in_environment` restores the command's arguments after the activation (`source` shares `"$@"`), names its marker per run (`…-$$`; a wrapper runs concurrently), removes it with `/usr/bin/rm`, and reports a failed or exiting activation once ("did not finish", exit 97). A derived candidate whose base activation lies outside the coder's jail (the human `analyze_ini_sh`, in this repository) sources a copy in the candidate folder; a jailed test runs it.
-- 2026-10-06 — **B3c-3 review 4 (clean) lows:** `env_pin_wheels` needs a candidate built from the current `env.lock` and answers a derived definition directly; `prompts/coder.md` asks for absolute paths in `activate.sh` (the runtime sources a copy). Residuals recorded (relative sourcing in a copied base activation; the parent folder on the candidate's `PYTHONPATH`).
-- 2026-10-06 — **Env plan B3c-4: build on commit.** `merge_flow.committed_environments` / `build_committed_environments`; `AuthoringSession.commit` builds them after a direct-branch commit (`_build_environments`, ledger `env.build` / `env.build.error`, `env_note` appended to the lead's commit answer). A derived build now writes its record too (with `base`), and `built_environments(..., base_envs)` resolves it against the configured human environment, so derived environments are listed (`env.env_catalogue` passes the analysis environment).
-- 2026-10-06 — **B3c-4 review fixes:** a reused build rewrites its record when activation, boot file or externals changed (`_record_fields`); `forget` + `merge_flow.deleted_environments` drop a deleted definition from the catalogue; `StoppableRunner` lets a stop kill a commit build and the candidate tools' conda/pip; `_build_environments` turns any failure into the lead's note.
-- 2026-10-06 — **B3c-4 review 2 fixes:** a stop during a commit build kills it and records `env.build.error` ("stopped"; shielded), the launch drift check (B3c-5) building what is missing; `StoppableRunner` reaps with `wait()` after a timeout or error (an escaped child holding the pipes had held the call past its timeout).
-- 2026-10-06 — **B3c-4 review 3 fixes:** `gate.check_env_definitions` admits a deleted definition unless a toolkit package still names it (it had refused every deletion, so `forget` never ran); a stopped commit build starts no further environment; the rebuild comment and residuals say a new path lookup sees the new build at once.
-- 2026-10-06 — **B3c-4 review 4 (clean) low:** `env.forget` is recorded as each record is dropped, before any build; a failure note names what was removed. Residual: `propose_and_pr` (the standalone measurement path) leaves `env_note` to the ledger.
-- 2026-10-06 — **Env plan B3c-5: launch reconcile and drift.** `merge_flow.reconcile_environments` (missing/stale builds, drift kept as `ar-<id>.drift-<fp8>` with its lock saved and rebuilt, external stamp changes recorded and reported); `graph.runtime._reconcile_environments` runs it after preflight with ledger events.
-- 2026-10-06 — **B3c-5 review fixes:** a definition that does not validate is `failed` and never treated as drift (an editor swap file had renamed an intact build away); drift also covers distributions installed or removed by hand (baseline `installed_dists` recorded at build); a failed drift rebuild restores the drifted prefix and record; every intact definition goes through `build()` (record refreshed, jail rule applied); the drift lock carries the recorded activation; a `tainted` notice; events name the cause.
-- 2026-10-06 — **B3c-5 review 2 (clean) lows:** a stop ends reconcile before the next environment (a stop mid-drift had renamed a prefix and crashed); a current record with its prefix gone is rebuilt with `cause: missing`; an external added to or removed from a definition re-baselines silently; derived environments' externals are stamped and reported too.
-- 2026-10-06 — **Env plan B4: replay.** `env_build.replay` (a lock's conda part rebuilt into its own prefix and compared; Anaconda and conda-forge hosts with checksums; reuse; unjailed taint as a build) and `env.replay_environment(fingerprint)` (lock store → replay, recorded activation/boot written beside it, externals compared). Live-verified on a conda-forge env.
-- 2026-10-06 — **B4 review (clean) lows:** a changed replay prefix is kept aside, not deleted; url-less or duplicate recorded packages are refused; `replay_environment` refuses a lock that does not hash to its fingerprint and reports the activation's `owner`.
-- 2026-10-06 — **Env plan B3c-2: Layer B in the named environment.** `gate._run_layer_b` / `_gate_environment`; `_default_test_runner(environment=)` runs the tests through `envs.in_environment(keep=)`; `_jailed_pytest(extra_ro=)`. `tests/conftest.py` points `agent_conda_dir()` at a temporary folder for every test (a gate test had built into `~/.auto_research`).
-- 2026-10-06 — **B3c-2 review fixes:** watched tools per environment group (another environment's tool had failed the recorder's import); gate builds per definition digest with a one-day prune (concurrent gates had shared one prefix); the private `PFILES` folder in the environment path; `TestRunner` and gate_bench's `_tests_off_runner` accept the new keywords.
-- 2026-10-06 — **B3c-2 review 2 (clean) lows:** the copied base activation lives in its digest folder and is written atomically; one prune lock; labelled determinism details per group; the two-group test asserts both recorders passed.
-- 2026-10-06 — **Env plan B3b: routing.** `ToolkitRegistry.tool_env` + the `env` argument and description line in `tool_definitions`; `PersistentSandbox` REPL pool (`call_tool(environment=)`, `label=`, `call_environment`, pool closed by `restart`/`shutdown`, killed by `abort`/`kill_now`); pipeline activations sourced in the jail by the launcher.
-- 2026-10-06 — **B3b review fixes:** a REPL not yet running is started before its call's stamp is taken (a first routed call, and the first after a restart, had gone unstamped); a pipeline environment refuses to start unjailed when the jail is configured; its activation and boot files are bound as files, not their folders; `tests/conftest.py` also points `env_lock_dir()` at the temporary folder.
-- 2026-10-06 — **B3b review 2 fixes:** a coder-written boot file under a human activation is bound and refused unjailed like a coder-written activation; a failure or environment-change restart of the worker's own REPL keeps the pool (`_restart_own`); `abort`/`kill_now` iterate a copy of the pool; a provider test over a real jailed REPL pool.
-- 2026-10-06 — **B3b review 3 fixes:** a pool REPL's launcher sends the activation's output to stderr (`envs.in_environment(quiet=True)`; a banner had broken the protocol on every call); a REPL that ends unexpectedly attaches its stderr tail to the call's error (`_stderr_tail`: "activation … did not finish").
-- 2026-10-06 — **B3b review 4 fixes:** the REPL runs its boot file with fd 1 on stderr (a C-level XSPEC banner had broken the protocol on every call, analysis REPL included); `_stderr_tail` keeps the newest bytes. Residuals: a boot file that raises is swallowed (as before); a write to a REPL that already died reports without the tail.
-- 2026-10-07 — **Build jail under a symlinked path (B5 live cell):** `build_policy` and `pin_wheels` bind the staged definition and the candidate prefix as spelled, so the jail recreates the spelling conda and pip are handed; a resolved-only bind left the staged `env.lock` unreachable whenever the conda dir is reached through a link (`/data` → `/nfsdata1` here, which every production runtime dir is), and every candidate build failed in a second. Tests build and pin, jailed, under a symlinked folder outside `/tmp`. `prompts/analyst_lead.md` and `prompts/analyst_worker.md` say when to ask for a package environment.
-- 2026-10-07 — **`verify` record caps raised (B5 live cell):** `_MAX_RECORD` 64 MB, `_MAX_RECORDS_TOTAL` 1 GB. A conda record lists every file its package installs; libboost-headers' exceeded the old 4 MB cap and failed every Boost build at `verify`, after its install. Test: a 7 MB record verifies.
-- 2026-10-07 — **REPL on Python < 3.11 (B5 live cell):** the REPL no longer passes `-P` (3.11+ only; a Python 3.9 pipeline environment's pool REPL died at launch on it); the script's first statement removes the working folder from `sys.path` instead, on every version. Test: a REPL on Python 3.9 starts and a package planted in its working folder does not shadow the standard library. Residual: the shell server keeps `-P` (its source opens with a `__future__` import, so no prelude), which needs the analysis interpreter at 3.11+ (3.13 today).
-- 2026-10-07 — **REPL protocol line limit (B5 live cell):** the REPL subprocess is read with a 256 MB line limit (`_PROTOCOL_LINE_LIMIT`); asyncio's default 64 KB failed every larger tool return. Test: a 1 MB return arrives whole.
-- 2026-10-07 — **T1 / B6 docs sweep:** the `PersistentSandbox` entry names the `environment` / pool
-  signature and where each environment's boot file comes from. No code change. Jailed probe through
-  the module API (`env_build.build` into the runtime conda dir, `PersistentSandbox.call_tool(...,
-  environment=ar-xspec)`): `xspec.Model("relxillCp")` builds, so the toolkit's `boot.py` runs in a
-  routed REPL (F21 narrowed to the default REPL).
+- 2026-10-06 — **Jail hardening: [F20] closed, [F22]–[F24], [F27].** The builtin shell server runs
+  jailed: `graph.runtime._builtin_server_config` passes its source with `-c` and wraps it, like the
+  worker REPL, in `jail.analysis_policy` (toolkit always overlaid read-only, `PYTHONNOUSERSITE=1`,
+  a symlinked writable root or `home` refused, a writable root holding the process's own folder
+  demoted to read-only); the shell writes only the workers' folders (`writable_dirs=`) and keeps the
+  run's `authoring/` read-only. `runner._source_ini_env` sources the init script with
+  `bash --norc --noprofile`, stdin `/dev/null`, in a clean environment (21 key/token variables had
+  reached the shell), and fails on a missing script. The shell guard stands down only for a server
+  launched jailed (`MCPToolClient.is_jailed` → `ToolkitRegistry.mcp_jailed`). Each jailed process
+  gets a private `/tmp` on local disk (`jail.private_tmp`: refuses a symlinked, foreign or non-0700
+  folder; removed when the process ends; the REPL's recreated empty at each start), a home outside
+  every agent-writable folder mounted at `jail.JAIL_HOME_AT` (`/home/ar`, `JailPolicy.home_at`), its
+  own `PFILES` dir (`runner.with_private_param_dir`; `/grad/fzhou/pfiles` left `agent_fs_allow`) and
+  a private `PYTHONPYCACHEPREFIX`. Host side: `workspace.memory_path` beside the ledger, memory I/O
+  `O_NOFOLLOW`, `write_launcher` writes an `O_EXCL` temp file and renames it; `record_beside`/
+  `resolve_record` use the legacy spelling only for a pre-split run; `human_reply_dir`. Gate Layer B
+  is read-only except its worktree, JUnit folder, home and private `/tmp`; both runs share one
+  `--basetemp`, wiped at each start (human ruling: a toolkit suite left 65 GB in 10 minutes). [F27]
+  the resume base ref lives beside the ledger (`merge_flow._base_ref_path`);
+  `heal_toolkit_branch_if_dirty` refuses a non-ancestor; `run.resume.heal` records every outcome but
+  clean.
+- 2026-10-06 — **Env plan B1, B2a, B2b: environments as objects.** `sandbox/envs.py` (`Environment`,
+  `External`, `fingerprint`, `lock`, `write_lock`, `fingerprint_and_lock`, `describe`);
+  `auto_research.env` gains `analysis_environment`, `host_environment`, `env_lock_dir`; config
+  `env_externals` (HEASoft build record, CALDB indexes). Fingerprint and lock come from one
+  computation (a lock hashes to its name and embeds activation, boot file and pip sources); a failed
+  activation is never cached and `fingerprint_and_lock` raises on it; HOME is normalised only as a
+  whole leading path; pipeline-prefix files are read regular-only, bounded, links not followed
+  (`_read_regular`, `_file_sha`). Measured: the analysis env fingerprints in 2.6 s cold, 1.5 ms
+  cached. `PersistentSandbox(environment=)` restarts before a call whose fingerprint changed
+  (`_restart_if_environment_changed`; a failed restart is that call's error), announces it out of
+  band (`take_notice()`), and stamps receipts with `booted_fingerprint` once its lock is written
+  (`booted_lock_written`); shell (MCP) receipts are unstamped; fingerprints print as `env:<hex12>`.
+  `use_env`: build records carry name, activation, boot file and externals
+  (`env_build.built_environments`); `shell_environment` holds the chosen name, resolved per call, its
+  activation sourced inside the jailed shell (`envs.in_environment`) and never in the runtime (a
+  pipeline activation is fingerprinted by its bytes; `activation_env()` refuses it).
+- 2026-10-06 — **Env plan B3a: definitions and the builder.** `sandbox/env_build.py` (read/validate,
+  builder, lock verification); `env.agent_conda_dir`, `env.conda_executable`. `env.pip` takes only
+  `name==version --hash=sha256:…`, installed `--isolated --require-hashes --only-binary=:all:`.
+  `build(conda_dir=, jailed=)` stages the definition once (`build-*/def/<name>/`, read through one
+  `O_DIRECTORY | O_NOFOLLOW` descriptor) and validates, builds and verifies the copy, jailed
+  (`build_policy`) with its own home, cache and `/tmp`, only the target prefix writable; records in
+  `<conda_dir>/built/` (`build_record`) and the install lock outside every jail; completion marker
+  `.ar-built`; activation and boot file a content-addressed copy (`<conda_dir>/activation/`); a
+  sticky `built/unjailed.json` bars jailed reuse after an unjailed build. Built envs are `ar-<name>`;
+  a rebuild moves the finished build aside (`.prev-<sha8>-<rand6>`) first. Caps: definition files
+  4 MB, `env.yaml` 16 KB and 64 brackets, no YAML anchors. `verify` checks the conda records against
+  the lock and the pins by dist-info + METADATA, one install each (`_pin_dist_infos`), and refuses
+  `pyvenv.cfg`, `bin/python*._pth` and a linked `lib`/`site-packages`; the start-up-file hunt was
+  dropped by human ruling (a file a build drops outside its records is an accepted residual).
+  `jail_argv` adds `--new-session` to every jailed process (TIOCSTI reproduced). No CPU/memory/
+  process limit on builds: ruling 2026-10-06. Ten review rounds (the loop stopped after 9 by the
+  user's instruction, then a final review). Live-verified build; `~/.conda/environments.txt`
+  untouched.
+- 2026-10-06 — **Env plan B3c-1: the gate admits environment definitions; [G3] closed.** Gated files
+  (`gate._gated`): a `*_utils` file or `envs/<name>/{env.yaml,env.lock,env.pip,activate.sh,boot.py}`;
+  never `.gitignore`/`.gitattributes`/`.gitmodules`, a name with a glob character or not UTF-8.
+  Layer A adds `structural.env_definition.<name>` (`check_env_definitions`: the definition validates
+  and ships with a package naming it; a deletion is admitted unless a package still names it),
+  `structural.env_resolves`, `structural.tests_left_tree_unchanged`, `no_fabrication.line_endings`
+  (lone CR) and `no_fabrication.encoding` (a non-UTF-8 cookie); the AST scans count lines as git
+  does and scope a node by every line it spans. The gate records `GateReport.manifest`
+  (`gate.changeset_manifest`: path → `<mode>:<sha256>` | `deleted`) and `GateReport.base`; Layer B
+  runs on a clean export of HEAD from raw objects plus the manifest (`gate._export_judged`) with the
+  real worktree masked (`JailPolicy.masked`). `approve_edit(manifest=, base=)` stages exactly the
+  judged bytes with no git filters (`merge_flow._stage_judged`), runs no hook, and refuses if HEAD or
+  a judged file moved; `AuthoringSession` refuses a commit whose changeset is not the reviewed one
+  (`_reviewed_manifest`). Tree hygiene at gate entry, commit, failure reset, close and heal:
+  `_restore_owner_access` (owner access restored; FIFOs, sockets, devices and nested `.git` removed),
+  `remove_untracked_ignores` (`gate.untracked_ignore_files`), `purge_bytecode` over the whole toolkit
+  tree. Every git call has a timeout (`_GIT_TIMEOUT_S` = 300 s; `gate._clear_index_lock`) and decodes
+  with `surrogateescape`. gate_bench's `commit_sweep` commits through the production path. Closing
+  ruling on the threat model: an honest coder under pressure and real tooling inconsistencies;
+  deliberate sabotage is bounded by the jail, the read-only `.git`, the co-lead and the human merge,
+  an accepted residual. 31 review rounds.
+- 2026-10-06 — **Env plan B3c-3 and B3c-2: the coder's environment tools; Layer B in the package's
+  environment.** `env_build.solve`/`pin_wheels`; `coder/env_tools.CandidateEnvs` (`env_solve`,
+  `env_pin_wheels`, `cand_env_activate`) on both escalation servers; candidates built per attempt
+  under `<worktree_base>/envs_cand/<tool>`, read-only in the author jail (`coder_policy(readonly=)`,
+  `CodexBackend(jail_readonly=)`), `active/bin` first on the author's `PATH`; the wrappers run
+  through `envs.in_environment` from a clean environment (a missing `python`/`pytest`/`pip` stubbed,
+  exit 127); `CandidateEnvs.close()` runs first in `aclose`; Codex `tool_timeout_sec = 3600`. The seed
+  lists environments (`_environment_context`); `prompts/coder.md` gains *Your package's software
+  environment*. Live-verified. Layer B: `gate._run_layer_b`/`_gate_environment` run the tests through
+  `envs.in_environment` (`_default_test_runner(environment=)`, `_jailed_pytest(extra_ro=)`), watched
+  tools grouped per environment, gate builds per definition digest with a one-day prune.
+  `tests/conftest.py` points `agent_conda_dir()` and `env_lock_dir()` at a temporary folder.
+- 2026-10-06 — **Env plan B3c-4, B3c-5, B4: build on commit, launch reconcile and drift, replay.**
+  `merge_flow.committed_environments`/`build_committed_environments`/`deleted_environments`;
+  `AuthoringSession.commit` builds after a direct-branch commit (`_build_environments`; ledger
+  `env.build`/`env.build.error`/`env.forget`; `env_note` on the lead's answer); a stop kills the build
+  (`StoppableRunner`). Derived builds write records (with `base`) and are listed via
+  `env.env_catalogue`; a reused build refreshes its record (`_record_fields`).
+  `merge_flow.reconcile_environments`, run after preflight by `graph.runtime._reconcile_environments`:
+  missing or stale builds rebuilt; drift (hand-installed or removed distributions included, against
+  `installed_dists`) kept as `ar-<id>.drift-<fp8>` with its lock and rebuilt, restored if the rebuild
+  fails; an invalid definition is `failed`, never drift; external stamp changes reported.
+  `env_build.replay` + `env.replay_environment(fingerprint)` rebuild a lock's conda part into its own
+  prefix and compare (a changed prefix kept aside; the lock must hash to its fingerprint).
+  Live-verified replay on a conda-forge env. Residual: `propose_and_pr` leaves `env_note` to the
+  ledger.
+- 2026-10-06 — **Env plan B3b: routing.** `ToolkitRegistry.tool_env` + the `env` argument and
+  description line in `tool_definitions`; `PersistentSandbox` REPL pool (`call_tool(environment=)`,
+  `label=`, `call_environment`; closed by `restart`/`shutdown`, killed by `abort`/`kill_now`, kept by
+  a restart of the worker's own REPL, `_restart_own`). A REPL starts before its call is stamped; a
+  pipeline activation or coder-written boot file is bound as a file and refused unjailed when the
+  jail is configured; activation output and the boot file's fd 1 go to stderr
+  (`in_environment(quiet=True)`; an XSPEC banner had broken the protocol); a REPL that dies attaches
+  its stderr tail to the error (`_stderr_tail`). Residual: a boot file that raises is swallowed.
+- 2026-10-07 — **B5 live-cell fixes; T1/B6 docs.** `build_policy` and `pin_wheels` bind the staged
+  definition and the candidate prefix as spelled (under a symlinked conda dir, `/data` →
+  `/nfsdata1`, every candidate build had failed in a second); `verify` caps `_MAX_RECORD` 64 MB,
+  `_MAX_RECORDS_TOTAL` 1 GB (libboost-headers' record exceeded 4 MB); the REPL drops `-P` (3.11+
+  only) and removes its working folder from `sys.path` itself (residual: the shell server keeps
+  `-P`, so the analysis interpreter must be 3.11+, 3.13 today); REPL protocol line limit 256 MB
+  (`_PROTOCOL_LINE_LIMIT`; asyncio's default 64 KB). `prompts/analyst_lead.md` and
+  `prompts/analyst_worker.md` say when to ask for a package environment. Docs only: the
+  `PersistentSandbox` entry names the `environment`/pool signature. Jailed probe through the module
+  API: `xspec.Model("relxillCp")` builds in a routed `ar-xspec` REPL, so the toolkit's `boot.py`
+  runs (F21 narrowed to the default REPL).

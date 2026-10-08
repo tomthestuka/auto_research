@@ -251,8 +251,8 @@ only read ([§9.3](#93-invariants-the-unit-enforces-and-no-definition-turns-off)
   green and the invariant tests ([§9.10](#910-build-order-phase-3) step 0) unchanged, plus one live
   cell for each role whose wiring moved.
 - **The execution layer is shared with the environments work.** Software environments
-  (handoff [F18]; the gitignored `tmp_agent_envs_plan.md` is the authoritative record of its
-  rulings, plan approved by the human 2026-10-06) are a separate work stream that
+  (handoff [F18], closed 2026-10-07; its rulings are recorded in
+  [§9.6](#96-execution-sandbox-and-environments-per-unit)) are a separate work stream that
   touches the same sandbox/execution code; claim symbols on the coordination board before editing
   there, and keep its settled decisions ([§9.6](#96-execution-sandbox-and-environments-per-unit)).
 
@@ -544,7 +544,7 @@ checkpointer resume, detached runs (`run_research_nohup`).
 one `v<k>/` folder per report to the human; `run_research()`, `python -m auto_research`, the
 notebook. **Benchmarks:** `gate_bench` (seeded-defect catch rate), `author_bench` (authoring
 reliability per coder), `science_bench` (seat trees). **Live record:** PI questions #2, #7, #12
-accepted (handoff §1.1).
+accepted (run ledger: `tmp_handoff_closed.md` §1).
 
 ---
 
@@ -673,8 +673,8 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
   unit's policy. F20 is closed (2026-10-06): the REPL (`sandbox/persistent.py`) and the shell
   server (`graph.runtime._builtin_server_config`) already share `jail.analysis_policy`
   (`sandbox/jail.py`), which the launcher step absorbs.
-- **Environments** (handoff [F18], its own work stream; rulings 2026-10-05/06 recorded in
-  `tmp_agent_envs_plan.md`). **Built and live-verified 2026-10-07** (plan B1–B5): definitions,
+- **Environments** (handoff [F18], its own work stream; rulings 2026-10-05/06, recorded here).
+  **Built and live-verified 2026-10-07** (plan B1–B6, T1): definitions,
   the jailed builder, the coder's environment tools, the gate's Layer B in the package's
   environment, build on commit, launch reconcile and drift, replay, and routing of each toolkit
   call into its package's environment. The toolkit step (T1) landed 2026-10-07: `xspec_utils` runs
@@ -699,8 +699,16 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
     serve a unit's own REPL and shell, and the packages that name no environment.
   - **Provenance.** Every receipt stamps an environment fingerprint, a lock store rebuilds any
     recorded version, and trajectories replay with their environment.
-  - **No model-filled environment field in a brief.** The source environment is derived from the
-    fingerprints of the receipts a brief cites.
+  - **No environment field in any brief or report** (B3c naming ruling, 2026-10-06). The
+    environment a coding session works on is the one the brief's target package names in its
+    `tool_config.yaml`; a failed resolution is a gate failure the coder retries. A package names
+    exactly one environment and several may share one; extend the one your package names, create a
+    new one only on conflict, named after the stack. Built prefixes carry no id suffix
+    (`ar-<id>`); past states come from the lock store by fingerprint. A change to an environment
+    re-runs the tests of every package naming it.
+  - **Builder: conda** (2026-10-06). Pixi measured ~8x faster with a better lock and was rejected:
+    pre-1.0, a project-per-folder model, and no agent system found using it. Builds have no resource
+    limits (ruling, B3a).
   - **Drift** (an `ar-` environment no longer matching its definition) is rebuilt visibly:
     - the drifted prefix is kept as `ar-<name>.drift-<fp8>`;
     - the environment is rebuilt from its unchanged definition;
@@ -725,7 +733,11 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
       the files a build may have dropped);
     - externals that cannot be rebuilt;
     - a user `.so` outside any environment, which is not hashed;
-    - a human activating an `ar-` environment.
+    - a human activating an `ar-` environment;
+    - deliberate sabotage of the gate by the coder (ruling, B3c-1): artifacts no tool-writing task
+      produces are bounded by structure (jailed coder, read-only `.git`, the decorrelated co-lead,
+      the human's merge); the threat model is an honest coder under pressure, so further findings
+      of this class are justified as residuals, not patched.
   - **Open:** F21, narrowed by T1 — a toolkit call routed to `ar-xspec` runs the toolkit's boot
     file in the jail (relxillCp loads, probed 2026-10-07), but `repl_init_py` lives in this
     repository, which the jail does not mount, so a unit's default REPL starts without it. Also open: a notice when a human environment changes between a
@@ -1048,17 +1060,19 @@ entry 2026-09-25, [R7] evidence rule, LIVE-VERIFIED 2026-09-26).
 - 2026-10-06 — **§9.6 residual risks:** a file a build's package script writes outside the conda
   records is accepted as escaping the fingerprint (human ruling, after nine review rounds of the
   environment builder; `verify` checks records and pins only).
-- 2026-10-07 — **Environment stream built and live-verified (plan B1–B5).** §9.6 status line; §13
-  environment residuals and the provenance edges a review found ([R8]). B5 live cell
-  (`tests/test_live_env_pipeline.py`): a worker's missing Boost.Python runtime became the
-  pipeline-built `ar-sherpana` (Python 3.9, boost 1.87, hdf5 1.12), built on commit, the gate's tests
-  and the workers' calls ran in it (`dataReader` imports), a second run reused it. Five harness bugs
-  found and fixed on the way (symlinked build paths, a 4 MB record cap, `-P` on Python < 3.11, the
-  REPL's 64 KB line limit, input hashing that could end a run).
-- 2026-10-07 — **Toolkit step T1 and the B6 docs sweep; F18 closed.** `research_toolkit` gains a root
-  `conftest.py` (unmarked / `slow` / `live`, live opt-in) and `envs/xspec/` (`ar-xspec`: production
-  `solve`, 232 packages, `ixpeobssim` as a hashed wheel, HEASoft/CALDB activation, XSPEC + relxill
-  boot file); `xspec_utils` names it. Parity: the `xspec_utils` suite gives 421/426 in `ar-xspec`
-  and the same five failures in the human environment. Jailed probe: relxillCp loads in an
-  `ar-xspec` REPL once `/data/fzhou/XSPEC/relxill` is on the read-only allow-list (config). §9.6
-  status and sequencing, §9.10 step 4 Done, §9.11 q5 and F21 narrowed.
+- 2026-10-07 — **Environment stream built and LIVE-VERIFIED (plan B1–B6, T1); F18 closed.** §9.6
+  status, sequencing and rulings recorded here (B3c naming: no environment field in briefs, the target
+  package's `env:` decides, extend before create, no id suffix, an environment change re-tests every
+  package naming it; conda over pixi; no build resource limits; the sabotage residual; the "derived
+  from cited receipts" rule removed); §9.10 step 4 Done; §9.11 q5 and F21 narrowed; §13 environment
+  residuals and [R8] provenance edges.
+  - B5 live cell (`tests/test_live_env_pipeline.py`): a worker's missing Boost.Python runtime became
+    the pipeline-built `ar-sherpana` (Python 3.9, boost 1.87, hdf5 1.12), built on commit; gate tests
+    and worker calls ran in it, a second run reused it. Five harness bugs fixed (symlinked build
+    paths, 4 MB record cap, `-P` on Python < 3.11, the REPL's 64 KB line limit, run-ending input
+    hashing).
+  - T1: `research_toolkit` root `conftest.py` (unmarked / `slow` / `live`, live opt-in) and
+    `envs/xspec/` (`ar-xspec`: 232 packages, `ixpeobssim` as a hashed wheel, HEASoft/CALDB
+    activation, XSPEC + relxill boot file), named by `xspec_utils`. Parity: 421/426 in `ar-xspec`,
+    the same five failures in the human environment. Jailed probe: relxillCp loads once
+    `/data/fzhou/XSPEC/relxill` is on the read-only allow-list.

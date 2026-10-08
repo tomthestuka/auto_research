@@ -598,6 +598,4 @@ Compacted 2026-09-24 (detail in git history).
 - 2026-09-10 — `main.tex` prose corrected to "all ten PD quantities lie below the published value,
   by 0.2--2.4 sigma and by 1.6 sigma on average"; `--score DIR` regenerates any published batch.
 - 2026-10-06 — **[F25] A trial's allow-list names `<runtime_dir>/runs`, not the whole runtime dir,
-  and the trial's papers are read-only** (`environment.orchestration_config`). Before, a jailed REPL
-  or shell could read the trial's ledgers (receipt blobs, filed reports) and write the librarian's
-  PDFs. Production already allow-listed `runs/` only.
+  and the trial's papers are read-only** (`environment.orchestration_config`), as in production.

@@ -286,6 +286,8 @@ carried by **reference** (`FigureRef`), never embedded
   one verify-list shape across roles (human ruling); title and ids resolve from the receipt.
 
 ## Changelog
+Compacted 2026-10-07 (detail in git history).
+
 - 2026-05-26 -> 2026-06-12 — Full Pydantic v2 protocol: research/search/analysis/review messages,
   `FigureRef`/`DocumentRef`, function-call tool envelopes, sandbox results, report + LaTeX schemas.
 - 2026-06-12 -> 2026-06-16 — Phase 2: `ToolSpec`/`ValidationDataset`/`ProposedCheck`,
@@ -323,5 +325,7 @@ carried by **reference** (`FigureRef`), never embedded
   `rework` property replaced by `assign_to: Assignee | None` (`librarian | analysts | human`).
 - 2026-09-25 — [R7] `Receipt.arg_numbers` is legacy (kept for replay); the shell grounds nothing
   (`provenance.store.is_evidence`).
-- 2026-10-06 — `Receipt.env`: fingerprint of the environment the producing call ran in (env plan B1).
-- 2026-10-06 — **Env plan B3b:** `Receipt.env_untested` (a toolkit call run in an environment other than its package's tested one, by the caller's choice; still evidence) and `capture.receipt_call(env_untested=)`, set on every receipt of the call.
+- 2026-10-06 — Env plan B1/B3b: `Receipt.env` (fingerprint of the environment the producing call ran
+  in) and `Receipt.env_untested` (a toolkit call run outside its package's tested environment by the
+  caller's choice; still evidence), set on every receipt of the call by
+  `capture.receipt_call(env_untested=)`.

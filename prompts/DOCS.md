@@ -93,7 +93,7 @@ logic here.
 - `status_monitor.md` — system prompt for the `/status` reporter over the monitor ledger.
 
 ## Changelog
-Compacted 2026-09-01 and again 2026-09-24 (detail in git history).
+Compacted 2026-09-01, again 2026-09-24 and 2026-10-07 (detail in git history).
 
 - 2026-05-26 -> 2026-06-22 — Prompt set built (reviewer, librarian, worker, lead, `coder`, and the
   code-review-only `analyst_colead.md`); §9.6 failure classification + `ask_human`; `coder.md` package
@@ -131,5 +131,9 @@ Compacted 2026-09-01 and again 2026-09-24 (detail in git history).
   follow_up exempt), `analyst_lead.md` (commit receipts; code facts in words), `analyst_worker.md`
   (no `python -c` arithmetic: derived values from a toolkit tool, requested via `tool_request`),
   `librarian_io.md` (a web page is a lead to its paper).
-- 2026-10-07 — **`analyst_colead.md`: production-threatening issues only** (user, after the B5 live cell: 12 co-lead rejections over 3 tools, each round a new, finer objection). Two questions before an issue is raised: would a real run hit it, and is it already caught (gate in the package environment, jail, receipts, lead and reviewer, human merge)? The issue names the real run that hits it. `lead_rebuttal` handling unchanged. Positive wording replaces the "Do not record…" sentence.
-- 2026-10-07 — **`coder.md`: mark each test by its class** (env plan T1): the toolkit's root `conftest.py` defines unmarked (fast, deterministic), `slow` (real data, minutes) and `live` (network; opt-in) tests; the gate's run has no network, so a tool also needs tests that pass offline.
+- 2026-10-07 — **`analyst_colead.md`: production-threatening issues only** (user, after the B5 live
+  cell: 12 co-lead rejections over 3 tools). An issue is raised only when a real run would hit it and
+  nothing already catches it (gate in the package environment, jail, receipts, lead and reviewer,
+  human merge), and names that run; `lead_rebuttal` handling unchanged. **`coder.md`** (env plan T1):
+  each test marked by class per the toolkit's root `conftest.py` (unmarked, `slow`, `live` opt-in);
+  the gate's run has no network, so a tool also needs tests that pass offline.
