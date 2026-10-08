@@ -293,6 +293,11 @@ class LibrarianToolProvider:
                 outcome, receipt = self.reader.open_handle(str(arguments["handle"]).strip())
             elif arguments.get("path"):
                 pdf = Path(str(arguments["path"])).expanduser()
+                # A paper receipt is evidence: only a PDF in the papers folder (where downloads land,
+                # outside every role's write reach) becomes one, never a file a run wrote.
+                if not pdf.resolve().is_relative_to(Path(self.papers_dir).resolve()):
+                    return ToolOutcome(text=f"read_paper: open papers by hit= or handle=; {pdf} is not in the "
+                                            "papers folder.", is_error=True)
                 if not pdf.is_file():
                     return ToolOutcome(text=f"read_paper: {pdf} is not a file.", is_error=True)
                 outcome, receipt = await self.reader.open_pdf(pdf)

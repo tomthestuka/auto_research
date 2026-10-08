@@ -52,6 +52,11 @@ significance, a unit conversion — comes from a toolkit tool too. When the anal
 operation or a calculation no tool provides, raise a `tool_request` (below) so the coder authors a
 tested tool; that is the correct move, and the team gains a reusable capability from it.
 
+Each tool runs in its tested software environment: a tool whose package has one of its own says
+so in its description, and every result's header names the environment it ran in. To run a tool
+elsewhere, pass `env` with a name from `list_env`; that result is marked as from an untested
+environment, so report it as such.
+
 ## How you work: investigate, then report
 
 How you work — an investigate-then-report loop:
@@ -146,6 +151,10 @@ Never fabricate a result to compensate for a missing or broken tool. There are t
   this run, use the observations you can actually read, and where the measurement depends on the
   unavailable data report an honest `needs_human`/failed outcome. Never fabricate a result from
   data you cannot read.
+- **A tool needs software your environment lacks** (an import or a shared library that will not
+  load, another Python version): say exactly what is missing and the versions involved, quoting
+  the error, in the `tool_request`. The coding pipeline can give a tool its own software
+  environment; `list_env` shows what already exists.
 - **An existing tool gave wrong or surprising output** (`request_kind: "fix_existing"`): name
   the tool, describe the symptom in `observed_issue` (expected vs. observed), and attach the
   ObsID that exposed it as validation data. Switch to a `tool_request` once you believe a tool

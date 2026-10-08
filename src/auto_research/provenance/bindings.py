@@ -63,6 +63,11 @@ _EXEMPT_RES = (
         r"\barXiv[:\s]*\d{4}\.\d{4,5}(?:v\d+)?|\b[a-z\-]+(?:\.[A-Z]{2})?/\d{7}(?:v\d+)?"
         r"|\b10\.\d{4,9}/[^\s,;)\]]+|\b\d{4}[A-Za-z&.]{5}[\d.]{4}[A-Z.][\d.]{4}[A-Z]\b"
     ),
+    # a hex identifier (an environment fingerprint, a commit SHA): 12+ lowercase hex characters with
+    # a letter other than e (`602214076000e12` is a number). The runtime prints these beside every result; restating one is not a value.
+    re.compile(r"\b(?=[0-9a-f]*[a-df])[0-9a-f]{12,64}\b"),  # a-d/f: `e` alone is an exponent
+    # an environment fingerprint as the runtime prints it, whatever its hex digits: "env:1234e5678901"
+    re.compile(r"\benv:[0-9a-f]{6,64}\b"),
     # an HTTP status code named with its reason phrase: "401 Unauthorized", "HTTP 429"
     re.compile(
         r"\bHTTP\s*[1-5]\d\d\b|\b[1-5]\d\d\s+(?:Unauthorized|Forbidden|Not Found|Too Many Requests|"

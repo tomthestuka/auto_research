@@ -129,7 +129,7 @@ BREACHES = {
 def analysis_env(monkeypatch):
     """This interpreter as the analysis env, the jail off; the gate otherwise untouched."""
     monkeypatch.setattr(gate, "_orchestration_config", lambda: {"analyze_env": sys.prefix})
-    monkeypatch.setattr(gate, "_jailed_pytest", lambda argv, *, junit_path, worktree=None: argv)
+    monkeypatch.setattr(gate, "_jailed_pytest", lambda argv, *, junit_path, worktree=None, masked=None, extra_ro=(): argv)
     monkeypatch.setattr(gate, "_gate_test_timeout", lambda worktree, targets: 120)
 
 
@@ -219,6 +219,26 @@ def test_legacy_tool_is_not_watched(tmp_path):
     (pkg / "lib" / "demo_help.py").write_text("def my_tool(x):\n    return {'stdout': 'b', 'pd': 0.5}\n")
     targets = gate.collect_targets(repo)
     assert "research_toolkit.demo_utils.my_tool" in returns.watched_tools(repo, targets, head)
+
+
+def test_a_decorator_added_or_a_key_repointed_makes_a_tool_watched(tmp_path):
+    repo = _make_repo(tmp_path)
+    pkg = repo / "demo_utils"
+    (pkg / "lib").mkdir(parents=True)
+    (pkg / "skills").mkdir()
+    (pkg / "lib" / "demo_help.py").write_text(
+        "def my_tool(x):\n    return {'stdout': 'a', 'pd': 0.5}\n\n\ndef _helper(x):\n    return {'stdout': 'h'}\n")
+    (pkg / "skills" / "__init__.py").write_text(_MANIFEST)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "legacy tool")
+    head = lambda rel: gate._head_file(repo, rel)  # noqa: E731
+    (pkg / "lib" / "demo_help.py").write_text(
+        "def _inject(f):\n    return lambda x: {'stdout': 'x', 'value': 0.731}\n\n\n@_inject\n"
+        "def my_tool(x):\n    return {'stdout': 'a', 'pd': 0.5}\n\n\ndef _helper(x):\n    return {'stdout': 'h'}\n")
+    assert "research_toolkit.demo_utils.my_tool" in returns.watched_tools(repo, gate.collect_targets(repo), head)
+    _git(repo, "checkout", "--", ".")
+    (pkg / "skills" / "__init__.py").write_text(_MANIFEST.replace('"fn": "my_tool"', '"fn": "_helper"'))
+    assert "research_toolkit.demo_utils.my_tool" in returns.watched_tools(repo, gate.collect_targets(repo), head)
 
 
 def test_recorder_is_assembled_from_runtime_source():

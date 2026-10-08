@@ -78,6 +78,8 @@ class ToolkitRegistry:
         # ``tool_config.yaml``; absent tools fall back to the global default
         # (``orchestration.yaml: sandbox_call_timeout_s``, resolved lazily in ``load``).
         self._call_timeout_ceiling: dict[str, int] = {}
+        #: Per-tool tested environment (``tool_config.yaml`` ``env:``), env plan B3b.
+        self._tool_env: dict[str, str] = {}
         self._default_call_timeout_s: int = _CALL_TIMEOUT_FALLBACK_S
         # The manifest packages imported on the last load() — reused by reload().
         self._manifest_packages: list[str] = []
@@ -155,6 +157,7 @@ class ToolkitRegistry:
             if inserted:
                 sys.path.remove(root_str)
         self._tools = {}
+        self._tool_env = {}
         self._loaded = False
         self.load()
 
@@ -216,6 +219,13 @@ class ToolkitRegistry:
             cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
         except Exception:  # noqa: BLE001 — a malformed config must not break discovery
             return
+        if not isinstance(cfg, dict):
+            return
+        env = cfg.get("env")
+        if isinstance(env, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,47}", env):
+            # The package's tested environment (env plan B3b): its tools run there.
+            for full in tool_names:
+                self._tool_env[full] = env
         per_tool = cfg.get("call_timeout_s") or {}
         pkg_default = cfg.get("default_call_timeout_s")
         for full in tool_names:
@@ -223,6 +233,12 @@ class ToolkitRegistry:
             value = per_tool.get(short, pkg_default)
             if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
                 self._call_timeout_ceiling[full] = int(value)
+
+    def tool_env(self, tool_name: str) -> str | None:
+        """The environment ``tool_name``'s package names in its ``tool_config.yaml`` (``env:``) —
+        built as ``ar-<env>`` — or ``None``: the worker's own (analysis) environment."""
+        self.load()
+        return self._tool_env.get(tool_name)
 
     def call_timeout_ceiling(self, tool_name: str) -> int:
         """The sandbox per-call timeout (seconds) for ``tool_name``.
@@ -248,13 +264,19 @@ class ToolkitRegistry:
         self.load()
         defs: list[dict] = []
         for kind, spec in self._tools.items():
-            defs.append(
-                {
-                    "name": self._function_name(kind),
-                    "description": spec["description"],
-                    "input_schema": spec.get("args_schema") or {"type": "object", "properties": {}},
-                }
-            )
+            schema = dict(spec.get("args_schema") or {"type": "object", "properties": {}})
+            properties = dict(schema.get("properties") or {})
+            env = self._tool_env.get(kind)
+            description = spec["description"]
+            if "env" not in properties:
+                # The caller's environment choice (B3b), declared on every toolkit tool.
+                properties["env"] = {"type": "string", "description": (
+                    "An environment name from list_env to run this call in instead of the tool's tested one; "
+                    "its result is marked as from an untested environment.")}
+                schema["properties"] = properties
+                if env:
+                    description += f"\n\nRuns in its tested environment ar-{env}."
+            defs.append({"name": self._function_name(kind), "description": description, "input_schema": schema})
         for kind, desc in self._mcp_tools.items():
             defs.append(
                 {

@@ -131,3 +131,5 @@ Compacted 2026-09-01 and again 2026-09-24 (detail in git history).
   follow_up exempt), `analyst_lead.md` (commit receipts; code facts in words), `analyst_worker.md`
   (no `python -c` arithmetic: derived values from a toolkit tool, requested via `tool_request`),
   `librarian_io.md` (a web page is a lead to its paper).
+- 2026-10-07 — **`analyst_colead.md`: production-threatening issues only** (user, after the B5 live cell: 12 co-lead rejections over 3 tools, each round a new, finer objection). Two questions before an issue is raised: would a real run hit it, and is it already caught (gate in the package environment, jail, receipts, lead and reviewer, human merge)? The issue names the real run that hits it. `lead_rebuttal` handling unchanged. Positive wording replaces the "Do not record…" sentence.
+- 2026-10-07 — **`coder.md`: mark each test by its class** (env plan T1): the toolkit's root `conftest.py` defines unmarked (fast, deterministic), `slow` (real data, minutes) and `live` (network; opt-in) tests; the gate's run has no network, so a tool also needs tests that pass offline.

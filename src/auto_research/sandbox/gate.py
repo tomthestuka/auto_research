@@ -33,8 +33,10 @@ the ``test_runner`` seam, mirroring ``merge_flow``'s deterministic-test design.
 from __future__ import annotations
 
 import ast
+import asyncio
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -43,6 +45,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
 from functools import lru_cache, partial
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -75,21 +78,84 @@ def _code_gate_config() -> dict:
 # Target enumeration — which .py files (and which added lines) the scan covers
 # ----------------------------------------------------------------------------
 
-_TOOLKIT_PKG_RE = re.compile(r"(^|/)[A-Za-z0-9_]+_utils(/|$)")
+# A top-level package only: `obsdb_catalog/evil_utils/` is inside the protected catalog writer.
+_TOOLKIT_PKG_RE = re.compile(r"^[A-Za-z0-9_]+_utils(/|$)")
+#: A software-environment definition file (env plan B3c): ``envs/<name>/<one of its files>``.
+_ENV_DEF_RE = re.compile(
+    r"^envs/([a-z0-9][a-z0-9_-]{0,47})/(?:env\.yaml|env\.lock|env\.pip|activate\.sh|boot\.py)$"
+)
+#: Pinned lists, checked line by line by the environment validator rather than scanned as prose.
+_ENV_PINNED_RE = re.compile(r"^envs/[^/]+/env\.(?:lock|pip)$")
+
+
+def _gated(rel: str) -> bool:
+    """Whether a changed path is the coder's to change: a ``*_utils`` package file or an
+    environment definition file, named without glob characters (git reads ``*?[`` in a pathspec
+    as a pattern; a name is only ever a name here)."""
+    # `.gitattributes`/`.gitmodules`/`.gitignore` change what git does to, or shows of, every other
+    # file (filters, encodings, submodules, hiding): never the coder's.
+    try:
+        rel.encode("utf-8")  # a name that is not UTF-8 (surrogate-escaped) is never a judged name
+    except UnicodeEncodeError:
+        return False
+    return bool((_TOOLKIT_PKG_RE.search(rel) or _ENV_DEF_RE.match(rel)) and not re.search(r"[*?\[\\]", rel)
+                and Path(rel).name not in (".gitattributes", ".gitmodules", ".gitignore"))
+
+
+def _clear_index_lock(root: Path) -> None:
+    """Remove the ``index.lock`` a git call the runtime timed out (and killed) left behind; only the
+    runtime runs git in the toolkit (the coder's ``.git`` is read-only), so nothing else holds it.
+    The git dir is ``.git`` itself or, in a linked worktree, the folder its ``.git`` file names."""
+    dot_git = Path(root) / ".git"
+    git_dir = dot_git
+    if dot_git.is_file() and not dot_git.is_symlink():
+        text = dot_git.read_text(encoding="utf-8", errors="replace").strip()
+        if text.startswith("gitdir:"):
+            git_dir = (Path(root) / text.split(":", 1)[1].strip()).resolve()
+    lock = git_dir / "index.lock"
+    if lock.is_file() and not lock.is_symlink():
+        lock.unlink(missing_ok=True)
 
 
 def _git(worktree: Path, *args: str) -> str:
-    out = subprocess.run(
-        ["git", *args], cwd=str(worktree), capture_output=True, text=True, check=True
-    )
-    return out.stdout
+    # surrogateescape: a latin-1 byte in a diff or a file name is carried, never a crash (a byte
+    # that is not UTF-8 killed the authoring flow, B3c-1 review 10); the file-level check then
+    # reports an undecodable file.
+    try:
+        out = subprocess.run(
+            ["git", "-c", "core.quotePath=false", *args], cwd=str(worktree), capture_output=True,
+            check=True, timeout=300,  # a hang is an error
+        )
+    except subprocess.TimeoutExpired:
+        _clear_index_lock(Path(worktree))
+        raise
+    # Bytes decoded by hand: text mode would turn a lone CR into a line break, shifting git's lines.
+    return out.stdout.decode("utf-8", "surrogateescape")
 
 
 def _head_file(worktree: Path, rel: str) -> str:
     """``rel`` as committed at HEAD, or ``""`` when HEAD has no such file."""
     proc = subprocess.run(["git", "-C", str(worktree), "show", f"HEAD:{rel}"],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, errors="surrogateescape", timeout=300)
     return proc.stdout if proc.returncode == 0 else ""
+
+
+def _status(worktree: Path) -> list[tuple[str, str]]:
+    """``(XY code, path)`` per changed path, from ``git status --porcelain -z -uall``: NUL-separated,
+    so a name with spaces or non-ASCII characters is the name itself, never git's quoted form; a
+    rename yields its new path (the old one is consumed)."""
+    raw = _git(worktree, "status", "--porcelain", "-z", "-uall").split("\0")
+    out, i = [], 0
+    while i < len(raw):
+        entry = raw[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        code, rel = entry[:2], entry[3:]
+        if "R" in code or "C" in code:
+            i += 1  # the original path of a rename or copy follows (index or work-tree side)
+        out.append((code, rel))
+    return out
 
 
 def collect_all_changes(worktree: Path) -> list[str]:
@@ -107,15 +173,7 @@ def collect_all_changes(worktree: Path) -> list[str]:
     This is the separate query that question needs. Ignored files never appear (``git status``
     omits them), so ``__pycache__`` and ``.pytest_cache`` do not show up here.
     """
-    status = _git(worktree, "status", "--porcelain", "-uall")
-    rels: list[str] = []
-    for line in status.splitlines():
-        if not line.strip():
-            continue
-        rel = line[3:].strip().split(" -> ")[-1]  # renames report "old -> new"
-        if rel:
-            rels.append(rel)
-    return sorted(set(rels))
+    return sorted({rel for _code, rel in _status(worktree) if rel})
 
 
 def collect_targets(worktree: Path) -> dict[Path, set[int] | None]:
@@ -127,17 +185,12 @@ def collect_targets(worktree: Path) -> dict[Path, set[int] | None]:
     """
     targets: dict[Path, set[int] | None] = {}
     # -uall lists each file inside a new untracked directory (not just the dir).
-    status = _git(worktree, "status", "--porcelain", "-uall")
-    for line in status.splitlines():
-        if not line.strip():
-            continue
-        code, _, rel = line[:2], line[2], line[3:].strip()
-        rel = rel.split(" -> ")[-1]  # renames
+    for code, rel in _status(worktree):
         # Track every changed/new file under a ``*_utils`` package — not only ``.py``.
         # Shell reduction scripts and other text artifacts are part of the tool and must
         # be gated and staged too (§9.2). The package filter keeps scratch outside a
         # ``*_utils`` package invisible, so explicit-path staging never leaks it (§9.9).
-        if not _TOOLKIT_PKG_RE.search(rel):
+        if not _gated(rel):
             continue
         path = worktree / rel
         if not path.is_file():
@@ -147,6 +200,15 @@ def collect_targets(worktree: Path) -> dict[Path, set[int] | None]:
         else:
             targets[path] = _added_lines(worktree, rel)
     return targets
+
+
+def collect_deleted(worktree: Path) -> list[str]:
+    """Gated paths (:func:`_gated`) the changeset deletes. :func:`collect_targets` lists files that
+    exist; a deletion must be staged and shown too, or the commit holds a tree the gate never saw
+    (B3c-1 review: a deleted ``env.lock`` turned a validated definition into an invalid one)."""
+    return sorted({rel for code, rel in _status(worktree)
+                   if "D" in code and _gated(rel)
+                   and (not os.path.lexists(worktree / rel) or (worktree / rel).is_dir())})
 
 
 _PKG_SEGMENT_RE = re.compile(r"[A-Za-z0-9_]+_utils")
@@ -173,16 +235,19 @@ def _touched_packages(worktree: Path, targets: dict[Path, set[int] | None]) -> d
 
 def _added_lines(worktree: Path, rel: str) -> set[int]:
     """Added line numbers (new-file side) from ``git diff`` of one modified file."""
-    diff = _git(worktree, "diff", "--unified=0", "--", rel)
+    # --text: a file over core.bigFileThreshold would show as "Binary files differ" and yield no
+    # added lines, leaving all of it unscanned.
+    diff = _git(worktree, "diff", "--text", "--unified=0", "--", rel)
     added: set[int] = set()
-    new_lineno = 0
-    for line in diff.splitlines():
+    new_lineno, in_hunk = 0, False
+    for line in diff.split("\n"):
         if line.startswith("@@"):
             m = re.search(r"\+(\d+)(?:,(\d+))?", line)
-            if m:
-                new_lineno = int(m.group(1))
+            new_lineno, in_hunk = (int(m.group(1)), True) if m else (new_lineno, in_hunk)
             continue
-        if line.startswith("+") and not line.startswith("+++"):
+        if not in_hunk or line.startswith("\\"):
+            continue  # file headers; "\ No newline at end of file" names no line
+        if line.startswith("+"):  # every `+` inside a hunk, `+++` included, is an added line
             added.add(new_lineno)
             new_lineno += 1
         elif not line.startswith("-"):
@@ -358,7 +423,7 @@ def scan_python_source(
 
     hard: list[CheckResult] = []
     findings: list[CheckResult] = []
-    source_lines = source.splitlines()
+    source_lines = source.split("\n")  # git's lines (`\n` only), as `added` counts them
 
     # Physical source lines that reference an ObsID/path token are exempt from the
     # vocabulary scan (§9.5 fixtures load a marked `synth…` ObsID directly).
@@ -375,10 +440,18 @@ def scan_python_source(
     # ── Vocabulary: scan comment / docstring / string-literal TEXT ──────────────
     seen_vocab: set[tuple[int, str]] = set()
 
-    def _scan_text(text: str, base_line: int) -> None:
+    def _scan_text(text: str, base_line: int, span: range | None = None) -> None:
+        # A string constant is in scope when any physical line it spans was added, and is then
+        # scanned whole: its value's own line breaks (a `\n` escape, a form feed) are not git's
+        # lines, so mapping them onto line numbers let added text escape (B3c-1 review 25).
+        if span is not None:
+            if added is not None and not any(line in added for line in span):
+                return
+            if all(line in allow_lines for line in span):
+                return
         for offset, raw in enumerate(text.splitlines()):
-            lineno = base_line + offset
-            if not _in_scope(lineno, added) or lineno in allow_lines:
+            lineno = base_line + offset if span is None else span.start
+            if span is None and (not _in_scope(lineno, added) or lineno in allow_lines):
                 continue
             low = raw.lower()
             for phrase in _match_vocabulary(low, vocab):
@@ -405,23 +478,30 @@ def scan_python_source(
         return hard, findings
 
     # Comments come from the raw text (AST drops them); strings/docstrings from the AST.
-    for offset, raw in enumerate(source.splitlines()):
+    # Lines as git counts them (`\n` only): `splitlines` also breaks on form feeds, `\r`, U+2028…
+    for offset, raw in enumerate(source.split("\n")):
         lineno = offset + 1
         if "#" in raw:
             # Only the comment portion (cheap heuristic: text after the last # that is
             # not inside an obvious string is good enough for a vocabulary scan).
             comment = raw[raw.index("#") :]
-            _scan_text(comment, lineno)
+            # One unit on git's line: a form feed or U+2028 inside it is not a line break there.
+            _scan_text(comment, lineno, range(lineno, lineno + 1))
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            _scan_text(node.value, getattr(node, "lineno", 0))
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+            start = getattr(node, "lineno", 0)
+            value = node.value if isinstance(node.value, str) else node.value.decode("utf-8", "replace")
+            _scan_text(value, start, range(start, (getattr(node, "end_lineno", None) or start) + 1))
 
     # ── Code patterns (hard + finding tiers) + literal-array findings + placeholder bodies (AST) ──
     pattern_lines: set[int] = set()  # one pattern report per line (nested attrs would double up)
     for node in ast.walk(tree):
         lineno = getattr(node, "lineno", None)
-        if lineno is None or not _in_scope(lineno, added):
+        # In scope when any line the node spans was added — not only its first: an added
+        # continuation line (`.random.normal(x)`) or a function body changed under an unchanged
+        # `def` line escaped otherwise (B3c-1 review 28).
+        if lineno is None or not _touches(node, added):
             continue
 
         if isinstance(node, (ast.Attribute, ast.Name)) and lineno not in pattern_lines:
@@ -439,7 +519,11 @@ def scan_python_source(
                               f"flagged code pattern ({dotted}) — the co-lead judges intent")
                         break
 
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_placeholder_body(node):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_placeholder_body(node) and (
+            _in_scope(lineno, added) or any(_touches(stmt, added) for stmt in _body_without_docstring(node.body))
+        ):
+            # The `def` line or the body itself changed — never a pre-existing placeholder flagged
+            # because some other line of a long function was edited.
             _hard("no_fabrication.placeholder_body", lineno, f"function {node.name!r} has a placeholder body")
 
         # Tier-3 findings
@@ -483,7 +567,7 @@ def scan_text_source(
     hard: list[CheckResult] = []
     findings: list[CheckResult] = []
     seen: set[tuple[int, str]] = set()
-    for lineno, raw in enumerate(source.splitlines(), 1):
+    for lineno, raw in enumerate(source.split("\n"), 1):  # git's lines (`\n` only)
         if not _in_scope(lineno, added) or any(rx.search(raw) for rx in allow_res):
             continue
         low = raw.lower()
@@ -738,15 +822,24 @@ def check_structural(
     # `run_gate` enumerates once, before Layer B executes, so an artifact a tool's own test writes
     # into the worktree cannot trip this in the same run.
     changes = collect_all_changes(worktree) if all_changes is None else all_changes
-    stray = [r for r in changes if not _TOOLKIT_PKG_RE.search(r)]
+    # A link among the changes (or a folder on its path replaced by one) would let the scans read,
+    # and Layer B import, files outside the worktree that are never staged.
+    # A folder entry is a nested repository (git lists one as `dir/`): its files are run by the
+    # tests but never scanned, shown or committed.
+    stray = [r for r in changes if not _gated(r) or r.endswith("/") or _through_link(worktree, r)]
+    stray += [r for r in untracked_ignore_files(worktree) if r not in stray]
     out.append(CheckResult(
         name="structural.changes_allowed", layer="A", passed=not stray,
         detail="" if not stray else (
-            f"changes outside a *_utils package: {stray}. Toolkit code lives in "
-            "<domain>_utils/{lib,skills,tests} (§9.2). Anything else — the catalog writer, "
-            "repo-root files, scratch — is not the coder's to edit: message the lead "
-            "(message to='lead') instead."
+            f"changes outside a *_utils package or an environment definition: {stray}. Toolkit "
+            "code lives in <domain>_utils/{lib,skills,tests} (§9.2); an environment in "
+            "envs/<name>/{env.yaml,env.lock,env.pip,activate.sh,boot.py}. Anything else — the "
+            "catalog writer, repo-root files, scratch — is not the coder's to edit: message the "
+            "lead (message to='lead') instead."
         ),
+    ))
+    out.extend(check_env_definitions(
+        worktree, changes, _touched_packages(worktree, targets), tool_spec.target_domain,
     ))
 
     # (b) a test file exists among the changes (untested tool is not mergeable, §9.4).
@@ -783,6 +876,207 @@ def check_structural(
     return out
 
 
+def untracked_ignore_files(worktree: Path) -> list[str]:
+    """Every ``.gitignore`` git does not track: written during the attempt, and able to hide
+    anything — itself included — from every check (a self-ignoring ``json/.gitignore`` hid a
+    ``json`` package that shadowed the standard library for every worker, B3c-1 review 16). The
+    ones pytest writes inside its own ``.pytest_cache`` (not an importable name) are left alone."""
+    # Ignored or not: one that does not ignore itself hides the rest just the same.
+    raw = (_git(worktree, "ls-files", "-o", "-i", "--exclude-standard", "-z")
+           + "\0" + _git(worktree, "ls-files", "-o", "--exclude-standard", "-z"))
+    # `.gitattributes` too: an untracked one changes how the reset itself checks files out (an
+    # encoding attribute left a file re-encoded after the reset, B3c-1 review 24).
+    return sorted({rel for rel in raw.split("\0")
+                   if rel and Path(rel).name in (".gitignore", ".gitattributes")
+                   and ".pytest_cache" not in Path(rel).parts})
+
+
+def changeset_manifest(worktree: Path) -> dict[str, str]:
+    """``{path: sha256 | "deleted"}`` for every gated file the changeset holds — what a commit
+    would stage. Recorded on the gate report, compared again before the commit."""
+    out = {}
+    for path in collect_targets(worktree):
+        rel = str(path.relative_to(worktree))
+        if not _interpreter_cache(rel):
+            out[rel] = _entry(path)
+    out.update({rel: "deleted" for rel in collect_deleted(worktree)})
+    return out
+
+
+def _entry(path: Path) -> str:
+    """A judged file's identity: ``<mode>:<sha256>`` of the file itself (a link is ``link:<target>``,
+    so a file swapped for a link to identical bytes, or made executable, no longer matches)."""
+    import stat
+
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        return f"link:{os.readlink(path)}"
+    return f"{stat.S_IMODE(info.st_mode):o}:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+
+
+def _export_judged(worktree: Path, manifest: dict[str, str], dest: Path, *, base: str = "HEAD") -> None:
+    """A clean tree for Layer B: the commit's parent (``HEAD``) plus exactly the judged files, each
+    checked against its manifest entry. Nothing else in the worktree — an ignored file, a stray
+    ``.pyc``, a self-ignoring ``.gitignore`` — can be imported by the tests, so what they ran is what
+    the commit holds. ``HEAD`` is written from its raw objects (``ls-tree`` + ``cat-file``), never
+    through ``git archive``, whose ``.gitattributes`` handling (``export-ignore``, ``export-subst``)
+    would make the tested tree differ from the committed one. Raises ``ValueError`` when a judged
+    file no longer matches."""
+    listing = subprocess.run(["git", "-C", str(worktree), "ls-tree", "-r", "-z", "--full-tree", base],
+                             capture_output=True, check=True, timeout=300).stdout.decode("utf-8", "surrogateescape")
+    entries = []
+    for row in filter(None, listing.split("\0")):
+        meta, rel = row.split("\t", 1)
+        mode, kind, sha = meta.split()
+        if kind == "blob":
+            entries.append((mode, sha, rel))
+    batch = subprocess.run(["git", "-C", str(worktree), "cat-file", "--batch"],
+                           input="".join(f"{sha}\n" for _m, sha, _r in entries).encode(),
+                           capture_output=True, check=True, timeout=300).stdout
+    dest.mkdir(parents=True)
+    offset = 0
+    for mode, _sha, rel in entries:
+        header_end = batch.index(b"\n", offset)
+        header = batch[offset:header_end].split()
+        if len(header) != 3 or header[1] != b"blob":
+            raise ValueError(f"HEAD object for {rel} is unreadable ({b' '.join(header).decode(errors='replace')})")
+        size = int(header[2])
+        body = batch[header_end + 1: header_end + 1 + size]
+        offset = header_end + 1 + size + 1
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if mode == "120000":
+            os.symlink(body.decode("utf-8", "surrogateescape"), target)
+        else:
+            target.write_bytes(body)
+            target.chmod(0o755 if mode == "100755" else 0o644)
+    import stat
+
+    for rel, entry in sorted(manifest.items(), key=lambda kv: kv[1] != "deleted"):  # deletions first
+        target = dest / rel
+        if entry == "deleted":
+            if target.is_symlink() or target.is_file():  # HEAD holds blobs and links only
+                target.unlink()
+            continue
+        # As `git add` sees it: a committed link on the way is replaced by a real folder, so a
+        # write never follows one out of the export (B3c-1 review 6).
+        walk = dest
+        for part in Path(rel).parts[:-1]:
+            walk = walk / part
+            if walk.is_symlink():
+                walk.unlink()
+            walk.mkdir(exist_ok=True)
+        if target.is_symlink():
+            target.unlink()
+        elif target.is_dir():  # a folder replaced by a file: its files were all deleted above
+            target.rmdir()
+        # Hash the bytes actually copied (one read), with the source's mode: what was judged.
+        fd = os.open(worktree / rel, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            data = handle.read() if stat.S_ISREG(info.st_mode) else b""
+        if f"{stat.S_IMODE(info.st_mode):o}:{hashlib.sha256(data).hexdigest()}" != entry:
+            raise ValueError(f"{rel} changed while the gate ran")
+        target.write_bytes(data)
+        target.chmod(int(entry.split(":", 1)[0], 8))
+
+def _interpreter_cache(rel: str) -> bool:
+    """Bytecode Python writes into ``__pycache__`` beside the code it imports: regenerated, never
+    authored. Anything else — a ``.py`` placed in ``__pycache__``, a sourceless ``.pyc`` beside the
+    code — is a judged file like any other (and the binary check fails a ``.pyc``)."""
+    return "__pycache__" in Path(rel).parts and rel.endswith((".pyc", ".pyo"))
+
+
+def _through_link(worktree: Path, rel: str) -> bool:
+    """Whether ``rel``, or any folder on its way inside ``worktree``, is a symbolic link."""
+    path = worktree
+    for part in Path(rel).parts:
+        path = path / part
+        if path.is_symlink():
+            return True
+    return False
+
+
+def check_env_definitions(
+    worktree: Path, changes: list[str], packages: dict[str, Path], target_domain: str | None = None,
+) -> list[CheckResult]:
+    """Each environment definition the changeset touches must validate (``env_build.validate``:
+    conda-forge explicit lock with checksums, hash-pinned pip wheels, a human base that exists,
+    externals only from the human's declared list) and must ship with a package that runs in it:
+    a touched package whose ``tool_config.yaml`` names it (``env: <name>``). One result per
+    definition; none when the changeset touches no definition."""
+    from auto_research.env import analysis_environment, declared_externals
+    from auto_research.sandbox.env_build import validate
+
+    names = sorted({m.group(1) for r in changes if (m := re.match(r"^envs/([^/]+)/", r))})
+    # Every package this session works on that names an environment must resolve to a
+    # definition: the brief's target package, and every package the changeset touches.
+    naming = dict(packages)
+    if target_domain and _PKG_SEGMENT_RE.fullmatch(target_domain) and (worktree / target_domain).is_dir():
+        naming.setdefault(target_domain, worktree / target_domain)
+    from auto_research.sandbox.env_build import _NAME
+
+    users = {pkg: _package_env(root) for pkg, root in naming.items()}
+    out = []
+    # A name, not a path: `../x`, `/abs`, `x/` resolve nowhere a definition may live.
+    unresolved = {pkg: env for pkg, env in users.items() if env is not None and (
+        not _NAME.fullmatch(env) or not (worktree / "envs" / env / "env.yaml").is_file())}
+    if unresolved or any(env is not None for env in users.values()):
+        out.append(CheckResult(
+            name="structural.env_resolves", layer="A", passed=not unresolved,
+            detail="" if not unresolved else "; ".join(
+                (f"{pkg}/tool_config.yaml names env {env!r}, but envs/{env}/env.yaml does not exist: "
+                 "write the definition there, or correct the name")
+                if _NAME.fullmatch(env) else
+                (f"{pkg}/tool_config.yaml names env {env!r}, which is not an env name: give the "
+                 "folder name under envs/ (lowercase letters, digits, '_' and '-')")
+                for pkg, env in sorted(unresolved.items(), key=lambda kv: kv[0])
+            ),
+        ))
+    if not names:
+        return out
+    human = analysis_environment()
+    bases = {human.name: human} if human is not None else {}
+    externals = declared_externals()
+    for name in names:
+        if not (worktree / "envs" / name).exists():
+            # A deleted definition (B3c-4 drops its build from the catalogue at commit): fine
+            # unless a package anywhere in the toolkit still runs in it.
+            still = sorted(p.name for p in worktree.glob("*_utils") if p.is_dir() and _package_env(p) == name)
+            out.append(CheckResult(
+                name=f"structural.env_definition.{name}", layer="A", passed=not still,
+                detail="" if not still else (f"envs/{name} is deleted but {', '.join(still)} still name it "
+                                             "in tool_config.yaml: point them at another env, or keep it."),
+            ))
+            continue
+        problems = validate(worktree / "envs" / name, base_envs=bases, externals=externals)
+        if name not in users.values():
+            problems.append(
+                f"no touched package names envs/{name}: add `env: {name}` to the tool_config.yaml "
+                "of the package whose tools run in it, so its tests run there."
+            )
+        out.append(CheckResult(
+            name=f"structural.env_definition.{name}", layer="A", passed=not problems,
+            detail="" if not problems else "; ".join(problems),
+        ))
+    return out
+
+
+def _package_env(package_root: Path) -> str | None:
+    """The environment a package's ``tool_config.yaml`` names (``env:``), or ``None``."""
+    path = package_root / "tool_config.yaml"
+    if not path.is_file():
+        return None
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 — a malformed config fails resolution, visibly
+        return "<tool_config.yaml does not parse>"
+    if not isinstance(data, dict) or data.get("env") is None:
+        return None
+    env = data["env"]
+    return env if isinstance(env, str) else repr(env)  # a non-name fails resolution, visibly
+
+
 def _manifest_keys(source: str) -> list[str]:
     """Extract the string keys of the ``TOOL_MANIFEST`` dict literal (pure-data, §9.2).
 
@@ -813,7 +1107,9 @@ def _manifest_keys(source: str) -> list[str]:
 
 # A test runner returns: {"results": list[CheckResult(layer="B")], "deterministic": bool,
 #                         "determinism_detail": str}
-TestRunner = Callable[[Path, list[str]], Awaitable[dict]]
+# ``(worktree, test_paths)``; a group of tests whose package names an environment also gets
+# ``environment=`` (B3c-2), and the default runner its group's ``returns_tools=``.
+TestRunner = Callable[..., Awaitable[dict]]
 
 
 def _layer_b_output_cap() -> int:
@@ -882,7 +1178,8 @@ def _layer_b_verdict(rc1: int, outcomes: dict[str, str], out1: str) -> tuple[boo
 
 async def _default_test_runner(
     worktree: Path, test_paths: list[str], *, timeout_s: int = 900,
-    returns_tools: dict[str, tuple[str, str]] | None = None,
+    returns_tools: dict[str, tuple[str, str]] | None = None, masked: Path | None = None,
+    environment: Any | None = None,
 ) -> dict:
     """Run the worktree's tests twice and compare **per-test outcomes** for determinism.
 
@@ -900,19 +1197,38 @@ async def _default_test_runner(
     Layer B passes only when pytest exits 0 **and** ≥1 test PASSED: an all-SKIPPED suite
     (validation data absent / hardcoded / off-host) also exits 0, and merging it would land a
     tool that never ran (§9.4). Nothing verified ⇒ fail, not silent pass.
+
+    ``environment`` (B3c-2): a pipeline environment the tested package names, built from the judged
+    definition. Its Python runs the tests, its activation sourced inside the jail
+    (:func:`envs.in_environment`, never in this process: it is coder-written and not yet reviewed),
+    its prefix and activation copy bound read-only. ``None``: the analysis environment, as before.
     """
     import os
 
-    from auto_research.sandbox.runner import _source_ini_env, with_private_param_dir
+    from auto_research.sandbox.runner import with_private_param_dir
 
     cfg = _orchestration_config()
-    analyze_env = cfg.get("analyze_env")
-    ini_sh = cfg.get("analyze_ini_sh")
-    python_exec = str(Path(analyze_env) / "bin" / "python") if analyze_env else "python"
+    from auto_research.env import analysis_environment
 
-    base_env = _source_ini_env(ini_sh) if ini_sh else dict(os.environ)
+    analysis = analysis_environment(cfg)
+    python_exec = str(analysis.python) if analysis is not None else "python"
+
+    if analysis is not None:
+        base_env = analysis.activation_env()
+    elif cfg.get("analyze_ini_sh"):  # an init script with no prefix: sourced clean, as before
+        from auto_research.sandbox.runner import _source_ini_env
+
+        base_env = dict(_source_ini_env(cfg["analyze_ini_sh"]))
+    else:
+        base_env = dict(os.environ)
     existing = base_env.get("PYTHONPATH", "")
     env = {**base_env, "PYTHONPATH": str(worktree) + (":" + existing if existing else "")}
+    extra_ro: tuple[str, ...] = ()
+    if environment is not None:
+        python_exec = str(environment.python)
+        env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")}
+        extra_ro = tuple(str(p) for p in (environment.prefix,
+                                          *((environment.activate.parent,) if environment.activate else ())))
 
     def _run(junit_path: str) -> tuple[int, str, dict[str, str]]:
         # The return check's recorder (G15) loads in both runs, so the two argvs stay identical for
@@ -922,12 +1238,21 @@ async def _default_test_runner(
         )
         argv = [python_exec, "-m", "pytest", "-p", "no:cacheprovider", *plugin_args, "-q",
                 f"--junitxml={junit_path}", *test_paths]
+        if environment is not None:
+            # A clean start in the environment, inside the jail below (the shared launcher).
+            import shlex
+
+            from auto_research.sandbox.envs import in_environment
+
+            script = in_environment(environment, f'{shlex.quote(python_exec)} "$@"', worktree, pass_args=True,
+                                    keep=("AR_RETURNS_OUT", "AR_RETURNS_TOOLS", "AR_RETURNS_COPY_CAP", "PYTHONPATH"))
+            argv = ["/bin/bash", "--noprofile", "--norc", "-c", script, "_", *argv[1:]]
         # The OS jail, with **no network** (§12): a mergeability verdict that can reach the network
         # is a verdict that depends on something other than the data on disk, and §9.4's premise is
         # real local input. Verified against all 30 existing Layer-B suites before being turned on.
         run_env = {**run_env, "PYTHONNOUSERSITE": "1"}
         unjailed = list(argv)
-        argv = _jailed_pytest(argv, junit_path=junit_path, worktree=worktree)
+        argv = _jailed_pytest(argv, junit_path=junit_path, worktree=worktree, masked=masked, extra_ro=extra_ro)
         # Its own HEASoft parameter folder (F23), shared by both runs like the private /tmp.
         private = _gate_private_tmp(junit_path)
         jailed = argv != unjailed
@@ -935,6 +1260,11 @@ async def _default_test_runner(
             run_env, "/tmp/pfiles" if jailed else private / "pfiles",
             create=private / "pfiles",
         )
+        if environment is not None:
+            # The launcher puts this writable half back after the activation (HEASoft's init points
+            # PFILES at the real home's folder, F23).
+            (private / "pfiles").mkdir(parents=True, exist_ok=True)
+            run_env["PFILES"] = "/tmp/pfiles" if jailed else str(private / "pfiles")
         # One pytest scratch folder for both runs, which pytest wipes when each run starts: run 1's
         # scratch is gone before run 2 with the jail on or off, whatever TMPDIR says.
         basetemp = "/tmp/pytest-gate" if jailed else str(private / "pytest-gate")
@@ -991,7 +1321,10 @@ def _gate_private_tmp(junit_path: str) -> Path:
     return path
 
 
-def _jailed_pytest(argv: list[str], *, junit_path: str, worktree: Path | None = None) -> list[str]:
+def _jailed_pytest(
+    argv: list[str], *, junit_path: str, worktree: Path | None = None, masked: Path | None = None,
+    extra_ro: tuple[str, ...] = (),
+) -> list[str]:
     """Wrap the Layer-B pytest invocation in the OS jail, network denied.
 
     The JUnit report is written to a throwaway directory outside the worktree, so that directory
@@ -1020,13 +1353,16 @@ def _jailed_pytest(argv: list[str], *, junit_path: str, worktree: Path | None = 
         if Path(e).resolve() != host_tmp and (tree is None or Path(e).resolve() != tree)
     )
     policy = JailPolicy(
-        ro=others,
+        ro=(*others, *extra_ro),
         rw=(str(Path(junit_path).parent), *((str(worktree),) if worktree else ()), str(home)),
         network=False,
         home=str(home),
         label="gate",
         tmp=str(_gate_private_tmp(junit_path)),
         home_at=JAIL_HOME_AT,
+        # The real worktree, when the tests run on an export of it: hidden, so a test cannot
+        # import an unjudged file from it by absolute path (B3c-1 review 5).
+        masked=(str(masked),) if masked is not None else (),
     )
     return wrap(argv, policy)
 
@@ -1151,14 +1487,18 @@ async def run_gate(
     # Enumerated once, here, BEFORE Layer B runs: an artifact a tool's own test writes into the
     # worktree must not be able to fail `changes_allowed` in the same gate run (F2).
     all_changes = collect_all_changes(worktree)
+    manifest = changeset_manifest(worktree)
+    base = _git(worktree, "rev-parse", "HEAD").strip()
 
+    watched = None
     if test_runner is None:
         # Bind the per-package timeout into the default runner only; an injected runner keeps
         # its (worktree, test_paths) signature untouched. Derived from the touched changeset
         # (like every other check), so it no longer depends on the brief's advisory field.
+        watched = returns.watched_tools(worktree, targets, partial(_head_file, worktree))
         test_runner = partial(
-            _default_test_runner, timeout_s=_gate_test_timeout(worktree, targets),
-            returns_tools=returns.watched_tools(worktree, targets, partial(_head_file, worktree)),
+            _default_test_runner, timeout_s=_gate_test_timeout(worktree, targets), masked=worktree,
+            returns_tools=watched,
         )
 
     layer_a: list[CheckResult] = []
@@ -1185,16 +1525,44 @@ async def run_gate(
                 detail=f"{rel} — undecodable (non-UTF-8) file in toolkit diff; data must not live in the toolkit (§9.5)",
             ))
             continue
-        if rel.endswith(".py"):
-            hard, finds = scan_python_source(rel, source, added=added, config=cfg)
-            layer_a.extend(hard)
-            findings.extend(finds)
-            if not _TEST_RE.search(rel):   # a test's figure dicts are fixtures, not tool returns
-                layer_a.extend(scan_figure_shape(rel, source, added=added))
-        else:
-            hard, finds = scan_text_source(rel, source, added=added, config=cfg)
-            layer_a.extend(hard)
-            findings.extend(finds)
+        if rel.endswith(".py") and re.search(r"^[ \t\f]*#.*?coding[:=][ \t]*(?!utf-?8\b)[-\w.]+", "\n".join(source.split("\n")[:2]), re.I | re.M):
+            # Python decodes a source by its PEP 263 cookie at import, the scans read UTF-8: under
+            # `utf-7` a "comment" is code (B3c-1 review 31). UTF-8 only.
+            layer_a.append(CheckResult(
+                name="no_fabrication.encoding", layer="A", passed=False,
+                detail=f"{rel} — a source-encoding declaration other than utf-8; write UTF-8 and drop it",
+            ))
+            continue
+        if re.search(r"\r(?!\n)", source):
+            # Python reads a lone CR as a line break, git does not: every scan scoped to git's
+            # added lines would then look at the wrong ones (B3c-1 review 27). No source needs one.
+            layer_a.append(CheckResult(
+                name="no_fabrication.line_endings", layer="A", passed=False,
+                detail=f"{rel} — a carriage return without a line feed; use \\n line endings",
+            ))
+            continue
+        if _ENV_PINNED_RE.match(rel):
+            # A pinned list of URLs and hashes, checked line by line in A.3: only its comment
+            # lines are prose (a package named like a banned word, `mock`, is not).
+            source = "\n".join(ln if ln.lstrip().startswith("#") else "" for ln in source.split("\n"))
+        try:
+            if rel.endswith(".py") and not _ENV_PINNED_RE.match(rel):
+                hard, finds = scan_python_source(rel, source, added=added, config=cfg)
+                layer_a.extend(hard)
+                findings.extend(finds)
+                if not _TEST_RE.search(rel):   # a test's figure dicts are fixtures, not tool returns
+                    layer_a.extend(scan_figure_shape(rel, source, added=added))
+            else:
+                hard, finds = scan_text_source(rel, source, added=added, config=cfg)
+                layer_a.extend(hard)
+                findings.extend(finds)
+        except (RecursionError, MemoryError):
+            # A file nested too deeply to parse or walk is a failed check, never a crash that ends
+            # the authoring (B3c-1 review 29).
+            layer_a.append(CheckResult(
+                name="no_fabrication.syntax", layer="A", passed=False,
+                detail=f"{rel} — nested too deeply to scan; write it as plain, shallow code",
+            ))
 
     # A.3 structural.
     structural = check_structural(worktree, tool_spec, targets, all_changes)
@@ -1209,7 +1577,36 @@ async def run_gate(
     structural_ok = all(c.passed for c in structural)
     if structural_ok:
         test_paths = sorted(str(p.relative_to(worktree)) for p in targets if _TEST_RE.search(str(p)))
-        outcome = await test_runner(worktree, test_paths)
+        export_root = Path(tempfile.mkdtemp(prefix="gate-export-"))
+        try:
+            export = export_root / worktree.name
+            try:
+                _export_judged(worktree, manifest, export, base=base)
+            except (ValueError, OSError, UnicodeError, subprocess.SubprocessError) as exc:
+                outcome = {"results": [CheckResult(
+                    name="layer_b.export", layer="B", passed=False,
+                    detail=f"the judged files could not be exported for the tests: {exc}",
+                )], "deterministic": True}
+            else:
+                outcome = await _run_layer_b(test_runner, export, test_paths, watched=watched)
+        finally:
+            shutil.rmtree(export_root, ignore_errors=True)
+        # What is judged is what was scanned: a test that writes into the worktree would change
+        # the changeset after the scans ([G3]).
+        after = changeset_manifest(worktree)
+        moved = sorted(k for k in set(manifest) | set(after) if manifest.get(k) != after.get(k))
+        moved += sorted(r for r in set(collect_all_changes(worktree)) - set(all_changes) - set(moved)
+                        if not _interpreter_cache(r))
+        # (The tests run on an export with the worktree hidden; this catches the rest — the jail
+        # off, or a process editing the worktree while the gate ran.)
+        layer_a.append(CheckResult(
+            name="structural.tests_left_tree_unchanged", layer="A", passed=not moved,
+            detail="" if not moved else (
+                f"the changeset changed while the gate ran: {moved[:10]}. The gate judges the files "
+                "as submitted; leave them untouched until it reports, and write test output under "
+                "pytest's tmp_path."
+            ),
+        ))
         layer_b.extend(outcome.get("results", []))
         findings.extend(outcome.get("findings", []))
         layer_a.append(CheckResult(
@@ -1229,8 +1626,114 @@ async def run_gate(
     reason = "gate passed" if passed else _failure_reason(layer_a, layer_b)
     return GateReport(
         passed=passed, layer_a=layer_a, layer_b=layer_b, findings=findings,
-        reason=reason, report_hash=_report_hash(layer_a, layer_b),
+        reason=reason, report_hash=_report_hash(layer_a, layer_b), manifest=manifest, base=base,
     )
+
+
+async def _run_layer_b(
+    test_runner: TestRunner, export: Path, test_paths: list[str], *, watched: dict | None = None,
+) -> dict:
+    """Layer B per environment (B3c-2): each package's tests run in the environment its
+    ``tool_config.yaml`` names, built from the judged definition in ``export`` into the gate's own
+    conda dir (``agent_conda_dir()/gate``: never listed, reused while the definition is unchanged);
+    tests of a package naming none run as before. The groups' outcomes are merged into one. With
+    ``watched`` (the default runner's return recorder), each group watches only its own
+    environment's tools: another environment's may not even import there."""
+    groups: dict[str | None, list[str]] = {}
+    for path in test_paths:
+        env = _package_env(export / path.split("/", 1)[0])
+        groups.setdefault(env, []).append(path)
+    if list(groups) == [None]:
+        return await test_runner(export, test_paths)
+
+    def own(env_id):
+        if watched is None:
+            return {}
+        return {"returns_tools": {k: v for k, v in watched.items()
+                                  if _package_env(export / v[0].split(".", 1)[0]) == env_id}}
+    merged: dict = {"results": [], "findings": [], "deterministic": True, "determinism_detail": ""}
+    for env_id, paths in groups.items():
+        if env_id is None:
+            outcome = await test_runner(export, paths, **own(None))
+        else:
+            environment, error = await _gate_environment(export, env_id)
+            if environment is None:
+                outcome = {"results": [CheckResult(
+                    name=f"layer_b.env.{env_id}", layer="B", passed=False,
+                    detail=f"envs/{env_id} did not build, so its package's tests could not run: {error}",
+                )], "deterministic": True}
+            else:
+                outcome = await test_runner(export, paths, environment=environment, **own(env_id))
+        merged["results"] += outcome.get("results", [])
+        merged["findings"] += outcome.get("findings", [])
+        if not outcome.get("deterministic", True):
+            merged["deterministic"] = False
+            detail = f"[{f'env {env_id}' if env_id else 'analysis env'}] {outcome.get('determinism_detail', '')}"
+            merged["determinism_detail"] = "; ".join(filter(None, (merged["determinism_detail"], detail)))
+    return merged
+
+
+async def _gate_environment(export: Path, env_id: str) -> tuple[Any | None, str]:
+    """The environment ``envs/<env_id>`` of the judged files, built for the gate; or why not."""
+    from auto_research.env import agent_conda_dir, analysis_environment, conda_executable, declared_externals
+    from auto_research.sandbox.env_build import StoppableRunner, build, read_definition
+    from auto_research.sandbox.jail import jail_enabled
+
+    import time
+
+    from auto_research.sandbox.env_build import _remove_tree
+
+    human = analysis_environment()
+    runner = StoppableRunner()
+    gate_root = agent_conda_dir() / "gate"
+
+    def _build():
+        import fcntl
+
+        definition = read_definition(export / "envs" / env_id)
+        conda_dir = gate_root / definition.digest()[:16]
+        gate_root.mkdir(parents=True, exist_ok=True)
+        # One folder per definition digest: concurrent gates (a benchmark's trials) never move one
+        # another's build while its tests run; one unused for a day is removed, under one lock so
+        # two gates never prune and rebuild the same folder at once.
+        with open(gate_root / ".prune.lock", "a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            for old in gate_root.iterdir():
+                try:
+                    if old.is_dir() and old != conda_dir and time.time() - old.stat().st_mtime > 86400:
+                        _remove_tree(old)
+                except OSError:
+                    pass
+            conda_dir.mkdir(parents=True, exist_ok=True)
+            os.utime(conda_dir)
+        return build(definition, conda_dir=conda_dir,
+                     conda_exe=conda_executable(), base_envs={human.name: human} if human else {},
+                     externals=declared_externals(), jailed=jail_enabled(), runner=runner), conda_dir
+    def _reachable(built):
+        # A derived environment with no activation of its own sources its base's, the human's init
+        # script, which may lie where the jail binds nothing (this repository): a copy inside this
+        # build's own folder (pruned with it), bound with it, written whole before it is used.
+        import dataclasses
+        import uuid
+
+        environment, conda_dir = built
+        if environment.activate is None or environment.activate.resolve().is_relative_to(conda_dir.resolve()):
+            return environment
+        data = environment.activate.read_bytes()
+        copy = conda_dir / "activation-base" / hashlib.sha256(data).hexdigest()[:16] / environment.activate.name
+        if not copy.is_file() or copy.read_bytes() != data:
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            temp = copy.with_name(f".{copy.name}.{uuid.uuid4().hex}")
+            temp.write_bytes(data)
+            os.replace(temp, copy)
+        return dataclasses.replace(environment, activate=copy)
+    try:
+        return _reachable(await asyncio.to_thread(_build)), ""
+    except asyncio.CancelledError:
+        runner.stop()
+        raise
+    except Exception as exc:  # noqa: BLE001 — a build failure is a failed Layer B, said to the coder
+        return None, f"{type(exc).__name__}: {str(exc)[-800:]}"
 
 
 def _failure_reason(layer_a: list[CheckResult], layer_b: list[CheckResult]) -> str:

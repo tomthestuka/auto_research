@@ -1030,8 +1030,14 @@ class ReviewerAgent(AgentRole):
         # The knowledge base the reader takes titles and identifiers from: the provider's, or the
         # default database `text_search` itself falls back to, so the two never disagree.
         storage = getattr(getattr(provider, "retrieval", None), "storage", None) or Storage()
+        from auto_research.env import papers_dir as _papers_dir
+
+        papers = _papers_dir().resolve()
         reader = PaperReader(
-            store, lookup, source=REVIEWER_SOURCE, allowed=provider._allowed,
+            # A paper receipt is evidence: only a PDF in the papers folder becomes one, never a file
+            # a run wrote (a worker's scratch PDF had read as a paper).
+            store, lookup, source=REVIEWER_SOURCE,
+            allowed=lambda p: provider._allowed(p) and Path(p).resolve().is_relative_to(papers),
             storage=storage,
             unreadable_action="state it as a limitation if the review depended on it",
         )
@@ -1375,6 +1381,9 @@ class AnalystWorkerAgent(AgentRole):
             "peer_reports": [report.model_dump(mode="json") for report in peer_reports],
             "available_toolkits": list(self.available_toolkits),
             "memory": memory or None,
+            # The software environment its tools run in, named up front (env plan B2a); `list_env`
+            # shows its packages.
+            "environment": _environment_brief(self.sandbox),
         }
         peer_figures = [figure for report in peer_reports for figure in report.figures]
 
@@ -2960,3 +2969,16 @@ def _reply_dir_for(agent_folder):
     from auto_research.sandbox.workspace import human_reply_dir
 
     return human_reply_dir(agent_folder)
+
+
+def _environment_brief(sandbox) -> dict | None:
+    """Name, Python version and fingerprint of the environment a worker's tools run in."""
+    environment = getattr(sandbox, "environment", None)
+    if environment is None:
+        return None
+    try:
+        from auto_research.sandbox.envs import describe
+
+        return describe(environment)
+    except Exception:  # noqa: BLE001 — an unreadable env leaves the brief out, never the turn
+        return {"name": environment.name}

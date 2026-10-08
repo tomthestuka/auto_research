@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import textwrap
 from pathlib import Path
 
@@ -341,24 +342,37 @@ def watched_tools(worktree: Path, targets: dict[Path, set[int] | None], head_man
         if not manifest.is_file():
             continue
         entries = manifest_entries(manifest.read_text(encoding="utf-8"))
-        old = set(manifest_entries(head_manifest(str(manifest.relative_to(worktree)))))
+        old = manifest_entries(head_manifest(str(manifest.relative_to(worktree))))
         for key, (module, fn) in entries.items():
-            if key not in old:
+            if old.get(key) != (module, fn):  # new, or re-pointed to another module or function
                 out[key] = (module, fn)
                 continue
-            source = worktree / (module.replace(".", "/") + ".py")
-            if source not in targets:
+            base = worktree / module.replace(".", "/")
+            source = next((p for p in (base.with_suffix(".py"), base / "__init__.py") if p in targets), None)
+            if source is None:
                 continue
             added = targets[source]
             try:
-                tree = ast.parse(source.read_text(encoding="utf-8"))
-            except (OSError, SyntaxError):
+                text = source.read_bytes().decode("utf-8")
+                tree = ast.parse(text)
+            except (OSError, SyntaxError, UnicodeDecodeError, ValueError, RecursionError, MemoryError):
+                out[key] = (module, fn)  # cannot be read: watched, never skipped
                 continue
-            for node in tree.body:
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == fn:
-                    span = range(node.lineno, (node.end_lineno or node.lineno) + 1)
-                    if added is None or any(n in added for n in span):
-                        out[key] = (module, fn)
+            if re.search(r"\r(?!\n)", text):
+                # Python and git count lines differently around a lone CR: the span cannot be
+                # mapped to git's added lines, so the tool is watched (B3c-1 review 25).
+                out[key] = (module, fn)
+                continue
+            top = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn]
+            if not top:  # defined under an `if`/`try`, or not as a plain `def`: watched, never skipped
+                out[key] = (module, fn)
+                continue
+            for node in top:
+                # From the first decorator: one added above an unchanged `def` changes the tool.
+                first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
+                span = range(first, (node.end_lineno or node.lineno) + 1)
+                if added is None or any(n in added for n in span):
+                    out[key] = (module, fn)
     return out
 
 

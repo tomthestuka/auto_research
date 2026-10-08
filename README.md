@@ -19,10 +19,10 @@ at all — self-modification is impossible by construction.
 
 Coding agents: read **`CLAUDE.md`** before doing anything. It is the single source of
 truth for how this project is built — current status, the phase spec, and the build
-order live there, not here. **Phase 3 (in planning):** generalizing the agent unit inside this
-repository (per-unit toolkit and sandbox, subagent grants, and software environments built only by
-the coding pipeline); the Phase 2 spec is
-archived in `CLAUDE_p2.md`.
+order live there, not here. **Phase 3 (active):** generalizing the agent unit inside this
+repository (per-unit toolkit and sandbox, subagent grants). Its software-environment stream is
+built and live-verified: the coding pipeline defines and builds environments, and each toolkit call
+runs in its package's own. The Phase 2 spec is archived in `CLAUDE_p2.md`.
 
 ---
 
@@ -80,6 +80,20 @@ tests are opt-in and env-gated.
    the observation data. Heavy and host-specific. **Without it the graph still runs end-to-end** —
    only the analyst tool calls fail (caught by the error-feedback loop).
 
+**Pipeline-built environments.** A toolkit package may name its own environment in its
+`tool_config.yaml` (`env: <id>`), defined in the toolkit at `envs/<id>/` (a conda-forge lock,
+pinned pip wheels, an activation and a REPL boot file). Only the coding pipeline writes these; the
+runtime builds them, jailed, into `<runtime_dir>/conda/envs/ar-<id>` (never your own conda
+environments or package cache), runs the package's tests in it at the gate, and runs its tools in
+it for the workers. Every receipt names the environment it ran in, and
+`auto_research.env.replay_environment(<fingerprint>)` rebuilds a recorded state. Optional config:
+`conda_exe` (default `$CONDA_EXE` or `conda` on `PATH`) and `env_externals` (software outside conda,
+such as HEASoft and CALDB, stamped on every receipt). `xspec_utils` runs in `ar-xspec` (toolkit `envs/xspec/`);
+a package that names no environment runs in the configured analysis environment. A routed tool runs
+only with `agent_os_jail: true`, and every path its activation or boot file reads (for `ar-xspec`,
+HEASoft, CALDB and the relxill folder) must be on the allow-list. The first launch builds `ar-xspec`
+(about a minute on local disk; much longer when the runtime dir is on NFS).
+
 ### Manual setup (or what the installer automates)
 
 Everything the installer does, by hand:
@@ -113,7 +127,7 @@ smoke test.
 |---|---|
 | `.env` | API keys and optional tracing flags. Loaded automatically. Never committed (`cp .env.example .env`). |
 | `config/models.yaml` | Role → model-group mapping (OpenAI/Anthropic/Google/DeepSeek/Z.AI/Qwen). No model IDs in code. |
-| `config/orchestration.yaml` | `runtime_dir`, iteration/ReAct caps, `toolkit_root`, `analyze_env`, `analyze_ini_sh`, `disabled_tools`, `agent_fs_allow` (the per-agent filesystem allow-list), the internet-stability retry policy (`provider_retry_*` — transient provider failures waited out with growing cooldowns instead of killing the run), report formats, report retry cap, and Phase-2 authoring caps. |
+| `config/orchestration.yaml` | `runtime_dir`, iteration/ReAct caps, `toolkit_root`, `analyze_env`, `analyze_ini_sh`, `env_externals`, `conda_exe`, `disabled_tools`, `agent_fs_allow` (the per-agent filesystem allow-list), the internet-stability retry policy (`provider_retry_*` — transient provider failures waited out with growing cooldowns instead of killing the run), report formats, report retry cap, and Phase-2 authoring caps. |
 | `config/observations.yaml` | `obs_db_root` — the single obs-db folder; missions are its `<MISSION>` subdirs (those holding a `catalog.json`), discovered from disk and treated as data. |
 | `AUTO_RESEARCH_CONFIG_DIR` | Optional. Names a directory holding all four files below, and every reader honours it, so one process can be run against a whole different configuration — other model seats, another toolkit checkout, another runtime and obs root — without editing anything here. Unset (the normal case) is `config/`. An environment variable because the readers include subprocesses that inherit it and are not all Python. The `.example` templates and `.env` stay with the repo either way. |
 | `config/code_gate.yaml` | The Phase-2 gate's no-fabrication scan lists (banned vocabulary, hard-fail vs finding-tier code patterns — which list a pattern sits in decides its severity; RNG is finding-tier since Monte-Carlo tools need randomness — literal-array findings, ObsID allowlist). A Tier-1 word inside an explicit negation is demoted to the finding tier, so prose stating the no-fabrication discipline is not rejected for stating it. Human-tunable; no scan constant in code. |
@@ -451,7 +465,7 @@ Current role/tool surfaces:
 |---|---|---|
 | Librarian | `LibrarianToolProvider`: arXiv/ADS/web search, full-text reading of papers and pages (each minted as a receipt), local text search, `edit_report`/`turn_end`. | One research pass: a `LiteratureReport` whose findings cite, by handle, the documents it read. |
 | Local retrieval | Pure-Python `text_search()`/`vector_search()` (stub) over SQLite, reached through the **reviewer's** `text_search` and the shared `read_paper` (which attaches the PDF) — not a graph node. | Returns local paper paths and attaches chosen PDFs; no standalone LLM role. |
-| Analyst worker | `SandboxToolProvider`: `research_toolkit` manifest tools (including `catalog_utils`'s read-only `data_catalog`) + MCP tools in a persistent sandbox, plus `web_search`, `web_fetch`, and the report tools `edit_report`/`review_report`. | `analyze()` chains load→fit→run→plot or other tools, self-corrects in-loop, then **writes its report via `edit_report`**, citing figures from its catalog. |
+| Analyst worker | `SandboxToolProvider`: `research_toolkit` manifest tools (including `catalog_utils`'s read-only `data_catalog`) + MCP tools in a persistent sandbox — each toolkit call in its package's tested environment, or another chosen with `env` (marked untested) — plus `list_env`/`use_env` (its shell), `web_search`, `web_fetch`, and the report tools `edit_report`/`review_report`. | `analyze()` chains load→fit→run→plot or other tools, self-corrects in-loop, then **writes its report via `edit_report`**, citing figures from its catalog. |
 | Analyst lead | `ReadOnlyToolProvider`: run artifacts, figures, memory, papers dir, full `research_toolkit` source, the `data_catalog` tool (from `research_toolkit`'s `catalog_utils`, run in-process for the sandbox-less lead), `web_search` + `web_fetch` (`include_text_search=False` — knowledge-base search is the reviewer's), `edit_report`/`review_report`, the three authoring tools, `author_chain`, and `turn_end`. | **One cycle** (`run_cycle`): one ReAct loop with **no stages** — investigate, brief a coding chain if the analysts hit a missing capability, drive and submit each link, write the report, end on `turn_end`. **The report is the decision**: `rework=true` sends the analysts back with a probe, `rework=false` makes it the analysis result. `author_chain` is a *brief*, not a terminal — a finished link advances the chain on a tool result, so a dead link is a sentence in the conversation rather than the end of the turn. A cycle that commits anything ends before judging, so the committed tools are reloaded and the workers rerun on them first. Also answers author clarifications. |
 | Analyst co-lead | `ReadOnlyToolProvider`: the authored toolkit worktree + `web_search` + `web_fetch` (`include_text_search=False`). | Provider-decorrelated **code review** of one authored tool — brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs → `ToolReviewVerdict`. |
 | Reviewer | `ReadOnlyToolProvider`: run artifacts, figures, memory, `web_search` + `web_fetch`, `text_search`, and the shared `read_paper` (attaches the PDF itself; papers are cited by handle and never text-matched, each paper value attributed with its place in the paper and listed for verification), `edit_report`/`review_report` (the draft shown as rendered pages), `turn_end`. | The sole I/O: scopes and plans each request, then files one `ReviewerReport` per turn whose `assign_to` routes the graph (librarian, analysts, or the human). A report to the human is rendered by the harness (its PDF carries a "values to verify against the PDFs" appendix) and sent as a PDF; the human's reply returns as a nudge. |

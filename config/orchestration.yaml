@@ -9,6 +9,9 @@ analyze_env: /grad/fzhou/.conda/envs/astropy        # conda prefix with the anal
 analyze_ini_sh: /nfsdata1/fzhou/auto_research/src/auto_research/sandbox/analyst_env.sh  # headless env sourced per tool subprocess (HEADAS/CALDB, no interactive cruft)
 repl_init_py: /nfsdata1/fzhou/auto_research/src/auto_research/sandbox/repl_init.py       # python exec'd at REPL-subprocess boot (domain session setup); empty/absent ⇒ no-op
 analyze_probe: "import xspec, xspec_utils"  # one-line python smoke-test run under analyze_env (installer + preflight); empty ⇒ skip
+env_externals:                                   # software outside conda the analysis env uses; stamped (hashed) on every receipt, not rebuilt
+  heasoft: {root: /opt/heasoft/heasoft-6.34/x86_64-pc-linux-gnu-libc2.34, stamps: [BUILD_DIR/build.txt, BUILD_DIR/config.txt]}
+  caldb: {root: /man1/CALDB, stamps: [data/ixpe/gpd/caldb.indx, data/ixpe/xrt/caldb.indx]}
 
 # ── Feedback-loop caps (hard backstops against pathology, not workflow budgets) ──
 max_iterations: 3            # reviewer→work send-backs per feedback edge (literature / analysis)
@@ -62,6 +65,7 @@ gate_test_timeout_s: 900      # per pytest invocation in the gate's Layer-B (run
 agent_fs_allow:
   - /data/fzhou/research_toolkit          # toolkit_root (coder's worktree)
   - /data/fzhou/XSPEC/Cyg_X-1             # obs_db_root (observations.yaml)
+  - /data/fzhou/XSPEC/relxill             # relxill local models (envs/xspec/boot.py lmod)
   - /grad/fzhou/.conda/envs/astropy       # analyze_env
   - /opt/heasoft/heasoft-6.34/x86_64-pc-linux-gnu-libc2.34   # HEADAS
   - /opt/heasoft/heasoft-6.34                                # HEASoft release root: PyXspec's
@@ -80,6 +84,7 @@ agent_fs_readonly:            # subset of agent_fs_allow the jail mounts read-on
   - /opt/heasoft/heasoft-6.34/x86_64-pc-linux-gnu-libc2.34   # HEADAS
   - /opt/heasoft/heasoft-6.34                                # HEASoft release root
   - /man1/CALDB                                              # CALDB
+  - /data/fzhou/XSPEC/relxill                                # relxill local models
 
 # ── Tool discovery ──
 mcp_servers: []      # extra MCP servers for workers ({name,command,args}); empty ⇒ built-in only (bash_exec/list_dir/read_file)

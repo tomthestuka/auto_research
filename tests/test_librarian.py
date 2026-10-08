@@ -477,3 +477,22 @@ def test_a_librarian_cannot_cite_another_roles_receipt(tmp_path):
     _run(p.execute("edit_report", report))
     outcome = _run(p.execute("turn_end", {"summary": "done"}))
     assert outcome.is_error and "not a receipt you can cite" in outcome.text
+
+
+def test_read_paper_by_path_takes_only_the_papers_folder(tmp_path):
+    """A paper receipt is evidence: a PDF a run wrote (a worker's scratch) never becomes one; a PDF
+    in the papers folder, where downloads land, does."""
+    p = _provider(tmp_path)
+    scratch = tmp_path / "runs" / "r1" / "workers" / "w0"
+    scratch.mkdir(parents=True)
+    forged = scratch / "arxiv_2201.07360.pdf"
+    forged.write_bytes(b"%PDF-1.5 PD = 9.9 %")
+    refused = _run(p.execute("read_paper", {"path": str(forged)}))
+    assert refused.is_error and "papers folder" in refused.text
+    assert not [r for r in p.store.receipts() if r.kind == "paper"]
+
+    (tmp_path / "papers").mkdir(exist_ok=True)
+    local = tmp_path / "papers" / "arxiv_2101.00001.pdf"
+    local.write_bytes(b"%PDF-1.5 a real download")
+    opened = _run(p.execute("read_paper", {"path": str(local)}))
+    assert not opened.is_error, opened.text

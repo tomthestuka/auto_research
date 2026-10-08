@@ -674,7 +674,12 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
   server (`graph.runtime._builtin_server_config`) already share `jail.analysis_policy`
   (`sandbox/jail.py`), which the launcher step absorbs.
 - **Environments** (handoff [F18], its own work stream; rulings 2026-10-05/06 recorded in
-  `tmp_agent_envs_plan.md`):
+  `tmp_agent_envs_plan.md`). **Built and live-verified 2026-10-07** (plan B1–B5): definitions,
+  the jailed builder, the coder's environment tools, the gate's Layer B in the package's
+  environment, build on commit, launch reconcile and drift, replay, and routing of each toolkit
+  call into its package's environment. The toolkit step (T1) landed 2026-10-07: `xspec_utils` runs
+  in `ar-xspec`, and the toolkit's root `conftest.py` sorts tests into unmarked, `slow` and `live`
+  (opt-in).
   - **Owned only by the coding pipeline.** Agent environments are named `ar-<name>` and are created
     or changed only by a gated, reviewed commit. Every unit lists and uses environments and never
     modifies them. A missing environment is a `tool_request` to the lead, then to the pipeline.
@@ -690,8 +695,8 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
     environment, named in the tool description. An override runs, and its receipt is flagged
     "untested env" (still evidence, fingerprint stamped). Every result names its environment.
     `use_env` switches only the unit's own REPL and shell (navigation).
-  - **Human environments** (today `astropy`) are ordinary environments units use read-only. After
-    the toolkit step they serve only a unit's own REPL and shell.
+  - **Human environments** (today `astropy`) are ordinary environments units use read-only. They
+    serve a unit's own REPL and shell, and the packages that name no environment.
   - **Provenance.** Every receipt stamps an environment fingerprint, a lock store rebuilds any
     recorded version, and trajectories replay with their environment.
   - **No model-filled environment field in a brief.** The source environment is derived from the
@@ -706,22 +711,24 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
   - **Storage.** Agent environments, packages and locks live under the runtime data dir, apart from
     the human's conda cache (human environments hardlink into `~/.conda/pkgs`, measured). No agent
     writes a human environment or that cache.
-  - **Sequencing.** Until the toolkit step — scheduled after this repository's work — the analysis
-    environment stays config-defined (`analyze_env`, `analyze_ini_sh`, `repl_init_py`). At that
-    step:
-    - its activation moves into the toolkit as an environment definition;
-    - `xspec_utils` gets its own environment and stops using the human `astropy` one;
-    - that environment's lock must be ABI-matched to the HEASoft build of PyXspec, which was built
-      against the system copy `/opt/anaconda/anaconda3/envs/astropy` (Python 3.13), not the
-      configured `analyze_env` `/grad/fzhou/.conda/envs/astropy`.
+  - **Sequencing (T1, done 2026-10-07).** `xspec_utils` names `ar-xspec`, defined at
+    `research_toolkit/envs/xspec/`: activation sourcing the HEASoft and CALDB externals, a boot file
+    for the XSPEC session and relxill, and a lock ABI-matched to HEASoft's PyXspec (built against
+    `/opt/anaconda/anaconda3/envs/astropy`, Python 3.13). Its tests give the same results there as in
+    the human environment. The config-defined analysis environment (`analyze_env`,
+    `analyze_ini_sh`, `repl_init_py`) stays for a unit's own REPL and shell and for packages naming
+    no environment (`heasarc_utils`, `catalog_utils`); its keys retire when nothing needs it.
   - **Accepted residual risks:**
     - an upstream package removed;
-    - in-place edits that escape the fingerprint;
+    - in-place edits that escape the fingerprint, including a file a build's own package script
+      writes outside the conda records (ruling 2026-10-06: `verify` checks records and pins, not
+      the files a build may have dropped);
     - externals that cannot be rebuilt;
     - a user `.so` outside any environment, which is not hashed;
     - a human activating an `ar-` environment.
-  - **Open:** F21 — the REPL boot file lives in this repository, which the jail does not mount, so it
-    has never run in jailed runs. Also open: a notice when a human environment changes between a
+  - **Open:** F21, narrowed by T1 — a toolkit call routed to `ar-xspec` runs the toolkit's boot
+    file in the jail (relxillCp loads, probed 2026-10-07), but `repl_init_py` lives in this
+    repository, which the jail does not mount, so a unit's default REPL starts without it. Also open: a notice when a human environment changes between a
     unit's calls or runs.
 
 ### 9.7 Subagents per unit — on/off, two kinds
@@ -782,7 +789,7 @@ before moving on, and stop to verify the checkpoint. Statuses: **Todo** · **Don
 | 1 | Todo | **One unit** — `_react` + channel + report tools + `turn_end` as one unit; the four roles become definitions with validators; exceptions contained at the unit boundary (§9.3.8). | Each role's tests pass through the unit; one live cell per role. |
 | 2 | Todo | **Toolkits per unit** + the generalised evidence predicate. | Two units with different toolkits in one run; a tool of an unregistered toolkit grounds nothing. |
 | 3 | Todo | **Sandbox + execution per unit; one launcher** (absorbs `jail.analysis_policy`, landed with F20). | Jail on/off per unit; every process a unit starts goes through the launcher; a unit with no backend has no shell. |
-| 4 | Todo | **Environments** — the F18 work stream's build list, plugged into the execution backend and the coding pipeline. | Receipts carry environment fingerprints; a toolkit call runs in its package's tested environment; human environments untouched. |
+| 4 | Done (2026-10-07, on today's backend, ahead of 1–3) | **Environments** — the F18 work stream's build list, plugged into the execution backend and the coding pipeline. | Receipts carry environment fingerprints; a toolkit call runs in its package's tested environment; human environments untouched. |
 | 5 | Todo | **Subagents, kind A** — grants, monotone reach, depth and count caps. | A parent spawns a child and cites its receipts; a child asking for more reach is refused. |
 | 6 | Todo | **Coding pipeline as kind B** — `author_chain` → a grant any unit may hold. | A non-lead unit authors a tool into its toolkit's branch; a `commit` receipt; registry reload. |
 | 7 | Todo | **Live parity run** — one PI question end to end on the generalized unit. | Accepted, with a ledger of the same shape as Phase 2's. |
@@ -796,8 +803,9 @@ before moving on, and stop to verify the checkpoint. Statuses: **Todo** · **Don
 3. **Jail default when `bwrap` is missing:** fail the launch, or warn and run (today: warn).
 4. **The librarian's toolkit:** relocate literature search into a toolkit package now (P2 §9.2
    `lib_utils`), or keep `auto_research/sources` and give the librarian no toolkit.
-5. **F21:** how the REPL boot file reaches a jailed REPL before the toolkit step moves it into an
-   environment definition (handoff; awaiting a ruling).
+5. **F21 (narrowed by T1):** whether a unit's default REPL needs a boot file at all now that
+   `xspec_utils` calls run in `ar-xspec` with the toolkit's; if so, how `repl_init_py` reaches the
+   jail.
 
 
 ---
@@ -960,6 +968,15 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 - **Slack Socket Mode can stop delivering events after idle, silently** (bolt-python#1529, closed
   not-planned 2026-09-14); ruling 2026-09-25: Telegram is the channel, Slack not pursued.
 - **`retrieval.vector_search`** — `NotImplementedError` stub (§12 RAG).
+- **Environment pipeline residuals (2026-10-07):** after any unjailed build, the sticky taint makes
+  every jailed build fresh until a human removes `built/unjailed.json`; each build downloads its
+  packages afresh (one tool pays ~3 downloads, [F30]); input hashing resolves a worker's paths on
+  the host, not in its jail ([F29]); the shell server keeps `-P`, so the analysis interpreter must
+  be 3.11+; a derived environment's human base activation is copied for the jail (relative
+  sourcing inside it fails loudly).
+- **Provenance edges found 2026-10-07 ([R8]):** numbers inside a quote's locator are not scanned;
+  a decimal tail after an exempt ordinal passes; `env_untested` is visible only to the calling
+  worker; a shell-written file passed to a toolkit reader can yield evidence.
 
 **Providers**
 - **Gemini parts captured twice** (`google.py`, 7 → 12) and replayed; `thought_signature` capture
@@ -1028,3 +1045,20 @@ entry 2026-09-25, [R7] evidence rule, LIVE-VERIFIED 2026-09-26).
     `jail.analysis_policy`; the shell guard stands down only for a server recorded jailed.
   - §9.5: the toolkit contract gains environment definitions.
   - §9.11 q5 replaced by F21 (the REPL boot file is not mounted in the jail).
+- 2026-10-06 — **§9.6 residual risks:** a file a build's package script writes outside the conda
+  records is accepted as escaping the fingerprint (human ruling, after nine review rounds of the
+  environment builder; `verify` checks records and pins only).
+- 2026-10-07 — **Environment stream built and live-verified (plan B1–B5).** §9.6 status line; §13
+  environment residuals and the provenance edges a review found ([R8]). B5 live cell
+  (`tests/test_live_env_pipeline.py`): a worker's missing Boost.Python runtime became the
+  pipeline-built `ar-sherpana` (Python 3.9, boost 1.87, hdf5 1.12), built on commit, the gate's tests
+  and the workers' calls ran in it (`dataReader` imports), a second run reused it. Five harness bugs
+  found and fixed on the way (symlinked build paths, a 4 MB record cap, `-P` on Python < 3.11, the
+  REPL's 64 KB line limit, input hashing that could end a run).
+- 2026-10-07 — **Toolkit step T1 and the B6 docs sweep; F18 closed.** `research_toolkit` gains a root
+  `conftest.py` (unmarked / `slow` / `live`, live opt-in) and `envs/xspec/` (`ar-xspec`: production
+  `solve`, 232 packages, `ixpeobssim` as a hashed wheel, HEASoft/CALDB activation, XSPEC + relxill
+  boot file); `xspec_utils` names it. Parity: the `xspec_utils` suite gives 421/426 in `ar-xspec`
+  and the same five failures in the human environment. Jailed probe: relxillCp loads in an
+  `ar-xspec` REPL once `/data/fzhou/XSPEC/relxill` is on the read-only allow-list (config). §9.6
+  status and sequencing, §9.10 step 4 Done, §9.11 q5 and F21 narrowed.

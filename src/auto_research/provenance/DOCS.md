@@ -174,3 +174,19 @@ report renderer.
   cache root is resolved, so its crops are not refused by the component walk; a failed quote's hint
   is drawn from the bytes that were checked (`_Resolved.raw`), not a second read; the drift sink
   keeps a reference to each scheduled alert.
+- 2026-10-06 — **Env plan B1: every receipt names its environment.** `Receipt.env` (fingerprint;
+  `sandbox.envs`); `ReceiptStore.mint(env=)` with `ReceiptStore.default_env` for a call that names
+  none (the orchestrator's, set by `run_research`); `capture.receipt_call(env=)`. A worker's sandbox
+  calls stamp the REPL environment's fingerprint (`react._sandbox_env_fingerprint`), its lock
+  written under `<runtime>/conda/locks/` the first time that state is seen.
+- 2026-10-06 — B1 review: `mint(env_default=)` / `receipt_call(env_default=)`: a call whose
+  environment could not be fingerprinted is left unstamped (`env=None`), never given the run's
+  default; a configured non-builtin MCP server's calls are unstamped too. `run_research` now really
+  sets `default_env` (a shadowed import had made it fail into `env.fingerprint.error`; the fake-run
+  test pins it).
+- 2026-10-06 — `NOT_EVIDENCE_NAMES['list_env']`: an environment listing grounds nothing (B2a).
+- 2026-10-06 — Grounding exempts a hex identifier (12+ lowercase hex with a letter: an environment fingerprint, a commit SHA), which the runtime prints beside every result (B2a review).
+- 2026-10-06 — The hex-identifier exemption needs a letter a–d or f (`602214076000e12` is a number).
+- 2026-10-06 — Grounding also exempts `env:<hex>` (an environment fingerprint as the runtime prints it, whatever its digits); `CallReceipts.header` keeps captions on one line.
+- 2026-10-06 — **Env plan B3b:** `Receipt.env_untested` (a toolkit call run in an environment other than its package's tested one, by the caller's choice; still evidence) and `capture.receipt_call(env_untested=)`, set on every receipt of the call.
+- 2026-10-07 — **Input hashing never ends a call (B5 live cell):** `ReceiptStore.hash_input` lists a folder with `surrogateescape` (a non-UTF-8 file name had raised `UnicodeEncodeError` out of a worker's tool call and ended the run) and leaves a folder of more than `_MAX_LISTED_FILES` (20,000) files unhashed; `capture.inputs_before` skips any input whose hashing fails (§9.3.8).

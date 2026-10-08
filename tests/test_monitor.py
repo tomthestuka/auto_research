@@ -385,6 +385,10 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path, mon
     monkeypatch.setattr(
         "auto_research.graph.runtime.load_orchestration_config", lambda *a, **k: _hermetic_orch
     )
+    # The runtime's conda folders (bound into the shell, environment locks): a temp copy, never the
+    # configured runtime dir.
+    monkeypatch.setattr("auto_research.env.agent_conda_dir", lambda: tmp_path / "conda")
+    monkeypatch.setattr("auto_research.env.env_lock_dir", lambda: tmp_path / "conda" / "locks")
 
     class IO:
         last_receipts: dict = {}
@@ -436,6 +440,14 @@ def test_run_research_returns_monitor_with_fake_dependencies(tmp_path: Path, mon
     assert run.monitor.jsonl_path == tmp_path / "monitor.jsonl"
     events = [event.event for event in run.monitor.events]
     assert events[0] == "run.start"
+    # Every receipt names its environment (env plan B1): in-process calls take the run's default.
+    from auto_research.provenance import ReceiptStore
+    from auto_research.sandbox.workspace import run_dir
+
+    start = next(e for e in run.monitor.events if e.event == "run.start")
+    errors = [e.summary for e in run.monitor.events if e.event == "env.fingerprint.error"]
+    assert ReceiptStore.for_run(run_dir(start.data["run_id"])).default_env, errors
+    assert "env.fingerprint.error" not in events
     assert "librarian.literature.report" in events
     assert "reviewer.review.verdict" in events
     # The run closes on the derived digest, one event after the finish record.

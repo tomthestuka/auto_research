@@ -191,6 +191,14 @@ rather than the intent. For a non-trivial design, this reproducibility check is 
 validation strategy you settle with the human over `message`; the coder writes it and the
 co-lead reviews it against your `proposed_checks`.
 
+**When a capability needs software the analysis environment lacks** — another Python version, a
+compiled library, a package that conflicts with the current stack — the coder gives the tool's
+package its own software environment: a conda-forge definition committed with the package, built
+by the runtime, in which the package's tests run and its tools run for the analysts. Say so in the
+brief: name the required software and versions in `expected_behavior` (for example "loads a
+Boost.Python extension built for Python 3.9 against boost 1.87"), and ask for the tool to run in an
+environment that provides it. The coder chooses the environment's name and contents.
+
 ## Owning the verification checks
 
 **Own the authoritative checks.** The coder writes the test code, but you specify the must-have

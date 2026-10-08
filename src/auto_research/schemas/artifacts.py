@@ -62,6 +62,16 @@ class Receipt(MessageModel):
     created_at: datetime
     call_id: str | None = None
     toolkit_commit: str | None = None
+    env: Sha256 | None = Field(
+        default=None,
+        description="Fingerprint of the software environment the producing call ran in "
+        "(`sandbox.envs.fingerprint`; its lock rebuilds it). None for receipts minted before it existed.",
+    )
+    env_untested: bool = Field(
+        default=False,
+        description="The producing toolkit call ran in an environment other than its package's tested "
+        "one, chosen by the caller (env plan B3b). Still evidence; the environment is in `env`.",
+    )
     args_sha256: Sha256 | None = None
     inputs: list[InputFile] = Field(default_factory=list)
     parents: list[Handle] = Field(default_factory=list)

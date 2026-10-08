@@ -104,6 +104,14 @@ def load_orchestration_config(path: str | Path | None = None) -> dict:
         return yaml.safe_load(stream) or {}
 
 
+def _env_spelling(environment: Any, analyze_env: Path | None, analyze_ini_sh: str | None):
+    """``(prefix, init script)`` for the shell server, from the analysis environment object when
+    there is one (env plan B1: every reader builds from it), else the configured keys."""
+    if environment is None:
+        return analyze_env, analyze_ini_sh
+    return environment.prefix, (str(environment.activate) if environment.activate else analyze_ini_sh)
+
+
 def _builtin_server_config(
     analyze_env: Path | None,
     analyze_ini_sh: str | None,
@@ -184,12 +192,21 @@ def _builtin_server_config(
     for folder in writable:
         folder.mkdir(parents=True, exist_ok=True)
     tmp = private_tmp("shell", scratch)
+    # Environments the pipeline built, read-only, so `use_env` can point the shell at one; bound
+    # even when empty, so one built later in the run is visible too.
+    from auto_research.env import agent_conda_dir
+
+    built = [agent_conda_dir() / "envs", agent_conda_dir() / "activation"]
+    for folder in built:
+        folder.mkdir(parents=True, exist_ok=True)
     argv = wrap(
         # -P: no cwd on sys.path, so a module planted in the run folder cannot hijack the server.
+        # (3.11+ only; the analysis interpreter is 3.13. The REPL uses SAFE_PATH_PRELUDE instead.)
         [python, "-P", "-c", builtin_source],
         analysis_policy(
             label="shell", toolkit_root=toolkit_root,
-            writable=tuple(str(folder) for folder in writable), readonly=(str(authoring),),
+            writable=tuple(str(folder) for folder in writable),
+            readonly=(str(authoring), *(str(folder) for folder in built)),
             tmp=tmp, home=private_tmp("shell-home", scratch),  # this run's own, outside its folder
         ),
     )
@@ -198,6 +215,9 @@ def _builtin_server_config(
     env = with_private_param_dir(
         env, "/tmp/pfiles" if argv[0] != python else tmp / "pfiles", create=tmp / "pfiles",
     )
+    # In-tree `__pycache__` is never read (git ignores it, so nothing judges it): bytecode goes to
+    # the server's private folder, never the shared host /tmp.
+    env["PYTHONPYCACHEPREFIX"] = "/tmp/ar-pycache" if argv[0] != python else str(tmp / "ar-pycache")
 
     return {
         "name": "builtin",
@@ -318,9 +338,20 @@ class SandboxSettings:
     analyze_ini_sh: str | None
     repl_init_py: str | None
     analyze_probe: str | None
+    environment: Any = None
+    """The same analysis environment as one object (``auto_research.env.analysis_environment``)."""
+    catalogue: Any = None
+    """``() -> list[Environment]``: every environment a unit may list and use (``env_catalogue``);
+    called when asked, so an environment the pipeline builds mid-run appears."""
 
     @classmethod
     def from_config(cls, orch: dict[str, Any] | None = None) -> "SandboxSettings":
+        from auto_research.env import analysis_environment
+
+        from functools import partial
+
+        from auto_research.env import env_catalogue
+
         settings = orch if orch is not None else load_orchestration_config()
         env = settings.get("analyze_env")
         return cls(
@@ -328,6 +359,8 @@ class SandboxSettings:
             analyze_ini_sh=settings.get("analyze_ini_sh") or None,
             repl_init_py=settings.get("repl_init_py") or None,
             analyze_probe=settings.get("analyze_probe") or None,
+            environment=analysis_environment(settings),
+            catalogue=partial(env_catalogue, settings),
         )
 
 
@@ -459,6 +492,8 @@ def attach_worker_runtime(
             analyze_ini_sh=settings.analyze_ini_sh,
             repl_init_py=settings.repl_init_py,
             mcp_client=mcp_client,
+            environment=settings.environment,
+            environments=settings.catalogue,
         )
         worker.sandbox = sandbox
         worker.registry = registry
@@ -552,6 +587,43 @@ def _normalize_report_formats(
     if unknown:
         raise ValueError(f"Unknown report_formats: {sorted(unknown)}. Valid: {sorted(_valid)}")
     return list(value)
+
+
+async def _reconcile_environments(toolkit_root: Path, monitor: Any) -> None:
+    """The pipeline's environments against their committed definitions, before any unit runs (env
+    plan B3c-5): missing builds made, drift rebuilt visibly, changed externals reported — each a
+    ledger event. A problem is recorded, never the end of the launch; a stop kills the builds."""
+    from auto_research.sandbox.env_build import StoppableRunner
+    from auto_research.sandbox.merge_flow import reconcile_environments
+
+    runner = StoppableRunner()
+    try:
+        results = await asyncio.to_thread(reconcile_environments, toolkit_root, runner=runner)
+    except asyncio.CancelledError:
+        runner.stop()
+        raise
+    except Exception as exc:  # noqa: BLE001 — environments are reported, never the launch's end
+        await monitor.record("run", "env.reconcile.error", level=2,
+                             summary=f"environments not reconciled: {type(exc).__name__}: {exc}",
+                             data={"error": repr(exc)})
+        return
+    summaries = {
+        "built": lambda r: f"built {r.get('name')} (its build record was {r.get('cause')})",
+        "drift": lambda r: (f"ar-{r['env']} drifted from its definition: kept as {Path(r['kept']).name}, "
+                            "rebuilt from the definition" if r.get("rebuilt") else
+                            f"ar-{r['env']} drifted from its definition; the rebuild failed "
+                            f"({r.get('error')}), so the drifted prefix stays in use"),
+        "tainted": lambda r: (f"an unjailed build ran in this conda dir: every jailed build is fresh "
+                              f"(nothing reused) until a human checks and removes {r['marker']}"),
+        "external_changed": lambda r: f"ar-{r['env']}: declared externals changed: {', '.join(r['externals'])}",
+        "failed": lambda r: f"ar-{r['env']}: {r.get('error')}",
+    }
+    for result in results:
+        if result["status"] in summaries:
+            event = {"built": "env.build", "drift": "env.drift", "external_changed": "env.external_changed",
+                     "failed": "env.build.error", "tainted": "env.tainted"}[result["status"]]
+            await monitor.record("run", event, level=2 if result["status"] != "built" else 3,
+                                 summary=summaries[result["status"]](result), data=result)
 
 
 async def run_research(
@@ -670,7 +742,24 @@ async def run_research(
     debate_max_rounds = int(orch.get("debate_max_rounds", 3))
     tool_retry_cap = int(orch.get("tool_retry_cap", 3))
     toolkit_root = Path(orch["toolkit_root"])  # required; validated by the launch preflight
+    await _reconcile_environments(toolkit_root, run_monitor)
     sandbox_settings = SandboxSettings.from_config(orch)
+    # Every receipt names the environment it was produced in (env plan B1): in-process tools run
+    # in the orchestrator's; the analysis environment's lock is written now, the worker stamps it.
+    try:
+        from auto_research.env import env_lock_dir, host_environment
+        from auto_research.provenance.store import ReceiptStore as _Store
+        from auto_research.sandbox.envs import fingerprint_and_lock
+
+        _Store.for_run(run_dir(run_id)).default_env = fingerprint_and_lock(
+            host_environment(), env_lock_dir()
+        )
+        analysis = sandbox_settings.environment  # the same object the REPL and the shell run in
+        if analysis is not None:
+            fingerprint_and_lock(analysis, env_lock_dir())
+        env_error: Exception | None = None
+    except Exception as exc:  # noqa: BLE001 — an unreadable env leaves receipts unstamped, never the run dead
+        env_error = exc  # recorded after run.start, which opens the ledger
     analyze_env = sandbox_settings.analyze_env
     analyze_ini_sh = sandbox_settings.analyze_ini_sh
     repl_init_py = sandbox_settings.repl_init_py
@@ -838,7 +927,8 @@ async def run_research(
     if not mcp_server_configs:
         mcp_server_configs = [
             _builtin_server_config(
-                analyze_env, analyze_ini_sh, toolkit_root,
+                *_env_spelling(sandbox_settings.environment, analyze_env, analyze_ini_sh),
+                toolkit_root,
                 cwd=run_dir(run_id), analyze_probe=analyze_probe,
                 # The workers' own folders only (the shell runs each command in the caller's).
                 writable_dirs=[
@@ -905,6 +995,11 @@ async def run_research(
             "monitor_jsonl": str(getattr(run_monitor, "jsonl_path", "") or ""),
         },
     )
+    if env_error is not None:
+        await run_monitor.record(
+            "run", "env.fingerprint.error", level=3,
+            summary=f"Environment fingerprint unavailable: {env_error!r}", data={},
+        )
 
     # Start all sandboxes before the graph runs
     for sandbox in sandboxes:

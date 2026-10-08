@@ -15,7 +15,7 @@ from pathlib import Path
 
 from typing import Any
 
-from auto_research.sandbox.runner import _source_ini_env, with_private_param_dir
+from auto_research.sandbox.runner import with_private_param_dir
 
 
 def _descendant_pids(pid: int) -> list[int]:
@@ -64,7 +64,14 @@ def repl_payload(result):
 # corrupts the parser and kills the sandbox.  We therefore (1) keep a private
 # copy of the original stdout fd for protocol responses only, and (2) redirect
 # fd 1/2 to a capture file at the OS level for the duration of each tool call.
-_REPL_SCRIPT = inspect.getsource(repl_payload) + "\n" + textwrap.dedent("""
+# First statement: `python -c` puts the working folder first on sys.path, so a package written into
+# the workdir would shadow the toolkit one and its results be stamped as toolkit evidence. Removed
+# here rather than with `-P`, which only Python 3.11+ accepts (a 3.9 pipeline environment's REPL
+# died at launch on it, B5 live cell 2026-10-07); `sys` is built in, so nothing can shadow it.
+#: Prepended to a ``python -c`` program in place of ``-P`` (shared with the shell server).
+SAFE_PATH_PRELUDE = "import sys as _sys\n_sys.path[:] = [_p for _p in _sys.path if _p not in ('', '.')]\n"
+_REPL_SCRIPT = SAFE_PATH_PRELUDE + \
+    inspect.getsource(repl_payload) + "\n" + textwrap.dedent("""
     import sys, os, json, importlib, traceback, tempfile
 
     def _coerce(v):
@@ -101,7 +108,19 @@ _REPL_SCRIPT = inspect.getsource(repl_payload) + "\n" + textwrap.dedent("""
         except Exception:
             pass
 
-    _run_repl_init()
+    # The boot file's own output (an XSPEC banner flushed at C level) goes to stderr: fd 1 is the
+    # protocol stream once the loop starts.
+    _s1 = os.dup(1)
+    os.dup2(2, 1)
+    try:
+        _run_repl_init()
+    finally:
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        os.dup2(_s1, 1)
+        os.close(_s1)
 
     # Private duplicate of the real stdout — used ONLY for JSON protocol lines.
     _proto = os.fdopen(os.dup(1), "w")
@@ -170,6 +189,14 @@ _REPL_SCRIPT = inspect.getsource(repl_payload) + "\n" + textwrap.dedent("""
 """).strip()
 
 
+#: Largest tool return (one JSON line) the REPL protocol reads, in bytes.
+_PROTOCOL_LINE_LIMIT = 256 * 1024 * 1024
+
+
+class _EnvironmentRestartFailed(Exception):
+    """A restart the environment check started failed; returned as the call's error."""
+
+
 class PersistentSandbox:
     """Persistent REPL subprocess for one analyst worker.
 
@@ -192,16 +219,39 @@ class PersistentSandbox:
         repl_init_py: Path | str | None = None,
         default_timeout_s: int = 300,
         mcp_client: Any | None = None,
+        environment: Any | None = None,
+        environments: Any | None = None,
+        label: str = "repl",
     ) -> None:
         self._toolkit_root = Path(toolkit_root)
         self._workdir = Path(workdir)
-        self._analyze_env = Path(analyze_env) if analyze_env else None
-        self._analyze_ini_sh = analyze_ini_sh
-        self._repl_init_py = str(repl_init_py) if repl_init_py else None
+        if environment is None:
+            # The legacy spelling of the same thing (prefix, activation, boot file).
+            from auto_research.sandbox.envs import Environment
+
+            prefix = Path(analyze_env) if analyze_env else Path(sys.prefix)
+            environment = Environment(
+                name=prefix.name, prefix=prefix,
+                activate=Path(analyze_ini_sh) if analyze_ini_sh else None,
+                boot=Path(repl_init_py) if repl_init_py else None,
+            )
+        #: The software environment this REPL runs in; its fingerprint stamps every receipt.
+        self.environment = environment
+        #: ``() -> list[Environment]``: what this worker may list and point its shell at.
+        self.environments = environments
+        #: The name of the environment this worker's shell (``bash_exec``) runs in when it chose
+        #: another with ``use_env``; ``None`` is its own. Kept here, so the choice lasts across rounds.
+        self.shell_environment: str | None = None
         self._default_timeout_s = default_timeout_s
         self._proc: asyncio.subprocess.Process | None = None
         self._alive = False
         self.mcp_client = mcp_client
+        self._label = label
+        #: One REPL per other environment a toolkit call is routed to (env plan B3b), started at
+        #: its first call, in the same folder, toolkit and jail policy as this one.
+        self._pool: dict[str, PersistentSandbox] = {}
+        #: The environment the last ``call_tool`` ran in (this REPL's, or a pool REPL's).
+        self.call_environment = self.environment
 
     @property
     def is_alive(self) -> bool:
@@ -217,19 +267,41 @@ class PersistentSandbox:
         if self.is_alive:
             return
         self._workdir.mkdir(parents=True, exist_ok=True)
-        python_exec = (
-            str(self._analyze_env / "bin" / "python")
-            if self._analyze_env
-            else sys.executable
-        )
-        if not self._analyze_ini_sh:
-            raise ValueError("analyze_ini_sh must be configured — no env fallback")
-        base_env = _source_ini_env(self._analyze_ini_sh)
-        existing = base_env.get("PYTHONPATH", "")
-        pythonpath = str(self._toolkit_root) + (":" + existing if existing else "")
-        env = {**base_env, "PYTHONPATH": pythonpath}
-        if self._repl_init_py:
-            env["AR_REPL_INIT_PY"] = self._repl_init_py
+        # Fingerprinted before the activation is sourced: a change in between then costs one
+        # spurious restart at the next call, never an undetected one. The lock flag is cleared
+        # first, so a start that fails midway never leaves an earlier boot's True behind.
+        self.booted_lock_written = False
+        self.booted_fingerprint = await asyncio.to_thread(self._current_fingerprint)
+        python_exec = str(self.environment.python)
+        activation = self.environment.activate
+        # Coder-written files: a pipeline environment's activation or boot copy (under the agent
+        # conda dir). They run only in the jail, bound as files; the launcher sources a coder-written
+        # activation (and a pipeline environment with none) inside it.
+        owned: tuple[Path, ...] = ()
+        if self.environment.owner == "pipeline":
+            from auto_research.env import agent_conda_dir
+
+            agent_dir = agent_conda_dir().resolve()
+            owned = tuple(f for f in (activation, self.environment.boot)
+                          if f is not None and f.resolve().is_relative_to(agent_dir))
+        pipeline = self.environment.owner == "pipeline" and (activation is None or activation in owned)
+        if pipeline:
+            # A pipeline environment's activation is coder-written: sourced inside the jail by the
+            # shared launcher (envs.in_environment), never here (env plan B3b).
+            env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")}
+        else:
+            if self.environment.activate is None:
+                raise ValueError("analyze_ini_sh must be configured — no env fallback")
+            # A derived environment with no activation of its own runs its human base's, as the
+            # analysis REPL does.
+            import dataclasses
+
+            base_env = dataclasses.replace(self.environment, owner="human").activation_env()
+            existing = base_env.get("PYTHONPATH", "")
+            pythonpath = str(self._toolkit_root) + (":" + existing if existing else "")
+            env = {**base_env, "PYTHONPATH": pythonpath}
+        if self.environment.boot is not None:
+            env["AR_REPL_INIT_PY"] = str(self.environment.boot)
         # The OS jail (§12) when configured: the REPL is where toolkit tools and ``bash_exec`` run,
         # and a shell command's implicit reads are exactly what the command-string guard cannot see.
         # Network stays on — acquisition tools download observations. The toolkit is read-only and
@@ -237,31 +309,56 @@ class PersistentSandbox:
         from auto_research.sandbox.jail import analysis_policy, private_tmp, wrap
 
         env["PYTHONNOUSERSITE"] = "1"  # the jail home persists; a user site there would run at boot
-        # -P: `python -c` would put the cwd first on sys.path, so a package written into the workdir
-        # would shadow the toolkit one and its results be stamped as toolkit evidence. A flag, not
-        # PYTHONSAFEPATH, so the REPL's own child processes keep their normal path rules.
+        # The working folder is kept off sys.path by the script's first statement (any Python version;
+        # the REPL's own child processes keep their normal path rules).
         # Fresh at every start (incl. a restart after a timeout): nothing the agent left in its /tmp
         # survives into the next launch's mounts.
         import shutil
 
-        shutil.rmtree(private_tmp("repl", self._workdir), ignore_errors=True)
-        self._private_tmp = private_tmp("repl", self._workdir)
+        shutil.rmtree(private_tmp(self._label, self._workdir), ignore_errors=True)
+        self._private_tmp = private_tmp(self._label, self._workdir)
+        command = [python_exec, "-c", _REPL_SCRIPT]
+        readonly: tuple[str, ...] = (
+            (str(self.environment.prefix), *(str(f) for f in owned)) if self.environment.owner == "pipeline" else ())
+        if pipeline:
+            import shlex
+
+            from auto_research.sandbox.envs import in_environment
+
+            script = in_environment(self.environment, f'{shlex.quote(python_exec)} "$@"', self._toolkit_root,
+                                    pass_args=True, keep=("AR_REPL_INIT_PY", "PYTHONPYCACHEPREFIX"), quiet=True)
+            command = ["/bin/bash", "--noprofile", "--norc", "-c", script, "_", *command[1:]]
         argv = wrap(
-            [python_exec, "-P", "-c", _REPL_SCRIPT],
+            command,
             analysis_policy(
-                label="repl", toolkit_root=self._toolkit_root,
-                writable=(str(self._workdir),), tmp=self._private_tmp,
+                label=self._label, toolkit_root=self._toolkit_root,
+                writable=(str(self._workdir),), tmp=self._private_tmp, readonly=readonly,
                 # This worker's own home, outside every agent-writable folder (a planted symlink there
                 # became a writable bind of its target), checked like the private /tmp.
-                home=private_tmp("repl-home", self._workdir),
+                home=private_tmp(f"{self._label}-home", self._workdir),
             ),
         )
         # Its own HEASoft parameter folder (F23): /tmp is private when jailed.
-        jailed = argv[0] != python_exec
+        jailed = argv[0] != command[0]
+        if owned and not jailed:
+            from auto_research.sandbox.jail import jail_enabled
+
+            if jail_enabled():  # configured but not runnable here: a coder-written activation waits
+                raise RuntimeError(f"{self.environment.name} runs only in the jail, which cannot start on this host")
         env = with_private_param_dir(
             env, "/tmp/pfiles" if jailed else self._private_tmp / "pfiles",
             create=self._private_tmp / "pfiles",
         )
+        if pipeline:  # the launcher puts this writable half back after the activation
+            (self._private_tmp / "pfiles").mkdir(parents=True, exist_ok=True)
+            env["PFILES"] = "/tmp/pfiles" if jailed else str(self._private_tmp / "pfiles")
+        # Bytecode in this REPL's own private folder: the toolkit's `__pycache__` (git-ignored, so
+        # never judged) is never read — a planted `.pyc` matching its source cannot replace
+        # reviewed code. Private either way: never the shared host /tmp.
+        env["PYTHONPYCACHEPREFIX"] = "/tmp/ar-pycache" if jailed else str(self._private_tmp / "ar-pycache")
+        # The environment state this REPL booted on (taken above): a call after it changes
+        # restarts it first (env plan B2a); its receipts stamp it only once its lock is on disk.
+        self.booted_lock_written = await asyncio.to_thread(self._lock_booted)
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE,
@@ -269,13 +366,77 @@ class PersistentSandbox:
             stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=str(self._workdir),
+            # One tool return is one protocol line; asyncio's default 64 KB line limit failed every
+            # larger return (B5 live cell 2026-10-07: "Separator is found, but chunk is longer than
+            # limit").
+            limit=_PROTOCOL_LINE_LIMIT,
         )
         self._alive = True
 
+    def _current_fingerprint(self) -> str | None:
+        """The environment's fingerprint now, or ``None`` when it cannot be known (unreadable, or
+        its activation failed): an unknown state never triggers a restart."""
+        try:
+            from auto_research.sandbox.envs import _state
+
+            digest, parts = _state(self.environment)
+        except Exception:  # noqa: BLE001 — an unreadable env disables the check, never the call
+            return None
+        return None if "error" in parts.get("activation", {}) else digest
+
+    def _lock_booted(self) -> bool:
+        """Write the lock for the state this REPL booted on; True when it is on disk."""
+        if self.booted_fingerprint is None:
+            return False
+        try:
+            from auto_research.env import env_lock_dir
+            from auto_research.sandbox.envs import fingerprint_and_lock
+
+            return fingerprint_and_lock(self.environment, env_lock_dir()) == self.booted_fingerprint
+        except Exception:  # noqa: BLE001 — unstamped receipts, never a REPL that cannot start
+            return False
+
+    def take_notice(self) -> str | None:
+        """The runtime's notice for the call just made (a restart), handed over once."""
+        notice, self._notice = getattr(self, "_notice", None), None
+        return notice
+
+    async def _restart_if_environment_changed(self) -> str | None:
+        """Restart first when the environment changed since boot; return what the model is told.
+
+        A restart clears whatever the REPL session held (a loaded dataset, a fit), so the call that
+        triggered it says so; a restart that fails comes back as that call's error, never as an
+        exception out of the tool loop (contained failure).
+        """
+        if not self.is_alive:
+            return None
+        booted = getattr(self, "booted_fingerprint", None)
+        current = await asyncio.to_thread(self._current_fingerprint)
+        if booted is None or current is None or current == booted:
+            return None
+        try:
+            await self._restart_own()
+        except Exception as exc:  # noqa: BLE001
+            raise _EnvironmentRestartFailed(str(exc)) from exc
+        return (f"[environment changed (env:{booted[:12]} -> env:{current[:12]}): the REPL was restarted "
+                "and its session state cleared; reload what this step needs]")
+
     async def restart(self) -> None:
-        """Kill any current subprocess and spawn a fresh REPL."""
+        """Kill any current subprocess and spawn a fresh REPL; the pool's REPLs go and start again at
+        their next call (a commit reloads what every one of them imports)."""
+        await self._close_pool()
         await self._kill_current()
         await self.start()
+
+    async def _restart_own(self) -> None:
+        """This REPL alone, fresh (a failure or an environment change): the pool's sessions stay."""
+        await self._kill_current()
+        await self.start()
+
+    async def _close_pool(self) -> None:
+        pool, self._pool = self._pool, {}
+        for child in pool.values():
+            await child.shutdown()
 
     async def _kill_current(self) -> None:
         """Terminate the current subprocess **and its descendants**, if any.
@@ -320,7 +481,9 @@ class PersistentSandbox:
         the stop).
         """
 
-        was_alive = self.is_alive
+        was_alive = self.is_alive or any(child.is_alive for child in self._pool.values())
+        for child in list(self._pool.values()):
+            await child._kill_current()
         await self._kill_current()
         return was_alive
 
@@ -332,12 +495,14 @@ class PersistentSandbox:
         is that nothing in the run can still write to disk when the next step (the toolkit-branch
         reset) runs.
         """
+        for child in list(self._pool.values()):
+            await child._kill_current()
         await self._kill_current()
 
     async def _restart_for_failure(self) -> str:
         """Restart after a tool-call failure; return a suffix on restart failure."""
         try:
-            await self.restart()
+            await self._restart_own()
         except Exception as exc:  # noqa: BLE001
             return f"; sandbox restart failed: {exc}"
         return ""
@@ -349,13 +514,58 @@ class PersistentSandbox:
         args: dict,
         *,
         timeout_s: int | None = None,
+        environment: Any | None = None,
     ) -> dict:
         """Send one tool call to the persistent subprocess and return the result dict.
 
         Returns a dict with at minimum ``exit_code``, ``stdout``, and ``stderr``.
         On timeout or subprocess death ``exit_code`` is non-zero and the sandbox
         attempts to spawn a replacement subprocess for subsequent calls.
+
+        ``environment`` (env plan B3b): another environment to run the call in — the tool package's
+        tested one, or the caller's choice — on its own REPL from the pool; ``call_environment``,
+        ``call_stamp`` and the notice then name that REPL's.
         """
+        if environment is not None and environment.name != self.environment.name:
+            child = self._pool.get(environment.name)
+            if child is not None and child.environment != environment:  # rebuilt: a fresh record
+                await child.shutdown()
+                child = None
+            if child is None:
+                child = PersistentSandbox(
+                    self._toolkit_root, self._workdir, environment=environment,
+                    default_timeout_s=self._default_timeout_s,
+                    label=f"repl-{environment.name}",
+                )
+                self._pool[environment.name] = child
+            self.call_environment = child.environment
+            result = await child.call_tool(module, fn, args, timeout_s=timeout_s)
+            self._notice = child.take_notice()
+            self.call_stamp = child.call_stamp
+            return result
+        self.call_environment = self.environment
+        self.call_stamp = None
+        if not self.is_alive:
+            # Started before the stamp is taken: a first call (a pool REPL's, or after a restart)
+            # names the state it runs in like every other.
+            try:
+                await self.start()
+            except Exception as exc:  # noqa: BLE001
+                return {"exit_code": 1, "stderr": f"sandbox start failed: {exc}", "stdout": ""}
+        try:
+            notice = await self._restart_if_environment_changed()
+        except _EnvironmentRestartFailed as exc:
+            return {"exit_code": 1, "stdout": "",
+                    "stderr": f"the environment changed and the REPL could not restart in it: {exc}"}
+        # Out of band, never in the result dict: a tool's own return is not where runtime text
+        # comes from (a tool returning a key of that name must not write into the header).
+        self._notice = notice
+        # The state this call runs in, fixed before it runs: a timeout or crash restarts the REPL
+        # inside `_call`, and the receipt must still name the state the call actually ran in.
+        self.call_stamp = self.booted_fingerprint if getattr(self, "booted_lock_written", False) else None
+        return await self._call(module, fn, args, timeout_s=timeout_s)
+
+    async def _call(self, module: str, fn: str, args: dict, *, timeout_s: int | None) -> dict:
         if not self.is_alive:
             try:
                 await self.start()
@@ -372,10 +582,11 @@ class PersistentSandbox:
                 timeout=timed,
             )
             if not line:
+                said = await self._stderr_tail()
                 restart_error = await self._restart_for_failure()
                 return {
                     "exit_code": 1,
-                    "stderr": "sandbox subprocess exited unexpectedly" + restart_error,
+                    "stderr": "sandbox subprocess exited unexpectedly" + (f": {said}" if said else "") + restart_error,
                     "stdout": "",
                 }
             return json.loads(line.decode())
@@ -385,6 +596,24 @@ class PersistentSandbox:
         except Exception as exc:  # noqa: BLE001
             restart_error = await self._restart_for_failure()
             return {"exit_code": 1, "stderr": str(exc) + restart_error, "stdout": ""}
+
+    async def _stderr_tail(self, limit: int = 1200) -> str:
+        """What a REPL that ended wrote to stderr (an activation that did not finish says so there)."""
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return ""
+        data = b""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 2
+        try:
+            while (left := deadline - loop.time()) > 0:
+                chunk = await asyncio.wait_for(proc.stderr.read(64 * 1024), timeout=left)
+                if not chunk:
+                    break
+                data = (data + chunk)[-64 * 1024:]  # the newest: the cause comes last
+        except Exception:  # noqa: BLE001 — the tail is a courtesy; the call's error stands without it
+            pass
+        return data.decode("utf-8", "replace").strip()[-limit:]
 
     async def call_mcp_tool(
         self,
@@ -403,6 +632,7 @@ class PersistentSandbox:
 
     async def shutdown(self) -> None:
         """Gracefully stop the subprocess; kill if it does not exit within 5 s."""
+        await self._close_pool()
         if self._proc is None:
             return
         try:

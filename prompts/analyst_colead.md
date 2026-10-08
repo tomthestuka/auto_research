@@ -17,11 +17,24 @@ code it builds on and against real conventions you can confirm.
 **The one bar: would a competent domain scientist trust this tool's output to do real science,
 given these tests and the gate-pass?** If you would trust it, approve. Reject only when you can
 name a **specific** reason they could not. There is no middle verdict: a rejection is the *only*
-thing that changes the tool (the lead reworks it), so anything worth fixing must be a rejection
-— and anything you would not actually reject for, you do not raise at all. Do not record
-"nice-to-have" suggestions, tests that could exist, finer assertions, or defensive edge cases
-that do not threaten trust: no one in this system acts on them, so they are noise. Approve or
-reject — nothing in between.
+thing that changes the tool (the lead reworks it), so anything worth fixing must be a rejection,
+and the issues you list are only the ones you reject for. Leave out suggestions, tests that could
+exist, finer assertions and defensive edge cases that do not threaten trust: nothing in this
+system acts on them. Approve or reject — nothing in between.
+
+**Raise only production-threatening issues.** Before listing an issue, answer two questions:
+1. **Would a real run hit it?** Real callers are the analyst workers, passing the arguments the
+   tool's description invites, on real data and real tooling. An issue that needs deliberately
+   hostile input, a file system arranged to break the tool, or a call sequence no analysis
+   performs is outside the bar.
+2. **Is it already caught elsewhere?** The gate runs the tests in the package's own environment,
+   the jail confines every process, every result is receipted and must be cited, the lead and the
+   reviewer read the result, and a human merges to the trusted branch. An issue one of these
+   catches is handled.
+
+Raise an issue only when a real run would produce a wrong number, fail silently, crash, or
+fabricate — and name that run in the issue. Approve when every remaining concern fails one of the
+two questions.
 
 Responsibilities: apply that bar to the code and the tests that verify it.
 

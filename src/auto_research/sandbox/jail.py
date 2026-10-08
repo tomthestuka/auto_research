@@ -79,6 +79,9 @@ class JailPolicy:
     processes mount theirs at a fixed path outside ``/tmp``: their homes live under the host temp
     root, which inside the jail is the process's own writable ``/tmp``, so a mount destination
     there could be redirected by a symlink planted in an earlier session (F22 review)."""
+    masked: tuple[str, ...] = field(default=())
+    """Paths covered by an empty read-only tmpfs, on top of every bind: what a process must not see
+    even though an allow-listed root contains it (the gate's tests and the real worktree)."""
     tmp: str | None = None
     """A private directory bound at ``/tmp``, in place of the host's. The host temp root holds
     other processes' scratch — another session's working copy of this repository, an author
@@ -298,8 +301,12 @@ def jail_argv(policy: JailPolicy) -> list[str]:
     # ``--die-with-parent`` matters for the interrupt path: the jailed process is pid 1 of its own
     # namespace, so when the runtime kills what it spawned, everything inside goes with it rather
     # than surviving as an orphan that can still write to the toolkit (§9.9's whole point).
+    # ``--new-session`` (setsid) detaches the jailed process from the caller's terminal: without it
+    # a TIOCSTI ioctl on /dev/tty pushes keystrokes into the parent shell (legacy_tiocsti=1 here;
+    # reproduced 2026-10-06). bwrap itself stays in the caller's process group, so a group kill
+    # still reaches it and ``--die-with-parent`` takes the jailed process with it.
     argv = [binary, "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
-            "--die-with-parent"]
+            "--die-with-parent", "--new-session"]
     if not policy.network:
         argv += ["--unshare-net"]
     for entry in _SYSTEM_RO:
@@ -328,6 +335,11 @@ def jail_argv(policy: JailPolicy) -> list[str]:
 
     for target, link in _symlink_pairs([*policy.ro, *policy.rw]):
         argv += ["--symlink", target, link]
+
+    for entry in policy.masked:
+        resolved = str(Path(entry).resolve())
+        if Path(resolved).exists():
+            argv += ["--tmpfs", resolved, "--remount-ro", resolved]
 
     if policy.home:
         home = str(Path(policy.home).resolve())
@@ -397,12 +409,10 @@ def write_launcher(path: Path, target: str, policy: JailPolicy) -> Path:
     # author still failed `execvp` after its directory was bound (2026-08-20).
     resolved_target = str(Path(target).resolve())
     target_dir = str(Path(resolved_target).parent)
-    policy = JailPolicy(
-        ro=(*policy.ro, target_dir) if target_dir not in policy.ro else policy.ro,
-        rw=policy.rw, network=policy.network, home=policy.home, label=policy.label,
-        ro_files=policy.ro_files, ro_files_at=policy.ro_files_at, tmp=policy.tmp,
-        home_at=policy.home_at,
-    )
+    from dataclasses import replace
+
+    # Every other field carried over, the mask included (a field added later is never dropped).
+    policy = replace(policy, ro=(*policy.ro, target_dir) if target_dir not in policy.ro else policy.ro)
     prefix = jail_argv(policy)
     command = [*prefix, "--", resolved_target] if prefix else [resolved_target]
     body = "#!/bin/sh\nexec " + " ".join(_quote(part) for part in command)
@@ -449,14 +459,15 @@ def check_os_jail_probe() -> None:
     probe = str(config.get("analyze_probe") or "").strip()
     if not probe:
         return
-    interpreter = Path(str(config.get("analyze_env") or "")) / "bin" / "python"
+    from auto_research.env import analysis_environment
+
+    environment = analysis_environment(config)
+    interpreter = environment.python if environment is not None else Path("bin") / "python"
     if not interpreter.is_file():
         return  # the analyze_probe check owns that failure
 
-    from auto_research.sandbox.runner import _source_ini_env
 
-    ini = config.get("analyze_ini_sh")
-    env = dict(_source_ini_env(ini)) if ini else dict(os.environ)
+    env = environment.activation_env() if environment is not None else dict(os.environ)
     toolkit = str(config.get("toolkit_root") or "")
     if toolkit:
         existing = env.get("PYTHONPATH", "")
@@ -620,7 +631,7 @@ def codex_settings_home(label: str) -> Path:
     return home
 
 
-def coder_policy(*, label: str, extra_rw: tuple[str, ...] = ()) -> JailPolicy:
+def coder_policy(*, label: str, extra_rw: tuple[str, ...] = (), readonly: tuple[str, ...] = ()) -> JailPolicy:
     """The jail for an author harness: the allow-list, its own home, and its credential file.
 
     The Claude harness authenticates from ``~/.claude/.credentials.json``, which a jailed home
@@ -645,6 +656,7 @@ def coder_policy(*, label: str, extra_rw: tuple[str, ...] = ()) -> JailPolicy:
     under it: leaving it readable would let one author read another's solution, which would quietly
     invalidate a repeated-trial measurement rather than break anything visibly.
     """
+    overlays = tuple(readonly)
     import tempfile
 
     base = policy_from_config(network=True, label=label)
@@ -676,6 +688,11 @@ def coder_policy(*, label: str, extra_rw: tuple[str, ...] = ()) -> JailPolicy:
     # too. The runtime's own git is untouched: `approve_edit`, the gate-entry reset and
     # `collect_all_changes` run in the parent process, outside the jail.
     readonly = (*readonly, *(str(Path(entry) / ".git") for entry in writable))
+    # Read-only overlays inside a writable root (the attempt's candidate environments: the coder
+    # runs them, the runtime alone builds them).
+    for entry in overlays:
+        Path(entry).mkdir(parents=True, exist_ok=True)
+    readonly = (*readonly, *overlays)
     return JailPolicy(
         ro=readonly,
         rw=writable,

@@ -83,3 +83,14 @@ def _seat_overrides(
             os.environ.pop(CONFIG_DIR_ENV, None)
         else:
             os.environ[CONFIG_DIR_ENV] = previous
+
+
+@pytest.fixture(autouse=True)
+def _agent_conda_dir_in_tmp(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every build a test makes lands in a temporary folder, never the user's runtime dir (the gate
+    builds the environment a judged package names, env plan B3c-2). A test may point it elsewhere."""
+    from auto_research import env
+
+    folder = tmp_path_factory.mktemp("agent-conda")
+    monkeypatch.setattr(env, "agent_conda_dir", lambda: folder)
+    monkeypatch.setattr(env, "env_lock_dir", lambda: folder / "locks")  # a real REPL writes its lock

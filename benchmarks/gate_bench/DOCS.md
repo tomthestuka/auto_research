@@ -551,3 +551,4 @@ Compacted 2026-09-01 and again 2026-09-24 (detail in git history).
   Table 3 / Fig. 4 source `20260831T172738Z-swapfix-*`, carried it. Ruling 2026-09-25: no agent consulted
   it; published numbers stand (builder fixed 09-03). `_NOT_BEHAVIOURAL` lists corrected.
 - 2026-09-26 — `table_catchrate.py`: caption and headers rewritten for the manuscript's PI-review pass (co-lead column, "Defect class"/"Defects", "defect-free change" controls, the co-lead column counts every rejection); reviewer id printed as the model id (`gpt-5.6-sol`, was `gpt-5-6-sol`). The committed `catchrate.tex` had been hand-edited; it is regenerated again. Numbers unchanged.
+- 2026-10-06 — `commit_sweep(worktree, scanned, message, gate=None)` commits through the production path when given the gate's report (`approve_edit(manifest=, base=)`); a refusal (`refused`) counts as caught. The G3 hole it probes is closed in the gate (judged manifest; see `src/auto_research/sandbox/DOCS.md`).

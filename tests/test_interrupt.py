@@ -399,6 +399,7 @@ def _live_session(log: _Recorder):
     session._direct_branch = "ai"
     session._monitor = None
     session._pending_questions = []
+    session._env_tools = None
     session._init_channel()
     session._toolkit_root = None
     session._worktree_base = None

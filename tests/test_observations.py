@@ -174,7 +174,8 @@ def test_execute_data_catalog_delegates_to_catalog_utils(monkeypatch):
         captured["min_level"] = min_level
         return "Local ixpe data (1 ObsIDs):\n- 01002901: max_level=3, products=[level2_evt, pcube]"
 
-    monkeypatch.setattr(react, "_catalog_read_fn", _fake_read)
+    monkeypatch.setattr(react, "_toolkit_clean_head", lambda: "head1")
+    monkeypatch.setattr(react, "_catalog_read_fn", ("head1", _fake_read))
 
     out = asyncio.run(react.execute_data_catalog({"obs_db_path": "/data/x/IXPE", "min_level": 2}))
     assert not out.is_error
@@ -210,3 +211,57 @@ def test_data_catalog_lead_sources_def_from_catalog_utils():
     assert DATA_CATALOG_TOOL in defs
     props = defs[DATA_CATALOG_TOOL]["input_schema"]["properties"]
     assert "obs_db_path" in props and "mission" not in props
+
+
+def test_data_catalog_runs_committed_toolkit_code_only(tmp_path, monkeypatch, request):
+    """The lead's in-process read never runs an uncommitted edit, and a new commit is re-imported."""
+    import asyncio
+    import os
+    import subprocess
+
+    from auto_research import env as app_env
+    from auto_research.agents import react
+
+    root = tmp_path / "toolkit"
+    lib = root / "catalog_utils" / "lib"
+    lib.mkdir(parents=True)
+    (root / "catalog_utils" / "__init__.py").write_text("")
+    (lib / "__init__.py").write_text("")
+    (lib / "catalog_read.py").write_text("def data_catalog(path, min_level=None):\n    return 'v1'\n")
+    (root / ".gitignore").write_text("__pycache__/\n*.pyc\n")  # as the real toolkit's
+    git = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)  # noqa: E731
+    git("init", "-q"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
+    git("add", "-A"); git("commit", "-qm", "v1")
+    monkeypatch.setattr(app_env, "toolkit_root", lambda: root)
+    monkeypatch.setattr(react, "_catalog_read_fn", None)
+    import sys
+
+    def forget_scratch_modules():  # the scratch toolkit's catalog_utils must not outlive this test
+        for name in [m for m in sys.modules if m.split(".")[0] in ("catalog_utils", "obsdb_catalog")]:
+            del sys.modules[name]
+
+    forget_scratch_modules()
+    request.addfinalizer(forget_scratch_modules)
+    run = lambda: asyncio.run(react.execute_data_catalog({"obs_db_path": "/x"}))  # noqa: E731
+    assert run().text == "v1"
+    (lib / "catalog_read.py").write_text("def data_catalog(path, min_level=None):\n    return 'EDITED'\n")
+    edited = run()
+    assert edited.is_error and "uncommitted" in edited.text
+    git("commit", "-qam", "v2")
+    assert run().text == "EDITED"
+    # A forged bytecode file (git-ignored, so the clean check cannot see it) is never what runs.
+    import importlib.util
+    import py_compile
+
+    source = lib / "catalog_read.py"
+    forged_src = tmp_path / "forged.py"
+    forged_src.write_text("def data_catalog(path, min_level=None):\n    return 'FORGED'\n")
+    st = source.stat()
+    os.utime(forged_src, ns=(st.st_atime_ns, st.st_mtime_ns))
+    forged_src.write_text("def data_catalog(path, min_level=None):\n    return 'FORGED'\n".ljust(st.st_size))
+    os.utime(forged_src, ns=(st.st_atime_ns, st.st_mtime_ns))
+    pyc = importlib.util.cache_from_source(str(source))
+    py_compile.compile(str(forged_src), cfile=pyc)
+    git("commit", "-q", "--allow-empty", "-m", "v3")  # a new head: the next call re-imports
+    assert run().text == "EDITED"
+

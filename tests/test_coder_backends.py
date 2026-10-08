@@ -350,6 +350,7 @@ def test_codex_thread_config_carries_the_allow_list_and_the_provider_block():
     assert config["mcp_servers"]["escalation"] == {
         "url": "http://127.0.0.1:5/mcp",
         "bearer_token_env_var": "AR_ESCALATION_TOKEN",
+        "tool_timeout_sec": 3600,
     }
 
 

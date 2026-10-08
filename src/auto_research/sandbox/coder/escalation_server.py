@@ -60,7 +60,9 @@ class EscalationServer:
         *,
         host: str = "127.0.0.1",
         token_env: str = "AR_ESCALATION_TOKEN",
+        env_tools: Any | None = None,
     ) -> None:
+        self._env_tools = env_tools
         self._ask_lead = ask_lead
         self._ask_human = ask_human
         self._host = host
@@ -92,6 +94,25 @@ class EscalationServer:
         async def message(to: str, text: str) -> str:
             f"""{_MESSAGE_SCHEMA_DESCRIPTION}"""
             return await self.route(to, text)
+
+        if self._env_tools is not None:
+            from auto_research.sandbox.coder.env_tools import (
+                ENV_ACTIVATE_DESCRIPTION, ENV_PIN_DESCRIPTION, ENV_SOLVE_DESCRIPTION,
+            )
+
+            tools = self._env_tools
+
+            @mcp.tool(description=ENV_SOLVE_DESCRIPTION)
+            async def env_solve(env_id: str, specs: list[str]) -> str:
+                return await tools.solve(env_id, specs)
+
+            @mcp.tool(description=ENV_PIN_DESCRIPTION)
+            async def env_pin_wheels(env_id: str, requirements: list[str]) -> str:
+                return await tools.pin(env_id, requirements)
+
+            @mcp.tool(description=ENV_ACTIVATE_DESCRIPTION)
+            async def cand_env_activate(env_id: str = "") -> str:
+                return await tools.activate(env_id or None)
 
         app = mcp.streamable_http_app()
         return _with_bearer_auth(app, self.token)

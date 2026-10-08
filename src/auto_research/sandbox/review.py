@@ -82,9 +82,16 @@ def check_author_reviewer_decorrelation() -> None:
 
 
 def _git(worktree: Path, *args: str) -> str:
-    out = subprocess.run(
-        ["git", *args], cwd=str(worktree), capture_output=True, text=True, check=True
-    )
+    from auto_research.sandbox.gate import _clear_index_lock
+
+    try:
+        out = subprocess.run(
+            ["git", *args], cwd=str(worktree), capture_output=True, text=True, check=True,
+            errors="surrogateescape", timeout=300,  # a byte that is not UTF-8 is shown; a hang is an error
+        )
+    except subprocess.TimeoutExpired:
+        _clear_index_lock(Path(worktree))
+        raise
     return out.stdout
 
 
@@ -95,31 +102,34 @@ def _truncate(text: str) -> str:
 
 
 def build_diff_bundle(worktree: Path) -> str:
-    """Render the new/changed ``*_utils`` files as a single review artifact.
+    """Render the new/changed ``*_utils`` files and environment definitions as one review artifact.
 
     Reuses ``gate.collect_targets`` for the file set (every changed file under a ``*_utils``
     package — ``.py`` and other text such as shell scripts): a new (untracked) file is shown
     in full; a modified file is shown as its unified ``git diff``. Mirrors the gate's view, so
     the co-lead judges exactly the lines the gate scanned.
     """
+    from auto_research.sandbox.gate import collect_deleted
+
     worktree = Path(worktree)
     targets = collect_targets(worktree)
-    if not targets:
+    deleted = collect_deleted(worktree)
+    if not targets and not deleted:
         return "(no toolkit changes detected in the worktree)"
 
-    parts: list[str] = []
+    parts: list[str] = [f"### DELETED FILE: {rel}" for rel in deleted]
     for path in sorted(targets, key=lambda p: str(p)):
         rel = str(path.relative_to(worktree))
         added = targets[path]
         if added is None:  # new / untracked file → full content
             try:
                 body = path.read_text(encoding="utf-8")
-            except OSError as exc:
-                body = f"<unreadable: {exc}>"
+            except (OSError, UnicodeDecodeError) as exc:
+                body = f"<unreadable as text: {type(exc).__name__}>"
             lang = "python" if rel.endswith(".py") else ("bash" if rel.endswith(".sh") else "")
             parts.append(f"### NEW FILE: {rel}\n```{lang}\n{_truncate(body)}\n```")
         else:  # modified tracked file → unified diff
-            diff = _git(worktree, "diff", "--unified=3", "--", rel).strip()
+            diff = _git(worktree, "diff", "--text", "--unified=3", "--", rel).strip()
             parts.append(f"### MODIFIED: {rel}\n```diff\n{_truncate(diff)}\n```")
     return "\n\n".join(parts)
 

@@ -446,7 +446,7 @@ def test_structural_missing_entry_detail_lists_found_keys(tmp_path):
 # ── run_gate integration (fake Layer-B runner; real temp git worktree) ──────────
 
 
-async def _pass_runner(worktree, test_paths):
+async def _pass_runner(worktree, test_paths, **_kw):
     return {
         "results": [CheckResult(name="layer_b.pytest", layer="B", passed=True, detail="")],
         "deterministic": True,
@@ -895,3 +895,848 @@ def test_n1_layer_b_failure_keeps_far_more_than_the_old_2000_chars(tmp_path):
     assert "the line that matters" in detail, "the traceback must survive the window"
     assert "1 failed, 21 passed" in detail, "the summary must survive too"
     assert "elided" in detail, "and an over-cap output must say so rather than look complete"
+
+
+# ── environment definitions in the changeset (env plan B3c-1) ──────────────────────────────────
+
+_LOCK = ("@EXPLICIT\n"
+         "https://conda.anaconda.org/conda-forge/linux-64/python-3.9.18-h1_0.conda#" + "a" * 32 + "\n"
+         "https://conda.anaconda.org/conda-forge/noarch/mock-5.1.0-pyhd_0.conda#" + "b" * 32 + "\n")
+
+
+def _with_env(repo, monkeypatch, *, lock=_LOCK, names_it=True, extra=None):
+    from auto_research import env as app_env
+
+    monkeypatch.setattr(app_env, "_orch_config", lambda: {"env_externals": {}})
+    # The gate builds the definition it judges (B3c-2): conda faked at the process boundary.
+    from tests.test_env_build import _fake_conda
+
+    from auto_research.sandbox import env_build, jail
+
+    fake = _fake_conda([])
+
+    class _Runner(env_build.StoppableRunner):
+        def __call__(self, argv, **kwargs):
+            return fake(argv, **kwargs)
+
+    monkeypatch.setattr(env_build, "StoppableRunner", _Runner)
+    monkeypatch.setattr(jail, "jail_enabled", lambda: False)
+    monkeypatch.setattr(app_env, "conda_executable", lambda: "conda")
+    _write_pkg(repo)
+    if names_it:
+        (repo / "demo_utils" / "tool_config.yaml").write_text("env: sherpa\n")
+    folder = repo / "envs" / "sherpa"
+    folder.mkdir(parents=True)
+    (folder / "env.yaml").write_text("purpose: sherpa for the demo tools\n")
+    (folder / "env.lock").write_text(lock)
+    for name, text in (extra or {}).items():
+        (folder / name).write_text(text)
+    return folder
+
+
+def test_an_environment_definition_with_its_package_passes_and_is_gated(tmp_path, monkeypatch):
+    from auto_research.sandbox.gate import collect_targets
+
+    repo = _make_repo(tmp_path)
+    _with_env(repo, monkeypatch, extra={"activate.sh": "export SHERPA_READY=1\n"})
+    gated = {str(p.relative_to(repo)) for p in collect_targets(repo)}
+    assert {"envs/sherpa/env.yaml", "envs/sherpa/env.lock", "envs/sherpa/activate.sh"} <= gated
+    # A conda package named like a banned word (`mock`) is a pinned lock line, not prose.
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert report.passed, report.reason
+    env_check = [c for c in report.layer_a if c.name == "structural.env_definition.sherpa"]
+    assert env_check and env_check[0].passed
+
+
+@pytest.mark.parametrize("case,needle", [
+    ("bad_lock", "conda-forge package URL"),
+    ("unnamed", "add `env: sherpa`"),
+    ("stray", "environment definition"),
+])
+def test_a_bad_environment_change_fails_with_the_reason(tmp_path, monkeypatch, case, needle):
+    repo = _make_repo(tmp_path)
+    if case == "bad_lock":
+        _with_env(repo, monkeypatch, lock="@EXPLICIT\nhttps://repo.anaconda.com/pkgs/main/x.conda#" + "a" * 32 + "\n")
+    elif case == "unnamed":
+        _with_env(repo, monkeypatch, names_it=False)
+    else:
+        _with_env(repo, monkeypatch, extra={"notes.txt": "scratch\n"})
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert not report.passed and needle in report.reason, report.reason
+
+
+def test_approve_edit_stages_the_environment_definition_with_the_tool(tmp_path, monkeypatch):
+    from auto_research.sandbox.merge_flow import approve_edit
+
+    repo = _make_repo(tmp_path)
+    _with_env(repo, monkeypatch)
+    (repo / "scratch.txt").write_text("not staged\n")
+    sha = approve_edit(repo, message="Add my_tool with its sherpa env")
+    committed = set(subprocess.run(["git", "show", "--name-only", "--pretty=format:", sha], cwd=repo,
+                                   capture_output=True, text=True, check=True).stdout.split())
+    assert {"envs/sherpa/env.yaml", "envs/sherpa/env.lock", "demo_utils/tool_config.yaml"} <= committed
+    assert "scratch.txt" not in committed
+
+
+def test_the_reviewer_sees_the_environment_definition(tmp_path, monkeypatch):
+    from auto_research.sandbox.review import build_diff_bundle
+
+    repo = _make_repo(tmp_path)
+    _with_env(repo, monkeypatch, extra={"activate.sh": "export SHERPA_READY=1\n"})
+    bundle = build_diff_bundle(repo)
+    assert "### NEW FILE: envs/sherpa/env.lock" in bundle and "SHERPA_READY" in bundle
+
+
+def test_a_misspelled_env_name_fails_resolution_with_the_fix(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path)
+    _with_env(repo, monkeypatch)
+    (repo / "demo_utils" / "tool_config.yaml").write_text("env: sherpaa\n")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    resolves = next(c for c in report.layer_a if c.name == "structural.env_resolves")
+    assert not resolves.passed and "envs/sherpaa/env.yaml does not exist" in resolves.detail
+
+
+def test_the_target_package_env_must_resolve_even_untouched(tmp_path, monkeypatch):
+    """The brief's target package names the env the session works on; an unresolvable name fails."""
+    repo = _make_repo(tmp_path)
+    _with_env(repo, monkeypatch)
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "committed")
+    (repo / "demo_utils" / "tool_config.yaml").write_text("env: gone\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "renamed")
+    other = repo / "other_utils" / "lib"
+    other.mkdir(parents=True)
+    (other / "x.py").write_text("def x():\n    return 1\n")
+    report = asyncio.run(run_gate(repo, _spec(target_domain="demo_utils"), test_runner=_pass_runner))
+    resolves = next(c for c in report.layer_a if c.name == "structural.env_resolves")
+    assert not resolves.passed and "'gone'" in resolves.detail
+
+
+def test_a_deleted_definition_file_is_validated_staged_and_shown(tmp_path, monkeypatch):
+    from auto_research.sandbox.merge_flow import approve_edit
+    from auto_research.sandbox.review import build_diff_bundle
+
+    repo = _make_repo(tmp_path)
+    folder = _with_env(repo, monkeypatch, extra={"activate.sh": "export A=1\n"})
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "committed env")
+    (folder / "activate.sh").unlink()
+    (repo / "demo_utils" / "lib" / "test_demo.py").write_text(
+        'def test_my_tool():\n    assert my_tool("synth240611-ab") is not None\n')
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert report.passed, report.reason
+    assert "### DELETED FILE: envs/sherpa/activate.sh" in build_diff_bundle(repo)
+    sha = approve_edit(repo, message="drop the activation")
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True).stdout
+    assert "activate.sh" not in status
+    shown = subprocess.run(["git", "show", "--name-status", "--pretty=format:", sha], cwd=repo,
+                           capture_output=True, text=True).stdout
+    assert "D\tenvs/sherpa/activate.sh" in shown
+
+
+def test_comment_lines_of_a_lock_are_scanned_as_prose(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path)
+    _with_env(repo, monkeypatch, lock="# TODO fake the data here, simulated placeholder values\n" + _LOCK)
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert not report.passed and "envs/sherpa/env.lock" in report.reason
+
+
+@pytest.mark.parametrize("named", ["../demo_utils", "/abs/outside", "sherpa/", "./sherpa", "[1, 2]", "{"])
+def test_an_env_named_like_a_path_or_not_a_name_fails_resolution(tmp_path, monkeypatch, named):
+    repo = _make_repo(tmp_path)
+    _with_env(repo, monkeypatch)
+    (repo / "demo_utils" / "env.yaml").write_text("purpose: smuggled\n")
+    (repo / "demo_utils" / "tool_config.yaml").write_text(f"env: {named}\n")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    resolves = next(c for c in report.layer_a if c.name == "structural.env_resolves")
+    assert not resolves.passed, named
+
+
+def test_a_link_among_the_changes_is_refused(tmp_path, monkeypatch):
+    import shutil
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "committed")
+    outside = tmp_path / "outside_lib"
+    shutil.copytree(repo / "demo_utils" / "lib", outside)
+    (outside / "evil.py").write_text("x = 1\n")
+    shutil.rmtree(repo / "demo_utils" / "lib")
+    (repo / "demo_utils" / "lib").symlink_to(outside)
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    allowed = next(c for c in report.layer_a if c.name == "structural.changes_allowed")
+    assert not allowed.passed and "demo_utils/lib" in allowed.detail
+
+
+def test_a_non_ascii_file_name_is_judged_by_its_real_name(tmp_path, monkeypatch):
+    from auto_research.sandbox.gate import collect_all_changes
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    (repo / "demo_utils" / "lib" / "shé.py").write_text("x = 1\n")
+    assert "demo_utils/lib/shé.py" in collect_all_changes(repo)
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert next(c for c in report.layer_a if c.name == "structural.changes_allowed").passed
+
+
+def test_a_nested_repository_in_a_package_is_refused(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    vend = repo / "demo_utils" / "vend"
+    vend.mkdir()
+    _git(vend, "init", "-q")
+    (vend / "helper.py").write_text("x = 1\n")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    allowed = next(c for c in report.layer_a if c.name == "structural.changes_allowed")
+    assert not allowed.passed and "demo_utils/vend/" in allowed.detail
+
+
+def test_a_package_inside_a_protected_folder_is_not_a_package(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    inside = repo / "obsdb_catalog" / "evil_utils"
+    inside.mkdir(parents=True)
+    (inside / "__init__.py").write_text("x = 1\n")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    allowed = next(c for c in report.layer_a if c.name == "structural.changes_allowed")
+    assert not allowed.passed and "obsdb_catalog/evil_utils/__init__.py" in allowed.detail
+
+
+def test_tests_that_write_into_the_worktree_fail_the_gate(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+
+    async def writing_runner(export, test_paths):
+        # Tests run in a clean export; one that reaches the real worktree by its absolute path:
+        (repo / "demo_utils" / "lib" / "late.py").write_text("y = 2\n")
+        (repo / "scratch.txt").write_text("output\n")
+        return await _pass_runner(export, test_paths)
+
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=writing_runner))
+    moved = next(c for c in report.layer_a if c.name == "structural.tests_left_tree_unchanged")
+    assert not report.passed and not moved.passed
+    assert "demo_utils/lib/late.py" in moved.detail and "scratch.txt" in moved.detail
+
+
+def test_layer_b_runs_on_exactly_the_judged_files(tmp_path):
+    """Ignored or planted files in the worktree never reach the tests (B3c-1 review 4)."""
+    repo = _make_repo(tmp_path)
+    (repo / ".gitignore").write_text("*.pyc\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "ignore bytecode")
+    _write_pkg(repo)
+    (repo / "demo_utils" / "lib" / "hidden.pyc").write_bytes(b"planted")
+    seen = {}
+
+    async def looking_runner(export, test_paths):
+        seen["files"] = sorted(str(p.relative_to(export)) for p in export.rglob("*") if p.is_file())
+        return await _pass_runner(export, test_paths)
+
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=looking_runner))
+    assert report.passed, report.reason
+    assert "demo_utils/lib/demo_help.py" in seen["files"]
+    assert not any(f.endswith("hidden.pyc") for f in seen["files"]), seen["files"]
+    # A `.gitignore` the coder writes (hiding itself and a module) is a refused change.
+    (repo / "demo_utils" / ".gitignore").write_text(".gitignore\nlib/secret.py\n")
+    (repo / "demo_utils" / "lib" / "secret.py").write_text("SECRET = 1\n")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=looking_runner))
+    allowed = next(c for c in report.layer_a if c.name == "structural.changes_allowed")
+    assert not allowed.passed and "demo_utils/.gitignore" in allowed.detail
+
+
+def test_a_judged_file_swapped_for_a_link_or_made_executable_is_not_committed(tmp_path):
+    from auto_research.sandbox.merge_flow import approve_edit
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert report.passed
+    test_file = repo / "demo_utils" / "lib" / "test_demo.py"
+    test_file.chmod(0o755)
+    with pytest.raises(RuntimeError, match="changed after the gate"):
+        approve_edit(repo, message="m", manifest=report.manifest)
+    test_file.chmod(0o644)
+    helper = repo / "demo_utils" / "lib" / "demo_help.py"
+    (tmp_path / "copy.py").write_bytes(helper.read_bytes())
+    helper.unlink()
+    helper.symlink_to(tmp_path / "copy.py")
+    with pytest.raises(RuntimeError, match="changed after the gate"):
+        approve_edit(repo, message="m", manifest=report.manifest)
+
+
+def test_approve_edit_never_commits_what_was_staged_outside_the_manifest(tmp_path):
+    from auto_research.sandbox.merge_flow import approve_edit
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    (repo / "README.md").write_text("rewritten\n")
+    _git(repo, "add", "README.md")
+    sha = approve_edit(repo, message="m", manifest=report.manifest)
+    committed = set(subprocess.run(["git", "show", "--name-only", "--pretty=format:", sha], cwd=repo,
+                                   capture_output=True, text=True, check=True).stdout.split())
+    assert "README.md" not in committed
+
+
+def test_approve_edit_commits_exactly_what_the_gate_judged(tmp_path):
+    from auto_research.sandbox.merge_flow import approve_edit
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert report.passed and "demo_utils/lib/demo_help.py" in report.manifest
+    (repo / "demo_utils" / "lib" / "demo_help.py").write_text("def my_tool(obsid):\n    return 0\n")
+    with pytest.raises(RuntimeError, match="changed after the gate"):
+        approve_edit(repo, message="m", manifest=report.manifest)
+    (repo / "demo_utils" / "lib" / "demo_help.py").write_text("def my_tool(obsid):\n    return load(obsid)\n")
+    sha = approve_edit(repo, message="m", manifest=report.manifest)
+    committed = set(subprocess.run(["git", "show", "--name-only", "--pretty=format:", sha], cwd=repo,
+                                   capture_output=True, text=True, check=True).stdout.split())
+    assert committed == set(report.manifest)
+
+
+def test_the_review_bundle_survives_a_binary_file(tmp_path):
+    from auto_research.sandbox.review import build_diff_bundle
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    (repo / "demo_utils" / "lib" / "blob.pyc").write_bytes(b"\xff\xfe\x00\x01")
+    assert "blob.pyc" in build_diff_bundle(repo)
+
+
+def test_the_export_is_the_committed_tree_whatever_gitattributes_say(tmp_path):
+    """No `export-ignore`/`export-subst`, an outside link kept as a link, a deletion and an
+    executable bit carried over: the tests see exactly what the commit holds (review 5)."""
+    import os
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    lib = repo / "demo_utils" / "lib"
+    (lib / "old.py").write_text("OLD = 1\n")
+    (lib / "const.py").write_text("STAMP = '$Format:%H$'\n")
+    (lib / "gone.py").write_text("GONE = 1\n")
+    (repo / "demo_utils" / ".gitattributes").write_text("lib/old.py export-ignore\nlib/const.py export-subst\n")
+    os.symlink("/data/elsewhere", repo / "data")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "committed by the human")
+    (lib / "gone.py").unlink()
+    (lib / "demo_help.py").write_text("def my_tool(obsid):\n    return load(obsid) or 1\n")
+    (lib / "run.sh").write_text("#!/bin/sh\necho ok\n")
+    (lib / "run.sh").chmod(0o755)
+    (lib / "test_demo.py").write_text('def test_my_tool():\n    assert my_tool("synth240611-ac") is not None\n')
+    seen = {}
+
+    async def looking_runner(export, test_paths):
+        seen["old"] = (export / "demo_utils/lib/old.py").is_file()
+        seen["const"] = (export / "demo_utils/lib/const.py").read_text()
+        seen["link"] = os.readlink(export / "data")
+        seen["gone"] = (export / "demo_utils/lib/gone.py").exists()
+        seen["exec"] = os.access(export / "demo_utils/lib/run.sh", os.X_OK)
+        return await _pass_runner(export, test_paths)
+
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=looking_runner))
+    assert report.passed, report.reason
+    assert seen == {"old": True, "const": "STAMP = '$Format:%H$'\n", "link": "/data/elsewhere",
+                    "gone": False, "exec": True}
+
+
+def test_a_committed_folder_link_replaced_by_a_folder_never_writes_through(tmp_path):
+    """HEAD links a package folder outside; the coder makes it a real folder. The export replaces
+    the link as git does, nothing lands outside, and the commit records the change (review 6)."""
+    import os
+
+    from auto_research.sandbox.merge_flow import approve_edit
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(str(outside), repo / "demo_utils" / "data")
+    (repo / "demo_utils" / "lib" / "launch.sh").write_text("#!/bin/sh\n")
+    (repo / "demo_utils" / "lib" / "launch.sh").chmod(0o755)
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "linked data")
+    (repo / "demo_utils" / "data").unlink()
+    (repo / "demo_utils" / "data").mkdir()
+    (repo / "demo_utils" / "data" / "table.py").write_text("ROWS = 1\n")
+    (repo / "demo_utils" / "lib" / "test_demo.py").write_text(
+        'def test_my_tool():\n    assert my_tool("synth240611-ad") is not None\n')
+    seen = {}
+
+    async def looking_runner(export, test_paths):
+        seen["data_is_dir"] = (export / "demo_utils/data").is_dir() and not (export / "demo_utils/data").is_symlink()
+        seen["exec"] = os.access(export / "demo_utils/lib/launch.sh", os.X_OK)
+        return await _pass_runner(export, test_paths)
+
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=looking_runner))
+    assert report.passed, report.reason
+    assert list(outside.iterdir()) == [] and seen == {"data_is_dir": True, "exec": True}
+    sha = approve_edit(repo, message="m", manifest=report.manifest)
+    tree = subprocess.run(["git", "ls-tree", "-r", sha], cwd=repo, capture_output=True, text=True).stdout
+    assert "demo_utils/data/table.py" in tree and "120000" not in tree
+
+
+def test_an_export_refuses_a_file_that_no_longer_matches_its_manifest_entry(tmp_path):
+    from auto_research.sandbox.gate import _export_judged, changeset_manifest
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    manifest = changeset_manifest(repo)
+    (repo / "demo_utils" / "lib" / "demo_help.py").write_text("def my_tool(o):\n    return 0\n")
+    with pytest.raises(ValueError, match="changed while the gate ran"):
+        _export_judged(repo, manifest, tmp_path / "export")
+
+
+def test_the_gate_hides_the_real_worktree_from_its_tests(tmp_path, monkeypatch):
+    """The default runner masks the worktree, and the jail argv carries the mask (review 6)."""
+    from auto_research.sandbox import gate, jail
+
+    seen = {}
+    real = gate._jailed_pytest
+
+    def capturing(argv, *, junit_path, worktree=None, masked=None, extra_ro=()):
+        seen["masked"] = masked
+        monkeypatch.setattr(jail, "_config", lambda: {"agent_os_jail": True})
+        monkeypatch.setattr(jail, "bwrap_path", lambda: "/usr/bin/bwrap")
+        seen["argv"] = real(argv, junit_path=junit_path, worktree=worktree, masked=masked, extra_ro=extra_ro)
+        return argv  # run unjailed here; the argv above is what a jailed run would get
+
+    monkeypatch.setattr(gate, "_jailed_pytest", capturing)
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    asyncio.run(run_gate(repo, _spec()))
+    assert seen["masked"] == repo
+    i = seen["argv"].index("--tmpfs")
+    assert seen["argv"][i + 1] == str(repo.resolve()) and "--remount-ro" in seen["argv"]
+
+
+def test_a_glob_character_in_a_name_is_refused(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    (repo / "demo_utils" / "lib" / "[ab].py").write_text("x = 1\n")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    allowed = next(c for c in report.layer_a if c.name == "structural.changes_allowed")
+    assert not allowed.passed and "[ab].py" in allowed.detail
+
+
+def test_approve_edit_reads_every_path_literally(tmp_path):
+    """A committed `[ab].py` deleted must remove that file only, never `a.py`/`b.py` (review 7)."""
+    from auto_research.sandbox.gate import _entry
+    from auto_research.sandbox.merge_flow import approve_edit
+
+    repo = _make_repo(tmp_path)
+    lib = repo / "demo_utils" / "lib"
+    lib.mkdir(parents=True)
+    for name in ("a.py", "b.py", "[ab].py"):
+        (lib / name).write_text(f"# {name}\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "human commit")
+    (lib / "[ab].py").unlink()
+    (lib / "new.py").write_text("NEW = 1\n")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout
+    # A glob-named path is never a judged path, so a manifest naming one is refused outright …
+    manifest = {"demo_utils/lib/[ab].py": "deleted", "demo_utils/lib/new.py": _entry(lib / "new.py")}
+    with pytest.raises(RuntimeError, match="changed after the gate"):
+        approve_edit(repo, message="m", manifest=manifest)
+    assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout == head
+    # … and staging reads names literally all the same: `[ab].py` restored, `new.py` added alone.
+    (lib / "[ab].py").write_text("# [ab].py\n")
+    sha = approve_edit(repo, message="m", manifest={"demo_utils/lib/new.py": _entry(lib / "new.py")})
+    tree = subprocess.run(["git", "ls-tree", "-r", "--name-only", sha], cwd=repo,
+                          capture_output=True, text=True).stdout.split()
+    assert {"demo_utils/lib/a.py", "demo_utils/lib/b.py", "demo_utils/lib/[ab].py",
+            "demo_utils/lib/new.py"} <= set(tree)
+
+
+def test_a_judged_deletion_is_committed_from_the_manifest(tmp_path):
+    from auto_research.sandbox.merge_flow import approve_edit
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    (repo / "demo_utils" / "lib" / "old.py").write_text("OLD = 1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "committed")
+    (repo / "demo_utils" / "lib" / "old.py").unlink()
+    (repo / "demo_utils" / "lib" / "test_demo.py").write_text(
+        'def test_my_tool():\n    assert my_tool("synth240611-ae") is not None\n')
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert report.passed and report.manifest["demo_utils/lib/old.py"] == "deleted"
+    sha = approve_edit(repo, message="m", manifest=report.manifest)
+    shown = subprocess.run(["git", "show", "--name-status", "--pretty=format:", sha], cwd=repo,
+                           capture_output=True, text=True).stdout
+    assert "D\tdemo_utils/lib/old.py" in shown
+
+
+def test_a_committed_file_link_replaced_by_a_file_never_writes_through(tmp_path):
+    import os
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    outside = tmp_path / "outside.py"
+    outside.write_text("ORIGINAL = 1\n")
+    os.symlink(str(outside), repo / "demo_utils" / "lib" / "shared.py")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "linked file")
+    (repo / "demo_utils" / "lib" / "shared.py").unlink()
+    (repo / "demo_utils" / "lib" / "shared.py").write_text("REPLACED = 1\n")
+    (repo / "demo_utils" / "lib" / "test_demo.py").write_text(
+        'def test_my_tool():\n    assert my_tool("synth240611-af") is not None\n')
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert outside.read_text() == "ORIGINAL = 1\n", report.reason
+
+
+def test_a_py_file_in_pycache_is_judged_not_skipped(tmp_path):
+    from auto_research.sandbox.gate import changeset_manifest
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    hook = repo / "demo_utils" / "sub" / "__pycache__" / "hook.py"
+    hook.parent.mkdir(parents=True)
+    hook.write_text("x = 1\n")
+    assert "demo_utils/sub/__pycache__/hook.py" in changeset_manifest(repo)
+
+
+def test_a_gitattributes_file_is_not_the_coders(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    (repo / "demo_utils" / ".gitattributes").write_text("lib/demo_help.py ident\n")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    allowed = next(c for c in report.layer_a if c.name == "structural.changes_allowed")
+    assert not allowed.passed and ".gitattributes" in allowed.detail
+
+
+def test_the_commit_holds_the_judged_bytes_whatever_attributes_apply(tmp_path):
+    """A committed `.gitattributes` with an encoding or `ident` never changes what is staged."""
+    from auto_research.sandbox.merge_flow import approve_edit
+
+    repo = _make_repo(tmp_path)
+    (repo / ".gitattributes").write_text("*.py ident\n*.txt working-tree-encoding=UTF-7\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "human attributes")
+    _write_pkg(repo)
+    (repo / "demo_utils" / "lib" / "demo_help.py").write_text("ID = '$Id: kept $'\ndef my_tool(obsid):\n    return load(obsid)\n")
+    (repo / "demo_utils" / "lib" / "note.txt").write_text("# see +AAo-import os\n")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert report.passed, report.reason
+    sha = approve_edit(repo, message="m", manifest=report.manifest, base=report.base)
+    for rel in ("demo_utils/lib/demo_help.py", "demo_utils/lib/note.txt"):
+        blob = subprocess.run(["git", "cat-file", "blob", f"{sha}:{rel}"], cwd=repo,
+                              capture_output=True, check=True).stdout
+        assert blob == (repo / rel).read_bytes(), rel
+
+
+def test_the_commit_lands_on_the_head_the_gate_judged(tmp_path):
+    from auto_research.sandbox.merge_flow import approve_edit
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "sneak")
+    with pytest.raises(RuntimeError, match="HEAD moved"):
+        approve_edit(repo, message="m", manifest=report.manifest, base=report.base)
+
+
+def test_a_folder_replaced_by_a_file_can_pass(tmp_path):
+    import shutil
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    (repo / "demo_utils" / "x").mkdir()
+    (repo / "demo_utils" / "x" / "y.py").write_text("Y = 1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "folder")
+    shutil.rmtree(repo / "demo_utils" / "x")
+    (repo / "demo_utils" / "x").write_text("X = 1\n")
+    (repo / "demo_utils" / "lib" / "test_demo.py").write_text(
+        'def test_my_tool():\n    assert my_tool("synth240611-ag") is not None\n')
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert report.passed, report.reason
+
+
+def test_a_file_replacing_a_folder_commits(tmp_path):
+    import shutil
+
+    from auto_research.sandbox.merge_flow import approve_edit
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    (repo / "demo_utils" / "sub").mkdir()
+    (repo / "demo_utils" / "sub" / "a.py").write_text("A = 1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "folder")
+    shutil.rmtree(repo / "demo_utils" / "sub")
+    (repo / "demo_utils" / "sub").write_text("SUB = 1\n")
+    (repo / "demo_utils" / "lib" / "test_demo.py").write_text(
+        'def test_my_tool():\n    assert my_tool("synth240611-ah") is not None\n')
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert report.passed, report.reason
+    sha = approve_edit(repo, message="m", manifest=report.manifest, base=report.base)
+    tree = subprocess.run(["git", "ls-tree", "-r", "--name-only", sha], cwd=repo, capture_output=True, text=True).stdout
+    assert "demo_utils/sub\n" in tree + "\n" and "demo_utils/sub/a.py" not in tree
+
+
+def test_a_latin1_byte_is_a_failed_check_not_a_crash(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "committed")
+    helper = repo / "demo_utils" / "lib" / "demo_help.py"
+    helper.write_bytes(helper.read_bytes() + b"# temperature in \xb0C\n")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert not report.passed and "undecodable" in report.reason
+    import os
+
+    fd = os.open(bytes(repo / "demo_utils" / "lib") + b"/caf\xff.py", os.O_WRONLY | os.O_CREAT, 0o644)
+    os.write(fd, b"x = 1\n")
+    os.close(fd)
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))  # no crash
+    assert not report.passed
+
+
+def test_bytecode_is_purged_from_the_packages_and_nothing_else(tmp_path):
+    from auto_research.sandbox.merge_flow import purge_bytecode
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    cache = repo / "demo_utils" / "lib" / "__pycache__"
+    cache.mkdir()
+    (cache / "demo_help.cpython-313.pyc").write_bytes(b"forged")
+    (repo / "demo_utils" / "lib" / "helper.pyc").write_bytes(b"sourceless")
+    (repo / "demo_utils" / "sync.sh").write_text("# the human's\n")
+    (repo / "obsdb_catalog" / "__pycache__").mkdir(parents=True)
+    (repo / "obsdb_catalog" / "__pycache__" / "core.cpython-313.pyc").write_bytes(b"forged")
+    (repo / "json.pyc").write_bytes(b"shadows the stdlib")
+    (repo / "obsdb_catalog" / "__pycache__").chmod(0o111)  # unlistable, still loadable by Python
+    purge_bytecode(repo)
+    assert not (cache / "demo_help.cpython-313.pyc").exists() and not (repo / "demo_utils/lib/helper.pyc").exists()
+    assert not (repo / "obsdb_catalog/__pycache__/core.cpython-313.pyc").exists() and not (repo / "json.pyc").exists()
+    assert (repo / "demo_utils" / "sync.sh").is_file()
+
+
+def test_commit_runs_no_repository_hook(tmp_path):
+    from auto_research.sandbox.merge_flow import approve_edit
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\ntouch \"$GIT_DIR/../hook-ran\"\nexit 1\n")
+    hook.chmod(0o755)
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    approve_edit(repo, message="m", manifest=report.manifest, base=report.base)
+    assert not (repo / "hook-ran").exists()
+
+
+def test_bytecode_is_purged_through_a_linked_toolkit_root(tmp_path):
+    import os
+
+    from auto_research.sandbox.merge_flow import purge_bytecode
+
+    repo = _make_repo(tmp_path)
+    (repo / "json.pyc").write_bytes(b"x")
+    link = tmp_path / "toolkit_link"
+    os.symlink(repo, link)
+    purge_bytecode(link)
+    assert not (repo / "json.pyc").exists()
+
+
+def test_a_big_changed_file_is_scanned_line_by_line(tmp_path):
+    from auto_research.sandbox.gate import _added_lines
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "committed")
+    _git(repo, "config", "core.bigFileThreshold", "1k")
+    helper = repo / "demo_utils" / "lib" / "demo_help.py"
+    helper.write_text(helper.read_text() + "# pad\n" * 400 + "x = 'fabricated'\n")
+    assert len(_added_lines(repo, "demo_utils/lib/demo_help.py")) == 401
+
+
+def test_added_lines_are_exact_without_a_final_newline_and_with_plus_plus(tmp_path):
+    from auto_research.sandbox.gate import _added_lines
+
+    repo = _make_repo(tmp_path)
+    lib = repo / "demo_utils" / "lib"
+    lib.mkdir(parents=True)
+    (lib / "a.py").write_text("A = 1\nB = 2\nVALUE = 2")  # no final newline, as 8 real files have
+    (lib / "b.py").write_text('"""Doc.\n"""\n')
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "base")
+    (lib / "a.py").write_text("A = 1\nB = 2\nX = 1\nY = 2\nVALUE = 2\nZ = 3\n")
+    (lib / "b.py").write_text('"""Doc.\n++ returns placeholder data\n"""\n')
+    assert _added_lines(repo, "demo_utils/lib/a.py") == {3, 4, 5, 6}
+    assert _added_lines(repo, "demo_utils/lib/b.py") == {2}
+
+
+def test_an_untracked_gitattributes_is_removed_before_a_reset(tmp_path):
+    from auto_research.sandbox.merge_flow import remove_untracked_ignores
+
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "c")
+    (repo / "demo_utils" / ".gitattributes").write_text("*.py working-tree-encoding=UTF-16\n")
+    assert "demo_utils/.gitattributes" in remove_untracked_ignores(repo)
+    assert not (repo / "demo_utils" / ".gitattributes").exists()
+
+
+@pytest.mark.parametrize("added_text", [
+    'MSG = "fit ok\\nusing fake data for now"\n',              # a \n escape inside one added line
+    "# note\x0cmore\nX = 1\n# here we use fake data\n",        # a form feed in an added comment
+    "# note\u2028more\nX = 1\n# here we use fake data\n",      # U+2028 likewise
+    "X = 1  # ok\x0cfabricated values\n",                        # inside one comment: form feed
+    "X = 1  # ok\x0bfabricated values\n",                        # vertical tab
+    "X = 1  # ok\u2028fabricated values\n",                      # U+2028
+    "X = 1  # ok\r# fabricated values\n",                        # a lone CR (Python: two lines)
+    'DATA = b"fake data for now"\n',                             # a bytes literal
+])
+def test_added_text_is_scanned_whatever_line_breaks_it_holds(tmp_path, added_text):
+    from auto_research.sandbox.gate import collect_targets, scan_python_source
+
+    repo = _make_repo(tmp_path)
+    lib = repo / "demo_utils" / "lib"
+    lib.mkdir(parents=True)
+    (lib / "mod.py").write_text("A = 1\nB = 2\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "base")
+    (lib / "mod.py").write_bytes(("A = 1\nB = 2\n" + added_text).encode())
+    added = collect_targets(repo)[lib / "mod.py"]
+    source = (lib / "mod.py").read_bytes().decode("utf-8")  # as the gate reads it: no newline translation
+    hard, _ = scan_python_source("demo_utils/lib/mod.py", source, added=added)
+    assert any(c.name == "no_fabrication.vocabulary" for c in hard), (added, hard)
+
+
+def test_a_lone_carriage_return_fails_the_gate(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "c")
+    helper = repo / "demo_utils" / "lib" / "demo_help.py"
+    helper.write_bytes(helper.read_bytes() + b'x = 2\rMSG = "fake data for now"\n')
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert not report.passed and "carriage return" in report.reason
+
+
+def test_ast_scans_see_added_lines_inside_multi_line_nodes(tmp_path):
+    from auto_research.sandbox.gate import collect_targets, scan_python_source
+
+    repo = _make_repo(tmp_path)
+    lib = repo / "demo_utils" / "lib"
+    lib.mkdir(parents=True)
+    (lib / "core.py").write_text(
+        "import numpy as np\n\n\ndef fit(x):\n    return compute(x)\n\n\ndef spread(x):\n"
+        "    y = (np\n         .mean(x))\n    return y\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "base")
+    (lib / "core.py").write_text(
+        "import numpy as np\n\n\ndef fit(x):\n    pass\n\n\ndef spread(x):\n"
+        "    y = (np\n         .random.normal(x))\n    return y\n")
+    added = collect_targets(repo)[lib / "core.py"]
+    hard, finds = scan_python_source("demo_utils/lib/core.py", (lib / "core.py").read_text(), added=added)
+    assert any(c.name == "no_fabrication.placeholder_body" for c in hard), hard
+    assert any("random.normal" in c.detail for c in finds), finds
+
+
+@pytest.mark.parametrize("body", ["def f():\n    return [" + "-" * 3000 + "1]\n",
+                                  "TABLE = " + " + ".join(["1.0"] * 20000) + "\n"])
+def test_a_deeply_nested_file_is_a_failed_check_not_a_crash(tmp_path, body):
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    (repo / "demo_utils" / "lib" / "deep.py").write_text(body)
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert not report.passed and "nested too deeply" in report.reason
+
+
+@pytest.mark.parametrize("cookie,fails", [("# -*- coding: utf-7 -*-", True), ("# coding: latin-1", True),
+                                          ("# -*- coding: utf-8 -*-", False), ("# coding=utf8", False)])
+def test_only_a_utf8_source_encoding_is_accepted(tmp_path, cookie, fails):
+    repo = _make_repo(tmp_path)
+    _write_pkg(repo)
+    (repo / "demo_utils" / "lib" / "enc.py").write_text(cookie + "\nX = 1\n")
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=_pass_runner))
+    assert ("source-encoding" in report.reason) is fails, report.reason
+
+
+
+def _derived_package(repo, monkeypatch, *, activate="export STACK_READY=1\n", test_body=None):
+    """demo_utils names a derived environment layered on this test's interpreter (a real Python
+    with pytest), with an activation of its own."""
+    import sys
+    from pathlib import Path
+
+    from auto_research import env as app_env
+    from auto_research.sandbox.envs import Environment
+
+    base = Environment(name="testbase", prefix=Path(sys.prefix), owner="human")
+    monkeypatch.setattr(app_env, "_orch_config", lambda: {"env_externals": {}})
+    monkeypatch.setattr(app_env, "analysis_environment", lambda config=None: base)
+    _write_pkg(repo)
+    (repo / "demo_utils" / "tool_config.yaml").write_text("env: stack\n")
+    (repo / "demo_utils" / "lib" / "test_demo.py").write_text(test_body or (
+        "import os, sys\n"
+        "def test_runs_in_its_environment():\n"
+        "    assert os.environ.get('STACK_READY') == '1'\n"
+        f"    assert sys.prefix == {str(Path(sys.prefix))!r}\n"
+    ))
+    folder = repo / "envs" / "stack"
+    folder.mkdir(parents=True)
+    (folder / "env.yaml").write_text("purpose: the demo tools' stack\nbase: testbase\n")
+    if activate is not None:
+        (folder / "activate.sh").write_text(activate)
+    return folder
+
+
+def test_layer_b_runs_a_package_tests_in_the_environment_it_names(tmp_path, monkeypatch):
+    """B3c-2 through the real gate and its default runner: the judged definition is built, its
+    activation sourced in the test process (inside the jail when it is on), its Python used."""
+    repo = _make_repo(tmp_path)
+    _derived_package(repo, monkeypatch)
+    report = asyncio.run(run_gate(repo, _spec()))
+    pytest_result = next(c for c in report.layer_b if c.name == "layer_b.pytest")
+    assert pytest_result.passed, pytest_result.detail
+
+
+def test_layer_b_fails_honestly_when_the_named_activation_breaks(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path)
+    _derived_package(repo, monkeypatch, activate="exit 0\n")
+    report = asyncio.run(run_gate(repo, _spec()))
+    assert not report.passed
+    result = next(c for c in report.layer_b if c.name == "layer_b.pytest")
+    assert not result.passed and "did not finish" in result.detail
+
+
+def test_layer_b_groups_tests_by_environment_and_reports_a_failed_build(tmp_path, monkeypatch):
+    seen = []
+
+    async def recording(worktree, test_paths, environment=None):
+        seen.append((tuple(test_paths), getattr(environment, "name", None)))
+        return {"results": [CheckResult(name="layer_b.pytest", layer="B", passed=True, detail="")],
+                "deterministic": True}
+
+    repo = _make_repo(tmp_path)
+    _derived_package(repo, monkeypatch)
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=recording))
+    assert seen == [(("demo_utils/lib/test_demo.py",), "ar-stack")] and report.passed
+    (repo / "envs" / "stack" / "env.yaml").write_text("purpose: x\nbase: gone\n")  # no such base
+    seen.clear()
+    report = asyncio.run(run_gate(repo, _spec(), test_runner=recording))
+    assert not report.passed and seen == []
+
+
+def test_each_environment_group_watches_only_its_own_tools(tmp_path, monkeypatch):
+    """Two packages in one changeset, one naming an environment: the analysis group's return
+    recorder must not import the other environment's tool (it may not even import there)."""
+    repo = _make_repo(tmp_path)
+    _derived_package(repo, monkeypatch, test_body=(
+        "from demo_utils.lib.demo_help import my_tool\n"
+        "def test_my_tool():\n    assert my_tool('x') == {'stdout': 'ok'}\n"))
+    # The demo tool imports only where its environment's activation ran.
+    (repo / "demo_utils" / "lib" / "demo_help.py").write_text(
+        "import os\nassert os.environ['STACK_READY'] == '1'\n"
+        "def my_tool(obsid):\n    return {'stdout': 'ok'}\n")
+    other = repo / "other_utils"
+    for sub in ("lib", "skills"):
+        (other / sub).mkdir(parents=True)
+    (other / "__init__.py").write_text("from .skills import TOOL_MANIFEST\n")
+    (other / "lib" / "__init__.py").write_text("")
+    (other / "lib" / "other_help.py").write_text("def other_tool(obsid):\n    return {'stdout': 'fine'}\n")
+    (other / "skills" / "__init__.py").write_text(
+        'TOOL_MANIFEST = {\n  "research_toolkit.other_utils.other_tool": {\n'
+        '    "module": "other_utils.lib.other_help", "fn": "other_tool",\n'
+        '    "description": "d", "args_schema": {}}}\n')
+    (other / "lib" / "test_other.py").write_text(
+        "from other_utils.lib.other_help import other_tool\n"
+        "def test_other():\n    assert other_tool('x') == {'stdout': 'fine'}\n")
+    from auto_research.sandbox import jail
+
+    # The stand-in analysis environment (this interpreter) is not on the jail's allow-list as the
+    # configured one is; the grouping is what this test is about.
+    monkeypatch.setattr(jail, "jail_enabled", lambda: False)
+    report = asyncio.run(run_gate(repo, _spec()))
+    failed = [c for c in report.layer_b if not c.passed]
+    assert not failed, failed
+    assert not [f for f in report.findings if f.name == "finding.returns_unobserved"]
+    watched = [c for c in report.layer_b if c.name.startswith("layer_b.returns")]
+    assert len(watched) == 2 and all(c.passed for c in watched), watched

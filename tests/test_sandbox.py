@@ -569,6 +569,14 @@ class TestBashExecInterpreterConsistency:
     launching shell's PATH (so ``import astropy`` / ``import xspec_utils`` breaks
     nondeterministically). This test fails if that wiring regresses."""
 
+    @pytest.fixture(autouse=True)
+    def _own_conda_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The runtime's conda folders, which the shell binds read-only: a temp copy, never the
+        configured runtime dir."""
+        from auto_research import env as app_env
+
+        monkeypatch.setattr(app_env, "agent_conda_dir", lambda: tmp_path / "conda")
+
     def test_bash_exec_python_matches_analyze_env(self) -> None:
         import shutil
 
@@ -613,6 +621,14 @@ class TestShellServerJail:
     ``agent_fs_allow`` happens to contain -- in particular ``/tmp`` is absent from it, so a write
     that lands proves the cwd bind, not a broad root.
     """
+
+    @pytest.fixture(autouse=True)
+    def _own_conda_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The runtime's conda folders, which the shell binds read-only: a temp copy, never the
+        configured runtime dir."""
+        from auto_research import env as app_env
+
+        monkeypatch.setattr(app_env, "agent_conda_dir", lambda: tmp_path / "conda")
 
     @staticmethod
     def _orch() -> dict:
@@ -754,6 +770,41 @@ class TestShellServerJail:
         assert authoring["exit_code"] != 0, "the shell can write the run's authoring control files"
         if ";" in (server["env"].get("PFILES") or ""):  # a HEASoft-style stack is configured
             assert pfiles["stdout"].startswith("/tmp/pfiles;"), pfiles  # its own, not a shared one
+
+    def test_the_shell_can_look_into_a_built_environment_and_not_write_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """use_env: built environments are bound read-only into the jailed shell."""
+        from auto_research import env as app_env
+        from auto_research.agents.react import _in_environment
+        from auto_research.sandbox import jail, runner
+        from auto_research.sandbox.envs import Environment
+
+        if not jail.jail_available()[0]:
+            pytest.skip("bwrap cannot run on this host")
+        orch = self._orch()
+        runs = tmp_path / "runs"
+        toolkit = self._synthetic_toolkit(tmp_path)
+        self._synthetic_jail(monkeypatch, orch, runs, toolkit)
+        monkeypatch.setattr(runner, "_ini_env_cache", {})
+        prefix = tmp_path / "conda" / "envs" / "ar-look-0123456789abcdef"
+        (prefix / "bin").mkdir(parents=True)
+        (prefix / "bin" / "look-hello").write_text("#!/bin/sh\necho HELLO-FROM-LOOK $LOOK_ACTIVE\n")
+        activation = tmp_path / "conda" / "activation" / "0123456789abcdef" / "activate.sh"
+        activation.parent.mkdir(parents=True)
+        activation.write_text("export LOOK_ACTIVE=sourced-in-jail\n")
+        (prefix / "bin" / "look-hello").chmod(0o755)
+        cwd = runs / "run1"
+        cwd.mkdir(parents=True)
+        server = self._server(orch, cwd, toolkit)
+        look = Environment(name="ar-look", prefix=prefix, owner="pipeline", activate=activation)
+        looked, wrote = self._bash(
+            server,
+            _in_environment(look, "look-hello", toolkit),
+            _in_environment(look, f"touch {prefix}/bin/planted", toolkit),
+        )
+        assert looked["stdout"].strip() == "HELLO-FROM-LOOK sourced-in-jail", looked
+        assert wrote["exit_code"] != 0 and not (prefix / "bin" / "planted").exists(), wrote
 
     def test_the_shell_writes_only_the_workers_folders_not_the_run_folder(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1139,3 +1190,21 @@ def test_an_analysis_home_is_mounted_outside_tmp(tmp_path, monkeypatch):
     argv = jail.jail_argv(policy)
     assert ("--bind", str(home.resolve()), jail.JAIL_HOME_AT) in list(zip(argv, argv[1:], argv[2:]))
     assert ("--setenv", "HOME", jail.JAIL_HOME_AT) in list(zip(argv, argv[1:], argv[2:]))
+
+
+def test_the_shell_reads_no_in_tree_bytecode(tmp_path, monkeypatch):
+    """git ignores `__pycache__`, so nothing judges it: the shell keeps bytecode in its own folder."""
+    from auto_research import env as app_env
+    from auto_research.graph.runtime import _builtin_server_config
+
+    monkeypatch.setattr(app_env, "agent_conda_dir", lambda: tmp_path / "conda")
+    ini = tmp_path / "activate.sh"
+    ini.write_text("export A=1\n")
+    (tmp_path / "toolkit").mkdir()
+    cfg = _builtin_server_config(None, str(ini), tmp_path / "toolkit", cwd=tmp_path / "run")
+    prefix = cfg["env"]["PYTHONPYCACHEPREFIX"]
+    if cfg["jailed"]:
+        assert prefix == "/tmp/ar-pycache"  # the jail's private /tmp
+    else:
+        assert prefix == str(Path(cfg["private_tmp"]) / "ar-pycache")  # never the shared host /tmp
+

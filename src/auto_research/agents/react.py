@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
+from functools import partial
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -116,6 +118,150 @@ async def _run_extra_tool(
         if definition.get("name") == name:
             return await executor(arguments)
     return None
+
+
+def _sandbox_env_fingerprint(sandbox: Any) -> str | None:
+    """The fingerprint of the environment a worker's sandbox runs in, its lock written once.
+
+    Stamped on every receipt of the sandbox's calls (env plan B1); ``None`` for a sandbox that does
+    not name one (a test fake), which then takes the store's default.
+    """
+    environment = getattr(sandbox, "environment", None)
+    if environment is None:
+        return None
+    if hasattr(sandbox, "call_stamp"):
+        # The state the call ran in, fixed before it ran; None when its lock is not on disk.
+        return sandbox.call_stamp
+    environment = getattr(sandbox, "call_environment", None) or environment  # a routed call's
+    if hasattr(sandbox, "booted_fingerprint"):
+        return sandbox.booted_fingerprint if getattr(sandbox, "booted_lock_written", False) else None
+    from auto_research.env import env_lock_dir
+    from auto_research.sandbox.envs import fingerprint_and_lock
+
+    try:
+        return fingerprint_and_lock(environment, env_lock_dir())
+    except Exception:  # noqa: BLE001 — an unreadable env leaves the receipt unstamped, never the call failed
+        return None
+
+
+LIST_ENV_TOOL = "list_env"
+
+
+def list_env_tool_def() -> dict:
+    """The environment listing a unit with an execution backend gets (env plan B2a)."""
+    return {
+        "name": LIST_ENV_TOOL,
+        "description": (
+            "List the software environments your tools run in. With no argument: each one's name, "
+            "owner, Python version and fingerprint, which one your tools use (`active`) and which "
+            "your shell uses (`shell`). With `env`: its conda and pip packages, the external "
+            "software it uses, and, for a human environment, the variables its activation sets. Use it to check a package or version before relying on it; the listing shows "
+            "where to look and is not evidence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "env": {
+                    "type": "string",
+                    "description": "An environment's name from the plain listing, to show its contents.",
+                },
+            },
+        },
+    }
+
+
+def _available_environments(sandbox: Any) -> list:
+    """The sandbox's own environment first, then every other one its catalogue lists."""
+    own = getattr(sandbox, "environment", None)
+    listing = getattr(sandbox, "environments", None)
+    others = list(listing()) if callable(listing) else []
+    return ([own] if own is not None else []) + [
+        env for env in others if own is None or env.name != own.name
+    ]
+
+
+def execute_list_env(sandbox: Any, arguments: Mapping[str, Any]) -> ToolOutcome:
+    """Answer ``list_env`` from the sandbox's environment and its catalogue."""
+    from auto_research.sandbox.envs import describe
+
+    environment = getattr(sandbox, "environment", None)
+    if environment is None:
+        return ToolOutcome(text="No software environment is attached to your tools.", is_error=True)
+    wanted = str(arguments.get("env") or "").strip()
+    try:
+        available = _available_environments(sandbox)
+        shell = getattr(sandbox, "shell_environment", None) or environment.name
+        if not wanted:
+            rows = [
+                {**describe(env), "active": env is environment, "shell": env.name == shell}
+                for env in available
+            ]
+            return ToolOutcome(text=json.dumps({"environments": rows}, indent=1))
+        match = next((env for env in available if env.name == wanted), None)
+        if match is None:
+            names = ", ".join(env.name for env in available)
+            return ToolOutcome(text=f"No environment named {wanted!r}; available: {names}.", is_error=True)
+        return ToolOutcome(text=json.dumps(describe(match, detail=True), indent=1))
+    except Exception as exc:  # noqa: BLE001 — an unreadable environment is reported, never fatal
+        return ToolOutcome(text=f"The environment could not be read: {exc}", is_error=True)
+
+
+USE_ENV_TOOL = "use_env"
+
+
+def use_env_tool_def() -> dict:
+    """Point the unit's own shell at another environment, for a quick look (env plan B2b)."""
+    return {
+        "name": USE_ENV_TOOL,
+        "description": (
+            "Choose the software environment your shell (bash_exec) runs in, for a quick look: "
+            "which version a package has, whether a module imports, what a command prints there. "
+            "Name one from list_env; with no name, your shell returns to your tools' own "
+            "environment. Your toolkit tools keep running in their own environment. What the "
+            "shell shows is where you looked; a number in your report comes from a toolkit tool."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "env": {"type": "string", "description": "An environment's name from list_env."},
+            },
+        },
+    }
+
+
+def execute_use_env(sandbox: Any, arguments: Mapping[str, Any], *, shell_jailed: bool) -> ToolOutcome:
+    """Set ``sandbox.shell_environment`` (``None`` = the sandbox's own) from the catalogue. A
+    pipeline environment's activation is coder-written, so the shell takes one only when it runs
+    jailed (``shell_jailed``: what the shell server's launch recorded)."""
+    environment = getattr(sandbox, "environment", None)
+    if environment is None:
+        return ToolOutcome(text="No software environment is attached to your tools.", is_error=True)
+    wanted = str(arguments.get("env") or "").strip()
+    if not wanted or wanted == environment.name:
+        sandbox.shell_environment = None
+        return ToolOutcome(text=f"Your shell runs in {environment.name}, your tools' own environment.")
+    try:
+        available = _available_environments(sandbox)
+    except Exception as exc:  # noqa: BLE001 — an unreadable catalogue is reported, never fatal
+        return ToolOutcome(text=f"The environments could not be listed: {exc}", is_error=True)
+    match = next((env for env in available if env.name == wanted), None)
+    if match is None:
+        names = ", ".join(env.name for env in available)
+        return ToolOutcome(text=f"No environment named {wanted!r}; available: {names}.", is_error=True)
+    if match.owner == "pipeline" and not shell_jailed:
+        return ToolOutcome(
+            text=f"{match.name} is available to your shell when the shell runs in the OS jail; "
+                 "this run's shell runs without it. Use a toolkit tool, or ask for the jail.",
+            is_error=True,
+        )
+    sandbox.shell_environment = match.name
+    return ToolOutcome(text=(
+        f"Your shell (bash_exec) now runs in {match.name}; your toolkit tools still run in "
+        f"{environment.name}. Call use_env with no name to return."
+    ))
+
+
+from auto_research.sandbox.envs import in_environment as _in_environment  # noqa: E402 — shared with the coder's candidates
 
 
 def _receipted(
@@ -447,6 +593,17 @@ def _import_from_toolkit(module_path: str, attr: str):
     return getattr(module, attr)
 
 
+def _toolkit_clean_head() -> str | None:
+    """The toolkit's ``HEAD`` commit when its tree holds no uncommitted change, else ``None``."""
+    from auto_research.env import toolkit_root
+    from auto_research.sandbox.merge_flow import _dirty_paths, _git_in
+
+    root = toolkit_root()
+    if _dirty_paths(root):
+        return None
+    return _git_in(root, "rev-parse", "HEAD").strip()
+
+
 def data_catalog_tool_def() -> dict | None:
     """Provider-neutral definition for the read-only ``data_catalog`` tool.
 
@@ -485,10 +642,38 @@ async def execute_data_catalog(arguments: Mapping[str, Any]) -> ToolOutcome:
             is_error=True,
         )
     try:
-        if _catalog_read_fn is None:
-            _catalog_read_fn = _import_from_toolkit("catalog_utils.lib.catalog_read", "data_catalog")
+        # Committed code only, as a worker's sandbox would run it after a commit: the lead imports
+        # this in the orchestrator itself, unjailed, and its output is evidence. While the toolkit
+        # holds uncommitted changes (an authoring session's work) the read waits; a new commit
+        # re-imports (B3c-1 review 31: an edited, later rejected module kept running from memory).
+        head = _toolkit_clean_head()
+        if head is None:
+            return ToolOutcome(
+                text="data_catalog runs committed toolkit code only, and the toolkit has "
+                     "uncommitted changes (a tool is being authored). Call it again once that "
+                     "authoring has finished.",
+                is_error=True,
+            )
+        if _catalog_read_fn is None or _catalog_read_fn[0] != head:
+            import sys
+            import tempfile
+
+            from auto_research.env import toolkit_root
+            from auto_research.sandbox.merge_flow import purge_bytecode
+
+            for name in [m for m in sys.modules if m.split(".")[0] in ("catalog_utils", "obsdb_catalog")]:
+                del sys.modules[name]
+            # Git ignores bytecode, so the clean check above cannot see a planted `.pyc`: none is
+            # left to read, and this import writes and reads its own in a private folder.
+            purge_bytecode(toolkit_root())
+            previous = sys.pycache_prefix
+            sys.pycache_prefix = tempfile.mkdtemp(prefix="ar-lead-pycache-")
+            try:
+                _catalog_read_fn = (head, _import_from_toolkit("catalog_utils.lib.catalog_read", "data_catalog"))
+            finally:
+                sys.pycache_prefix = previous
         raw_min = arguments.get("min_level")
-        text = _catalog_read_fn(obs_db_path, min_level=int(raw_min) if raw_min is not None else None)
+        text = _catalog_read_fn[1](obs_db_path, min_level=int(raw_min) if raw_min is not None else None)
     except Exception as exc:  # noqa: BLE001 — malformed catalog / missing toolkit → recoverable
         return ToolOutcome(text=f"{type(exc).__name__}: {exc}", is_error=True)
     return ToolOutcome(text=text)
@@ -1966,7 +2151,12 @@ async def _submit_now(session: Any, cycle: "LeadCycle | None") -> ToolOutcome:
                 f"messaging the coder (never weaken a check to pass), then submit_for_review again:\n{body}"
             )
         )
-    review = await session.run_review_step(gate)
+    try:
+        review = await session.run_review_step(gate)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # The tree could not be read for the review: an honest error to the lead, never a crash.
+        return ToolOutcome(text=f"The co-lead review could not read the changeset: {exc}. "
+                                "Fix the tree with the coder, then submit_for_review.", is_error=True)
     if not review.approved:
         issues = "\n".join(f"- {i}" for i in review.issues) or review.rationale
         return ToolOutcome(
@@ -1976,14 +2166,18 @@ async def _submit_now(session: Any, cycle: "LeadCycle | None") -> ToolOutcome:
                 "respond_to_review to defend the design if you believe a challenge is unfounded."
             )
         )
-    sha = await session.commit(
-        review.commit_summary.strip() or session.tool_spec.proposed_tool_name
-    )
+    try:
+        sha = await session.commit(
+            review.commit_summary.strip() or session.tool_spec.proposed_tool_name
+        )
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        return ToolOutcome(text=f"Not committed: {exc}. Call submit_for_review to judge the tree as it is now.",
+                           is_error=True)
     return ToolOutcome(
         text=(
             f"COMMITTED {session.tool_spec.proposed_tool_name} → {sha[:10]}. Gate passed and the "
             "co-lead approved — the tool is on the authoring branch. Authoring for this tool is "
-            "done." + await _advance(cycle)
+            "done." + getattr(session, "env_note", "") + await _advance(cycle)
         )
     )
 
@@ -2062,8 +2256,17 @@ async def execute_respond_to_review(session: Any, arguments: Mapping[str, Any]) 
                 "by messaging the coder, or conclude — an honest failure is an acceptable outcome."
             )
         )
+    # The co-lead re-reads the tree: hold until the coder stops, as a submit does.
+    prefix, blocked = await _wait_before_submit(session)
+    if blocked is not None:
+        return blocked
     session.debates_used += 1
-    review = await session.run_review_step(session.last_gate, lead_rebuttal=message)
+    try:
+        review = await session.run_review_step(session.last_gate, lead_rebuttal=message)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # The tree could not be read for the review: an honest error to the lead, never a crash.
+        return ToolOutcome(text=f"The co-lead review could not read the changeset: {exc}. "
+                                "Fix the tree with the coder, then submit_for_review.", is_error=True)
     if not review.approved:
         issues = "\n".join(f"- {i}" for i in review.issues) or review.rationale
         return ToolOutcome(
@@ -2087,13 +2290,18 @@ async def execute_respond_to_review(session: Any, arguments: Mapping[str, Any]) 
                 f"{failed}\nFix it by messaging the coder, then submit_for_review."
             )
         )
-    sha = await session.commit(
-        review.commit_summary.strip() or session.tool_spec.proposed_tool_name
-    )
+    try:
+        sha = await session.commit(
+            review.commit_summary.strip() or session.tool_spec.proposed_tool_name
+        )
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        return ToolOutcome(text=f"Not committed: {exc}. Call submit_for_review to judge the tree as it is now.",
+                           is_error=True)
     return ToolOutcome(
         text=(
-            f"The co-lead was PERSUADED and the gate passed — COMMITTED "
+            prefix + f"The co-lead was PERSUADED and the gate passed — COMMITTED "
             f"{session.tool_spec.proposed_tool_name} → {sha[:10]}. Authoring for this tool is done."
+            + getattr(session, "env_note", "")
         )
     )
 
@@ -2528,6 +2736,7 @@ class SandboxToolProvider:
     receipts: Any | None = None
     receipt_source: str | None = None
     extra_tools: Sequence[ExtraTool] = ()
+    sandbox: Any | None = None
 
     def __init__(
         self,
@@ -2604,6 +2813,9 @@ class SandboxToolProvider:
             # it validates: without it the loop ended on "no tool calls", and an unwritten report
             # was composed on the model's behalf.
             defs.append(turn_end_tool_def())
+        if getattr(self.sandbox, "environment", None) is not None:
+            defs.append(list_env_tool_def())
+            defs.append(use_env_tool_def())
         defs.extend(definition for definition, _ in getattr(self, "extra_tools", ()))
         return defs
 
@@ -2629,6 +2841,15 @@ class SandboxToolProvider:
             return await execute_turn_end(
                 lambda: worker_report_problems(self.report_workspace), arguments
             )
+        if name == LIST_ENV_TOOL:
+            outcome = await asyncio.to_thread(execute_list_env, self.sandbox, arguments)
+            return _receipted(self.receipts, self.receipt_source, name, arguments, outcome)
+        if name == USE_ENV_TOOL:
+            jailed = self.registry.mcp_jailed("mcp.builtin.bash_exec") if hasattr(self.registry, "mcp_jailed") else False
+            outcome = await asyncio.to_thread(
+                partial(execute_use_env, self.sandbox, arguments, shell_jailed=jailed)
+            )
+            return _receipted(self.receipts, self.receipt_source, name, arguments, outcome)
         kind = self.registry.kind_for_function(name)
         args = dict(arguments)
         if kind == "mcp.builtin.bash_exec" and "cwd" not in args and self.cwd is not None:
@@ -2676,13 +2897,39 @@ class SandboxToolProvider:
         ceiling_fn = getattr(self.registry, "call_timeout_ceiling", None)
         call_timeout = ceiling_fn(kind) if ceiling_fn is not None else self.timeout_s
 
+        # The environment this worker pointed its shell at (use_env), looked up by name on every
+        # call so a rebuilt one is the current build; its own when None. `shell_env` in the
+        # arguments is the runtime's record alone: a model-supplied one is dropped.
+        if kind == "mcp.builtin.bash_exec":
+            args.pop("shell_env", None)
+        shell_env = None
+        chosen = getattr(self.sandbox, "shell_environment", None) if kind == "mcp.builtin.bash_exec" else None
+        if chosen is not None:
+            available = await asyncio.to_thread(_available_environments, self.sandbox)
+            shell_env = next((env for env in available if env.name == chosen), None)
+            if shell_env is None:
+                return ToolOutcome(
+                    text=f"Environment {chosen} is no longer available; call use_env to choose another.",
+                    is_error=True,
+                )
+            args["shell_env"] = shell_env.name  # recorded with the call; dropped before it is sent
+        untested = False  # set by a routed toolkit call (B3b)
+        ran = False  # the sandbox ran the call: only then is it stamped with an environment
         t0 = time.monotonic()
         state = None
         if not self.registry.is_known(kind):
             raw = {"exit_code": 127, "stderr": f"Tool not registered: {kind}", "stdout": ""}
         elif self.registry.is_mcp(kind):
             state = await self._inputs_before(args)
-            raw = await self.sandbox.call_mcp_tool(kind, args, timeout_s=call_timeout)
+            sent = args
+            if kind == "mcp.builtin.bash_exec" and shell_env is not None:
+                sent = {key: value for key, value in args.items() if key != "shell_env"}
+                sent["command"] = _in_environment(
+                    shell_env, str(args.get("command", "")), getattr(self.registry, "_root", None),
+                )
+                raw = await self.sandbox.call_mcp_tool(kind, sent, timeout_s=call_timeout)
+            else:
+                raw = await self.sandbox.call_mcp_tool(kind, sent, timeout_s=call_timeout)
         else:
             spec = self.registry.spec(kind)
             schema_props = (spec.get("args_schema") or {}).get("properties", {})
@@ -2690,10 +2937,19 @@ class SandboxToolProvider:
                 if arg_name in schema_props and not args.get(arg_name):
                     args[arg_name] = path
             self._redirect_figure_args(spec["fn"], args, schema_props)
-            state = await self._inputs_before(args)
+            # The environment the call runs in (env plan B3b): the package's tested one
+            # (`tool_config.yaml` `env:`), or the caller's `env` — recorded with the call, marked
+            # untested on its receipts, never sent to the tool.
+            routed, env_error, untested = await self._route_environment(kind, args, schema_props)
+            if env_error is not None:
+                return ToolOutcome(text=env_error, is_error=True)
+            sent = {k: v for k, v in args.items() if not (k == "env" and "env" not in schema_props)}
+            state = await self._inputs_before(sent)
             raw = await self.sandbox.call_tool(
-                spec["module"], spec["fn"], args, timeout_s=call_timeout
+                spec["module"], spec["fn"], sent, timeout_s=call_timeout,
+                **({"environment": routed} if routed is not None else {}),
             )
+            ran = True
         elapsed = time.monotonic() - t0
 
         raw = normalize_tool_raw(raw)
@@ -2704,14 +2960,33 @@ class SandboxToolProvider:
         if self.receipts is not None and self.receipt_source is not None:
             # The runtime's receipts, not the tool's word: figures come back carrying the hash of
             # the file on disk, and a figure whose file is absent is dropped here.
+            # The environment the call ran in: the sandbox's for a toolkit tool and the builtin
+            # shell (same activation); unknown for a configured MCP server of its own.
+            # A shell (MCP) call runs in its server's process, launched once with the activation
+            # captured then and shared by every worker: not the REPL's state, so unstamped.
+            own_server = kind.startswith("mcp.")
+            env_fp = None if own_server or not ran else await asyncio.to_thread(_sandbox_env_fingerprint, self.sandbox)
             minted = await asyncio.to_thread(
                 receipt_call, self.receipts, source=self.receipt_source, produced_by=kind,
                 args=args, text=text, failed=exit_code != 0, state=state, figures=figures,
-                cwd=self.cwd, toolkit_root=getattr(self.registry, "_root", None),
+                cwd=self.cwd, toolkit_root=getattr(self.registry, "_root", None), env=env_fp,
+                env_default=getattr(self.sandbox, "environment", None) is None and not own_server,
+                env_untested=untested,
             )
             figures = minted.figures
             provenance_notes = minted.notes
             header = minted.header() + "\n"
+            environment = getattr(self.sandbox, "call_environment", None) or getattr(self.sandbox, "environment", None)
+            if env_fp is not None and environment is not None:
+                # Which environment produced this result, visible where the result is read (B2a).
+                header += (f"[ran in {environment.name} @ env:{env_fp[:12]}"
+                           + (", untested environment for this tool" if untested else "") + "]\n")
+        if kind == "mcp.builtin.bash_exec" and shell_env is not None:
+            header += f"[shell in {shell_env.name}]\n"
+        take_notice = getattr(self.sandbox, "take_notice", None)
+        notice = take_notice() if callable(take_notice) else None
+        if notice:
+            header += f"{notice}\n"
         # V-4: accumulate produced figures into the agent's append-only "self" catalog (deduped by
         # path+sha), so they persist across rounds and stay citable via review_report/edit_report.
         if self.figure_sink is not None and figures:
@@ -2738,6 +3013,40 @@ class SandboxToolProvider:
         if provenance_notes:
             text += "\n[provenance] " + " | ".join(provenance_notes)
         return ToolOutcome(text=text, is_error=result.exit_code != 0, figures=figures, result=result)
+
+    async def _route_environment(
+        self, kind: str, args: Mapping[str, Any], schema_props: Mapping[str, Any],
+    ) -> tuple[Any | None, str | None, bool]:
+        """Where a toolkit call runs (env plan B3b): ``(environment or None for the REPL's own,
+        error text or None, untested)``. The tested environment is the one the tool's package names
+        (``tool_config.yaml`` ``env:`` → ``ar-<env>``), else the REPL's own; the caller's ``env``
+        (when the tool declares no argument of that name) picks another from the catalogue and
+        marks the call untested. A pipeline environment runs only in the jail: its activation is
+        coder-written."""
+        own = getattr(self.sandbox, "environment", None)
+        tool_env = getattr(self.registry, "tool_env", None)
+        tested_id = tool_env(kind) if callable(tool_env) else None
+        tested = f"ar-{tested_id}" if tested_id else (own.name if own is not None else None)
+        chosen = args.get("env") if "env" not in schema_props else None
+        if isinstance(chosen, str) and chosen.strip().lower() in ("", "null", "none"):
+            chosen = None  # an empty choice is no choice (some vendors write "null" into a string)
+        if chosen is not None and not isinstance(chosen, str):
+            return None, "Give env as an environment name from list_env.", False
+        want = chosen.strip() if chosen else tested
+        untested = want != tested
+        if want is None or own is None or want == own.name:
+            return None, None, untested
+        available = await asyncio.to_thread(_available_environments, self.sandbox)
+        match = next((env for env in available if env.name == want), None)
+        if match is None:
+            return None, (f"Environment {want} is not available here (list_env lists what is)."
+                          + ("" if chosen else " It is this tool's tested environment and has not been "
+                             "built: say so in your report's tool_request.")), False
+        from auto_research.sandbox.jail import jail_enabled
+
+        if match.owner == "pipeline" and not jail_enabled():
+            return None, f"{want} runs only in the jail, which is off for this run.", False
+        return match, None, untested
 
     async def _inputs_before(self, args: Mapping[str, Any]) -> Any:
         """Hash what the call's arguments name, before it runs (data roots and outputs skipped)."""
@@ -3442,7 +3751,8 @@ class ReadOnlyToolProvider:
         extra = await _run_extra_tool(getattr(self, "extra_tools", ()), name, arguments)
         if extra is not None:
             return extra
-        session = self.authoring_session if name == SUBMIT_TOOL else None
+        # Both tools can land a commit; each one's commit is a receipt the lead can cite.
+        session = self.authoring_session if name in (SUBMIT_TOOL, RESPOND_TO_REVIEW_TOOL) else None
         committed_before = getattr(session, "last_commit_sha", None)
         outcome = await self._execute(name, arguments)
         if session is not None:

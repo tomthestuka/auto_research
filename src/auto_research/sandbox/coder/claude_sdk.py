@@ -30,9 +30,12 @@ from auto_research.sandbox.coder.events import cap_text, coder_text_cap, emit
 
 
 def _make_escalation_server(
-    ask_lead: Callable[..., Awaitable[str]], ask_human: Callable[..., Awaitable[str]]
+    ask_lead: Callable[..., Awaitable[str]], ask_human: Callable[..., Awaitable[str]],
+    env_tools: Any | None = None,
 ):
-    """Build the in-process MCP server exposing the coder's ``message`` tool (§9.7, E12)."""
+    """Build the in-process MCP server exposing the coder's ``message`` tool (§9.7, E12) and, with
+    ``env_tools`` (a :class:`~auto_research.sandbox.coder.env_tools.CandidateEnvs`), its environment
+    tools (env plan B3c-3)."""
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
     from auto_research.sandbox.coder.escalation_server import MESSAGE_DESCRIPTION, route_message
@@ -54,7 +57,38 @@ def _make_escalation_server(
         answer = await route_message(ask_lead, ask_human, str(args.get("to")), args["text"])
         return {"content": [{"type": "text", "text": answer}]}
 
-    return create_sdk_mcp_server("escalation", tools=[_message])
+    tools = [_message]
+    if env_tools is not None:
+        from auto_research.sandbox.coder.env_tools import (
+            ENV_ACTIVATE_DESCRIPTION, ENV_PIN_DESCRIPTION, ENV_SOLVE_DESCRIPTION,
+        )
+
+        def _schema(list_key: str | None, list_description: str = "") -> dict[str, Any]:
+            properties: dict[str, Any] = {"env_id": {"type": "string", "description": "The folder name under envs/."}}
+            if list_key:
+                properties[list_key] = {"type": "array", "items": {"type": "string"}, "description": list_description}
+            return {"type": "object", "properties": properties, "required": ["env_id", *([list_key] if list_key else [])]}
+
+        @tool("env_solve", ENV_SOLVE_DESCRIPTION, _schema("specs", "conda-forge package specs."))
+        async def _env_solve(args: dict[str, Any]) -> dict[str, Any]:
+            text = await env_tools.solve(str(args.get("env_id") or ""), list(args.get("specs") or []))
+            return {"content": [{"type": "text", "text": text}]}
+
+        @tool("env_pin_wheels", ENV_PIN_DESCRIPTION, _schema("requirements", "Exact `name==version` requirements."))
+        async def _env_pin(args: dict[str, Any]) -> dict[str, Any]:
+            text = await env_tools.pin(str(args.get("env_id") or ""), list(args.get("requirements") or []))
+            return {"content": [{"type": "text", "text": text}]}
+
+        activate_schema = {"type": "object", "properties": {"env_id": {
+            "type": "string", "description": "The folder name under envs/; empty to return to the analysis environment."}}}
+
+        @tool("cand_env_activate", ENV_ACTIVATE_DESCRIPTION, activate_schema)
+        async def _env_activate(args: dict[str, Any]) -> dict[str, Any]:
+            text = await env_tools.activate(str(args.get("env_id") or "") or None)
+            return {"content": [{"type": "text", "text": text}]}
+
+        tools += [_env_solve, _env_pin, _env_activate]
+    return create_sdk_mcp_server("escalation", tools=tools)
 
 
 def _make_path_confiner(worktree: Path):
@@ -142,7 +176,9 @@ def _make_fs_guard_hook(guard):
     return hook
 
 
-def _jail_launcher(worktree_base: Path | None, worktree: Path | None = None) -> str | None:
+def _jail_launcher(
+    worktree_base: Path | None, worktree: Path | None = None, readonly: tuple[str, ...] = (),
+) -> str | None:
     """A wrapper that runs the SDK's own CLI inside the OS jail, or ``None`` when the jail is off.
 
     The SDK accepts a path to the binary (``cli_path``) and builds its own arguments after that, so
@@ -181,13 +217,15 @@ def _jail_launcher(worktree_base: Path | None, worktree: Path | None = None) -> 
     # removed that accidental coverage and exposed it. The Codex launcher always passed its
     # worktree, which is why only this harness was affected.
     writable = [str(worktree_base)] + ([str(worktree)] if worktree is not None else [])
-    policy = coder_policy(label=f"claude_sdk-{digest}", extra_rw=tuple(writable))
+    # ``readonly``: the attempt's candidate environments — the coder runs them, the runtime alone
+    # builds them.
+    policy = coder_policy(label=f"claude_sdk-{digest}", extra_rw=tuple(writable), readonly=readonly)
     launcher = Path(worktree_base)
     launcher.mkdir(parents=True, exist_ok=True)
     return str(write_launcher(launcher / "claude-jailed", str(real), policy))
 
 
-def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, escalation_server, max_turns: int, env: dict[str, str] | None = None, worktree_base: Path | None = None):
+def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, escalation_server, max_turns: int, env: dict[str, str] | None = None, worktree_base: Path | None = None, jail_readonly: tuple[str, ...] = ()):
     from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
     from auto_research.sandbox.fs_guard import PathGuard
@@ -215,6 +253,8 @@ def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, esca
             "Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep",
             "WebSearch", "WebFetch",
             "mcp__escalation__message",
+            "mcp__escalation__env_solve", "mcp__escalation__env_pin_wheels",
+            "mcp__escalation__cand_env_activate",
         ],
         # The coder never issues git (§9.9): staging/commit is the runtime's job
         # (``approve_edit`` only, after gate-pass ∧ review-pass). Deny-rules are evaluated
@@ -228,7 +268,7 @@ def _build_options(*, worktree: Path, coder_model: str, system_prompt: str, esca
     env = _with_live_anthropic_key(env)
     if env:  # full sourced env (analyst conda + HEASoft); omit when unset so the SDK inherits.
         kwargs["env"] = env
-    launcher = _jail_launcher(worktree_base, worktree)
+    launcher = _jail_launcher(worktree_base, worktree, jail_readonly)
     if launcher:
         # The OS jail (§12): the guard hook above stays, since it is what tells the model *why* a
         # path was refused, but the kernel is now what enforces it — including the reads a hook

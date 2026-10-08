@@ -50,8 +50,13 @@ def _source_ini_env(ini_sh: str) -> dict[str, str]:
 
     Raises ``RuntimeError`` on any failure — no fallback to ``os.environ``.
     """
-    if ini_sh in _ini_env_cache:
-        return _ini_env_cache[ini_sh]
+    try:  # keyed on the script's mtime too: an edited script is sourced again
+        cache_key = f"{ini_sh}@{Path(ini_sh).expanduser().stat().st_mtime_ns}"
+    except OSError:
+        cache_key = ini_sh
+
+    if cache_key in _ini_env_cache:
+        return _ini_env_cache[cache_key]
     base = {name: os.environ[name] for name in _INI_BASE_VARS if name in os.environ}
     base["PATH"] = _INI_BASE_PATH
     script = str(Path(ini_sh).expanduser().resolve())  # cwd is "/", so a relative path would miss
@@ -83,7 +88,7 @@ def _source_ini_env(ini_sh: str) -> dict[str, str]:
                 env[k] = v
     if not env:
         raise RuntimeError(f"Sourcing analyst env {ini_sh!r} produced an empty environment")
-    _ini_env_cache[ini_sh] = env
+    _ini_env_cache[cache_key] = env
     return env
 
 
@@ -129,11 +134,17 @@ def check_analyze_probe(*, config_path: str | Path | None = None) -> None:
     probe = (orch.get("analyze_probe") or "").strip()
     if not probe:
         return
-    analyze_env = orch.get("analyze_env")
-    analyze_ini_sh = orch.get("analyze_ini_sh") or None
+    from auto_research.env import analysis_environment
+
+    environment = analysis_environment(orch)
     toolkit_root = orch.get("toolkit_root")
-    python_exec = str(Path(analyze_env) / "bin" / "python") if analyze_env else sys.executable
-    base_env = _source_ini_env(analyze_ini_sh) if analyze_ini_sh else dict(os.environ)
+    python_exec = str(environment.python) if environment is not None else sys.executable
+    if environment is not None:
+        base_env = environment.activation_env()
+    elif orch.get("analyze_ini_sh"):  # an init script with no prefix: sourced clean, as before
+        base_env = _source_ini_env(orch["analyze_ini_sh"])
+    else:
+        base_env = dict(os.environ)
     if toolkit_root:
         existing = base_env.get("PYTHONPATH", "")
         base_env = {

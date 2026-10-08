@@ -49,6 +49,13 @@ class GateReport(MessageModel):
     findings: list[CheckResult] = Field(default_factory=list)
     reason: str = ""
     report_hash: str = ""
+    manifest: dict[str, str] | None = None
+    base: str = ""
+    """The ``HEAD`` commit the judged files sit on (and Layer B's export was written from); the
+    commit must land on exactly this parent."""
+    """Every file the gate judged, by path: its sha256, or ``deleted``. ``approve_edit`` commits
+    exactly these and refuses when any changed after the gate ([G3]: a test writing into the
+    worktree, or a file swapped in before the commit, would otherwise land unjudged)."""
 
 
 class ToolReviewVerdict(MessageModel):

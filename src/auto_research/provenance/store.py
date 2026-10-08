@@ -69,6 +69,7 @@ NOT_EVIDENCE_NAMES = {
     "mcp.builtin.list_dir": "a directory listing", "dispatch": "a task brief",
     "human_reply": "a file the human sent", "report_renderer": "an earlier published report",
     "search_literature": "a search result",
+    "list_env": "an environment listing",
 }
 
 
@@ -249,11 +250,18 @@ def checkable_text(raw: bytes) -> str | None:
         return None
 
 
+
+#: Most files a directory input is listed by; a larger one is not hashed as an input.
+_MAX_LISTED_FILES = 20_000
+
 class ReceiptStore:
     """Append-only receipts for one run, keyed by handle."""
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
+        #: The environment fingerprint stamped on a receipt whose minting call names none: the
+        #: orchestrator's own, for in-process tools (set by the run, `run_research`).
+        self.default_env: str | None = None
         self.blobs = self.root / "blobs"
         self.ledger = self.root / "receipts.jsonl"
         self._lock = threading.Lock()
@@ -300,6 +308,8 @@ class ReceiptStore:
         path: Path | None = None,
         call_id: str | None = None,
         toolkit_commit: str | None = None,
+        env: str | None = None,
+        env_default: bool = True,
         args: object | None = None,
         inputs: Sequence[InputFile] = (),
         parents: Iterable[str] = (),
@@ -352,6 +362,9 @@ class ReceiptStore:
                 created_at=datetime.now(timezone.utc),
                 call_id=call_id,
                 toolkit_commit=toolkit_commit,
+                # The run's default only for a call that names no environment of its own; a call
+                # whose environment could not be fingerprinted stays unstamped, never mislabelled.
+                env=env if env is not None or not env_default else self.default_env,
                 args_sha256=args_sha,
                 inputs=list(inputs),
                 parents=parent_set,
@@ -378,7 +391,9 @@ class ReceiptStore:
         for receipt in self.receipts(source=INPUT_SOURCE):
             if receipt.sha256 == digest and receipt.kind == kind:
                 return receipt
-        return self.mint(source=INPUT_SOURCE, kind=kind, produced_by=produced_by, data=text)
+        # Nothing ran to produce the task: no environment, not the run's default.
+        return self.mint(source=INPUT_SOURCE, kind=kind, produced_by=produced_by, data=text,
+                         env_default=False)
 
     def _index(self, receipt: Receipt) -> None:
         self._receipts[receipt.handle] = receipt
@@ -398,12 +413,17 @@ class ReceiptStore:
         if cached is not None:
             return cached
         if target.is_dir():
-            listing = sorted(
-                f"{p.relative_to(target)}\t{p.stat().st_size}\t{p.stat().st_mtime_ns}"
-                for p in target.rglob("*") if p.is_file()
-            )
+            listing = []
+            for p in target.rglob("*"):
+                if p.is_file():
+                    listing.append(f"{p.relative_to(target)}\t{p.stat().st_size}\t{p.stat().st_mtime_ns}")
+                    if len(listing) > _MAX_LISTED_FILES:
+                        # Not an input anyone can trace (a whole scratch tree): left unhashed.
+                        raise OSError(f"{target} holds more than {_MAX_LISTED_FILES} files")
+            # File names need not be UTF-8 (B5 live cell 2026-10-07: one ended the run here).
             entry = InputFile(
-                path=target, sha256=sha256_bytes("\n".join(listing).encode("utf-8")), basis="listing"
+                path=target, sha256=sha256_bytes("\n".join(sorted(listing)).encode("utf-8", "surrogateescape")),
+                basis="listing",
             )
         else:
             digest = sha256_file(target)

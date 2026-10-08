@@ -274,3 +274,5 @@ Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
   erases the run's ledger directory too. A run folder is writable to the jailed shell, so a record
   read from it could be forged. **[F23]** the shell server's `PFILES` is private; its home is the
   run's own (`.home-shell`). Workers' REPL workdir is `agent_dir`, no longer memory.md's folder.
+- 2026-10-06 — **Env plan B2b (`use_env`):** `SandboxSettings.catalogue` (`partial(env.env_catalogue, config)`) reaches each worker's sandbox through `attach_worker_runtime`; `_builtin_server_config` binds `<runtime>/conda/envs` and `activation/` read-only into the shell's jail (created if absent, so an environment built mid-run is visible).
+- 2026-10-06 — **Env plan B3c-5:** `run_research` reconciles the pipeline's environments right after preflight (`_reconcile_environments` → `merge_flow.reconcile_environments`): missing or stale builds made, a drifted prefix kept aside and rebuilt, changed externals reported; each a ledger event; a problem never stops the launch; a stop kills the builds.

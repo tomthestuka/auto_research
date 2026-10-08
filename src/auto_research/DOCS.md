@@ -215,3 +215,7 @@ Compacted 2026-09-01 and again 2026-09-24 (every entry); detail in git history.
 - 2026-09-25 — [E12] `RunControl` inboxes carry `InboxEntry` (sender, kind, handles) for every text a
   seat receives; seat liveness, resumed-task and background-task registries, `cancel_resumed()`
   called first in the interrupt cleanup.
+- 2026-10-06 — `env.analysis_environment(config)`, `env.host_environment()`, `env.env_lock_dir()`:
+  the analysis environment as one object for every reader (env plan B1; see `sandbox/DOCS.md`).
+- 2026-10-06 — `env.declared_externals(config)` (the human's `env_externals`, by name; `analysis_environment` uses it) and `env.env_catalogue(config)` (the analysis environment plus every pipeline-built one) for `use_env` / `list_env`; `env.agent_conda_dirs` → `agent_conda_dir`.
+- 2026-10-06 — **Env plan B4:** `env.replay_environment(fingerprint)` rebuilds the environment state a receipt stamps from the lock store into `<runtime>/conda/replay/<fp16>` and reports whether its conda part matches, with recorded externals compared to today's.

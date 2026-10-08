@@ -310,6 +310,9 @@ def build_matrix(records: Sequence[Record], stamps: dict[str, str] | None = None
         lines += ["## Post-commit sweep (handoff [G3])", ""]
         for record in sweeps:
             sweep = record["commit_sweep"]
+            if sweep.get("refused"):
+                lines.append(f"- **{record['id']}**: commit refused — {sweep['refused']}")
+                continue
             lines.append(
                 f"- **{record['id']}**: commit {sweep['commit_sha'][:10]} staged "
                 f"{sweep['n_committed']} path(s), of which unscanned: "

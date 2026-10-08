@@ -74,7 +74,7 @@ SCAN_OFF_CONFIG: dict = {
 }
 
 
-async def _tests_off_runner(worktree: Path, test_paths: list[str]) -> dict:
+async def _tests_off_runner(worktree: Path, test_paths: list[str], **_kw) -> dict:
     """Stand in for a tool-local test layer that verifies nothing.
 
     Returning no results is not the right model: ``run_gate`` requires a non-empty Layer B, so
@@ -260,17 +260,24 @@ def tool_spec_for(mutant: Mutant) -> ToolSpec:
 # ----------------------------------------------------------------------------
 
 
-def commit_sweep(worktree: Path, scanned: set[str], message: str) -> dict:
+def commit_sweep(worktree: Path, scanned: set[str], message: str, gate=None) -> dict:
     """Commit through the runtime's own ``approve_edit`` and report what it staged that the
     gate had not enumerated (CLAUDE.md §9.9 / handoff [G3]).
 
     The gate enumerates its targets once, before Layer B runs; ``approve_edit`` re-enumerates
     at commit time, so any file a test wrote in between is staged without ever having been
-    scanned. Runs inside the throwaway clone only.
+    scanned. Runs inside the throwaway clone only. With the gate's report, the commit takes the
+    production path (``manifest`` + ``base``): a changeset that moved after the gate is refused,
+    which counts as caught.
     """
     from auto_research.sandbox.merge_flow import approve_edit
 
-    sha = approve_edit(worktree, message=message)
+    try:
+        sha = (approve_edit(worktree, message=message, manifest=gate.manifest, base=gate.base)
+               if gate is not None and gate.manifest is not None else approve_edit(worktree, message=message))
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as exc:
+        return {"ran": True, "commit_sha": None, "n_committed": 0, "unscanned_paths": [],
+                "caught": True, "refused": str(exc)}
     committed = set(_git(worktree, "show", "--name-only", "--pretty=format:", sha).split())
     unscanned = sorted(committed - scanned)
     return {
@@ -374,7 +381,7 @@ async def run_mutant(mutant: Mutant, cfg: RunConfig, *, meter: Any | None = None
 
         record["commit_sweep"] = None
         if gate.passed and mutant.expected == "commit_sweep":
-            record["commit_sweep"] = commit_sweep(worktree, scanned, f"gate-bench {mutant.id}")
+            record["commit_sweep"] = commit_sweep(worktree, scanned, f"gate-bench {mutant.id}", gate=gate)
 
         if cfg.keep_worktrees:
             record["worktree"] = str(worktree)

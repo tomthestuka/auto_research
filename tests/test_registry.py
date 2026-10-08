@@ -163,3 +163,20 @@ def test_reload_preserves_mcp_and_disabled(tmp_path, cleanup_modules):
     assert reg.is_mcp("mcp.builtin.bash_exec")  # MCP index preserved across reload
     assert "eps_utils.t2" not in reg.list_tools()  # disabled still filtered
     assert "eps_utils.t1" in reg.list_tools()
+
+
+def test_a_package_names_the_environment_its_tools_run_in(tmp_path, cleanup_modules):
+    """B3b: `env:` in tool_config.yaml routes the package's tools; every toolkit tool declares the
+    caller's `env` choice, and a routed tool's description names its tested environment."""
+    _write_pkg(tmp_path, "stack_utils", {"stack_utils.fit": "fits"})
+    _write_pkg(tmp_path, "plain_utils", {"plain_utils.look": "looks"})
+    _write_tool_config(tmp_path, "stack_utils", "env: sherpa\n")
+    reg = ToolkitRegistry(tmp_path)
+    assert reg.tool_env("stack_utils.fit") == "sherpa" and reg.tool_env("plain_utils.look") is None
+    defs = {d["name"]: d for d in reg.tool_definitions()}
+    assert defs["stack_utils_fit"]["description"].endswith("Runs in its tested environment ar-sherpa.")
+    assert defs["plain_utils_look"]["description"] == "looks"
+    assert "env" in defs["plain_utils_look"]["input_schema"]["properties"]
+    _write_tool_config(tmp_path, "stack_utils", "default_call_timeout_s: 60\n")
+    reg.reload()
+    assert reg.tool_env("stack_utils.fit") is None

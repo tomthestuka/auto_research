@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from dotenv import load_dotenv
 
@@ -456,3 +456,130 @@ def sandbox_call_timeout_default() -> int:
         return int(_orch_config().get("sandbox_call_timeout_s", 300))
     except (TypeError, ValueError):
         return 300
+
+
+def analysis_environment(config: dict | None = None) -> "Environment | None":
+    """The configured analysis environment as one object (handoff [F18], env plan B1).
+
+    Today's human environment: ``analyze_env`` (the conda prefix), ``analyze_ini_sh`` (its
+    activation), ``repl_init_py`` (the REPL boot file) and ``env_externals`` (software outside conda
+    the activation points at, stamped by the files listed). ``None`` when no prefix is configured.
+    Every reader of those keys builds its process from this object.
+    """
+    from auto_research.sandbox.envs import Environment
+
+    config = config if config is not None else _orch_config()
+    prefix = config.get("analyze_env")
+    if not prefix:
+        return None
+    externals = tuple(declared_externals(config).values())
+    activate = config.get("analyze_ini_sh") or None
+    boot = config.get("repl_init_py") or None
+    return Environment(
+        name=Path(str(prefix)).name, prefix=Path(str(prefix)).expanduser(), owner="human",
+        activate=Path(str(activate)).expanduser() if activate else None,
+        boot=Path(str(boot)).expanduser() if boot else None,
+        externals=externals,
+    )
+
+
+def declared_externals(config: dict | None = None) -> "dict[str, External]":
+    """The software outside conda the human declares (``env_externals``), by name."""
+    from auto_research.sandbox.envs import External
+
+    config = config if config is not None else _orch_config()
+    return {
+        str(name): External(name=str(name), root=Path(str(spec.get("root", ""))).expanduser(),
+                            stamps=tuple(str(s) for s in (spec.get("stamps") or ())))
+        for name, spec in (config.get("env_externals") or {}).items()
+    }
+
+
+def env_catalogue(config: dict | None = None) -> "list[Environment]":
+    """Every environment a unit may list and use: the configured analysis environment (human) and
+    each environment the coding pipeline has built (``agent_conda_dir()``), externals resolved from
+    the human's ``env_externals``."""
+    from auto_research.sandbox.env_build import built_environments
+
+    config = config if config is not None else _orch_config()
+    analysis = analysis_environment(config)
+    built = built_environments(agent_conda_dir(), declared_externals(config),
+                               {analysis.name: analysis} if analysis else {})
+    return ([analysis] if analysis else []) + [env for env in built if not analysis or env.name != analysis.name]
+
+
+def host_environment() -> "Environment":
+    """The orchestrator's own environment: where in-process tools (harness tools, the lead's
+    in-process toolkit calls) run. No activation, no externals."""
+    import sys
+
+    from auto_research.sandbox.envs import Environment
+
+    return Environment(name=Path(sys.prefix).name, prefix=Path(sys.prefix), owner="human")
+
+
+def env_lock_dir() -> Path:
+    """Where environment locks live: under the runtime dir, outside every agent's reach."""
+    return runtime_data_dir() / "conda" / "locks"
+
+
+def agent_conda_dir() -> Path:
+    """Where pipeline-built environments live (``envs/``), with their build records (``built/``)
+    and staging: under the runtime dir, apart from the human's own envs and package cache."""
+    return runtime_data_dir() / "conda"
+
+
+def conda_executable() -> str:
+    """The conda binary the runtime builds with: config ``conda_exe``, else ``$CONDA_EXE``, else
+    the one on PATH."""
+    import shutil
+
+    configured = _orch_config().get("conda_exe") or os.environ.get("CONDA_EXE") or shutil.which("conda")
+    if not configured:
+        raise RuntimeError("no conda executable: set conda_exe in orchestration.yaml or CONDA_EXE")
+    return str(configured)
+
+
+def replay_environment(fingerprint: str, *, runner: Any = None) -> dict:
+    """Rebuild the environment state a receipt stamps (its ``env`` fingerprint) from the lock store,
+    into a prefix of its own under ``agent_conda_dir()/replay/`` (env plan B4), jailed when the jail
+    is on. The report (:func:`sandbox.env_build.replay`) adds each recorded external's state now
+    (``same``, ``changed``, ``undeclared``: an external cannot be rebuilt) and writes the recorded
+    activation and boot file beside the prefix (``<prefix>.activate.sh`` / ``.boot.py``); ``owner``
+    says whose they are (a pipeline environment's are coder-written: source them in a jail). A lock
+    that does not hash to the fingerprint it is filed under is refused."""
+    import json
+    import re
+    import subprocess
+
+    from auto_research.sandbox.env_build import replay
+    from auto_research.sandbox.envs import _external_stamp
+    from auto_research.sandbox.jail import jail_enabled
+
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint or ""):
+        raise ValueError("give the full 64-character fingerprint a receipt stamps")
+    path = env_lock_dir() / f"{fingerprint}.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"no lock for {fingerprint[:12]} in {env_lock_dir()}")
+    import hashlib
+
+    lock = json.loads(path.read_text(encoding="utf-8"))
+    components = lock.get("components") if isinstance(lock, dict) else None
+    if (not isinstance(components, dict) or lock.get("fingerprint") != fingerprint
+            or hashlib.sha256(json.dumps(components, sort_keys=True).encode("utf-8")).hexdigest() != fingerprint):
+        raise ValueError(f"the lock filed under {fingerprint[:12]} does not hash to it; it is not that state")
+    report = replay(lock, conda_dir=agent_conda_dir(), conda_exe=conda_executable(),
+                    jailed=jail_enabled(), runner=runner or subprocess.run)
+    current = declared_externals()
+    report["externals"] = {
+        name: ("undeclared" if name not in current else
+               "same" if _external_stamp(current[name]) == recorded else "changed")
+        for name, recorded in (lock.get("externals") or {}).items()
+    }
+    report["owner"] = lock.get("owner")  # "pipeline": the activation is coder-written; source it jailed
+    for key, suffix in (("activation_script", ".activate.sh"), ("boot_file", ".boot.py")):
+        if isinstance(lock.get(key), str):
+            target = Path(report["prefix"] + suffix)
+            target.write_text(lock[key], encoding="utf-8")
+            report[key] = str(target)
+    return report

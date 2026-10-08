@@ -5,6 +5,7 @@ analyst lead, and stub gate/review hooks — so no live LLM or git is involved.
 """
 
 import asyncio
+import subprocess
 
 from auto_research.run_control import RunControl
 import pathlib
@@ -939,6 +940,396 @@ def test_a_submission_is_checkpointed_before_the_gate_and_restorable_after_a_res
     assert "Restored prior work" in resumed.initial_message
 
 
+def test_anything_staged_is_unstaged_before_the_gate_judges(tmp_path, monkeypatch):
+    """The gate and the review read the work tree; a commit takes the index. A change the coder
+    staged itself is unstaged at gate entry, so what is judged is what is committed."""
+    from auto_research.sandbox import merge_flow
+
+    # The submission snapshot also resets the index; without it only the gate entry can.
+    monkeypatch.setattr(merge_flow, "save_submission_snapshot", lambda *a, **k: None)
+    repo = _toolkit_repo(tmp_path)
+    (repo / "obsdb_catalog").mkdir()
+    (repo / "obsdb_catalog" / "writer.py").write_text("PROTECTED = 1\n")
+    (repo / "demo_utils" / "tests").mkdir(parents=True, exist_ok=True)
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "protected writer")
+    _git(repo, "checkout", "-q", "-b", "ai")
+
+    session = _direct_session(tmp_path, repo)
+    _coder_edits(repo)
+    _git(repo, "mv", "obsdb_catalog/writer.py", "demo_utils/lib/writer.py")  # a staged rename
+    asyncio.run(session.run_gate_step())
+    staged = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=repo,
+                            capture_output=True, text=True).stdout
+    assert staged == ""
+    # Unstaged, the rename is a deletion of a protected file the gate's allow-list sees.
+    from auto_research.sandbox.gate import collect_all_changes
+
+    assert "obsdb_catalog/writer.py" in collect_all_changes(repo)
+
+
+def test_a_session_commits_only_what_its_gate_judged(tmp_path):
+    """[G3] through the session: a file changed between the gate and the commit stops the commit."""
+    from auto_research.sandbox.gate import run_gate
+    from auto_research.sandbox.merge_flow import approve_edit as real_approve
+    from auto_research.schemas.merge import CheckResult
+
+    async def pass_runner(worktree, test_paths):
+        return {"results": [CheckResult(name="layer_b.pytest", layer="B", passed=True)], "deterministic": True}
+
+    async def real_gate(worktree, spec):
+        return await run_gate(worktree, spec, test_runner=pass_runner)
+
+    repo = _toolkit_repo(tmp_path)
+    (repo / "demo_utils" / "tests").mkdir(parents=True, exist_ok=True)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    session = _direct_session(tmp_path, repo, run_gate=real_gate, approve_edit=real_approve)
+    _coder_edits(repo)
+    (repo / "demo_utils" / "tests" / "test_retbb.py").write_text(
+        "from demo_utils.lib.retbb import add_retbb\n\ndef test_r():\n    assert add_retbb(2) == 2\n")
+    (repo / "demo_utils" / "skills" / "__init__.py").write_text(
+        'TOOL_MANIFEST = {"research_toolkit.demo_utils.fit_retbb_hss": {"module": "demo_utils.lib.retbb", '
+        '"fn": "add_retbb", "description": "d", "args_schema": {}}}\n')
+    gate = asyncio.run(session.run_gate_step())
+    assert gate.passed, gate.reason
+    (repo / "demo_utils" / "lib" / "retbb.py").write_text("def add_retbb(i):\n    return -i\n")
+    with pytest.raises(RuntimeError, match="changed after the gate"):
+        asyncio.run(session.commit("m"))
+    # Reviewed one tree, re-gated another (a rebuttal path): no commit either.
+    asyncio.run(session.run_review_step(gate))
+    (repo / "demo_utils" / "lib" / "retbb.py").write_text("def add_retbb(i):\n    return i\n")
+    asyncio.run(session.run_gate_step())
+    with pytest.raises(RuntimeError, match="after the co-lead reviewed it"):
+        asyncio.run(session.commit("m"))
+
+
+def test_a_commit_that_cannot_clear_bytecode_is_not_made(tmp_path, monkeypatch):
+    """Purge before staging: a failure is an honest no-commit, never a commit reported as none."""
+    from auto_research.sandbox import merge_flow
+    from auto_research.sandbox.gate import run_gate
+    from auto_research.sandbox.merge_flow import approve_edit as real_approve
+    from auto_research.schemas.merge import CheckResult
+
+    async def pass_runner(worktree, test_paths):
+        return {"results": [CheckResult(name="layer_b.pytest", layer="B", passed=True)], "deterministic": True}
+
+    async def real_gate(worktree, spec):
+        return await run_gate(worktree, spec, test_runner=pass_runner)
+
+    repo = _toolkit_repo(tmp_path)
+    (repo / "demo_utils" / "tests").mkdir(parents=True, exist_ok=True)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    session = _direct_session(tmp_path, repo, run_gate=real_gate, approve_edit=real_approve)
+    _coder_edits(repo)
+    (repo / "demo_utils" / "tests" / "test_retbb.py").write_text(
+        "from demo_utils.lib.retbb import add_retbb\n\ndef test_r():\n    assert add_retbb(2) == 2\n")
+    (repo / "demo_utils" / "skills" / "__init__.py").write_text(
+        'TOOL_MANIFEST = {"research_toolkit.demo_utils.fit_retbb_hss": {"module": "demo_utils.lib.retbb", '
+        '"fn": "add_retbb", "description": "d", "args_schema": {}}}\n')
+    gate = asyncio.run(session.run_gate_step())
+    assert gate.passed, gate.reason
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout
+
+    def failing(root):
+        raise PermissionError("cannot list")
+
+    monkeypatch.setattr(merge_flow, "purge_bytecode", failing)
+    with pytest.raises(RuntimeError, match="could not be cleared"):
+        asyncio.run(session.commit("m"))
+    assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout == head
+    assert session.last_commit_sha is None
+
+
+def test_a_non_utf8_byte_never_stops_the_failure_reset(tmp_path):
+    """A rejected attempt's file holding a latin-1 byte: the patch is saved byte-exact and the tree
+    is still reset (B3c-1 review 12)."""
+    from auto_research.sandbox.merge_flow import _reset_direct_tree
+
+    repo = _toolkit_repo(tmp_path)
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    (repo / "demo_utils" / "lib" / "evil.py").write_bytes(b"# caf\xe9\nx = 1\n")
+    (repo / "demo_utils" / "lib" / "evil.pyc").write_bytes(b"planted")
+    asyncio.run(_reset_direct_tree(repo, base_ref=base, artifact_dir=tmp_path / "wt"))
+    status = subprocess.run(["git", "status", "--porcelain", "--ignored"], cwd=repo,
+                            capture_output=True, text=True).stdout
+    assert "evil" not in status, status
+    (patch,) = (tmp_path / "wt").glob("*.patch")
+    assert b"caf\xe9" in patch.read_bytes()
+
+
+@pytest.mark.parametrize("lock", ["read_only_package", "unlistable_folder"])
+def test_a_folder_the_coder_locked_never_stops_the_failure_reset(tmp_path, lock):
+    from auto_research.sandbox.merge_flow import _reset_direct_tree
+
+    repo = _toolkit_repo(tmp_path)
+    (repo / "demo_utils" / "lib" / "core.py").write_text("x = 'judged'\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "core")
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    (repo / "demo_utils" / "lib" / "core.py").write_text("x = 'EVIL'\n")
+    if lock == "read_only_package":
+        (repo / "demo_utils" / "lib").chmod(0o555)
+    else:
+        sub = repo / "demo_utils" / "sub"
+        sub.mkdir()
+        (sub / "evil.py").write_text("x = 1\n")
+        sub.chmod(0)
+    try:
+        asyncio.run(_reset_direct_tree(repo, base_ref=base, artifact_dir=tmp_path / "wt"))
+    finally:
+        for folder in (repo / "demo_utils" / "lib", repo / "demo_utils" / "sub"):
+            if folder.exists():
+                folder.chmod(0o755)
+    status = subprocess.run(["git", "status", "--porcelain", "--ignored"], cwd=repo,
+                            capture_output=True, text=True).stdout
+    assert status == "" and (repo / "demo_utils" / "lib" / "core.py").read_text() == "x = 'judged'\n", status
+
+
+def test_deep_nesting_never_stops_the_failure_reset(tmp_path):
+    import os
+
+    from auto_research.sandbox.merge_flow import _reset_direct_tree
+
+    repo = _toolkit_repo(tmp_path)
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    (repo / "demo_utils" / "lib" / "evil.py").write_text("x = 1\n")
+    deep = str(repo / "demo_utils")
+    for _ in range(1200):  # one level at a time (os.makedirs itself recurses)
+        deep = os.path.join(deep, "d")
+        os.mkdir(deep)
+    open(os.path.join(deep, "x.pyc"), "wb").close()
+    asyncio.run(_reset_direct_tree(repo, base_ref=base, artifact_dir=tmp_path / "wt"))
+    status = subprocess.run(["git", "status", "--porcelain", "--ignored"], cwd=repo,
+                            capture_output=True, text=True).stdout
+    assert status == "", status
+
+
+def test_planted_ignored_bytecode_is_purged_when_nothing_tracked_changed(tmp_path):
+    from auto_research.sandbox.merge_flow import heal_toolkit_branch_if_dirty
+
+    repo = _toolkit_repo(tmp_path)
+    (repo / ".gitignore").write_text("*.pyc\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "ignore bytecode")
+    _git(repo, "checkout", "-q", "-b", "ai")
+    session = _direct_session(tmp_path, repo)
+    (repo / "numpy.pyc").write_bytes(b"planted")
+    assert not session.pending_changes()
+    asyncio.run(session.aclose())
+    assert not (repo / "numpy.pyc").exists()
+    (repo / "json.pyc").write_bytes(b"planted")
+    heal_toolkit_branch_if_dirty(tmp_path / "run", root=repo, branch="ai")
+    assert not (repo / "json.pyc").exists()
+
+
+def test_a_self_ignoring_gitignore_cannot_hide_a_package(tmp_path):
+    from auto_research.sandbox.gate import check_structural, collect_all_changes, collect_targets
+    from auto_research.sandbox.merge_flow import heal_toolkit_branch_if_dirty
+
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    pytest_cache = repo / "demo_utils" / ".pytest_cache"
+    pytest_cache.mkdir()
+    (pytest_cache / ".gitignore").write_text("*\n")  # pytest's own: left alone
+
+    def plant():
+        (repo / "json").mkdir(exist_ok=True)
+        (repo / "json" / ".gitignore").write_text("*\n")
+        (repo / "json" / "__init__.py").write_text("EVIL = True\n")
+
+    plant()
+    checks = {c.name: c for c in check_structural(repo, _spec(), collect_targets(repo), collect_all_changes(repo))}
+    assert not checks["structural.changes_allowed"].passed and "json/.gitignore" in checks["structural.changes_allowed"].detail
+    session = _direct_session(tmp_path, repo)
+    asyncio.run(session.aclose())
+    assert not (repo / "json").exists() and (pytest_cache / ".gitignore").exists()
+    plant()
+    heal_toolkit_branch_if_dirty(tmp_path / "run", root=repo, branch="ai")
+    assert not (repo / "json" / "__init__.py").exists()
+
+
+def test_a_failing_bytecode_purge_never_skips_the_ignore_removal(tmp_path, monkeypatch):
+    from auto_research.sandbox import merge_flow
+    from auto_research.sandbox.merge_flow import _save_diff_and_reset
+
+    repo = _toolkit_repo(tmp_path)
+    (repo / "json").mkdir()
+    (repo / "json" / ".gitignore").write_text("*\n")
+    (repo / "json" / "__init__.py").write_text("PLANTED = 1\n")
+    real = merge_flow.purge_bytecode
+    calls = []
+
+    def first_fails(root):
+        calls.append(root)
+        if len(calls) == 1:
+            raise OSError(36, "File name too long")
+        return real(root)
+
+    monkeypatch.setattr(merge_flow, "purge_bytecode", first_fails)
+    _save_diff_and_reset(repo, "HEAD", tmp_path / "wt", patch_prefix="t")
+    assert not (repo / "json" / "__init__.py").exists()
+
+
+@pytest.mark.parametrize("mode", [0o555, 0o000, 0o100])
+def test_a_hidden_package_in_a_read_only_folder_is_removed_on_close(tmp_path, mode):
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    session = _direct_session(tmp_path, repo)
+    (repo / "json").mkdir()
+    (repo / "json" / ".gitignore").write_text("*\n")
+    (repo / "json" / "__init__.py").write_text("PLANTED = True\n")
+    (repo / "json").chmod(mode)
+    try:
+        asyncio.run(session.aclose())
+    finally:
+        if (repo / "json").exists():
+            (repo / "json").chmod(0o755)
+    assert not (repo / "json" / "__init__.py").exists()
+
+
+def test_the_review_bundle_survives_a_latin1_byte(tmp_path):
+    from auto_research.sandbox.review import build_diff_bundle
+
+    repo = _toolkit_repo(tmp_path)
+    (repo / "demo_utils" / "lib" / "core.py").write_text("x = 1\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "core")
+    (repo / "demo_utils" / "lib" / "core.py").write_bytes(b"x = 1  # 20\xb0C\n")
+    assert "core.py" in build_diff_bundle(repo)
+
+
+def test_a_fifo_never_hangs_the_gate_or_the_close(tmp_path):
+    import os
+    import threading
+
+    from auto_research.sandbox.gate import run_gate
+
+    async def real_gate(worktree, spec):
+        return await run_gate(worktree, spec)
+
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    session = _direct_session(tmp_path, repo, run_gate=real_gate)
+    (repo / "json").mkdir()
+    os.mkfifo(repo / "json" / ".gitignore")
+    done = []
+
+    def drive():
+        done.append(asyncio.run(session.run_gate_step()))
+        asyncio.run(session.aclose())
+        done.append("closed")
+
+    worker = threading.Thread(target=drive, daemon=True)
+    worker.start()
+    worker.join(60)
+    assert len(done) == 2, "a FIFO hung the gate or the close"
+    assert not (repo / "json" / ".gitignore").exists()
+
+
+def test_a_nested_repository_trap_is_removed_before_git_walks_the_tree(tmp_path):
+    import os
+    import threading
+
+    from auto_research.sandbox.merge_flow import _dirty_paths
+
+    repo = _toolkit_repo(tmp_path)
+    nested = repo / "demo_utils" / "n"
+    nested.mkdir()
+    (nested / ".git").write_text("gitdir: ../g\n")
+    trap = repo / "demo_utils" / "g"
+    (trap / "objects").mkdir(parents=True)
+    (trap / "refs").mkdir()
+    (trap / "HEAD").write_text("ref: refs/heads/x\n")
+    os.symlink("/dev/ptmx", trap / "commondir")
+    seen = []
+    worker = threading.Thread(target=lambda: seen.append(_dirty_paths(repo)), daemon=True)
+    worker.start()
+    worker.join(60)
+    assert seen, "git hung on a nested-repository trap"
+    assert not (nested / ".git").exists()
+
+
+def test_a_rebuttal_review_sweeps_the_tree_first(tmp_path):
+    import os
+    import threading
+
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    session = _direct_session(tmp_path, repo)
+    gate = asyncio.run(session.run_gate_step())
+    (repo / "json").mkdir()
+    os.mkfifo(repo / "json" / ".gitignore")
+    done = []
+    worker = threading.Thread(target=lambda: done.append(asyncio.run(session.run_review_step(gate))),
+                              daemon=True)
+    worker.start()
+    worker.join(60)
+    assert done, "a FIFO hung the rebuttal review"
+
+
+def test_a_timed_out_git_clears_the_lock_in_a_linked_worktree_too(tmp_path):
+    from auto_research.sandbox.gate import _clear_index_lock
+
+    repo = _toolkit_repo(tmp_path)
+    linked = tmp_path / "linked"
+    _git(repo, "worktree", "add", "-q", str(linked))
+    git_dir = (linked / ".git").read_text().split(":", 1)[1].strip()
+    lock = pathlib.Path(git_dir) / "index.lock"
+    lock.write_text("")
+    _clear_index_lock(linked)
+    assert not lock.exists()
+
+
+@pytest.mark.parametrize("state", [{"submits": "x"}, {"submits": [1]}, {"submits": [{}]},
+                                   {"submits": [{"patch": "../../etc/passwd"}]}])
+def test_a_coder_written_snapshot_state_never_crashes_the_session(tmp_path, state):
+    import json
+
+    from auto_research.sandbox.merge_flow import _submissions_dir
+
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    snap = _submissions_dir(tmp_path / "wt", "fit_retbb_hss")
+    snap.mkdir(parents=True)
+    (snap / "state.json").write_text(json.dumps({**state, "base_ref": head}))
+    session = _direct_session(tmp_path, repo)  # builds, restoring nothing
+    assert session.restored_submission is None
+    asyncio.run(session.run_gate_step())
+
+
+def test_a_gitignore_that_hides_only_its_neighbour_never_survives_a_failed_reset(tmp_path):
+    """Even when `git add -A` fails (a nested empty repository), the hidden file is cleaned."""
+    from auto_research.sandbox.merge_flow import _save_diff_and_reset
+
+    repo = _toolkit_repo(tmp_path)
+    (repo / "json").mkdir()
+    (repo / "json" / ".gitignore").write_text("__init__.py\n")
+    (repo / "json" / "__init__.py").write_text("PWNED = True\n")
+    (repo / "empty_repo").mkdir()
+    _git(repo / "empty_repo", "init", "-q")
+    try:
+        _save_diff_and_reset(repo, "HEAD", tmp_path / "wt", patch_prefix="t")
+    except RuntimeError:
+        pass  # `add -A` refuses the empty nested repository; the reset still runs
+    assert not (repo / "json" / "__init__.py").exists()
+
+
+def test_an_unreadable_file_is_a_failed_gate_not_a_crash(tmp_path):
+    from auto_research.sandbox.gate import run_gate
+
+    async def real_gate(worktree, spec):
+        return await run_gate(worktree, spec)
+
+    repo = _toolkit_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "ai")
+    session = _direct_session(tmp_path, repo, run_gate=real_gate)
+    secret = repo / "demo_utils" / "lib" / "locked.py"
+    secret.write_text("x = 1\n")
+    secret.chmod(0)
+    try:
+        gate = asyncio.run(session.run_gate_step())
+    finally:
+        secret.chmod(0o644)
+    assert not gate.passed and "could not read" in gate.reason
+
+
 def test_a_snapshot_never_restores_onto_a_moved_base_ref(tmp_path):
     """A chain-mate's commit moves HEAD; the old snapshot silently stays unrestored."""
     repo = _toolkit_repo(tmp_path)
@@ -1270,6 +1661,7 @@ def _bg_session(events, **kw):
     session._direct_branch = None
     session._monitor = None
     session._pending_questions = []
+    session._env_tools = None
     session._init_channel()
     session.tool_spec = types.SimpleNamespace(proposed_tool_name="ixpe_pcube_bands")
     return session

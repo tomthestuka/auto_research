@@ -61,6 +61,27 @@ def test_the_jailed_process_dies_with_its_parent(bwrap):
     assert "--die-with-parent" in jail.jail_argv(JailPolicy())
 
 
+@pytest.mark.skipif(not jail.bwrap_path(), reason="bwrap is not installed on this host")
+def test_a_jailed_process_has_no_controlling_terminal_session():
+    """TIOCSTI on /dev/tty from inside the jail injected keystrokes into the parent shell
+    (legacy_tiocsti=1, reproduced 2026-10-06). The jailed process must be in a session created
+    inside the jail: the caller's session lies outside the pid namespace, where getsid reads 0."""
+    import subprocess
+
+    probe = subprocess.run(
+        [*jail.jail_argv(JailPolicy(network=False)), "--", "/usr/bin/python3", "-c",
+         "import os; print(os.getsid(0) != 0)"],
+        capture_output=True, text=True,
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == "True"
+
+
+def test_every_jailed_process_starts_its_own_session(bwrap):
+    """No jailed process shares the caller's terminal session (TIOCSTI, 2026-10-06)."""
+    assert "--new-session" in jail.jail_argv(JailPolicy())
+
+
 def test_read_only_roots_are_bound_read_only(bwrap, tmp_path):
     ro, rw = tmp_path / "ro", tmp_path / "rw"
     ro.mkdir()
@@ -563,6 +584,7 @@ def test_the_codex_launcher_is_not_written_into_the_working_tree(tmp_path, monke
 
     backend = codex_sdk.CodexBackend.__new__(codex_sdk.CodexBackend)
     backend._worktree = worktree
+    backend._jail_readonly = ()
 
     from auto_research.sandbox import jail
 
@@ -588,3 +610,17 @@ def test_the_codex_launcher_is_not_written_into_the_working_tree(tmp_path, monke
         f"would find a dirty branch"
     )
     assert launcher.name == ".codex-jailed"
+
+
+@pytest.mark.skipif(not jail.bwrap_path(), reason="bwrap is not installed on this host")
+def test_a_masked_path_is_empty_inside_the_jail(tmp_path):
+    import subprocess
+
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "secret.py").write_text("x = 1\n")
+    policy = JailPolicy(ro=(str(tmp_path),), masked=(str(tree),), network=False)
+    probe = subprocess.run([*jail.jail_argv(policy), "--", "/bin/ls", "-A", str(tree)],
+                           capture_output=True, text=True)
+    assert probe.returncode == 0 and probe.stdout.strip() == "", probe
+

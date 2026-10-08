@@ -10,6 +10,7 @@ analyze_env: /path/to/conda/envs/analyze    # conda prefix with the analysis sta
 analyze_ini_sh: /path/to/analyst_env.sh     # headless env sourced per tool subprocess (copy analyst_env.sh.example)
 repl_init_py: /path/to/repl_init.py         # python exec'd at REPL-subprocess boot (domain session setup; copy repl_init.py.example); empty/absent ⇒ no-op
 analyze_probe: ""                           # one-line python smoke-test run under analyze_env (installer + preflight); empty ⇒ skip
+env_externals: {}   # {name: {root: <path>, stamps: [<file under root>, ...]}}: software outside conda the analysis env uses; stamped on every receipt
 
 # ── Feedback-loop caps (hard backstops against pathology, not workflow budgets) ──
 max_iterations: 3            # reviewer→work send-backs per feedback edge (literature / analysis)

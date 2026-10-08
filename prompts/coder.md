@@ -265,7 +265,8 @@ test path (e.g. `pytest <domain>_utils/tests/test_<your_tool>.py`), **not** a ba
 the worktree: that would collect and run the whole toolkit's existing suite, which is needlessly
 slow and can fill scratch with other tools' data. The gate itself only runs your changed tests, so
 your own file is the right target. Make it green **before** you declare done — your `Bash` runs in
-the analysis environment, so `python`/`pytest` carry the full science stack (the same interpreter
+the analysis environment (or the candidate you activated, see *Your package's software
+environment*), so `python`/`pytest` carry the full science stack (the same interpreter
 that gates your tool), and import-time failures surface to you directly, well before the gate.
 
 **Reproducibility test — required for a science tool.** A *science tool* computes or derives a
@@ -277,6 +278,12 @@ recovered value within tolerance. Data-acquisition and literature-search tools a
 (their stability is a checksum/differential check, not a within-tolerance result). The lead plans
 which checks a tool needs — it is in your brief's proposed checks; follow that plan, and ask the
 lead (`message` to `lead`) if the brief is silent on reproducibility for a science tool.
+
+**Mark each test by its class** (the toolkit's root `conftest.py`): leave a fast, deterministic
+test unmarked; mark one that runs on real observation data or a real model for minutes
+`@pytest.mark.slow`; mark one that reaches the network or an external service
+`@pytest.mark.live` — it runs only when asked for, and the gate's run has no network, so a tool
+also needs unmarked or `slow` tests that pass offline.
 
 **Keep each test fast, and its verdict stable.** The gate runs your tests **twice** and compares
 the **per-test outcomes** (pass / fail / error / skip): a test whose verdict *flips* between the
@@ -319,6 +326,36 @@ tool twice — raise it per package in the same `tool_config.yaml`:
 ```yaml
 gate_test_timeout_s: 3600   # seconds; the gate's per-run Layer-B budget for this package
 ```
+
+## Your package's software environment
+
+Your package names the environment its tools run in, in its `tool_config.yaml`: `env: <env_id>`.
+The definition lives in your working directory at `envs/<env_id>/`, and the runtime builds it from
+there once your tool is committed. Extend the environment your package already names; create a new
+one when the packages you need conflict with it, and name it after its software stack (`sherpa`,
+`ciao`). Several packages may share one environment; a package names exactly one.
+
+A definition is a folder of plain files:
+
+- `env.yaml` — `purpose` (one line), `base` (a human environment to layer on, or none) and
+  `externals` (declared software such as HEASoft that the environment uses).
+- `env.lock` — the exact conda-forge packages. `env_solve(env_id, specs)` rewrites it from the
+  full list of specs, such as `python=3.11`, `numpy=2.1` and `pytest`. Each solve and each build
+  downloads its packages afresh, so settle the list and solve once per change.
+- `env.pip` — wheels conda-forge lacks, written by `env_pin_wheels(env_id, ["pkg==1.2.3"])` with
+  each wheel's checksum. Pin exact versions.
+- `activate.sh` — variables the tools need, and sourcing a declared external's init script. Give
+  every path in it absolutely: the runtime sources a copy kept in its own folder.
+- `boot.py` — setup the analysts' Python session runs first.
+
+`cand_env_activate(env_id)` builds the definition into your own candidate and makes it your
+shell's: plain `python`, `pytest` and `pip list` then run in it from a clean start, the way the
+analysts' tools will, with your `activate.sh` sourced first, so an edit to it applies on the next
+command. Packages enter a candidate through `env.lock` and `env.pip` only. Rebuild after each `env_solve` or
+`env_pin_wheels` by calling it again. `cand_env_activate()` with no env id returns your shell to the
+analysis environment. When your package names an environment, run its tests in that environment
+before you submit: the gate builds the environment from your definition and runs your package's
+tests in it, with your `activate.sh` sourced first.
 
 ## When you are unsure — escalate to ground each decision
 

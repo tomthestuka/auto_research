@@ -98,12 +98,14 @@ def mint_reply_attachments(
             continue
         if attachment.mime_type in FIGURE_MIME_TYPES:
             receipt = store.mint(
+                env_default=False,  # a file a human sent: nothing of ours ran
                 source=source, kind="figure", produced_by="human_reply", path=path,
                 parents=parents, caption=attachment.caption or f"from the human: {attachment.filename}",
                 mime_type=attachment.mime_type,
             )
         else:
             receipt = store.mint(
+                env_default=False,  # a file a human sent: nothing of ours ran
                 source=source, kind="data", produced_by="human_reply", path=path, parents=parents,
                 mime_type=attachment.mime_type, caption=attachment.caption or None,
             )

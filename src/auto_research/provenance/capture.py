@@ -47,7 +47,9 @@ class CallReceipts:
         parts = [f"[receipt {self.result.handle}]"]
         for product in self.products:
             label = product.caption if product.kind == "figure" else Path(product.path).name
-            parts.append(f"[{product.handle}] {label}")
+            # One line, whatever the tool put in a caption or a file name: a newline there would
+            # forge a runtime line below the header.
+            parts.append(f"[{product.handle}] {' '.join(str(label or '').split())}")
         return " · ".join(parts)
 
 
@@ -110,7 +112,7 @@ def inputs_before(
             continue
         try:
             state.inputs.append(store.hash_input(path))
-        except OSError:
+        except Exception:  # noqa: BLE001 — an input that cannot be hashed is left out; the call runs (§9.3.8)
             continue
     return state
 
@@ -145,6 +147,9 @@ def receipt_call(
     kind: str = "result",
     fields: Mapping[str, Any] | None = None,
     reachable: Callable[[Path], bool] | None = None,
+    env: str | None = None,
+    env_default: bool = True,
+    env_untested: bool = False,
 ) -> CallReceipts:
     """Mint the call's result receipt and one receipt per figure / data file it produced.
 
@@ -164,7 +169,8 @@ def receipt_call(
     commit = toolkit_commit(toolkit_root)
     common = dict(
         source=source, produced_by=produced_by, call_id=call_id, toolkit_commit=commit,
-        args=dict(args), inputs=state.inputs, failed=failed,
+        args=dict(args), inputs=state.inputs, failed=failed, env=env, env_default=env_default,
+        **({"env_untested": True} if env_untested else {}),
     )
     extra = dict(fields or {})
     result = store.mint(kind=kind, data=text, **common, **extra)

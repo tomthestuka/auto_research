@@ -323,3 +323,5 @@ carried by **reference** (`FigureRef`), never embedded
   `rework` property replaced by `assign_to: Assignee | None` (`librarian | analysts | human`).
 - 2026-09-25 — [R7] `Receipt.arg_numbers` is legacy (kept for replay); the shell grounds nothing
   (`provenance.store.is_evidence`).
+- 2026-10-06 — `Receipt.env`: fingerprint of the environment the producing call ran in (env plan B1).
+- 2026-10-06 — **Env plan B3b:** `Receipt.env_untested` (a toolkit call run in an environment other than its package's tested one, by the caller's choice; still evidence) and `capture.receipt_call(env_untested=)`, set on every receipt of the call.

@@ -136,6 +136,7 @@ class CodexBackend:
         escalation_token_env: str | None = None,
         env: dict[str, str] | None = None,
         writable_roots: list[str] | None = None,
+        jail_readonly: tuple[str, ...] = (),
         monitor: Any | None = None,
         codex_bin: str | None = None,
         client_factory: Any | None = None,
@@ -166,6 +167,8 @@ class CodexBackend:
         self._key_env = member.key_env or env_var_names(member.provider)[0]
         self._env = env
         self._writable_roots = writable_roots or [str(worktree)]
+        # Folders the jailed author reads but never writes (its candidate environments, B3c-3).
+        self._jail_readonly = tuple(jail_readonly)
         self._monitor = monitor
         self._codex_bin = codex_bin
         self._client_factory = client_factory
@@ -405,7 +408,9 @@ class CodexBackend:
             }
             config["model_provider"] = self._provider
         if self._escalation_url:
-            server: dict[str, Any] = {"url": self._escalation_url}
+            # Codex abandons an MCP call after 60 s by default (config reference,
+            # `mcp_servers.<id>.tool_timeout_sec`); an environment solve or build takes minutes.
+            server: dict[str, Any] = {"url": self._escalation_url, "tool_timeout_sec": 3600}
             if self._escalation_token_env:
                 server["bearer_token_env_var"] = self._escalation_token_env
             config["mcp_servers"] = {"escalation": server}
@@ -451,7 +456,7 @@ class CodexBackend:
         # A label of this author's own, so concurrent authors do not share one settings directory:
         # a sweep runs several at once, and the CLI writes login state and history into it.
         label = self._jail_label()
-        policy = coder_policy(label=label, extra_rw=(str(target),))
+        policy = coder_policy(label=label, extra_rw=(str(target),), readonly=self._jail_readonly)
         # The launcher lives in this author's own home, NOT in the working tree.
         #
         # Writing it into the tree left an untracked `.codex-jailed` behind after every session, so
