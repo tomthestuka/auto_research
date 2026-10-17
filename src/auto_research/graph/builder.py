@@ -174,6 +174,7 @@ def build_graph(
         render = ReviewerRender(
             report_dir=_version_dir(_run_id, state.get("human_rounds", 0) + 1),
             run_id=_run_id, formats=tuple(_report_formats),
+            ledger=getattr(monitor, "jsonl_path", None),
         )
         verdict = await reviewer.review(
             state["request"],
@@ -202,14 +203,27 @@ def build_graph(
             pdf = render.compile.pdf_path if render.compile is not None else None
             update["report_latex"] = tex
             update["report_pdf"] = pdf
-            if render.renderer_errors or pdf is None:
+            compile_errors = list(render.compile.errors) if render.compile is not None else []
+            if compile_errors or pdf is None:
                 await _record(
                     monitor,
                     "reviewer.compose_report.renderer_error",
                     level=1,
                     summary="The report was accepted but no PDF was produced — a renderer defect",
                     actor="reviewer",
-                    data={"errors": render.renderer_errors, "tex": str(tex) if tex else None},
+                    data={"errors": compile_errors, "tex": str(tex) if tex else None},
+                )
+        if verdict.assign_to == "human" and "html" in _report_formats:
+            page = render.html.html_path if render.html is not None else None
+            update["report_html"] = page
+            if page is None:
+                await _record(
+                    monitor,
+                    "reviewer.compose_report.renderer_error",
+                    level=1,
+                    summary="The report was accepted but no HTML page was produced — a renderer defect",
+                    actor="reviewer",
+                    data={"errors": render.html_errors, "format": "html"},
                 )
         return update
 
@@ -344,8 +358,10 @@ def build_graph(
             request_question=state["request"].question,
             report_dir=_version_dir(_run_id, state.get("human_rounds", 0) + 1),
             formats=_report_formats,
-            tex_path=state.get("report_latex"),
-            pdf_path=state.get("report_pdf"),
+            # Only this run's formats: a resumed checkpoint's earlier files are not republished.
+            tex_path=state.get("report_latex") if "tex" in _report_formats else None,
+            pdf_path=state.get("report_pdf") if "tex" in _report_formats else None,
+            html_path=state.get("report_html") if "html" in _report_formats else None,
         )
         result["report_artifacts"] = dict(published.artifacts)
         if published.research_report is not None:
@@ -361,6 +377,7 @@ def build_graph(
                 "jsonl": str(published.jsonl_path) if published.jsonl_path else None,
                 "tex": str(state.get("report_latex")) if state.get("report_latex") else None,
                 "pdf": str(state.get("report_pdf")) if state.get("report_pdf") else None,
+                "html": str(state.get("report_html")) if state.get("report_html") else None,
             },
         )
         return result
@@ -390,7 +407,9 @@ def build_graph(
 
         verdict = state["verdict"]
         store = receipts if receipts is not None else getattr(reviewer, "receipts", None)
-        pdf = (state.get("report_artifacts") or {}).get("pdf")
+        # The PDF when there is one, else the HTML page (`report_formats` without `tex`).
+        artifacts = state.get("report_artifacts") or {}
+        pdf = artifacts.get("pdf") or artifacts.get("html")
         extra: dict[str, Any] = {}
         if pdf is not None and store is not None:
             from auto_research.hitl.attachments import resolve_attachments
@@ -418,7 +437,7 @@ def build_graph(
         await _record(
             monitor, "run.human.sent", level=1,
             summary=f"Report {rounds} sent to the human", actor="reviewer",
-            data={"query": query, "pdf": pdf},
+            data={"query": query, "attachment": pdf},
         )
         try:
             response = await resolve_human(human_handler, query)
@@ -502,7 +521,7 @@ def _version_dir(run_id: str, version: int) -> Path:
 
 def _report_message(report: ReviewerReport, *, attached: bool) -> str:
     """The message the human receives with the report: its title, abstract and how to answer."""
-    where = "The report is attached as a PDF." if attached else "The report's text follows."
+    where = "The report is attached." if attached else "The report's text follows."
     body = [f"**{report.title}**", "", report.abstract, "", where]
     if not attached:
         for section in report.sections:

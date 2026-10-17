@@ -37,3 +37,6 @@ tmp*
 
 # publication materials
 papers/
+# PI project batches and research database (local copies)
+notebooks/projects*
+notebooks/ixpe_research_database.json

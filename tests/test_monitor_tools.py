@@ -209,7 +209,7 @@ def test_tools_take_no_path_argument(tmp_path):
     """Read-only is structural: the provider is built with the run's ledger and the model cannot
     point any tool at another file."""
     schemas = {t["name"]: t["input_schema"]["properties"] for t in _ledger(tmp_path).tool_definitions()}
-    assert set(schemas) == {"brief_history", "ledger_event", "ledger_grep"}
+    assert set(schemas) == {"brief_history", "ledger_event", "ledger_grep", "read_file"}
     assert not any("path" in props for props in schemas.values())
 
 
@@ -284,7 +284,7 @@ def test_reporter_searches_then_answers(tmp_path):
     assert answer == "The reviewer accepted it (#1): PD 2.1σ."
     assert len(model.calls) == 3
     assert [t["name"] for t in model.calls[0]["tools"]] == [
-        "brief_history", "ledger_event", "ledger_grep",
+        "brief_history", "ledger_event", "ledger_grep", "read_file",
     ]
 
 
@@ -297,7 +297,7 @@ def test_reporter_is_given_only_the_monitor_tools(tmp_path):
     asyncio.run(_agent(model).report("", jsonl_path=path))
 
     names = {t["name"] for t in model.calls[0]["tools"]}
-    assert names == {"brief_history", "ledger_event", "ledger_grep"}
+    assert names == {"brief_history", "ledger_event", "ledger_grep", "read_file"}
 
 
 def test_reporter_answers_even_when_the_loop_ends_on_its_cap(tmp_path, monkeypatch):
@@ -320,6 +320,23 @@ def test_reporter_answers_even_when_the_loop_ends_on_its_cap(tmp_path, monkeypat
     # provider items referencing them (`function_call … without its required 'reasoning' item`
     # killed run 8c75990e on exactly this shape). "none" is what stops another tool call.
     assert {t["name"] for t in model.calls[-1]["tools"]} == {
-        "brief_history", "ledger_event", "ledger_grep"
+        "brief_history", "ledger_event", "ledger_grep", "read_file"
     }
     assert model.calls[-1]["tool_choice"] == "none"
+
+
+def test_read_file_pages_the_ledger_within_its_bound(tmp_path):
+    """The reporter's read_file reads only its own ledger, and no reply exceeds the window bound,
+    however long the events are (ledger fields are recorded whole since 2026-10-17)."""
+    from auto_research.agents.react import _EVENT_MAX_WINDOW_CHARS as _MAX_WINDOW_CHARS, _MAX_LINE_CHARS
+
+    path = tmp_path / "monitor.jsonl"
+    events = [dict(_event(i), data={"text": "x" * 300_000}) for i in range(1, 400)]
+    _write_ledger(path, events)
+    provider = MonitorToolProvider(path)
+    first = _call(provider, "read_file", path="/etc/passwd")  # no path is taken: the ledger
+    assert len(first) <= _MAX_WINDOW_CHARS + 120 and "… [+" in first and "offset=" in first
+    offset = int(first.rsplit("offset=", 1)[1].split()[0].rstrip("]"))
+    second = _call(provider, "read_file", offset=offset, limit=5000)
+    assert second.lstrip().startswith(str(offset)) and len(second) <= _MAX_WINDOW_CHARS + 120
+    assert _MAX_LINE_CHARS < 300_000

@@ -165,7 +165,7 @@ class SeatRouter:
         await self._record(
             "channel.message", level=4, actor=sender,
             summary=f"{sender} → {to} ({route}): {_cap(text, 80)}",
-            data={"from": sender, "to": to, "route": route, "text": _cap(text, 4000),
+            data={"from": sender, "to": to, "route": route, "text": text,
                   "handles": shown},
         )
         await self._mirror(f"💬 {sender} → {to}\n\n{text}")
@@ -233,7 +233,7 @@ class SeatRouter:
             "channel.message", level=3, actor=sender,
             summary=f"{sender} → human: {query.headline}",
             data={"from": sender, "to": HUMAN, "route": "human", "kind": query.kind,
-                  "query_id": query.id, "text": _cap(text, 4000),
+                  "query_id": query.id, "text": text,
                   "attachments": [a.handle for a in attachments]},
         )
         sent = (
@@ -307,7 +307,7 @@ class SeatRouter:
         await self._record(
             "channel.reply", level=3, actor=query.asked_by,
             summary=f"human → {query.asked_by}: {_cap(response.answer or '', 80)}",
-            data={"query_id": query.id, "answer": _cap(response.answer or "", 4000),
+            data={"query_id": query.id, "answer": response.answer or "",
                   "files": minted, "notes": list(getattr(response, "notes", ()) or ())},
         )
         await deliver("\n\n".join(parts), tuple(minted), "reply")
@@ -346,7 +346,7 @@ class SeatRouter:
         await self._record(
             "channel.message", level=4, actor=sender,
             summary=f"{sender} → {to} ({route}): {_cap(text, 80)}",
-            data={"from": sender, "to": to, "route": route, "text": _cap(text, 4000),
+            data={"from": sender, "to": to, "route": route, "text": text,
                   "is_error": is_error},
         )
 

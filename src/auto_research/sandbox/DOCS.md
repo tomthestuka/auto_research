@@ -29,7 +29,7 @@ sandbox/
 ├── runner.py         # run_tool()     — one-shot subprocess (kept for ad-hoc use)
 ├── workspace.py      # per-run/agent folder layout and memory.md utilities
 ├── analyst_env.sh    # dedicated headless analyst env (HEADAS, CALDB, no cruft)
-├── builtin_server.py # MCP stdio server: bash_exec, list_dir, read_file
+├── builtin_server.py # MCP stdio server: bash_exec, list_dir
 ├── mcp_client.py     # MCPToolClient — manages stdio MCP server sessions
 ├── merge_flow.py     # propose_and_pr() — author harness + rework loop (step 2);
 │                     #   approve_edit() — atomic commit (step 6); git-identity preflight
@@ -75,7 +75,8 @@ process has a clean XSPEC session, so analysts must reload any state they need.
 
 **MCP tool path:** alongside `TOOL_MANIFEST` tools, analyst workers may call
 tools served by stdio MCP servers.  `builtin_server.py` runs as a subprocess
-and currently exposes `bash_exec`, `list_dir`, and `read_file`. Restricting MCP to
+and exposes `bash_exec` and `list_dir` (`read_file` is in-process for every role since 2026-10-17:
+`agents.react.execute_read_file`). Restricting MCP to
 read-only file-tree exploration is deferred beyond Phase 2.
 `MCPToolClient`
 manages the server sessions and exposes tools to the registry under the naming
@@ -550,11 +551,7 @@ Tools:
   line. No domain string (FITS/xspec) is hardcoded in source.
 - `list_dir(path)` → `{"path": str, "entries": list[str]}` — alphabetically sorted
   directory listing.
-- `read_file(path, max_bytes=65536)` → `{"content": str, "truncated": bool, "size_bytes": int}`
-  — read a text file up to `max_bytes`; UTF-8 with `errors="replace"`.
-
-Kind strings: `mcp.builtin.bash_exec`, `mcp.builtin.list_dir`,
-`mcp.builtin.read_file`.
+Kind strings: `mcp.builtin.bash_exec`, `mcp.builtin.list_dir`.
 
 ### `PersistentSandbox.call_mcp_tool`
 
@@ -1077,7 +1074,6 @@ the hook mapping a fake-model verdict — no live LLM).
 - `builtin_server.py` — MCP stdio server with shell and file-tree tools.
   - `bash_exec(command, cwd=None, timeout_s=60)` → `{stdout, stderr, exit_code}`.
   - `list_dir(path)` → `{path, entries}`.
-  - `read_file(path, max_bytes)` → `{content, truncated, size_bytes}`.
   Kind prefix: `mcp.builtin.*`.
 - `PersistentSandbox.call_mcp_tool(kind, args, *, timeout_s)` → `dict` —
   forward one MCP call; returns error dict if no client attached.
@@ -1317,8 +1313,9 @@ the hook mapping a fake-model verdict — no live LLM).
   is given; `claude_sdk._make_escalation_server(ask_lead, ask_human, env_tools)` likewise) (`MESSAGE_DESCRIPTION`, `route_message`) from
   **this** process (the handlers must reach the live lead's inbox and the run's HITL connector). Loopback, ephemeral port, per-session bearer token;
   `url`, `env()` and `token_env` are what a harness needs, `start()`/`aclose()` its lifecycle.
-- `coder.events.emit` / `cap_text` / `coder_text_cap()` — the shared ledger emission, so a backend
-  records without importing the flow that drives it. `merge_flow._emit`/`_cap_text` alias them.
+- `coder.events.emit` / `cap_text(text, limit)` — the shared ledger emission, so a backend
+  records without importing the flow that drives it; `cap_text` bounds only one-line summaries and
+  model-visible notes, ledger data fields are recorded whole. `merge_flow._emit`/`_cap_text` alias them.
 - `merge_flow._build_backend(...)` → a `CoderBackend` — the harness dispatch, on
   `coder_member().harness`. For Codex it turns the `agent_fs_allow` list into `writableRoots` and
   builds the escalation endpoint; for Claude it builds the SDK options and wraps the client.
@@ -1565,3 +1562,6 @@ Compacted 2026-09-01, 2026-09-24 and 2026-10-07 (the 10-06/07 entries); detail i
   `PersistentSandbox` entry names the `environment`/pool signature. Jailed probe through the module
   API: `xspec.Model("relxillCp")` builds in a routed `ar-xspec` REPL, so the toolkit's `boot.py`
   runs (F21 narrowed to the default REPL).
+- 2026-10-17 — `coder_text_cap()` retired; `cap_text` takes an explicit limit. Coder prose, tool inputs/results, escalations, gate reasons and co-lead issues/rationale are recorded whole in the ledger (summaries and model-visible notes keep their short previews).
+- 2026-10-17 — Codex harness: `coder.turn_end` records the vendor error whole (the lead's copy stays at 600 chars), `coder.read_outside_allowlist` every path.
+- 2026-10-17 — `builtin_server.read_file` removed (first 64 KB, no offset): workers read through the shared in-process `read_file` (`agents/DOCS.md`). `bash_exec` and `list_dir` stay in the server.

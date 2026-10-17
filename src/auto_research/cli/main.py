@@ -63,13 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--report-format",
         action="append",
-        choices=("jsonl", "tex"),
+        choices=("jsonl", "tex", "html"),
         default=None,
         dest="report_formats",
-        metavar="{jsonl,tex}",
+        metavar="{jsonl,tex,html}",
         help=(
             "Which report artifact(s) to produce on an accepted verdict. "
-            "May be supplied more than once. Defaults to both jsonl and tex."
+            "May be supplied more than once. Defaults to the configured report_formats."
         ),
     )
     parser.add_argument(
@@ -171,6 +171,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "report_jsonl": str(run.report_jsonl) if run.report_jsonl else None,
             "report_latex": str(run.report_latex) if run.report_latex else None,
             "report_pdf": str(run.report_pdf) if run.report_pdf else None,
+            "report_html": str(run.report_html) if run.report_html else None,
         })
 
     if args.format == "json":
@@ -185,6 +186,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             out["report_latex"] = str(run.report_latex)
         if run.report_pdf:
             out["report_pdf"] = str(run.report_pdf)
+        if run.report_html:
+            out["report_html"] = str(run.report_html)
         print(json.dumps(out, indent=2, sort_keys=True))
     else:
         # The derived end-of-run digest first (cost, wall clock, tools authored, reports), then
@@ -205,6 +208,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Report LaTeX:   {run.report_latex}")
         if run.report_pdf:
             print(f"Report PDF:     {run.report_pdf}")
+        if run.report_html:
+            print(f"Report HTML:    {run.report_html}")
     return 0
 
 

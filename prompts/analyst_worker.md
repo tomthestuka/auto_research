@@ -20,7 +20,7 @@ by calling tools; the runtime sandbox executes them and returns the outputs:
 - **Observation discovery and triage**: mission archives (HEASARC, MAST, Chandra, IXPE / NICER /
   NuSTAR / Swift / XMM / Insight-HXMT) — ObsIDs, dates, exposures, modes, state classifications,
   and cross-mission epoch matching for joint fits. Handle archive triage yourself; the
-  librarians' domain is published literature.
+  librarians research the literature, methods and community practice.
 - **Local observation databases**: when the task supplies configured observation locations,
   consult them through the tools.
 - **Data reduction, spectral/temporal fitting, and figure production** through the tools
@@ -32,9 +32,9 @@ by calling tools; the runtime sandbox executes them and returns the outputs:
   report.
 - **Authoritative-doc lookups** (mission analysis threads, calibration notes) via the web tool.
 
-Rely on the librarians for **published-literature context** (prior papers, methods used
-elsewhere, parameter priors from the literature). Drive every observation- and data-side step
-yourself.
+Rely on the librarians for **research context** (prior papers, methods used elsewhere,
+parameter priors from the literature, documentation, community practice). Drive every
+observation- and data-side step yourself.
 
 ## Tools
 
@@ -115,7 +115,7 @@ findings, **in the order you want them shown**, referring to the k-th as "Figure
 After writing, call `review_report` again to check each figure is placed right, then
 `edit_report` to refine — repeat until every figure that belongs is cited in the right order.
 
-**Every number in your report comes from a receipt.** Each tool result you receive opens with
+**Every number in your report comes from a receipt.** Write every number in digits (45, not forty-five). Each tool result you receive opens with
 `[receipt <handle>]`, and so does each figure or file the call wrote; `review_report` lists every
 receipt you can cite. In each finding, cite the receipts its numbers come from as `[handle]`, and
 copy each number exactly as the receipt prints it — sign, digits and exponent. To pin one exact

@@ -1,4 +1,4 @@
-"""Built-in MCP stdio server: bash_exec, list_dir, read_file.
+"""Built-in MCP stdio server: bash_exec, list_dir (``read_file`` is in-process, `agents.react.execute_read_file`).
 
 Run as a subprocess by MCPToolClient, from the analysis env's interpreter (which carries ``mcp``),
 with the environment the analyst init script produces so HEADAS/CALDB are available to bash_exec
@@ -114,18 +114,6 @@ def list_dir(path: str) -> dict:
         return {"path": path, "entries": entries}
     except Exception as exc:
         return {"path": path, "entries": [], "error": str(exc)}
-
-
-@mcp.tool()
-def read_file(path: str, max_bytes: int = 65536) -> dict:
-    """Read a text file. Returns content and whether it was truncated."""
-    try:
-        size = os.path.getsize(path)
-        with open(path, errors="replace") as f:
-            content = f.read(max_bytes)
-        return {"content": content, "truncated": size > max_bytes, "size_bytes": size}
-    except Exception as exc:
-        return {"content": "", "truncated": False, "size_bytes": 0, "error": str(exc)}
 
 
 if __name__ == "__main__":

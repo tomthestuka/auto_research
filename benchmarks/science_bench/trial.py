@@ -420,6 +420,7 @@ def measured_outcome(result: dict[str, Any], ledger: dict[str, Any]) -> dict[str
         "report_jsonl": result.get("report_jsonl"),
         "report_latex": result.get("report_latex"),
         "report_pdf": result.get("report_pdf"),
+        "report_html": result.get("report_html"),
         "worker_statuses": ledger.get("worker_statuses", []),
         "needs_human": "needs_human" in ledger.get("worker_statuses", []),
     }

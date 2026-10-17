@@ -62,6 +62,7 @@ class ResearchRun:
     report_jsonl: Path | None = None
     report_latex: Path | None = None
     report_pdf: Path | None = None
+    report_html: Path | None = None
 
     def markdown(self) -> str:
         """Return the grouped monitor report."""
@@ -577,10 +578,10 @@ def _normalize_report_formats(
     value: str | list[str] | None,
     default: list[str],
 ) -> list[str]:
-    """Normalize report_formats to a validated list."""
-    _valid = {"jsonl", "tex"}
+    """Normalize report_formats to a validated list (the configured default is validated too)."""
+    _valid = {"jsonl", "tex", "html"}
     if value is None:
-        return list(default)
+        value = list(default)
     if isinstance(value, str):
         value = [value]
     unknown = set(value) - _valid
@@ -1142,6 +1143,7 @@ async def run_research(
         report_jsonl=final_state.get("report_jsonl"),
         report_latex=final_state.get("report_latex"),
         report_pdf=final_state.get("report_pdf"),
+        report_html=final_state.get("report_html"),
     )
 
 

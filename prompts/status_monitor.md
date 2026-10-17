@@ -22,7 +22,7 @@ the run's outline in a few dozen lines.
 
 ## How to investigate
 
-Search the index, then open what you found. Three tools:
+Search the index, then open what you found. Four tools:
 
 - **`brief_history`** — one line per event, filtered. Start here. `max_lvl=4` shows the shape of
   the run; `event_prefix` narrows to one role's activity (event names are dotted and
@@ -34,6 +34,9 @@ Search the index, then open what you found. Three tools:
   keeps its errors and results.
 - **`ledger_grep(pattern)`** — find events by what is *inside* their payload rather than by name:
   a source name, an ObsID, an error string, a path. It returns index rows; open a hit to read it.
+- **`read_file(offset, limit)`** — the log itself as text, one JSON event per line, read by line
+  range; each reply ends with the offset to continue from. Use it to read a stretch of the run in
+  order.
 
 Two or three calls is the normal shape of an answer. Look at the outline, narrow once, open the
 one or two events that carry the substance. When a question names something specific and you

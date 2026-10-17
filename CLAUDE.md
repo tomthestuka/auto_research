@@ -909,7 +909,10 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 
 **Provenance**
 - **What receipts do not cover (2026-09-24):** (a) inputs a tool locates itself from an identifier
-  are not hashed; (b) grounding checks a number exists in a cited receipt, not its row/column;
+  are not hashed, except an observation named by ObsID in a mission folder (2026-10-17: catalog
+  entry + folder listing, basis `obsdb`, or the folder's listing when uncatalogued; hashed before
+  the call runs, after it for the lead's in-process `data_catalog`; not linked to an in-run receipt
+  that wrote it); (b) grounding checks a number exists in a cited receipt, not its row/column;
   (c) the static figure-shape scan is beaten by one indirection; the dynamic return check (G15)
   covers what the tests call; C-level writes and uncalled tools stay with the co-lead; (d) exemption shapes
   (years, Figure/Table numbers) are unchecked; (e) a toolkit tool writing model-chosen content could
@@ -917,6 +920,7 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   authoritative. The flagged-quote shape is pinned deterministically only.
 - **Paper values are attributed, not verified** (ruling 2026-09-24) — a model can still attribute a
   wrong number; the `paper_attributions` list makes it cheap to check.
+- **Numbers written as words are not grounded** (found live 2026-10-17): the number scan reads digits only. Ruling 2026-10-17: the check stays on digits; every role's prompt says to write numbers in digits.
 - **Report fields are checked for emptiness, not content** — accepted limit, every role (ruling
   2026-09-24); numbers stay grounded.
 
@@ -1076,3 +1080,5 @@ entry 2026-09-25, [R7] evidence rule, LIVE-VERIFIED 2026-09-26).
     activation, XSPEC + relxill boot file), named by `xspec_utils`. Parity: 421/426 in `ar-xspec`,
     the same five failures in the human environment. Jailed probe: relxillCp loads once
     `/data/fzhou/XSPEC/relxill` is on the read-only allow-list.
+- 2026-10-17 — **Provenance trail in an HTML report** (plan `tmp_plan_provenance_replay.md`, user rulings 2026-10-16/17; replay is the human's, the runtime re-runs nothing). The run ledger records every field whole (caps retired) and each worker call's runtime context, so `provenance.calls` rebuilds the exact arguments of any toolkit receipt, proven by its `args_sha256`; receipts name the observations a tool located by ObsID (`obsdb` inputs) and the toolkit root; `report_formats` gains `html`: `report.html`, every number opening its z-chain (data | tool, commit, environment, arguments, inputs, copy reproduce code), checked at the reviewer's `turn_end` and parsed back; one paged, bounded `read_file` for every role (workers and the status monitor included). §13: (a) narrowed; new entries for spelled-out numbers and report-table receipts (rulings pending). Live: `tests/test_live_provenance_html.py` (B1, B2, R1, R2, R4, R5).
+- 2026-10-17 — Rulings: a report table cited by receipt must be evidence (`render.check_table`, both formats); spelled-out numbers stay unchecked and the prompts ask for digits; `report_formats: [html]` in the live config, the page sent to the human when there is no PDF; the librarian's `web_fetch` description and the literature schema/refusal wording follow its deep-research scope.

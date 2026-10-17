@@ -79,7 +79,7 @@ class ReviewerReport(MessageModel):
     accepted: bool = Field(
         default=False,
         description=(
-            "True when the analysis answers the request and agrees with the literature. False when "
+            "True when the analysis answers the request and agrees with the published research. False when "
             "it does not yet, or when an honest limitation stands; say which in rationale."
         ),
     )
@@ -90,8 +90,8 @@ class ReviewerReport(MessageModel):
     assign_to: Assignee | None = Field(
         default=None,
         description=(
-            "Who receives this report. 'librarian': follow_up is the literature questions for a "
-            "search. 'analysts': follow_up is the analysis task, or the revision to make. 'human': "
+            "Who receives this report. 'librarian': follow_up is the research questions for a "
+            "search (the literature, documentation, code, community practice). 'analysts': follow_up is the analysis task, or the revision to make. 'human': "
             "the title, abstract, sections, findings, figures and tables are the report the human "
             "receives and discusses with you."
         ),
@@ -99,7 +99,7 @@ class ReviewerReport(MessageModel):
     follow_up: str = Field(
         default="",
         description=(
-            "For the librarian or the analysts: the task handed to them verbatim — the literature "
+            "For the librarian or the analysts: the task handed to them verbatim — the research "
             "questions to answer, or the analysis steps to run with the targets and the "
             "data-source priority. For a capability the toolkit lacks, state what to measure and "
             "on which data, and leave the build choice to the analyst team."

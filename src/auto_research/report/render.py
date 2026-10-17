@@ -33,6 +33,7 @@ from pathlib import Path
 from urllib.parse import quote as url_quote
 
 from auto_research.provenance import ReceiptLookup, paper_attributions, parse_bindings
+from auto_research.provenance.store import NOT_EVIDENCE_NAMES, TOOLKIT_PRODUCER_PREFIX
 from auto_research.report.figures import stage_figure_receipts
 from auto_research.report.writers import _errors_with_context
 from auto_research.schemas.artifacts import PaperAttribution, Receipt
@@ -177,30 +178,84 @@ def _longtable(caption: str, number: int, header: Sequence[str], body: Sequence[
     )
 
 
-def _table(table: ReviewerTable, number: int, ctx: _Context, problems: list[str]) -> str | None:
+def check_table(
+    table: ReviewerTable, number: int, lookup: ReceiptLookup
+) -> tuple[list[list[str]] | None, str | None, list[str]]:
+    """The one check of a report table, shared by every format: ``(rows, note, problems)``.
+
+    A table names a receipt (a table a tool computed: ``rows`` are the receipt's parsed rows, and
+    ``note`` says when its bytes changed since its receipt, F26) or lists columns and rows (a table
+    the reviewer builds: ``rows`` is ``None``). ``problems`` are the model's to fix.
+    """
     label = f"Table {number}"
-    caption = _inline(table.caption, ctx) if table.caption.strip() else label
     if table.receipt:
         if table.columns or table.rows:
-            problems.append(
+            return None, None, [
                 f"{label} names a receipt and also lists columns/rows. Fill one form: the receipt "
                 "for a table a tool computed, or columns and rows for a table you build."
-            )
-            return None
-        receipt = ctx.lookup.get(table.receipt)
+            ]
+        receipt = lookup.get(table.receipt)
+        if receipt is not None and not receipt.produced_by.startswith(TOOLKIT_PRODUCER_PREFIX):
+            # The table stands for what a tool computed (user ruling 2026-10-17): a toolkit result or
+            # file, never a read, the shell, a paper, a commit or the request.
+            what = NOT_EVIDENCE_NAMES.get(receipt.produced_by) or f"a {receipt.kind}, not a toolkit result"
+            return None, None, [
+                f"{label} cites {table.receipt}, {what}: a table a tool computed comes from a "
+                "toolkit result or the data file it wrote. Cite that receipt, or build the table "
+                "from columns and rows."
+            ]
         text, changed = (
-            ctx.lookup.text_with_note(table.receipt)
-            if receipt is not None and hasattr(ctx.lookup, "text_with_note")
-            else ((ctx.lookup.text(table.receipt), None) if receipt is not None else (None, None))
+            lookup.text_with_note(table.receipt)
+            if receipt is not None and hasattr(lookup, "text_with_note")
+            else ((lookup.text(table.receipt), None) if receipt is not None else (None, None))
         )
         parsed = parse_delimited(text) if text is not None else None
         if parsed is None:
-            problems.append(
+            return None, None, [
                 f"{label} cites {table.receipt}, which is not a receipt you can cite holding a "
                 "delimited table (CSV, TSV or Markdown pipe rows). Cite a receipt that holds one, "
                 "or build the table from columns and rows."
-            )
-            return None
+            ]
+        return parsed, changed, []
+    if not table.columns or not table.rows:
+        return None, None, [
+            f"{label} has neither a receipt nor columns and rows. Cite the receipt of a table a "
+            "tool computed, or list the columns and rows of the table you build."
+        ]
+    bad = [i for i, row in enumerate(table.rows, 1) if len(row) != len(table.columns)]
+    if bad:
+        return None, None, [
+            f"{label} has {len(table.columns)} columns, but row(s) {', '.join(map(str, bad))} "
+            "have a different number of cells."
+        ]
+    split = [i for i, row in enumerate([table.columns, *table.rows]) if any(
+        _unbalanced(cell) for cell in row)]
+    if split:
+        rows = ", ".join("the columns" if i == 0 else f"row {i}" for i in split)
+        return None, None, [
+            f"{label}: a quote or citation in {rows} is split across cells. Keep each "
+            '{{handle "…"}} and [handle] within one cell.'
+        ]
+    return None, None, []
+
+
+def _unbalanced(cell: str) -> bool:
+    """A cell holding part of a quote binding: once its whole bindings are taken out (a quote may
+    itself hold braces, a dict a tool printed), a ``{{`` or ``}}`` is left over."""
+    from auto_research.provenance.bindings import QUOTE_RE
+
+    rest = QUOTE_RE.sub("", cell)
+    return bool(re.search(r"\{\{\s*[\w-]+:[a-z]\d", rest)) or '"}}' in rest
+
+
+def _table(table: ReviewerTable, number: int, ctx: _Context, problems: list[str]) -> str | None:
+    label = f"Table {number}"
+    caption = _inline(table.caption, ctx) if table.caption.strip() else label
+    parsed, changed, found = check_table(table, number, ctx.lookup)
+    if found:
+        problems.extend(found)
+        return None
+    if table.receipt:
         ctx.note(table.receipt)
         header, *data = parsed
         note = latex_escape(changed) if changed else ""  # changed since its receipt (F26): say so
@@ -215,19 +270,6 @@ def _table(table: ReviewerTable, number: int, ctx: _Context, problems: list[str]
             [" & ".join(latex_escape(c) for c in row) for row in data],
             note,
         )
-    if not table.columns or not table.rows:
-        problems.append(
-            f"{label} has neither a receipt nor columns and rows. Cite the receipt of a table a "
-            "tool computed, or list the columns and rows of the table you build."
-        )
-        return None
-    bad = [i for i, row in enumerate(table.rows, 1) if len(row) != len(table.columns)]
-    if bad:
-        problems.append(
-            f"{label} has {len(table.columns)} columns, but row(s) {', '.join(map(str, bad))} "
-            "have a different number of cells."
-        )
-        return None
     return _longtable(
         caption, number,
         [_inline(c, ctx) for c in table.columns],

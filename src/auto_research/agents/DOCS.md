@@ -45,14 +45,20 @@ report call, cache-stable — rather than only on iteration 0 via `images=`. (Th
 then produces the role's structured output grounded in the trajectory (both reuse
 `_structured_loop`, the shared off-schema-retry core). Tool surfaces live behind
 the `ToolProvider` protocol in `react.py`: `SandboxToolProvider` (analyst science
-tools in the `PersistentSandbox`; when `orchestration.yaml: tool_search_enabled` is set it marks
+tools in the `PersistentSandbox`; every call's arguments are the model's completed by the runtime —
+the `bash_exec` folder and shell environment, a configured mission folder, figure outputs under
+the worker's `figures/` — through `provenance.calls.resolve_call_args` over the call's context
+(`_call_context`), returned as `ToolOutcome.call_context` and recorded on the `tool_result` ledger
+line, so the ledger rebuilds the arguments the call ran with; when `orchestration.yaml: tool_search_enabled` is set it marks
 every *registry* tool `defer_loading: true` so its schema loads on demand via the provider's
 tool search, while the harness tools it appends stay resident — see `models/DOCS.md`.
 Live-verified 2026-07-28 and enabled), `ReadOnlyToolProvider` (reviewer/lead/co-lead — in-process
 `read_file`/`list_dir` confined to its `roots` (the permitted roots are named in each tool's
 description and echoed in the `path not permitted` error so the model self-corrects instead of
-guessing). `read_file` reads **by line range** (`offset`/`limit`, default `_DEFAULT_LINE_LIMIT`=1000
-lines, each capped to `_MAX_LINE_CHARS`=2000) via the module helper `_read_lines`, returning
+guessing). `read_file` — the same one every role has, workers and the status monitor included —
+reads **by line range** (`offset`/`limit`, default `_DEFAULT_LINE_LIMIT`=1000 lines and at most
+`_MAX_WINDOW_CHARS`=100,000 characters, each line capped to `_MAX_LINE_CHARS`=2000 with a marked
+cut) via `execute_read_file` / `_read_lines`, returning
 `cat -n`-numbered lines; when the file is longer than the window the output ends with a note naming
 the next `offset`, so the lead can page through long toolkit source instead of reading blind (F8) —
 truncation is signalled, never silent. It is text-only (local PDFs go through `open_paper`). Also an
@@ -381,9 +387,12 @@ Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
 - `reviewer_scope(lookup)` — the handles that ground uncited: every readable receipt except
   `input:` ones (the request, the human's files) and published reports (`report_renderer`), which
   record a decision and carry the request, nudges and unlocated paper values.
-- `ReviewerRender(report_dir, run_id, formats=("tex",))` — callable used as `render`: renders and
-  compiles when `tex` is configured, returns model-fixable problems, and keeps the last
-  `render`/`compile` result and `renderer_errors` for the graph.
+- `ReviewerRender(report_dir, run_id, formats=("tex",), ledger=None)` — callable used as
+  `render(report, lookup, scope)`: each listed format runs its own path (`tex`: render + compile;
+  `html`: `report.html.render_html`, its numbers' sources from `check_report_fields(...,
+  sources=True)` over the validator's own fields and scope, arguments rebuilt from `ledger`);
+  returns model-fixable problems and keeps the last `render`/`compile`/`html` result,
+  `renderer_errors` (all formats) and `html_errors` for the graph.
 - `reviewer_scope(lookup) -> list[str]` — every readable handle except inputs: the request and
   dispatched tasks ground a text only when it cites `[input:hN]` (human 2026-09-24).
 - `reviewer_draft_view(report_dir, run_id, lookup) -> (report -> (text, [FigureRef]))` — renders
@@ -640,3 +649,14 @@ entries); detail in git history.
   session's `env_note`. The in-process `data_catalog` runs committed toolkit code only
   (`react._toolkit_clean_head`: an error while the toolkit is dirty; memo keyed on the toolkit
   commit; re-import purges bytecode and imports under a private `sys.pycache_prefix`).
+- 2026-10-17 — [provenance replay, step 1] `SandboxToolProvider._redirect_figure_args` and the inline path/shell rewrites replaced by `_call_context` + `provenance.calls.resolve_call_args` (one statement of the rewrite); `ToolOutcome.call_context`; `AgentRole._react_loop` records the model's args, the result text and steer messages whole (the `_event_arg_cap`/`_event_result_cap`/`_cap_text` helpers are gone) and the call context on `*.tool_result`. Behaviour unchanged (the path guard still runs first, on the model's arguments, which the rewrite never touches).
+- 2026-10-17 — `ToolOutcome.receipt_call_id` (the minted receipts' `call_id`, from `SandboxToolProvider.execute` and `_receipted`), written as `call_id` on the `tool_result` ledger line; `_call_context` records `runtime_only` (`env` for a toolkit tool declaring none, `shell_env` for a wrapped shell command).
+- 2026-10-17 — [provenance replay, step 2] `SandboxToolProvider._inputs_before` passes the call's mission folders, so each ObsID an argument names is an `obsdb` input; `_receipted(toolkit_root=)` — the lead's in-process `data_catalog` receipt now names the toolkit root and commit.
+- 2026-10-17 — `_inputs_before` treats `obs_db_path` as a mission folder too; `_call_context` records the tool's `module` and `fn` (where a reader imports it from).
+- 2026-10-17 — [provenance replay, step 3] `ReviewerRender` dispatches per format (`tex`, `html`; one format's fault never stops another's), takes the run ledger and the reviewer's scope (`reviewer_turn_problems` passes it), keeps `html` and `html_errors`.
+- 2026-10-17 — `ReviewerRender(report, lookup, scope, numbers)` reuses the validator's own `check_report_fields(sources=True)` answer (`reviewer_turn_problems` computes it only when `html` is configured); each format path is isolated (an exception becomes that format's renderer error); the page is written only when no format has a problem that attempt; problems are deduplicated.
+- 2026-10-17 — `_inputs_before(named=)` passes the mission folders the model named itself; `_call_context` records `workdir` (the REPL's folder) for toolkit calls.
+- 2026-10-17 — [provenance replay, step 4b] One `read_file` for every role: `read_file_tool_def` + `execute_read_file` over `_page` (streamed, `offset`/`limit`, at most `_MAX_WINDOW_CHARS` = 100,000 characters per read in whole lines, a line over `_MAX_LINE_CHARS` cut with `… [+N chars]`, the footer naming the next offset). Reviewer/lead/co-lead as before; analyst workers now in-process through `SandboxToolProvider` (allow-list checked with links resolved, relative paths from the worker's folder, receipted as `read_file`, a record); the status monitor reads its own ledger with it (no path argument). `_page_text_lines` (web_fetch) shares `_page`.
+- 2026-10-17 — Step-4b review fixes: `_bounded_lines` reads a file in bounded chunks (a 300 MB newline-free file had taken the backend to 705 MB) and `_page` stops counting 20 MB past the window ("more lines follow"); a non-regular file (FIFO) and a file with a NUL in its first 8 KB are answered, not read; every read runs off the event loop with a 60 s answer (`_bounded_read`); with the jail on, a worker's read allowed only through the host `/tmp` is sent to its shell (`_in_host_tmp`: the shell's /tmp is private); the status monitor's `read_file` keeps `ledger_event`'s 32,000-character bound; `_int_arg` answers `None`/`inf`/`"2, "` offsets for `read_file` and `web_fetch` (web_fetch had raised out of the loop). Residuals: a read past its timeout leaves its thread behind; a symlink swapped between the guard and `open` (sabotage only).
+- 2026-10-17 — Reader re-review fixes (paging verified against a reference over 600 random files): the count-ahead cap counts newlines (a file of empty lines had been counted whole); the window bound counts each row's real width; a worker's path checks run off the event loop with the read, and its own folder is never taken for host /tmp; `ReadOnlyToolProvider._allowed` answers a NUL path (it had raised out of the turn); `_int_arg` treats only missing/None/"" as the default (`limit=0` is one line); the monitor's tool description names its own 32,000-character bound.
+- 2026-10-17 — The librarian's `web_fetch` description: a page is listed in a finding's support for what it says in words; a value on it points to the paper to open and attribute. Reviewer refusals and `_PASS_NAMES` say "research" for the librarian; the reviewer is told a report to the human goes "as a document".

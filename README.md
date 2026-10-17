@@ -190,16 +190,19 @@ SIGINT/SIGTERM route to the same interrupt (a library caller's signals are never
 the SQLite DB, figures/artifacts, per-worker sandbox scratch, run logs (each run's
 `monitor.jsonl` — the single source of truth for its trace **and** its cost), and
 reviewer reports. The ledger is the run's **durable** record, read long after the run by any
-offline scoring or audit pass, so its per-field text caps are config rather than constants
-(`ledger_arg_cap` / `ledger_result_cap` / `ledger_coder_text_cap`, each 100,000 characters);
-a longer field keeps a `[+N chars]` marker so what was dropped stays countable. What the
-`/status` reporter can pull into its own context is capped separately and independently. On an accepted verdict,
-`runs/{run_id}/reviewer/report/` holds `report.tex` + `report.pdf` and, when configured,
-`report.jsonl` (the machine handle: the filed report, its receipt closure and the artifact
-handles). The reviewer writes **plain text only**, through `edit_report`; the harness renders
+offline scoring or audit pass, so every field is written whole, one call per line (like a Claude
+Code session file); a toolkit call's line pair (model args + `call_context`) rebuilds the
+arguments it ran with. What the `/status` reporter can pull into its own context is bounded by
+its own windowed tools. On an accepted verdict,
+`runs/{run_id}/reviewer/report/` holds, per configured `report_formats`, `report.tex` +
+`report.pdf`, `report.html` (every number opens the chain that produced it: each toolkit call as
+`<toolkit root>/<package>.<function>` with its commit, environment, exact arguments rebuilt from
+the ledger, inputs and hashes, plus a "copy reproduce code" button; replay is the reader's, the
+runtime re-runs nothing) and `report.jsonl` (the machine handle: the filed report, its receipt
+closure and the artifact handles). The reviewer writes **plain text only**, through `edit_report`; the harness renders
 the LaTeX (`report/render.py`, compiled with `lualatex`, DejaVu fonts) inside the reviewer's
-`turn_end`, which accepts only once every configured format renders and every number in the report
-is grounded in a receipt. Figures are staged by hash and re-hashed, tool-computed tables are
+`turn_end`, which accepts only once no configured format has a problem the model can fix and every
+number in the report is grounded in a receipt (a renderer's own fault is recorded, never sent back). Figures are staged by hash and re-hashed, tool-computed tables are
 typeset from their receipt's bytes, references come from paper/web receipt identifiers, and a
 provenance appendix lists what the report cites. Nothing is composed on a model's behalf. The
 receipts themselves are kept beside the run's ledger, under `ledgers/{run_id}/receipts/`

@@ -142,14 +142,6 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
 - `sandbox_call_timeout_default() -> int` — resolves `sandbox_call_timeout_s` from
   `orchestration.yaml` (default 300): the global sandbox per-tool-call timeout a tool's
   `tool_config.yaml` overrides per tool (`auto_research.sandbox.registry`).
-- `LedgerCaps(arg, result, coder_text)` / `ledger_caps() -> LedgerCaps` — per-field character
-  caps for text recorded into the run ledger, from `orchestration.yaml` (`ledger_arg_cap`,
-  `ledger_result_cap`, `ledger_coder_text_cap`, each default 100,000). A longer field is trimmed
-  with a `"[+N chars]"` marker, so what was dropped stays countable. Read at **call time** by
-  `agents.roles._event_arg_cap`/`_event_result_cap` and `sandbox.coder.events.coder_text_cap`,
-  never captured at import. A non-positive or malformed value falls back to the default — a 0
-  would silence the durable record. Independent of the *read* side: `MonitorToolProvider` windows
-  an event payload separately, so raising these never widens an agent's context.
 - `ProviderRetryPolicy(max_retries, base_cooldown_s, max_cooldown_s)` /
   `provider_retry_policy() -> ProviderRetryPolicy` — the transient-provider retry knobs
   from `orchestration.yaml` (`provider_retry_max` 8, `provider_retry_base_cooldown_s` 60,
@@ -221,3 +213,5 @@ Compacted 2026-09-01, again 2026-09-24 (every entry) and 2026-10-07; detail in g
   pipeline-built one, for `use_env` / `list_env`), `agent_conda_dirs` → `agent_conda_dir`;
   `replay_environment(fingerprint)` rebuilds a receipt's stamped environment from the lock store into
   `<runtime>/conda/replay/<fp16>`, reports whether its conda part matches and compares externals.
+- 2026-10-17 — Ledger caps retired (`LedgerCaps`, `ledger_caps()`, the `ledger_arg_cap` / `ledger_result_cap` / `ledger_coder_text_cap` keys): the ledger records every field whole (user ruling). Readers stay bounded by their own windows (`MonitorToolProvider`).
+- 2026-10-17 — CLI `--report-format` accepts `html`; its default is the configured `report_formats`.

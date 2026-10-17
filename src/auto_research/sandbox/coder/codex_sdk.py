@@ -552,13 +552,13 @@ class CodexBackend:
             await emit(
                 self._monitor, "coder.steer.refused", level=4,
                 summary="the coder turn ended before the steer landed",
-                data={"error": cap_text(str(exc), 300), "harness": self.harness},
+                data={"error": str(exc), "harness": self.harness},
             )
             return False
         await emit(
             self._monitor, "coder.steer", level=5,
             summary=f"steered the coder mid-turn: {cap_text(message, 60)}",
-            data={"text": cap_text(message), "harness": self.harness},
+            data={"text": message, "harness": self.harness},
         )
         return True
 
@@ -629,7 +629,7 @@ class CodexBackend:
                     texts.append(text)
                     await emit(
                         self._monitor, "coder.text", level=8,
-                        summary=cap_text(text.strip(), 80), data={"text": cap_text(text)},
+                        summary=cap_text(text.strip(), 80), data={"text": text},
                     )
             elif kind in _TOOL_ITEM_TYPES:
                 await self._record_tool_item(root, kind)
@@ -641,12 +641,13 @@ class CodexBackend:
         if method == "turn/completed":
             turn = getattr(payload, "turn", None)
             status = str(getattr(turn, "status", "") or "")
-            error = cap_text(str(getattr(turn, "error", "") or ""), 600) or None
+            raw_error = str(getattr(turn, "error", "") or "")
+            error = cap_text(raw_error, 600) or None  # the lead's copy; the ledger keeps it whole
             failed = "fail" in status.lower() or "abort" in status.lower()
             await emit(
                 self._monitor, "coder.turn_end", level=2 if failed else 5,
                 summary=f"coder turn ended ({status or 'completed'})",
-                data={"status": status, "error": error, "harness": self.harness},
+                data={"status": status, "error": raw_error or None, "harness": self.harness},
             )
             if failed:
                 # A failed turn must not read as an empty reply. The lead receives this text as
@@ -661,11 +662,11 @@ class CodexBackend:
         summary = f"coder → {kind}"
         if kind == "commandExecution":
             command = str(getattr(root, "command", "") or "")
-            data["input"] = cap_text(command)
+            data["input"] = command
             data["exit_code"] = getattr(root, "exit_code", None)
             output = getattr(root, "aggregated_output", None)
             if output:
-                data["text"] = cap_text(str(output))
+                data["text"] = str(output)
             summary = f"coder → shell: {cap_text(command, 60)}"
             await self._audit_reads(root)
         elif kind == "fileChange":
@@ -675,10 +676,10 @@ class CodexBackend:
         elif kind == "mcpToolCall":
             tool = getattr(root, "tool", "")
             data["tool"] = f"{getattr(root, 'server', '')}.{tool}"
-            data["input"] = cap_text(json.dumps(getattr(root, "arguments", None), default=str))
+            data["input"] = json.dumps(getattr(root, "arguments", None), default=str)
             summary = f"coder → {data['tool']}"
         elif kind == "webSearch":
-            data["input"] = cap_text(str(getattr(root, "query", "") or ""))
+            data["input"] = str(getattr(root, "query", "") or "")
             summary = f"coder → web_search: {cap_text(data['input'], 60)}"
         await emit(self._monitor, "coder.tool_use", level=7, summary=summary, data=data)
 
@@ -719,7 +720,7 @@ class CodexBackend:
             await emit(
                 self._monitor, "coder.read_outside_allowlist", level=3,
                 summary=f"coder read {len(outside)} path(s) outside the allow-list",
-                data={"paths": outside[:20], "harness": self.harness},
+                data={"paths": outside, "harness": self.harness},
             )
 
     async def _record_usage(self, usage: Any) -> Any:

@@ -42,9 +42,11 @@ class InputFile(MessageModel):
 
     path: Path
     sha256: Sha256
-    basis: Literal["content", "listing"] = Field(
+    basis: Literal["content", "listing", "obsdb"] = Field(
         default="content",
-        description="'content' hashes the bytes; 'listing' hashes a directory's (name, size, mtime) listing.",
+        description="'content' hashes the bytes; 'listing' hashes a directory's (name, size, mtime) listing; "
+        "'obsdb' is an observation the tool located itself from its ObsID: `path` is "
+        "<mission folder>/<obsid>, hashed over its catalog entry plus its folder's listing.",
     )
     receipt: Handle | None = Field(
         default=None, description="The in-run receipt whose bytes these are, when one exists."
@@ -62,6 +64,12 @@ class Receipt(MessageModel):
     created_at: datetime
     call_id: str | None = None
     toolkit_commit: str | None = None
+    toolkit_root: Path | None = Field(
+        default=None,
+        description="The toolkit checkout a toolkit tool ran from, at `toolkit_commit` (the tool is "
+        "`<toolkit_root>/<package>.<function>`). None for a harness call (the shell, a read), which "
+        "still stamps the checkout's commit, and before 2026-10-17.",
+    )
     env: Sha256 | None = Field(
         default=None,
         description="Fingerprint of the software environment the producing call ran in "

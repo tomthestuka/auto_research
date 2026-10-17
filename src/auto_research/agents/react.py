@@ -26,6 +26,7 @@ from typing import Any, Protocol, get_args
 from pydantic import ValidationError
 
 from auto_research.provenance import check_report_fields
+from auto_research.provenance.calls import FIGURE_PATH_ARGS, resolve_call_args
 from auto_research.provenance.capture import inputs_before, receipt_call
 from auto_research.env import coder_wait_limits_s, tool_search_config
 from auto_research.observations import load_observations_config
@@ -62,10 +63,10 @@ from auto_research.schemas import (
 
 # Figure-output arguments, by naming convention → the extension the toolkit expects.
 # A toolkit tool exposing one of these args has its figure written under the worker's
-# figures_dir (see SandboxToolProvider._redirect_figure_args). ``""`` = base/prefix path
+# figures_dir (``provenance.calls.resolve_call_args``). ``""`` = base/prefix path
 # (the tool appends its own suffix, e.g. ``_DU1.png``); ``.png`` = full file path.
 # Convention-keyed (not tool-keyed) so new toolkits inherit it for free.
-_FIGURE_PATH_ARGS: dict[str, str] = {"save_path": ".png", "save_path_prefix": ""}
+_FIGURE_PATH_ARGS = FIGURE_PATH_ARGS
 
 # Cap on distinct PDFs the reviewer may open in one ReAct loop. Each opened PDF is
 # re-attached to every subsequent model call, so this bounds the re-sent token cost.
@@ -77,6 +78,9 @@ _OPEN_PAPER_CAP = 6
 # cap bound what one call returns; "more" is fetched by re-calling with a higher offset.
 _DEFAULT_LINE_LIMIT = 1000
 _MAX_LINE_CHARS = 2000
+#: The most characters one read returns, whatever the line window: a window stops at whole lines
+#: before it (Claude Code's Read bounds a read the same way, by size, with "use offset and limit").
+_MAX_WINDOW_CHARS = 100_000
 
 
 @dataclass
@@ -94,6 +98,13 @@ class ToolOutcome:
     figures: list[FigureRef] = field(default_factory=list)
     documents: list[DocumentRef] = field(default_factory=list)
     result: ToolResult | None = None
+    #: What the runtime decided for the call beyond the model's arguments (``resolve_call_args``);
+    #: recorded on the ``tool_result`` ledger line. ``None`` for a tool outside the worker's
+    #: provider, ``{}`` for a worker's call the runtime completes with nothing.
+    call_context: dict[str, Any] | None = None
+    #: The runtime's ``call_id`` on the receipts this call minted; recorded on the ``tool_result``
+    #: ledger line, so a receipt joins its call by identity (``provenance.calls.calls_by_receipt``).
+    receipt_call_id: str | None = None
 
 
 class ToolProvider(Protocol):
@@ -145,6 +156,7 @@ def _sandbox_env_fingerprint(sandbox: Any) -> str | None:
 
 
 LIST_ENV_TOOL = "list_env"
+READ_FILE_TOOL = "read_file"
 
 
 def list_env_tool_def() -> dict:
@@ -273,8 +285,13 @@ def _receipted(
     *,
     kind: str = "result",
     fields: Mapping[str, Any] | None = None,
+    toolkit_root: Path | None = None,
+    state: Any = None,
 ) -> ToolOutcome:
     """Mint a receipt for an in-process tool's outcome and label the text the model sees with it.
+
+    ``toolkit_root``: given for a toolkit tool run in-process (the lead's ``data_catalog``), so its
+    receipt names the toolkit and commit like the same tool run in a worker's sandbox.
 
     The blob is the outcome text as the tool produced it, before the label, so a quote the model
     copies from the text it read is checked against exactly that text.
@@ -283,9 +300,10 @@ def _receipted(
         return outcome
     minted = receipt_call(
         receipts, source=source, produced_by=name, args=arguments, text=outcome.text,
-        failed=outcome.is_error, kind=kind, fields=fields,
+        failed=outcome.is_error, kind=kind, fields=fields, toolkit_root=toolkit_root, state=state,
     )
-    return replace(outcome, text=f"{minted.header()}\n{outcome.text}")
+    return replace(outcome, text=f"{minted.header()}\n{outcome.text}",
+                   receipt_call_id=minted.result.call_id)
 
 
 async def _web_receipted(
@@ -805,12 +823,16 @@ async def execute_web_fetch(web_source: Any | None, arguments: Mapping[str, Any]
                 "try a linked source or the page's underlying document URL)"
             )
         )
-    page = _page_text_lines(
-        content,
-        offset=int(arguments.get("offset", 1)),
-        limit=int(arguments.get("limit", _DEFAULT_LINE_LIMIT)),
-        resume_hint="web_fetch",
-    )
+    try:
+        page = _page_text_lines(
+            content, offset=_int_arg(arguments, "offset", 1),
+            limit=_int_arg(arguments, "limit", _DEFAULT_LINE_LIMIT), resume_hint="web_fetch",
+        )
+    except (ValueError, TypeError, OverflowError) as exc:
+        return ToolOutcome(
+            text=f"invalid argument: {type(exc).__name__}: {exc}. offset and limit must be plain integers.",
+            is_error=True,
+        )
     return ToolOutcome(text=page["content"])
 
 
@@ -2772,7 +2794,7 @@ class SandboxToolProvider:
         # rather than guessing (its prompt promises this). In-process, never in the sandbox.
         self.web_source = web_source
         # Figures land in <worker scratch>/figures (under the runtime data dir),
-        # never in /tmp or a repo. See _redirect_figure_args.
+        # never in /tmp or a repo. See provenance.calls.resolve_call_args.
         self.figures_dir = (Path(cwd) / "figures") if cwd is not None else None
         self._figures_dir_ready = False
         self.timeout_s = timeout_s
@@ -2798,6 +2820,13 @@ class SandboxToolProvider:
             ({**d, "defer_loading": True} if defer else d)
             for d in self.registry.tool_definitions()
         ]
+        # The one paged read every role has (the builtin server's 64 KB read is gone, 2026-10-17).
+        defs.append(read_file_tool_def(
+            "Give a path inside the allow-list (your folder, the toolkit, the observation data); "
+            "a relative path is read from your folder. Files your shell wrote to /tmp are its own: "
+            "read those with bash_exec.",
+            path_hint="Path to the file: absolute, or relative to your folder.",
+        ))
         if self.web_source is not None:
             defs.append(web_search_tool_def())
             defs.append(web_fetch_tool_def())
@@ -2841,6 +2870,38 @@ class SandboxToolProvider:
             return await execute_turn_end(
                 lambda: worker_report_problems(self.report_workspace), arguments
             )
+        if name == READ_FILE_TOOL:
+            # In this process, checked against the worker's allow-list (it resolves links). The
+            # jail's private /tmp is the shell's only: a read sees the host's paths.
+            raw = str(arguments.get("path", "") or "")
+            target = Path(raw) if Path(raw).is_absolute() or self.cwd is None else Path(self.cwd) / raw
+            guard, own = self._guard, self.cwd
+            refused: list[bool] = []
+
+            def checked_read() -> ToolOutcome:
+                # The checks resolve paths (a hung mount blocks), so they run off the loop too.
+                if not raw or not guard.is_allowed(target):
+                    refused.append(True)
+                    return ToolOutcome(
+                        text=(f"path not permitted: {raw or '(none)'} — outside the agent filesystem "
+                              "allow-list (your folder, research_toolkit, the observation data, HEASoft)."),
+                        is_error=True,
+                    )
+                if _in_host_tmp(target, guard, own=own):
+                    # With the jail on, the shell's /tmp is private to it; the host's is someone else's.
+                    refused.append(True)
+                    return ToolOutcome(
+                        text=(f"{raw}: /tmp here is not your shell's /tmp (that one is private to the "
+                              "shell). Write files you want to read into your folder, or read them with "
+                              "bash_exec."),
+                        is_error=True,
+                    )
+                return execute_read_file(target, arguments)
+
+            outcome = await _bounded(checked_read, target)
+            if refused:
+                return outcome  # refused before any read: nothing to receipt
+            return _receipted(self.receipts, self.receipt_source, name, arguments, outcome)
         if name == LIST_ENV_TOOL:
             outcome = await asyncio.to_thread(execute_list_env, self.sandbox, arguments)
             return _receipted(self.receipts, self.receipt_source, name, arguments, outcome)
@@ -2851,9 +2912,6 @@ class SandboxToolProvider:
             )
             return _receipted(self.receipts, self.receipt_source, name, arguments, outcome)
         kind = self.registry.kind_for_function(name)
-        args = dict(arguments)
-        if kind == "mcp.builtin.bash_exec" and "cwd" not in args and self.cwd is not None:
-            args["cwd"] = str(self.cwd)
 
         # Filesystem allow-list on the builtin file tools (the raw read/list/bash surface).
         # read_file/list_dir are checked by their target and always: they run IN THIS PROCESS, so
@@ -2873,9 +2931,9 @@ class SandboxToolProvider:
             # `None` means "nothing denied" here -- an empty list would be a *rejection* with an
             # empty reason, i.e. every shell command blocked. The suite caught exactly that.
             denied = None if _jail_supersedes_command_check(self.registry, kind) else \
-                self._guard.forbidden_in_command(args.get("command", ""))
-        elif kind in ("mcp.builtin.read_file", "mcp.builtin.list_dir"):
-            target = args.get("path")
+                self._guard.forbidden_in_command(arguments.get("command", ""))
+        elif kind == "mcp.builtin.list_dir":
+            target = arguments.get("path")
             if target is not None and not self._guard.is_allowed(target):
                 denied = str(target)
         if denied is not None:
@@ -2887,6 +2945,10 @@ class SandboxToolProvider:
                 ),
                 is_error=True,
             )
+        context, shell_env = await self._call_context(kind)
+        if isinstance(shell_env, ToolOutcome):
+            return shell_env
+        args = resolve_call_args(arguments, context)
 
         # Sandbox call timeout: the tool's declared ceiling (tool_config.yaml; default 300s),
         # the hard SIGTERM backstop that lets a long-running tool (e.g. a HEASARC download) run
@@ -2897,22 +2959,6 @@ class SandboxToolProvider:
         ceiling_fn = getattr(self.registry, "call_timeout_ceiling", None)
         call_timeout = ceiling_fn(kind) if ceiling_fn is not None else self.timeout_s
 
-        # The environment this worker pointed its shell at (use_env), looked up by name on every
-        # call so a rebuilt one is the current build; its own when None. `shell_env` in the
-        # arguments is the runtime's record alone: a model-supplied one is dropped.
-        if kind == "mcp.builtin.bash_exec":
-            args.pop("shell_env", None)
-        shell_env = None
-        chosen = getattr(self.sandbox, "shell_environment", None) if kind == "mcp.builtin.bash_exec" else None
-        if chosen is not None:
-            available = await asyncio.to_thread(_available_environments, self.sandbox)
-            shell_env = next((env for env in available if env.name == chosen), None)
-            if shell_env is None:
-                return ToolOutcome(
-                    text=f"Environment {chosen} is no longer available; call use_env to choose another.",
-                    is_error=True,
-                )
-            args["shell_env"] = shell_env.name  # recorded with the call; dropped before it is sent
         untested = False  # set by a routed toolkit call (B3b)
         ran = False  # the sandbox ran the call: only then is it stamped with an environment
         t0 = time.monotonic()
@@ -2933,10 +2979,9 @@ class SandboxToolProvider:
         else:
             spec = self.registry.spec(kind)
             schema_props = (spec.get("args_schema") or {}).get("properties", {})
-            for arg_name, path in _observation_path_args().items():
-                if arg_name in schema_props and not args.get(arg_name):
-                    args[arg_name] = path
-            self._redirect_figure_args(spec["fn"], args, schema_props)
+            if context.get("figure_args") and not self._figures_dir_ready:
+                self.figures_dir.mkdir(parents=True, exist_ok=True)
+                self._figures_dir_ready = True
             # The environment the call runs in (env plan B3b): the package's tested one
             # (`tool_config.yaml` `env:`), or the caller's `env` — recorded with the call, marked
             # untested on its receipts, never sent to the tool.
@@ -2944,7 +2989,7 @@ class SandboxToolProvider:
             if env_error is not None:
                 return ToolOutcome(text=env_error, is_error=True)
             sent = {k: v for k, v in args.items() if not (k == "env" and "env" not in schema_props)}
-            state = await self._inputs_before(sent)
+            state = await self._inputs_before(sent, named=arguments)
             raw = await self.sandbox.call_tool(
                 spec["module"], spec["fn"], sent, timeout_s=call_timeout,
                 **({"environment": routed} if routed is not None else {}),
@@ -2957,6 +3002,7 @@ class SandboxToolProvider:
         text, exit_code = tool_text(raw)
         header = ""
         provenance_notes: list[str] = []
+        receipt_call_id = None
         if self.receipts is not None and self.receipt_source is not None:
             # The runtime's receipts, not the tool's word: figures come back carrying the hash of
             # the file on disk, and a figure whose file is absent is dropped here.
@@ -2975,6 +3021,7 @@ class SandboxToolProvider:
             )
             figures = minted.figures
             provenance_notes = minted.notes
+            receipt_call_id = minted.result.call_id
             header = minted.header() + "\n"
             environment = getattr(self.sandbox, "call_environment", None) or getattr(self.sandbox, "environment", None)
             if env_fp is not None and environment is not None:
@@ -3012,7 +3059,8 @@ class SandboxToolProvider:
             text += f"\n[figure capture: {len(figure_notes)} dropped] " + " | ".join(figure_notes)
         if provenance_notes:
             text += "\n[provenance] " + " | ".join(provenance_notes)
-        return ToolOutcome(text=text, is_error=result.exit_code != 0, figures=figures, result=result)
+        return ToolOutcome(text=text, is_error=result.exit_code != 0, figures=figures, result=result,
+                           call_context=context, receipt_call_id=receipt_call_id)
 
     async def _route_environment(
         self, kind: str, args: Mapping[str, Any], schema_props: Mapping[str, Any],
@@ -3048,46 +3096,80 @@ class SandboxToolProvider:
             return None, f"{want} runs only in the jail, which is off for this run.", False
         return match, None, untested
 
-    async def _inputs_before(self, args: Mapping[str, Any]) -> Any:
+    async def _inputs_before(self, args: Mapping[str, Any], named: Mapping[str, Any] | None = None) -> Any:
         """Hash what the call's arguments name, before it runs (data roots and outputs skipped)."""
         if self.receipts is None or self.receipt_source is None:
             return None
-        skip = set(_observation_path_args()) | set(_FIGURE_PATH_ARGS)
+        # A mission folder argument: the configured `<mission>_path` names, and `obs_db_path` (how
+        # `acquire` and `data_catalog` take theirs). The folder is never hashed whole (a mission
+        # holds tens of thousands of files); the observations the call names in it are.
+        missions = set(_observation_path_args()) | {"obs_db_path"}
+        skip = missions | set(_FIGURE_PATH_ARGS)
+        folders = {name: args[name] for name in sorted(missions) if isinstance(args.get(name), str) and args[name]}
+        # `named`: the model's own arguments; a mission folder the runtime filled in is not one it read.
+        by_model = [name for name in folders if named is None or (named.get(name) or "")]
         return await asyncio.to_thread(
-            inputs_before, self.receipts, args, cwd=self.cwd, skip_keys=skip
+            partial(inputs_before, self.receipts, args, cwd=self.cwd, skip_keys=skip,
+                    observation_paths=folders, named_folders=by_model)
         )
 
-    def _redirect_figure_args(self, fn: str, args: dict, schema_props: Mapping) -> None:
-        """Force figure-output paths under the worker's ``figures_dir``.
+    async def _call_context(self, kind: str) -> tuple[dict[str, Any], Any]:
+        """What the runtime decides for one call that the model does not write: ``(context, shell
+        environment)``, or ``(context, ToolOutcome)`` when the worker's shell environment is gone.
 
-        Keyed on the **arg-name convention** (``_FIGURE_PATH_ARGS``), not on specific
-        tool kinds, so any toolkit tool that follows the convention places its PNGs
-        under the run's figures dir (inside the runtime data dir) instead of /tmp,
-        the repo, or wherever the model happened to name. The model's chosen basename
-        is preserved — only the directory and the extension convention are enforced —
-        so captions/provenance stay meaningful. A no-op when no ``cwd`` is attached
-        (e.g. Studio) or the tool exposes no figure arg.
+        ``context`` is the input of :func:`resolve_call_args` and is recorded on the call's ledger
+        line, so the arguments the call ran with can be rebuilt from the ledger alone.
+        - ``cwd``: ``bash_exec`` runs in the worker's folder unless the model names one;
+        - ``shell_env``: the environment the worker pointed its shell at (``use_env``), looked up
+          by name on every call so a rebuilt one is the current build; ``None`` for its own;
+        - ``observation_paths``: the configured mission folders a toolkit tool's ``<mission>_path``
+          arguments take when the model leaves them empty;
+        - ``module`` / ``fn``: where a toolkit tool's code is (the registry's manifest entry);
+        - ``figure_args`` / ``figures_dir`` / ``stamp_ms``: figure outputs are placed under
+          the worker's figures folder (any toolkit tool following the ``_FIGURE_PATH_ARGS``
+          convention), never /tmp, a repository, or wherever the model named; an unnamed figure is
+          called ``<fn>_<stamp_ms>``;
+        - ``runtime_only``: ``env`` for a toolkit tool declaring no argument of that name (it picks
+          the environment, ``_route_environment``) and ``shell_env`` for a wrapped shell command:
+          recorded and hashed with the call, never sent to the tool.
         """
-        if self.figures_dir is None:
-            return
-        touched = False
-        for arg_name, ext in _FIGURE_PATH_ARGS.items():
-            if arg_name not in schema_props:
-                continue
-            value = args.get(arg_name)
-            base = os.path.basename(value.strip()) if isinstance(value, str) and value.strip() else ""
-            if not base:
-                base = f"{fn}_{int(time.time() * 1000)}"
-            low = base.lower()
-            for known in (".png", ".pdf", ".jpg", ".jpeg", ".svg"):
-                if low.endswith(known):
-                    base = base[: -len(known)]
-                    break
-            args[arg_name] = str(self.figures_dir / f"{base}{ext}")
-            touched = True
-        if touched and not self._figures_dir_ready:
-            self.figures_dir.mkdir(parents=True, exist_ok=True)
-            self._figures_dir_ready = True
+        context: dict[str, Any] = {}
+        if kind == "mcp.builtin.bash_exec":
+            if self.cwd is not None:
+                context["cwd"] = str(self.cwd)
+            context["shell_env"] = None
+            chosen = getattr(self.sandbox, "shell_environment", None)
+            if chosen is None:
+                return context, None
+            available = await asyncio.to_thread(_available_environments, self.sandbox)
+            match = next((env for env in available if env.name == chosen), None)
+            if match is None:
+                return context, ToolOutcome(
+                    text=f"Environment {chosen} is no longer available; call use_env to choose another.",
+                    is_error=True,
+                )
+            context["shell_env"] = match.name
+            context["runtime_only"] = ["shell_env"]
+            return context, match
+        if not self.registry.is_known(kind) or self.registry.is_mcp(kind):
+            return context, None
+        spec = self.registry.spec(kind)
+        schema_props = (spec.get("args_schema") or {}).get("properties", {})
+        # Where the tool's code is: a reader reproducing the call imports `fn` from `module`.
+        context.update(module=spec.get("module"), fn=spec.get("fn"))
+        if self.cwd is not None:
+            context["workdir"] = str(self.cwd)  # the REPL's working folder (relative paths resolve there)
+        paths = {name: path for name, path in _observation_path_args().items() if name in schema_props}
+        if paths:
+            context["observation_paths"] = paths
+        if "env" not in schema_props:
+            # The caller's `env` picks the environment (`_route_environment`) and is never sent.
+            context["runtime_only"] = ["env"]
+        figure_args = [name for name in _FIGURE_PATH_ARGS if name in schema_props]
+        if figure_args and self.figures_dir is not None:
+            context.update(figure_args=figure_args, figures_dir=str(self.figures_dir),
+                           stamp_ms=int(time.time() * 1000))
+        return context, None
 
 
 # ----------------------------------------------------------------------------
@@ -3176,7 +3258,8 @@ class MonitorToolProvider:
     open what it found, instead of being handed a fixed window someone else chose.
 
     Read-only by construction, not by instruction: no tool takes a path, so there is nothing to
-    confine — the provider is built with the run's own ledger path and can reach nothing else.
+    confine — the provider is built with the run's own ledger path and can reach nothing else
+    (``read_file`` here reads that one file by line range).
     """
 
     def __init__(self, jsonl_path: Path | None) -> None:
@@ -3331,9 +3414,18 @@ class MonitorToolProvider:
                     "required": ["pattern"],
                 },
             },
+            # The run's log as text, one event per line: the same paged read every role has, so
+            # a whole-ledger read is bounded however long the events are.
+            read_file_tool_def("It reads this run's event log (monitor.jsonl), one JSON event per line.",
+                               path_hint=None, max_chars=_EVENT_MAX_WINDOW_CHARS),
         ]
 
     async def execute(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
+        if name == READ_FILE_TOOL:
+            if self.jsonl_path is None:
+                return ToolOutcome(text="The run's event log is empty or unreadable.")
+            # This provider's own bound (`ledger_event`'s largest window), not the general one.
+            return await _bounded_read(self.jsonl_path, arguments, max_chars=_EVENT_MAX_WINDOW_CHARS)
         events = _read_ledger(self.jsonl_path)
         if not events:
             return ToolOutcome(text="The run's event log is empty or unreadable.")
@@ -3453,46 +3545,209 @@ def _as_list(value: Any) -> list[str]:
 # ----------------------------------------------------------------------------
 
 
+#: How far past a full window a file read keeps counting lines, to name the total in its footer;
+#: a longer file's footer says more lines follow instead (so a read never costs O(file)).
+_COUNT_AHEAD_CHARS = 20_000_000
+
+
+def _page(
+    lines: Iterable[tuple[str, int]], offset: int = 1, limit: int = _DEFAULT_LINE_LIMIT, *,
+    resume_hint: str = "read_file", max_chars: int = _MAX_WINDOW_CHARS,
+) -> dict:
+    """A ``cat -n`` window over ``lines`` — ``(shown text, full length)`` pairs, read once.
+
+    At most ``limit`` lines from ``offset`` (1-indexed, clamped to the last line) and at most
+    ``max_chars`` characters (whole lines; the first line always). A line longer than
+    ``_MAX_LINE_CHARS`` is cut with a ``… [+N chars]`` marker. When lines remain, the footer names
+    the next ``offset`` and the tool (``resume_hint``) to continue with, so no cut is silent (F8);
+    the total is named when counting it stays within ``_COUNT_AHEAD_CHARS`` past the window.
+    """
+    limit = max(1, limit)
+    offset = max(1, offset)
+    window: list[str] = []
+    size = 0
+    total = 0
+    full_at: int | None = None
+    ahead = 0
+    last: tuple[str, int] | None = None
+    counted = True
+    for total, (text, length) in enumerate(lines, 1):
+        last = (text, length)
+        if full_at is not None:
+            ahead += length + 1  # the newline too: a file of empty lines is not free to count
+            if ahead > _COUNT_AHEAD_CHARS:
+                counted = False
+                break
+            continue
+        if total < offset:
+            continue
+        shown = _cut_line(text, length)
+        if window and (len(window) >= limit or size + len(shown) + len(f"{total:>6}\t") + 1 > max_chars):
+            full_at = total
+            continue
+        row = f"{total:>6}\t{shown}"
+        window.append(row)
+        size += len(row) + 1
+    start = offset
+    if not window and total and last is not None:  # offset past the end: the last line
+        start = total
+        window = [f"{total:>6}\t{_cut_line(*last)}"]
+    elif not total:
+        start = 1
+    end = start + len(window) - 1 if window else 0
+    truncated = full_at is not None or end < total
+    body = "\n".join(window)
+    if truncated:
+        of = f" of {total}" if counted else "; more lines follow"
+        body += f"\n\n[read lines {start}–{end}{of}; call {resume_hint} with offset={end + 1} to continue]"
+    return {"content": body, "total_lines": total if counted else None, "start_line": start,
+            "end_line": end, "truncated": truncated}
+
+
+def _cut_line(text: str, length: int) -> str:
+    text = text[:_MAX_LINE_CHARS]
+    return text if length <= _MAX_LINE_CHARS else f"{text}… [+{length - _MAX_LINE_CHARS:,} chars]"
+
+
+def _bounded_lines(handle: Any) -> Iterable[tuple[str, int]]:
+    """``(first _MAX_LINE_CHARS characters, full length)`` per line, never holding a whole long line
+    (a file with no newline can be gigabytes). Ends at ``\n``; a trailing ``\r`` is dropped."""
+    while True:
+        chunk = handle.readline(_MAX_LINE_CHARS + 1)
+        if not chunk:
+            return
+        head, length = chunk, len(chunk)
+        while not chunk.endswith("\n"):
+            chunk = handle.readline(1 << 20)
+            if not chunk:
+                break
+            length += len(chunk)
+        if (chunk.endswith("\n") and length):
+            length -= 1
+            if head.endswith("\n"):
+                head = head[:-1]
+        if head.endswith("\r"):
+            head, length = head[:-1], length - 1
+        yield head, length
+
+
 def _page_text_lines(
     text: str, offset: int = 1, limit: int = _DEFAULT_LINE_LIMIT, *, resume_hint: str = "read_file"
 ) -> dict:
-    """Format ``text`` as a ``cat -n`` line window (1-indexed line numbers + tab).
+    """:func:`_page` over a text already in memory (``web_fetch``'s extracted page)."""
+    return _page(((line, len(line)) for line in text.splitlines()), offset, limit, resume_hint=resume_hint)
 
-    Returns a window of at most ``limit`` lines starting at ``offset`` (1-indexed, clamped), each
-    line capped to ``_MAX_LINE_CHARS`` so one pathological line can't blow the budget. The
-    ``content`` carries a footer when more lines remain, naming the next ``offset`` and the tool
-    (``resume_hint``) to continue with — so truncation is always signalled, never silent (F8).
-    Shared by ``read_file`` (file text) and ``web_fetch`` (extracted page markdown).
-    """
-    lines = text.splitlines()
-    total = len(lines)
-    limit = max(1, limit)
-    start = 1 if total == 0 else min(max(1, offset), total)
-    window = lines[start - 1 : start - 1 + limit]
-    body = "\n".join(
-        f"{start + i:>6}\t{line[:_MAX_LINE_CHARS]}" for i, line in enumerate(window)
-    )
-    end = start + len(window) - 1
-    truncated = end < total
-    if truncated:
-        body += (
-            f"\n\n[read lines {start}–{end} of {total}; "
-            f"call {resume_hint} with offset={end + 1} to continue]"
-        )
+
+def _read_lines(
+    path: Path, offset: int = 1, limit: int = _DEFAULT_LINE_LIMIT, *, max_chars: int = _MAX_WINDOW_CHARS,
+) -> dict:
+    """Read a file by line range (``cat -n`` style), streaming it in bounded chunks. A file that is
+    not a regular file (a FIFO would block) or holds a NUL in its first 8 KB (binary: read it with
+    a toolkit tool) raises ``OSError``; so does any read failure — the caller answers it."""
+    target = Path(path)
+    if not target.exists():
+        raise FileNotFoundError(f"{target} does not exist")
+    if target.is_dir():
+        raise IsADirectoryError(f"{target} is a folder; list it with list_dir")
+    if not target.is_file():
+        raise OSError(f"{target} is not a regular file")
+    with open(target, "rb") as raw:
+        if b"\x00" in raw.read(8192):
+            raise OSError(f"{target} is a binary file; read it with a toolkit tool")
+    with open(target, encoding="utf-8", errors="replace") as handle:  # universal newlines
+        return _page(_bounded_lines(handle), offset, limit, resume_hint="read_file", max_chars=max_chars)
+
+
+def read_file_tool_def(
+    where: str, *, path_hint: str | None = "Absolute path to the file.", max_chars: int = _MAX_WINDOW_CHARS,
+) -> dict:
+    """The one ``read_file`` definition every role is given; ``where`` says what it may read.
+    ``path_hint=None``: the tool reads one fixed file and takes no path."""
+    properties: dict[str, Any] = {}
+    takes_path = path_hint is not None
+    if takes_path:
+        properties["path"] = {"type": "string", "description": path_hint}
+    properties["offset"] = {"type": "integer", "description": "1-indexed line to start at (default 1)."}
+    properties["limit"] = {"type": "integer", "description": f"Maximum lines to return (default {_DEFAULT_LINE_LIMIT})."}
     return {
-        "content": body,
-        "total_lines": total,
-        "start_line": start,
-        "end_line": end,
-        "truncated": truncated,
+        "name": "read_file",
+        "description": (
+            f"Read a UTF-8 text file by line range. {where} Returns lines numbered cat -n style, at "
+            f"most {_DEFAULT_LINE_LIMIT} lines or {max_chars:,} characters per call; a line "
+            f"longer than {_MAX_LINE_CHARS:,} characters is cut with a note. When the file goes on, "
+            "the output ends with a note naming the offset to continue from: call again with that "
+            "offset to read on."
+        ),
+        "input_schema": {"type": "object", "properties": properties, "required": ["path"] if takes_path else []},
     }
 
 
-def _read_lines(path: Path, offset: int = 1, limit: int = _DEFAULT_LINE_LIMIT) -> dict:
-    """Read a file by line range (``cat -n`` style). Thin wrapper over :func:`_page_text_lines`;
-    caller handles OSError."""
-    text = Path(path).read_text(encoding="utf-8", errors="replace")
-    return _page_text_lines(text, offset, limit, resume_hint="read_file")
+#: A read that has not returned by then (a hung network mount) is answered and left behind.
+_READ_TIMEOUT_S = 60
+
+
+async def _bounded(read: Callable[[], ToolOutcome], target: Path) -> ToolOutcome:
+    """``read`` off the event loop, answered within ``_READ_TIMEOUT_S`` (the thread is left to end)."""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(read), timeout=_READ_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return ToolOutcome(text=f"{target}: the read did not finish in {_READ_TIMEOUT_S} s.", is_error=True)
+
+
+async def _bounded_read(target: Path, arguments: Mapping[str, Any], *, max_chars: int = _MAX_WINDOW_CHARS) -> ToolOutcome:
+    """:func:`execute_read_file` off the event loop, answered within ``_READ_TIMEOUT_S``."""
+    return await _bounded(partial(execute_read_file, target, arguments, max_chars=max_chars), target)
+
+
+def _in_host_tmp(path: Path, guard: Any, *, own: Path | None = None) -> bool:
+    """Whether an in-process read of ``path`` is allowed only through the host's ``/tmp`` while the
+    jail gives the worker's shell a private one (the rule receipting applies too,
+    ``capture._allow_listed``). A path inside another allowed folder is that folder's."""
+    from auto_research.sandbox.jail import jail_enabled
+
+    if not jail_enabled():
+        return False
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, ValueError):
+        return False
+    host_tmp = Path("/tmp").resolve()
+    if not (resolved == host_tmp or host_tmp in resolved.parents):
+        return False
+    others = [root for root in getattr(guard, "roots", []) if root != host_tmp]
+    if own is not None:
+        try:
+            others.append(Path(own).resolve())  # the worker's own folder, which the jail mounts
+        except (OSError, ValueError):
+            pass
+    return not any(resolved == root or root in resolved.parents for root in others)
+
+
+def _int_arg(arguments: Mapping[str, Any], name: str, default: int) -> int:
+    """An integer argument a model wrote: missing, ``None`` or ``""`` is the default; ``"150, "`` or
+    ``1e400`` raises, for the caller to answer."""
+    value = arguments.get(name)
+    return default if value is None or value == "" else int(value)
+
+
+def execute_read_file(
+    target: Path, arguments: Mapping[str, Any], *, max_chars: int = _MAX_WINDOW_CHARS,
+) -> ToolOutcome:
+    """Read ``target`` by line range for any role; a malformed argument is the model's to fix."""
+    try:
+        page = _read_lines(
+            target, offset=_int_arg(arguments, "offset", 1),
+            limit=_int_arg(arguments, "limit", _DEFAULT_LINE_LIMIT), max_chars=max_chars,
+        )
+    except OSError as exc:
+        return ToolOutcome(text=f"{type(exc).__name__}: {exc}", is_error=True)
+    except (ValueError, TypeError, OverflowError) as exc:
+        # A malformed argument (live: offset='150, ') is the model's slip to correct.
+        return ToolOutcome(
+            text=f"invalid argument: {type(exc).__name__}: {exc}. offset and limit must be plain integers.",
+            is_error=True,
+        )
+    return ToolOutcome(text=page["content"] or "(empty)")
 
 
 class ReadOnlyToolProvider:
@@ -3586,36 +3841,11 @@ class ReadOnlyToolProvider:
     def tool_definitions(self) -> list[dict]:
         roots_text = self._roots_text()
         definitions = [
-            {
-                "name": "read_file",
-                "description": (
-                    "Read a UTF-8 text file by line range. Give an absolute path inside one of the "
-                    f"permitted roots: {roots_text}. Returns lines numbered cat -n style; when the "
-                    "file is longer than the window, the output ends with a note naming the offset "
-                    "to continue from — call again with that offset to read on. Text only; read a "
-                    "local PDF with open_paper instead."
-                ),
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Absolute path to the file, inside a permitted root.",
-                        },
-                        "offset": {
-                            "type": "integer",
-                            "description": "1-indexed line to start at (default 1).",
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": (
-                                f"Maximum lines to return (default {_DEFAULT_LINE_LIMIT})."
-                            ),
-                        },
-                    },
-                    "required": ["path"],
-                },
-            },
+            read_file_tool_def(
+                f"Give an absolute path inside one of the permitted roots: {roots_text}. Text only; "
+                "read a local PDF with open_paper instead.",
+                path_hint="Absolute path to the file, inside a permitted root.",
+            ),
             {
                 "name": "list_dir",
                 "description": (
@@ -3734,7 +3964,10 @@ class ReadOnlyToolProvider:
         return "authoring is not enabled for this run."
 
     def _allowed(self, path: Path) -> bool:
-        resolved = path.resolve()
+        try:
+            resolved = path.resolve()
+        except (OSError, ValueError):  # a NUL or a loop in a model-written path: not a path it may read
+            return False
         # §4: build-time governance files never enter runtime context, even inside a root
         # (research_toolkit carries its own CLAUDE.md/DOCS.md). Closes the reviewer/lead leak.
         if resolved.name in GOVERNANCE_BASENAMES:
@@ -3765,7 +3998,18 @@ class ReadOnlyToolProvider:
         # A toolkit tool the lead runs in-process is receipted under its registry kind, so it is
         # evidence like the same tool run in a worker's sandbox (`provenance.store.is_evidence`).
         producer = _CATALOG_UTILS_KIND if name == DATA_CATALOG_TOOL else name
-        return _receipted(self.receipts, self.receipt_source, producer, arguments, outcome, kind=kind)
+        root = state = None
+        if name == DATA_CATALOG_TOOL and self.receipts is not None:
+            from auto_research.env import toolkit_root
+
+            root = toolkit_root() if str(toolkit_root()) not in ("", ".") else None
+            # Recorded after the read: the catalog the call read is unchanged by it.
+            state = await asyncio.to_thread(
+                partial(inputs_before, self.receipts, arguments, skip_keys={"obs_db_path"},
+                        observation_paths={"obs_db_path": arguments.get("obs_db_path")})
+            )
+        return _receipted(self.receipts, self.receipt_source, producer, arguments, outcome, kind=kind,
+                          toolkit_root=root, state=state)
 
     def _commit_receipted(self, session: Any, before: str | None, outcome: ToolOutcome) -> ToolOutcome:
         """A submit that committed becomes a ``commit`` receipt the runtime writes from the session.
@@ -3822,28 +4066,12 @@ class ReadOnlyToolProvider:
                     ),
                     is_error=True,
                 )
+            if name == "read_file":
+                return await _bounded_read(target, arguments)
             try:
-                if name == "read_file":
-                    page = _read_lines(
-                        target,
-                        offset=int(arguments.get("offset", 1)),
-                        limit=int(arguments.get("limit", _DEFAULT_LINE_LIMIT)),
-                    )
-                    text = page["content"]
-                else:
-                    text = json.dumps(sorted(p.name for p in target.iterdir()))
+                text = json.dumps(sorted(p.name for p in target.iterdir()))
             except OSError as exc:
                 return ToolOutcome(text=f"{type(exc).__name__}: {exc}", is_error=True)
-            except (ValueError, TypeError) as exc:
-                # A malformed argument (live: offset='150, ') is the model's slip to correct,
-                # never a crash: surface it on the tool result like every other tool error.
-                return ToolOutcome(
-                    text=(
-                        f"invalid argument: {type(exc).__name__}: {exc}. "
-                        "offset and limit must be plain integers."
-                    ),
-                    is_error=True,
-                )
             return ToolOutcome(text=text or "(empty)")
 
         if name == "text_search":

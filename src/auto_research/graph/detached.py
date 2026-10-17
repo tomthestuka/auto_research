@@ -205,6 +205,7 @@ def reconstruct_run(request: ResearchRequest | str, run_directory: Path, run_id:
         report_jsonl=Path(report_jsonl) if report_jsonl else None,
         report_latex=Path(result["report_latex"]) if result.get("report_latex") else None,
         report_pdf=Path(result["report_pdf"]) if result.get("report_pdf") else None,
+        report_html=Path(result["report_html"]) if result.get("report_html") else None,
     )
 
 

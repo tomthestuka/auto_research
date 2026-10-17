@@ -47,7 +47,7 @@ XSPEC_KEY_TOOLS = {
     "research_toolkit.xspec_utils.load_data",
     "research_toolkit.xspec_utils.xspec_status",
 }
-MCP_FILETREE_TOOLS = {"mcp.builtin.list_dir", "mcp.builtin.read_file"}
+MCP_FILETREE_TOOLS = {"mcp.builtin.list_dir"}
 
 # Substrings that indicate an environment/sandbox failure (NOT retryable LLM
 # arg-formatting mistakes like "Field required" / "missing argument").

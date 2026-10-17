@@ -11,23 +11,11 @@ from __future__ import annotations
 from typing import Any
 
 
-def coder_text_cap() -> int:
-    """Cap applied to coder text (its own prose, tool inputs, tool results) before the ledger.
+def cap_text(text: str, limit: int) -> str:
+    """Trim text for a one-line summary or a model-visible note, stating how much was dropped.
 
-    A single authoring turn can carry a whole file. Read from config at call time
-    (``ledger_coder_text_cap``) rather than fixed here: the ledger is the run's durable record
-    and an offline scoring pass reads it long after the run, so the value a batch used has to
-    travel with that batch's config.
+    Ledger data fields are recorded whole (2026-10-17); this bounds only short previews.
     """
-    from auto_research.env import ledger_caps
-
-    return ledger_caps().coder_text
-
-
-def cap_text(text: str, limit: int | None = None) -> str:
-    """Trim text for the ledger, stating how much was dropped."""
-    if limit is None:
-        limit = coder_text_cap()
     if len(text) <= limit:
         return text
     return text[:limit] + f"… [+{len(text) - limit:,} chars]"

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from auto_research.provenance.store import ReceiptStore
+from auto_research.provenance.store import TOOLKIT_PRODUCER_PREFIX, ReceiptStore
 from auto_research.schemas.artifacts import InputFile, Receipt
 from auto_research.schemas.figures import FigureRef
 
@@ -74,9 +74,33 @@ def call_started_ns():
 def _stat(path: Path) -> tuple[int, int] | None:
     try:
         st = path.stat()
-    except OSError:
+    except (OSError, ValueError):  # ValueError: an embedded NUL in a model-written path
         return None
     return (st.st_size, st.st_mtime_ns)
+
+
+def _named_strings(args: Mapping[str, Any], skip: set[str]) -> list[str]:
+    """Every string an argument holds, through lists and dicts (keys and values), ``skip`` keys
+    excepted: ObsID candidates."""
+    found: list[str] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, str) and value.strip():
+            found.append(value.strip())
+        elif isinstance(value, int) and not isinstance(value, bool):
+            found.append(str(value))  # a NuSTAR ObsID passed as a number
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                visit(item)
+        elif isinstance(value, Mapping):
+            for key, item in value.items():
+                visit(key)
+                visit(item)
+
+    for key, value in args.items():
+        if key not in skip:
+            visit(value)
+    return found
 
 
 def _named_paths(args: Mapping[str, Any], cwd: Path | None, skip: Iterable[str]) -> list[Path]:
@@ -101,10 +125,60 @@ def _named_paths(args: Mapping[str, Any], cwd: Path | None, skip: Iterable[str])
 
 def inputs_before(
     store: ReceiptStore, args: Mapping[str, Any], *, cwd: Path | None = None,
-    skip_keys: Iterable[str] = (),
+    skip_keys: Iterable[str] = (), observation_paths: Mapping[str, Any] | None = None,
+    named_folders: Iterable[str] | None = None,
 ) -> CallInputs:
-    """Hash every existing path the arguments name (skipping ``skip_keys``: data roots, outputs)."""
+    """Hash every existing path the arguments name (skipping ``skip_keys``: data roots, outputs),
+    and every observation they name by ObsID. For each mission folder in ``observation_paths``
+    (``{argument: folder}``; relative to ``cwd`` as the tool resolves it; ``named_folders``: the
+    arguments the caller wrote itself, default all), every string an argument
+    holds — nested in lists and dicts too (``epoch={"IXPE": ["01002901"]}``) — that the folder's
+    catalog lists is an ``obsdb`` input; one naming a subfolder the catalog does not list is that
+    folder's ``listing`` (so a ``synth…`` observation still flags its result). A folder the caller
+    named, with no observation named in it, records its ``catalog.json``."""
     state = CallInputs(started_ns=call_started_ns())
+    from auto_research.observations import CATALOG_FILENAME
+    from auto_research.provenance.store import _catalog_entries
+
+    named = set(observation_paths or {}) if named_folders is None else set(named_folders)
+    folders: list[tuple[Path, bool]] = []
+    for key, value in sorted((observation_paths or {}).items()):
+        if isinstance(value, str) and value.strip():
+            folder = Path(value.strip())
+            try:
+                resolved = (folder if folder.is_absolute() or cwd is None else cwd / folder).resolve()
+            except (OSError, ValueError):  # a NUL or a loop in a model-written path: nothing to record
+                continue
+            folders.append((resolved, key in named))
+    names = []
+    for raw in dict.fromkeys(_named_strings(args, set(observation_paths or {}))):
+        name = raw.removeprefix("./").rstrip("/")
+        if re.fullmatch(r"[A-Za-z0-9_.+-]+", name) and name not in (".", ".."):
+            names.append(name)
+    recorded: set[str] = set()
+    chosen: dict[Path, bool] = {}
+    for folder, by_caller in folders:
+        chosen[folder] = chosen.get(folder, False) or by_caller
+    for folder, by_caller in chosen.items():
+        entries = _catalog_entries(folder / CATALOG_FILENAME)
+        held = False
+        for name in dict.fromkeys(names):
+            try:
+                entry = store.hash_obsdb_entry(folder, name, entries=entries)
+            except Exception:  # noqa: BLE001 — an observation that cannot be hashed is left out (§9.3.8)
+                continue
+            if entry is not None and str(entry.path) not in recorded:
+                recorded.add(str(entry.path))
+                state.inputs.append(entry)
+                held = True
+        catalog = folder / CATALOG_FILENAME
+        if not held and by_caller and catalog.is_file():
+            # A call that names a mission folder itself and no observation in it reads the folder's
+            # catalog (`data_catalog`); a folder the runtime filled in is not something it read.
+            try:
+                state.inputs.append(store.hash_input(catalog))
+            except Exception:  # noqa: BLE001 — left out, never fatal (§9.3.8)
+                pass
     for path in _named_paths(args, cwd, ()):
         state.before[str(path)] = _stat(path)
     for path in _named_paths(args, cwd, skip_keys):
@@ -169,6 +243,9 @@ def receipt_call(
     commit = toolkit_commit(toolkit_root)
     common = dict(
         source=source, produced_by=produced_by, call_id=call_id, toolkit_commit=commit,
+        # The root names where a toolkit tool lives; a harness call (the shell, a read) has none.
+        toolkit_root=(Path(toolkit_root).resolve()
+                      if commit is not None and produced_by.startswith(TOOLKIT_PRODUCER_PREFIX) else None),
         args=dict(args), inputs=state.inputs, failed=failed, env=env, env_default=env_default,
         **({"env_untested": True} if env_untested else {}),
     )

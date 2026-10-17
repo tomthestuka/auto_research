@@ -304,3 +304,33 @@ def test_a_checkpoint_from_the_graph_before_sole_io_is_refused_not_resumed():
         _refuse_pre_sole_io_checkpoint(old)
     _refuse_pre_sole_io_checkpoint(SimpleNamespace(checkpoint={"channel_values": {"arrived": "librarian"}}))
     _refuse_pre_sole_io_checkpoint(SimpleNamespace(checkpoint={"channel_values": {}}))
+
+
+def test_an_html_only_report_is_sent_to_the_human_as_the_page(tmp_path, monkeypatch):
+    """With `report_formats: [html]` there is no PDF: the published page is the attachment."""
+    from auto_research.report.html import HtmlResult
+
+    monkeypatch.setattr("auto_research.graph.builder._ledger_dir", lambda run_id: tmp_path / "ledger")
+    monkeypatch.setattr("auto_research.graph.builder._version_dir", lambda run_id, k: tmp_path / f"v{k}")
+
+    class PageReviewer(FakeReviewer):
+        async def review(self, request, *, render=None, **kwargs):
+            report = await super().review(request, render=render, **kwargs)
+            if report.assign_to == "human" and render is not None:
+                render.report_dir.mkdir(parents=True, exist_ok=True)
+                page = render.report_dir / "report.html"
+                page.write_text("<!doctype html><title>T</title>")
+                render.html = HtmlResult(html_path=page)  # what its turn_end's render leaves
+            return report
+
+    store = ReceiptStore(tmp_path / "receipts")
+    human = ScriptedHuman("done")
+    reviewer = PageReviewer(("human",))
+    graph = build_graph(
+        reviewer=reviewer, io_agent=FakeIOAgent(), retrieval=FakeRetrieval(), workers=[FakeWorker("w1")],
+        lead=FakeLead(), max_iterations=3, report_formats=["html"], human_handler=human, receipts=store,
+    )
+    state = _invoke(graph, ResearchRequest(question="q"))
+    (attachment,) = human.queries[0].attachments
+    assert attachment.filename == "report.html" and "The report is attached." in human.queries[0].message
+    assert state["report_html"] == tmp_path / "v1" / "report.html"

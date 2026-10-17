@@ -22,9 +22,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from auto_research.schemas.artifacts import KIND_LETTER, InputFile, Receipt
+from auto_research.provenance.calls import args_digest
 
 #: A marked synthetic ObsID (§9.5): ``…/synth<YYMMDD>-<sha>/…``.
-_SYNTH_RE = re.compile(r"^synth\d{6}-[0-9a-f]+$")
+#: Also the hand-authored validation fixtures in an obs-db (``synth_pa_pd_constant``, 2026-10-17).
+_SYNTH_RE = re.compile(r"^synth(?:\d{6}-[0-9a-f]+|_[A-Za-z0-9_]+)$")
 
 #: The source of every input a unit is handed: the research request and each dispatched task.
 #: Every unit may cite it, since what a role was asked is part of what it may repeat.
@@ -254,6 +256,35 @@ def checkable_text(raw: bytes) -> str | None:
 #: Most files a directory input is listed by; a larger one is not hashed as an input.
 _MAX_LISTED_FILES = 20_000
 
+def _listing(target: Path) -> bytes:
+    """A folder's (relative name, size, mtime) listing, sorted: what a ``listing`` input hashes.
+
+    Raises ``OSError`` past ``_MAX_LISTED_FILES`` files: not an input anyone can trace (a whole
+    scratch tree), left unhashed. File names need not be UTF-8 (B5 live cell 2026-10-07: one ended
+    the run here).
+    """
+    listing = []
+    for p in target.rglob("*"):
+        try:
+            st = p.stat()  # one stat: size and mtime from the same state
+        except OSError:
+            continue  # removed while listed (a reduction's temporary file), or a symlink loop
+        if stat.S_ISREG(st.st_mode):
+            listing.append(f"{p.relative_to(target)}\t{st.st_size}\t{st.st_mtime_ns}")
+            if len(listing) > _MAX_LISTED_FILES:
+                raise OSError(f"{target} holds more than {_MAX_LISTED_FILES} files")
+    return "\n".join(sorted(listing)).encode("utf-8", "surrogateescape")
+
+
+def _catalog_entries(catalog: Path) -> dict:
+    """``{obsid: entry}`` from a mission's ``catalog.json``; empty when absent or unreadable."""
+    try:
+        entries = json.loads(catalog.read_text(encoding="utf-8")).get("entries")
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return entries if isinstance(entries, dict) else {}
+
+
 class ReceiptStore:
     """Append-only receipts for one run, keyed by handle."""
 
@@ -336,10 +367,7 @@ class ReceiptStore:
         else:
             stored = Path(path).resolve()
             digest = sha256_file(stored)
-        args_sha = (
-            sha256_bytes(json.dumps(args, sort_keys=True, default=str).encode("utf-8"))
-            if args is not None else None
-        )
+        args_sha = args_digest(args) if args is not None else None
         parent_set = list(dict.fromkeys([*parents, *(i.receipt for i in inputs if i.receipt)]))
         flags: set[str] = set()
         if failed:
@@ -413,23 +441,38 @@ class ReceiptStore:
         if cached is not None:
             return cached
         if target.is_dir():
-            listing = []
-            for p in target.rglob("*"):
-                if p.is_file():
-                    listing.append(f"{p.relative_to(target)}\t{p.stat().st_size}\t{p.stat().st_mtime_ns}")
-                    if len(listing) > _MAX_LISTED_FILES:
-                        # Not an input anyone can trace (a whole scratch tree): left unhashed.
-                        raise OSError(f"{target} holds more than {_MAX_LISTED_FILES} files")
-            # File names need not be UTF-8 (B5 live cell 2026-10-07: one ended the run here).
-            entry = InputFile(
-                path=target, sha256=sha256_bytes("\n".join(sorted(listing)).encode("utf-8", "surrogateescape")),
-                basis="listing",
-            )
+            entry = InputFile(path=target, sha256=sha256_bytes(_listing(target)), basis="listing")
         else:
             digest = sha256_file(target)
             entry = InputFile(path=target, sha256=digest, receipt=self._by_sha.get(digest))
         self._input_cache[key] = entry
         return entry
+
+    def hash_obsdb_entry(
+        self, mission_dir: Path, obsid: str, *, entries: dict | None = None
+    ) -> InputFile | None:
+        """An observation a tool locates itself from its ObsID (user ruling 2026-10-16: record what
+        it is and a hash, never a copy): ``<mission_dir>/<obsid>``, hashed over its catalog entry
+        (``catalog.json``) and the listing of its folder (name, size, mtime), basis ``obsdb``. An
+        ObsID-like name (it holds a digit) the catalog does not list but that names a folder there
+        is that folder's ``listing``; a mission folder (one holding a catalog) never is. ``None``
+        otherwise. Read fresh on every call: a reduction can add products to the folder mid-run.
+        ``entries``: the mission's catalog entries, when the caller already read them.
+        """
+        from auto_research.observations import CATALOG_FILENAME
+
+        if entries is None:
+            entries = _catalog_entries(Path(mission_dir) / CATALOG_FILENAME)
+        folder = Path(mission_dir).resolve() / obsid
+        entry = entries.get(obsid)
+        if entry is None:
+            if (not re.search(r"\d", obsid) or not folder.is_dir()
+                    or (folder / CATALOG_FILENAME).exists()):
+                return None
+            return InputFile(path=folder, sha256=sha256_bytes(_listing(folder)), basis="listing")
+        listing = _listing(folder) if folder.is_dir() else b""
+        record = json.dumps(entry, sort_keys=True, default=str).encode("utf-8")
+        return InputFile(path=folder, sha256=sha256_bytes(record + b"\n" + listing), basis="obsdb")
 
     # -- lookup ------------------------------------------------------------------------------
 

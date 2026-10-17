@@ -163,9 +163,11 @@ class LibrarianToolProvider:
                 "description": (
                     "Read one web page's full text, one page at a time: pass url to open it, or "
                     "handle='lib:wK' with the offset the previous page named to continue. The "
-                    "first open assigns the page its handle; cite it by that handle and quote its "
-                    "text exactly as shown here. Use it for authoritative documentation and for a "
-                    "paper whose PDF is not downloadable."
+                    "first open assigns the page its handle; list it in a finding's support for "
+                    "what the page says in words — a method, a convention, a tool's behaviour, a "
+                    "known issue. A value on a page points to the paper that published it: open "
+                    "that paper and attribute the value there. Use it for documentation, code, "
+                    "data-product notes, discussions, and a paper whose PDF is not downloadable."
                 ),
                 "input_schema": {
                     "type": "object",

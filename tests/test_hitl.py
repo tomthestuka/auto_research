@@ -88,7 +88,7 @@ def test_providers_declare_no_human_tool(tmp_path):
     sandbox = {d["name"] for d in SandboxToolProvider(registry, sandbox=None).tool_definitions()}
     for names in (readonly, sandbox):
         assert not names & {"ask_human", "plan_and_debate", "message"}
-    assert sandbox == {"xspec_fit"}
+    assert sandbox == {"xspec_fit", "read_file"}
 
 
 # ── cli handler ───────────────────────────────────────────────────────────────

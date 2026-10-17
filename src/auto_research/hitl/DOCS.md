@@ -254,3 +254,4 @@ Compacted 2026-09-01 and 2026-09-24 (detail in git history).
   reply matching no single open question now gets a notice instead of being dropped (rulings: both).
   LIVE: one silent notify accepted.
 - 2026-10-06 — [F26] receipted files read through `provenance.store.read_receipted` (read once, no symlink, hash-checked; a changed file is sent with a note and a `receipt.drift` alert). See `provenance/DOCS.md`.
+- 2026-10-17 — Ledger fields recorded whole (user ruling): `channel.message` / `channel.reply` text and answers (were 4,000 chars), `hitl.command*` text and replies (were 400/200); one-line summaries keep their 80-char preview.

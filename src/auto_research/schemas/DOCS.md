@@ -137,10 +137,13 @@ carried by **reference** (`FigureRef`), never embedded
   serializable artifact image reference. `sha256` must be a 64-character
   lowercase hexadecimal digest.
 - `Receipt(handle, kind, path, sha256, produced_by, created_at, call_id=None,
-  toolkit_commit=None, args_sha256=None, inputs=[], parents=[], flags=[], caption=None,
+  toolkit_commit=None, toolkit_root=None, env=None, env_untested=False, args_sha256=None, inputs=[], parents=[], flags=[], caption=None,
   mime_type=None, title=None, ids={}, source_sha256=None, parser=None, commit_sha=None)` — the
   runtime's record of one artifact; `.source` is the handle's source; `.to_figure_ref()`.
-- `InputFile(path, sha256, basis="content"|"listing", receipt=None)` — one input a call read.
+- `InputFile(path, sha256, basis="content"|"listing"|"obsdb", receipt=None)` — one input a call read;
+  `obsdb` is an observation the tool located from its ObsID (`<mission folder>/<obsid>`, hashed over
+  its catalog entry and its folder listing). `Receipt.toolkit_root` names the toolkit checkout the
+  toolkit tool ran from (stamped only on toolkit producers; the commit is stamped on every call).
 - `KIND_LETTER` / `LETTER_KIND` / `HANDLE_PATTERN` / `ArtifactKind` / `ReceiptFlag` — the handle
   scheme.
 - `DocumentRef(path: Path, title: str, mime_type: str, created_at: datetime,
@@ -329,3 +332,5 @@ Compacted 2026-10-07 (detail in git history).
   in) and `Receipt.env_untested` (a toolkit call run outside its package's tested environment by the
   caller's choice; still evidence), set on every receipt of the call by
   `capture.receipt_call(env_untested=)`.
+- 2026-10-17 — `InputFile.basis` gains `obsdb`; `Receipt.toolkit_root` (provenance replay, step 2).
+- 2026-10-17 — `LiteratureFinding.claim` / `LiteratureReport` / `ReviewerReport` descriptions follow the librarian's deep-research scope ("research", not "literature"; numbers attributed to papers, web pages support words).

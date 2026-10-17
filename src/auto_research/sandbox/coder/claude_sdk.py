@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from auto_research.sandbox.coder.events import cap_text, coder_text_cap, emit
+from auto_research.sandbox.coder.events import cap_text, emit
 
 
 def _make_escalation_server(
@@ -370,13 +370,13 @@ async def _drive_author(
                     if block.text.strip():
                         await emit(monitor, "coder.text", level=8,
                                     summary=cap_text(block.text.strip(), 80),
-                                    data={"text": cap_text(block.text)})
+                                    data={"text": block.text})
                 elif isinstance(block, ToolUseBlock):
                     await emit(
                         monitor, "coder.tool_use", level=7,
                         summary=f"coder → {block.name}",
                         data={"tool": block.name,
-                              "input": cap_text(json.dumps(block.input, default=str, sort_keys=True))},
+                              "input": json.dumps(block.input, default=str, sort_keys=True)},
                     )
         elif isinstance(msg, UserMessage):
             for block in getattr(msg, "content", []) or []:
@@ -387,7 +387,7 @@ async def _drive_author(
                     await emit(
                         monitor, "coder.tool_result", level=7,
                         summary=f"coder tool result{' (error)' if block.is_error else ''}",
-                        data={"is_error": bool(block.is_error), "text": cap_text(text)},
+                        data={"is_error": bool(block.is_error), "text": text},
                     )
         elif isinstance(msg, ResultMessage):
             turn_usd = await _record_coder_cost(msg, coder_model)
@@ -457,13 +457,13 @@ class ClaudeSdkBackend:
             await emit(
                 self._monitor, "coder.steer.refused", level=4,
                 summary="the coder turn ended before the steer landed",
-                data={"error": cap_text(str(exc), 300), "harness": self.harness},
+                data={"error": str(exc), "harness": self.harness},
             )
             return False
         await emit(
             self._monitor, "coder.steer", level=5,
             summary=f"steered the coder mid-turn: {cap_text(message, 60)}",
-            data={"text": cap_text(message), "harness": self.harness},
+            data={"text": message, "harness": self.harness},
         )
         return True
 

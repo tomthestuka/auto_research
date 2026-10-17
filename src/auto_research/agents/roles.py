@@ -46,7 +46,7 @@ from auto_research.agents.react import (
     wait_for_reply_tool_def,
     _written_report,
 )
-from auto_research.env import react_grace_rounds, ledger_caps
+from auto_research.env import react_grace_rounds
 from auto_research.monitor import RunMonitor
 from auto_research.models import (
     ModelGroupHandle,
@@ -565,7 +565,7 @@ class AgentRole:
                         f"{self.role}.{action}.{kind}", level=3,
                         summary=f"{self.role} received a human steer"
                         if kind == "steer" else f"{self.role} was told: {text[:60]}",
-                        data={"message": _cap_text(text, _event_arg_cap())},
+                        data={"message": text},
                     )
                 injections.clear()
             elif injections:
@@ -698,12 +698,10 @@ class AgentRole:
                         "iteration": iteration + 1,
                         "tool": call.name,
                         "tool_call_id": call.id,
-                        # Full-fidelity (capped) call args, so a run is diagnosable from the
-                        # JSONL alone (terminal ignores these keys).
-                        "args": _cap_text(
-                            json.dumps(dict(call.arguments), default=str, sort_keys=True),
-                            _event_arg_cap(),
-                        ),
+                        # The model's call args, whole, so a run is diagnosable from the JSONL
+                        # alone (terminal ignores these keys). With the `tool_result` line's
+                        # `call_context` they rebuild the call that ran (`resolve_call_args`).
+                        "args": json.dumps(dict(call.arguments), default=str, sort_keys=True),
                     },
                 )
                 if filed_terminal:
@@ -763,9 +761,13 @@ class AgentRole:
                         "is_error": outcome.is_error,
                         "chars": len(outcome.text),
                         "figure_count": len(outcome.figures),
-                        # Returned text at full fidelity (capped); args live on the paired
-                        # `tool_call` input event above.
-                        "text": _cap_text(outcome.text, _event_result_cap()),
+                        # Returned text, whole; args live on the paired `tool_call` input
+                        # event above.
+                        "text": outcome.text,
+                        **({"call_context": outcome.call_context}
+                           if outcome.call_context is not None else {}),
+                        **({"call_id": outcome.receipt_call_id}
+                           if outcome.receipt_call_id is not None else {}),
                     },
                 )
                 # A terminal form, accepted by its handler, is this loop's answer. Recorded here
@@ -1103,7 +1105,7 @@ def _review_instruction(arrived: str, budgets: Mapping[str, int], human_attended
     """The reviewer's task for this turn, with the budgets the graph actually has left."""
     lit, ana = budgets.get("librarian", 0), budgets.get("analysts", 0)
     human = (
-        "A report to the human is sent to them as a PDF, and their reply comes back to you."
+        "A report to the human is sent to them as a document, and their reply comes back to you."
         if human_attended else
         "No human is attending this run: a report to the human is published and ends the run."
     )
@@ -2916,26 +2918,6 @@ def _default_sources() -> dict[str, QuerySource]:
 # Per-field character caps written to memory.md (crash-prevention).
 _STDOUT_MEM_CAP = 8_000
 _STDERR_MEM_CAP = 2_000
-
-# Per-field caps for tool-call args/results recorded into the monitor JSONL (full-fidelity
-# diagnosis without unbounded log growth — see monitor/DOCS.md). Read from config at call time
-# (``ledger_arg_cap`` / ``ledger_result_cap``) rather than fixed here, because the ledger is the
-# run's durable record and an offline scoring pass reads it long after: the value a batch used
-# has to travel with that batch's config, not with whatever the source said at the time.
-def _event_arg_cap() -> int:
-    return ledger_caps().arg
-
-
-def _event_result_cap() -> int:
-    return ledger_caps().result
-
-
-def _cap_text(text: str, limit: int) -> str:
-    """Truncate ``text`` to ``limit`` chars with a count marker (for monitor event data)."""
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"… [+{len(text) - limit:,} chars]"
-
 
 def _append_tool_results_to_memory(path: Path, results: Sequence[ToolResult]) -> None:
     """Append bare terminal recordings of tool calls to the worker's memory file.

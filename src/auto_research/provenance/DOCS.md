@@ -67,9 +67,18 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   role gets its store here (two instances on one directory would mint duplicate handles).
 - `store.is_evidence(receipt) -> bool`; `TOOLKIT_PRODUCER_PREFIX = "research_toolkit."`,
   `REQUEST_PRODUCER = "research_request"`, `NOT_EVIDENCE_NAMES` (producer → how a refusal names it).
+- `calls.resolve_call_args(arguments, context) -> dict` — the arguments a worker's call runs with
+  (the model's, completed by the runtime's context); `calls.args_digest(args)` — the
+  `Receipt.args_sha256` hash; `calls.ledger_calls(path) -> list[LedgerCall]` — every call in a
+  ledger that minted receipts, with its rebuilt `ran_args` (what the receipts hash) and `sent_args`
+  (what the tool received: without the runtime-only `env` / `shell_env`); a call answered without
+  running, or one that does not rebuild, is left out; `calls.calls_by_receipt(calls, receipts) ->
+  {handle: LedgerCall}` — a receipt matched to its call by identity (source = actor, `call_id`
+  named on the `tool_result` line) and proven by the rebuilt-args hash; unmatched otherwise. Any
+  subset of receipts in any order. `calls.FIGURE_PATH_ARGS`.
 - `ScopedLookup(store, *, own_source, admitted=())` — what one agent may cite: its own receipts
   (live) plus admitted handles and their ancestors; `.admit(handles)`, `.handles()`.
-- `capture.inputs_before(store, args, *, cwd, skip_keys) -> CallInputs` and
+- `capture.inputs_before(store, args, *, cwd, skip_keys, observation_paths=None) -> CallInputs` and
   `capture.receipt_call(store, *, source, produced_by, args, text, failed, state, figures, cwd,
   toolkit_root, kind, fields) -> CallReceipts` — one tool call to receipts; `.header()` is the line
   the model sees. `capture.toolkit_commit(root)` reads HEAD (read-only).
@@ -92,6 +101,18 @@ report renderer.
   fields (`caption`, `mime_type`, `title`, `ids`, `source_sha256`, `parser`, `commit_sha`).
 - `ReceiptStore.hash_input(path) -> InputFile` — cached per (path, size, mtime); links `receipt`
   when the bytes match an in-run receipt.
+- `ReceiptStore.hash_obsdb_entry(mission_dir, obsid) -> InputFile | None` — an observation a tool
+  located from its ObsID (user ruling 2026-10-16: what it is and a hash, never a copy): basis
+  `obsdb`, sha256 over the catalog entry (`catalog.json`) plus the folder listing; read fresh each
+  call; an uncatalogued ObsID-like folder is its `listing`; `None` otherwise. `capture.inputs_before(observation_paths=)`
+  records one per string any argument holds (through lists and dicts, e.g. `load_data`'s
+  `epoch={"IXPE": [...]}`) that a mission folder's catalog lists; a string naming a subfolder the
+  catalog does not list, and that holds a digit, is that folder's `listing` (fresh each call; a
+  mission folder never is); with no observation named in a folder the caller named itself
+  (`named_folders`), that folder's `catalog.json` is the input (`data_catalog`); a folder the runtime
+  filled in records nothing. Integer ObsIDs count. A `synth<YYMMDD>-<sha>` or hand-authored `synth_<name>`
+  folder flags the result synthetic.
+  Relative folders resolve against the call's `cwd`.
 - `ReceiptStore.text(handle) -> str | None` — the text a quote is checked against (result, web,
   paper, human; a data file when it decodes as UTF-8).
 - `ReceiptStore.verify(handle) -> str | None` — re-hash; a problem sentence or `None`.
@@ -104,6 +125,10 @@ report renderer.
   of the data-product rule, used by `receipt_call` and the gate.
 - `capture.call_started_ns()` — call start on `CLOCK_REALTIME_COARSE` so it compares with mtimes.
 - `store.checkable_text(raw)` — the decode rule behind `ReceiptStore.text`.
+- `bindings.number_sources(prose, usable, *, masked) -> list[NumberSource]` — every number the
+  grounding rule checks, with every usable receipt holding it (`NumberSource(start, end, value,
+  handles)`); `check_bindings(sources=True)` / `check_report_fields(sources=True)` fill
+  `BindingResult.numbers` keyed by text (what a report page shows as each number's source).
 - `bindings.ungrounded_numbers(prose, usable, *, masked)` — the number-grounding loop, used
   by `check_bindings` and the gate.
 
@@ -167,3 +192,12 @@ Compacted 2026-10-07 (the 2026-10-06/07 entries); detail in git history.
   folder with `surrogateescape` (a non-UTF-8 name had ended a run) and leaves one of more than
   `_MAX_LISTED_FILES` (20,000) files unhashed; `capture.inputs_before` skips an input whose hashing
   fails (§9.3.8).
+- 2026-10-17 — [provenance replay, step 1] `calls.py`: the call-argument rewrite moved here from `agents.react` (`resolve_call_args`, `FIGURE_PATH_ARGS`), `args_digest` (now what `ReceiptStore.mint` stamps), `ledger_calls` and `calls_by_receipt`. A receipt's exact arguments are rebuilt from the ledger, never stored; the hash proves the rebuild.
+- 2026-10-17 — Step-1 review fixes: `calls_by_receipt` joins by identity (the receipt's `call_id`, recorded on the `tool_result` line) and keeps the hash as proof — order pairing had matched a receipt to a not-run twin of another tool; `ledger_calls` drops calls that minted nothing and skips malformed lines; `LedgerCall.sent_args`.
+- 2026-10-17 — Step-1 re-review fixes: `ledger_calls` pairs a `tool_call` with its `tool_result` by actor, loop (`<role>.<action>`), tool and id (two overlapping loops of one actor reusing an id had crossed), streams the file, and skips a call whose context does not parse; `sent_args` documents the shell's activation wrapper. Residual: `args_digest` uses `default=str` (a non-JSON argument value hashes as its string; adapters pass JSON values).
+- 2026-10-17 — [provenance replay, step 2] Obs-db inputs (`hash_obsdb_entry`, `inputs_before(observation_paths=)`, store helpers `_listing`/`_catalog_entries`); `receipt_call` stamps `toolkit_root` beside `toolkit_commit`. Closes §13 (a) for ObsIDs in an obs-db catalog.
+- 2026-10-17 — Step-2 review fixes: ObsIDs are found through dicts (the real `load_data` passes `epoch={...}`, so none had been recorded), relative mission folders resolve against `cwd`, an uncatalogued observation folder is a `listing` input, `obs_db_path` is a mission folder (never listed whole: the IXPE folder took 2.9 s per call and then failed the 20,000-file limit); `receipt_call` stamps `toolkit_root` (resolved) on toolkit producers only; `_listing` stats each file once and skips a file removed while listed. Residuals: the observation is hashed before the call (a reduction writing into it during the call is not seen); an `obsdb` input links no in-run receipt that wrote the folder; the lead's in-process `data_catalog` records no input.
+- 2026-10-17 — [provenance replay, step 3] `number_sources` / `NumberSource` and `BindingResult.numbers` (`sources=True`): the grounding check's own per-number answer, shared with `ungrounded_numbers` through `_scanned_numbers`.
+- 2026-10-17 — Step-2 re-review fixes: `is_synthetic_path` also matches the obs-db's hand-authored fixtures (`synth_<name>`); the uncatalogued fallback lives in `hash_obsdb_entry` (fresh listing, ObsID-like names only, never a mission folder) and the catalog is read once per folder; a call naming no observation records `catalog.json` (the lead's in-process `data_catalog` too, through `_receipted(state=)`); integer ObsIDs and `./x`, `x/` forms; a NUL or loop in a path records nothing instead of ending the call; mission folders in sorted order; `_listing` skips any unreadable entry.
+- 2026-10-17 — `inputs_before(named_folders=)`: `catalog.json` is recorded only for a mission folder the caller named (an auto-filled `<mission>_path` had put every mission's catalog into every call's inputs).
+- 2026-10-17 — A cited non-evidence receipt's refusal ends "state anything else without a value" (it had said "in words", inviting a spelled-out number).

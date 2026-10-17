@@ -26,12 +26,16 @@ Runtime prompt files:
   staged plan with feasibility checks, every named resource confirmed), assigns each step with
   `assign_to` (librarian as often as needed, analysts, or the human), follows up results that
   open a sharper in-scope question, ends every report to the human with a Next steps section, and
-  reads the human's reply as a nudge (direction, not evidence).
-- `librarian_io.md` — the librarian's research loop: plan the literature questions, search
-  (short keyword queries), read papers and pages in full, follow the citation trail, and file a
-  `LiteratureReport` whose findings cite what was read by handle and quote every number exactly
-  as the document's text shows it (including PDF-spaced numbers). Scope stays literature-only;
-  observation and data work belongs to the analysts. Examples are domain-neutral.
+  reads the human's reply as a nudge (direction, not evidence). Consults the librarian before each
+  decision for the community's approach (`message` for a quick check, `assign_to` for a researched
+  answer).
+- `librarian_io.md` — the librarian as a deep research agent: plan the research questions
+  (prior measurements, methods and pitfalls, standard practice, tool usage), search (short keyword
+  queries; the `web` source for documentation, code, data-product notes and discussions), read
+  papers and pages in full, follow the citation trail, and file a `LiteratureReport` whose findings
+  cite what was read by handle. A web page supports a finding stated in words; a value is
+  attributed to the paper that published it. Observation and data work belongs to the analysts.
+  Examples are domain-neutral.
 - `analyst_worker.md` — task analysis, debate revisions, assumptions, figure
   reference handling, ReAct tool use, the **analysis-is-tool-driven / authors-no-code policy**
   (real steps run through tools; `bash`/`python -c` is read-only inspection only; missing logic
@@ -137,3 +141,8 @@ Compacted 2026-09-01, again 2026-09-24 and 2026-10-07 (detail in git history).
   human merge), and names that run; `lead_rebuttal` handling unchanged. **`coder.md`** (env plan T1):
   each test marked by class per the toolkit's root `conftest.py` (unmarked, `slow`, `live` opt-in);
   the gate's run has no network, so a tool also needs tests that pass offline.
+- 2026-10-17 — `status_monitor.md`: names its fourth tool, `read_file(offset, limit)` over the run's log.
+- 2026-10-17 — Reviewer and librarian prompts (user): the reviewer consults the librarian before each decision (new section "Consult the librarian before deciding"; librarian bullet, follow-up rule and team scope updated); the librarian is a deep research agent (published literature first and the only source backing a value, then documentation, software manuals, code repositories, data-product notes, conference material and community discussions via the `web` source and `web_fetch`; a web page supports a finding stated in words). `analyst_lead.md` librarian description widened to match. No code change: the librarian already had the `web` source.
+- 2026-10-17 — Stateless review of the prompt change applied: the reviewer assigns the librarian for researched answers and citable findings (keeping one pass to compare the analysis result with published values) and messages it for a quick check only after its first pass (a text to a seat that has not started is queued); a value from a librarian text becomes citable through `read_paper` or a filed report; the duplicated follow-up bullet removed; analysts look up what a data step needs, the librarian researches practice and pitfalls; `analyst_worker.md` librarian scope widened to match. Open (src/, not changed): `web_fetch` description still says to quote page text; `LiteratureFinding.claim`, `ReviewerReport` and reviewer refusal text still say literature.
+- 2026-10-17 — `reviewer.md`, `analyst_worker.md`, `analyst_lead.md`, `librarian_io.md`: write every number in digits (user ruling: a number spelled out is not grounded, so the agents write digits rather than the check reading words).
+- 2026-10-17 — The digits line drops its reason clause; "state … in words" became "without a value" (`analyst_lead.md`, `librarian_io.md`, and the grounding refusal in `provenance.bindings`), so a refusal never invites a spelled-out number; `reviewer.md` says a report goes to the human "as a document".

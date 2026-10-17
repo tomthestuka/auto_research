@@ -1,4 +1,5 @@
-"""The librarian's report: what the literature says about a request, bound to what was read.
+"""The librarian's report: what the research beyond the data says about a request (the literature
+first, then documentation, code and community practice), bound to what was read.
 
 The librarian writes this inside its own loop with ``edit_report`` and files it with ``turn_end``,
 the same lifecycle as an analyst's report. Every claim names the captured documents that support
@@ -22,13 +23,14 @@ from auto_research.schemas.base import MessageModel
 
 
 class LiteratureFinding(MessageModel):
-    """One claim about the literature and the captured documents that support it."""
+    """One claim from the research and the captured documents that support it."""
 
     claim: str = Field(
         description=(
-            "One self-contained statement of what the literature reports, in prose. Put every "
-            "number inside a quote of the document it comes from, copied exactly as that "
-            "document's text shows it."
+            "One self-contained statement of what the documents you read report — papers, "
+            "documentation, code, discussions — in prose. Attribute every number to the paper it "
+            "comes from, with its place: {{lib:p3 \"value\" Table 2}}. A web page supports a statement "
+            "that carries no value."
         )
     )
     support: list[str] = Field(
@@ -41,18 +43,18 @@ class LiteratureFinding(MessageModel):
 
 
 class LiteratureReport(MessageModel):
-    """The librarian's filed answer to a research request's literature question."""
+    """The librarian's filed answer to a research request's research questions."""
 
     summary: str = Field(
         default="",
         description=(
-            "The report's abstract: what was searched, what was read, and what the literature "
+            "The report's abstract: what was searched, what was read, and what the research "
             "establishes for this request, in prose."
         ),
     )
     findings: list[LiteratureFinding] = Field(
         default_factory=list,
-        description="The claims the literature supports, each bound to the documents behind it.",
+        description="The claims the research supports, each bound to the documents behind it.",
     )
     gaps: list[str] = Field(
         default_factory=list,

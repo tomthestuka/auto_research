@@ -30,14 +30,6 @@ coder_wait_max_s: 1800        # longest single wait (also bounds submit_for_revi
 react_grace_rounds: 20        # rounds a role gets to summarise after its budget runs out;
                               # failing to file within them is fatal to the run (CLAUDE.md §2b)
 
-# ── Run ledger (monitor JSONL) field caps (characters; a longer field is trimmed with a
-#    "[+N chars]" marker so what was dropped stays countable) ──
-# The ledger is the run's durable record, so these bound what an OFFLINE scoring/audit pass can
-# still read months later. The read side is capped separately (MonitorToolProvider windows an
-# event payload), so raising these never widens what an agent can pull into its own context.
-ledger_arg_cap: 100000         # tool-call arguments recorded per event
-ledger_result_cap: 100000      # tool-result text recorded per event
-ledger_coder_text_cap: 100000  # coder prose / tool input / tool result (both author harnesses)
 gate_layer_b_output_cap: 100000  # pytest output kept on a Layer-B failure, so the traceback survives
 
 # ── Internet stability (transient LLM-provider failures: overloaded / rate-limit / 5xx / connection drops) ──
@@ -91,7 +83,7 @@ mcp_servers: []      # extra MCP servers for workers ({name,command,args}); empt
 disabled_tools: [research_toolkit.heasarc_utils.acquire]   # tool names to hide from the catalogue regardless of what the toolkit exposes
 
 # ── Report (rendered inside the reviewer's turn_end; compose_report publishes it) ──
-report_formats: [tex]   # output handles: jsonl (machine), tex (LaTeX+PDF)
+report_formats: [html]   # output handles: jsonl (machine), tex (LaTeX+PDF), html (page with provenance popovers)
 
 # ── Phase-2 tool authoring (backstops, not budgets; §9.3/§9.9) ──
 tool_author_max_turns: 999            # Sonnet author's own SDK self-correction turns (L0)

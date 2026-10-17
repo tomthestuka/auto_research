@@ -267,7 +267,7 @@ def test_a_report_to_the_human_needs_its_parts(store):
         assert any(f"and {name} is empty" in p for p in problems)
 
 
-@pytest.mark.parametrize("team,cap_words", [("librarian", "literature passes"),
+@pytest.mark.parametrize("team,cap_words", [("librarian", "research passes"),
                                             ("analysts", "analysis passes")])
 def test_an_assignment_needs_a_follow_up_and_a_pass_left(store, team, cap_words):
     report = ReviewerReport(rationale="Short [lib:p1].", assign_to=team)

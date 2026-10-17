@@ -26,8 +26,9 @@ START ─► review ─assign_to─┬─ librarian ─► literature ─► rev
   team. Its `turn_end` refuses an assignment past its cap, so `after_review` never reroutes: a
   report it cannot route raises. A report to the human is rendered and compiled inside that
   `turn_end` (a `ReviewerRender` over the round's `report/v<k>/`), and the node records
-  `report_latex`/`report_pdf` plus a level-1 `reviewer.compose_report.renderer_error` when no PDF
-  came out.
+  `report_latex`/`report_pdf` (with `tex`) and `report_html` (with `html`), each with a level-1
+  `reviewer.compose_report.renderer_error` when its file did not come out. The render reads the
+  run ledger (`monitor.jsonl_path`) to rebuild each call's arguments.
 - **`literature`** runs one librarian pass on the reviewer's `follow_up` and returns to review.
   Literature reports and their receipts **accumulate** across passes (a second search builds on
   the first).
@@ -282,3 +283,6 @@ entries); detail in git history.
   `merge_flow.reconcile_environments`): missing or stale builds made, a drifted prefix kept aside
   and rebuilt, changed externals reported, each a ledger event; a problem never stops the launch; a
   stop kills the builds.
+- 2026-10-17 — `report_html` in the state, `ResearchRun`, the detached result and the CLI; `publish_report(html_path=)` mints it as a `rev:` receipt; `run.report` names it.
+- 2026-10-17 — The human node attaches the published PDF, else the HTML page (`report_formats` without `tex`); the message says "The report is attached.".
+- 2026-10-17 — `_normalize_report_formats` accepts `html` and validates the configured default too; `compose_report` republishes only this run's formats (a resumed checkpoint's earlier PDF is not sent); `run.human.sent` records `attachment`.

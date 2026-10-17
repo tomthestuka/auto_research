@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from auto_research.provenance import ReceiptLookup, check_report_fields
+from auto_research.report.html import HtmlResult, render_html
 from auto_research.report.render import CompileResult, RenderResult, compile_report, render_report
 from auto_research.schemas.figures import FigureRef
 from auto_research.schemas.review import ReviewerReport
@@ -56,7 +57,7 @@ REVIEWER_REPORT_FIELDS: tuple[str, ...] = (
 REVIEWER_STATUS_VALUES: tuple[str, ...] = ()
 
 #: What each team's pass is called when its cap is named in a refusal.
-_PASS_NAMES = {"librarian": "literature passes", "analysts": "analysis passes"}
+_PASS_NAMES = {"librarian": "research passes", "analysts": "analysis passes"}
 
 
 def reviewer_scope(lookup: ReceiptLookup) -> list[str]:
@@ -86,33 +87,70 @@ def reviewer_claims(report: ReviewerReport) -> dict[str, str | list[str]]:
 class ReviewerRender:
     """Renders a finalizing report inside ``turn_end`` and keeps what the graph needs afterwards.
 
-    ``formats`` is the run's ``report_formats``; only ``tex`` renders. ``render`` and ``compile``
-    hold the last attempt, so after the loop the graph reads the ``.tex``, the PDF and any renderer
-    error from here rather than rendering a second time.
+    ``formats`` is the run's ``report_formats``: each of ``tex`` (LaTeX + PDF) and ``html`` (the page
+    with provenance popovers) runs its own path only when listed, and one format's fault never
+    stops another's. ``render``, ``compile`` and ``html`` hold the last attempt, so after the loop
+    the graph reads the files and any renderer error from here rather than rendering again.
+    ``ledger`` is the run's ``monitor.jsonl``, from which the page rebuilds each call's arguments.
     """
 
     report_dir: Path
     run_id: str
     formats: Sequence[str] = ("tex",)
+    ledger: Path | None = None
     render: RenderResult | None = None
     compile: CompileResult | None = None
+    html: HtmlResult | None = None
     attempts: int = 0
 
-    def __call__(self, report: ReviewerReport, lookup: ReceiptLookup) -> list[str]:
-        if "tex" not in self.formats:
+    def __call__(
+        self, report: ReviewerReport, lookup: ReceiptLookup, scope: Sequence[str] = (),
+        numbers: Mapping[str, list] | None = None,
+    ) -> list[str]:
+        """``numbers``: the validator's own per-number answer (``check_report_fields(...,
+        sources=True).numbers``), computed here over ``scope`` when not given."""
+        if not {"tex", "html"} & set(self.formats):
             return []
         self.attempts += 1
-        self.compile = None
-        self.render = render_report(report, lookup, self.report_dir, run_id=self.run_id,
-                                    own_source=REVIEWER_SOURCE)
-        if self.render.problems:
-            return list(self.render.problems)
-        self.compile = compile_report(self.report_dir)
-        return list(self.compile.glyph_problems)
+        problems: list[str] = []
+        if "tex" in self.formats:
+            self.compile = None
+            try:
+                self.render = render_report(report, lookup, self.report_dir, run_id=self.run_id,
+                                            own_source=REVIEWER_SOURCE)
+                if self.render.problems:
+                    problems.extend(self.render.problems)
+                else:
+                    self.compile = compile_report(self.report_dir)
+                    problems.extend(self.compile.glyph_problems)
+            except Exception as exc:  # noqa: BLE001 — a renderer fault is recorded, never the model's
+                self.render = None
+                self.compile = CompileResult(pdf_path=None, errors=[f"the LaTeX renderer raised {type(exc).__name__}: {exc}"])
+        if "html" in self.formats:
+            try:
+                if numbers is None:
+                    numbers = check_report_fields(
+                        reviewer_claims(report), lookup, own_source=REVIEWER_SOURCE, itemised=(),
+                        scope=scope, sources=True,
+                    ).numbers
+                # Written only when no format has a problem this attempt: a page is never left for
+                # a report the turn has not accepted.
+                self.html = render_html(report, lookup, self.report_dir, run_id=self.run_id,
+                                        numbers=numbers, ledger=self.ledger, own_source=REVIEWER_SOURCE,
+                                        write=not problems)
+                problems.extend(self.html.problems)
+            except Exception as exc:  # noqa: BLE001 — a renderer fault is recorded, never the model's
+                self.html = HtmlResult(html_path=None, errors=[f"the HTML renderer raised {type(exc).__name__}: {exc}"])
+        return list(dict.fromkeys(problems))
 
     @property
     def renderer_errors(self) -> list[str]:
-        return list(self.compile.errors) if self.compile is not None else []
+        """Every renderer fault of the last attempt (never the model's to fix)."""
+        return [*(self.compile.errors if self.compile is not None else []), *self.html_errors]
+
+    @property
+    def html_errors(self) -> list[str]:
+        return list(self.html.errors) if self.html is not None else []
 
 
 def reviewer_turn_problems(
@@ -141,7 +179,7 @@ def reviewer_turn_problems(
     to_human = report.assign_to == "human"
     if report.assign_to is None:
         problems.append(
-            "assign_to is empty. Set it to 'librarian' (follow_up is the literature questions), "
+            "assign_to is empty. Set it to 'librarian' (follow_up is the research questions), "
             "'analysts' (follow_up is the analysis task) or 'human' (the report is sent to the "
             "human to discuss)."
         )
@@ -171,12 +209,14 @@ def reviewer_turn_problems(
                     "incomplete analysis, say what was attempted and what blocked it."
                 )
 
+    page = render is not None and "html" in render.formats
     checked = check_report_fields(
         reviewer_claims(report), lookup, own_source=REVIEWER_SOURCE, itemised=(), scope=scope,
+        sources=to_human and page,
     )
     problems.extend(checked.problems)
     if to_human and render is not None and not problems:
-        problems.extend(render(report, lookup))
+        problems.extend(render(report, lookup, scope, checked.numbers if page else None))
     return problems
 
 

@@ -57,6 +57,13 @@ at `level <= chatter` are kept in memory, rendered in Markdown, and written to
 the optional live stream. This means the log file is always a complete
 diagnostic trace, while terminal/notebook output is filtered by `chatter`.
 
+**Every field is recorded whole** (2026-10-17), one tool call per line pair, like a Claude Code
+session file: a role's `*.tool_call` line (written before the call runs) carries the model's
+arguments; its `*.tool_result` line carries the returned text and, for a worker's call, the
+runtime's `call_context` (`provenance.calls.resolve_call_args`), so the pair rebuilds the arguments
+the call ran with (`provenance.calls.ledger_calls`). An agent reading the ledger is bounded by its
+own windowed tools, never by the record.
+
 ## Interfaces / Contracts
 - `RunMonitor(chatter=10, run_id=None, jsonl_path=None, stream=None, cost_meter=None)` creates one
   monitor. `chatter` must be in `1..10`; `stream` is an optional text stream that receives
@@ -125,3 +132,5 @@ Compacted 2026-08-05 and again 2026-09-24 (detail in git history).
   followed by `.answer`.
 
 - 2026-09-25 — [R1] Verdict line reads `assign_to=` (the two flags are gone); `summary.py` takes the verdict from `reviewer.review.verdict` when assigned to the human and prints `reports to the human` from `run.finish.human_rounds`.
+- 2026-10-17 — Ledger fields recorded whole (the per-field caps are retired); `*.tool_result` carries `call_context` for a worker's call, so the `tool_call`/`tool_result` pair rebuilds the arguments it ran with.
+- 2026-10-17 — `*.tool_result` names the receipts' `call_id` when the call minted any (the receipt → ledger join). Channel messages, human replies and `/command` text are recorded whole too (`hitl.router`, `hitl.commands`).

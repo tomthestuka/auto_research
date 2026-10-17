@@ -120,10 +120,24 @@ class Binding:
     locator: str | None = None
 
 
+@dataclass(frozen=True)
+class NumberSource:
+    """One number in prose, ``[start, end)``, and the receipts that carry it on token boundaries:
+    the ones the text cites first, then the rest of its scope. Empty = ungrounded."""
+
+    start: int
+    end: int
+    value: str
+    handles: tuple[str, ...]
+
+
 @dataclass
 class BindingResult:
     problems: list[str] = field(default_factory=list)
     bindings: list[Binding] = field(default_factory=list)
+    #: Filled when asked (``sources=True``): every scanned number of the text with the receipts
+    #: holding it, keyed by the text (``check_report_fields`` merges every field's).
+    numbers: dict[str, list[NumberSource]] = field(default_factory=dict)
 
     @property
     def cited(self) -> list[str]:
@@ -222,20 +236,33 @@ def ungrounded_numbers(
     and the gate's return check (a tool's returned values against its own receipted output). A
     number inside ``masked`` or an exempt shape (Figure/Table/Eq. numbers, years, …) is skipped.
     """
+    return [m for m in _scanned_numbers(prose, masked) if not any(
+        bounded_find(hay, normalise(m.group(), "result")) for hay in usable.values()
+    )]
+
+
+def _scanned_numbers(prose: str, masked: Sequence[tuple[int, int]]) -> list[re.Match]:
+    """The numbers the grounding rule checks: every number outside ``masked`` and the exempt shapes."""
     spans = list(masked)
     for pattern in _EXEMPT_RES:
         spans.extend(m.span() for m in pattern.finditer(prose))
-    missing: list[re.Match] = []
-    for m in NUMBER_RE.finditer(prose):
-        if any(s <= m.start() < e for s, e in spans):
-            continue
+    return [m for m in NUMBER_RE.finditer(prose) if not any(s <= m.start() < e for s, e in spans)]
+
+
+def number_sources(
+    prose: str,
+    usable: Mapping[str, str],
+    *,
+    masked: Sequence[tuple[int, int]] = (),
+) -> list[NumberSource]:
+    """Each number the grounding rule checks, with every receipt in ``usable`` (in its order) that
+    carries it on token boundaries — what a reader is shown as the number's source."""
+    out: list[NumberSource] = []
+    for m in _scanned_numbers(prose, masked):
         token = normalise(m.group(), "result")
-        if not any(
-            bounded_find(hay, token)
-            for h, hay in usable.items()
-        ):
-            missing.append(m)
-    return missing
+        held = tuple(h for h, hay in usable.items() if bounded_find(hay, token))
+        out.append(NumberSource(m.start(), m.end(), m.group(), held))
+    return out
 
 
 def parse_bindings(prose: str, *, own_source: str | None = None) -> list[Binding]:
@@ -370,7 +397,7 @@ class _Resolved:
                 self._entries[handle] = (None, (
                     f"cites {handle}, {what}: it shows where to look, not evidence. Cite the toolkit "
                     "result the value came from, or attribute the paper with its place in it; state "
-                    "anything else in words."
+                    "anything else without a value."
                 ), None)
             else:
                 problem, text = self._checked_text(handle, receipt)
@@ -420,9 +447,11 @@ def check_bindings(
     exempt_spans: Sequence[tuple[int, int]] = (),
     label: str = "this text",
     support: Iterable[str] = (),
+    sources: bool = False,
     _resolved: _Resolved | None = None,
 ) -> BindingResult:
-    """Check one piece of prose; return its problems and its bindings.
+    """Check one piece of prose; return its problems and its bindings (and, with ``sources``, every
+    number's receipts: :func:`number_sources` over exactly the receipts that ground this text).
 
     ``scope`` adds receipts cited elsewhere that also ground this text's numbers (a report's
     summary is scoped by everything the report cites). A scope receipt that is missing, stale or
@@ -489,6 +518,8 @@ def check_bindings(
         if receipt is not None and not receipt.flags and hay is not None:
             usable.setdefault(handle, hay)
     masked = [(b.start, b.end) for b in result.bindings] + list(exempt_spans)
+    if sources:
+        result.numbers[prose] = number_sources(prose, usable, masked=masked)
     missing: list[str] = [
         f'"{m.group()}" (…{_context(prose, m.start(), m.end())}…)'
         for m in ungrounded_numbers(prose, usable, masked=masked)
@@ -530,6 +561,7 @@ def check_report_fields(
     own_source: str | None = None,
     itemised: Iterable[str] = ("findings",),
     scope: Iterable[str] = (),
+    sources: bool = False,
 ) -> BindingResult:
     """Check a report's prose fields together.
 
@@ -564,10 +596,11 @@ def check_report_fields(
         for label, text, grounding in items:
             part = check_bindings(
                 text, lookup, own_source=own_source, scope=grounding, label=label,
-                _resolved=resolved,
+                sources=sources, _resolved=resolved,
             )
             merged.problems.extend(part.problems)
             merged.bindings.extend(part.bindings)
+            merged.numbers.update(part.numbers)
     return merged
 
 

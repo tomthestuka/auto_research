@@ -51,3 +51,4 @@ class ResearchState(TypedDict, total=False):
     report_jsonl: Path | None
     report_latex: Path | None
     report_pdf: Path | None
+    report_html: Path | None

@@ -112,7 +112,7 @@ async def dispatch_command(text: str, ctx: CommandContext) -> str:
     name = parts[0].lower().split("@", 1)[0] if parts and parts[0] else ""
     arg = parts[1].strip() if len(parts) > 1 else ""
     await _record_command(ctx, "hitl.command", level=2, summary=f"human sent /{name or 'help'}",
-                          data={"text": text[:400], "command": name})
+                          data={"text": text, "command": name})
 
     if name in ("", "help"):
         reply, accepted = _help(ctx), True
@@ -128,7 +128,7 @@ async def dispatch_command(text: str, ctx: CommandContext) -> str:
     await _record_command(
         ctx, "hitl.command.reply", level=3,
         summary=f"/{name or 'help'} {'accepted' if accepted else 'rejected'}",
-        data={"command": name, "accepted": accepted, "reply": reply[:400]},
+        data={"command": name, "accepted": accepted, "reply": reply},
     )
     return reply
 
@@ -295,7 +295,7 @@ async def dispatch_callback(data: str, ctx: CommandContext) -> str:
 
     await _record_command(
         ctx, "hitl.command.button", level=3, summary=f"human tapped {action} for {key}",
-        data={"action": action, "agent_key": key, "reply": reply[:200]},
+        data={"action": action, "agent_key": key, "reply": reply},
     )
     return reply
 

@@ -66,12 +66,13 @@ def publish_report(
     formats: Sequence[str],
     tex_path: Path | None = None,
     pdf_path: Path | None = None,
+    html_path: Path | None = None,
     own_source: str = "rev",
 ) -> PublishResult:
     """Mint receipts for the rendered files and write the JSONL handle when ``jsonl`` is configured."""
     cited = cited_handles(report, own_source=own_source)
     result = PublishResult()
-    for fmt, path in (("tex", tex_path), ("pdf", pdf_path)):
+    for fmt, path in (("tex", tex_path), ("pdf", pdf_path), ("html", html_path)):
         if path is not None and Path(path).is_file():
             receipt = store.mint(source=own_source, kind="data", produced_by="report_renderer",
                                  path=Path(path), parents=cited)

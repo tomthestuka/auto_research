@@ -54,7 +54,7 @@ from auto_research.sandbox.coder.claude_sdk import (  # noqa: F401 — re-export
     _record_coder_cost,
     _with_live_anthropic_key,
 )
-from auto_research.sandbox.coder.events import cap_text, coder_text_cap, emit
+from auto_research.sandbox.coder.events import cap_text, emit
 from auto_research.sandbox.gate import _clear_index_lock
 from auto_research.schemas import GateReport, HumanQuery, MergeFlowResult, ToolReviewVerdict, ToolSpec
 
@@ -355,7 +355,6 @@ def _observation_paths() -> dict[str, str]:
 # harness records under the same names without importing the flow that drives it.
 # ----------------------------------------------------------------------------
 
-_coder_text_cap = coder_text_cap
 _cap_text = cap_text
 _emit = emit
 
@@ -395,7 +394,7 @@ def _make_ask_lead_handler(
         await _emit(
             monitor, "coder.ask_lead", level=4,
             summary=f"coder asked the lead: {_cap_text(message, 80)}",
-            data={"kind": kind, "message": _cap_text(message)},
+            data={"kind": kind, "message": message},
         )
         return "delivered. The lead reads it at its next step; its answer reaches you in your turn."
 
@@ -455,7 +454,7 @@ def _make_ask_human_handler(
         await _emit(
             monitor, "coder.ask_human", level=3,
             summary=f"coder raised to the human ({query.kind}): {_cap_text(message, 80)}",
-            data={"kind": query.kind, "message": _cap_text(message)},
+            data={"kind": query.kind, "message": message},
         )
         router = getattr(lead, "channel", None) if lead is not None else None
         if router is None or router.human_handler is None:
@@ -470,7 +469,7 @@ def _make_ask_human_handler(
             if entry_kind == "reply":
                 await _emit(
                     monitor, "coder.ask_human.answer", level=3,
-                    summary="human answered the coder", data={"answer": _cap_text(text)},
+                    summary="human answered the coder", data={"answer": text},
                 )
             if session is not None and hasattr(session, "send"):
                 await session.send(f"{label} {text}", mid_turn=True)
@@ -1592,7 +1591,7 @@ class AuthoringSession:
                 await _emit(
                     self._monitor, "coder.queued", level=5,
                     summary=f"queued for the coder's next turn: {_cap_text(message, 60)}",
-                    data={"text": _cap_text(message), "queued": len(self._queued)},
+                    data={"text": message, "queued": len(self._queued)},
                 )
                 return "queued"
         self.start_drive(message)
@@ -1809,7 +1808,7 @@ class AuthoringSession:
             g = GateReport(passed=False, reason=f"the worktree could not be unstaged before the gate: {exc}")
             self.last_gate = g
             await _emit(self._monitor, "gate.result", level=4, summary="gate rejected",
-                        data={"passed": False, "failing_checks": ["unstage"], "reason": _cap_text(g.reason)})
+                        data={"passed": False, "failing_checks": ["unstage"], "reason": g.reason})
             return g
         if self._base_ref is not None:
             if head != self._base_ref:
@@ -1851,7 +1850,7 @@ class AuthoringSession:
             self._monitor, "gate.result", level=4,
             summary=f"gate {'passed' if g.passed else 'rejected'}",
             data={"passed": g.passed, "failing_checks": failed, "report_hash": g.report_hash,
-                  "reason": _cap_text(g.reason)},
+                  "reason": g.reason},
         )
         self.last_gate = g
         if self._base_ref is not None:
@@ -1898,8 +1897,8 @@ class AuthoringSession:
         await _emit(
             self._monitor, "review.result", level=4,
             summary=f"co-lead {'approved' if review.approved else 'rejected'}",
-            data={"approved": review.approved, "issues": [_cap_text(i, 200) for i in review.issues],
-                  "checks_adequate": review.checks_adequate, "rationale": _cap_text(review.rationale)},
+            data={"approved": review.approved, "issues": list(review.issues),
+                  "checks_adequate": review.checks_adequate, "rationale": review.rationale},
         )
         self.last_review = review
         if self._base_ref is not None:
@@ -1954,7 +1953,7 @@ class AuthoringSession:
             self._monitor, "commit", level=3,
             summary=f"committed {self.tool_spec.proposed_tool_name} → {commit_sha[:10]}",
             data={"tool": self.tool_spec.proposed_tool_name, "commit_sha": commit_sha,
-                  "branch": self.branch, "message": _cap_text(message, 200)},
+                  "branch": self.branch, "message": message},
         )
         self.env_note = await self._build_environments(manifest)
         return commit_sha
