@@ -219,7 +219,7 @@ def test_a_complete_worker_report_has_no_problems(tmp_path):
     png = tmp_path / "fig.png"
     png.write_bytes(b"\x89PNG")
     report = NS(summary="PD = 3.4 +/- 0.14 percent", status="succeeded",
-                figures=[NS(path=png, caption="PD")])
+                findings=["PD = 3.4 +/- 0.14 percent"], figures=[NS(path=png, caption="PD")])
     ws = ReportWorkspace.__new__(ReportWorkspace)
     object.__setattr__(ws, "written_report", report)
     object.__setattr__(ws, "catalog", {"self": [object()]})

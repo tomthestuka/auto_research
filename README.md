@@ -166,7 +166,10 @@ Over **Telegram or Slack** a human can drive a live run with slash-commands (int
 treated as answers to an agent): `/help` (commands + the live roster, numbered), `/status
 [question]` (a reporter role reads the run's own event ledger — index, search, open an event — and
 answers), `/steer <id> <message>` (nudge one role at its next
-step, addressed by the **id** `/help` prints; `all` broadcasts), and `/stop`. Every invalid
+step, addressed by the **id** `/help` prints; `all` broadcasts), and `/stop`. `/stop` and
+`/status` answer at once ("/stop received, cleaning up…", "/status received, monitor agent
+investigating…") before their work, and each command runs on its own, so `/stop` never waits
+behind a slow `/status`. Every invalid
 command — unknown command, unknown id, a role name where an id belongs, a missing message — is
 refused immediately with the valid options, and nothing is queued on a guess. Commands are recorded
 in the run ledger, so a rejected command, a queued steer and a delivered steer are told apart after
@@ -177,9 +180,11 @@ observational.)*
 **Quick texts between seats.** Every agent on the team has a `message` tool that reaches any other agent (reviewer, librarian, lead, analysts) or you. `list_peers` shows who is on the team, what each does and whether it is working, finished or not started; the lead steers its coder the same way, as `message(to="coder")`. It never blocks: your answer, or a teammate's, arrives at the sender's next step, and `wait_for_reply` holds until one does. An agent that has already filed its report is resumed to read a text and answer, and its filed report stays as filed. Texts are informal and back no number in a report. With `channel_mirror: true` (default) the agents' texts to each other are copied to your chat, read-only, so you can follow along and `/steer` in.
 
 **`/stop` is Ctrl-C** — the interrupt a run has no terminal to receive. It cancels the run task
-where it stands, then cleans up deterministically: kill the sandbox processes *and their
-descendants*, reset the authoring branch if a tool was being written, close the channels, record
-the closing events. **No report is composed and no model is called on the way out**, and the run
+where it stands, then cleans up leaf to root, each step bounded and recorded: the agents, the
+sandbox processes *and their descendants*, the authoring branch (reset, the discarded work saved
+as a patch), the tools server, the ledger's closing record, then a landing checklist to your chat
+listing every step ✓, ✗ with the reason it failed, or – skipped with the reason, plus any command
+the stop cancelled (e.g. "/status answer – cancelled by /stop"), and the chat connector itself last. **No report is composed and no model is called on the way out**, and the run
 ends by raising `UserInterruptionError` rather than returning. What the run already wrote is its
 record — the ledger, per-round reports, figures — and `resume=True` continues from the last
 completed step, so a stop is a pause rather than a loss. On the CLI and the detached backend,
@@ -199,7 +204,7 @@ its own windowed tools. On an accepted verdict,
 `<toolkit root>/<package>.<function>` with its commit, environment, exact arguments rebuilt from
 the ledger, inputs and hashes, plus a "copy reproduce code" button; replay is the reader's, the
 runtime re-runs nothing) and `report.jsonl` (the machine handle: the filed report, its receipt
-closure and the artifact handles). The reviewer writes **plain text only**, through `edit_report`; the harness renders
+closure and the artifact handles). The reviewer writes **plain text only**, through `write_report`/`edit_report`; the harness renders
 the LaTeX (`report/render.py`, compiled with `lualatex`, DejaVu fonts) inside the reviewer's
 `turn_end`, which accepts only once no configured format has a problem the model can fix and every
 number in the report is grounded in a receipt (a renderer's own fault is recorded, never sent back). Figures are staged by hash and re-hashed, tool-computed tables are
@@ -428,8 +433,19 @@ search-and-read tools. The loop is bounded by `react_loop_cap`; the librarian's 
 automatic caching). For long loops, the same knob optionally carries Anthropic's
 provider-native **context editing** — clearing the oldest tool results server-side once a
 request crosses a token watermark (`config/orchestration.yaml: context_mgmt_*`), a
-context-window pressure valve, not a cost lever. It is Anthropic-only, and ships **enabled**
-(live-verified 2026-07-28).
+context-window pressure valve, not a cost lever. It is Anthropic-only and ships **off** since
+2026-10-18 (a clear rewrites the whole prompt cache, measured); compaction bounds a long turn
+instead: server-side compaction on Claude and OpenAI seats, a segment boundary with our
+`session_compactor` elsewhere, both at 90% of the member's input limit; on every provider a
+segment boundary also starts when a turn's media near the provider's request ceilings. A paper a
+tool opens rides that tool's result, sent once and cached in place.
+**Every graph seat is one session across its turns:** the run ledger (`monitor.jsonl`) records
+each turn whole, and a seat's next turn opens with its earlier turns rebuilt from it, every
+earlier tool output shrunk to one line naming the receipt `view_receipt` reads back in full
+(`agents/history.py`; the old per-worker `memory.md` is retired). Within a turn the conversation
+only grows at its end; at a turn boundary the earlier turns become one transcript message
+carrying the newest figure sets within 40,000 image tokens, so no earlier thinking is replayed
+(`agents/images.py`); a peer's or worker's figure is attached to a task once per session.
 As the authored toolkit grows, **tool search / lazy loading** keeps the resident surface small:
 with `config/orchestration.yaml: tool_search_enabled`, every `research_toolkit` tool is sent
 `defer_loading` and its schema stays out of context until the model discovers it through the
@@ -466,12 +482,12 @@ Current role/tool surfaces:
 
 | Role | Tool surface | What "one task" means |
 |---|---|---|
-| Librarian | `LibrarianToolProvider`: arXiv/ADS/web search, full-text reading of papers and pages (each minted as a receipt), local text search, `edit_report`/`turn_end`. | One research pass: a `LiteratureReport` whose findings cite, by handle, the documents it read. |
+| Librarian | `LibrarianToolProvider`: arXiv/ADS/web search, full-text reading of papers and pages (each minted as a receipt), local text search, `write_report`/`edit_report`/`turn_end`. | One research pass: a `LiteratureReport` whose findings cite, by handle, the documents it read. |
 | Local retrieval | Pure-Python `text_search()`/`vector_search()` (stub) over SQLite, reached through the **reviewer's** `text_search` and the shared `read_paper` (which attaches the PDF) — not a graph node. | Returns local paper paths and attaches chosen PDFs; no standalone LLM role. |
-| Analyst worker | `SandboxToolProvider`: `research_toolkit` manifest tools (including `catalog_utils`'s read-only `data_catalog`) + MCP tools in a persistent sandbox — each toolkit call in its package's tested environment, or another chosen with `env` (marked untested) — plus `list_env`/`use_env` (its shell), `web_search`, `web_fetch`, and the report tools `edit_report`/`review_report`. | `analyze()` chains load→fit→run→plot or other tools, self-corrects in-loop, then **writes its report via `edit_report`**, citing figures from its catalog. |
-| Analyst lead | `ReadOnlyToolProvider`: run artifacts, figures, memory, papers dir, full `research_toolkit` source, the `data_catalog` tool (from `research_toolkit`'s `catalog_utils`, run in-process for the sandbox-less lead), `web_search` + `web_fetch` (`include_text_search=False` — knowledge-base search is the reviewer's), `edit_report`/`review_report`, the three authoring tools, `author_chain`, and `turn_end`. | **One cycle** (`run_cycle`): one ReAct loop with **no stages** — investigate, brief a coding chain if the analysts hit a missing capability, drive and submit each link, write the report, end on `turn_end`. **The report is the decision**: `rework=true` sends the analysts back with a probe, `rework=false` makes it the analysis result. `author_chain` is a *brief*, not a terminal — a finished link advances the chain on a tool result, so a dead link is a sentence in the conversation rather than the end of the turn. A cycle that commits anything ends before judging, so the committed tools are reloaded and the workers rerun on them first. Also answers author clarifications. |
+| Analyst worker | `SandboxToolProvider`: `research_toolkit` manifest tools (including `catalog_utils`'s read-only `data_catalog`) + MCP tools in a persistent sandbox — each toolkit call in its package's tested environment, or another chosen with `env` (marked untested) — plus `list_env`/`use_env` (its shell), `web_search`, `web_fetch`, and the report tools `write_report`/`edit_report` (the report is one text document, written like a file and edited by exact match; each figure's label arrives with the tool result that made it). | `analyze()` chains load→fit→run→plot or other tools, self-corrects in-loop, then **writes its report via `write_report`/`edit_report`**, citing figures from its catalog. |
+| Analyst lead | `ReadOnlyToolProvider`: run artifacts, figures, memory, papers dir, full `research_toolkit` source, the `data_catalog` tool (from `research_toolkit`'s `catalog_utils`, run in-process for the sandbox-less lead), `web_search` + `web_fetch` (`include_text_search=False` — knowledge-base search is the reviewer's), `write_report`/`edit_report` (each worker figure labelled in its task), the three authoring tools, `author_chain`, and `turn_end`. | **One cycle** (`run_cycle`): one ReAct loop with **no stages** — investigate, brief a coding chain if the analysts hit a missing capability, drive and submit each link, write the report, end on `turn_end`. **The report is the decision**: `rework=true` sends the analysts back with a probe, `rework=false` makes it the analysis result. `author_chain` is a *brief*, not a terminal — a finished link advances the chain on a tool result, so a dead link is a sentence in the conversation rather than the end of the turn. A cycle that commits anything ends before judging, so the committed tools are reloaded and the workers rerun on them first. Also answers author clarifications. |
 | Analyst co-lead | `ReadOnlyToolProvider`: the authored toolkit worktree + `web_search` + `web_fetch` (`include_text_search=False`). | Provider-decorrelated **code review** of one authored tool — brief-match, Layer-B check adequacy, no-fabrication second pass, subtle bugs → `ToolReviewVerdict`. |
-| Reviewer | `ReadOnlyToolProvider`: run artifacts, figures, memory, `web_search` + `web_fetch`, `text_search`, and the shared `read_paper` (attaches the PDF itself; papers are cited by handle and never text-matched, each paper value attributed with its place in the paper and listed for verification), `edit_report`/`review_report` (the draft shown as rendered pages), `turn_end`. | The sole I/O: scopes and plans each request, then files one `ReviewerReport` per turn whose `assign_to` routes the graph (librarian, analysts, or the human). A report to the human is rendered by the harness (its PDF carries a "values to verify against the PDFs" appendix) and sent as a PDF; the human's reply returns as a nudge. |
+| Reviewer | `ReadOnlyToolProvider`: run artifacts, figures, memory, `web_search` + `web_fetch`, `text_search`, and the shared `read_paper` (attaches the PDF itself; papers are cited by handle and never text-matched, each paper value attributed with its place in the paper and listed for verification), `write_report`/`edit_report`, `turn_end` (which typesets the report and names what it cannot typeset). | The sole I/O: scopes and plans each request, then files one `ReviewerReport` per turn whose `assign_to` routes the graph (librarian, analysts, or the human). A report to the human is rendered by the harness (its PDF carries a "values to verify against the PDFs" appendix) and sent as a PDF; the human's reply returns as a nudge. |
 
 
 **Provenance: every number is bound to a receipt.** Every artifact a claim can rest on — each tool

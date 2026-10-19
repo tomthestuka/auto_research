@@ -33,7 +33,7 @@ class FigureCitation(MessageModel):
     report. ``source`` names a figure catalog — ``"self"`` for an agent's own produced
     figures, or a worker key like ``"analyst_worker_0"`` for one of the lead's per-worker
     catalogs — and ``index`` is the 1-based position within that source's append-only list
-    (the ``[source:index]`` handle ``review_report`` shows). The runtime resolves each
+    (the ``[source:index]`` label shown where the figure first appears). The runtime resolves each
     citation to a real :class:`FigureRef`; the *report-local* figure number is the
     citation's position in the ordered ``cited_figures`` list, so prose "Figure k" is the
     k-th cited. The two coordinate systems never mix in one message: ``{source, index}`` is
@@ -41,7 +41,10 @@ class FigureCitation(MessageModel):
     """
 
     source: NonEmptyStr = Field(
-        description="Catalog source, e.g. 'self' or 'analyst_worker_0'."
+        description=(
+            "Catalog source: 'self' for an analyst worker (its own figures, its only source); for "
+            "the analyst lead, the worker whose figure it is, e.g. 'analyst_worker_0'."
+        )
     )
     index: Annotated[int, Field(ge=1)] = Field(
         description="1-based slot within that source (its [source:index] number)."
@@ -61,8 +64,9 @@ class FiguredReport(MessageModel):
     cited_figures: list[FigureCitation] = Field(
         default_factory=list,
         description=(
-            "The figures this report places, as catalog handles in the order they should appear. "
-            "Cite every figure the prose refers to; an uncited catalog figure is dropped."
+            "The figures this report places: an array of {source, index} objects, one per figure, "
+            "in the order they should appear. Cite every figure the prose refers to; an uncited "
+            "catalog figure is dropped."
         ),
     )
     figures: list[FigureRef] = Field(

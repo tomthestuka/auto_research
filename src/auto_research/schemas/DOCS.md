@@ -212,8 +212,8 @@ carried by **reference** (`FigureRef`), never embedded
   ToolCallRequest | None = None)` — lead review of a proposed tool action.
 - `ToolResult(tool_name: str, stdout: str, stderr: str, exit_code: int,
   figures: list[FigureRef] = [], elapsed_s: float)` — result of a sandboxed
-  tool execution. Produced by the analyst worker's `SandboxToolProvider` loop, written to
-  the worker's private `memory.md`, and summarized into subsequent analyst task
+  tool execution. Produced by the analyst worker's `SandboxToolProvider` loop, recorded in
+  the run ledger (every seat's session history), and summarized into subsequent analyst task
   instructions by the consensus layer. Figures are `FigureRef` objects returned by tools.
   `exit_code=127` indicates "tool unavailable".
 - `ValidationDataset(mission: str, obsid: str, synthetic: bool = False)` — one real
@@ -334,3 +334,6 @@ Compacted 2026-10-07 (detail in git history).
   `capture.receipt_call(env_untested=)`.
 - 2026-10-17 — `InputFile.basis` gains `obsdb`; `Receipt.toolkit_root` (provenance replay, step 2).
 - 2026-10-17 — `LiteratureFinding.claim` / `LiteratureReport` / `ReviewerReport` descriptions follow the librarian's deep-research scope ("research", not "literature"; numbers attributed to papers, web pages support words).
+- 2026-10-18 — [A1] One definition of the report form in the field descriptions: `AnalystReport.summary` a 3–5-sentence briefing, `findings` the results (one item per result, citing receipts), `status` `succeeded` when findings hold the results; `FigureCitation.source` `self` for a worker, the worker key for the lead; `FiguredReport.cited_figures` an array of `{source, index}` objects; `LiteratureReport.summary` / `findings` the same briefing / results split.
+- 2026-10-18 — `ToolResult` is recorded in the run ledger, every seat's session history (`memory.md` retired by B2); the entry no longer names it.
+- 2026-10-18 — [A7] `AnalystReport.summary` defaults to "" (was a required non-empty string): the report is edited as one text document, so a draft with findings and no summary yet is legal; `turn_end` refuses an empty summary.

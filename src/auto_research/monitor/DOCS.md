@@ -64,6 +64,11 @@ runtime's `call_context` (`provenance.calls.resolve_call_args`), so the pair reb
 the call ran with (`provenance.calls.ledger_calls`). An agent reading the ledger is bounded by its
 own windowed tools, never by the record.
 
+**The ledger is each agent's session history** (2026-10-18, B1). A ReAct loop also records its
+turn's start (`*.turn_start`), every returned model turn whole (`*.model_turn`), the nudges it
+appends, and marks each conversation-bearing event with a `data["history"]` part, so
+`agents/history.py` rebuilds every call an agent made from this file alone.
+
 ## Interfaces / Contracts
 - `RunMonitor(chatter=10, run_id=None, jsonl_path=None, stream=None, cost_meter=None)` creates one
   monitor. `chatter` must be in `1..10`; `stream` is an optional text stream that receives
@@ -134,3 +139,5 @@ Compacted 2026-08-05 and again 2026-09-24 (detail in git history).
 - 2026-09-25 — [R1] Verdict line reads `assign_to=` (the two flags are gone); `summary.py` takes the verdict from `reviewer.review.verdict` when assigned to the human and prints `reports to the human` from `run.finish.human_rounds`.
 - 2026-10-17 — Ledger fields recorded whole (the per-field caps are retired); `*.tool_result` carries `call_context` for a worker's call, so the `tool_call`/`tool_result` pair rebuilds the arguments it ran with.
 - 2026-10-17 — `*.tool_result` names the receipts' `call_id` when the call minted any (the receipt → ledger join). Channel messages, human replies and `/command` text are recorded whole too (`hitl.router`, `hitl.commands`).
+- 2026-10-18 — [B1] New history events from every ReAct loop: `*.turn_start` (L8), `*.model_turn` (L9, the returned turn whole), `*.nudge` (L4); `*.tool_result`, `*.tools`, the injected-message events and `analyst.tool.compacted` carry a `data["history"]` part. The JSONL is each agent's session history (`agents/history.py`); `monitor.md` grows by the model turns.
+- 2026-10-18 — [B6/B7] New events: `*.compaction` (L3; `server: true` for a provider-side compaction, else a `rewrite` history part with `op: "compact"`), `*.compaction_pin` (L4), `*.compaction_failed` (L2), `*.history.unreadable` (L1), `*.history.unavailable` (L3).

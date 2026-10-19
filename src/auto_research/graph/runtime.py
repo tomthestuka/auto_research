@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import uuid
@@ -40,7 +41,6 @@ from auto_research.sandbox.workspace import (
     agent_dir,
     create_run_workspace,
     ledger_dir,
-    memory_path,
     run_dir,
 )
 from auto_research.schemas import ResearchRequest, ReviewerReport
@@ -481,7 +481,6 @@ def attach_worker_runtime(
         if not isinstance(worker, AnalystWorkerAgent):
             continue
         key = f"analyst_worker_{index}"
-        worker.memory_path = memory_path(run_id, key)
         worker.agent_key = key
         worker.report_dir = agent_dir(run_id, key)
         worker.report_dir.mkdir(parents=True, exist_ok=True)
@@ -774,6 +773,7 @@ async def run_research(
     # cancels the task registered here, so it needs no cooperation from anything.
     run_control = RunControl()
     run_control.register_run_task(asyncio.current_task())
+    cleaned = False  # set once a stop's (or a channel failure's) cleanup has torn the run down
     _restore_signals = _install_interrupt_signals(run_control) if install_signal_handlers else None
 
     storage = Storage()
@@ -1072,24 +1072,56 @@ async def run_research(
             final_state: dict[str, Any] = await graph.ainvoke(
                 graph_input, config=config, durability="sync"
             )
+            # The graph is done: nothing may cancel this task from here on (a channel failure or
+            # a stop arriving now is answered below or by the finished run, never by a cancel
+            # landing in the teardown).
+            run_control.register_run_task(None)
+            if run_control.fatal is not None:
+                # A channel task failed the run as its last node returned (D6).
+                raise run_control.fatal
         except asyncio.CancelledError:
-            if not run_control.stop_requested:
-                raise  # not ours: an outer cancel (kernel shutdown, a caller's timeout)
-            task = asyncio.current_task()
-            if task is not None:
-                task.uncancel()  # the cancellation was the delivery mechanism; it ends here
-            # A human stop. Cleanup is shielded because we are already inside a cancelled scope,
-            # where a bare `await` in teardown is cancelled the moment it suspends — the hole that
-            # left sandbox children running and the authoring branch dirty.
-            await asyncio.shield(
-                _interrupt_cleanup(
+            fatal = run_control.fatal
+            if fatal is not None and not run_control.stop_requested:
+                # Ruling D6: a resumed seat's `ReactBudgetExhausted` cancelled the run task to
+                # reach it. The interrupt's kill-and-repair runs (the authoring branch included),
+                # recorded as the run's failure, and the run ends with it.
+                task = asyncio.current_task()
+                if task is not None:
+                    task.uncancel()
+                outer_pending = _spend_cancels(task)
+                # Awaited in this task, not shielded into another: the cancel that delivered the
+                # failure is spent, `fail` and `interrupt` send no second one, and the MCP client
+                # (an anyio cancel scope) must be closed by the task that opened it.
+                await _interrupt_cleanup(
                     run_control,
                     sandboxes=sandboxes,
                     mcp_client=mcp_client,
                     human_handler=human_handler,
                     monitor=run_monitor,
+                    fatal=fatal,
+                    outer_pending=outer_pending,
                 )
+                cleaned = True
+                raise fatal from None
+            if not run_control.stop_requested:
+                raise  # not ours: an outer cancel (kernel shutdown, a caller's timeout)
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()  # the cancellation was the delivery mechanism; it ends here
+            outer_pending = _spend_cancels(task)
+            # A human stop (ruling D8: leaf to root). The cleanup runs in THIS task: the cancel
+            # that delivered the stop is spent and `interrupt` sends no second one, and the MCP
+            # client — an anyio cancel scope this task opened — can only be closed here. Shielding
+            # it into another task failed that close and left the server running.
+            await _interrupt_cleanup(
+                run_control,
+                sandboxes=sandboxes,
+                mcp_client=mcp_client,
+                human_handler=human_handler,
+                monitor=run_monitor,
+                outer_pending=outer_pending,
             )
+            cleaned = True
             raise UserInterruptionError(
                 run_control.stop_reason,
                 by=run_control.stopped_by or "human",
@@ -1099,6 +1131,9 @@ async def run_research(
                 },
             ) from None
         except Exception as exc:
+            # The run is ending with this error: a /stop or a channel failure now must not cancel
+            # its teardown and replace the error with a bare cancel (D8).
+            run_control.register_run_task(None)
             await run_monitor.record(
                 "run",
                 "run.error",
@@ -1111,12 +1146,24 @@ async def run_research(
             await _record_run_summary(run_monitor)
             raise
         finally:
+            run_control.register_run_task(None)
             if _restore_signals is not None:
                 _restore_signals()
-            # An interrupt already killed these; shutdown is idempotent and returns at once.
-            for sandbox in sandboxes:
-                await sandbox.shutdown()
-            await mcp_client.shutdown()
+            if not cleaned:
+                # A seat woken as the run ended (D5) would otherwise outlive it: its resume
+                # restarts a sandbox and spends after `run.finish`. A stop's cleanup already did
+                # all of this, bounded and recorded, and is not repeated.
+                try:
+                    await run_control.cancel_resumed(timeout=_INTERRUPT_STEP_TIMEOUT_S)
+                except TimeoutError as exc:
+                    await run_monitor.record(
+                        "run", "run.teardown.timeout", level=2,
+                        summary=f"Channel tasks outlived the run's teardown: {exc}",
+                        data={"error": repr(exc)},
+                    )
+                for sandbox in sandboxes:
+                    await sandbox.shutdown()
+                await mcp_client.shutdown()
 
     verdict = final_state["verdict"]
     await run_monitor.record(
@@ -1208,21 +1255,27 @@ async def _interrupt_cleanup(
     mcp_client: MCPToolClient,
     human_handler: HumanHandler | None,
     monitor: RunMonitor,
+    fatal: BaseException | None = None,
+    outer_pending: bool = False,
 ) -> None:
-    """Deterministic teardown for a human interrupt. **No model is called from here.**
+    """Deterministic teardown for a human interrupt, leaf to root (ruling D8). **No model is
+    called from here.** Runs in the run task, which opened the MCP client it closes.
 
-    Three phases, in this order for one reason: *nothing may be able to write to the toolkit when
-    the toolkit is repaired.* Resetting the authoring branch while the coder subprocess or a gate
-    pytest run is still alive just lets them dirty it again a moment later.
+    Order: the agents (resumed seats) → each sandbox and its children → the authoring branch
+    (coder disconnected, tree reset, patch saved) → the MCP client → the ledger's closing record
+    and summary → the landing checklist to the human (``notify``) → the HITL connector, last, since
+    it is the channel. Every step is bounded and recorded (``run.interrupt.step`` /
+    ``step_error`` / ``step_timeout`` / ``step_skipped`` with its reason); none is skipped without
+    one. The checklist lists them in this order, ✓ or ✗ with the reason.
 
-    1. **Kill** every process that can write — each sandbox REPL and its descendants, and (via the
-       authoring session's disconnect) the coder SDK subprocess.
-    2. **Repair** — reset the authoring branch to the attempt's base ref, saving the discarded work
-       as a patch first. An interrupted attempt *is* a non-committed attempt, so this is
-       ``AuthoringSession.aclose()``'s existing failure path, reached here because its own
-       ``finally`` sits inside the cancelled scope.
-    3. **Close and record** — MCP client, HITL connector, then ``run.interrupted`` and the derived
-       ``run.summary`` (both read the event stream; neither calls a model).
+    Also the teardown of a run a channel failure ends (``fatal``, ruling D6): the same kill and
+    repair, recorded as ``run.error`` rather than ``run.interrupted``.
+
+    Why this order: *nothing may be able to write to the toolkit when the toolkit is repaired.*
+    Resetting the authoring branch while the coder subprocess or a gate pytest run is still alive
+    just lets them dirty it again a moment later. The repair is ``AuthoringSession.aclose()``'s
+    existing failure path, reached here because its own ``finally`` sits inside the cancelled
+    scope.
 
     Every step is bounded and guarded: a wedged step (a git lock, a D-state child on NFS, a
     connector waiting on the network) logs and yields to the next, because an interrupt that hangs
@@ -1230,43 +1283,198 @@ async def _interrupt_cleanup(
     caught by the next launch's clean-tree preflight and by the resume-time heal.
     """
 
-    async def _step(name: str, coro, timeout: float | None = None) -> None:
+    steps: list[tuple[str, bool, str]] = []  # (what, done, detail), in teardown order
+    # An outer cancel (a caller's timeout, a kernel interrupt) arriving mid-cleanup is held until
+    # every step has run, then honoured: the cleanup is not shielded (it must run in this task),
+    # so without this one cancel would abort it part-way with nothing recorded.
+    me = asyncio.current_task()
+    entry = me.cancelling() if me is not None else 0
+    # An outer cancel that arrived together with the stop's own (the caller set it pending before
+    # this ran) is honoured at the end too.
+    outer: list[int] = [1] if outer_pending else []
+
+    async def _step(what: str, name: str, coro, timeout: float | None = None) -> bool:
+        """Run one bounded step; record it, and its line for the checklist, whatever happens."""
+        limit = timeout or _INTERRUPT_STEP_TIMEOUT_S
         try:
-            await asyncio.wait_for(coro, timeout=timeout or _INTERRUPT_STEP_TIMEOUT_S)
-        except (TimeoutError, asyncio.TimeoutError):
+            await asyncio.wait_for(coro, timeout=limit)
+        except asyncio.CancelledError:
+            if me is not None and me.cancelling() > entry:
+                me.uncancel()
+                outer.append(1)
+                reason = "interrupted by an outer cancel; the cleanup went on"
+            else:
+                reason = "the step was cancelled"
+            await _record(monitor, "run.interrupt.step_error", level=2,
+                          summary=f"Interrupt cleanup step '{name}' cancelled — continuing",
+                          data={"step": name, "error": reason})
+            steps.append((what, False, reason))
+            return False
+        except (TimeoutError, asyncio.TimeoutError) as exc:
+            # The step's own bound says what was still running; the outer bound says only that.
+            detail = str(exc) or f"timed out after {limit:.0f}s"
             await _record(monitor, "run.interrupt.step_timeout", level=2,
                           summary=f"Interrupt cleanup step '{name}' timed out — continuing",
-                          data={"step": name, "timeout_s": timeout})
+                          data={"step": name, "timeout_s": limit, "detail": detail})
+            steps.append((what, False, detail))
+            return False
         except Exception as exc:  # noqa: BLE001 — one failed step never blocks the rest
             await _record(monitor, "run.interrupt.step_error", level=2,
                           summary=f"Interrupt cleanup step '{name}' failed — continuing",
                           data={"step": name, "error": repr(exc)})
+            steps.append((what, False, f"{type(exc).__name__}: {exc}"[:200]))
+            return False
+        await _record(monitor, "run.interrupt.step", level=3,
+                      summary=f"Interrupt cleanup step '{name}' done", data={"step": name})
+        steps.append((what, True, ""))
+        return True
 
-    # 1 — kill everything that can still write to disk. Resumed seats first (E12): a seat resumed
-    # by a message runs its own loop beside the run task, so cancelling the run task alone would
-    # leave it calling tools into the sandboxes this step kills.
-    await _step("cancel_resumed_seats", run_control.cancel_resumed())
-    for index, sandbox in enumerate(sandboxes):
-        await _step(f"kill_sandbox_{index}", sandbox.kill_now())
+    async def _skipped(what: str, name: str, reason: str) -> None:
+        await _record(monitor, "run.interrupt.step_skipped", level=3,
+                      summary=f"Interrupt cleanup step '{name}' skipped: {reason}",
+                      data={"step": name, "reason": reason})
+        steps.append((what, False, f"skipped: {reason}"))
 
-    # 2 — repair the toolkit (disconnects the coder, then resets to the attempt's base ref).
+    # Leaf to root (ruling D8): what runs inside the run first, then what it runs in, the channel
+    # to the human last. Every step is attempted and bounded; a failed or skipped one is recorded
+    # with its reason and the next one still runs.
+    #
+    # 1 — the agents. Seats resumed by a message run their own loops beside the run task (E12);
+    # the run task's own turns already ended with the cancel that delivered the stop.
+    await _step("agents interrupted and closed", "cancel_resumed_seats",
+                run_control.cancel_resumed(timeout=_INTERRUPT_STEP_TIMEOUT_S),
+                timeout=_INTERRUPT_STEP_TIMEOUT_S + 1)
+
+    # 2 — every process that can still write: each sandbox REPL and its descendants.
+    if sandboxes:
+        for index, sandbox in enumerate(sandboxes):
+            await _step(f"sandbox {index} killed", f"kill_sandbox_{index}", sandbox.kill_now())
+    else:
+        await _skipped("sandboxes killed", "kill_sandboxes", "this run started no sandbox")
+
+    # 3 — the toolkit: disconnect the coder, then reset the branch to the attempt's base ref
+    # (saving the discarded work as a patch). Nothing can write to it any more.
     session = run_control.authoring_session
     if session is not None:
         run_control.authoring_session = None  # idempotent: never reset twice
-        await _step("authoring_reset", session.aclose(), timeout=_INTERRUPT_RESET_TIMEOUT_S)
+        mark = _ledger_mark(monitor)
+        if await _step("authoring branch reset", "authoring_reset", session.aclose(),
+                       timeout=_INTERRUPT_RESET_TIMEOUT_S):
+            # `aclose` reports a failed reset as an event, never a raise: read what it recorded.
+            new = _ledger_since(monitor, mark)
+            failed = [e for e in new if e.get("event", "").endswith(".error")
+                      and e.get("event", "").startswith("coder.")]
+            patches = [e["data"]["patch"] for e in new
+                       if e.get("event") == "coder.tree_reset" and (e.get("data") or {}).get("patch")]
+            if failed:
+                steps[-1] = (steps[-1][0], False, failed[-1].get("summary", "reset failed"))
+            elif patches:
+                steps[-1] = (steps[-1][0], True, f"patch saved: `{patches[-1]}`")
+            elif not any(e.get("event") == "coder.tree_reset" for e in new):
+                steps[-1] = (steps[-1][0], True, "nothing to reset: no unbanked changes")
+    else:
+        await _skipped("authoring branch reset", "authoring_reset", "no tool was being authored")
 
-    # 3 — close the channels, then record. Recording last so the ledger carries the outcome of
-    # every step above, including any that timed out.
-    await _step("mcp_shutdown", mcp_client.shutdown())
-    closer = getattr(human_handler, "shutdown", None) or getattr(human_handler, "close", None)
-    if closer is not None:
-        await _step("hitl_shutdown", closer())
-    await _record(
-        monitor, "run.interrupted", level=1,
-        summary=f"Run interrupted by {run_control.stopped_by or 'human'} — no report composed",
-        data={"reason": run_control.stop_reason, "by": run_control.stopped_by},
-    )
+    # 4 — the tools server (the shell): closed by this task, which opened it.
+    await _step("MCP closed", "mcp_shutdown", mcp_client.shutdown())
+
+    # 5 — the record, then the checklist to the human while the channel is still open.
+    if fatal is not None:
+        await _record(
+            monitor, "run.error", level=1, summary="Research run failed",
+            data={"error": repr(fatal), "from": "channel"},
+        )
+    else:
+        await _record(
+            monitor, "run.interrupted", level=1,
+            summary=f"Run interrupted by {run_control.stopped_by or 'human'} — no report composed",
+            data={"reason": run_control.stop_reason, "by": run_control.stopped_by},
+        )
     await _record_run_summary(monitor)
+    # Commands still running when the channel closes are cancelled with it: listed, not silent.
+    in_flight = getattr(human_handler, "in_flight_commands", None)
+    cancelled = list(in_flight()) if callable(in_flight) else []
+    if cancelled:
+        await _record(monitor, "run.interrupt.commands_cancelled", level=3,
+                      summary=f"Commands cancelled by the stop: {', '.join(cancelled)}",
+                      data={"commands": cancelled})
+    notify = getattr(human_handler, "notify", None)
+    if notify is not None:
+        await _step("checklist sent", "stop_checklist",
+                    notify(_stop_checklist(steps, fatal, cancelled)))
+    elif human_handler is not None:
+        await _skipped("checklist sent", "stop_checklist", "the connector cannot post a notice")
+
+    # 6 — the channel itself, last: nothing after it can reach the human.
+    closer = (getattr(human_handler, "aclose", None) or getattr(human_handler, "shutdown", None)
+              or getattr(human_handler, "close", None))
+    if closer is not None:
+        await _step("HITL connector closed", "hitl_shutdown", closer())
+    elif human_handler is not None:
+        await _skipped("HITL connector closed", "hitl_shutdown", "the connector has no close")
+    if outer or (me is not None and me.cancelling() > entry):
+        while me is not None and me.cancelling() > entry:
+            me.uncancel()  # one CancelledError carries it; the count returns to where it was
+        raise asyncio.CancelledError("an outer cancel arrived during the stop's cleanup")
+
+
+def _ledger_mark(monitor: RunMonitor) -> tuple[int, int]:
+    """Where the ledger ends now: (JSONL byte size, in-memory event count)."""
+    path = getattr(monitor, "jsonl_path", None)
+    size = path.stat().st_size if path is not None and path.exists() else 0
+    return size, len(getattr(monitor, "events", ()))
+
+
+def _ledger_since(monitor: RunMonitor, mark: tuple[int, int]) -> list[dict]:
+    """The events recorded after ``mark``: from the JSONL (every level), else from memory."""
+    path = getattr(monitor, "jsonl_path", None)
+    if path is not None and path.exists():
+        with path.open("rb") as handle:
+            handle.seek(mark[0])
+            tail = handle.read().decode("utf-8", errors="replace")
+        events = []
+        for line in tail.splitlines():
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                continue
+        return events
+    return [e.model_dump(mode="json") for e in list(getattr(monitor, "events", ()))[mark[1]:]]
+
+
+def _spend_cancels(task: asyncio.Task | None) -> bool:
+    """Spend any cancel still counted on ``task`` after the stop's own was delivered — an outer
+    cancel (a caller's timeout) that landed with it — and say whether there was one, so the
+    cleanup runs whole and honours it at the end."""
+    pending = False
+    while task is not None and task.cancelling() > 0:
+        task.uncancel()
+        pending = True
+    return pending
+
+
+def _stop_checklist(
+    steps: list[tuple[str, bool, str]], fatal: BaseException | None, cancelled: list[str] = (),
+) -> str:
+    """The landing message: every teardown step so far, in order — ✓, ✗ with the reason it failed,
+    or – with the reason it was skipped — then the commands the stop cancelled."""
+
+    def line(what: str, done: bool, detail: str) -> str:
+        if detail.startswith("skipped: "):
+            return f"{what} – skipped ({detail.removeprefix('skipped: ')})"
+        return f"{what} {'✓' if done else '✗'}" + (f" ({detail})" if detail else "")
+
+    by = "the failure" if fatal is not None else "/stop"
+    parts = [line(*step) for step in steps] + [
+        f"{command} answer – cancelled by {by}" for command in cancelled
+    ]
+    head = (
+        f"The run failed ({type(fatal).__name__}: {fatal}); cleanup:"
+        if fatal is not None else "/stop landed; cleanup:"
+    )
+    ok = all(done or detail.startswith("skipped") for _, done, detail in steps)
+    tail = "cleanup complete" if ok else "cleanup finished with failures"
+    return f"{head}\n" + " → ".join([*parts, tail])
 
 
 async def _record_run_summary(monitor: RunMonitor) -> None:

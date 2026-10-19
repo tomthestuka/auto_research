@@ -17,6 +17,7 @@ PromptRole = Literal[
     "coder",
     "status_monitor",
     "compactor",
+    "session_compactor",
 ]
 
 PROMPT_FILENAMES: dict[PromptRole, str] = {
@@ -38,6 +39,9 @@ PROMPT_FILENAMES: dict[PromptRole, str] = {
     # Summarises one finished authoring link into the outcome sentence the lead reads in place
     # of the coding transcript. A runtime LLM like any other, so its instructions live here.
     "compactor": "compactor.md",
+    # Condenses the middle of a long turn (B6/B7): the instructions of Anthropic's server-side
+    # compaction and the system prompt of the runtime's own summariser for every other provider.
+    "session_compactor": "session_compactor.md",
 }
 
 FORBIDDEN_RUNTIME_REFERENCES = ("CLAUDE.md", "DOCS.md", "AGENTS.md")

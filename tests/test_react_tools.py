@@ -167,8 +167,11 @@ def test_open_paper_no_longer_caps_size_itself(tmp_path):
     assert [d.path for d in out.documents] == [big]
 
 
-def test_react_threads_documents_into_subsequent_calls(tmp_path):
-    """A document a tool attaches is re-sent on every later model call and returned."""
+def test_react_nests_a_document_in_the_result_that_opened_it_once(tmp_path):
+    """R2: a document a tool attaches rides that tool's result, at its place in the conversation,
+    and is not re-attached at call time; reopening it while it is carried attaches nothing more."""
+    from auto_research.models.types import ToolResultMessage
+
     pdf = tmp_path / "p.pdf"
     pdf.write_bytes(b"%PDF-1.5\n")
     doc = document_from_file(pdf)
@@ -189,29 +192,31 @@ def test_react_threads_documents_into_subsequent_calls(tmp_path):
     class _FakeModel:
         def __init__(self):
             self.documents_per_call: list[list] = []
+            self.sent: list[list] = []
             self._calls = 0
 
         async def call(self, messages, *, schema=None, tools=None, tool_choice="auto",
                        images=(), documents=(), cache_prefix=False):
             self.documents_per_call.append(list(documents))
+            self.sent.append(list(messages))
             self._calls += 1
-            if self._calls == 1:
-                return ModelResponse(
-                    tool_calls=[ToolCall(id="c1", name="open_paper", arguments={"path": str(pdf)})]
-                )
+            if self._calls <= 2:
+                return ModelResponse(tool_calls=[ToolCall(
+                    id=f"c{self._calls}", name="open_paper", arguments={"path": str(pdf)})])
             return ModelResponse(content="done")
 
     model = _FakeModel()
     agent = ReviewerAgent(model=model, prompt="p")
 
     messages, figures, documents = asyncio.run(
-        agent._react(seed_messages=[], tools=_FakeTools(), action="review", cap=3)
+        agent._react(seed_messages=[], tools=_FakeTools(), action="review", cap=4)
     )
 
-    # First call saw no documents; the second (after open_paper) saw the attached PDF.
-    assert model.documents_per_call[0] == []
-    assert [d.sha256 for d in model.documents_per_call[1]] == [doc.sha256]
-    # The accumulated documents are returned for the terminal structured call.
+    assert model.documents_per_call == [[], [], []], "nothing rides the call-time channel"
+    nested = [[d.sha256 for p in m.results for d in p.documents]
+              for m in model.sent[2] if isinstance(m, ToolResultMessage)]
+    assert nested == [[doc.sha256], []], "attached at the first open, not again"
+    # The documents the turn opened are still returned.
     assert [d.sha256 for d in documents] == [doc.sha256]
 
 
@@ -833,7 +838,7 @@ def test_compose_declares_the_tools_the_loop_ACTUALLY_had():
 
     `test_compose_declares_loop_tools.py` proves both call sites name the same expression. That
     is not enough when the expression is a **mutable provider**: the lead's `adjudicate` attaches
-    a report workspace (adding `edit_report`/`review_report`) for the loop and detaches it in a
+    a report workspace (adding `write_report`/`edit_report`) for the loop and detaches it in a
     `finally`, so `self.tools` names one object whose `tool_definitions()` shrinks in between.
     Composing after the detach declares a set missing tools the replayed trajectory names — the
     "Tool reference 'x' not found in available tools" run-killer (2026-07-29).

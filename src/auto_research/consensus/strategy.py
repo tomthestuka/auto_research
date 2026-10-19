@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from auto_research.agents.roles import ProviderTurnFailed
 from auto_research.monitor import RunMonitor
 from auto_research.schemas import (
     AnalysisTask,
@@ -159,7 +160,6 @@ class DebateToConverge:
 
         # --- initial reports (each worker runs its own tool loop internally) ---
         reports = await self._initial_reports(workers, task)
-        task = self._augment_with_peer_tools(workers, task)
 
         if self.toolkit_root is None:
             author_budget = 0
@@ -169,10 +169,15 @@ class DebateToConverge:
             author_budget = max(0, self.tool_author_cap - self._credits.spent)
         debate_round = 0
         while True:
+            # Only the workers that filed reach the lead (D1): a worker whose turn a provider
+            # error ended filed nothing, and nothing is filed on its behalf. The lead is told who
+            # is missing, so a thinner set reads as a failure and never as agreement.
+            sources, filed = _filed(workers, reports)
+            await self._notify_lead(lead, workers, reports)
             outcome = await lead.run_cycle(
                 task,
-                reports,
-                sources=_source_keys(workers),
+                filed,
+                sources=sources,
                 # Rounds the cap still allows AFTER this cycle — what request_another_round is
                 # measured against, so the handler can refuse it with the cap named.
                 rounds_left=max(0, self.max_rounds - debate_round - 1),
@@ -239,7 +244,6 @@ class DebateToConverge:
                 )
                 task = _augment_with_probe(task, outcome.report)
                 reports = await self._revision_round(workers, task, reports, debate_round)
-                task = self._augment_with_peer_tools(workers, task)
                 continue
 
             if outcome.report is None:
@@ -269,8 +273,8 @@ class DebateToConverge:
         workers: Sequence[WorkerLike],
         task: AnalysisTask,
         outcome: Any,
-        reports_unchanged: Sequence[AnalystReport],
-    ) -> tuple[list[AnalystReport], AnalysisTask]:
+        reports_unchanged: Sequence[AnalystReport | None],
+    ) -> tuple[list[AnalystReport | None], AnalysisTask]:
         """Rerun the workers once on whatever the chain committed (A8/A11).
 
         Each authored link leaves a provenance note on the task so a reran worker uses the new
@@ -321,21 +325,32 @@ class DebateToConverge:
             # existing reports carry the failure notes, so the lead judges them and files its
             # honest terminal in the next cycle (§9.6).
             return list(reports_unchanged), task
-        reports = await self._initial_reports(workers, task)
-        return reports, self._augment_with_peer_tools(workers, task)
+        reports = await self._initial_reports(workers, task, phase="rerun")
+        return reports, task
 
     async def _revision_round(
         self,
         workers: Sequence[WorkerLike],
         task: AnalysisTask,
-        reports: list[AnalystReport],
+        reports: list[AnalystReport | None],
         debate_round: int,
-    ) -> list[AnalystReport]:
-        """One debate round: every worker revises with its peers' reports in view."""
-        revised: list[AnalystReport] = []
+    ) -> list[AnalystReport | None]:
+        """One debate round: every worker revises with its peers' filed reports in view.
+
+        A worker whose previous turn failed is asked again: each round is a new turn (D1).
+        """
+        revised: list[AnalystReport | None] = []
+        # Every worker sees its peers' results of the SAME round — the one their reports came
+        # from — so the snapshot is taken before any worker of this round runs.
+        last_round = _tool_results(workers)
         for index, worker in enumerate(workers):
-            report = await worker.analyze(task, peer_reports=_peers_for(reports, index))
+            report = await self._run_worker(
+                worker, index, self._with_peer_tools(workers, task, index, last_round),
+                debate_round, peer_reports=_peers_for(reports, index), phase="revision",
+            )
             revised.append(report)
+            if report is None:
+                continue
             await _record(
                 self.monitor,
                 "analyst.worker.revision",
@@ -347,13 +362,26 @@ class DebateToConverge:
         return revised
 
     async def _initial_reports(
-        self, workers: Sequence[WorkerLike], task: AnalysisTask
-    ) -> list[AnalystReport]:
-        """Each worker produces an initial report via its own tool loop."""
-        reports: list[AnalystReport] = []
+        self, workers: Sequence[WorkerLike], task: AnalysisTask, *, phase: str = "initial"
+    ) -> list[AnalystReport | None]:
+        """Each worker produces an initial report via its own tool loop.
+
+        Aligned with ``workers`` by index; ``None`` marks a worker whose turn a provider error
+        ended (D1), so the others still report.
+        """
+        reports: list[AnalystReport | None] = []
+        last_round = _tool_results(workers)
         for index, worker in enumerate(workers):
-            report = await worker.analyze(task)
+            # A rerun sees what its peers' tools returned in the round before; a first round has
+            # no peers' round to see.
+            worker_task = (
+                self._with_peer_tools(workers, task, index, last_round)
+                if phase == "rerun" else task
+            )
+            report = await self._run_worker(worker, index, worker_task, 0, phase=phase)
             reports.append(report)
+            if report is None:
+                continue
             await _record(
                 self.monitor,
                 "analyst.worker.initial_report",
@@ -364,27 +392,109 @@ class DebateToConverge:
             )
         return reports
 
-    def _augment_with_peer_tools(
+    async def _run_worker(
+        self,
+        worker: WorkerLike,
+        index: int,
+        task: AnalysisTask,
+        debate_round: int,
+        *,
+        peer_reports: Sequence[AnalystReport] | None = None,
+        phase: str = "initial",
+    ) -> AnalystReport | None:
+        """One worker's turn, or ``None`` when a provider error ended it unfiled (D1, §9.3.8).
+
+        Contains :class:`ProviderTurnFailed` only — the worker's honest failure, already in the
+        ledger as ``analyst_worker.<action>.provider_error``. ``ReactBudgetExhausted`` and every
+        other exception propagate unchanged.
+        """
+        try:
+            if peer_reports is None:
+                return await worker.analyze(task)
+            return await worker.analyze(task, peer_reports=peer_reports)
+        except ProviderTurnFailed as exc:
+            key = getattr(worker, "agent_key", None) or f"analyst_worker_{index}"
+            await _record(
+                self.monitor,
+                "analyst.worker.failed",
+                # The unit's own `provider_error` event is the level-1 line; this one records
+                # that the debate carried on.
+                level=2,
+                summary=(
+                    f"{key} filed no report this round (provider error); the debate carries on "
+                    "with the workers that filed"
+                ),
+                actor=key,
+                data={
+                    "round_index": debate_round,
+                    "error": repr(exc.cause),
+                    "error_type": type(exc.cause).__name__,
+                    "status_code": exc.status_code,
+                    "phase": phase,
+                },
+            )
+            return None
+
+    async def _notify_lead(
+        self,
+        lead: LeadLike,
+        workers: Sequence[WorkerLike],
+        reports: Sequence[AnalystReport | None],
+    ) -> None:
+        """Tell the lead, through its inbox, which workers filed nothing this round (D1).
+
+        A runtime notice (kind ``notice``): navigation, never a receipt. Delivered at the first
+        boundary of the lead's next loop. No-op when every worker filed.
+        """
+        keys = _source_keys(workers)
+        missing = [key for key, report in zip(keys, reports) if report is None]
+        if not missing:
+            return
+        control = getattr(lead, "run_control", None)
+        if control is None and callable(getattr(lead, "ensure_run_control", None)):
+            control = lead.ensure_run_control()
+        if control is None:
+            return
+        lead_key = getattr(lead, "agent_key", None) or "analyst_lead"
+        filed = [key for key, report in zip(keys, reports) if report is not None]
+        text = (
+            f"{', '.join(missing)} filed no report in the latest worker round: a model-provider "
+            f"error ended {'its' if len(missing) == 1 else 'their'} turn. The reports in this "
+            f"cycle come from: {', '.join(filed) if filed else 'no worker'}. Weigh the analysis "
+            "as one with these workers missing."
+        )
+        control.add_steer(lead_key, text, sender="runtime", kind="notice")
+        await _record(
+            self.monitor,
+            "analyst.lead.notice",
+            level=4,
+            summary=f"Lead told that {', '.join(missing)} filed no report this round",
+            actor=lead_key,
+            data={"missing": missing, "filed": filed, "message": text},
+        )
+
+    def _with_peer_tools(
         self,
         workers: Sequence[WorkerLike],
         task: AnalysisTask,
+        index: int,
+        last_round: Sequence[list[ToolResult]] | None = None,
     ) -> AnalysisTask:
-        """Inject a truncated cross-worker tool-result summary into the task.
+        """Worker ``index``'s task: the shared task plus what its PEERS' tools returned last round.
 
-        Reads each worker's ``last_tool_results`` (populated by its ReAct loop).
-        Returns the task unchanged when no worker produced any results.
+        Built per worker and per round from each worker's ``last_tool_results``, never written
+        back into the shared task (B8): the summary used to be appended to the shared
+        ``instructions`` after every round, so it stacked round on round, carried each worker's own
+        calls back to it, and reached the lead too. The worker's own results are in its session.
         """
-        all_results: list[list[ToolResult]] = [
-            list(getattr(worker, "last_tool_results", []) or []) for worker in workers
-        ]
-        summary = _peer_tool_summary(all_results)
+        keys = _source_keys(workers)
+        results = last_round if last_round is not None else _tool_results(workers)
+        peers = [(keys[i], results[i]) for i in range(len(workers)) if i != index]
+        summary = _peer_tool_summary(peers)
         if not summary:
             return task
-        new_instructions = "\n\n".join(filter(None, [task.instructions, summary]))
-        return AnalysisTask(
-            question=task.question,
-            instructions=new_instructions,
-            previous_report=task.previous_report,
+        return task.model_copy(
+            update={"instructions": "\n\n".join(filter(None, [task.instructions, summary]))}
         )
 
 
@@ -400,11 +510,8 @@ def _augment_with_authored_tool(task: AnalysisTask, tool_spec: Any, result: Any)
         f"  intent: {tool_spec.expected_behavior}"
     )
     new_instructions = "\n\n".join(filter(None, [task.instructions, note]))
-    return AnalysisTask(
-        question=task.question,
-        instructions=new_instructions,
-        previous_report=task.previous_report,
-    )
+    # A copy, so no other task field (the literature) is dropped on the way.
+    return task.model_copy(update={"instructions": new_instructions})
 
 
 def _augment_with_failed_tool(task: AnalysisTask, tool_spec: Any, result: Any) -> AnalysisTask:
@@ -425,11 +532,8 @@ def _augment_with_failed_tool(task: AnalysisTask, tool_spec: Any, result: Any) -
         f"  reason: {reason}"
     )
     new_instructions = "\n\n".join(filter(None, [task.instructions, note]))
-    return AnalysisTask(
-        question=task.question,
-        instructions=new_instructions,
-        previous_report=task.previous_report,
-    )
+    # A copy, so no other task field (the literature) is dropped on the way.
+    return task.model_copy(update={"instructions": new_instructions})
 
 
 def _worker_safe_reason(reason: str) -> str:
@@ -477,11 +581,8 @@ def _augment_with_probe(task: AnalysisTask, verdict: Any) -> AnalysisTask:
         )
     )
     new_instructions = "\n\n".join(filter(None, [task.instructions, note]))
-    return AnalysisTask(
-        question=task.question,
-        instructions=new_instructions,
-        previous_report=task.previous_report,
-    )
+    # A copy, so no other task field (the literature) is dropped on the way.
+    return task.model_copy(update={"instructions": new_instructions})
 
 
 def _source_keys(workers: Sequence[Any]) -> list[str]:
@@ -493,22 +594,42 @@ def _source_keys(workers: Sequence[Any]) -> list[str]:
     return [getattr(w, "agent_key", None) or f"analyst_worker_{i}" for i, w in enumerate(workers)]
 
 
-def _peers_for(reports: Sequence[AnalystReport], index: int) -> list[AnalystReport]:
-    return [report for report_index, report in enumerate(reports) if report_index != index]
+def _peers_for(reports: Sequence[AnalystReport | None], index: int) -> list[AnalystReport]:
+    """The other workers' filed reports (a failed worker's ``None`` is no peer report)."""
+    return [
+        report
+        for report_index, report in enumerate(reports)
+        if report_index != index and report is not None
+    ]
+
+
+def _filed(
+    workers: Sequence[Any], reports: Sequence[AnalystReport | None]
+) -> tuple[list[str], list[AnalystReport]]:
+    """The source keys and reports of the workers that filed, aligned (D1)."""
+    pairs = [
+        (key, report) for key, report in zip(_source_keys(workers), reports) if report is not None
+    ]
+    return [key for key, _ in pairs], [report for _, report in pairs]
 
 
 _TOOL_STDOUT_LIMIT = 400  # chars per result for cross-worker sharing
 
 
-def _peer_tool_summary(all_results: list[list[ToolResult]]) -> str:
-    """Build a truncated shared summary of all workers' tool results."""
-    if not any(all_results):
+def _tool_results(workers: Sequence[Any]) -> list[list[ToolResult]]:
+    """Each worker's latest tool results, copied (a snapshot of one round)."""
+    return [list(getattr(worker, "last_tool_results", []) or []) for worker in workers]
+
+
+def _peer_tool_summary(peers: Sequence[tuple[str, list[ToolResult]]]) -> str:
+    """A truncated summary of the given peers' tool results, labelled by each peer's key."""
+    if not any(results for _, results in peers):
         return ""
     parts: list[str] = ["Peer tool execution summary (truncated):"]
-    for worker_index, results in enumerate(all_results):
+    for label, results in peers:
         if not results:
             continue
-        parts.append(f"  Worker {worker_index + 1}:")
+        parts.append(f"  {label}:")
         for r in results:
             status = "OK" if r.exit_code == 0 else f"FAILED({r.exit_code})"
             stdout_snippet = r.stdout[:_TOOL_STDOUT_LIMIT] if r.stdout else ""

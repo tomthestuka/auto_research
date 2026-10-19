@@ -48,13 +48,17 @@ class LiteratureReport(MessageModel):
     summary: str = Field(
         default="",
         description=(
-            "The report's abstract: what was searched, what was read, and what the research "
-            "establishes for this request, in prose."
+            "A briefing of 3–5 sentences: what was searched, what was read, and the headline of "
+            "what the research establishes for this request. The claims themselves go in "
+            "findings."
         ),
     )
     findings: list[LiteratureFinding] = Field(
         default_factory=list,
-        description="The claims the research supports, each bound to the documents behind it.",
+        description=(
+            "The results: one item per claim the research supports, each bound to the documents "
+            "behind it."
+        ),
     )
     gaps: list[str] = Field(
         default_factory=list,

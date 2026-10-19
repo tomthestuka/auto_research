@@ -227,7 +227,8 @@ def provider_retry_policy() -> ProviderRetryPolicy:
 class ContextEditingConfig(NamedTuple):
     """Anthropic provider-native context-editing settings (``context_mgmt_*`` keys).
 
-    The ``clear_tool_uses`` strategy clears the *oldest tool RESULTS* server-side once a
+    The ``clear_tool_uses`` strategy clears the *oldest tool results* — and, with
+    ``clear_tool_inputs``, the calls' arguments too — server-side once a
     request crosses ``trigger_tokens`` input tokens, keeping the last ``keep_tool_uses``
     tool results verbatim and clearing at least ``clear_at_least_tokens`` per pass so the
     (unavoidable) prompt-cache invalidation is amortized over enough reclaimed tokens to be
@@ -244,7 +245,15 @@ class ContextEditingConfig(NamedTuple):
     trigger_tokens: int
     clear_at_least_tokens: int
     keep_tool_uses: int
+    clear_tool_inputs: bool = False
+    exclude_tools: tuple[str, ...] = ()
 
+
+#: Tools whose calls and results stay whole under clearing (human ruling B11, 2026-10-18): the
+#: channel texts, which mint no receipt and cannot be read again. Everything receipt-backed, the
+#: report tools and `view_receipt` may be cleared. The provider's tool-search tool joins them in the
+#: adapter, since a discovered tool stays callable only while its discovery blocks survive.
+CONTEXT_EDITING_EXCLUDED_TOOLS: tuple[str, ...] = ("message", "wait_for_reply")
 
 _CONTEXT_EDITING_DEFAULTS = ContextEditingConfig(
     enabled=False,
@@ -253,6 +262,8 @@ _CONTEXT_EDITING_DEFAULTS = ContextEditingConfig(
     trigger_tokens=120000,
     clear_at_least_tokens=20000,
     keep_tool_uses=3,
+    clear_tool_inputs=False,
+    exclude_tools=CONTEXT_EDITING_EXCLUDED_TOOLS,
 )
 
 
@@ -262,7 +273,9 @@ def context_editing_config() -> ContextEditingConfig:
     Keys: ``context_mgmt_enabled`` (default False — a config lacking the key keeps the
     non-beta path, byte-identical to before), ``context_mgmt_trigger_tokens`` (default
     120000), ``context_mgmt_clear_at_least_tokens`` (default 20000), ``context_mgmt_keep_tool_uses``
-    (default 3). The protocol strings ``context_mgmt_beta_header`` and ``context_mgmt_strategy``
+    (default 3), ``context_mgmt_clear_tool_inputs`` (a boolean, default False; true clears the
+    calls' arguments with their results), ``context_mgmt_exclude_tools`` (a list of names, default
+    :data:`CONTEXT_EDITING_EXCLUDED_TOOLS`). The protocol strings ``context_mgmt_beta_header`` and ``context_mgmt_strategy``
     are also overridable here (they carry Anthropic's dated beta identifiers, updatable without
     code when Anthropic bumps them) but default in code and stay out of the sample config to
     keep it clean. Missing/malformed values fall back per-field, so an older config keeps working.
@@ -292,7 +305,26 @@ def context_editing_config() -> ContextEditingConfig:
         keep_tool_uses=_read(
             "context_mgmt_keep_tool_uses", _CONTEXT_EDITING_DEFAULTS.keep_tool_uses, int
         ),
+        # A real boolean only: `bool("false")` is True.
+        clear_tool_inputs=(
+            value
+            if isinstance(value := cfg.get("context_mgmt_clear_tool_inputs"), bool)
+            else _CONTEXT_EDITING_DEFAULTS.clear_tool_inputs
+        ),
+        exclude_tools=_read(
+            "context_mgmt_exclude_tools", _CONTEXT_EDITING_DEFAULTS.exclude_tools, _tool_names
+        ),
     )
+
+
+def _tool_names(value: Any) -> tuple[str, ...]:
+    """A configured list of tool names: one string is one name (never its letters); a list keeps
+    its string entries; anything else raises, so the reader falls back to the default."""
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list | tuple):
+        return tuple(v for v in value if isinstance(v, str) and v)
+    raise TypeError(f"not a list of tool names: {value!r}")
 
 
 class ToolSearchConfig(NamedTuple):
@@ -355,6 +387,59 @@ def tool_search_config() -> ToolSearchConfig:
     )
 
 
+class CompactionConfig(NamedTuple):
+    """When a long turn's middle is condensed (B6, B7; ``compaction_*`` keys).
+
+    A turn is compacted once its prompt reaches ``trigger_fraction`` of its member's input limit
+    (``observability.costs.context_window_for``). Members whose provider is in
+    ``server_providers`` compact on the provider's side (Anthropic ``compact_20260112``, beta
+    ``compact-2026-01-12``: platform.claude.com/docs/en/build-with-claude/compaction-threshold); every
+    other member is condensed by the runtime's ``session_compactor`` role (``agents.compaction``).
+    The provider's trigger may not go below ``min_trigger_tokens`` ("``value`` must be at least
+    50,000 tokens").
+    """
+
+    enabled: bool
+    trigger_fraction: float = 0.9
+    server_providers: tuple[str, ...] = ("anthropic", "openai")
+    beta_header: str = "compact-2026-01-12"
+    strategy: str = "compact_20260112"
+    min_trigger_tokens: int = 50_000
+
+
+_COMPACTION_DEFAULTS = CompactionConfig(enabled=False)
+
+
+def compaction_config() -> CompactionConfig:
+    """Compaction policy from config/orchestration.yaml.
+
+    Keys: ``compaction_enabled`` (a boolean, default False — a config lacking it compacts nothing),
+    ``compaction_trigger_fraction`` (default 0.9, clamped to 0.1–0.99),
+    ``compaction_server_providers`` (default ``[anthropic]``). The protocol strings
+    ``compaction_beta_header`` / ``compaction_strategy`` default in code.
+    """
+    cfg = _orch_config()
+
+    def _read(key: str, fallback, cast):
+        try:
+            return cast(cfg.get(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+
+    enabled = cfg.get("compaction_enabled")
+    return CompactionConfig(
+        enabled=enabled if isinstance(enabled, bool) else _COMPACTION_DEFAULTS.enabled,
+        trigger_fraction=min(0.99, max(0.1, _read(
+            "compaction_trigger_fraction", _COMPACTION_DEFAULTS.trigger_fraction, float
+        ))),
+        server_providers=_read(
+            "compaction_server_providers", _COMPACTION_DEFAULTS.server_providers, _tool_names
+        ),
+        beta_header=_read("compaction_beta_header", _COMPACTION_DEFAULTS.beta_header, str),
+        strategy=_read("compaction_strategy", _COMPACTION_DEFAULTS.strategy, str),
+    )
+
+
 def react_grace_rounds() -> int:
     """Rounds a role gets to summarise after its ReAct budget runs out (``react_grace_rounds``).
 
@@ -364,9 +449,10 @@ def react_grace_rounds() -> int:
     unfiled return that discarded a completed 14-quantity reproduction (2026-09-15) and that the
     ledger could not distinguish from a role never asked to run.
 
-    Applies only where a terminal tool exists. A loop with no terminal tool (the librarian, the
-    co-lead's review, ``drive_authoring``) has no exit to force and its exhaustion is a
-    legitimate end, so it keeps the old behaviour.
+    The same window opens at the absolute ceiling (``react_loop_absolute_cap``), counted in model
+    turns (ruling D4, 2026-10-18); 0 means a terminal loop fails at the cap with no window.
+    Applies only where a terminal tool exists. A loop with no terminal tool (the co-lead's review,
+    ``drive_authoring``) has no exit to force and its exhaustion is a legitimate end.
     """
     cfg = _orch_config()
     try:

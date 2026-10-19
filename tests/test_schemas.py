@@ -349,16 +349,14 @@ def test_needs_human_is_barred_by_the_workers_surface_not_by_the_type():
 
     worker = edit_report_tool_def(WORKER_REPORT_FIELDS, WORKER_STATUS_VALUES)
     lead = edit_report_tool_def(LEAD_REPORT_FIELDS, LEAD_STATUS_VALUES)
-    assert worker["input_schema"]["properties"]["status"]["enum"] == ["succeeded", "failed"]
-    assert lead["input_schema"]["properties"]["status"]["enum"] == [
-        "succeeded", "failed", "needs_human",
-    ]
+    # A7: the surface is the draft document's layout, named in the tool description.
+    assert "# status — the outcome, one word: succeeded or failed\n" in worker["description"]
+    assert "succeeded or failed or needs_human" in lead["description"]
     # ...and the two surfaces are disjoint where they must be: a worker is never offered the
     # lead's decision fields, and the lead is never offered the worker's request-a-tool field.
-    worker_props = set(worker["input_schema"]["properties"])
-    lead_props = set(lead["input_schema"]["properties"])
-    assert {"rework", "rationale", "what_to_probe"}.isdisjoint(worker_props)
-    assert "tool_request" not in lead_props
+    for block in ("# rework", "# rationale", "# what_to_probe"):
+        assert block not in worker["description"] and block in lead["description"]
+    assert "# tool_request" not in lead["description"]
 
 
 def test_every_declared_report_property_is_a_real_field_on_the_model():
@@ -378,10 +376,15 @@ def test_every_declared_report_property_is_a_real_field_on_the_model():
         (WORKER_REPORT_FIELDS, WORKER_STATUS_VALUES),
         (LEAD_REPORT_FIELDS, LEAD_STATUS_VALUES),
     ):
-        declared = set(edit_report_tool_def(fields, statuses)["input_schema"]["properties"])
-        assert declared <= model_fields, f"declared but not on the model: {declared - model_fields}"
-        # Every field the surface names is declared, and nothing else but the figure handle.
-        assert declared == set(fields) | {"cited_figures"}
+        # A7: the surface is the draft document; every block names a real field on the model,
+        # and every field the surface names has a block.
+        from auto_research.agents.react import report_blocks
+
+        blocks = report_blocks(fields)
+        assert {b.field for b in blocks} <= model_fields
+        assert {b.field for b in blocks} == set(fields) | {"cited_figures"}
+        description = edit_report_tool_def(fields, statuses)["description"]
+        assert all(f"# {b.name} —" in description for b in blocks)
     # The status enums are exactly the model's own Literal, split by role.
     from typing import get_args
     literal = set(get_args(AnalystReport.model_fields["status"].annotation))

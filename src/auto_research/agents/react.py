@@ -25,6 +25,19 @@ from typing import Any, Protocol, get_args
 
 from pydantic import ValidationError
 
+from auto_research.agents.report_edit import (
+    ANALYST_BLOCKS,
+    REVIEWER_BLOCKS,
+    WRITE_REPORT_TOOL,
+    Block,
+    blocks_for,
+    change,
+    edit_tool_def,
+    outline,
+    render,
+    reply_lines,
+    write_tool_def,
+)
 from auto_research.provenance import check_report_fields
 from auto_research.provenance.calls import FIGURE_PATH_ARGS, resolve_call_args
 from auto_research.provenance.capture import inputs_before, receipt_call
@@ -340,7 +353,9 @@ _PEER_ROLES = {
     "analyst_worker": "runs the analysis with the toolkit",
 }
 _MESSAGE_KINDS = ("clarify_science", "clarify_code", "blocked")
-#: A text receipt shown by view_receipt past this many characters is cut, with a note.
+#: A text receipt longer than this many characters is shown by view_receipt in numbered windows of at
+#: most this many characters, each naming the offset to continue from (B3); a shorter one, asked
+#: without offset/limit, whole. Lines longer than `_MAX_LINE_CHARS` are split into rows.
 _VIEW_TEXT_CAP = 20_000
 
 
@@ -459,9 +474,10 @@ def view_receipt_tool_def() -> dict:
         "name": VIEW_RECEIPT_TOOL,
         "description": (
             "Show one receipt by its handle: a figure as an image, a text receipt (a tool output, "
-            "a page) as its text. Works for your own receipts, the ones you may cite, and any a "
-            "message you received named. Viewing shows you the content; your report still cites "
-            "only your own evidence."
+            "a page) as its text, a long one page by page. Works for your own receipts, the ones "
+            "you may cite, and any a message you received named; an earlier output shown as one "
+            "line names the handle that reads it back in full. Viewing shows you the content; your "
+            "report still cites only your own evidence."
         ),
         "input_schema": {
             "type": "object",
@@ -469,6 +485,18 @@ def view_receipt_tool_def() -> dict:
                 "handle": {
                     "type": "string",
                     "description": "The receipt handle, e.g. 'analyst_worker_0:f3'.",
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": (
+                        "For a text receipt: the line to start from (1 = the first). A long text "
+                        "comes back in numbered windows, each ending with the offset to continue "
+                        "from."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "For a text receipt: how many lines to show (default 1000).",
                 },
             },
             "required": ["handle"],
@@ -524,11 +552,35 @@ async def execute_view_receipt(
             "bytes are not text to show here."
         )
     text, changed = store.text_with_note(handle) if hasattr(store, "text_with_note") else (store.text(handle), None)
-    text = (f"{changed}\n" if changed else "") + (text or "")
+    text = text or ""
+    head = f"{handle} ({receipt.produced_by}):\n" + (f"{changed}\n" if changed else "")
+    paged = "offset" in arguments or "limit" in arguments or len(text) > _VIEW_TEXT_CAP
+    if not paged:
+        return ToolOutcome(text=f"{head}{text}")
+    try:
+        offset = _int_arg(arguments, "offset", 1)
+        limit = _int_arg(arguments, "limit", _DEFAULT_LINE_LIMIT)
+    except (TypeError, ValueError, OverflowError) as exc:
+        return ToolOutcome(
+            text=f"offset and limit are whole line numbers ({exc}); call view_receipt again with "
+            "integers.",
+            is_error=True,
+        )
+    # A line longer than one row is split into rows, so every character is reachable by offset (a
+    # one-line JSON result of 100k characters had been readable to its first 2,000 only).
+    rows = [
+        line[i:i + _MAX_LINE_CHARS]
+        for line in text.splitlines()
+        for i in range(0, max(len(line), 1), _MAX_LINE_CHARS)
+    ]
+    window = _page(
+        ((row, len(row)) for row in rows), offset, limit, resume_hint="view_receipt",
+        max_chars=_VIEW_TEXT_CAP,
+    )
     note = ""
-    if len(text) > _VIEW_TEXT_CAP:
-        text, note = text[:_VIEW_TEXT_CAP], f"\n\n[… cut at {_VIEW_TEXT_CAP} characters]"
-    return ToolOutcome(text=f"{handle} ({receipt.produced_by}):\n{text}{note}")
+    if window["start_line"] < max(1, offset):
+        note = f"[the receipt has {len(rows)} lines; here is the last]\n"
+    return ToolOutcome(text=f"{head}{note}{window['content']}")
 
 
 async def execute_wait_for_reply(
@@ -837,7 +889,7 @@ async def execute_web_fetch(web_source: Any | None, arguments: Mapping[str, Any]
 
 
 # ----------------------------------------------------------------------------
-# Inter-LLM report authoring — edit_report / review_report (V-4). Every analyst report
+# Inter-LLM report authoring — write_report / edit_report (V-4, A7). Every analyst report
 # (worker→lead, lead→reviewer) is a per-round JSONL the agent ReAct-refines through TOOLS,
 # so analysts keep their read-only discipline (the runtime writes; the agent never touches
 # disk). Figures are cited by a per-source catalog handle ([source:index]); the runtime
@@ -846,7 +898,6 @@ async def execute_web_fetch(web_source: Any | None, arguments: Mapping[str, Any]
 # ----------------------------------------------------------------------------
 
 EDIT_REPORT_TOOL = "edit_report"
-REVIEW_REPORT_TOOL = "review_report"
 
 
 #: Which report fields each role's ``edit_report`` declares (A3).
@@ -856,9 +907,9 @@ REVIEW_REPORT_TOOL = "review_report"
 #: instead of asking). The alternative — a subclass per role — would have widened ``status`` in a
 #: subtype, so anything typed as the worker's report could receive a value the worker may not file.
 #:
-#: Every name here must be a real field on the report model, and every field's prose is read from
-#: that model's own ``Field(description=...)``; ``test_report_authoring.py`` pins both, so the two
-#: roles' view of one object cannot drift the way it did before the forms carried descriptions.
+#: Every name here must be a real field on the report model with a block in the report document
+#: (``report_edit.ANALYST_BLOCKS``, whose hints the tool descriptions list); ``test_schemas.py``
+#: pins both, so the two roles' view of one object cannot drift.
 WORKER_REPORT_FIELDS: tuple[str, ...] = (
     "summary", "findings", "uncertainty", "status", "tool_request",
 )
@@ -874,24 +925,21 @@ LEAD_STATUS_VALUES: tuple[str, ...] = ("succeeded", "failed", "needs_human")
 
 @dataclass
 class ReportWorkspace:
-    """Per-round report-authoring state wired onto a provider for edit_report/review_report.
+    """Per-round report-authoring state wired onto a provider for write_report/edit_report.
 
-    The disciplined write path: the agent never writes files — ``edit_report`` validates its
-    args into ``report_model``, resolves ``cited_figures`` against ``catalog``, and writes the
-    per-round JSONL to ``report_path``. ``review_report`` reads the draft back and shows the
-    citable catalog (all its figures attached as images). ``catalog`` maps a source name
-    (``"self"`` for a worker; worker keys for the lead) → that source's append-only figure list;
-    ``source_reports`` holds subordinate reports for ``review_report(source)``; ``prior_report``
-    is the agent's own last-round report (the base ``review_report(None)`` shows before any edit
-    this round); ``written_report`` is set by ``edit_report`` so ``analyze``/``adjudicate`` read
-    the persisted result back.
+    The disciplined write path: the agent never writes files — ``write_report``/``edit_report``
+    parse the draft document into ``report_model``, resolve its figure lines against ``catalog``,
+    and write the per-round JSONL to ``report_path``. ``catalog`` maps a source name (``"self"``
+    for a worker; worker keys for the lead) → that source's append-only figure list, whose labels
+    reach the model where the figures first appear (a tool result, the lead's task), B18;
+    ``prior_report`` is the agent's own last-round report; ``written_report`` is set by each
+    accepted write or edit so ``analyze``/``run_cycle`` read the persisted result back.
     """
 
     report_path: Path
     report_model: type  # e.g. AnalystReport — validated in execute_edit_report
     catalog: dict[str, list[FigureRef]]
     own_source: str = "self"
-    source_reports: dict[str, Any] = field(default_factory=dict)
     prior_report: Any | None = None
     written_report: Any | None = None
     # Fields carried through edit_report from the tool args onto the report model, and the
@@ -911,11 +959,8 @@ class ReportWorkspace:
     # check, ``report -> problems``; it then replaces the default field walk, both in edit_report's
     # notes and at turn_end, so the report is checked once.
     provenance_check: Callable[[Any], list[str]] | None = None
-    # How review_report shows this role's own draft, when the default (summary / findings /
-    # numbered figures) does not fit its report — the reviewer shows its rendered pages.
-    draft_view: Callable[[Any], tuple[str, list[FigureRef]]] | None = None
-    # edit_report's description, when the analysts' wording (cited_figures, [source:index])
-    # does not describe this role's report.
+    # The text edit_report and write_report add after the document layout, when the analysts'
+    # wording (figure handles, receipts) does not describe this role's report (the reviewer's).
     edit_description: str | None = None
 
 
@@ -941,7 +986,8 @@ def report_provenance_problems(workspace: "ReportWorkspace | None", report: Any)
         if not path.is_file():
             problems.append(
                 f"Figure {index} ({getattr(figure, 'caption', '')}) points at {path}, which is not a file "
-                "on disk. Re-cite it from your catalog with review_report, or drop it."
+                "on disk. Place another figure from your catalog by its label, or take its line out "
+                "of # figures."
             )
     custom = getattr(workspace, "provenance_check", None)
     if custom is not None:
@@ -1010,54 +1056,6 @@ def resolve_figure_citations(
         seen.add(key)
         figures.append(fig)
     return figures, notes
-
-
-def _catalog_menu(catalog: Mapping[str, list[FigureRef]]) -> tuple[str, list[FigureRef]]:
-    """Render the citable catalog as a per-source menu (text) + display-copy images.
-
-    Each figure is addressed by its selection handle ``[source:index]`` — both in the text and
-    on the image caption — so the model picks unambiguously. Empty sources are skipped.
-    """
-    lines: list[str] = []
-    images: list[FigureRef] = []
-    for source, figs in catalog.items():
-        if not figs:
-            continue
-        lines.append(f"Source {source} ({len(figs)} figure(s)):")
-        for i, fig in enumerate(figs, 1):
-            lines.append(f"  [{source}:{i}] {fig.caption}  (from {fig.produced_by})")
-            images.append(fig.model_copy(update={"caption": f"[{source}:{i}] {fig.caption}"}))
-    return ("\n".join(lines) or "(no figures produced yet)"), images
-
-
-def _report_view(report: Any) -> tuple[str, list[FigureRef]]:
-    """Render a finished report as prose + a numbered ``Figure N`` manifest + display-copy images.
-
-    The report-local numbering (Figure 1 = ``figures[0]``) matches the prose, and each attached
-    image caption is prefixed ``Figure N —`` so the reader lines images up with the prose (V-4).
-    """
-    parts: list[str] = []
-    summary = getattr(report, "summary", None)
-    if summary:
-        parts.append(f"summary: {summary}")
-    findings = getattr(report, "findings", None)
-    if findings:
-        parts.append("findings:\n" + "\n".join(f"  - {x}" for x in findings))
-    uncertainty = getattr(report, "uncertainty", None)
-    if uncertainty:
-        parts.append(f"uncertainty: {uncertainty}")
-    status = getattr(report, "status", None)
-    if status and status != "succeeded":
-        parts.append(f"status: {status}")
-    images: list[FigureRef] = []
-    figures = getattr(report, "figures", None) or []
-    if figures:
-        manifest = ["figures in this report:"]
-        for n, fig in enumerate(figures, 1):
-            manifest.append(f"  Figure {n}: {fig.caption}  (from {fig.produced_by})")
-            images.append(fig.model_copy(update={"caption": f"Figure {n} — {fig.caption}"}))
-        parts.append("\n".join(manifest))
-    return ("\n\n".join(parts) or "(empty report)"), images
 
 
 FILE_EDIT_TOOL = "file_edit"
@@ -1204,7 +1202,9 @@ def turn_end_tool_def() -> dict:
 
 
 async def execute_turn_end(
-    validator: Callable[[], list[str]] | None, arguments: Mapping[str, Any]
+    validator: Callable[[], list[str]] | None,
+    arguments: Mapping[str, Any],
+    warnings: Callable[[], list[str]] | None = None,
 ) -> ToolOutcome:
     """Accept the turn, or reject it naming exactly what is missing (F5c).
 
@@ -1217,19 +1217,27 @@ async def execute_turn_end(
     calls this repeatedly without editing anything spins for free, bounded only by
     ``react_loop_absolute_cap``. The rejection always names a reason, which is what makes that
     unlikely for a cooperating model.
+
+    ``warnings`` (ruling 2026-10-18) are shown and never refuse: beside the problems on a
+    rejection, and after "Turn ended." on an accepted turn, which files the report as it stands.
     """
     problems = list(validator() if validator is not None else [])
+    notes = list(warnings() if warnings is not None else [])
     if problems:
         return ToolOutcome(
             text=(
                 "Your turn cannot be ended yet:\n"
                 + "\n".join(f"  - {p}" for p in problems)
                 + "\nFix these with your tools, then call turn_end again."
+                + "".join(f"\nAlso noted (a warning; turn_end files the report with it): {w}" for w in notes)
             ),
             is_error=True,
         )
     summary = str(arguments.get("summary") or "").strip()
-    return ToolOutcome(text=f"Turn ended. {summary}".strip())
+    text = f"Turn ended. {summary}".strip()
+    if notes:
+        text += "\nYour report is filed as it stands. Note for your next report: " + " ".join(notes)
+    return ToolOutcome(text=text)
 
 
 def worker_report_problems(workspace: ReportWorkspace | None) -> list[str]:
@@ -1247,19 +1255,31 @@ def worker_report_problems(workspace: ReportWorkspace | None) -> list[str]:
     report = workspace.written_report
     if report is None:
         return [
-            "No report has been written. Call edit_report to write it — that call is the only "
-            "way your report is saved, and nothing is composed on your behalf."
+            "No report has been written. Write it with write_report (or fill the empty draft "
+            "with edit_report) — those calls are the only way your report is saved, and nothing "
+            "is composed on your behalf."
         ]
     problems: list[str] = []
     if not str(getattr(report, "summary", "") or "").strip():
-        problems.append("The report's summary is empty.")
-    if getattr(report, "status", None) is None:
-        problems.append("The report declares no status; state whether the work succeeded.")
+        problems.append(
+            "The report's summary is empty. Write a 3–5-sentence briefing under # summary."
+        )
+    if getattr(report, "status", None) == "succeeded" and not _filled(getattr(report, "findings", None)):
+        # A4: the same door the lead's conclusion already has. A worker's results live in
+        # findings, one per item with its receipts; run 32814459 filed a 'succeeded' worker report
+        # whose 22,033-character summary held every result and whose findings were empty.
+        problems.append(
+            "The report declares status 'succeeded' and lists no findings. Write each result as a "
+            "'- ' item under # findings, one item per result citing its receipts, and keep summary to "
+            "the briefing; when the work could not be completed, declare status 'failed' and say "
+            "in summary what blocked it."
+        )
     uncited = sum(len(figs) for figs in (workspace.catalog or {}).values())
     if uncited and not getattr(report, "figures", None):
         problems.append(
-            f"{uncited} figure(s) are in your catalog and none is cited. Cite the ones your "
-            "prose refers to with edit_report's cited_figures, or say why none apply."
+            f"{uncited} figure(s) are in your catalog and the report places none. List the ones "
+            "your findings rest on as lines under # figures, such as '- [self:1]'; each figure's "
+            "[self:index] label is in the tool result that produced it."
         )
     return problems + report_provenance_problems(workspace, report)
 
@@ -1301,8 +1321,9 @@ def lead_turn_problems(cycle: "LeadCycle | None", workspace: "ReportWorkspace | 
     report = getattr(workspace, "written_report", None) if workspace is not None else None
     if workspace is not None and report is None:
         return [
-            "No report has been written. Call edit_report to write it — that call is the only way "
-            "your report is saved, and nothing is composed on your behalf."
+            "No report has been written. Write it with write_report (or fill the empty draft "
+            "with edit_report) — those calls are the only way your report is saved, and nothing "
+            "is composed on your behalf."
         ]
     if report is not None:
         if getattr(report, "rework", False):
@@ -1325,11 +1346,23 @@ def lead_turn_problems(cycle: "LeadCycle | None", workspace: "ReportWorkspace | 
                 )
         else:
             if not str(getattr(report, "summary", "") or "").strip():
-                problems.append("The report's summary is empty.")
-            if not (getattr(report, "findings", None) or []):
                 problems.append(
-                    "Your report concludes the analysis but lists no findings. State what the "
-                    "work established, or set rework=true if it did not establish anything yet."
+                    "The report's summary is empty. Write a 3–5-sentence briefing under "
+                    "# summary."
+                )
+            if not _filled(getattr(report, "findings", None)):
+                # Offer the rework route only while a round remains: at the cap it is refused.
+                route = (
+                    "; or set rework to true, with # rationale and # what_to_probe, when the "
+                    "work has not established anything yet."
+                    if cycle is None or cycle.rounds_left > 0 else
+                    ". No debate rounds remain, so a finding may state what is not settled, "
+                    "citing the receipts it rests on."
+                )
+                problems.append(
+                    "Your report concludes the analysis (rework false) but lists no findings. Write "
+                    "each result as a '- ' item under # findings, one item per result citing its "
+                    "receipts, and keep summary to the briefing" + route
                 )
         problems.extend(report_provenance_problems(workspace, report))
     if cycle is not None and cycle.session_open:
@@ -1341,26 +1374,51 @@ def lead_turn_problems(cycle: "LeadCycle | None", workspace: "ReportWorkspace | 
     return problems
 
 
-def _model_field_schema(model: type, name: str) -> dict:
-    """``model``'s field ``name`` as a tool property: its own JSON Schema, references inlined.
+#: What a placed figure's handle names, per surface (A1): a worker places only its own figures;
+#: the lead places each worker's, by that worker's key.
+_FIGURE_SOURCE_WORKER = (
+    "Each figure line is '- [self:index]', the label the tool result that produced the figure "
+    "gives it. When your catalog holds figures, place at least one; turn_end checks this."
+)
+_FIGURE_SOURCE_LEAD = (
+    "Each figure line names the worker whose figure it is, as your task's figure_catalog labels "
+    "it: '- [analyst_worker_0:3]'."
+)
 
-    How a role whose report is not an ``AnalystReport`` (the reviewer's, the librarian's) gets an
-    ``edit_report`` without forking it: the property and its description come from the model's
-    ``Field(description=…)``, the same single source the lead forms read.
-    """
-    full = model.model_json_schema()
-    defs = full.get("$defs", {})
+#: What the analysts' edit tools add after the layout: how numbers and figures are cited.
+_ANALYST_EVIDENCE = (
+    "Every number in your prose comes from a receipt: each tool result is labelled "
+    "[receipt <handle>], and a finding cites the receipts its numbers come from as [handle] (or "
+    "pins one exact span as {{handle \"copied text\"}}). Copy numbers exactly as the receipt prints "
+    "them, sign and digits included; compute any derived value with a tool so the calculation has "
+    "its own receipt. turn_end refuses a number that no receipt the text cites carries, naming it."
+)
 
-    def inline(node: Any) -> Any:
-        if isinstance(node, dict):
-            if "$ref" in node:
-                return inline(defs[node["$ref"].rsplit("/", 1)[-1]])
-            return {k: inline(v) for k, v in node.items() if k not in ("title", "default")}
-        if isinstance(node, list):
-            return [inline(v) for v in node]
-        return node
 
-    return inline(full["properties"][name])
+def report_blocks(prose_fields: Sequence[str], report_model: type | None = None) -> tuple[Block, ...]:
+    """The document blocks of a report surface (A7): the analysts' (figures always), else the
+    reviewer's. A surface field with no block is a typo in a surface constant and raises."""
+    if report_model is None or _is_figured(report_model):
+        blocks = blocks_for(prose_fields, ANALYST_BLOCKS, always=("cited_figures",))
+    else:
+        blocks = blocks_for(prose_fields, REVIEWER_BLOCKS)
+    missing = set(prose_fields) - {b.field for b in blocks}
+    if missing:  # pragma: no cover — caught at import by the tests
+        raise ValueError(f"the report document has no block for {sorted(missing)}")
+    return blocks
+
+
+def _role_extra(prose_fields: Sequence[str], report_model: type | None, description: str | None) -> str:
+    if description is not None:
+        return description
+    if report_model is not None and not _is_figured(report_model):
+        return ""
+    figures = _FIGURE_SOURCE_LEAD if "rework" in prose_fields else _FIGURE_SOURCE_WORKER
+    return f"{figures} {_ANALYST_EVIDENCE}"
+
+
+def _role_status_values(prose_fields: Sequence[str], status_values: Sequence[str]) -> tuple[str, ...]:
+    return tuple(status_values) if "status" in prose_fields else ()
 
 
 def edit_report_tool_def(
@@ -1369,240 +1427,30 @@ def edit_report_tool_def(
     report_model: type | None = None,
     description: str | None = None,
 ) -> dict:
-    """Definition for ``edit_report`` — the disciplined write path for an ``AnalystReport``.
+    """Definition for ``edit_report`` — Edit over the report draft document (A7).
 
-    The agent supplies the whole report each call (a call overwrites the last), citing figures by
-    their ``[source:index]`` catalog handle in ``cited_figures``; the runtime resolves and places
-    exactly those, in order, and the agent refers to the k-th as "Figure k" in its prose.
-
-    ``prose_fields`` selects which of the report's fields this role may write, and must match the
-    workspace's own ``prose_fields`` — the handler copies exactly those from the arguments, so a
-    property declared here and absent there is a field the model can fill and the runtime drops.
-    ``cited_figures`` is always declared: it is how figures are placed, for every role.
+    ``prose_fields`` selects this role's blocks and must match the workspace's own ``prose_fields``;
+    ``description`` (the reviewer's) replaces the analysts' evidence text after the edit text.
     """
-    declared = {
-        "name": EDIT_REPORT_TOOL,
-        "description": (
-            "Write (or rewrite) your report — this is the ONLY way it is saved; you never write "
-            "files yourself. Provide the full report each call (a call overwrites the last), so "
-            "refine across calls. Cite figures in 'cited_figures' by the [source:index] handle "
-            "from review_report, IN THE ORDER you want them shown — the runtime places exactly "
-            "those and you refer to the k-th as 'Figure k' in your prose; a figure you omit is "
-            "dropped. After writing, call review_report to see the placement and refine until "
-            "every figure is in the right place. Every number in your prose comes from a receipt: "
-            "each tool result is labelled [receipt <handle>], and a finding cites the receipts its "
-            "numbers come from as [handle] (or pins one exact span as {{handle \"copied text\"}}). "
-            "Copy numbers exactly as the receipt prints them, sign and digits included; compute "
-            "any derived value with a tool so the calculation has its own receipt. turn_end "
-            "refuses a number that no receipt the text cites carries, naming it."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "summary": {
-                    "type": "string",
-                    "description": (
-                        "The report summary (prose). Refer to figures as 'Figure 1', 'Figure 2', "
-                        "… matching the order of cited_figures. Its numbers are grounded by every "
-                        "receipt the report cites."
-                    ),
-                },
-                "findings": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Key findings, each a self-contained prose string that cites the receipts "
-                        "its numbers come from as [handle]."
-                    ),
-                },
-                "cited_figures": {
-                    "type": "array",
-                    "description": (
-                        "Figures to place, in citation order. Pick from review_report's catalog by "
-                        "its [source:index] handle; 'Figure k' in your prose is the k-th entry here."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "source": {
-                                "type": "string",
-                                "description": "Catalog source, e.g. 'self' or 'analyst_worker_0'.",
-                            },
-                            "index": {
-                                "type": "integer",
-                                "description": "1-based slot within that source (its [source:index] number).",
-                            },
-                        },
-                        "required": ["source", "index"],
-                    },
-                },
-                "uncertainty": {
-                    "type": "string",
-                    "description": "The dominant uncertainties / caveats (optional).",
-                },
-                "status": {
-                    "type": "string",
-                    "enum": ["succeeded", "failed"],
-                    "description": (
-                        "Declare the outcome of YOUR work: 'succeeded' when you completed it, "
-                        "'failed' when you could not. An honest 'failed' is a correct, "
-                        "penalty-free answer — never fabricate a result to force 'succeeded'. Say "
-                        "in the summary what blocked you and what a person would need to do."
-                    ),
-                },
-                "tool_request": {
-                    "type": "object",
-                    "description": (
-                        "Raise ONLY when the toolkit lacks a capability the task needs (or an "
-                        "existing tool misbehaves); otherwise omit. The analyst lead finalises the "
-                        "tool from this."
-                    ),
-                    "properties": {
-                        "request_kind": {
-                            "type": "string",
-                            "enum": ["new_capability", "fix_existing"],
-                        },
-                        "science_context": {
-                            "type": "string",
-                            "description": "What is being measured; why the toolkit can't do it.",
-                        },
-                        "expected_behavior": {
-                            "type": "string",
-                            "description": "Prose signature + I/O the tool should provide.",
-                        },
-                        "proposed_tool_name": {
-                            "type": "string",
-                            "description": "A suggested tool/function name (the lead may rename).",
-                        },
-                        "observed_issue": {
-                            "type": "string",
-                            "description": "For fix_existing: the wrong/surprising behaviour observed.",
-                        },
-                        "validation_data": {
-                            "type": "array",
-                            "description": "At least one real ObsID the tool's checks run against.",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "mission": {"type": "string"},
-                                    "obsid": {"type": "string"},
-                                    "synthetic": {"type": "boolean"},
-                                },
-                                "required": ["mission", "obsid"],
-                            },
-                        },
-                        "notes": {"type": "string"},
-                    },
-                    "required": [
-                        "science_context",
-                        "expected_behavior",
-                        "proposed_tool_name",
-                        "validation_data",
-                    ],
-                },
-                # `status` is REQUIRED, not defaulted (F9). The schema default is `failed`, on the
-                # principle that silence is never success — but a default only makes sense for a
-                # report the RUNTIME constructs. For a report the agent writes, leaving it
-                # optional would mark a genuinely successful analysis as failed for a missing
-                # field, the opposite of "the agent declares its own outcome". Caught by
-                # `test_monitor.py::test_run_research_returns_monitor_with_fake_dependencies`,
-                # whose fake omitted it and turned an accepted run into an honest failure.
-                #
-                # The three below are the LEAD's surface only (A3); a worker's call never
-                # declares them, so `WORKER_REPORT_FIELDS` filters them straight back out.
-                "rework": {
-                    "type": "boolean",
-                    "description": (
-                        "Set true to send the analysts back for one more round instead of "
-                        "concluding. When true, say why in rationale and what to look at in "
-                        "what_to_probe; when false, this report is the analysis result and needs "
-                        "summary, findings and status."
-                    ),
-                },
-                "rationale": {
-                    "type": "string",
-                    "description": (
-                        "Why another round is warranted — the evidence gap or disagreement that "
-                        "one more pass would close. Required when rework is true."
-                    ),
-                },
-                "what_to_probe": {
-                    "type": "string",
-                    "description": (
-                        "What the analysts should do next, in their own terms. This text reaches "
-                        "every worker verbatim as their next instruction. Required when rework "
-                        "is true."
-                    ),
-                },
-            },
-            # `summary` and `status` are always required: a report with neither is not a report,
-            # and leaving `status` optional marked a genuinely successful analysis as failed for a
-            # missing field. The rework-conditional requirements are deliberately NOT expressed
-            # here — the schema stays permissive so a partial write mid-turn is legal, and
-            # completeness is `turn_end`'s job (A3/A6). Conditional required-fields is also not
-            # portable across the six vendors.
-            "required": ["summary", "status"],
-        },
-    }
-    if description is not None:
-        declared["description"] = description
-    if report_model is not None and not _is_figured(report_model):
-        # A report that is not the analysts': every property, and which are required, come from
-        # the model itself; there is no figure placement to declare.
-        declared["input_schema"]["properties"] = {
-            name: _model_field_schema(report_model, name) for name in prose_fields
-        }
-        if "status" in prose_fields:
-            declared["input_schema"]["properties"]["status"]["enum"] = list(status_values)
-        declared["input_schema"]["required"] = [
-            name for name in prose_fields if report_model.model_fields[name].is_required()
-        ]
-        return declared
-    properties = declared["input_schema"]["properties"]
-    keep = set(prose_fields) | {"cited_figures"}
-    if report_model is not None:
-        for name in prose_fields:
-            if name not in properties and name in report_model.model_fields:
-                properties[name] = _model_field_schema(report_model, name)
-    unknown = keep - set(properties) - {"cited_figures"}
-    if unknown:  # pragma: no cover — a typo in a surface constant, caught at import by the tests
-        raise ValueError(f"edit_report has no property for {sorted(unknown)}")
-    declared["input_schema"]["properties"] = {
-        name: spec for name, spec in properties.items() if name in keep
-    }
-    if "status" in properties and "status" in keep:
-        declared["input_schema"]["properties"]["status"] = {
-            **properties["status"], "enum": list(status_values),
-        }
-    declared["input_schema"]["required"] = [
-        name for name in ("summary", "status") if name in keep
-    ]
-    return declared
+    return edit_tool_def(
+        EDIT_REPORT_TOOL, report_blocks(prose_fields, report_model),
+        _role_status_values(prose_fields, status_values),
+        _role_extra(prose_fields, report_model, description),
+    )
 
 
-def review_report_tool_def() -> dict:
-    """Definition for ``review_report`` — read a report back with its figures attached (V-4)."""
-    return {
-        "name": REVIEW_REPORT_TOOL,
-        "description": (
-            "Read a report back with its figures attached as images. Call with no argument to see "
-            "your own current draft plus every figure you can cite (each labelled [source:index]) "
-            "— use it to check that each figure is placed right, then edit_report again to refine. "
-            "Pass 'source' (e.g. 'analyst_worker_0') to read a subordinate's finished report."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "source": {
-                    "type": "string",
-                    "description": (
-                        "Whose report to read: omit for your own draft + your citable catalog; a "
-                        "worker key to read that worker's finished report."
-                    ),
-                },
-            },
-        },
-    }
+def write_report_tool_def(
+    prose_fields: tuple[str, ...] = WORKER_REPORT_FIELDS,
+    status_values: tuple[str, ...] = WORKER_STATUS_VALUES,
+    report_model: type | None = None,
+    description: str | None = None,
+) -> dict:
+    """Definition for ``write_report`` — Write the whole report draft document (A7)."""
+    return write_tool_def(
+        report_blocks(prose_fields, report_model),
+        _role_status_values(prose_fields, status_values),
+        _role_extra(prose_fields, report_model, description),
+    )
 
 
 def _is_figured(model: type) -> bool:
@@ -1610,101 +1458,207 @@ def _is_figured(model: type) -> bool:
     return isinstance(model, type) and issubclass(model, FiguredReport)
 
 
-async def _edit_plain_report(workspace: ReportWorkspace, arguments: Mapping[str, Any]) -> ToolOutcome:
-    """``edit_report`` for a report that is not a ``FiguredReport`` (the reviewer's).
+# -- write_report / edit_report: the report as one text document (A5/A7), and its notes (A2) -----
+#
+# One shared implementation (`agents/report_edit.py`) for every role: write_report replaces the
+# draft document, edit_report replaces an exact match in it, and every reply shows the changed lines
+# of the draft as stored. Each refusal names what is wrong and changes nothing. Parameter markup a
+# model writes into a text field is saved as the text it is, by ruling (human, 2026-10-18: "make no
+# special case").
 
-    Exactly the surface fields are copied onto the model; figures, when the model has them, are
-    whatever it declares (for the reviewer, figure receipt handles checked by its own validator).
+
+def _filled(items: Sequence[Any] | None) -> list[Any]:
+    """The items of a list field that say something (a blank finding is no finding)."""
+    return [item for item in (items or []) if str(item).strip()]
+
+
+def _findings_chars(findings: Sequence[Any] | None) -> int:
+    """The characters ``findings`` holds: each item's text, or a literature finding's claim."""
+    return sum(len(str(getattr(item, "claim", item)).strip()) for item in _filled(findings))
+
+
+def report_shape_notes(
+    summary: str | None,
+    findings: Sequence[Any] | None,
+    *,
+    findings_required: bool,
+    carries_results: bool = True,
+    cite: str = "citing its receipts",
+) -> list[str]:
+    """Warnings on a report whose results sit in ``summary`` rather than ``findings`` (A1/A2).
+
+    Never refusals. ``findings_required`` is whether ``turn_end`` will refuse this report with no
+    findings (a worker's or librarian's 'succeeded', a lead's ``rework`` false): then an empty
+    ``findings`` is named with that rule. Otherwise, by ruling (human, 2026-10-18), a summary longer
+    than the findings combined draws a warning — for a report that carries results
+    (``carries_results``: the callers pass ``findings_required``, so an honest 'failed' and a lead's
+    ``rework`` request, which have no results to move, draw none).
+    ``cite`` says how this role's findings cite their support (receipts for the analysts, document
+    handles for the librarian). Shown by ``edit_report`` on every save and by ``turn_end``
+    (:func:`report_warnings`).
     """
-    fields = {
-        key: arguments[key] for key in workspace.prose_fields
-        if key in arguments and arguments[key] is not None
+    if findings_required and not _filled(findings):
+        return [
+            f"findings is empty. Write each result as a '- ' item under # findings, one item per result {cite}, and keep "
+            "summary to the briefing; turn_end refuses this report while findings is empty."
+        ]
+    summary_chars = len(str(summary or "").strip())
+    findings_chars = _findings_chars(findings)
+    if carries_results and summary_chars > findings_chars:
+        return [
+            f"Warning: summary ({summary_chars} characters) is longer than findings "
+            f"({findings_chars} characters combined). summary is a 3–5-sentence briefing; move "
+            f"the results into findings, one item per result {cite}."
+        ]
+    return []
+
+
+def _findings_required(workspace: ReportWorkspace, report: Any) -> bool:
+    """turn_end's rule: a lead's conclusion (rework false) needs findings; any other analyst
+    report needs them when it declares 'succeeded'."""
+    if "rework" in workspace.prose_fields:
+        return not getattr(report, "rework", False)
+    return getattr(report, "status", None) == "succeeded"
+
+
+def _shape_notes_for(workspace: ReportWorkspace, report: Any) -> list[str]:
+    # A report carries results exactly where turn_end requires findings: an honest 'failed' or a
+    # lead's rework request has none to move, so it draws no summary warning.
+    required = _findings_required(workspace, report)
+    return report_shape_notes(
+        getattr(report, "summary", None), getattr(report, "findings", None),
+        findings_required=required, carries_results=required,
+    )
+
+
+def report_warnings(workspace: "ReportWorkspace | None") -> list[str]:
+    """The warnings ``turn_end`` adds for an analyst's written report (it files the report anyway)."""
+    report = _written_report(workspace)
+    if report is None or not _is_figured(workspace.report_model):
+        return []
+    return [note for note in _shape_notes_for(workspace, report) if note.startswith("Warning:")]
+
+
+def _report_values(workspace: ReportWorkspace, report: Any | None) -> dict[str, Any]:
+    """The draft's fields as JSON values, the ones the document renders."""
+    if report is None:
+        return {}
+    # Only what the model wrote: a field left at its default (status 'failed') renders empty.
+    dumped = report.model_dump(mode="json")
+    return {
+        b.field: dumped.get(b.field) if b.field in report.model_fields_set else None
+        for b in _blocks(workspace)
     }
-    try:
-        report = workspace.report_model.model_validate(fields)
-    except Exception as exc:  # noqa: BLE001 — off-schema report → self-correct and call again
-        return ToolOutcome(
-            text=f"edit_report: the report did not validate — fix and call again: {exc}",
-            is_error=True,
-        )
-    workspace.report_path.parent.mkdir(parents=True, exist_ok=True)
-    workspace.report_path.write_text(report.model_dump_json() + "\n", encoding="utf-8")
-    workspace.written_report = report
-    lines = ["Report saved."]
-    provenance = report_provenance_problems(workspace, report)
-    if provenance:
-        lines.append("Provenance — turn_end will refuse until these are fixed:")
-        lines.extend(f"  - {problem}" for problem in provenance)
-    return ToolOutcome(text="\n".join(lines))
+
+
+def _blocks(workspace: ReportWorkspace) -> tuple[Block, ...]:
+    return report_blocks(workspace.prose_fields, workspace.report_model)
+
+
+def report_document(workspace: ReportWorkspace, report: Any | None = None) -> str:
+    """The draft as the one text document the model edits (A7)."""
+    return render(_report_values(workspace, report if report is not None else workspace.written_report),
+                  _blocks(workspace))
+
+
+def _figure_problems(workspace: ReportWorkspace, citations: list[dict]) -> list[str]:
+    """A placed figure the catalog does not hold, named by its line."""
+    problems: list[str] = []
+    for k, entry in enumerate(citations, 1):
+        _, notes = resolve_figure_citations([FigureCitation.model_validate(entry)], workspace.catalog)
+        problems.extend(f"# figures line {k}: {note}" for note in notes)
+    return problems
+
+
+def _draft_outline(workspace: ReportWorkspace, report: Any | None) -> str:
+    # What an empty block reads as, where that is a decision: the default is a value too.
+    unset = {
+        "status": "reads as 'failed'", "rework": "reads as false",
+        "accepted": "reads as false", "assign_to": "no one assigned",
+    }
+    return outline(_report_values(workspace, report), _blocks(workspace), unset)
 
 
 async def execute_edit_report(
-    workspace: ReportWorkspace | None, arguments: Mapping[str, Any]
+    workspace: ReportWorkspace | None, arguments: Mapping[str, Any], tool: str = EDIT_REPORT_TOOL,
 ) -> ToolOutcome:
-    """Validate the report args, resolve figure citations, persist the per-round JSONL (V-4).
+    """Apply one ``edit_report`` (Edit) or ``write_report`` (Write) to the draft and persist it.
 
-    The single disciplined write path: the agent never touches disk. A shape/validation error
-    degrades to an error outcome so the model self-corrects in the loop.
+    The single disciplined write path: the agent never touches disk. A7 (human rulings 2026-10-18):
+    the draft is one text document (``report_edit``); a call that does not apply — old_string
+    missing or not unique, a document that does not parse, an unknown figure, a draft that does not
+    validate — is refused with the reason and nothing changes. The reply shows the changed lines
+    with their context and a one-line outline. Notes on a saved draft: findings empty where turn_end
+    requires them, the summary longer than the findings (ruling A2), provenance, unplaced catalog
+    figures and prose that refers to a figure the report does not place.
     """
     if workspace is None:
-        return ToolOutcome(text="edit_report is not available for this role.", is_error=True)
-    if not _is_figured(workspace.report_model):
-        return await _edit_plain_report(workspace, arguments)
-    cited: list[FigureCitation] = []
-    for entry in arguments.get("cited_figures") or []:
+        return ToolOutcome(text=f"{tool} is not available for this role.", is_error=True)
+    figured = _is_figured(workspace.report_model)
+    blocks = _blocks(workspace)
+    result = change(_report_values(workspace, workspace.written_report), blocks, tool, arguments)
+    problems = list(result.problems)
+    fields = dict(result.values)
+    if not problems and figured:
+        problems.extend(_figure_problems(workspace, fields.get("cited_figures") or []))
+        if not problems:
+            cited = [FigureCitation.model_validate(c) for c in fields.get("cited_figures") or []]
+            figures, _ = resolve_figure_citations(cited, workspace.catalog)
+            fields["figures"] = [f.model_dump(mode="json") for f in figures]
+    status = fields.get("status")
+    if not problems and status is not None and status not in workspace.status_values:
+        # The surface, not the type, is what keeps `needs_human` the lead's (A3).
+        problems.append(
+            f"# status reads {status!r}; this report's status is one of "
+            f"{', '.join(workspace.status_values)}."
+        )
+    report = None
+    if not problems:
         try:
-            cited.append(FigureCitation.model_validate(entry))
-        except Exception as exc:  # noqa: BLE001 — bad handle → tell the model to fix it
-            return ToolOutcome(
-                text=f"edit_report: bad cited_figures entry {entry!r}: {exc}", is_error=True
-            )
-    figures, drop_notes = resolve_figure_citations(cited, workspace.catalog)
-    fields: dict[str, Any] = {
-        key: arguments[key]
-        for key in workspace.prose_fields
-        if key in arguments and arguments[key] is not None
-    }
-    fields["cited_figures"] = [c.model_dump() for c in cited]
-    fields["figures"] = [f.model_dump(mode="json") for f in figures]
-    try:
-        report = workspace.report_model.model_validate(fields)
-    except Exception as exc:  # noqa: BLE001 — off-schema report → self-correct and call again
+            report = workspace.report_model.model_validate(fields)
+        except Exception as exc:  # noqa: BLE001 — off-schema draft → name it and keep the last one
+            problems.append(f"the draft does not validate: {exc}")
+    if problems:
         return ToolOutcome(
-            text=f"edit_report: the report did not validate — fix and call again: {exc}",
+            text=(
+                f"{tool}: nothing changed.\n"
+                + "\n".join(f"  - {p}" for p in problems)
+                + "\n" + _draft_outline(workspace, workspace.written_report)
+                # The draft as stored, text only: what the next old_string is copied from (B18).
+                + "\nThe draft on file reads:\n" + report_document(workspace).rstrip("\n")
+            ),
             is_error=True,
         )
     workspace.report_path.parent.mkdir(parents=True, exist_ok=True)
     workspace.report_path.write_text(report.model_dump_json() + "\n", encoding="utf-8")
     workspace.written_report = report
 
-    lines = [f"Report saved — {len(report.figures)} figure(s) placed:"]
-    for n, fig in enumerate(report.figures, 1):
-        lines.append(f"  Figure {n}: {fig.caption}")
+    # The reply shows the draft as stored and rendered: what the next old_string is copied from.
+    lines = reply_lines(tool, result, report_document(workspace, report))
+    lines.append(_draft_outline(workspace, report))
+    if figured:
+        lines.extend(_shape_notes_for(workspace, report))
     # The same check turn_end runs, reported here as a note while the draft is still being
     # written, so the fix happens now rather than as a refusal at the end.
     provenance = report_provenance_problems(workspace, report)
     if provenance:
         lines.append("Provenance — turn_end will refuse until these are fixed:")
         lines.extend(f"  - {problem}" for problem in provenance)
-    if drop_notes:
-        lines.append("Citations dropped (fix or re-cite): " + "; ".join(drop_notes))
+    if not figured:
+        return ToolOutcome(text="\n".join(lines))
     placed = {(str(f.path), f.sha256) for f in report.figures}
-    uncited = [
-        f"[{source}:{i}] {fig.caption}"
-        for source, figs in workspace.catalog.items()
+    unplaced = [
+        f"[{src}:{i}] {fig.caption[:50]}"
+        for src, figs in workspace.catalog.items()
         for i, fig in enumerate(figs, 1)
         if (str(fig.path), fig.sha256) not in placed
     ]
-    if uncited:
+    if unplaced:
         lines.append(
-            "Not cited (dropped from the report, still citable): " + "; ".join(uncited)
+            "Catalog figures not placed (add a '- [source:index]' line under # figures to place "
+            "one): " + ", ".join(unplaced)
         )
-
-    # Figure-reference guard: if the prose refers to figures the report did not place, warn so the
-    # model re-cites (a warning, not an error — the report is saved). Catches the failure where a
-    # model narrates "Figure 1 … Figure 4" in the summary but leaves cited_figures empty/short, so
-    # the referenced figures point at nothing (CLAUDE.md §13). Both tools are budget-free, so the
-    # model can immediately review_report + edit_report again to fix placement.
+    # Figure-reference guard: prose that refers to a figure the report does not place (§13).
     referenced = _referenced_figure_numbers(
         getattr(report, "summary", None),
         *(getattr(report, "findings", None) or []),
@@ -1714,94 +1668,22 @@ async def execute_edit_report(
     if referenced and (n_placed == 0 or max(referenced) > n_placed):
         catalog_has = any(figs for figs in workspace.catalog.values())
         lines.append(
-            f"Note: your report seems to reference Figure(s) {sorted(referenced)} but attached "
-            f"only {n_placed}. Did you mean that? If you want those figures shown, add them to "
-            "cited_figures"
+            f"Note: your report refers to Figure(s) {sorted(referenced)} and places {n_placed}. "
+            "To show them, add their lines under # figures"
             + (
-                " — you can call review_report to see your catalog and what will be presented."
+                " — each figure's label is where the figure first appeared to you."
                 if catalog_has
-                else " (there are no figures in your catalog yet)."
+                else " (your catalog holds no figures yet)."
             )
         )
     return ToolOutcome(text="\n".join(lines))
 
 
-async def execute_review_report(
+async def execute_write_report(
     workspace: ReportWorkspace | None, arguments: Mapping[str, Any]
 ) -> ToolOutcome:
-    """Read a report back with figures attached (V-4).
-
-    No ``source`` → the agent's own current draft + its citable catalog (every figure attached,
-    ``[source:index]``-labelled). A ``source`` → that subordinate's finished report (numbered
-    ``Figure N`` images). Always attaches figures, unified for self- and upper-review.
-    """
-    if workspace is None:
-        return ToolOutcome(text="review_report is not available for this role.", is_error=True)
-    source = str(arguments.get("source") or "").strip()
-    if source and source not in ("self", workspace.own_source):
-        report = workspace.source_reports.get(source)
-        if report is None:
-            have = ", ".join(workspace.source_reports) or "none"
-            return ToolOutcome(
-                text=f"review_report: no report for source '{source}' (available: {have})",
-                is_error=True,
-            )
-        text, images = _report_view(report)
-        return ToolOutcome(text=f"Report from {source}:\n\n{text}", figures=images)
-
-    draft = workspace.written_report or workspace.prior_report
-    if draft is not None and workspace.draft_view is not None:
-        draft_text, draft_images = workspace.draft_view(draft)
-        text = "Your current report draft:\n\n" + draft_text
-        receipts_text = _receipt_menu(workspace.receipts)
-        if receipts_text:
-            text += "\n\n--- receipts your prose can cite as [handle] ---\n" + receipts_text
-        return ToolOutcome(text=text, figures=draft_images)
-    if draft is not None:
-        draft_text, _ = _report_view(draft)
-        header = "Your current report draft:\n\n" + draft_text
-    else:
-        header = "You have not written a report yet — call edit_report to write one."
-    menu_text, menu_images = _catalog_menu(workspace.catalog)
-    text = (
-        header
-        + "\n\n--- figures you can cite (pick by [source:index], in the order you want them shown) ---\n"
-        + menu_text
-    )
-    receipts_text = _receipt_menu(workspace.receipts)
-    if receipts_text:
-        text += (
-            "\n\n--- receipts your prose can cite as [handle] (numbers must come from these) ---\n"
-            + receipts_text
-        )
-    return ToolOutcome(text=text, figures=menu_images)
-
-
-_RECEIPT_MENU_CAP = 60
-
-
-def _receipt_menu(lookup: Any | None) -> str:
-    """One line per citable receipt: handle, what produced it, and the start of its text."""
-    handles = getattr(lookup, "handles", None)
-    if not callable(handles):
-        return ""
-    listed = handles()
-    lines: list[str] = []
-    for handle in listed[-_RECEIPT_MENU_CAP:]:
-        receipt = lookup.get(handle)
-        if receipt is None:
-            continue
-        marks = f" [{', '.join(receipt.flags)}]" if receipt.flags else ""
-        if receipt.kind == "figure":
-            gist = receipt.caption or ""
-        elif receipt.kind == "data":
-            gist = str(receipt.path)
-        else:
-            gist = " ".join((lookup.text(handle) or "").split())[:100]
-        lines.append(f"  [{handle}] {receipt.kind} from {receipt.produced_by}{marks}: {gist}")
-    if len(listed) > _RECEIPT_MENU_CAP:
-        lines.insert(0, f"  (showing the latest {_RECEIPT_MENU_CAP} of {len(listed)})")
-    return "\n".join(lines)
+    """``write_report``: replace the whole draft document (A7)."""
+    return await execute_edit_report(workspace, arguments, WRITE_REPORT_TOOL)
 
 
 # ----------------------------------------------------------------------------
@@ -2784,9 +2666,9 @@ class SandboxToolProvider:
         self.extra_tools = list(extra_tools)
         # V-4: the agent's append-only figure catalog (its "self" source). Figures produced by
         # tool calls are appended here (deduped by path+sha), so they persist across debate rounds
-        # and the agent can cite them by [self:index] via review_report/edit_report.
+        # and the agent places them by the [self:index] label its tool result names (B18).
         self.figure_sink = figure_sink
-        # V-4: the per-round report-authoring workspace. When set, exposes edit_report/review_report
+        # V-4: the per-round report-authoring workspace. When set, exposes write_report/edit_report
         # so the worker ReAct-refines its report through tools (never writing files itself).
         self.report_workspace = report_workspace
         # Optional Tavily/web QuerySource — when supplied, exposes the shared web_search tool so
@@ -2831,13 +2713,12 @@ class SandboxToolProvider:
             defs.append(web_search_tool_def())
             defs.append(web_fetch_tool_def())
         if self.report_workspace is not None:
-            defs.append(
-                edit_report_tool_def(
-                    self.report_workspace.prose_fields, self.report_workspace.status_values,
-                    self.report_workspace.report_model, self.report_workspace.edit_description,
-                )
+            surface = (
+                self.report_workspace.prose_fields, self.report_workspace.status_values,
+                self.report_workspace.report_model, self.report_workspace.edit_description,
             )
-            defs.append(review_report_tool_def())
+            defs.append(edit_report_tool_def(*surface))
+            defs.append(write_report_tool_def(*surface))
             # The universal terminal (F5c). Declared with the report tools because those are what
             # it validates: without it the loop ended on "no tool calls", and an unwritten report
             # was composed on the model's behalf.
@@ -2864,11 +2745,12 @@ class SandboxToolProvider:
             )
         if name == EDIT_REPORT_TOOL:
             return await execute_edit_report(self.report_workspace, arguments)
-        if name == REVIEW_REPORT_TOOL:
-            return await execute_review_report(self.report_workspace, arguments)
+        if name == WRITE_REPORT_TOOL:
+            return await execute_write_report(self.report_workspace, arguments)
         if name == TURN_END_TOOL:
             return await execute_turn_end(
-                lambda: worker_report_problems(self.report_workspace), arguments
+                lambda: worker_report_problems(self.report_workspace), arguments,
+                lambda: report_warnings(self.report_workspace),
             )
         if name == READ_FILE_TOOL:
             # In this process, checked against the worker's allow-list (it resolves links). The
@@ -3035,14 +2917,16 @@ class SandboxToolProvider:
         if notice:
             header += f"{notice}\n"
         # V-4: accumulate produced figures into the agent's append-only "self" catalog (deduped by
-        # path+sha), so they persist across rounds and stay citable via review_report/edit_report.
+        # path+sha), so they persist across rounds and stay citable by their [self:index] label.
+        figure_labels: list[str] = []
         if self.figure_sink is not None and figures:
-            existing = {(str(f.path), f.sha256) for f in self.figure_sink}
+            existing = {(str(f.path), f.sha256): k for k, f in enumerate(self.figure_sink, 1)}
             for fig in figures:
                 key = (str(fig.path), fig.sha256)
                 if key not in existing:
-                    existing.add(key)
                     self.figure_sink.append(fig)
+                    existing[key] = len(self.figure_sink)
+                figure_labels.append(f"[self:{existing[key]}] {fig.caption}")
         result = ToolResult(
             tool_name=kind,
             stdout=raw.get("stdout", ""),
@@ -3055,6 +2939,10 @@ class SandboxToolProvider:
         text = header + text
         # Surface any dropped figures so the analyst notices its plotter emitted a bad
         # FigureRef (rather than the figure silently vanishing) — never fatal (F4).
+        if figure_labels:
+            # B18: the one place a figure's citable label appears; place it in the report as a
+            # '- [self:k]' line under # figures.
+            text += "\n[figures — place one with its label under # figures] " + " | ".join(figure_labels)
         if figure_notes:
             text += f"\n[figure capture: {len(figure_notes)} dropped] " + " | ".join(figure_notes)
         if provenance_notes:
@@ -3801,7 +3689,7 @@ class ReadOnlyToolProvider:
             writable=[self.editable_file.parent] if self.editable_file is not None else [],
         )
         self.retrieval = retrieval
-        # V-4: the analyst lead's per-round report-authoring workspace (edit_report/review_report).
+        # V-4: the analyst lead's per-round report-authoring workspace (write_report/edit_report).
         # Set per adjudication by the lead (its per-worker figure catalog + subordinate reports);
         # None outside adjudication (so decide_authoring/drive_authoring never see the report tools).
         self.report_workspace = report_workspace
@@ -3929,13 +3817,12 @@ class ReadOnlyToolProvider:
             # found" run-killer (2026-07-29).
             definitions.append(author_chain_tool_def())
         if self.report_workspace is not None:
-            definitions.append(
-                edit_report_tool_def(
-                    self.report_workspace.prose_fields, self.report_workspace.status_values,
-                    self.report_workspace.report_model, self.report_workspace.edit_description,
-                )
+            surface = (
+                self.report_workspace.prose_fields, self.report_workspace.status_values,
+                self.report_workspace.report_model, self.report_workspace.edit_description,
             )
-            definitions.append(review_report_tool_def())
+            definitions.append(edit_report_tool_def(*surface))
+            definitions.append(write_report_tool_def(*surface))
         if self.editable_file is not None:
             definitions.append(file_edit_tool_def(self.editable_file))
         if self.turn_end_validator is not None:
@@ -4050,12 +3937,15 @@ class ReadOnlyToolProvider:
             return await execute_author_chain(self.cycle, arguments)
         if name == EDIT_REPORT_TOOL:
             return await execute_edit_report(self.report_workspace, arguments)
-        if name == REVIEW_REPORT_TOOL:
-            return await execute_review_report(self.report_workspace, arguments)
+        if name == WRITE_REPORT_TOOL:
+            return await execute_write_report(self.report_workspace, arguments)
         if name == FILE_EDIT_TOOL:
             return await execute_file_edit(self.editable_file, arguments, self._guard)
         if name == TURN_END_TOOL:
-            return await execute_turn_end(self.turn_end_validator, arguments)
+            return await execute_turn_end(
+                self.turn_end_validator, arguments,
+                lambda: report_warnings(self.report_workspace),
+            )
         if name in ("read_file", "list_dir"):
             target = Path(str(arguments.get("path", "")))
             if not self._allowed(target):
@@ -4125,7 +4015,7 @@ class ReadOnlyToolProvider:
             if resolved not in self.opened_paths:
                 self.opened_paths.append(resolved)
             return ToolOutcome(
-                text=f"opened '{doc.title}' ({target}); the PDF is attached above.",
+                text=f"opened '{doc.title}' ({target}); the PDF is attached in this conversation.",
                 documents=[doc],
             )
 

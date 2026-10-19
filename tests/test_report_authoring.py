@@ -3,8 +3,9 @@
 Covers the figure-citation contract that replaces figure dedup: an append-only per-source
 catalog, ``{source, index}`` citations resolved to ordered ``report.figures`` (Figure 1 =
 figures[0]), the disciplined ``edit_report`` write (validates + persists a per-round JSONL,
-degrades on bad input), and ``review_report`` (own draft + citable catalog menu, or a
-subordinate's numbered report). No live models — just the resolver + tool executes.
+degrades on bad input). ``review_report`` was erased (B18): a figure's label reaches the model
+where the figure first appears (tests/test_report_edit.py). No live models — just the resolver
+and the tool executes.
 """
 
 import asyncio
@@ -15,11 +16,10 @@ import pytest
 
 from auto_research.agents.react import (
     EDIT_REPORT_TOOL,
-    REVIEW_REPORT_TOOL,
     ReportWorkspace,
     SandboxToolProvider,
     execute_edit_report,
-    execute_review_report,
+    execute_write_report,
     resolve_figure_citations,
 )
 from auto_research.sandbox.workspace import round_report_path
@@ -87,14 +87,10 @@ def test_edit_report_persists_jsonl_and_resolves_citations(tmp_path):
     path = tmp_path / "r.jsonl"
     ws = ReportWorkspace(report_path=path, report_model=AnalystReport, catalog=catalog)
     out = _run(
-        execute_edit_report(
-            ws,
-            {
-                "summary": "PD rises with energy (Figure 1); Q-U consistent (Figure 2).",
-                "findings": ["fit ok"],
-                "cited_figures": [{"source": "self", "index": 1}, {"source": "self", "index": 2}],
-            },
-        )
+        execute_write_report(ws, {"content": (
+            "# summary\nPD rises with energy (Figure 1); Q-U consistent (Figure 2).\n"
+            "# findings\n- fit ok\n# figures\n- [self:1]\n- [self:2]\n"
+        )})
     )
     assert not out.is_error
     # persisted report resolves the two cited figures in order; the third (uncited) is dropped
@@ -102,8 +98,8 @@ def test_edit_report_persists_jsonl_and_resolves_citations(tmp_path):
     assert [f.caption for f in ws.written_report.figures] == ["PCUBE PD/PA", "QU plane"]
     saved = AnalystReport.model_validate_json(path.read_text().strip())
     assert [f.caption for f in saved.figures] == ["PCUBE PD/PA", "QU plane"]
-    assert "Figure 1: PCUBE PD/PA" in out.text
-    assert "Not cited" in out.text and "raw diag" in out.text  # uncited surfaced, not silent
+    assert "figures 2" in out.text  # the draft outline
+    assert "not placed" in out.text and "[self:3]" in out.text  # unplaced surfaced, not silent
 
 
 def test_referenced_figure_numbers_parses_and_ignores_words():
@@ -121,93 +117,53 @@ def test_edit_report_warns_when_prose_references_uncited_figures(tmp_path):
     catalog = {"self": [_fig("a", "PCUBE"), _fig("b", "QU")]}
     ws = ReportWorkspace(report_path=tmp_path / "r.jsonl", report_model=AnalystReport, catalog=catalog)
     out = _run(
-        execute_edit_report(
+        execute_write_report(
             ws,
-            {"summary": "PD rises with energy (Figure 1); the Q-U plane is in Figure 2.",
-             "cited_figures": []},  # the Sonnet failure: references figures, cites none
+            {"content": "# summary\nPD rises with energy (Figure 1); the Q-U plane is in Figure 2.\n"},
+            # the Sonnet failure: references figures, places none
         )
     )
     assert not out.is_error  # a soft note, not a rejection — the report is still saved
     assert ws.written_report is not None and ws.written_report.figures == []
-    assert "Did you mean that?" in out.text and "[1, 2]" in out.text
-    assert "cited_figures" in out.text and "review_report" in out.text  # gentle nudge, not a directive
+    assert "refers to Figure(s) [1, 2] and places 0" in out.text
+    assert "# figures" in out.text  # names the action
 
 
 def test_edit_report_no_warning_when_references_match_placement(tmp_path):
     catalog = {"self": [_fig("a", "PCUBE"), _fig("b", "QU")]}
     ws = ReportWorkspace(report_path=tmp_path / "r.jsonl", report_model=AnalystReport, catalog=catalog)
     out = _run(
-        execute_edit_report(
+        execute_write_report(
             ws,
-            {"summary": "PD rises (Figure 1); Q-U in Figure 2.",
-             "cited_figures": [{"source": "self", "index": 1}, {"source": "self", "index": 2}]},
+            {"content": "# summary\nPD rises (Figure 1); Q-U in Figure 2.\n# figures\n- [self:1]\n- [self:2]\n"},
         )
     )
-    assert not out.is_error and "Did you mean that?" not in out.text  # references match placed figures
+    assert not out.is_error and "refers to Figure(s)" not in out.text  # references match placed figures
 
 
 def test_edit_report_invalid_report_degrades_not_raises(tmp_path):
     ws = ReportWorkspace(report_path=tmp_path / "r.jsonl", report_model=AnalystReport, catalog={"self": []})
-    out = _run(execute_edit_report(ws, {"findings": ["no summary"]}))  # summary is required
-    assert out.is_error and "did not validate" in out.text
+    # a tool request missing its required keys parses but does not validate
+    out = _run(execute_write_report(ws, {"content": "# summary\ns\n# tool_request\nnotes: x\n"}))
+    assert out.is_error and "does not validate" in out.text and "nothing changed" in out.text
     assert not (tmp_path / "r.jsonl").exists()  # nothing persisted on a bad report
 
 
 def test_edit_report_carries_tool_request(tmp_path):
     ws = ReportWorkspace(report_path=tmp_path / "r.jsonl", report_model=AnalystReport, catalog={"self": []})
     out = _run(
-        execute_edit_report(
-            ws,
-            {
-                "summary": "capability missing",
-                "status": "failed",
-                "tool_request": {
-                    "science_context": "need XSPEC polconst fit",
-                    "expected_behavior": "fit tbabs*polconst*powerlaw, return PD/PA",
-                    "proposed_tool_name": "fit_tbabs_polconst_powerlaw",
-                    "validation_data": [{"mission": "ixpe", "obsid": "01002901"}],
-                },
-            },
-        )
+        execute_write_report(ws, {"content": (
+            "# summary\ncapability missing\n# status\nfailed\n# tool_request\n"
+            "science_context: need XSPEC polconst fit\n"
+            "expected_behavior: fit tbabs*polconst*powerlaw, return PD/PA\n"
+            "proposed_tool_name: fit_tbabs_polconst_powerlaw\n"
+            "validation_data: ixpe 01002901\n"
+        )})
     )
     assert not out.is_error
     assert ws.written_report.tool_request is not None
     assert ws.written_report.tool_request.proposed_tool_name == "fit_tbabs_polconst_powerlaw"
     assert ws.written_report.status == "failed"
-
-
-# ── review_report: read-back with figures attached ─────────────────────────────
-
-
-def test_review_report_self_shows_catalog_menu_labeled_by_handle(tmp_path):
-    catalog = {"self": [_fig("a", "PCUBE"), _fig("b", "QU")]}
-    ws = ReportWorkspace(report_path=tmp_path / "r.jsonl", report_model=AnalystReport, catalog=catalog)
-    out = _run(execute_review_report(ws, {}))
-    assert not out.is_error
-    assert "[self:1] PCUBE" in out.text and "[self:2] QU" in out.text
-    # every catalog figure attached, each display-copy captioned by its [source:index] handle
-    assert [f.caption for f in out.figures] == ["[self:1] PCUBE", "[self:2] QU"]
-
-
-def test_review_report_source_shows_numbered_report(tmp_path):
-    sub = AnalystReport(summary="worker view", figures=[_fig("a", "PCUBE"), _fig("b", "QU")])
-    ws = ReportWorkspace(
-        report_path=tmp_path / "r.jsonl",
-        report_model=AnalystReport,
-        catalog={"analyst_worker_0": [_fig("a", "PCUBE")]},
-        source_reports={"analyst_worker_0": sub},
-    )
-    out = _run(execute_review_report(ws, {"source": "analyst_worker_0"}))
-    assert not out.is_error
-    assert "Figure 1: PCUBE" in out.text and "Figure 2: QU" in out.text
-    # a finished report's images are numbered "Figure N — …" (report-local, not [source:index])
-    assert [f.caption for f in out.figures] == ["Figure 1 — PCUBE", "Figure 2 — QU"]
-
-
-def test_review_report_unknown_source_errors(tmp_path):
-    ws = ReportWorkspace(report_path=tmp_path / "r.jsonl", report_model=AnalystReport, catalog={})
-    out = _run(execute_review_report(ws, {"source": "ghost"}))
-    assert out.is_error and "no report for source" in out.text
 
 
 # ── provider wiring ────────────────────────────────────────────────────────────
@@ -222,11 +178,11 @@ def test_sandbox_provider_exposes_report_tools_only_with_workspace(tmp_path):
     ws = ReportWorkspace(report_path=tmp_path / "r.jsonl", report_model=AnalystReport, catalog={"self": []})
     with_ws = SandboxToolProvider(_StubRegistry(), object(), report_workspace=ws)
     names = {d["name"] for d in with_ws.tool_definitions()}
-    assert {EDIT_REPORT_TOOL, REVIEW_REPORT_TOOL} <= names
+    assert {EDIT_REPORT_TOOL, "write_report"} <= names and "review_report" not in names
 
     without = SandboxToolProvider(_StubRegistry(), object())
     names2 = {d["name"] for d in without.tool_definitions()}
-    assert EDIT_REPORT_TOOL not in names2 and REVIEW_REPORT_TOOL not in names2
+    assert EDIT_REPORT_TOOL not in names2 and "write_report" not in names2
 
 
 # ── workspace path helper ──────────────────────────────────────────────────────
@@ -271,17 +227,33 @@ class _LeadModel:
                 tool_calls=[
                     ToolCall(
                         id="e1",
-                        name="edit_report",
-                        arguments={"summary": "lead synthesis", "cited_figures": self.next_cited},
+                        name="write_report",
+                        arguments={"content": (
+                            "# summary\nlead synthesis\n# status\nsucceeded\n# findings\n"
+                            "- the workers agree\n# figures\n"
+                            + "".join(f"- [{c['source']}:{c['index']}]\n" for c in self.next_cited)
+                        )},
                     )
                 ]
             )
         if not self.filed:
             self.filed = True
+            # Filed through `turn_end`: only an accepted one makes the draft the report (D4).
             return ModelResponse(
-                tool_calls=[ToolCall(id="f1", name="submit_adjudication", arguments={})]
+                tool_calls=[ToolCall(id="f1", name="turn_end", arguments={"summary": "filed"})]
             )
         return ModelResponse(content="done")
+
+
+def _disk_fig(tmp_path, name: str, caption: str) -> FigureRef:
+    """A figure whose file exists: `turn_end` refuses a placed figure that is not on disk."""
+    import hashlib
+
+    png = tmp_path / f"{name}.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + name.encode())
+    return _fig(name, caption).model_copy(
+        update={"path": png, "sha256": hashlib.sha256(png.read_bytes()).hexdigest()}
+    )
 
 
 def _lead(tmp_path):
@@ -294,8 +266,8 @@ def _lead(tmp_path):
 
 def test_lead_adjudicate_cites_across_worker_sources(tmp_path):
     lead, model = _lead(tmp_path)
-    r0 = _AR(summary="w0", figures=[_fig("a", "PCUBE")])
-    r1 = _AR(summary="w1", figures=[_fig("b", "bench")])
+    r0 = _AR(summary="w0", figures=[_disk_fig(tmp_path, "a", "PCUBE")])
+    r1 = _AR(summary="w1", figures=[_disk_fig(tmp_path, "b", "bench")])
     model.arm([{"source": "analyst_worker_1", "index": 1}, {"source": "analyst_worker_0", "index": 1}])
     outcome = _run(
         lead.run_cycle(
@@ -316,11 +288,11 @@ def test_lead_catalog_accumulates_across_iterations(tmp_path):
     lead, model = _lead(tmp_path)
     # iteration 1 — worker_0 produced OLD; the lead cites it
     model.arm([{"source": "analyst_worker_0", "index": 1}])
-    _run(lead.run_cycle(AnalysisTask(question="x"), [_AR(summary="w0", figures=[_fig("old", "OLD")])],
+    _run(lead.run_cycle(AnalysisTask(question="x"), [_AR(summary="w0", figures=[_disk_fig(tmp_path, "old", "OLD")])],
                         sources=["analyst_worker_0"]))
     # iteration 2 — worker_0's new report carries only NEW; OLD is gone from the report...
     model.arm([{"source": "analyst_worker_0", "index": 1}, {"source": "analyst_worker_0", "index": 2}])
-    final = _run(lead.run_cycle(AnalysisTask(question="x"), [_AR(summary="w0", figures=[_fig("new", "NEW")])],
+    final = _run(lead.run_cycle(AnalysisTask(question="x"), [_AR(summary="w0", figures=[_disk_fig(tmp_path, "new", "NEW")])],
                                 sources=["analyst_worker_0"])).report
     # ...but the lead's catalog kept OLD (slot 1) and appended NEW (slot 2), so both are citable
     assert [f.caption for f in final.figures] == ["OLD", "NEW"]

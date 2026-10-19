@@ -93,11 +93,11 @@ def _reviewer(tmp_path, script):
 
 
 def test_reviewer_writes_and_files_one_report_in_its_loop(tmp_path):
-    from auto_research.agents.react import EDIT_REPORT_TOOL, TURN_END_TOOL
+    from auto_research.agents.react import EDIT_REPORT_TOOL, TURN_END_TOOL, WRITE_REPORT_TOOL
 
     agent, fake = _reviewer(tmp_path, [
-        (EDIT_REPORT_TOOL, {"rationale": "The literature is adequate.", "assign_to": "analysts",
-                            "follow_up": "Fit the data."}),
+        (WRITE_REPORT_TOOL, {"content": "# assign_to\nanalysts\n# rationale\nThe literature is "
+                                        "adequate.\n# follow_up\nFit the data.\n"}),
         (TURN_END_TOOL, {"summary": "dispatched"}),
     ])
     report = asyncio.run(agent.review(ResearchRequest(question="Check this."),
@@ -106,19 +106,20 @@ def test_reviewer_writes_and_files_one_report_in_its_loop(tmp_path):
     assert fake.messages[0].content == "reviewer prompt"
     assert _user_payload(fake)["arrived"] == "request"
     names = {t["name"] for t in fake.tools}
-    assert {"edit_report", "review_report", "turn_end", "read_paper"} <= names
+    assert {"write_report", "edit_report", "turn_end", "read_paper"} <= names
+    assert "review_report" not in names  # B18: every reply shows what changed
     assert "open_paper" not in names
     assert (tmp_path / "reviewer" / "review1.jsonl").is_file()
 
 
 def test_reviewer_turn_end_refuses_until_the_report_is_complete(tmp_path):
-    from auto_research.agents.react import EDIT_REPORT_TOOL, TURN_END_TOOL
+    from auto_research.agents.react import EDIT_REPORT_TOOL, TURN_END_TOOL, WRITE_REPORT_TOOL
 
     agent, fake = _reviewer(tmp_path, [
         (TURN_END_TOOL, {"summary": "nothing written"}),
-        (EDIT_REPORT_TOOL, {"rationale": "Adequate.", "assign_to": "analysts", "follow_up": ""}),
+        (WRITE_REPORT_TOOL, {"content": "# assign_to\nanalysts\n# rationale\nAdequate.\n# follow_up\n"}),
         (TURN_END_TOOL, {"summary": "no dispatch"}),
-        (EDIT_REPORT_TOOL, {"rationale": "Adequate.", "assign_to": "analysts", "follow_up": "Fit it."}),
+        (EDIT_REPORT_TOOL, {"old_string": "# follow_up\n", "new_string": "# follow_up\nFit it.\n"}),
         (TURN_END_TOOL, {"summary": "ok"}),
     ])
     report = asyncio.run(agent.review(ResearchRequest(question="q"),
@@ -129,12 +130,12 @@ def test_reviewer_turn_end_refuses_until_the_report_is_complete(tmp_path):
 def test_a_call_after_an_accepted_turn_end_in_the_same_batch_is_not_run(tmp_path):
     # Found 2026-09-25 by an adversarial review: an edit after turn_end in one batch replaced the
     # filed report with an unvalidated one. The shared loop answers it and runs nothing.
-    from auto_research.agents.react import EDIT_REPORT_TOOL, TURN_END_TOOL
+    from auto_research.agents.react import EDIT_REPORT_TOOL, TURN_END_TOOL, WRITE_REPORT_TOOL
 
     agent, fake = _reviewer(tmp_path, [[
-        (EDIT_REPORT_TOOL, {"rationale": "Adequate.", "assign_to": "analysts", "follow_up": "Fit it."}),
+        (WRITE_REPORT_TOOL, {"content": "# assign_to\nanalysts\n# rationale\nAdequate.\n# follow_up\nFit it.\n"}),
         (TURN_END_TOOL, {"summary": "ok"}),
-        (EDIT_REPORT_TOOL, {"rationale": "PD is 9.99.", "assign_to": "librarian", "follow_up": "12.345"}),
+        (WRITE_REPORT_TOOL, {"content": "# assign_to\nlibrarian\n# rationale\nPD is 9.99.\n# follow_up\n12.345\n"}),
     ]])
     report = asyncio.run(agent.review(ResearchRequest(question="q"),
                                       budgets={"librarian": 0, "analysts": 1}))
@@ -196,6 +197,7 @@ def test_analyst_lead_agent_adjudicates_reports(tmp_path):
     """
     from auto_research.agents.react import (
         EDIT_REPORT_TOOL,
+        WRITE_REPORT_TOOL,
         TURN_END_TOOL,
         ReadOnlyToolProvider,
     )
@@ -212,11 +214,9 @@ def test_analyst_lead_agent_adjudicates_reports(tmp_path):
             self.messages = list(messages)
             self.turn += 1
             script = [
-                (EDIT_REPORT_TOOL, {
-                    "summary": "Final synthesis.",
-                    "findings": ["Workers agree."],
-                    "status": "succeeded",
-                }),
+                (WRITE_REPORT_TOOL, {"content": (
+                    "# summary\nFinal synthesis.\n# status\nsucceeded\n# findings\n- Workers agree.\n"
+                )}),
                 (TURN_END_TOOL, {"summary": "done"}),
             ]
             if self.turn > len(script):

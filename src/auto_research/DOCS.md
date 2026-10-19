@@ -121,7 +121,18 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   seat's `message`, the coder's question, a runtime notice — is an `InboxEntry(sender, text,
   handles, kind)` queued by `add_steer(key, text, *, sender="human", kind="steer", handles=())`
   and drained once by `drain_inbox(key)` (`drain_steer` returns the texts); `render()` is the user
-  turn the seat reads. `set_live`/`is_live` mark a running loop; `register_resumed(sender, seat,
+  turn the seat reads; `peek_inbox(key)` lists the waiting entries without draining them, and
+  `WAKING_KINDS` (`message`, `reply`, `steer`) are the kinds a seat is resumed to read (D5;
+  `agents/DOCS.md` `TurnOutcome`, `hitl/DOCS.md` `wake`). `fail(exc)` (ruling D6) ends the run with
+  a failure raised in a channel task nobody awaits: it sets `fatal` and cancels the registered run
+  task, and `run_research` raises `fatal` instead of treating the cancel as a stop. A second
+  `interrupt` (a second `/stop`) does nothing, so it cannot cancel the cleanup the first started.
+  `cancel_resumed(timeout=None)` cancels the channel tasks and waits at most `timeout`, raising
+  `TimeoutError` with how many still run. `running` says whether a run task is registered and
+  live; the stop's or failure's cancel goes out once (`_cancel_sent`). Only the first
+  failure counts and none after a human stop (the stop wins); `interrupt` after a failure does
+  nothing. Both cancel through `_cancel_run`, which reads the run task when it fires (none once the
+  graph has returned and unregistered it) and never cancels a task twice. `set_live`/`is_live` mark a running loop; `register_resumed(sender, seat,
   task)` / `resumed_by(sender)` track seats a message resumed; `register_background(task)` holds
   awaited human replies; `cancel_resumed()` cancels both (the interrupt cleanup's first step).
 - `run_control.UserInterruptionError` — raised in place of the `CancelledError` that carried a
@@ -215,3 +226,16 @@ Compacted 2026-09-01, again 2026-09-24 (every entry) and 2026-10-07; detail in g
   `<runtime>/conda/replay/<fp16>`, reports whether its conda part matches and compares externals.
 - 2026-10-17 — Ledger caps retired (`LedgerCaps`, `ledger_caps()`, the `ledger_arg_cap` / `ledger_result_cap` / `ledger_coder_text_cap` keys): the ledger records every field whole (user ruling). Readers stay bounded by their own windows (`MonitorToolProvider`).
 - 2026-10-17 — CLI `--report-format` accepts `html`; its default is the configured `report_formats`.
+- 2026-10-18 — [D1] `InboxEntry` kind `requeued`, rendered as-is: a text held back from a seat's
+  failed model call goes back to its inbox unwrapped, so a repeated failure cannot nest it.
+- 2026-10-18 — [D5 review] The `requeued` kind is retired (re-queued texts keep their own sender
+  and kind); new `RunControl.peek_inbox` and `WAKING_KINDS`.
+- 2026-10-18 — [D6 ruling] `RunControl.fatal` / `fail(exc)`: how a resumed seat's
+  `ReactBudgetExhausted` reaches and ends the run.
+- 2026-10-18 — [D6 review] `fail` counts only the first failure and none after a stop; `interrupt`
+  after a failure is a no-op; both cancel through `_cancel_run` (late-firing safe, never twice).
+- 2026-10-18 — [D8] `interrupt` is a no-op once a stop was requested (a second `/stop` cannot
+  cancel the cleanup).
+- 2026-10-18 — [D8 review] `cancel_resumed(timeout=)` is bounded and never swallows its caller's
+  own cancel.
+- 2026-10-18 — [D8 follow-ups] `RunControl.running`; the run task's cancel is sent once.

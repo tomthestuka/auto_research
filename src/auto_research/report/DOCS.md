@@ -90,7 +90,7 @@ The graph's `compose_report` node calls `publish_report`; the `.tex`/PDF already
 ## Dependencies
 - External: stdlib (`re`, `csv`, `shutil`, `subprocess`, `pathlib`, `urllib.parse`, `html`,
   `html.parser`, `ast`, `hashlib`); lualatex with
-  fontspec and the DejaVu/FreeSerif fonts; `pdftoppm` for the reviewer's draft preview (optional).
+  fontspec and the DejaVu/FreeSerif fonts.
 - Internal: `auto_research.provenance` (incl. `provenance.calls` for the ledger rebuild),
   `auto_research.schemas.{review,report,artifacts}`, `auto_research.env` (`env_lock_dir`, read for an
   environment's name).

@@ -2,11 +2,12 @@
 
 import base64
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 from pydantic import BaseModel
 
-from auto_research.env import context_editing_config, tool_search_config
+from auto_research.env import compaction_config, context_editing_config, tool_search_config
 from auto_research.models.keys import ANTHROPIC, active_key
 from auto_research.models.providers._tool_search import anthropic_search_tool_name
 from auto_research.models.providers._media import (
@@ -122,10 +123,27 @@ _LIMITS = MediaLimits(
     max_image_bytes=10 * 1024 * 1024,
     # "Maximum request size 32 MB" — the ceiling for the whole payload, PDFs included.
     max_request_bytes=32 * 1024 * 1024,
-    # "Maximum pages per request 600 (100 when the request's context window is under 1M tokens)":
-    # our configured models are the sub-1M tier, so 100 is the live limit.
+    # "Maximum pages per request 600 (100 when the request's context window is under 1M tokens)".
     max_pdf_pages=100,
 )
+
+
+def _limits_for(config: RoleModelConfig) -> MediaLimits:
+    """The ceilings that depend on the member's window, from its declared ``context_tokens``.
+
+    Images: *"100 per request on the API, for models with a 200k-token context window. 600 per
+    request on the API, for all other models"* (platform.claude.com/docs/en/build-with-claude/
+    vision, "Request limits"). PDF pages: *"600 (100 when the request's context window is under 1M
+    tokens)"* (.../pdf-support). An undeclared window keeps the smaller ceilings.
+    """
+    from auto_research.observability.costs import context_window_for
+
+    window = context_window_for(config) or 0
+    return replace(
+        _LIMITS,
+        max_images=600 if window > 200_000 else _LIMITS.max_images,
+        max_pdf_pages=600 if window >= 1_000_000 else _LIMITS.max_pdf_pages,
+    )
 
 
 class AnthropicProvider:
@@ -179,7 +197,7 @@ class AnthropicProvider:
         # carries: Anthropic's limits are "on the entire request payload, including any
         # other content sent alongside PDFs" (.../build-with-claude/pdf-support).
         plan = plan_for_call(
-            messages, images, documents, _LIMITS,
+            messages, images, documents, _limits_for(config),
             reserved_bytes=nonmedia_weight(messages, tools=tools),
         )
         system, provider_messages = _to_anthropic_messages(messages, plan)
@@ -245,19 +263,47 @@ class AnthropicProvider:
         ctx_extra: dict[str, Any] = {}
         if use_ctx_edit:
             ctx_extra["betas"] = [ctx_cfg.beta_header]
-            ctx_extra["context_management"] = {
-                "edits": [
-                    {
-                        "type": ctx_cfg.strategy,
-                        "trigger": {"type": "input_tokens", "value": ctx_cfg.trigger_tokens},
-                        "keep": {"type": "tool_uses", "value": ctx_cfg.keep_tool_uses},
-                        "clear_at_least": {
-                            "type": "input_tokens",
-                            "value": ctx_cfg.clear_at_least_tokens,
-                        },
-                    }
-                ]
+            clear_edit: dict[str, Any] = {
+                "type": ctx_cfg.strategy,
+                "trigger": {"type": "input_tokens", "value": ctx_cfg.trigger_tokens},
+                "keep": {"type": "tool_uses", "value": ctx_cfg.keep_tool_uses},
+                "clear_at_least": {
+                    "type": "input_tokens",
+                    "value": ctx_cfg.clear_at_least_tokens,
+                },
             }
+            # B5. `clear_tool_inputs`: "Controls whether the tool call parameters are cleared along
+            # with the tool results" (default false); `exclude_tools`: "List of tool names whose
+            # tool uses and results should never be cleared"
+            # (platform.claude.com/docs/en/build-with-claude/context-editing). Only names this
+            # request declares are listed, plus the tool-search tool when one is sent.
+            if ctx_cfg.clear_tool_inputs:
+                clear_edit["clear_tool_inputs"] = True
+            declared = {t["name"] for t in (tools or ())}
+            excluded = [name for name in dict.fromkeys(ctx_cfg.exclude_tools) if name in declared]
+            ts_now = tool_search_config()
+            if ts_now.enabled and any(t.get("defer_loading") for t in (tools or ())):
+                excluded.append(anthropic_search_tool_name(ts_now.anthropic_tool))
+            if excluded:
+                clear_edit["exclude_tools"] = excluded
+            ctx_extra["context_management"] = {"edits": [clear_edit]}
+
+        # B6: server-side compaction once the prompt reaches a fraction of the member's window.
+        # "Enable compaction by adding the `compact_20260112` strategy to
+        # `context_management.edits`"; "`value` must be at least 50,000 tokens"; custom
+        # `instructions` "completely replace the default prompt", and a request with tools needs
+        # them to say the summary is text only, or "the model occasionally calls a tool during
+        # the internal summarization step" (platform.claude.com/docs/en/build-with-claude/
+        # compaction-threshold). The response then carries a `compaction` block, which the loop
+        # replays as part of its turn ("When the API receives a `compaction` block, all content
+        # blocks before it are ignored").
+        compact_edit = _compaction_edit(config) if cache_prefix else None
+        if compact_edit is not None:
+            ctx_extra["betas"] = list(dict.fromkeys(
+                [*ctx_extra.get("betas", []), compaction_config().beta_header]
+            ))
+            edits = ctx_extra.setdefault("context_management", {"edits": []})["edits"]
+            edits.append(compact_edit)
 
         # The key is read from the pool rather than left to the SDK's own environment
         # lookup, because a key-scoped failure (rate limit, spent balance) rotates the live
@@ -267,7 +313,7 @@ class AnthropicProvider:
         # beta.messages accepts betas + context_management; its response carries the same
         # content/usage shape, and ParsedBetaMessage.parsed_output is a property mirroring the
         # non-beta parse — so the extraction below is identical on either namespace.
-        messages_api = client.beta.messages if use_ctx_edit else client.messages
+        messages_api = client.beta.messages if ctx_extra else client.messages
 
         # ONE request, built from whatever the caller gave us. `schema` and `tools` are
         # independent: declaring both lets a terminal compose keep its tool declarations while
@@ -324,14 +370,30 @@ class AnthropicProvider:
             request["tools"] = tool_defs
             request["tool_choice"] = _tool_choice_block(tool_choice)
 
+        async def send() -> Any:
+            if schema is not None:
+                return await messages_api.parse(output_format=schema, **request, **ctx_extra)
+            return await messages_api.create(**request, **ctx_extra)
+
+        dropped_from: int | None = None
+        try:
+            response = await send()
+        except Exception as exc:  # noqa: BLE001 — only the binding refusal is handled here
+            dropped_from = _thinking_binding_refusal(exc)
+            if dropped_from is None:
+                raise
+            # Safety net (human ruling B6.5): a thinking block "bound to a different conversation"
+            # (preserved thinking's prefix check, Claude Fable 5.1 / Opus 5.5 / Sonnet 5.5 / Haiku
+            # 5.5) is removed from the failing message to the end, and the request is sent once
+            # more. Removal from the end is valid: "You can remove thinking blocks from the start,
+            # end, or all of the history" (platform.claude.com/docs/en/build-with-claude/
+            # preserved-thinking). Reported on `context_edits` so the role records it.
+            _strip_thinking(provider_messages, dropped_from)
+            response = await send()
         if schema is not None:
-            response = await messages_api.parse(
-                output_format=schema, **request, **ctx_extra
-            )
             parsed_obj = response.parsed_output
             parsed = parsed_obj.model_dump(mode="json") if parsed_obj is not None else None
         else:
-            response = await messages_api.create(**request, **ctx_extra)
             parsed = None
 
         # ONE extraction pass over the turn the model authored, whichever method sent it.
@@ -359,10 +421,65 @@ class AnthropicProvider:
             usage=_anthropic_usage(usage),
             stop=stop_from_anthropic(response),
             has_unresolved_server_tool=_has_unresolved_server_tool(provider_parts),
-            context_edits=_context_edits(response),
+            context_edits=_context_edits(response) + (
+                [{"type": "thinking_dropped", "from_message": dropped_from}]
+                if dropped_from is not None else []
+            ),
             provider_parts=provider_parts,
             raw=response,
         )
+
+
+def _thinking_binding_refusal(exc: BaseException) -> int | None:
+    """The message index a preserved-thinking refusal names, or ``None`` for any other error.
+
+    The documented 400: *"messages.1.content.0: Invalid `signature` in `thinking` block. The block
+    is bound to a different conversation."* (.../build-with-claude/preserved-thinking).
+    """
+    import re
+
+    text = str(getattr(exc, "message", "") or exc)
+    if "bound to a different conversation" not in text:
+        return None
+    found = re.search(r"messages\.(\d+)", text)
+    return int(found.group(1)) if found else 0
+
+
+def _strip_thinking(provider_messages: list[dict], start: int) -> None:
+    """Remove ``thinking`` / ``redacted_thinking`` blocks from ``provider_messages[start:]``."""
+    for message in provider_messages[start:]:
+        content = message.get("content")
+        if message.get("role") == "assistant" and isinstance(content, list):
+            message["content"] = [
+                b for b in content
+                if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))
+            ]
+
+
+def _compaction_edit(config: RoleModelConfig) -> dict[str, Any] | None:
+    """The ``compact_20260112`` edit for this member, or ``None`` when it does not apply.
+
+    Applies when compaction is enabled, this provider compacts on its side, and the member's input
+    limit is known; the trigger is ``trigger_fraction`` of it (at least the documented 50,000).
+    """
+    cfg = compaction_config()
+    if not cfg.enabled or "anthropic" not in cfg.server_providers:
+        return None
+    from auto_research.observability.costs import context_window_for
+
+    window = context_window_for(config)
+    if not window:
+        return None
+    from auto_research.agents.prompts import load_prompt
+
+    return {
+        "type": cfg.strategy,
+        "trigger": {
+            "type": "input_tokens",
+            "value": max(cfg.min_trigger_tokens, int(window * cfg.trigger_fraction)),
+        },
+        "instructions": load_prompt("session_compactor"),
+    }
 
 
 def _tool_choice_block(tool_choice: str) -> dict[str, str]:
@@ -389,12 +506,46 @@ def _anthropic_usage(usage: Any) -> ModelUsage:
     """
     if usage is None:
         return ModelUsage()
+    if _compaction_iterations(usage):
+        # A call that compacted: "To calculate total tokens consumed and billed for a request, sum
+        # across all entries in the `usage.iterations` array" — all four classes, so a top level
+        # that may or may not include the compaction step's cache traffic is never added twice.
+        totals = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
+                  "cache_creation_input_tokens": 0}
+        for step in _field(usage, "iterations") or ():
+            for key in totals:
+                totals[key] += int(_field(step, key) or 0)
+        return ModelUsage(
+            input_tokens=totals["input_tokens"],
+            output_tokens=totals["output_tokens"],
+            cache_read_tokens=totals["cache_read_input_tokens"],
+            cache_write_tokens=totals["cache_creation_input_tokens"],
+        )
     return ModelUsage(
         input_tokens=getattr(usage, "input_tokens", 0) or 0,
         output_tokens=getattr(usage, "output_tokens", 0) or 0,
         cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
         cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
     )
+
+
+def _field(obj: Any, name: str) -> Any:
+    return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+
+
+def _compaction_iterations(usage: Any) -> list[Any]:
+    """The ``compaction`` entries of ``usage.iterations`` (B6).
+
+    "The top-level `input_tokens` and `output_tokens` do not include compaction iteration usage
+    … To calculate total tokens consumed and billed for a request, sum across all entries in the
+    `usage.iterations` array" (.../compaction-threshold, "Understanding usage"). Their presence
+    marks a call that compacted; ``_anthropic_usage`` then bills the sum over every entry of
+    ``usage.iterations`` in place of the top level.
+    """
+    return [
+        step for step in (_field(usage, "iterations") or ())
+        if _field(step, "type") == "compaction"
+    ]
 
 
 def _context_edits(response: Any) -> list[dict[str, Any]]:
@@ -407,9 +558,24 @@ def _context_edits(response: Any) -> list[dict[str, Any]]:
     """
     cm = getattr(response, "context_management", None)
     applied = getattr(cm, "applied_edits", None) if cm is not None else None
-    if not applied:
-        return []
     edits: list[dict[str, Any]] = []
+    # B6: a compaction this call ran is reported here too, with its own token cost.
+    usage = getattr(response, "usage", None)
+    summaries = [
+        _field(b, "content") for b in getattr(response, "content", ()) or ()
+        if _field(b, "type") == "compaction"
+    ]
+    for n, step in enumerate(_compaction_iterations(usage) if usage is not None else ()):
+        summary = summaries[n] if n < len(summaries) else None
+        edits.append({
+            "type": "compaction",
+            "input_tokens": int(_field(step, "input_tokens") or 0)
+            + int(_field(step, "cache_read_input_tokens") or 0),
+            "output_tokens": int(_field(step, "output_tokens") or 0),
+            "summary_chars": len(summary) if isinstance(summary, str) else None,
+        })
+    if not applied:
+        return edits
     for edit in applied:
         try:
             edits.append(edit.model_dump(mode="json"))
@@ -445,6 +611,21 @@ def _figure_blocks(figure: FigureRef, plan: MediaPlan | None = None) -> list[dic
             },
         },
     ]
+
+
+def _document_blocks(document: Any, plan: MediaPlan | None) -> list[dict[str, Any]]:
+    """One document as blocks: a note when the guard altered or withheld it, then the document."""
+    resolved = plan.resolve(document) if plan is not None else MediaPlan().resolve(document)
+    if resolved.dropped:
+        return [{"type": "text", "text": resolved.note or ""}]
+    blocks: list[dict[str, Any]] = []
+    if resolved.note:
+        blocks.append({"type": "text", "text": resolved.note})
+    blocks.append({
+        "type": "document",
+        "source": {"type": "base64", "media_type": resolved.mime, "data": resolved.b64()},
+    })
+    return blocks
 
 
 def _tool_result_block(part: ToolResultPart, plan: MediaPlan | None) -> dict:
@@ -498,6 +679,11 @@ def _tool_result_block(part: ToolResultPart, plan: MediaPlan | None) -> dict:
     figure_blocks: list[dict] = []
     for figure in part.figures:
         figure_blocks.extend(_figure_blocks(figure, plan))
+    # A document the tool opened nests here too (R2): "a list of nested content blocks ... can use
+    # the `text`, `image`, `document`, or `search_result` types", with a worked "Example of tool
+    # result with documents" (same page).
+    for document in part.documents:
+        figure_blocks.extend(_document_blocks(document, plan))
     if not figure_blocks:
         # No figures: the bare string this adapter has always sent, byte-identical, so the common
         # path's cached prefix is untouched.
@@ -568,6 +754,15 @@ def _to_anthropic_messages(
             provider_messages.append({"role": "user", "content": content})
         elif message.role == "system":
             system_texts.append(message.content)
+        elif message.figures or message.documents:
+            # A user message carrying figures: its text, then each caption and image (B6), then
+            # its documents (R2).
+            blocks: list[dict] = [{"type": "text", "text": message.content}]
+            for figure in message.figures:
+                blocks.extend(_figure_blocks(figure, plan))
+            for document in message.documents:
+                blocks.extend(_document_blocks(document, plan))
+            provider_messages.append({"role": message.role, "content": blocks})
         else:
             provider_messages.append({"role": message.role, "content": message.content})
     return ("\n".join(system_texts) or None), provider_messages

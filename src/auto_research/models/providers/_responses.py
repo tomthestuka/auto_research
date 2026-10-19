@@ -43,6 +43,7 @@ from auto_research.models.providers._media import (
     MediaLimits,
     MediaPlan,
     caption_with_note,
+    hoist_documents,
     nonmedia_weight,
     plan_for_call,
 )
@@ -514,6 +515,11 @@ class ResponsesProvider:
         # ordinary `images` walk and are evicted oldest-first like any other block.
         substitutions: list[tuple[DocumentRef, ParsedDocument | None]] = []
         planned_images: list[FigureRef] = list(images)
+        if not vendor.accepts_inline_documents:
+            # Its substitution runs on call-time documents, so a nested one moves there (R2
+            # residual: on this vendor a document is still re-sent at the end of every call).
+            messages, nested = hoist_documents(messages)
+            documents = [*nested, *documents]
         planned_documents: Sequence[DocumentRef] = documents
         if documents and not vendor.accepts_inline_documents:
             for document in documents:
@@ -685,6 +691,18 @@ class ResponsesProvider:
                     },
                 ]
 
+        # B13: OpenAI's server-side compaction for an OpenAI member, once the prompt reaches
+        # `compaction_trigger_fraction` of its input limit — "context_management with
+        # compact_threshold"; the output then carries an encrypted `compaction` item, carried on
+        # `provider_parts` and appended to the next input as is
+        # (developers.openai.com/api/docs/guides/compaction). Probed live 2026-10-18 on
+        # tool-call-only turns, 5/5 (tests/test_live_openai_compaction.py).
+        compact = _compaction_threshold(vendor, config) if cache_prefix else None
+        if compact is not None:
+            request["extra_body"] = {
+                **request.get("extra_body", {}),
+                "context_management": [{"type": "compaction", "compact_threshold": compact}],
+            }
         response = await client.responses.create(**request)
 
         # ONE extraction pass: the response carries what it carries, and the caller reads the
@@ -862,6 +880,22 @@ def _substituted_document_text(document: DocumentRef, parsed: ParsedDocument | N
     )
 
 
+def _document_items(document: DocumentRef, plan: MediaPlan | None) -> list[dict]:
+    """One document as input items: a note when the guard altered or withheld it, then the file."""
+    resolved = plan.resolve(document) if plan is not None else MediaPlan().resolve(document)
+    if resolved.dropped:
+        return [{"type": "input_text", "text": resolved.note or ""}]
+    items: list[dict] = []
+    if resolved.note:
+        items.append({"type": "input_text", "text": resolved.note})
+    items.append({
+        "type": "input_file",
+        "filename": document.path.name,
+        "file_data": f"data:{resolved.mime};base64,{resolved.b64()}",
+    })
+    return items
+
+
 def _figure_items(figure: FigureRef, plan: MediaPlan | None = None) -> list[dict]:
     """Render one figure as Responses-API content items: a caption then the image bytes.
 
@@ -880,6 +914,19 @@ def _figure_items(figure: FigureRef, plan: MediaPlan | None = None) -> list[dict
         text,
         {"type": "input_image", "image_url": f"data:{resolved.mime};base64,{resolved.b64()}"},
     ]
+
+
+def _compaction_threshold(vendor: "ResponsesVendor", config: RoleModelConfig) -> int | None:
+    """The compaction threshold for this member, or ``None`` when the vendor does not compact on
+    its side (``compaction_config().server_providers``) or the member's input limit is unknown."""
+    from auto_research.env import compaction_config
+    from auto_research.observability.costs import context_window_for
+
+    cfg = compaction_config()
+    if not cfg.enabled or vendor.name not in cfg.server_providers:
+        return None
+    window = context_window_for(config)
+    return int(window * cfg.trigger_fraction) if window else None
 
 
 def _to_responses_input(
@@ -940,16 +987,21 @@ def _to_responses_input(
                 )
                 for figure in part.figures:
                     figure_content.extend(_figure_items(figure, plan))
-            # A tool's figures live inline at this turn: a user message carrying the image(s)
+                for document in part.documents:
+                    figure_content.extend(_document_items(document, plan))
+            # A tool's figures (and documents, R2) live inline at this turn: a user message carrying the image(s)
             # placed right after the function_call_output item(s), so they replay in place
             # every round and fall inside the automatically-cached prefix as the loop grows.
             if figure_content:
                 items.append({"role": "user", "content": figure_content})
         else:
             content_type = "output_text" if message.role == "assistant" else "input_text"
-            items.append(
-                {"role": message.role, "content": [{"type": content_type, "text": message.content}]}
-            )
+            content = [{"type": content_type, "text": message.content}]
+            for figure in message.figures:  # a user message carrying figures (B6)
+                content.extend(_figure_items(figure, plan))
+            for document in message.documents:  # and documents (R2)
+                content.extend(_document_items(document, plan))
+            items.append({"role": message.role, "content": content})
     return items
 
 

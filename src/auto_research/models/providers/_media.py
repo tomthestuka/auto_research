@@ -131,25 +131,75 @@ def iter_media(
     images: Sequence[FigureRef] = (),
     documents: Sequence[DocumentRef] = (),
 ) -> list[MediaItem]:
-    """Every figure/document this request will render, oldest first.
+    """Every figure/document this request will render, in conversation order.
 
-    Order mirrors what the translators emit — tool-result figures inline through the conversation,
-    then call-time ``images=``, then ``documents=`` — so "drop the oldest" drops the least relevant
-    evidence, and the count is the count the provider will see.
+    The walk follows the conversation: a message's figures, a tool result's figures then its
+    documents (R2), then call-time ``images=`` and ``documents=``. An adapter may emit call-time
+    documents elsewhere (Anthropic puts them first); the overflow rule drops the oldest IMAGES by
+    this order, and the count is the count the provider will see.
     """
     items: list[MediaItem] = []
     for message in messages:
+        if isinstance(message, ModelMessage):
+            for figure in message.figures:
+                items.append(MediaItem(figure, True, Path(figure.path), figure.mime_type))
+            for document in message.documents:
+                items.append(MediaItem(document, False, Path(document.path), document.mime_type))
         if isinstance(message, ToolResultMessage):
             for part in message.results:
                 for figure in part.figures:
                     items.append(
                         MediaItem(figure, True, Path(figure.path), figure.mime_type)
                     )
+                for document in part.documents:
+                    items.append(
+                        MediaItem(document, False, Path(document.path), document.mime_type)
+                    )
     for figure in images:
         items.append(MediaItem(figure, True, Path(figure.path), figure.mime_type))
     for document in documents:
         items.append(MediaItem(document, False, Path(document.path), document.mime_type))
     return items
+
+
+def hoist_documents(
+    messages: Sequence[ConversationMessage],
+) -> tuple[list[ConversationMessage], list[DocumentRef]]:
+    """``(messages without their nested documents, those documents in order)``.
+
+    For a vendor that reads a document only as locally extracted text (``_doc_parse``): its
+    substitution runs on call-time documents, so documents nested in tool results move there.
+    """
+    out: list[ConversationMessage] = []
+    hoisted: list[DocumentRef] = []
+    for message in messages:
+        if isinstance(message, ToolResultMessage) and any(p.documents for p in message.results):
+            hoisted.extend(d for p in message.results for d in p.documents)
+            message = message.model_copy(update={"results": [
+                p.model_copy(update={"documents": []}) for p in message.results
+            ]})
+        elif isinstance(message, ModelMessage) and message.documents:
+            hoisted.extend(message.documents)
+            message = message.model_copy(update={"documents": []})
+        out.append(message)
+    return out, hoisted
+
+
+def media_load(messages: Sequence[ConversationMessage]) -> tuple[int, int]:
+    """``(image blocks, media bytes as base64)`` the conversation carries, from the files on disk.
+
+    An upper bound on what a request sends (an image the guard downscales sends fewer bytes); a
+    file that cannot be read counts no bytes.
+    """
+    images = 0
+    size = 0
+    for item in iter_media(messages):
+        images += item.is_image
+        try:
+            size += item.path.stat().st_size
+        except OSError:
+            continue
+    return images, (size * 4 + 2) // 3
 
 
 def plan_media(
@@ -165,17 +215,31 @@ def plan_media(
     plan = MediaPlan()
     kept: list[tuple[MediaItem, Resolved]] = []
 
-    block_count = len(items)
     max_edge = limits.max_edge
-    if limits.strict_block_threshold and block_count > limits.strict_block_threshold:
-        # Anthropic: past this many image+document blocks, every image must fit the stricter cap.
+    if limits.strict_max_edge:
+        # Anthropic: past `strict_block_threshold` image+document blocks every image must fit the
+        # stricter cap. Applied from the first send, whatever the count (human ruling B6.3,
+        # 2026-10-18): an image downscaled only once a turn crossed the threshold would change
+        # bytes it had already sent, and within a turn the conversation only grows at its end.
         max_edge = min(max_edge or limits.strict_max_edge, limits.strict_max_edge)
 
+    # Past the provider's image count the OLDEST images are withheld, so the current turn's
+    # evidence is what the model sees (it used to be the newest that went, run 32814459 review).
+    # Only images the provider takes count: one withheld for its type or for a text-only model is
+    # gone already and must not push a sendable one out.
+    image_count = sum(
+        1 for item in items
+        if item.is_image and limits.images_accepted
+        and (not limits.image_mimes or item.mime in limits.image_mimes)
+    )
+    overflow = max(0, image_count - limits.max_images) if limits.max_images else 0
     images_seen = 0
     for item in items:
-        if item.is_image:
+        if item.is_image and limits.images_accepted and (
+            not limits.image_mimes or item.mime in limits.image_mimes
+        ):
             images_seen += 1
-        resolved = _resolve_one(item, limits, max_edge, images_seen)
+        resolved = _resolve_one(item, limits, max_edge, images_seen, overflow)
         plan._by_ref[id(item.ref)] = resolved
         if not resolved.dropped:
             kept.append((item, resolved))
@@ -185,7 +249,7 @@ def plan_media(
 
 
 def _resolve_one(
-    item: MediaItem, limits: MediaLimits, max_edge: int, image_index: int
+    item: MediaItem, limits: MediaLimits, max_edge: int, image_index: int, overflow: int = 0
 ) -> Resolved:
     """Per-item checks: mime, count, pages, bytes, dimensions."""
     name = item.path.name
@@ -209,12 +273,12 @@ def _resolve_one(
                 f"[withheld] {name}: {item.mime} is not an image type this provider accepts "
                 f"({', '.join(sorted(limits.image_mimes))}).",
             )
-        if limits.max_images and image_index > limits.max_images:
+        if image_index <= overflow:
             return Resolved(
                 None,
                 item.mime,
-                f"[withheld] {name}: this request already carries the provider's maximum of "
-                f"{limits.max_images} images.",
+                f"[withheld] {name}: this request carries more than the provider's maximum of "
+                f"{limits.max_images} images; the most recent ones were kept.",
             )
         return _resolve_image(item, limits, max_edge)
 
@@ -284,8 +348,7 @@ def _resolve_image_bytes(item: MediaItem, data: bytes, limits: MediaLimits, max_
         shrunk,
         item.mime,
         f"[downscaled] {item.path.name}: {width}x{height} -> {new_size[0]}x{new_size[1]} to fit "
-        "this provider's limit for a request carrying this many images. The stored artifact is "
-        "unchanged.",
+        "this provider's image size limit. The stored artifact is unchanged.",
     )
 
 

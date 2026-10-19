@@ -38,10 +38,15 @@ provider_retry_base_cooldown_s: 60   # first cooldown; doubles each retry, jitte
 provider_retry_max_cooldown_s: 600   # cooldown ceiling
 
 # ── Context management (Anthropic provider-native context editing; beta — clears stale tool results server-side on long loops) ──
-context_mgmt_enabled: true                 # live-verified 2026-07-28
+context_mgmt_enabled: false                # off by ruling B12: each clear rewrites the whole prompt cache; compaction is the bound
 context_mgmt_trigger_tokens: 120000        # clear oldest tool results once a request exceeds this many input tokens
-context_mgmt_clear_at_least_tokens: 20000  # clear at least this per pass (amortizes the cache-prefix invalidation)
+context_mgmt_clear_at_least_tokens: 60000  # clear at least this per pass (a clear pays back its cache rewrite in ~12 calls)
 context_mgmt_keep_tool_uses: 3             # keep this many most-recent tool results verbatim
+context_mgmt_clear_tool_inputs: true       # clear the calls' arguments with their results
+context_mgmt_exclude_tools: [message, wait_for_reply]  # never cleared (+ the tool-search tool, added in code)
+compaction_enabled: true                   # condense a turn's middle near its member's input limit
+compaction_trigger_fraction: 0.9           # of the member's input limit (litellm max_input_tokens)
+compaction_server_providers: [anthropic, openai]  # compact on the provider's side; others: our segment boundary
 
 # ── Tool search / lazy loading (provider-native; toolkit tools load on demand, harness tools stay resident) ──
 tool_search_enabled: true                  # live-verified 2026-07-28 on both providers
@@ -91,7 +96,7 @@ tool_author_submit_cap: 5             # lead's submit_for_review calls (each = g
 tool_author_debate_cap: 5             # lead↔co-lead respond_to_review turns per tool
 tool_author_gate_rework_cap: 5        # legacy propose_and_pr auto-loop (unused on the lead-driven path)
 tool_author_review_rework_cap: 5      # legacy propose_and_pr auto-loop (unused on the lead-driven path)
-tool_author_branch: ai                # branch the runtime commits onto directly; never merged to master; preflight asserts it's checked out + clean
+tool_author_branch: ai-xspec                # branch the runtime commits onto directly; never merged to master; preflight asserts it's checked out + clean
 tool_author_cap: 12                   # authoring attempts per analysis (bounds the acquire→reduce→analyse chain)
 
 # ── Raise-to-human channel (§9.8) ──

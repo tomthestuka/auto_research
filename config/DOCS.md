@@ -106,6 +106,21 @@ uninstalled configuration rather than silently falling back here.
 - `models.yaml.roles.<role>.members[].parameters` — provider-specific keyword
   arguments. OpenAI reasoning uses `reasoning.effort`; Gemini 3 thinking uses
   `thinking_config.thinking_level`.
+- `models.yaml.roles.<role>.members[].context_tokens` — optional override of the member's input
+  limit in tokens. Unset, the limit is litellm's `max_input_tokens` for the model
+  (`observability.costs.context_window_for`, the map prices come from; 2026-10-18 it matches the
+  provider pages: Claude Fable/Opus/Sonnet 5 1,000,000, GPT-5.6 Sol/Terra/Luna 922,000, GPT-5.5
+  1,050,000, Gemini 3.5 Flash 1,048,576). Set it where the usable limit is lower (a vendor that
+  truncates silently). The limit sets the window-dependent media ceilings and the compaction
+  trigger.
+- `models.yaml.roles.session_compactor` — the model that condenses a long turn's middle for members
+  whose provider has no server-side compaction (B7; `gpt-5.6-luna`). Optional: without it such a
+  turn is not condensed and a `*.compaction_failed` event says so.
+- `orchestration.yaml.compaction_enabled` (a boolean, code default false, configured true) and
+  `compaction_trigger_fraction` (default 0.9) — a turn is condensed once its prompt reaches that
+  fraction of its member's input limit; `compaction_server_providers` (default `[anthropic]`)
+  compact on the provider's side (`compact_20260112`), every other provider by
+  `session_compactor` (`agents/compaction.py`).
 - `models.yaml.roles.<role>.members[].priceMTk` — optional USD rates per
   million tokens with `input` and `output` keys, consumed by
   `auto_research.observability`.
@@ -149,16 +164,25 @@ uninstalled configuration rather than silently falling back here.
   code and stay out of the sample config to keep it clean. The Anthropic entry is the **dated
   type** only — the adapter derives the undated `name` the API requires beside it. **Live-verified
   2026-07-28 on both providers** (`tests/test_live_tool_search.py`).
-- `orchestration.yaml.context_mgmt_*` — Anthropic provider-native **context editing** (the
+- `orchestration.yaml.context_mgmt_*` — Anthropic provider-native **context editing**, shipped
+  **off** since ruling B12 (2026-10-18: the B5 probe measured every clear rewriting the whole prompt
+  cache; server-side compaction is the in-turn bound instead); the settings stay for re-enabling (the
   context-window pressure valve for long ReAct loops; read via `env.context_editing_config`).
-  `context_mgmt_enabled` (shipped **true** since 2026-07-28; the *code* default stays **false**, so
-  a config lacking the key keeps the non-beta path)
+  `context_mgmt_enabled` (shipped true 2026-07-28 → 2026-10-18, **false** since; the *code*
+  default is **false**, so a config lacking the key keeps the non-beta path)
   routes the Anthropic adapter's `cache_prefix` calls through `client.beta.messages` with a
   `clear_tool_uses_20250919` `context_management` edit; `context_mgmt_trigger_tokens` (default
   120000) is the input-token watermark at which the oldest tool results are cleared server-side;
-  `context_mgmt_clear_at_least_tokens` (default 20000) the minimum reclaimed per pass (amortizes
-  the cache-prefix invalidation); `context_mgmt_keep_tool_uses` (default 3) how many most-recent
-  tool results stay verbatim. Two protocol strings — `context_mgmt_beta_header`
+  `context_mgmt_clear_at_least_tokens` (code default 20000, configured 60000 since B5) the minimum
+  reclaimed per pass (amortizes the cache-prefix invalidation); `context_mgmt_keep_tool_uses`
+  (default 3) how many most-recent tool results stay verbatim; `context_mgmt_clear_tool_inputs`
+  (a boolean, code default false, configured true) clears the calls' arguments with their results
+  — the agent then finds a cleared call's output again only through its receipts
+  (`view_receipt`); `context_mgmt_exclude_tools` (a list of names, default
+  `[message, wait_for_reply]`, `env.CONTEXT_EDITING_EXCLUDED_TOOLS`, ruling B11: channel texts
+  mint no receipt and cannot be read again; report tools, `view_receipt` and every receipt-backed
+  result may be cleared) are never cleared, and the adapter adds the tool-search tool whenever a
+  request defers tools. Two protocol strings — `context_mgmt_beta_header`
   (`context-management-2025-06-27`) and `context_mgmt_strategy` (`clear_tool_uses_20250919`) —
   default in code and are overridable here when Anthropic bumps the dated beta identifiers (kept
   out of the sample config to stay clean). **Live-verified 2026-07-28**
@@ -319,3 +343,9 @@ Compacted 2026-09-01, 2026-09-24 and 2026-10-07 (detail in git history).
   HEASoft and CALDB here; stamp files hashed into every receipt's environment fingerprint, env plan
   B1); `/data/fzhou/XSPEC/relxill` added to `agent_fs_allow` and `agent_fs_readonly` (`ar-xspec`'s
   boot file loads relxill from it inside the jail).
+- 2026-10-18 — [B4] `context_tokens` per chat member (values quoted from each provider's model page); Claude Sonnet 5 `priceMTk` 3/15 → 2/10 (the introductory price became standard, about-claude/pricing).
+- 2026-10-18 — [B5 ruling] `context_tokens` is an override only: the window comes from litellm first (board B5); no member sets it today.
+- 2026-10-18 — [B5] `context_mgmt_clear_tool_inputs: true`, `context_mgmt_clear_at_least_tokens: 60000`; new key `context_mgmt_exclude_tools`.
+- 2026-10-18 — [B6/B7] `compaction_enabled: true`, `compaction_trigger_fraction: 0.9`; new role `session_compactor` (gpt-5.6-luna).
+- 2026-10-18 — [B11 ruling] `context_mgmt_exclude_tools: [message, wait_for_reply]` (code default the same).
+- 2026-10-18 — [B12 ruling] `context_mgmt_enabled: false` (config and .example); compaction (`compaction_enabled: true`) bounds a turn.

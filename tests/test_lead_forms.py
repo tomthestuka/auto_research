@@ -33,6 +33,7 @@ import pytest
 from auto_research.agents.react import (
     AUTHOR_CHAIN_TOOL,
     EDIT_REPORT_TOOL,
+    WRITE_REPORT_TOOL,
     LEAD_FORM_TOOLS,
     LEAD_REPORT_FIELDS,
     LEAD_STATUS_VALUES,
@@ -372,6 +373,7 @@ def _conversation_through_one_link(monkeypatch, status="committed"):
     messages.append(closing)
     aio.run(driver.advance())                      # the handler: closes link 1, compacts
     messages.append(_results_for(closing))         # the loop answers the closing call
+    aio.run(driver.apply_cut(messages))   # the loop's next boundary (B14 (c))
     return driver, messages
 
 
@@ -392,7 +394,9 @@ def test_every_call_keeps_an_answer_across_the_compaction(monkeypatch):
 def test_the_coding_middle_goes_and_the_opening_call_carries_the_outcome(monkeypatch):
     _, messages = _conversation_through_one_link(monkeypatch)
     names = [c.name for m in messages for c in (getattr(m, "tool_calls", None) or ())]
-    assert AUTHOR_CHAIN_TOOL in names and SUBMIT_TOOL in names
+    # B14 (c): the link leaves from the end — its coding turns AND the call that closed it; the
+    # prefix up to the opening call is untouched.
+    assert AUTHOR_CHAIN_TOOL in names and SUBMIT_TOOL not in names
     assert _CODING_CALL not in names and "read_file" not in names
     answer = next(
         part
@@ -405,6 +409,7 @@ def test_the_coding_middle_goes_and_the_opening_call_carries_the_outcome(monkeyp
         "the opening call's answer must carry the link's outcome — it is the only account of "
         "the link the lead keeps"
     )
+    assert answer.content.endswith("\n\nok"), "what the closing call answered rides along"
 
 
 def test_a_failed_link_hands_the_choice_back(monkeypatch):
@@ -434,10 +439,12 @@ def test_a_batched_turn_keeps_its_other_results(monkeypatch):
     messages.append(opening)
     aio.run(driver.advance())
     messages.append(_results_for(opening, content="file contents"))
+    aio.run(driver.apply_cut(messages))   # the loop's next boundary (B14 (c))
     closing = _assistant(SUBMIT_TOOL)
     messages.append(closing)
     aio.run(driver.advance())
     messages.append(_results_for(closing))
+    aio.run(driver.apply_cut(messages))   # the loop's next boundary (B14 (c))
 
     parts = {p.name: p.content for m in messages if isinstance(m, ToolResultMessage) for p in m.results}
     assert parts["read_file"] == "file contents", "the batched read lost its own answer"
@@ -630,10 +637,11 @@ def test_a_turn_end_refusal_keeps_the_lead_in_its_loop(tmp_path):
 
 
 def test_the_leads_report_surface_carries_its_decision_fields():
-    declared = edit_report_tool_def(LEAD_REPORT_FIELDS, LEAD_STATUS_VALUES)["input_schema"]
-    assert {"rework", "rationale", "what_to_probe"} <= set(declared["properties"])
-    assert "tool_request" not in declared["properties"], "the lead authors, it does not ask"
-    assert declared["properties"]["status"]["enum"] == list(LEAD_STATUS_VALUES)
+    # A7: the surface is the draft document's layout, named in the tool description.
+    described = edit_report_tool_def(LEAD_REPORT_FIELDS, LEAD_STATUS_VALUES)["description"]
+    assert all(f"# {f} —" in described for f in ("rework", "rationale", "what_to_probe"))
+    assert "# tool_request" not in described, "the lead authors, it does not ask"
+    assert " or ".join(LEAD_STATUS_VALUES) in described
 
 
 def test_the_lead_provider_declares_its_own_surface(tmp_path):
@@ -644,9 +652,12 @@ def test_the_lead_provider_declares_its_own_surface(tmp_path):
     declared = next(
         d for d in provider.tool_definitions() if d["name"] == EDIT_REPORT_TOOL
     )
-    assert set(declared["input_schema"]["properties"]) == set(LEAD_REPORT_FIELDS) | {
-        "cited_figures"
-    }
+    # A5: value fields replaced when sent; findings and figures edited in place.
+    # A7: Edit over the draft document; the lead's blocks are named in the description.
+    assert set(declared["input_schema"]["properties"]) == {"old_string", "new_string", "replace_all"}
+    for field in LEAD_REPORT_FIELDS:
+        assert f"# {field} —" in declared["description"]
+    assert "# tool_request" not in declared["description"]
 
 
 # ── B6: the coding middle is dropped on a COMMITTED link only ────────────────
@@ -677,6 +688,9 @@ def _driver_with(monkeypatch, statuses):
 
         async def _record(self, *a, **k):
             return None
+
+        def _history_part(self, *a, **k):
+            return {}
 
     driver = _ChainDriver(
         lead=_Lead(), provider=type("P", (), {"authoring_session": None})(), cycle=cycle,
@@ -718,6 +732,7 @@ def test_both_arms_compact_and_the_chain_still_advances(monkeypatch):
         messages.append(opening)
         aio.run(driver.advance())
         messages.append(_results_for(opening))
+        aio.run(driver.apply_cut(messages))   # the loop's next boundary (B14 (c))
         coding = _assistant(_CODING_CALL)
         messages.extend([coding, _results_for(coding)])
 
@@ -725,6 +740,7 @@ def test_both_arms_compact_and_the_chain_still_advances(monkeypatch):
     messages.append(closing)
     aio.run(driver.advance())
     messages.append(_results_for(closing))
+    aio.run(driver.apply_cut(messages))   # the loop's next boundary (B14 (c))
 
     assert [r.status for r in driver.outcome.authored] == ["committed", "failed"], (
         "a failed link must not end the chain (F9)"
@@ -754,24 +770,20 @@ def test_the_lead_is_actually_OFFERED_its_decision_fields(tmp_path):
     lead.report_dir = tmp_path
     workspace = lead._make_report_workspace({})
     assert workspace is not None
-    declared = edit_report_tool_def(workspace.prose_fields, workspace.status_values)
-    properties = set(declared["input_schema"]["properties"])
-    assert {"rework", "rationale", "what_to_probe"} <= properties, (
+    described = edit_report_tool_def(workspace.prose_fields, workspace.status_values)["description"]
+    assert all(f"# {f} —" in described for f in ("rework", "rationale", "what_to_probe")), (
         "the lead was not offered the fields its decision rides on"
     )
-    assert "tool_request" not in properties, "the lead authors; it does not ask for tools"
-    assert declared["input_schema"]["properties"]["status"]["enum"] == list(LEAD_STATUS_VALUES)
+    assert "# tool_request" not in described, "the lead authors; it does not ask for tools"
+    assert " or ".join(LEAD_STATUS_VALUES) in described
 
     # ...and the worker's surface is unchanged by the same helper.
     worker = AnalystWorkerAgent(model=object(), prompt="p")
     worker.report_dir = tmp_path
     worker_ws = worker._make_report_workspace()
-    worker_props = set(
-        edit_report_tool_def(worker_ws.prose_fields, worker_ws.status_values)
-        ["input_schema"]["properties"]
-    )
-    assert {"rework", "rationale", "what_to_probe"}.isdisjoint(worker_props)
-    assert "tool_request" in worker_props
+    worker_described = edit_report_tool_def(worker_ws.prose_fields, worker_ws.status_values)["description"]
+    assert all(f"# {f} —" not in worker_described for f in ("rework", "rationale", "what_to_probe"))
+    assert "# tool_request —" in worker_described
 
 
 def test_every_declared_authoring_tool_is_actually_ROUTED():
@@ -1090,15 +1102,25 @@ class _SilentThenScripted:
 def _drive_with_model(model, **kwargs):
     from auto_research.agents.react import LeadCycle
 
+    from auto_research.agents.roles import ReactBudgetExhausted
+
     cycle = LeadCycle(authoring_enabled=False, rounds_left=1)
     lead = AnalystLeadAgent(model=model, prompt="p")
-    asyncio.run(
-        lead._react(
-            seed_messages=[],
-            tools=_FormsProvider(cycle), action="run_cycle",
-            cap=8, absolute_cap=12, terminal_tools=frozenset({TURN_END_TOOL}), **kwargs,
+    model.exhausted = False
+    try:
+        asyncio.run(
+            lead._react(
+                seed_messages=[],
+                tools=_FormsProvider(cycle), action="run_cycle",
+                cap=8, absolute_cap=12, terminal_tools=frozenset({TURN_END_TOOL}), **kwargs,
+            )
         )
-    )
+    except ReactBudgetExhausted:
+        # Ruling D4: a loop that must file and never does ends loudly at its ceiling plus grace,
+        # never by returning unfiled.
+        if not kwargs.get("require_terminal"):
+            raise
+        model.exhausted = True
     return model
 
 
@@ -1115,6 +1137,8 @@ def test_a_prose_turn_does_not_end_the_loop_when_the_terminal_is_required():
     assert with_flag.calls > 3, (
         f"require_terminal must re-inject past every silent turn, got {with_flag.calls} calls"
     )
+    # It never filed, so it ended loudly at its ceiling plus grace (ruling D4), not quietly.
+    assert with_flag.exhausted and not without.exhausted
 
 
 def test_the_re_injected_message_reaches_the_model():
@@ -1168,7 +1192,7 @@ def test_the_nudge_states_the_channel_rule_then_the_routes_out():
     text = _TERMINAL_REQUIRED_NUDGE
     # The channel rule comes first — that is the actual mistake — then the three routes out.
     assert text.index("tool calls") < text.index("edit_report") < text.index("turn_end")
-    for route in ("investigate", "edit_report", "review_report", "turn_end"):
+    for route in ("investigate", "write_report", "edit_report", "turn_end"):
         assert route in text, route
     assert "only way" in text and "nothing is written on your behalf" in text
 
@@ -1417,9 +1441,9 @@ class _FilesBadlyThenWell(_ToolSpammer):
         # attempt, where one is written first so it validates.
         if self.turn_end_attempts > self.refusals:
             return ModelResponse(tool_calls=[
-                ToolCall(id=f"e{self.calls}", name=EDIT_REPORT_TOOL,
-                         arguments={"summary": "s", "findings": ["f"], "status": "succeeded",
-                                    "rework": False}),
+                ToolCall(id=f"e{self.calls}", name=WRITE_REPORT_TOOL,
+                         arguments={"content": "# summary\ns\n# status\nsucceeded\n# rework\n"
+                                               "false\n# findings\n- f\n"}),
                 ToolCall(id=f"t{self.calls}", name=TURN_END_TOOL, arguments={}),
             ])
         return ModelResponse(

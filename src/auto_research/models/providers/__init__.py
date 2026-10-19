@@ -8,7 +8,8 @@ from auto_research.models.providers.deepseek import DeepSeekProvider
 from auto_research.models.providers.google import GoogleProvider
 from auto_research.models.providers.openai import OpenAIProvider
 from auto_research.models.providers.zai import ZaiProvider
-from auto_research.models.types import CHAT_PROVIDERS, ModelProvider, ProviderName
+from auto_research.models.providers._media import MediaLimits
+from auto_research.models.types import CHAT_PROVIDERS, ModelProvider, ProviderName, RoleModelConfig
 
 
 #: Every adapter, by the provider name a config member declares. The four vendors speaking the
@@ -35,6 +36,20 @@ def provider_for(name: ProviderName) -> ModelProvider:
     if name in CHAT_PROVIDERS:
         return _ADAPTERS[name]()
     return HarnessOnlyProvider(name)
+
+
+def media_limits(config: RoleModelConfig) -> MediaLimits | None:
+    """The documented media ceilings a member's requests meet (``_media.MediaLimits``), read from
+    its adapter without building a client; ``None`` for a provider with no chat adapter."""
+    from auto_research.models.providers import google
+    from auto_research.models.providers.anthropic import _limits_for
+
+    if config.provider == "anthropic":
+        return _limits_for(config)
+    if config.provider == "google":
+        return google._LIMITS
+    vendor = getattr(_ADAPTERS.get(config.provider), "vendor", None)
+    return vendor.limits_for(config.model) if isinstance(vendor, ResponsesVendor) else None
 
 
 def responses_vendors() -> tuple[ResponsesVendor, ...]:

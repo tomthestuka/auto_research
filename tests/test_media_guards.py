@@ -131,14 +131,13 @@ def _dimensions(data: bytes) -> tuple[int, int]:
 # ── the boundary that killed the run ──────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("count,expect_resized", [(20, False), (21, True)])
-def test_strict_dimension_cap_applies_only_past_the_block_threshold(
-    tmp_path, count, expect_resized
-):
-    """21 image blocks tightens the cap to 2000 px; 20 leaves the image untouched.
+@pytest.mark.parametrize("count", [1, 20, 21])
+def test_the_strict_dimension_cap_applies_from_the_first_send(tmp_path, count):
+    """Every image is fitted to 2000 px from its first send, whatever the request's count.
 
-    This is the exact boundary that killed run 8c75990e — the figure was 2677x1554 and legal on
-    its own, illegal only because of how many images rode with it.
+    21 image blocks is the boundary that killed run 8c75990e (a 2677x1554 figure, legal alone).
+    Fitting only past it changed bytes already sent once a turn crossed it; within a turn a
+    conversation only grows at its end (human ruling B6, 2026-10-18), so the cap applies always.
     """
     figures = [
         _figure(_png(tmp_path / f"f{i}.png", (2677, 1554))) for i in range(count)
@@ -148,13 +147,8 @@ def test_strict_dimension_cap_applies_only_past_the_block_threshold(
     resolved = plan.resolve(figures[0])
     assert not resolved.dropped
     width, height = _dimensions(resolved.data)
-    if expect_resized:
-        assert max(width, height) == 2000
-        assert (width, height) == (2000, 1161)  # aspect ratio preserved
-        assert "downscaled" in (resolved.note or "")
-    else:
-        assert (width, height) == (2677, 1554)
-        assert resolved.note is None
+    assert (width, height) == (2000, 1161)  # aspect ratio preserved
+    assert "downscaled" in (resolved.note or "")
 
 
 def test_under_limit_bytes_are_identical_to_no_guard(tmp_path):
@@ -465,3 +459,98 @@ def test_a_document_changed_after_its_receipt_is_sent_with_a_note_in_the_request
     request = json.dumps(_CaptureAnthropic.store["request"]["messages"])
     assert "differs from its receipt" in request
     assert '"document"' in request  # still sent
+
+
+def test_anthropic_nests_a_document_in_the_tool_result_that_opened_it(tmp_path, monkeypatch):
+    """R2: the document block sits inside its ``tool_result`` content ("Example of tool result
+    with documents"), and the request carries no front-of-conversation document message."""
+    import anthropic
+
+    from auto_research.models.providers.anthropic import AnthropicProvider
+    from auto_research.models.types import ModelResponse, ToolCall, ToolResultPart
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", _CaptureAnthropic)
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4 paper")
+    document = _document(pdf)
+    convo = [
+        ModelMessage(role="user", content="read it"),
+        ModelResponse(tool_calls=[ToolCall(id="c1", name="read_paper", arguments={})]),
+        ToolResultMessage(results=[ToolResultPart(
+            tool_call_id="c1", name="read_paper", content="attached", documents=[document])]),
+    ]
+    cfg = RoleModelConfig(name="m", provider="anthropic", model="fake", vision=True,
+                          documents=True)
+    asyncio.run(AnthropicProvider().call(convo, cfg))
+    messages = _CaptureAnthropic.store["request"]["messages"]
+    assert messages[0]["content"] == "read it" or messages[0]["content"][0]["type"] == "text", (
+        "no document message in front")
+    (result,) = messages[-1]["content"]
+    assert result["type"] == "tool_result"
+    assert [b["type"] for b in result["content"]] == ["text", "document"]
+
+
+def test_nested_and_message_documents_count_against_the_request_ceiling(tmp_path):
+    """R2: a document nested in a tool result, or carried by a message, is walked by the plan in
+    conversation order, so it counts against the request ceiling like a call-time one (the 413
+    class: an unwalked document is an unbudgeted one)."""
+    from auto_research.models.types import ToolResultPart
+
+    small = tmp_path / "small.pdf"
+    small.write_bytes(b"%PDF-1.4 " + b"s" * 1024)
+    big = tmp_path / "big.pdf"
+    big.write_bytes(b"%PDF-1.4 " + b"b" * 25_164_990)  # 33,553,333 bytes as base64
+    first, second = _document(small), _document(big)
+    convo = [
+        ToolResultMessage(results=[ToolResultPart(tool_call_id="c1", name="read",
+                                                  content="ok", documents=[first])]),
+        ModelMessage(role="user", content="carried", documents=[second]),
+    ]
+    items = iter_media(convo)
+    assert [(i.ref, i.is_image) for i in items] == [(first, False), (second, False)]
+    plan = plan_media(items, _ANTHROPIC_LIKE)
+    assert not plan.resolve(second).dropped, "the newest fits the ceiling alone"
+    assert plan.resolve(first).dropped, "the nested one counted: together they pass 32 MB"
+
+
+def test_a_member_without_documents_refuses_a_nested_or_carried_document(tmp_path, monkeypatch):
+    from auto_research.models.types import ModelHandle, ToolResultPart
+    from tests.test_models import FakeProvider
+
+    monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
+    pdf = tmp_path / "p.pdf"
+    pdf.write_bytes(b"%PDF-1.4 p")
+    document = _document(pdf)
+    handle = ModelHandle(
+        role="analyst_worker",
+        config=RoleModelConfig(name="fake", provider="openai", model="fake", vision=True),
+        provider=FakeProvider(),
+    )
+    nested = ToolResultMessage(results=[ToolResultPart(tool_call_id="c1", name="read",
+                                                       content="ok", documents=[document])])
+    for convo in ([nested], [ModelMessage(role="user", content="x", documents=[document])]):
+        with pytest.raises(ValueError, match="not configured for document"):
+            asyncio.run(handle.call(convo))
+
+
+def test_google_renders_a_nested_document_after_the_function_response(tmp_path):
+    from google.genai import types
+
+    from auto_research.models.providers.google import _to_gemini_contents
+    from auto_research.models.types import ModelResponse, ToolCall, ToolResultPart
+
+    pdf = tmp_path / "p.pdf"
+    pdf.write_bytes(b"%PDF-1.4 paper")
+    document = _document(pdf)
+    convo = [
+        ModelMessage(role="user", content="read"),
+        ModelResponse(tool_calls=[ToolCall(id="c1", name="read", arguments={})]),
+        ToolResultMessage(results=[ToolResultPart(tool_call_id="c1", name="read",
+                                                  content="ok", documents=[document])]),
+    ]
+    _system, contents = _to_gemini_contents(convo, types, plan_media(iter_media(convo),
+                                                                      _ANTHROPIC_LIKE))
+    assert contents[-2].parts[0].function_response is not None
+    (part,) = contents[-1].parts
+    assert part.inline_data.mime_type == "application/pdf"

@@ -40,7 +40,7 @@ def test_cyg_x1_ixpe_softstate() -> None:
     Exercises the complete stack with chatter=10:
     - LibrarianIO: compose search strategy, search arXiv/ADS, ingest PDFs via IODebateToConverge
     - Retrieval: text_search_paths() from SQLite
-    - AnalystWorker: debate with persistent XSPEC sandbox, private memory.md per worker
+    - AnalystWorker: debate with persistent XSPEC sandbox, one session per worker rebuilt from the ledger
     - AnalystLead: convergence judge and adjudication
     - Reviewer: literature and analysis review with capped feedback edges
     """

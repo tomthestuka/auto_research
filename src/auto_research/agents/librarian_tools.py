@@ -11,7 +11,7 @@ graph role. This provider is its whole tool surface:
   PDF itself and assigns the handle (``lib:p1``, ``lib:p2`` …). A paper is cited, never text-matched.
 - ``web_fetch`` — the same for a web page (``lib:w1`` …).
 - ``text_search`` — search the local knowledge base of papers earlier runs already read.
-- ``edit_report`` / ``review_report`` — write and read back the ``LiteratureReport``.
+- ``write_report`` / ``edit_report`` — write and edit the ``LiteratureReport`` draft document.
 - ``turn_end`` — submit it; the validator rejects with a reason and the loop continues.
 
 The model never names a file it writes and never types a reference: the report cites handles,
@@ -30,17 +30,27 @@ from pydantic import ValidationError
 
 from auto_research.agents.react import (
     EDIT_REPORT_TOOL,
-    REVIEW_REPORT_TOOL,
     TURN_END_TOOL,
     ToolOutcome,
     execute_turn_end,
+    report_shape_notes,
     turn_end_tool_def,
+)
+from auto_research.agents.report_edit import (
+    LIBRARIAN_BLOCKS,
+    WRITE_REPORT_TOOL,
+    change,
+    edit_tool_def,
+    outline,
+    render,
+    reply_lines,
+    write_tool_def,
 )
 from auto_research.provenance import ReceiptStore, ScopedLookup, check_bindings, paper_attributions
 from auto_research.schemas.artifacts import Receipt
 from auto_research.agents.paper_tools import READ_PAPER_TOOL, PaperReader, format_ids
 from auto_research.schemas.artifacts import PaperAttribution
-from auto_research.schemas.literature import LiteratureFinding, LiteratureReport
+from auto_research.schemas.literature import LiteratureReport
 from auto_research.schemas.search import SearchResult
 from auto_research.sources.receipts import mint_paper_receipt, mint_web_receipt
 
@@ -48,9 +58,10 @@ SEARCH_LITERATURE_TOOL = "search_literature"
 WEB_FETCH_TOOL = "web_fetch"
 TEXT_SEARCH_TOOL = "text_search"
 
+
 #: Tools that write or read back the librarian's own report, or submit it: report authoring, not
 #: evidence gathering, so they cost no tool budget (the same ruling as the analysts').
-LIBRARIAN_FREE_TOOLS = frozenset({EDIT_REPORT_TOOL, REVIEW_REPORT_TOOL, TURN_END_TOOL})
+LIBRARIAN_FREE_TOOLS = frozenset({EDIT_REPORT_TOOL, WRITE_REPORT_TOOL, TURN_END_TOOL})
 
 #: Characters of a web page shown per read. A page ends at a line break, so a number is never cut
 #: in two across pages; the quote check runs against the whole text regardless.
@@ -199,15 +210,7 @@ class LibrarianToolProvider:
                     "required": ["query"],
                 },
             },
-            _edit_report_tool_def(),
-            {
-                "name": REVIEW_REPORT_TOOL,
-                "description": (
-                    "Read back your current report draft and the list of documents you can cite "
-                    "(every paper and page you opened, by handle). Free: costs no tool budget."
-                ),
-                "input_schema": {"type": "object", "properties": {}},
-            },
+            *_report_tool_defs(),
             turn_end_tool_def(),
         ]
 
@@ -222,12 +225,10 @@ class LibrarianToolProvider:
             return await self._web_fetch(arguments)
         if name == TEXT_SEARCH_TOOL:
             return await self._text_search(arguments)
-        if name == EDIT_REPORT_TOOL:
-            return self._edit_report(arguments)
-        if name == REVIEW_REPORT_TOOL:
-            return ToolOutcome(text=self._review_text())
+        if name in (EDIT_REPORT_TOOL, WRITE_REPORT_TOOL):
+            return self._edit_report(arguments, name)
         if name == TURN_END_TOOL:
-            return await execute_turn_end(self.turn_problems, arguments)
+            return await execute_turn_end(self.turn_problems, arguments, self._warnings)
         return ToolOutcome(text=f"unknown tool: {name}", is_error=True)
 
     # ------------------------------------------------------------------ search
@@ -403,60 +404,94 @@ class LibrarianToolProvider:
 
     # ------------------------------------------------------------------ report
 
-    def _edit_report(self, arguments: Mapping[str, Any]) -> ToolOutcome:
-        # Only what the librarian writes; `attributed_values` is the runtime's, set at filing.
-        fields = {k: arguments[k] for k in ("summary", "findings", "gaps", "status") if k in arguments}
-        try:
-            report = LiteratureReport.model_validate(fields)
-        except ValidationError as exc:
+    def _edit_report(self, arguments: Mapping[str, Any], tool: str = EDIT_REPORT_TOOL) -> ToolOutcome:
+        """Apply one edit_report (Edit) or write_report (Write) to the draft document (A7).
+
+        Only what the librarian writes; `attributed_values` is the runtime's, set at filing.
+        """
+        result = change(self._values(self.written_report), LIBRARIAN_BLOCKS, tool, arguments)
+        problems = list(result.problems)
+        report = None
+        if not problems:
+            try:
+                report = LiteratureReport.model_validate(result.values)
+            except ValidationError as exc:
+                problems.append(f"the draft does not validate: {exc}")
+        if problems:
             return ToolOutcome(
-                text=f"edit_report: the report did not validate — fix and call again: {exc}",
+                text=(
+                    f"{tool}: nothing changed.\n"
+                    + "\n".join(f"  - {p}" for p in problems)
+                    + "\n" + self._outline(self.written_report)
+                    + "\nThe draft on file reads:\n"
+                    + render(self._values(self.written_report), LIBRARIAN_BLOCKS).rstrip("\n")
+                ),
                 is_error=True,
             )
         self.report_path.parent.mkdir(parents=True, exist_ok=True)
         self.report_path.write_text(report.model_dump_json() + "\n", encoding="utf-8")
         self.written_report = report
+        lines = reply_lines(tool, result, render(self._values(report), LIBRARIAN_BLOCKS))
+        lines.append(self._outline(report))
         unknown = sorted(
             {h for f in report.findings for h in f.support if h not in self.captures}
         )
-        text = f"Report saved: {len(report.findings)} finding(s), {len(report.gaps)} gap(s)."
         if unknown:
-            text += (
-                f" These handles are not documents you opened: {', '.join(unknown)}. "
-                "Call review_report to see what you can cite."
+            lines.append(
+                f"These handles are not documents you opened in this pass: {', '.join(unknown)}. "
+                "Open one with read_paper (or web_fetch) to cite it. " + self._opened_text()
             )
-        return ToolOutcome(text=text)
+        lines.extend(self._shape_notes(report))
+        return ToolOutcome(text="\n".join(lines))
 
-    def _review_text(self) -> str:
-        parts = []
-        report = self.written_report
+    @staticmethod
+    def _values(report: LiteratureReport | None) -> dict[str, Any]:
         if report is None:
-            parts.append("You have not written a report yet — call edit_report to write one.")
-        else:
-            parts.append(f"Your current report draft:\n\nsummary: {report.summary}")
-            for n, finding in enumerate(report.findings, 1):
-                parts.append(f"finding {n}: {finding.claim}\n  support: {', '.join(finding.support)}")
-            for gap in report.gaps:
-                parts.append(f"gap: {gap}")
-            parts.append(f"status: {report.status}")
-        parts.append("--- documents you can cite ---")
-        if self.captures:
-            parts.extend(f"[{h}] {r.title}  ({_ids_text(r.ids)})" for h, r in self.captures.items())
-        else:
-            parts.append("(none opened yet)")
-        return "\n".join(parts)
+            return {}
+        dumped = report.model_dump(mode="json")
+        return {
+            b.field: dumped.get(b.field) if b.field in report.model_fields_set else None
+            for b in LIBRARIAN_BLOCKS
+        }
+
+    @classmethod
+    def _outline(cls, report: LiteratureReport | None) -> str:
+        return outline(cls._values(report), LIBRARIAN_BLOCKS, {"status": "reads as 'failed'"})
+
+    @staticmethod
+    def _shape_notes(report: LiteratureReport) -> list[str]:
+        succeeded = report.status == "succeeded"
+        return report_shape_notes(
+            report.summary, report.findings, findings_required=succeeded,
+            carries_results=succeeded, cite="naming in support the documents behind it",
+        )
+
+    def _warnings(self) -> list[str]:
+        """The warnings turn_end adds; it files the report anyway (ruling 2026-10-18)."""
+        if self.written_report is None:
+            return []
+        return [n for n in self._shape_notes(self.written_report) if n.startswith("Warning:")]
+
+    def _opened_text(self) -> str:
+        """The handles this pass can cite (B18: named where they are needed, review_report gone)."""
+        if not self.captures:
+            return "You have opened no document in this pass yet."
+        return "The documents you opened in this pass: " + ", ".join(self.captures) + "."
 
     def turn_problems(self) -> list[str]:
         """What stops this librarian's turn from ending, each stated so the model can fix it."""
         report = self.written_report
         if report is None:
             return [
-                "No report has been written. Call edit_report to write it — that call is the only "
-                "way your report is saved, and nothing is composed on your behalf."
+                "No report has been written. Write it with write_report (or fill the empty draft "
+                "with edit_report) — those calls are the only way your report is saved, and nothing "
+                "is composed on your behalf."
             ]
         problems: list[str] = []
         if not report.summary.strip():
-            problems.append("The report's summary is empty.")
+            problems.append(
+                "The report's summary is empty. Write a 3–5-sentence briefing under # summary."
+            )
         if report.status == "succeeded" and not report.findings:
             problems.append(
                 "The report declares success but lists no findings. State what the literature "
@@ -473,8 +508,9 @@ class LibrarianToolProvider:
             unopened = [h for h in finding.support if h not in self.captures]
             for handle in unopened:
                 problems.append(
-                    f"Finding {n} cites '{handle}', which is not a document you opened. "
-                    "Call review_report to see the handles you can cite."
+                    f"Finding {n} cites '{handle}', which is not a document you opened in this "
+                    "pass. Open it in this pass with read_paper (or web_fetch) to cite it. "
+                    + self._opened_text()
                 )
         problems.extend(self._binding_problems(report))
         return problems
@@ -544,56 +580,23 @@ class LibrarianToolProvider:
 # ---------------------------------------------------------------------------- helpers
 
 
-def _edit_report_tool_def() -> dict:
-    """``edit_report`` over a ``LiteratureReport``, every description read from the schema itself.
+_LIBRARIAN_EXTRA = (
+    "Each finding names the documents you read that support it, by handle."
+)
 
-    Written out rather than ``model_json_schema()``: that emits ``$ref``/``$defs`` for the nested
-    finding, a shape vendors resolve inconsistently, and defaults the model has no use for. The
-    prose still has one source — the ``Field(description=...)`` the handler validates back into —
-    so what the model is told and what is checked cannot drift.
+
+def _report_tool_defs() -> tuple[dict, dict]:
+    """``edit_report`` (Edit) and ``write_report`` (Write) over the librarian's draft document (A7).
+
+    The block hints are written in ``report_edit.LIBRARIAN_BLOCKS``; the fields they fill are the
+    ``LiteratureReport`` the handler validates back into, so what the model writes and what is
+    checked cannot drift.
     """
-    report, finding = LiteratureReport.model_fields, LiteratureFinding.model_fields
-    return {
-        "name": EDIT_REPORT_TOOL,
-        "description": (
-            "Write (or rewrite) your report — this is the ONLY way it is saved. Provide the whole "
-            "report each call; a call overwrites the last, so refine across calls. Each finding "
-            "cites the handles of the documents you read that support it. Free: costs no tool budget."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "summary": {"type": "string", "description": report["summary"].description},
-                "findings": {
-                    "type": "array",
-                    "description": report["findings"].description,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "claim": {"type": "string", "description": finding["claim"].description},
-                            "support": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": finding["support"].description,
-                            },
-                        },
-                        "required": ["claim", "support"],
-                    },
-                },
-                "gaps": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": report["gaps"].description,
-                },
-                "status": {
-                    "type": "string",
-                    "enum": ["succeeded", "failed"],
-                    "description": report["status"].description,
-                },
-            },
-            "required": ["summary", "status"],
-        },
-    }
+    status = ("succeeded", "failed")
+    return (
+        edit_tool_def(EDIT_REPORT_TOOL, LIBRARIAN_BLOCKS, status, _LIBRARIAN_EXTRA),
+        write_tool_def(LIBRARIAN_BLOCKS, status, _LIBRARIAN_EXTRA),
+    )
 
 
 def _hit_line(number: int, result: SearchResult) -> str:

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
+import hashlib
 import json
+from dataclasses import dataclass, field
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from pathlib import Path
@@ -12,6 +16,16 @@ from pydantic import BaseModel, ValidationError
 
 from auto_research.config_paths import orchestration_yaml
 from auto_research.agents.prompts import PromptRole, load_prompt
+from auto_research.agents.compaction import KEEP_RECENT_TURNS, has_server_compaction, pin_text
+from auto_research.agents.history import (
+    HISTORY_KEY,
+    document_entries,
+    dumps,
+    encode_message,
+    encode_response,
+    figure_entries,
+    new_turn_id,
+)
 from auto_research.agents.react import (
     TURN_END_TOOL,
     AUTHOR_CHAIN_TOOL,
@@ -24,7 +38,7 @@ from auto_research.agents.react import (
     LeadCycle,
     LeadCycleOutcome,
     MonitorToolProvider,
-    REVIEW_REPORT_TOOL,
+    WRITE_REPORT_TOOL,
     RESPOND_TO_REVIEW_TOOL,
     ReadOnlyToolProvider,
     ReportWorkspace,
@@ -47,19 +61,19 @@ from auto_research.agents.react import (
     _written_report,
 )
 from auto_research.env import react_grace_rounds
+from auto_research.run_control import WAKING_KINDS
 from auto_research.monitor import RunMonitor
 from auto_research.models import (
     ModelGroupHandle,
     ModelHandle,
     ModelMessage,
     ModelResponse,
+    RoleModelConfig,
     ToolResultMessage,
     ToolResultPart,
     resolve,
 )
 from auto_research.sandbox.workspace import (
-    append_memory,
-    read_memory,
     report_record_path,
     round_report_path,
 )
@@ -101,6 +115,49 @@ class CallableModel(Protocol):
         """Call the model; return structured output and/or tool calls."""
 
 
+def _run_ending(run_control: Any) -> bool:
+    """Whether a human stop or a channel failure is ending the run (D8: leave its cleanup to it)."""
+    return run_control is not None and (
+        bool(getattr(run_control, "stop_requested", False))
+        or getattr(run_control, "fatal", None) is not None
+    )
+
+
+def _one_turn_at_a_time(method):
+    """Run a seat's turns one at a time, then wake it for texts its turn put back (D5).
+
+    Wraps every entry point that runs a turn of a graph seat — its fresh turn (``analyze``,
+    ``run_cycle``, ``research``, ``review``), ``resume`` and the lead's ``drive_authoring``. A
+    resume woken for texts that arrived as the seat filed would otherwise run beside the caller's
+    cleanup and the seat's next fresh turn, which share its tools, sandbox and report state. The
+    wake is scheduled when the turn returns normally (a turn that raised wakes nothing); the resume
+    it starts acquires the same lock, so it runs only after this turn is over. One lock per event
+    loop: a role reused under a new loop (a notebook, a test) gets a fresh one.
+    """
+
+    @functools.wraps(method)
+    async def wrapper(self, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        held = self.__dict__.get("_turn_lock")
+        if held is None or held[0] is not loop:
+            held = self._turn_lock = (loop, asyncio.Lock())
+        async with held[1]:
+            try:
+                result = await method(self, *args, **kwargs)
+            except BaseException:
+                self._pending_wake = []
+                raise
+            wake = list(getattr(self, "_pending_wake", ()))
+            self._pending_wake = []
+            channel = getattr(self, "channel", None)
+            if wake and channel is not None and hasattr(channel, "wake"):
+                # Scheduled now, it starts only after this turn releases the lock.
+                channel.wake(self.agent_key, wake)
+            return result
+
+    return wrapper
+
+
 class AgentRole:
     """Base class shared by thin role wrappers."""
 
@@ -132,6 +189,8 @@ class AgentRole:
         # message can resume it.
         self.channel: Any | None = None
         self._kept_turn: dict[str, Any] | None = None
+        # (sender, kind) of texts the last turn put back when it filed, woken for when it ends (D5).
+        self._pending_wake: list[tuple[str, str]] = []
 
     async def _call(
         self,
@@ -346,8 +405,22 @@ class AgentRole:
 
             self.channel = SeatRouter(self.ensure_run_control(), monitor=self.monitor)
             self.channel.register(self.agent_key, self)
+        # The turn's id is fixed here, before the loop, so every part the loop records names THIS
+        # turn even when another loop of the same seat runs beside it (a background resume).
+        kwargs.setdefault(
+            "turn_id", new_turn_id(getattr(self, "agent_key", None) or self.role)
+        )
+        # This turn's own outcome (D4): whether ITS turn_end was accepted, and who sent the texts
+        # it put back after filing (D5). Per turn, so a background resume of the same seat cannot
+        # overwrite it the way it can the shared `last_filed_form`.
+        outcome: TurnOutcome = kwargs.setdefault("outcome", TurnOutcome())
+        session: dict[str, Any] = kwargs.setdefault("session", {})
         if getattr(self, "channel", None) is None:
-            return await self._react_loop(tools=tools, **kwargs)
+            try:
+                return await self._react_loop(tools=tools, **kwargs)
+            except Exception:
+                self._kept_turn = None if not resumed else self._kept_turn
+                raise
         wrapped = ChannelTools(tools, role=self, resumed=resumed, declared=declared)
         kwargs["free_tools"] = frozenset(kwargs.get("free_tools", frozenset())) | {
             WAIT_FOR_REPLY_TOOL, LIST_PEERS_TOOL
@@ -357,12 +430,20 @@ class AgentRole:
             control.set_live(self.agent_key, True)
         try:
             result = await self._react_loop(tools=wrapped, **kwargs)
+        except Exception:
+            # A fresh turn that ends unfiled leaves the kept turn from an earlier round stale: a
+            # text resuming it would continue a session that has moved past it (B2 review).
+            if not resumed:
+                self._kept_turn = None
+            raise
         finally:
             if control is not None:
                 control.set_live(self.agent_key, False)
-        if self.last_filed_form is not None and kwargs.get("terminal_tools"):
+        if outcome.filed_form is not None and kwargs.get("terminal_tools"):
             self._kept_turn = {
                 "messages": result[0],
+                # The turn that left this conversation: a resume continues it in the ledger.
+                "turn_id": kwargs["turn_id"],
                 "tools": tools,
                 "state": {
                     name: getattr(tools, name)
@@ -370,23 +451,48 @@ class AgentRole:
                     if hasattr(tools, name)
                 },
                 "declared": wrapped.tool_definitions(),
+                "session": session,
                 "kwargs": {
                     k: v for k, v in kwargs.items()
                     if k in ("cap", "free_tools", "absolute_cap", "terminal_tools")
                 },
             }
+        if outcome.requeued_from and self.has_kept_turn():
+            # D5: texts that arrived in the batch that filed were put back in the inbox. The
+            # seat is woken once the whole turn — the role method and its cleanup — is over
+            # (`_one_turn_at_a_time`), so the resume never runs beside it.
+            self.__dict__.setdefault("_pending_wake", []).extend(outcome.requeued_from)
         return result
 
     def has_kept_turn(self) -> bool:
         """Whether this seat finished a turn a message can resume (E12)."""
         return getattr(self, "_kept_turn", None) is not None
 
+    @_one_turn_at_a_time
     async def resume(self) -> None:
         """Resume the kept turn to read what reached the inbox: the seat's normal loop, normal
         tools and cap, exit only by ``turn_end`` — with the filed report final (E12)."""
         kept = getattr(self, "_kept_turn", None)
         if kept is None:
             return
+        control = getattr(self, "run_control", None)
+        if control is not None and not any(
+            entry.kind in WAKING_KINDS for entry in control.peek_inbox(self.agent_key)
+        ):
+            # A fresh turn that ran first (the seat's turns run one at a time) already read what
+            # this resume was started for; a notice alone waits for the seat's next turn.
+            return
+        # Live before the first await: a second text arriving while this resume reads the ledger
+        # lands in the inbox instead of starting a second resume of the same turn (B8 review).
+        if control is not None:
+            control.set_live(self.agent_key, True)
+        try:
+            await self._resume_kept(kept)
+        finally:
+            if control is not None:
+                control.set_live(self.agent_key, False)
+
+    async def _resume_kept(self, kept: dict[str, Any]) -> None:
         tools = kept["tools"]
         sandbox = getattr(tools, "sandbox", None)
         if sandbox is not None and hasattr(sandbox, "is_alive") and not sandbox.is_alive:
@@ -395,16 +501,77 @@ class AgentRole:
         for name, value in kept["state"].items():
             setattr(tools, name, value)
         saved_form, saved_response = self.last_filed_form, self.last_response
+        turn_id = new_turn_id(getattr(self, "agent_key", None) or self.role)
+        # B8: the kept turn is resumed from its rebuild in the run ledger — the record, not the
+        # process's memory of it — whenever the ledger holds it (it always does in a run). The
+        # rebuilt list becomes the kept list, so a failure or a later resume sees what this one
+        # appended.
+        rebuilt, diverged = await self._kept_turn_rebuild(kept)
+        if rebuilt is not None:
+            kept["messages"] = rebuilt
         try:
             await self._react(
+                turn_id=turn_id,
                 seed_messages=kept["messages"], share_messages=True, tools=tools,
                 action="resume", resumed=True, declared=kept["declared"],
-                require_terminal=True, **kept["kwargs"],
+                require_terminal=True,
+                # A diverged kept list is recorded whole rather than by a base the ledger would
+                # rebuild differently (which would poison every later rebuild of this seat).
+                history_base=(
+                    {"through": kept["turn_id"], "view": "verbatim",
+                     "count": len(kept["messages"])}
+                    if kept.get("turn_id") and not diverged else None
+                ),
+                session=kept.get("session"),
+                **kept["kwargs"],
             )
         finally:
             for name, value in restore.items():
                 setattr(tools, name, value)
             self.last_filed_form, self.last_response = saved_form, saved_response
+            # The kept list is shared, so whatever this resume appended is on it whether or not it
+            # filed; the turn that recorded those appends is the one a next resume continues.
+            if self._kept_turn is not None and self._kept_turn["messages"] is kept["messages"]:
+                self._kept_turn["turn_id"] = turn_id
+
+    async def _kept_turn_rebuild(self, kept: Mapping[str, Any]) -> tuple[list | None, bool]:
+        """``(the kept turn rebuilt from the ledger, diverged)``.
+
+        ``(None, False)`` without a ledger or turn id. A rebuild that does not match the kept list
+        in memory is ``(None, True)``, recorded as ``*.history.diverged`` at level 1 with the first
+        message that differs; the kept list is resumed then.
+        """
+        monitor, turn_id = self.monitor, kept.get("turn_id")
+        if monitor is None or not turn_id or (
+            getattr(monitor, "jsonl_path", None) is None and getattr(monitor, "chatter", 10) < 10
+        ):
+            return None, False
+        from auto_research.agents.history import conversation, encode_message
+
+        actor = getattr(self, "agent_key", None) or self.role
+        first_diff = None
+        try:
+            rebuilt = await asyncio.to_thread(
+                conversation, monitor, actor, turn_id, run_id=getattr(monitor, "run_id", None)
+            )
+            error = None
+        except Exception as exc:  # noqa: BLE001 — the kept list still holds the turn
+            rebuilt, error = None, repr(exc)
+        if rebuilt is not None:
+            mine = [encode_message(m) for m in kept["messages"]]
+            theirs = [encode_message(m) for m in rebuilt]
+            if mine == theirs:
+                return rebuilt, False
+            first_diff = next(
+                (i for i, (a, b) in enumerate(zip(mine, theirs)) if a != b), min(len(mine), len(theirs))
+            )
+            error = "the ledger's rebuild differs from the kept turn"
+        await self._record(
+            f"{self.role}.history.diverged", level=1,
+            summary=f"{actor}: resuming from the kept turn (the ledger rebuild did not serve)",
+            data={"error": error, "turn": turn_id, "first_differing_message": first_diff},
+        )
+        return None, True
 
     def ensure_run_control(self) -> Any:
         """This seat's RunControl, creating one when the role runs without a run (a benchmark's
@@ -431,6 +598,11 @@ class AgentRole:
         free_tools: frozenset[str] = frozenset(),
         absolute_cap: int | None = None,
         terminal_tools: frozenset[str] = frozenset(),
+        history_base: Mapping[str, Any] | None = None,
+        task_receipt: str | None = None,
+        turn_id: str | None = None,
+        outcome: "TurnOutcome | None" = None,
+        session: dict[str, Any] | None = None,
     ) -> tuple[list, list[FigureRef], list[DocumentRef]]:
         """Run an inner ReAct loop: gather evidence by calling tools to completion.
 
@@ -448,9 +620,12 @@ class AgentRole:
         across as many rounds as it needs to converge without starving the evidence-
         gathering iterations the same loop is for; the human ending the debate is the
         normal stop. With ``free_tools`` empty the loop is identical to ``range(cap)``.
-        ``absolute_cap`` (config ``react_loop_absolute_cap``, passed only by the lead's
-        design debate) is a hard ceiling on TOTAL iterations — the runaway-free-tool backstop;
-        when ``None`` it defaults to ``cap`` (so non-opt-in callers are unchanged).
+        ``absolute_cap`` (config ``react_loop_absolute_cap``) bounds TOTAL iterations — the
+        runaway-free-tool backstop; when ``None`` it defaults to ``cap``. Neither cap is an exit
+        for a loop with ``terminal_tools`` (§2b, ruling D4): each opens the grace window
+        (``react_grace_rounds``; at the ceiling counted in model turns) and its end raises
+        :class:`ReactBudgetExhausted`. ``outcome`` (a :class:`TurnOutcome`) records this turn's
+        accepted terminal and the texts put back after filing.
 
         ``terminal_tools`` names tools whose successful call **ends the loop**: the role has
         filed the form its turn exists to produce, and there is nothing further to gather. The
@@ -471,9 +646,10 @@ class AgentRole:
         Returns ``(messages, figures, documents)``: the full trajectory (seed + all
         turns) for a terminal :meth:`_call_over_messages`, the figures produced by
         tools, and the documents a tool attached (e.g. PDFs opened via ``open_paper``).
-        Accumulated documents are re-attached to every subsequent model call so the
-        model can read them multimodally mid-loop; ``cache_prefix=True`` keeps the
-        stable system+tools prefix cached so only the growing tail is re-sent.
+        A document rides the tool result that opened it (R2), once: sent at its place in the
+        conversation, it falls inside the cached prefix as the loop grows, and one already in the
+        conversation is not attached again. ``cache_prefix=True`` keeps the stable prefix cached
+        so only the growing tail is re-sent.
         ``on_result(call, outcome)`` is an optional async hook (monitor/memory).
         """
         # Normally a copy: a caller's seed is its own. `share_messages` hands the loop the
@@ -481,13 +657,55 @@ class AgentRole:
         # link's coding transcript from the LIVE trajectory (A7). The alternative was a nested
         # per-link loop, and that is the topology whose only exits were whole-cycle terminals.
         messages: list = seed_messages if share_messages else list(seed_messages)
+        # Session history (B1): the turn opens in the ledger with what it was seeded with, and
+        # every part the loop adds below is recorded where it is added (`agents.history`).
+        # `history_base` names the earlier turn the leading seed messages continue, so they are
+        # recorded by reference rather than again.
+        turn_id = turn_id or new_turn_id(getattr(self, "agent_key", None) or self.role)
+        if images:
+            # The turn's first-call figures sit in its task message, so every call of the turn
+            # sends them at the same place: within a turn a conversation only grows at its end
+            # (human ruling B6, 2026-10-18). They used to ride the first call only, which removed
+            # them from every later request — an edit of earlier content.
+            last = messages[-1] if messages else None
+            if isinstance(last, ModelMessage) and last.role == "user":
+                messages[-1] = last.model_copy(update={"figures": [*last.figures, *images]})
+            else:
+                messages.append(ModelMessage(
+                    role="user", content="The figures that come with this turn's task:",
+                    figures=list(images),
+                ))
+            images = ()
+        await self._history_turn_start(
+            action, turn_id, messages, base=history_base, task_receipt=task_receipt,
+        )
+        declared_sha: list[str | None] = [None]  # the tool set last recorded in this turn
+        # What a long turn's compaction needs (B6/B7): where its task is, the receipts its tools
+        # produced (pinned outside any summary, with what each can ground), the last prompt size,
+        # and the calls since the last segment boundary.
+        # A resume continues its kept turn's session (its task is NOT the last text it got).
+        session = session if session is not None else {}
+        session.setdefault("task_index", next(
+            (i for i in range(len(messages) - 1, -1, -1)
+             if isinstance(messages[i], ModelMessage) and messages[i].role == "user"),
+            None,
+        ))
+        session.setdefault("produced", [])
+        session.setdefault("prompt_tokens", 0)
+        session.setdefault("since", KEEP_RECENT_TURNS)
+        session.setdefault("task_receipt", task_receipt)
+        session["sent_len"] = len(messages)
         figures: list[FigureRef] = []
         documents: list[DocumentRef] = []
         seen_docs: set[str] = set()
         # Which terminal form this loop filed, and with what. `None` after the loop means the
         # role never filed one — the failure the caller has to treat as such.
         self.last_filed_form: tuple[str, dict] | None = None
+        # The per-turn record (D4/D5); bound to its own name because `outcome` below is each
+        # tool call's result.
+        turn_outcome = outcome
         filed_terminal = False
+        filed_form: tuple[str, dict] | None = None  # this loop's accepted terminal call
         budget_cap = max(1, cap)
         absolute_ceiling = max(budget_cap, absolute_cap) if absolute_cap is not None else budget_cap
         budget_used = 0
@@ -510,10 +728,67 @@ class AgentRole:
         # the model mid-loop lands here first — a human steer, and from B onward a background
         # coder event — rather than being appended wherever the code happened to be.
         injections: list[tuple[str, str]] = []  # (kind, text)
-        while iteration < absolute_ceiling:
+        # The inbox entries drained but not yet shown to the model, in arrival order (D1, D5):
+        # what goes back to the inbox if this turn ends before showing them.
+        unshown: list[Any] = []  # InboxEntry
+        # The absolute ceiling is a cap like the budget (ruling D4, 2026-10-18): a loop that must
+        # file gets the same grace window there, counted in model turns (iterations at the
+        # ceiling are mostly free calls, which never spend `grace_used`), and then fails loudly.
+        # Before this, a loop of free calls — a refused `turn_end` 600 times — ended here unfiled
+        # and its caller read the unfiled draft as the report.
+        ceiling_grace_end: int | None = None
+        while True:
+            if iteration >= absolute_ceiling:
+                if not terminal_tools:
+                    break  # no terminal tool to reach: the ceiling is a legitimate end
+                if ceiling_grace_end is None:
+                    ceiling_grace_end = iteration + grace_total
+                    # Inside the budget's window already: it was told, and the countdown on each
+                    # result now counts down whichever window closes first.
+                    announce = not in_grace
+                    in_grace = True
+                    await self._record(
+                        f"{self.role}.{action}.grace_opened", level=3,
+                        summary=(
+                            f"{self.role} reached its absolute ceiling; {grace_total} grace "
+                            "round(s) to file"
+                        ),
+                        data={"cap": budget_cap, "absolute_cap": absolute_ceiling,
+                              "grace": grace_total, "iteration": iteration, "at": "ceiling"},
+                    )
+                    if announce:
+                        injections.append(("grace", _GRACE_OPENED.format(grace=grace_total)))
+                if iteration >= ceiling_grace_end:
+                    await self._record(
+                        f"{self.role}.{action}.grace_exhausted", level=1,
+                        summary=f"{self.role} did not file within its grace window — fatal",
+                        data={"cap": budget_cap, "absolute_cap": absolute_ceiling,
+                              "grace": grace_total, "iteration": iteration, "at": "ceiling"},
+                    )
+                    raise ReactBudgetExhausted(
+                        f"{self.role}.{action}: reached its absolute ceiling ({absolute_ceiling} "
+                        f"model turns) and used all {grace_total} grace rounds without filing a "
+                        "terminal form. Exhausting a cap is not an exit (CLAUDE.md §2b); nothing "
+                        "is composed on a role's behalf."
+                    )
             if budget_used >= budget_cap and not in_grace:
+                if not terminal_tools:
+                    break  # no terminal tool to reach: the budget is a legitimate end
                 if grace_total <= 0:
-                    break  # no terminal tool to reach, or grace disabled: the old behaviour
+                    # Grace configured to 0 on a loop that must file: the cap is still not an
+                    # exit (§2b, ruling D4), so it fails loudly here, with no window.
+                    await self._record(
+                        f"{self.role}.{action}.grace_exhausted", level=1,
+                        summary=f"{self.role} spent its budget with no grace window — fatal",
+                        data={"cap": budget_cap, "grace": 0, "iteration": iteration,
+                              "at": "budget"},
+                    )
+                    raise ReactBudgetExhausted(
+                        f"{self.role}.{action}: used its full budget ({budget_cap}) without "
+                        "filing a terminal form, and no grace rounds are configured. Exhausting "
+                        "a cap is not an exit (CLAUDE.md §2b); nothing is composed on a role's "
+                        "behalf."
+                    )
                 in_grace = True
                 await self._record(
                     f"{self.role}.{action}.grace_opened", level=3,
@@ -536,11 +811,24 @@ class AgentRole:
             # for this role. A no-op when run_control is unset. A /stop is NOT read here: it
             # cancels the run task outright (see ``RunControl.interrupt``), so there is nothing
             # for this loop to notice.
+            # B14 (c): a coding link closed in the last tool round is cut now that its results
+            # are in — its transcript removed from the end, its outcome in place of the answer.
+            segment_cut = getattr(self, "_segment_cut", None)
+            if segment_cut is not None:
+                self._segment_cut = None
+                await segment_cut(messages)
+            # B13 (b): on a provider with no server-side bound, a turn nearing its member's input
+            # limit starts a new segment — its task, a summary, the pin, its latest round word for
+            # word — sending no earlier assistant turn, so no earlier thinking (ruling B6.2).
+            # Before the inbox drain, so a text the model has not seen yet is never summarised.
+            if not _last_turn_has_unresolved_server_tool(messages):
+                await self._segment_boundary(action, turn_id, messages, tools, session)
             # Every text this seat receives — a human steer, the human's reply, another seat's
             # message, the coder's question, a runtime notice — arrives through its inbox (E12).
             if self.run_control is not None:
                 for entry in self.run_control.drain_inbox(self.agent_key):
                     injections.append((entry.kind, entry.render()))
+                    unshown.append(entry)
             # B4: the coder runs beside this loop, so when it stops the lead is TOLD rather than
             # having to poll. Same queue and the same hold rule as a human steer — a pushed event
             # is exactly what made the A2 race reachable, so it goes through the same gate.
@@ -565,9 +853,10 @@ class AgentRole:
                         f"{self.role}.{action}.{kind}", level=3,
                         summary=f"{self.role} received a human steer"
                         if kind == "steer" else f"{self.role} was told: {text[:60]}",
-                        data={"message": text},
+                        data={"message": text, **self._history_part("user", turn=turn_id)},
                     )
                 injections.clear()
+                unshown.clear()
             elif injections:
                 await self._record(
                     f"{self.role}.{action}.injection_held", level=4,
@@ -577,16 +866,88 @@ class AgentRole:
                     ),
                     data={"held": len(injections), "kinds": sorted({k for k, _ in injections})},
                 )
-            response = await self.model.call(
-                messages,
-                tools=tools.tool_definitions(),
-                tool_choice="auto",
-                images=images if iteration == 0 else (),
-                documents=documents,
-                cache_prefix=True,
-            )
+            try:
+                response = await self.model.call(
+                    messages,
+                    tools=tools.tool_definitions(),
+                    tool_choice="auto",
+                    images=(),
+                    documents=(),
+                    cache_prefix=True,
+                )
+            except Exception as exc:
+                # Contained failure (CLAUDE.md §9.3.8, D1): whatever the provider returned that
+                # `call_with_transient_retry` would not wait out — a 400 "prompt is too long", an
+                # auth error, a retry budget spent — ends THIS unit's turn, recorded, with nothing
+                # filed on its behalf. Raised as the unit's own failure so the caller that has
+                # peers to carry on with (the debate) can, and one that has none ends honestly.
+                # Our own defects are not provider errors and propagate untouched.
+                from auto_research.models.retry import is_provider_error
+
+                if not is_provider_error(exc):
+                    raise
+                # Texts this call carried are in this turn's ledger history (B1), which the seat's
+                # next turn carries (B2). Texts still HELD for an unresolved server tool were never
+                # recorded or sent: back into the inbox, so the sender's "delivered" holds. Inbox
+                # texts only: a grace countdown or a coder event belongs to this turn.
+                unread = self._requeue_unread(unshown)
+                # A text should reach the seat's next turn, never resume a stale conversation
+                # (E12). A fresh turn's failure leaves the kept turn from an earlier round stale;
+                # a resume's failure spoils the turn it resumed (the identity check keeps any
+                # other kept turn, should one ever be stored meanwhile).
+                kept = getattr(self, "_kept_turn", None)
+                if action != "resume" or (kept is not None and kept.get("messages") is messages):
+                    self._kept_turn = None
+                await self._record(
+                    f"{self.role}.{action}.provider_error", level=1,
+                    summary=(
+                        f"{self.agent_key or self.role}'s turn ended on a provider error, "
+                        "nothing filed"
+                    ),
+                    data={
+                        "error": repr(exc),
+                        "error_type": type(exc).__name__,
+                        "status_code": _provider_status(exc),
+                        "iteration": iteration,
+                        "budget_used": budget_used,
+                        "filed": False,
+                        "requeued_texts": len(unread),
+                    },
+                )
+                raise ProviderTurnFailed(
+                    agent=self.agent_key or self.role, action=action, cause=exc
+                ) from exc
             self.last_response = response
             await self._record_context_edit(response, action)
+            if any(e.get("type") == "thinking_dropped" for e in response.context_edits):
+                # Ruling B6.5: the provider refused replayed thinking; the adapter sent the call
+                # once more without it. The conversation drops it too, so later calls send what
+                # was accepted rather than repeating the refusal.
+                await self._strip_thinking(action, turn_id, messages)
+            session["sent_len"] = len(messages)
+            usage = getattr(response, "usage", None)
+            session["prompt_tokens"] = (
+                (usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens)
+                if usage is not None else 0
+            )
+            session["since"] += 1
+            if has_server_compaction(response):
+                # B6: the provider condensed the turn, task included ("all content blocks before
+                # it are ignored"); code, not the summary, restates the task and says where the
+                # record is (the summary is navigation, never evidence).
+                if not any(e.get("type") == "compaction" for e in response.context_edits):
+                    await self._record(
+                        f"{self.role}.{action}.compaction", level=3,
+                        summary=f"{self.role}: the provider condensed the turn",
+                        data={"server": True,
+                              "provider": getattr(getattr(self.model, "config", None),
+                                                  "provider", None)},
+                    )
+                task_index = session["task_index"]
+                task = messages[task_index].content if task_index is not None else None
+                injections.append(("compaction_pin", pin_text(
+                    session["task_receipt"], session["produced"], task=task,
+                )))
             if not response.tool_calls:
                 # A turn with no tool calls is FIVE different outcomes, and breaking here
                 # collapsed them into "the model is done" (F5b). Slot 3's lead returned
@@ -630,9 +991,14 @@ class AgentRole:
                         "continued": bool(nudge),
                     },
                 )
-                if nudge is None or (
+                ends_loop = nudge is None or (
                     silent_turns >= _SILENT_TURN_CAP and not require_terminal
-                ):
+                )
+                await self._history_model(
+                    action, turn_id, response, iteration, in_history=not ends_loop,
+                    tools=tools, declared_sha=declared_sha,
+                )
+                if ends_loop:
                     break
                 silent_turns += 1
                 # The whole turn is replayed, then the nudge as its own NEW user message — never
@@ -669,6 +1035,11 @@ class AgentRole:
                 # against a model that kept answering in prose (caught by its own test, 2026-09-15).
                 iteration += 1
                 messages.append(ModelMessage(role="user", content=nudge))
+                await self._record(
+                    f"{self.role}.{action}.nudge", level=4,
+                    summary=f"{self.role} was told to continue: {nudge[:60]}",
+                    data={"message": nudge, **self._history_part("user", turn=turn_id)},
+                )
                 continue
             silent_turns = 0
             # The turn we replay IS the turn we received: `ModelResponse` is the neutral
@@ -677,6 +1048,10 @@ class AgentRole:
             # time the provider part-set grew (tool-search discovery blocks until 2026-07-27,
             # thinking blocks until 2026-08-05).
             messages.append(response)
+            await self._history_model(
+                action, turn_id, response, iteration, in_history=True,
+                tools=tools, declared_sha=declared_sha,
+            )
             result_parts: list[ToolResultPart] = []
             # Steers that arrive WHILE this batch runs. A model turn can emit many tool calls, and
             # the loop dispatches them all before it comes back round to the top-of-iteration
@@ -711,7 +1086,7 @@ class AgentRole:
                     outcome = ToolOutcome(
                         text=(
                             f"{call.name} was not run: your turn already ended with an accepted "
-                            f"{self.last_filed_form[0]}, and the report it accepted stands."
+                            f"{filed_form[0]}, and the report it accepted stands."
                         ),
                         is_error=True,
                     )
@@ -726,16 +1101,35 @@ class AgentRole:
                     )
                 else:
                     outcome = await tools.execute(call.name, dict(call.arguments))
+                result_receipt = self._result_receipt(outcome.receipt_call_id)
+                if result_receipt:
+                    session["produced"].append(
+                        (call.name, result_receipt, self._grounds(result_receipt))
+                    )
+                # A document nests in the result that opened it (R2), unless the conversation
+                # already carries it (a segment boundary drops the earlier ones, so a reopened
+                # paper comes back).
+                carried = {
+                    d.sha256 for m in messages if isinstance(m, ToolResultMessage)
+                    for p in m.results for d in p.documents
+                } | {d.sha256 for p in result_parts for d in p.documents}
+                nested_docs = [d for d in outcome.documents if d.sha256 not in carried]
+                for doc in outcome.documents:  # a paper's receipt is pinned like an output's
+                    handle = self._paper_handle(doc)
+                    if handle and all(entry[1] != handle for entry in session["produced"]):
+                        session["produced"].append((call.name, handle, self._grounds(handle)))
                 result_parts.append(
                     ToolResultPart(
                         tool_call_id=call.id,
                         name=call.name,
                         content=outcome.text,
                         is_error=outcome.is_error,
+                        receipt=result_receipt,
                         # Carry the figures on the turn so the adapter renders them inline
                         # in history (an adjacent image turn), keeping them visible every
                         # later round and in the terminal report call, and cache-stable.
                         figures=outcome.figures,
+                        documents=nested_docs,
                     )
                 )
                 # Also accumulate for the return value: worker.analyze staples these onto
@@ -768,23 +1162,44 @@ class AgentRole:
                            if outcome.call_context is not None else {}),
                         **({"call_id": outcome.receipt_call_id}
                            if outcome.receipt_call_id is not None else {}),
+                        **self._history_part(
+                            "tool_result", turn=turn_id,
+                            figures=figure_entries(
+                                outcome.figures, self._history_store(),
+                                prefer=getattr(self, "agent_key", None),
+                            ),
+                            documents=document_entries(nested_docs),
+                            result_receipt=result_receipt,
+                        ),
                     },
                 )
                 # A terminal form, accepted by its handler, is this loop's answer. Recorded here
                 # but acted on after the whole batch is appended, so the trajectory never ends
                 # mid-batch with a `tool_use` whose `tool_result` was dropped.
                 if call.name in terminal_tools and not outcome.is_error:
-                    self.last_filed_form = (call.name, dict(call.arguments))
+                    filed_form = (call.name, dict(call.arguments))
+                    self.last_filed_form = filed_form
+                    if turn_outcome is not None:
+                        turn_outcome.filed_form = filed_form
                     filed_terminal = True
                 if self.run_control is not None:
-                    batch_steers.extend(self.run_control.drain_inbox(self.agent_key))
+                    drained = self.run_control.drain_inbox(self.agent_key)
+                    batch_steers.extend(drained)
+                    unshown.extend(drained)
+            grace_suffix = ""
             if in_grace:
                 # The countdown rides the tool results rather than a separate user turn: a turn
                 # appended after tool results is the one position a provider forbids when the
                 # answered turn left a server tool unresolved (A2), and a model reads what comes
                 # back from its own call.
-                remaining = max(0, grace_total - grace_used - 1)
+                # Whichever window closes first: the budget's (spent calls) or the ceiling's
+                # (model turns), when both are open.
+                left = [grace_total - grace_used - 1] if budget_used >= budget_cap else []
+                if ceiling_grace_end is not None:
+                    left.append(ceiling_grace_end - iteration - 1)
+                remaining = max(0, min(left))
                 note = _GRACE_REMAINING.format(remaining=remaining)
+                grace_suffix = note
                 result_parts = [
                     part.model_copy(update={"content": part.content + note})
                     for part in result_parts
@@ -820,27 +1235,53 @@ class AgentRole:
                         {"name": p.name, "is_error": p.is_error, "chars": len(p.content)}
                         for p in result_parts
                     ],
+                    **self._history_part("results_end", turn=turn_id, suffix=grace_suffix),
                 },
             )
             # The form is filed and its result is on the trajectory: stop. Placed after the whole
             # batch is appended and accounted for, so a turn that filed alongside other calls
             # still leaves every `tool_use` paired with its `tool_result`.
             if filed_terminal:
+                # D5: texts drained while this batch ran (and any still held) were never shown.
+                # Back into the inbox in arrival order, as they arrived (sender and kind kept, so
+                # nothing is wrapped twice); the seat is then woken to read them.
+                requeued = self._requeue_unread(unshown)
+                if turn_outcome is not None:
+                    turn_outcome.requeued_from = requeued
                 await self._record(
                     f"{self.role}.{action}.filed",
                     level=3,
                     summary=(
-                        f"{self.role} filed {self.last_filed_form[0]} — "
+                        f"{self.role} filed {filed_form[0]} — "
                         f"{action} loop complete"
                     ),
                     data={
-                        "form": self.last_filed_form[0],
+                        "form": filed_form[0],
                         "iteration": iteration,
                         "budget_used": budget_used,
+                        "requeued_texts": len(requeued),
                     },
                 )
                 break
         return messages, figures, documents
+
+    def _requeue_unread(self, entries: Sequence[Any]) -> list[tuple[str, str]]:
+        """Put inbox entries this turn drained but never showed back in the seat's inbox (D1, D5).
+
+        ``entries`` are the ``InboxEntry`` objects in arrival order, re-queued as they arrived
+        (sender, kind, handles), so a later turn renders each once. A grace countdown, coder event
+        or compaction pin is not an inbox entry and stays with its turn. Returns ``(sender,
+        kind)`` per entry, which decides whether the idle seat is woken (``SeatRouter.wake``).
+        """
+        control = self.run_control
+        if control is None or not self.agent_key:
+            return []
+        for entry in entries:
+            control.add_steer(
+                self.agent_key, entry.text, sender=entry.sender, kind=entry.kind,
+                handles=entry.handles,
+            )
+        return [(entry.sender, entry.kind) for entry in entries]
 
     async def _record(
         self,
@@ -869,12 +1310,488 @@ class AgentRole:
                 data=record_data,
             )
 
+    async def _history_seed(self) -> tuple[list, dict | None]:
+        """This seat's opening messages for its next turn, and the base to record (B2).
+
+        Every graph role is one session across its turns (human ruling 2026-10-18): the worker's
+        ``analyze``, the lead's ``run_cycle``, the reviewer's ``review`` and the librarian's
+        ``research`` each open with this, then that turn's own task.
+
+        At a turn boundary the earlier turns become ONE user message (ruling B6.2, the "simple
+        compaction" pattern): ``history.transcript`` of the seat's latest turn rebuilt from the run
+        ledger (this run's rows only), each earlier tool output as its index line (B3), carrying the
+        newest figure sets within the image budget (``images.keep_newest``, B4 at the boundary).
+        No earlier assistant turn is replayed, so no earlier thinking is sent, on any provider. A
+        transcript longer than half the compaction trigger is condensed by ``session_compactor``
+        and followed by the pin of its receipts. Empty — a fresh seed — with no ledger to read, no
+        earlier turn, or a ledger that does not rebuild (recorded at level 1).
+        """
+        monitor = self.monitor
+        actor = getattr(self, "agent_key", None) or self.role
+        if monitor is None:
+            return [], None
+        if getattr(monitor, "jsonl_path", None) is None and getattr(monitor, "chatter", 10) < 10:
+            # A monitor that writes no JSONL keeps only the events up to its chatter level (a
+            # library call, a test): there is no ledger to continue from, and the seat says so.
+            await self._record(
+                f"{self.role}.history.unavailable", level=3,
+                summary=f"{actor} starts each turn fresh: this run writes no ledger file",
+            )
+            return [], None
+        from auto_research.agents import images as image_budget
+        from auto_research.agents.history import (
+            figure_entries,
+            transcript,
+            turn_figure_sets,
+            turns_for,
+        )
+
+        try:
+            turns = await asyncio.to_thread(
+                turns_for, monitor, actor, run_id=getattr(monitor, "run_id", None)
+            )
+        except Exception as exc:  # noqa: BLE001 — an unreadable history costs the context, not the turn
+            await self._record(
+                f"{self.role}.history.unreadable", level=1,
+                summary=f"{actor}'s history could not be rebuilt from the ledger; starting fresh",
+                data={"error": repr(exc)},
+            )
+            return [], None
+        turn = next(reversed(turns.values()), None) if turns else None
+        if turn is None or not any(not isinstance(m, ModelMessage) or m.role != "system"
+                                   for m in turn.messages):
+            return [], None
+        # Every figure this session has carried, by hash: a turn's task attaches only the others.
+        self._session_figures = {
+            figure.sha256 for t in turns.values()
+            for figs in turn_figure_sets(t.messages) for figure in figs
+        }
+        # A figure handed in with a task (a peer's) is named by its receipt too.
+        handed = [f for m in turn.messages if isinstance(m, ModelMessage) for f in m.figures]
+        names = dict(turn.handles.get("figures", {}))
+        for entry in figure_entries(handed, self._history_store()):
+            if entry["handle"]:
+                names.setdefault(entry["ref"]["sha256"], entry["handle"])
+        text = transcript(turn.messages, names)
+        figures = image_budget.keep_newest(turn_figure_sets(turn.messages))
+        text = await self._condensed_transcript(text, list(turns.values()))
+        opening = [
+            ModelMessage(role="system", content=self.prompt),
+            ModelMessage(role="user", content=text, figures=figures),
+        ]
+        return opening, {"through": turn.id, "view": "transcript", "count": 0}
+
+    def _task_figures(
+        self, figures: Sequence[FigureRef], *, continued: bool
+    ) -> tuple[list[FigureRef], list[dict[str, str | None]]]:
+        """``(figures to attach to this turn's task, the rest named by handle)`` (R7).
+
+        Each figure once, by hash. A continued session (``continued``: the seed came from the
+        ledger) attaches only figures it has not carried before, the earlier ones named in its
+        transcript. The set is then bounded like a boundary's (``images.keep_newest``, one set per
+        figure): all while they fit 40k image tokens, else the newest within 20k; every figure left
+        out is named by its receipt handle, which ``view_receipt`` opens.
+        """
+        from auto_research.agents import images as image_budget
+        from auto_research.agents.history import figure_entries
+
+        shown = getattr(self, "_session_figures", None) if continued else None
+        seen: set[str] = set(shown or ())
+        fresh: list[FigureRef] = []
+        for figure in figures:
+            if figure.sha256 not in seen:
+                seen.add(figure.sha256)
+                fresh.append(figure)
+        kept = image_budget.keep_newest([[f] for f in fresh])
+        kept_ids = {id(f) for f in kept}
+        left = [f for f in fresh if id(f) not in kept_ids]
+        named = [
+            {"handle": entry["handle"], "caption": entry["ref"].get("caption")}
+            for entry in figure_entries(left, self.receipts)
+        ]
+        return kept, named
+
+    async def _condensed_transcript(self, text: str, turns: Sequence[Any]) -> str:
+        """``text``, or its summary when it is longer than half the compaction trigger of this
+        seat's member (characters / 3.5 as tokens); the pin of the earlier turns' receipts follows
+        the summary. A summariser that fails leaves the transcript whole, recorded."""
+        from auto_research.agents import compaction
+        from auto_research.agents.history import CONDENSED_NOTE, TRANSCRIPT_MARK, figure_entries
+        from auto_research.env import compaction_config
+        from auto_research.observability.costs import context_window_for
+
+        cfg = compaction_config()
+        member = getattr(self.model, "config", None)
+        window = context_window_for(member) if isinstance(member, RoleModelConfig) else None
+        if not cfg.enabled or not window or len(text) / 3.5 <= cfg.trigger_fraction * window / 2:
+            return text
+        try:
+            from auto_research.agents.prompts import load_prompt
+            from auto_research.models import resolve
+
+            summariser = resolve("session_compactor").handles[0]
+            reply = await summariser.call([
+                ModelMessage(role="system", content=load_prompt("session_compactor")),
+                ModelMessage(role="user", content=text),
+            ])
+            summary = compaction.summary_text(reply.content or "")
+        except Exception as exc:  # noqa: BLE001 — a long transcript beats no history
+            summary = ""
+            await self._record(
+                f"{self.role}.history.compaction_failed", level=2,
+                summary=f"{self.role}: condensing the earlier turns failed; sent whole",
+                data={"error": repr(exc), "chars": len(text)},
+            )
+        if not summary:
+            return text
+        # Every receipt of the earlier turns (R10), read from the rebuilt turns themselves: each
+        # output's, its figures', the papers its tools opened, and the figures handed in.
+        named: dict[str, str] = {}
+        for earlier in turns:
+            figure_names = earlier.handles.get("figures", {})
+            for m in earlier.messages:
+                if isinstance(m, ToolResultMessage):
+                    for p in m.results:
+                        if p.receipt:
+                            named.setdefault(p.receipt, p.name)
+                        for f in p.figures:
+                            if figure_names.get(f.sha256):
+                                named.setdefault(figure_names[f.sha256], p.name)
+                        for d in p.documents:
+                            handle = self._paper_handle(d)
+                            if handle:
+                                named.setdefault(handle, p.name)
+                elif isinstance(m, ModelMessage) and m.role == "user" and m.figures:
+                    for entry in figure_entries(m.figures, self._history_store()):
+                        if entry["handle"]:
+                            named.setdefault(entry["handle"], "handed_to_you")
+        produced = [(tool, handle, self._grounds(handle)) for handle, tool in named.items()]
+        await self._record(
+            f"{self.role}.history.condensed", level=3,
+            summary=f"{self.role}: the earlier turns were condensed ({len(text):,} characters)",
+            data={"chars": len(text), "summary_chars": len(summary)},
+        )
+        return (f"{TRANSCRIPT_MARK} {CONDENSED_NOTE}\n"
+                f"{summary}\n\n{compaction.pin_text(None, produced, earlier_turns=True)}")
+
+    # -- session history (B1): the parts a rebuild needs, recorded where the loop adds them --
+
+    async def _history_turn_start(
+        self,
+        action: str,
+        turn_id: str,
+        messages: Sequence[Any],
+        *,
+        base: Mapping[str, Any] | None = None,
+        task_receipt: str | None = None,
+    ) -> None:
+        """Open a turn in the ledger: its id and the seed after its base (figures ride their
+        messages).
+
+        A seed's leading ``base["count"]`` messages are the base turn's conversation, recorded by
+        that turn; only what follows them is written here. Messages travel as one JSON string
+        (``history.dumps``), so their key order survives the ledger's sorted lines.
+        """
+        if self.monitor is None:
+            return
+        actor = getattr(self, "agent_key", None) or self.role
+        skip = int(base.get("count", 0)) if base else 0
+        part: dict[str, Any] = {
+            "part": "turn_start",
+            "turn": turn_id,
+            "base": dict(base) if base else None,
+            "seed_json": dumps([encode_message(m) for m in list(messages)[skip:]]),
+            "task_receipt": task_receipt,
+        }
+        await self._record(
+            f"{self.role}.{action}.turn_start", level=8,
+            summary=f"{actor} started a turn ({len(messages)} message(s) in its seed)",
+            data={"turn": turn_id, HISTORY_KEY: part},
+        )
+
+    def _history_part(self, kind: str, *, turn: str, **extra: Any) -> dict[str, Any]:
+        """The ``data`` entry that marks an event as one part of turn ``turn``'s history."""
+        return {HISTORY_KEY: {"part": kind, "turn": turn, **extra}}
+
+    async def _history_model(
+        self,
+        action: str,
+        turn_id: str,
+        response: Any,
+        iteration: int,
+        *,
+        in_history: bool,
+        tools: Any = None,
+        declared_sha: list | None = None,
+    ) -> None:
+        """Record one returned model turn whole — its prose, thinking and calls as received — and
+        the tool set it was offered (whole when it changed within the turn, else its hash)."""
+        if self.monitor is None or not isinstance(response, ModelResponse):
+            return
+        extra: dict[str, Any] = {}
+        if tools is not None:
+            try:
+                declared = dumps(tools.tool_definitions())
+            except Exception:  # noqa: BLE001 — the declaration is context; the turn is the record
+                declared = None
+            if declared is not None:
+                sha = hashlib.sha256(declared.encode("utf-8")).hexdigest()
+                extra["tools_sha256"] = sha
+                if declared_sha is not None and declared_sha[0] != sha:
+                    extra["tools_json"] = declared
+                    declared_sha[0] = sha
+        await self._record(
+            f"{self.role}.{action}.model_turn", level=9,
+            summary=(
+                f"{self.role} model turn: {len(response.tool_calls)} call(s), "
+                f"{len(response.content or '')} chars of text"
+            ),
+            data={
+                "iteration": iteration,
+                **self._history_part(
+                    "model", turn=turn_id, response_json=dumps(encode_response(response)),
+                    in_history=in_history, **extra,
+                ),
+            },
+        )
+
+    async def _segment_boundary(
+        self, action: str, turn_id: str, messages: list, tools: Any, session: dict[str, Any]
+    ) -> bool:
+        """Start a new segment of a long turn (B13 (b)); ``True`` if it did.
+
+        Two triggers. Tokens, for a member whose provider has no server-side bound (not in
+        ``compaction_config().server_providers``): the prompt reaches ``trigger_fraction`` of its
+        input limit — the last call's prompt plus an estimate of what was appended since
+        (characters / 3.5 and each new figure's image tokens), so one large round cannot carry a
+        request past the window. Media, for every provider (R3): the conversation's image blocks
+        reach ``MEDIA_IMAGES_FRACTION`` of the provider's documented per-request limit, or its
+        media bytes (base64) ``MEDIA_BYTES_FRACTION`` of the request-size limit — before the media
+        guard would start withholding earlier images (an edit of earlier content). Then the
+        ``session_compactor`` role summarises the segment, and the
+        conversation becomes the system prompt, the turn's task (word for word), the summary, the
+        pin, and the latest round word for word (its calls and what they returned, which the model
+        has not read yet). No earlier assistant turn remains, so no earlier thinking is sent
+        (ruling B6.2). Recorded as a ``rewrite`` part (``op: "compact"``) and two ``user`` parts;
+        the ledger rebuild replays them. Never while the lead has a coding link open. A summariser
+        that fails or returns nothing leaves the turn whole, records why, and waits
+        ``KEEP_RECENT_TURNS`` calls before trying again.
+        """
+        from auto_research.agents import compaction, images as image_budget
+        from auto_research.agents.history import encode_message, transcript
+        from auto_research.env import compaction_config
+        from auto_research.observability.costs import context_window_for
+
+        cfg = compaction_config()
+        member = getattr(self.model, "config", None)
+        if not cfg.enabled or not isinstance(member, RoleModelConfig):
+            return False
+        window = context_window_for(member)
+        appended = messages[session.get("sent_len", len(messages)):]
+        estimate = session["prompt_tokens"] + sum(
+            len(json.dumps(encode_message(m), default=str)) for m in appended
+        ) / 3.5 + sum(
+            image_budget.image_tokens(f.path)
+            for m in appended if isinstance(m, ToolResultMessage)
+            for p in m.results for f in p.figures
+        ) + sum(
+            _document_tokens(d)
+            for m in appended if isinstance(m, ToolResultMessage)
+            for p in m.results for d in p.documents
+        )
+        # The latest round stays word for word, so it is what a cut keeps besides the task.
+        latest = next(
+            (i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], ModelResponse)),
+            None,
+        )
+        task_index = session.get("task_index")
+        kept = ([messages[task_index]] if task_index is not None else []) + (
+            messages[latest:] if latest is not None else []
+        )
+        trigger = None
+        if (member.provider not in cfg.server_providers and window
+                and estimate >= cfg.trigger_fraction * window
+                and session["since"] >= KEEP_RECENT_TURNS):
+            trigger = "tokens"
+        elif session["since"] >= KEEP_RECENT_TURNS or not session.get("failed"):
+            # Media pressure skips the wait (a request past a ceiling fails at once) unless the
+            # last summary failed.
+            trigger = _media_trigger(member, messages, kept)
+        if trigger is None:
+            return False
+        if getattr(tools, "authoring_session", None) is not None:
+            return False
+        # The latest round — the last assistant turn and everything after it — stays readable
+        # word for word; everything before it is the summary's.
+        plan = compaction.plan_compaction(
+            messages, session["task_index"], keep_recent=0, keep_discovery=False
+        )
+        if plan is None:
+            return False
+        middle = [i for i in plan.middle if latest is None or i < latest]
+        if not middle:
+            return False
+        summary, error = "", None
+        try:
+            from auto_research.agents.prompts import load_prompt
+            from auto_research.models import resolve
+
+            summariser = resolve("session_compactor").handles[0]
+            reply = await summariser.call([
+                ModelMessage(role="system", content=load_prompt("session_compactor")),
+                ModelMessage(role="user", content=compaction.render_middle(messages, middle)),
+            ])
+            summary = compaction.summary_text(reply.content or "")
+        except Exception as exc:  # noqa: BLE001 — a failed summary leaves the turn whole
+            error = repr(exc)
+        if not summary:
+            session["since"] = 0  # back off: the next try waits a few calls
+            session["failed"] = True
+            await self._record(
+                f"{self.role}.{action}.compaction_failed", level=2,
+                summary=f"{self.role}: condensing the turn failed; it continues whole",
+                data={"error": error or "the summariser returned no text",
+                      "prompt_tokens": round(estimate)},
+            )
+            return False
+        last_round = messages[latest:] if latest is not None else []
+        part = plan.as_part(summary)
+        messages[:] = compaction.apply_compaction(messages, part)
+        session["task_index"] = len(plan.head) if plan.task is not None else None
+        session["since"] = 0
+        session["failed"] = False
+        session["prompt_tokens"] = 0
+        await self._record(
+            f"{self.role}.{action}.compaction", level=3,
+            summary=(
+                f"{self.role} started a new segment of its turn: {len(middle)} message(s) "
+                f"condensed (prompt ~{round(estimate):,} of {window or 0:,} tokens; {trigger})"
+            ),
+            data={"prompt_tokens": round(estimate), "window": window, "trigger": trigger,
+                  **self._history_part("rewrite", turn=turn_id, **part)},
+        )
+        pin = compaction.pin_text(session["task_receipt"], session["produced"])
+        appended_now = [ModelMessage(role="user", content=pin)]
+        if last_round:
+            figures = [f for m in last_round if isinstance(m, ToolResultMessage)
+                       for p in m.results for f in p.figures]
+            # The documents those calls opened ride along (R2): the model has not read them yet.
+            documents = [d for m in last_round if isinstance(m, ToolResultMessage)
+                         for p in m.results for d in p.documents]
+            appended_now.append(ModelMessage(
+                role="user",
+                content="Your latest calls and what they returned, word for word:\n"
+                + _latest_round_text(last_round),
+                figures=figures,
+                documents=documents,
+            ))
+        for message in appended_now:
+            messages.append(message)
+            await self._record(
+                f"{self.role}.{action}.compaction_pin", level=4,
+                summary=f"{self.role} was told where its record is after the cut",
+                data={"message": message.content,
+                      **self._history_part("user", turn=turn_id,
+                                           figures=figure_entries(message.figures,
+                                                                  self._history_store()),
+                                           documents=document_entries(message.documents))},
+            )
+        session["sent_len"] = len(messages) - len(appended_now)
+        return True
+
+    async def _strip_thinking(self, action: str, turn_id: str, messages: list) -> None:
+        """Drop thinking blocks from the conversation after a provider refused them as bound to
+        another conversation (ruling B6.5), recorded as a ``rewrite`` (``op: "strip_thinking"``)."""
+        from auto_research.agents.history import strip_thinking
+
+        messages[:] = strip_thinking(messages)
+        await self._record(
+            f"{self.role}.{action}.thinking_stripped", level=2,
+            summary=f"{self.role}: the turn's thinking blocks were dropped after a refusal",
+            data=self._history_part("rewrite", turn=turn_id, op="strip_thinking"),
+        )
+
+    def _grounds(self, handle: str) -> bool:
+        """Whether a receipt can back a number (``provenance.store.is_evidence``)."""
+        store = self._history_store()
+        try:
+            from auto_research.provenance.store import is_evidence
+
+            receipt = store.get(handle) if store is not None else None
+            return bool(receipt is not None and is_evidence(receipt))
+        except Exception:  # noqa: BLE001 — unknown reads as navigation, the safe side
+            return False
+
+    def _paper_handle(self, document: DocumentRef) -> str | None:
+        """The paper receipt whose PDF ``document`` is (by its receipted hash), if any."""
+        store = self._history_store()
+        if store is None:
+            return None
+        try:
+            for receipt in store.receipts(kind="paper"):
+                if receipt.source_sha256 == document.sha256:
+                    return receipt.handle
+        except Exception:  # noqa: BLE001 — a missing pin costs a pointer, not the turn
+            return None
+        return None
+
+    def _history_store(self) -> Any | None:
+        """The run's receipt store when this role carries one (figure handles come from it)."""
+        return getattr(self, "receipts", None)
+
+    def _result_receipt(self, call_id: str | None) -> str | None:
+        """The handle of the text receipt a tool call minted for its output, when it minted one.
+
+        Searched newest first: the call that just returned minted it, so the scan stops at once.
+        """
+        store = self._history_store()
+        if store is None or not call_id:
+            return None
+        try:
+            for receipt in reversed(store.receipts(kind="result")):
+                if receipt.call_id == call_id:
+                    return receipt.handle
+        except Exception:  # noqa: BLE001 — a missing handle leaves the result unindexed, nothing else
+            return None
+        return None
+
     async def _record_context_edit(self, response: Any, action: str) -> None:
         """Record when provider-native context editing cleared stale context on the last
         model call (``ModelResponse.context_edits`` — Anthropic only, empty otherwise), so a
         run-watcher sees context pressure relieved. A no-op when nothing was cleared. NOT LIVE
         TESTED (2026-07-22)."""
         edits = getattr(response, "context_edits", None)
+        if not edits:
+            return
+        for edit in [e for e in edits if e.get("type") == "thinking_dropped"]:
+            # Ruling B6.5: a provider refused replayed thinking as bound to another conversation;
+            # the adapter removed it from that message on and sent the request once more.
+            await self._record(
+                f"{self.role}.{action}.thinking_dropped", level=2,
+                summary=(f"{self.role}: replayed thinking was refused as bound to another "
+                         f"conversation; removed from message {edit.get('from_message')} on"),
+                data={"edit": edit},
+            )
+        compactions = [e for e in edits if e.get("type") == "compaction"]
+        done = [e for e in compactions if e.get("summary_chars")]
+        if compactions and not done:
+            await self._record(
+                f"{self.role}.{action}.compaction_failed", level=2,
+                summary=f"{self.role}: the provider's compaction returned no summary (a no-op)",
+                data={"edits": compactions, "server": True},
+            )
+        elif done:
+            # B6: the provider condensed this call's context; its own token cost rides the call.
+            await self._record(
+                f"{self.role}.{action}.compaction", level=3,
+                summary=(
+                    f"{self.role}: the provider condensed the turn "
+                    f"({sum(e.get('input_tokens', 0) for e in compactions):,} tokens read, "
+                    f"summary {done[-1].get('summary_chars')} characters)"
+                ),
+                data={"edits": compactions, "server": True},
+            )
+        edits = [e for e in edits if e.get("type") not in ("compaction", "thinking_dropped")]
         if not edits:
             return
         cleared_tokens = sum(int(e.get("cleared_input_tokens", 0) or 0) for e in edits)
@@ -909,6 +1826,7 @@ class ReviewerAgent(AgentRole):
     receipts: Any | None = None
     report_dir: Path | None = None
 
+    @_one_turn_at_a_time
     async def review(
         self,
         request: ResearchRequest,
@@ -942,9 +1860,7 @@ class ReviewerAgent(AgentRole):
             REVIEWER_SOURCE,
             REVIEWER_STATUS_VALUES,
             reviewer_claims,
-            reviewer_draft_view,
             reviewer_scope,
-            reviewer_text_view,
             reviewer_turn_problems,
         )
         from auto_research.agents.paper_tools import PaperReader
@@ -983,11 +1899,6 @@ class ReviewerAgent(AgentRole):
                 reviewer_claims(r), lookup, own_source=REVIEWER_SOURCE, itemised=(),
                 scope=reviewer_scope(lookup),
             ).problems,
-            draft_view=(
-                reviewer_draft_view(render.report_dir, render.run_id, lookup)
-                if render is not None and "tex" in render.formats
-                else reviewer_text_view(lookup)
-            ),
             edit_description=REVIEWER_EDIT_DESCRIPTION,
         )
         accepted: list[bool] = []
@@ -1001,18 +1912,27 @@ class ReviewerAgent(AgentRole):
                 accepted.append(True)
             return problems
 
+        # A continuing session (B2) already holds the earlier turns, so the payload carries only
+        # what arrived for this turn (human ruling, board B7: "attach only this turn's report").
+        history, history_base = await self._history_seed()
+        if history:
+            previous = ()
+            literature_now = list(literature[-1:]) if arrived == "librarian" else []
+            report_now = report if arrived == "analysts" else None
+        else:
+            literature_now, report_now = list(literature), report
         payload = {
             "request": request.model_dump(mode="json"),
             "request_receipt": request_handle,
             "arrived": arrived,
             "your_turn": _review_instruction(arrived, budgets, human_attended),
             "your_earlier_reports": [_earlier_report(r) for r in previous],
-            "literature_reports": [lit.model_dump(mode="json") for lit in literature],
+            "literature_reports": [lit.model_dump(mode="json") for lit in literature_now],
             "literature_documents": [
                 {"handle": h, "title": getattr(r, "title", None), "ids": getattr(r, "ids", {})}
                 for h, r in (literature_receipts or {}).items()
             ],
-            "analysis_report": report.model_dump(mode="json") if report else None,
+            "analysis_report": report_now.model_dump(mode="json") if report_now else None,
             "human_nudges": list(human_nudges),
             "human_files": [_human_file(store, h) for h in human_files],
             "figures_you_can_place": [
@@ -1020,7 +1940,7 @@ class ReviewerAgent(AgentRole):
             ],
         }
         seed = [
-            ModelMessage(role="system", content=self.prompt),
+            *(history or [ModelMessage(role="system", content=self.prompt)]),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
         provider = self.tools
@@ -1055,10 +1975,12 @@ class ReviewerAgent(AgentRole):
                 action="review",
                 cap=_react_loop_cap(),
                 images=report.figures if report else (),
-                free_tools=frozenset({TURN_END_TOOL, EDIT_REPORT_TOOL, REVIEW_REPORT_TOOL}),
+                free_tools=frozenset({TURN_END_TOOL, EDIT_REPORT_TOOL, WRITE_REPORT_TOOL}),
                 absolute_cap=_react_loop_absolute_cap(),
                 require_terminal=True,  # turn_end is the only exit
                 terminal_tools=frozenset({TURN_END_TOOL}),
+                task_receipt=request_handle,
+                history_base=history_base,
             )
         finally:
             for name, value in saved.items():
@@ -1110,12 +2032,17 @@ def _review_instruction(arrived: str, budgets: Mapping[str, int], human_attended
         "No human is attending this run: a report to the human is published and ends the run."
     )
     return (
-        f"{_ARRIVED[arrived]} Write your report with edit_report and set assign_to: 'librarian' or "
-        "'analysts' with follow_up as their task, or 'human' with the full report (title, "
-        "abstract, sections, key_findings, figures and tables; use review_report to see it "
-        f"typeset and polish it once). {human} {lit} literature pass(es) and {ana} analysis "
+        f"{_ARRIVED[arrived]} Write your report with write_report and edit_report and set assign_to: "
+        "'librarian' or 'analysts' with follow_up as their task, or 'human' with the full report "
+        "(title, abstract, sections, key_findings, figures and tables; turn_end typesets it and "
+        f"names anything it cannot typeset). {human} {lit} literature pass(es) and {ana} analysis "
         "pass(es) remain in this run. Then call turn_end."
     )
+
+
+def _figure_labels(source: str, figures: Sequence[FigureRef]) -> list[str]:
+    """Each catalog figure as its citable label and caption, ``[source:k] caption`` (B18)."""
+    return [f"[{source}:{k}] {fig.caption}" for k, fig in enumerate(figures, 1)]
 
 
 def _earlier_report(report: "ReviewerReport") -> dict[str, Any]:
@@ -1200,6 +2127,7 @@ class LibrarianIOAgent(AgentRole):
         # What the last pass read, by handle: the receipts its report cites.
         self.last_receipts: dict[str, Receipt] = {}
 
+    @_one_turn_at_a_time
     async def research(
         self,
         request: ResearchRequest,
@@ -1235,22 +2163,28 @@ class LibrarianIOAgent(AgentRole):
             "research_request": request.model_dump(mode="json"),
             "follow_up": follow_up,
         }
+        history, history_base = await self._history_seed()
         seed = [
-            ModelMessage(role="system", content=self.prompt),
+            *(history or [ModelMessage(role="system", content=self.prompt)]),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
+        turn = TurnOutcome()
         await self._react(
             seed_messages=seed,
             tools=provider,
+            outcome=turn,
             action="research",
             cap=_librarian_react_loop_cap(),
             free_tools=LIBRARIAN_FREE_TOOLS,
             require_terminal=True,
             terminal_tools=frozenset({TURN_END_TOOL}),
             absolute_cap=_react_loop_absolute_cap(),
+            history_base=history_base,
         )
-        report = provider.written_report
-        if report is None:  # pragma: no cover — _react raises before an unfiled return
+        # Only an accepted `turn_end` makes the draft the report (ruling D4); a loop that ended
+        # otherwise (a refusal or transient stop) filed nothing.
+        report = provider.written_report if turn.filed_form is not None else None
+        if report is None:
             raise RuntimeError("librarian loop returned without a filed report")
         # The verify-against-the-PDF list: every value the report attributes to a paper, collected by
         # the runtime so a person can check each one (papers are cited, never text-matched).
@@ -1305,10 +2239,10 @@ class AnalystWorkerAgent(AgentRole):
     ``SandboxToolProvider`` — calling toolkit/MCP tools in the attached
     ``PersistentSandbox``, seeing each result in-context, and chaining dependent
     calls (load → fit → run → plot) to completion — then emits an ``AnalystReport``
-    grounded in those results (:meth:`AgentRole._call_over_messages`). The live
-    conversation is the within-call working memory; ``memory_path`` is the durable
-    cross-round/cross-worker store (prior results are read in and new results
-    appended). ``last_tool_results`` exposes the loop's results for the consensus
+    grounded in those results (:meth:`AgentRole._call_over_messages`). Its session history is
+    the run ledger: each turn after the first starts from the earlier turns rebuilt from it,
+    their tool outputs indexed to one line each (``agents.history``, B2/B3), so nothing is
+    re-read into the seed. ``last_tool_results`` exposes the loop's results for the consensus
     peer summary. With no sandbox/registry (e.g. Studio), it falls back to a plain
     tool-less structured call.
     """
@@ -1321,7 +2255,6 @@ class AnalystWorkerAgent(AgentRole):
         available_toolkits: Sequence[str] = ("research_toolkit.xspec_utils",),
         sandbox: Any | None = None,  # PersistentSandbox | None — avoid circular import
         registry: Any | None = None,  # ToolkitRegistry | None
-        memory_path: Path | None = None,
         worker_index: int = 0,
         human_handler: Any | None = None,
         model: CallableModel | None = None,
@@ -1340,13 +2273,11 @@ class AnalystWorkerAgent(AgentRole):
         self.available_toolkits = tuple(available_toolkits)
         self.sandbox = sandbox
         self.registry = registry
-        self.memory_path = memory_path
         self.worker_index = worker_index
         # When wired, the worker can raise a clarification to a human via ask_human (§9.7).
         self.human_handler = human_handler
         self.last_tool_results: list[ToolResult] = []
-        # V-4: this agent's stable working-folder key + report dir (set by runtime; defaults derive
-        # from memory_path). agent_key is the figure-catalog source key the lead addresses it by.
+        # V-4: this agent's stable working-folder key + report dir (set by runtime). agent_key is the figure-catalog source key the lead addresses it by.
         self.agent_key: str | None = None
         self.report_dir: Path | None = None
         # Provenance: the run's ReceiptStore (set by runtime). Every tool call this worker makes
@@ -1355,7 +2286,7 @@ class AnalystWorkerAgent(AgentRole):
         # V-4: append-only figure catalog (source "self" = figures this worker's tools produced),
         # persisting across debate rounds and rework iterations so nothing is dropped; the per-round
         # report (ReAct-refined via edit_report) cites from it. Monotonic debate-round counter names
-        # the per-round report file; last report seeds the next round's review_report(None).
+        # the per-round report file; the last report is this agent's _last_report.
         self._figure_catalog: dict[str, list[FigureRef]] = {"self": []}
         self._round = 0
         self._last_report: AnalystReport | None = None
@@ -1367,26 +2298,29 @@ class AnalystWorkerAgent(AgentRole):
             return True
         return bool(self.sandbox.is_alive)
 
+    @_one_turn_at_a_time
     async def analyze(self, task: AnalysisTask, *, peer_reports: Sequence[AnalystReport] = ()) -> AnalystReport:
         """Investigate the task with tools (ReAct), then produce an AnalystReport.
 
-        Reads private ``memory`` (durable prior results) into the seed; runs the
-        ReAct loop to gather evidence; then composes the report over the gathered
-        trajectory, with the loop's real figures attached. Falls back to a plain
-        structured call when no sandbox+registry is attached.
+        Continues its session (B2): the earlier turns, rebuilt from the run ledger with their
+        tool outputs indexed (:meth:`_history_seed`), then this turn's task; runs the ReAct loop
+        to gather evidence and write the report. Falls back to a plain structured call when no
+        sandbox+registry is attached.
         """
         self.last_tool_results = []
         self._figure_catalog.setdefault("self", [])
-        memory = read_memory(self.memory_path) if self.memory_path else ""
         payload = {
             "task": task.model_dump(mode="json"),
             "peer_reports": [report.model_dump(mode="json") for report in peer_reports],
             "available_toolkits": list(self.available_toolkits),
-            "memory": memory or None,
             # The software environment its tools run in, named up front (env plan B2a); `list_env`
             # shows its packages.
             "environment": _environment_brief(self.sandbox),
         }
+        if self._figure_catalog["self"]:
+            # B18: the citable label of every figure an earlier round produced (a new one is
+            # labelled in the tool result that makes it); text only, the images are not resent.
+            payload["your_figures"] = _figure_labels("self", self._figure_catalog["self"])
         peer_figures = [figure for report in peer_reports for figure in report.figures]
 
         # No tool surface (e.g. Studio): plain tool-less structured report.
@@ -1397,10 +2331,8 @@ class AnalystWorkerAgent(AgentRole):
             await self.sandbox.start()
 
         self._round += 1
-        # The agent's own folder (report_dir), never memory.md's: memory lives beside the ledger,
-        # out of the jail's reach (F22).
-        cwd = self.report_dir or (self.memory_path.parent if self.memory_path is not None else None)
-        _mint_task_input(self.receipts, task)
+        cwd = self.report_dir
+        task_receipt = _mint_task_input(self.receipts, task)
         workspace = self._make_report_workspace(peer_reports)
         provider = SandboxToolProvider(
             self.registry, self.sandbox, cwd=cwd, web_source=WebSource(),
@@ -1409,21 +2341,30 @@ class AnalystWorkerAgent(AgentRole):
             receipts=self.receipts,
             receipt_source=self.agent_key if self.receipts is not None else None,
         )
+        history, history_base = await self._history_seed()
+        peer_figures, not_attached = self._task_figures(peer_figures, continued=bool(history))
+        if not_attached:
+            payload["peer_figures_not_attached"] = {
+                "note": "Past this turn's image budget; view_receipt(handle) shows each.",
+                "figures": not_attached,
+            }
         seed = [
-            ModelMessage(role="system", content=self.prompt),
+            *(history or [ModelMessage(role="system", content=self.prompt)]),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
-        # edit_report/review_report are budget-free (report authoring, not evidence gathering),
+        # write_report/edit_report are budget-free (report authoring, not evidence gathering),
         # so refining figure placement never starves the tool-iteration budget (absolute_cap backstops).
+        turn = TurnOutcome()
         messages, react_figures, _ = await self._react(
             seed_messages=seed,
             tools=provider,
+            outcome=turn,
             action="analyze",
             cap=_react_loop_cap(),
             images=peer_figures,
             # turn_end is free too, by ruling: the editing burns budget, so the loop is bounded
             # by the work rather than by the validation (F5c/D3).
-            free_tools=frozenset({EDIT_REPORT_TOOL, REVIEW_REPORT_TOOL, TURN_END_TOOL}),
+            free_tools=frozenset({EDIT_REPORT_TOOL, WRITE_REPORT_TOOL, TURN_END_TOOL}),
             # No escape path (CLAUDE.md §2b). The worker writes its report INSIDE this loop and
             # `turn_end` submits it, so the lead's rule is this loop's rule — and all three
             # measured losses are the worker's, not the lead's: a completed 14-quantity
@@ -1432,10 +2373,10 @@ class AnalystWorkerAgent(AgentRole):
             require_terminal=True,
             terminal_tools=frozenset({TURN_END_TOOL}),
             absolute_cap=_react_loop_absolute_cap(),
+            task_receipt=task_receipt,
+            history_base=history_base,
         )
         self.last_tool_results = provider.results
-        if self.memory_path and provider.results:
-            _append_tool_results_to_memory(self.memory_path, provider.results)
 
         # V-4: the report is what the worker persisted via edit_report this round (figures cited by
         # index from its catalog, resolved by the runtime).
@@ -1454,23 +2395,27 @@ class AnalystWorkerAgent(AgentRole):
         # and the inventions self-labelled. The harness asked for it.
         #
         # The loop now ends on `turn_end`, whose validator refuses to accept an unwritten report
-        # and names why, so the model writes it with the tool that exists for that. This also
-        # matches what the lead has always done: "A report it wrote but never filed is real
-        # evidence it produced, so it is used rather than discarded; nothing is composed on its
-        # behalf."
-        report = workspace.written_report if workspace is not None else None
+        # and names why, so the model writes it with the tool that exists for that.
+        # Only an accepted `turn_end` makes the draft the report (ruling D4): a validator success is
+        # the only thing that advances a report. A draft the loop left unfiled is not one.
+        filed = turn.filed_form is not None
+        report = workspace.written_report if (workspace is not None and filed) else None
         if report is None:
             report = AnalystReport(
                 summary=(
-                    "This worker's loop ended without a saved report. No report was composed on "
-                    "its behalf — the material a model did not write is not evidence."
+                    "This worker's loop ended without a filed report (no turn_end was accepted). "
+                    "No report was composed on its behalf — the material a model did not file is "
+                    "not evidence."
                 ),
                 status="failed",
             )
             await self._record(
                 "analyst_worker.analyze.no_report", level=3,
-                summary="worker ended its loop with no report written; recorded as failed",
-                data={"iterations": len(messages)},
+                summary="worker ended its loop with no report filed; recorded as failed",
+                data={
+                    "iterations": len(messages),
+                    "unfiled_draft": workspace is not None and workspace.written_report is not None,
+                },
             )
         self._last_report = report
         return report
@@ -1486,7 +2431,7 @@ class AnalystWorkerAgent(AgentRole):
     ) -> ReportWorkspace | None:
         """Build this round's report workspace (V-4), or None when no report dir is wired.
 
-        The report dir is the agent's working folder (``report_dir``, else ``memory_path.parent``);
+        The report dir is the agent's working folder (``report_dir``);
         the per-round JSONL path is derived from role + model + the monotonic debate round.
 
         The surface comes from the ROLE (``report_fields`` / ``report_status_values``). It used to
@@ -1496,9 +2441,7 @@ class AnalystWorkerAgent(AgentRole):
         decision carried in prose is a decision the harness cannot act on, which is the exact
         failure class A3 exists to remove.
         """
-        report_dir = self.report_dir or (
-            self.memory_path.parent if self.memory_path is not None else None
-        )
+        report_dir = self.report_dir
         if report_dir is None:
             return None
         return ReportWorkspace(
@@ -1519,20 +2462,24 @@ class AnalystWorkerAgent(AgentRole):
         )
 
 
-def _mint_task_input(store: ReceiptStore | None, task: Any) -> None:
-    """Record the task a unit was handed. A brief grounds nothing (``is_evidence``); the request's
-    own numbers are restated by citing the request's receipt."""
+def _mint_task_input(store: ReceiptStore | None, task: Any) -> str | None:
+    """Record the task a unit was handed and return its receipt handle (named on the turn's start
+    in the ledger). A brief grounds nothing (``is_evidence``); the request's own numbers are
+    restated by citing the request's receipt."""
     if store is None or task is None:
-        return
+        return None
     text = "\n".join(filter(None, [getattr(task, "question", ""), getattr(task, "instructions", "")]))
     if text.strip():
-        store.mint_input(text)
+        return store.mint_input(text).handle
+    return None
 
 
 def _receipt_scope(
     store: ReceiptStore | None, own_source: str | None, reports: Any = ()
 ) -> ScopedLookup | None:
-    """What a role may cite: its own receipts, plus those the reports it received cite.
+    """What a role may cite: its own receipts, plus those the reports it received cite, plus the
+    receipts of the figures those reports place (B18: a figure past the image budget is named by
+    its receipt handle, which ``view_receipt`` must then open; a figure grounds no number).
 
     ``None`` when no store is wired (Studio), which leaves the report's numbers unchecked.
     """
@@ -1544,6 +2491,7 @@ def _receipt_scope(
         texts.extend(getattr(report, "findings", None) or [])
         for text in texts:
             cited.extend(b.handle for b in parse_bindings(text))
+        cited.extend(_receipt_handles_for_figures(store, getattr(report, "figures", None) or ()))
     return ScopedLookup(store, own_source=own_source, admitted=cited)
 
 
@@ -1559,7 +2507,7 @@ _CYCLE_FREE_TOOLS: frozenset[str] = frozenset(
         # the window it was given to file in. The absolute ceiling still bounds the retries.
         TURN_END_TOOL,
         EDIT_REPORT_TOOL,
-        REVIEW_REPORT_TOOL,
+        WRITE_REPORT_TOOL,
         SUBMIT_TOOL,
         RESPOND_TO_REVIEW_TOOL,
         # Waiting is not evidence-gathering, and it cannot be spammed: a short timeout is raised
@@ -1577,8 +2525,8 @@ def _cycle_instruction(cycle: LeadCycle, reports: Sequence[Any], rounds_left: in
     """
     lines = [
         "This is your turn on the analysts' work. Investigate as long as you need (read_file, "
-        "list_dir, web_search, data_catalog), then write YOUR REPORT with edit_report — your "
-        "report is your decision — check it with review_report, and end the turn with turn_end. "
+        "list_dir, web_search, data_catalog), then write YOUR REPORT with write_report and "
+        "edit_report — your report is your decision — and end the turn with turn_end. "
         "The harness checks the report before accepting and tells you exactly what is missing, "
         "so a rejection is a fix, not a failure.",
         "Set rework=true in the report to send the analysts back for one more round, saying why "
@@ -1663,27 +2611,96 @@ def _render_span(span: list, *, per_message: int = 4000) -> str:
     return "\n\n".join(out)
 
 
+def _media_trigger(
+    member: RoleModelConfig, messages: Sequence[Any], kept: Sequence[Any] = ()
+) -> str | None:
+    """``"media"`` when the conversation's images or media bytes near the provider's documented
+    per-request ceilings (R3, ``compaction.MEDIA_*_FRACTION``) and a cut would bring them back
+    under: what the cut keeps (``kept``: the task and the latest round) is below the line, so a
+    boundary never fires again on media it cannot remove. Else ``None``."""
+    from auto_research.agents.compaction import MEDIA_BYTES_FRACTION, MEDIA_IMAGES_FRACTION
+    from auto_research.models.providers import media_limits
+    from auto_research.models.providers._media import media_load
+
+    limits = media_limits(member)
+    if limits is None or not (limits.max_images or limits.max_request_bytes):
+        return None
+    images, size = media_load(messages)
+    kept_images, kept_size = media_load(kept)
+    image_line = MEDIA_IMAGES_FRACTION * limits.max_images
+    byte_line = MEDIA_BYTES_FRACTION * limits.max_request_bytes
+    over_images = limits.max_images and images >= image_line
+    over_bytes = limits.max_request_bytes and size >= byte_line
+    if not (over_images or over_bytes):
+        return None
+    if (limits.max_images and kept_images >= image_line) or (
+        limits.max_request_bytes and kept_size >= byte_line
+    ):
+        return None
+    return "media"
+
+
+#: Tokens a provider reads per PDF page (text plus the page image; Anthropic's PDF guide gives
+#: 1,500-3,000 text tokens a page plus the image), for the token trigger's estimate only.
+_PDF_PAGE_TOKENS = 3_000
+
+
+def _document_tokens(document: DocumentRef) -> int:
+    """A rough token cost of a document a tool opened: pages times ``_PDF_PAGE_TOKENS`` for a
+    PDF, characters / 3.5 for text; an unreadable file counts nothing."""
+    try:
+        data = Path(document.path).read_bytes()
+    except OSError:
+        return 0
+    if document.mime_type == "application/pdf":
+        from auto_research.models.providers._media import _pdf_page_count
+
+        pages = _pdf_page_count(data)  # 0 when unparseable: then a byte-based guess
+        return pages * _PDF_PAGE_TOKENS if pages else len(data) // 4
+    return int(len(data) / 3.5)
+
+
+def _latest_round_text(round_: Sequence[Any]) -> str:
+    """The latest round as text: each call with its arguments and what it returned, whole."""
+    lines: list[str] = []
+    calls: dict[str, Any] = {}
+    for message in round_:
+        if isinstance(message, ModelResponse):
+            calls = {c.id: c for c in message.tool_calls}
+            if message.content:
+                lines.append(message.content)
+        elif isinstance(message, ToolResultMessage):
+            for part in message.results:
+                call = calls.get(part.tool_call_id)
+                args = json.dumps(dict(getattr(call, "arguments", None) or {}),
+                                  ensure_ascii=False, default=str)
+                status = " (error)" if part.is_error else ""
+                lines.append(f"→ {part.name} {args}{status}\n{part.content}")
+        elif isinstance(message, ModelMessage):
+            lines.append(message.content)
+    return "\n\n".join(lines)
+
+
 def _compact_coding_span(messages: list, mark: int, summary: str) -> list:
-    """Replace a finished link's coding span with the outcome its own opening call returns.
+    """Close a finished link's coding span as a segment bound (human ruling B14 (c)).
 
     A coding session is opened by a tool call — ``author_chain`` for the first link, the
     ``submit_for_review`` that closed the previous one thereafter — and ``mark`` is where that
-    call's result lands. The whole span after it is the coder transcript, which the lead has no
-    further use for once the link is decided::
+    call's result lands. Applied at a complete tool round (the batch that closed the link has its
+    results), the cut keeps everything before ``mark`` word for word, rewrites the opening answer
+    to the link's outcome, and removes the rest — the coder transcript and the closing turn::
 
-        [… opening CALL]  [its ANSWER]  [drive/check/read × N]  [the CALL that closed the link]
-             kept           REWRITTEN            dropped                kept, result pending
+        [previous … opening CALL] [its ANSWER] [the link …, the CALL that closed it, its results]
+                kept, unchanged      REWRITTEN                    removed (the ledger keeps it)
 
-    The answer is rewritten rather than removed, which is what keeps the pair closed: the
-    opening call keeps an answer, and that answer now carries the outcome instead of a sentence
-    about a session that no longer exists. Only the parts belonging to a chain-driving tool are
-    rewritten, so a turn that batched ``author_chain`` with a file read keeps the read's result.
+    So the prefix the lead's earlier thinking was produced under is unchanged, the link's
+    transcript leaves from the end, and the outcome is appended in its place — valid under
+    preserved thinking's prefix check, unlike a cut that kept the closing turn after a rewritten
+    answer. The opening call keeps its answer; only chain-driving parts are rewritten, so a turn
+    that batched ``author_chain`` with a file read keeps the read's result.
 
-    Nothing is synthesized as somebody else's words: a tool result is the harness's own to
-    write, and this is the harness reporting what its tool did.
-
-    Returns ``messages`` unchanged when there is nothing to compact — no answer has landed yet,
-    or the message at ``mark`` is not a chain-driving tool's result.
+    Returns ``messages`` unchanged when there is nothing to cut — no answer has landed yet, or the
+    message at ``mark`` is not a chain-driving tool's result.
     """
     if mark <= 0 or mark >= len(messages):
         return messages
@@ -1700,17 +2717,8 @@ def _compact_coding_span(messages: list, mark: int, summary: str) -> list:
             for part in answer.results
         ]
     )
-    # The turn that triggered this close is still waiting for its own result, so it has to
-    # survive the cut — dropping it would strand the result the loop is about to append, which
-    # is the same malformed request one message later.
-    pending = set(_unanswered_call_ids(messages))
-    last = messages[-1]
-    tail = (
-        [last]
-        if pending and any(c.id in pending for c in (getattr(last, "tool_calls", None) or ()))
-        else []
-    )
-    return messages[:mark] + [rebuilt] + tail
+    return messages[:mark] + [rebuilt]
+
 
 def _authoring_result(session: Any, spec: Any) -> MergeFlowResult:
     """The terminal ``MergeFlowResult`` for one authoring attempt, read off its session.
@@ -1783,6 +2791,9 @@ class _ChainDriver:
         self.session: Any = None  # the live one, if any
         self.spec: Any = None
         self.mark = 0             # where the current link's coding transcript starts
+        self.turn_id: str | None = None  # the lead turn whose conversation this driver edits
+        # (mark, summary, tool, status) per link closed since the last boundary, in order.
+        self.pending_cuts: list[tuple] = []
 
     async def advance(self) -> str:
         """Close the current link and open the next; return what to tell the lead."""
@@ -1916,29 +2927,25 @@ class _ChainDriver:
         # lead. The raw transcript stays in the run ledger for a human.
         span = self.messages[self.mark + 1:]
         summary = await self._outcome_for(spec, result, span, session)
-        self.messages[:] = _compact_coding_span(self.messages, self.mark, summary)
-        await self.lead._record(
-            "analyst.tool.compacted", level=6,
-            summary=f"Coding span compacted: {spec.proposed_tool_name}",
-            data={
-                "tool": spec.proposed_tool_name,
-                "status": result.status,
-                "turns_dropped": len(span),
-                "outcome": summary,
-            },
-        )
+        # The cut waits for a complete tool round (B14 (c)): this runs inside the tool call that
+        # closed the link, whose result the loop has not appended yet. The loop applies it at its
+        # next boundary (`apply_cut`, via the lead's `_segment_cut`), or `close()` does.
+        self.pending_cuts.append((self.mark, summary, spec.proposed_tool_name, result.status))
+        self.lead._segment_cut = self.apply_cut
         await self.lead._record(
             "analyst.tool.authored", level=5,
             summary=f"Tool authoring {result.status}: {spec.proposed_tool_name}",
             data={"result": result.model_dump(mode="json")},
         )
         self.provider.authoring_session = None
+        await session.aclose()
+        # Released only once it closed (D8): a /stop landing mid-close leaves the handle, and the
+        # stop's cleanup closes it again, resetting the branch.
         if (
             self.lead.run_control is not None
             and self.lead.run_control.authoring_session is session
         ):
             self.lead.run_control.authoring_session = None
-        await session.aclose()
 
     async def _outcome_for(self, spec: Any, result: Any, span: list, session: Any) -> str:
         """What the opening call answers with once its link is decided.
@@ -2006,9 +3013,69 @@ class _ChainDriver:
             )
             return ""
 
+    async def apply_cut(self, messages: list) -> None:
+        """Apply the pending link cut at a complete tool round (B14 (c)), and record it.
+
+        The outcome the lead reads is the link's summary followed by what the closing call
+        answered (the next link opening, or the chain's end), since that answer leaves with the
+        rest of the link. A link opened by the same closing call starts at the rewritten answer.
+        """
+        pending, self.pending_cuts = self.pending_cuts, []
+        if getattr(self.lead, "_segment_cut", None) == self.apply_cut:
+            self.lead._segment_cut = None
+        if not pending:
+            return
+        # Two links closed in one batch (rare): the first link's opening answer is the bound, and
+        # the outcome carries every closed link's summary in order.
+        mark = pending[0][0]
+        summary = "\n\n".join(p[1] for p in pending)
+        tool = ", ".join(p[2] for p in pending)
+        status = ", ".join(p[3] for p in pending)
+        closing = [
+            part.content
+            for message in messages[mark + 1:] if isinstance(message, ToolResultMessage)
+            for part in message.results if part.name in _CHAIN_DRIVING_TOOLS
+        ]
+        outcome = summary + (f"\n\n{closing[-1]}" if closing else "")
+        dropped = len(messages) - mark - 1
+        messages[:] = _compact_coding_span(messages, mark, outcome)
+        if self.session is not None:
+            self.mark = mark  # the next link's opening answer is the one just rewritten
+        await self.lead._record(
+            "analyst.tool.compacted", level=6,
+            summary=f"Coding span compacted: {tool}",
+            data={
+                "tool": tool,
+                "status": status,
+                "turns_dropped": dropped,
+                "outcome": outcome,
+                # The same edit, as a history part: a rebuild replays `_compact_coding_span`.
+                **(self.lead._history_part(
+                    "rewrite", turn=self.turn_id, op="coding_span", mark=mark, summary=outcome,
+                ) if self.turn_id else {}),
+            },
+        )
+
     async def close(self) -> None:
-        """Release whatever is still open when the cycle ends, however it ended."""
+        """Release whatever is still open when the cycle ends, however it ended.
+
+        A link closed in the loop's last batch is not cut: the turn is over (a filed batch must
+        stay as the validator accepted it), and the next turn's opening transcript bounds it.
+
+        When the run is being stopped (or a channel failure ends it), an open link is left to the
+        stop's cleanup (ruling D8): it resets the branch after the sandboxes are killed, in
+        order, and no model is called on the way out (the link's summary would call one).
+        """
+        if self.session is not None and _run_ending(self.lead.run_control):
+            self.session = self.spec = None
+            self.pending_cuts = []
+            self.provider.authoring_session = None
+            self.cycle.session_open = False
+            return
         await self._close_current()
+        self.pending_cuts = []
+        if getattr(self.lead, "_segment_cut", None) == self.apply_cut:
+            self.lead._segment_cut = None
 
 
 class AnalystLeadAgent(AgentRole):
@@ -2043,7 +3110,7 @@ class AnalystLeadAgent(AgentRole):
         # keyed by *worker* source (one list per worker), accumulated append-only across debate rounds
         # AND rework iterations (the lead instance persists), so a figure produced any round stays
         # citable — closing the "last-round-only" leak. Monotonic debate-round counter names the
-        # per-round report; last report seeds the next round's review_report(None).
+        # per-round report; the last report is this agent's _last_report.
         self.agent_key: str | None = None
         self.report_dir: Path | None = None
         # Provenance: the run's ReceiptStore (set by runtime). The lead may cite its own reads and
@@ -2059,8 +3126,8 @@ class AnalystLeadAgent(AgentRole):
         """Build this adjudication's report workspace (V-4), or None with no report dir wired.
 
         The catalog is the lead's per-worker figure catalog (source = worker key); ``source_reports``
-        lets ``review_report(worker_key)`` read that worker's finished report. ``own_source='self'``
-        (the lead produces no figures) keeps ``review_report(worker_key)`` on the subordinate branch.
+        reach the lead whole in its task (``worker_reports``), with every figure's label
+        (``figure_catalog``, B18). ``own_source='self'``: the lead produces no figures.
         """
         report_dir = self.report_dir
         if report_dir is None:
@@ -2075,7 +3142,6 @@ class AnalystLeadAgent(AgentRole):
             report_model=AnalystReport,
             catalog=self._figure_catalog,
             own_source="self",
-            source_reports=source_reports,
             prior_report=self._last_report,
             # A3 — and the reason this is spelled out on BOTH builders: the lead overrides the
             # base one, so setting the surface only there left the lead with the worker's fields
@@ -2102,7 +3168,7 @@ class AnalystLeadAgent(AgentRole):
         The catalog is keyed by *worker*, accumulated across debate rounds AND rework iterations
         (this instance persists), so a figure produced in any round stays citable — that is what
         closed the "last-round-only" leak (V-4). Returns the source keys, the latest report per
-        source (for ``review_report(source)``), and every accumulated figure.
+        source (whose receipts the lead may cite), and every accumulated figure.
         """
         source_keys = (
             list(sources)
@@ -2122,6 +3188,7 @@ class AnalystLeadAgent(AgentRole):
         all_figures = [fig for slot in self._figure_catalog.values() for fig in slot]
         return source_keys, source_reports, all_figures
 
+    @_one_turn_at_a_time
     async def run_cycle(
         self,
         task: AnalysisTask,
@@ -2171,7 +3238,7 @@ class AnalystLeadAgent(AgentRole):
         """
         self._round += 1
         source_keys, source_reports, all_figures = self._accumulate_figures(reports, sources)
-        _mint_task_input(self.receipts, task)
+        task_receipt = _mint_task_input(self.receipts, task)
         workspace = self._make_report_workspace(source_reports)
         authoring_possible = (
             toolkit_root is not None
@@ -2192,8 +3259,48 @@ class AnalystLeadAgent(AgentRole):
             "available_toolkits": list(self.available_toolkits),
             "your_turn": _cycle_instruction(cycle, reports, rounds_left),
         }
+        history, history_base = await self._history_seed()
+        all_figures, not_attached = self._task_figures(all_figures, continued=bool(history))
+        # B18: every worker figure the report can place, by its citable label, once. A figure
+        # past this turn's image budget carries its receipt handle on the same line, so no
+        # figure is listed twice (this replaces `_task_figures`' separate `figures_not_attached`).
+        from auto_research.agents.history import figure_entries
+
+        left_out = {entry["handle"] for entry in not_attached}
+        handle_of = {
+            entry["ref"].get("sha256"): entry["handle"]
+            for entry in figure_entries(
+                [f for slot in self._figure_catalog.values() for f in slot], self.receipts
+            )
+        }
+        payload["figure_catalog"] = {
+            "note": (
+                "Place a figure with its label as a '- [analyst_worker_i:k]' line under # figures. "
+                "Each attached image is captioned with its label; view_receipt with a figure's "
+                "receipt handle shows any figure again, including one marked 'not attached' (past "
+                "this turn's image budget)."
+            ),
+            "figures": [
+                label
+                + (f" (receipt {handle_of[fig.sha256]})" if handle_of.get(fig.sha256) else "")
+                + (" (not attached)" if handle_of.get(fig.sha256) in left_out else "")
+                for key, slot in self._figure_catalog.items()
+                for label, fig in zip(_figure_labels(key, slot), slot)
+            ],
+        }
+        # Each attached image carries its label, so an image and its catalog line pair up even
+        # when two workers' plots share a caption.
+        label_of = {
+            fig.sha256: label
+            for key, slot in self._figure_catalog.items()
+            for label, fig in zip(_figure_labels(key, slot), slot)
+        }
+        all_figures = [
+            f.model_copy(update={"caption": label_of[f.sha256]}) if f.sha256 in label_of else f
+            for f in all_figures
+        ]
         messages: list = [
-            ModelMessage(role="system", content=self.prompt),
+            *(history or [ModelMessage(role="system", content=self.prompt)]),
             ModelMessage(role="user", content=_payload_text(payload)),
         ]
         provider = self.tools
@@ -2219,12 +3326,15 @@ class AnalystLeadAgent(AgentRole):
             allow_correlated_review=allow_correlated_review,
         )
         cycle.advance_chain = driver.advance
+        driver.turn_id = turn_id = new_turn_id(self.agent_key or self.role)
 
+        turn = TurnOutcome()
         try:
             await self._react(
                 seed_messages=messages,
                 share_messages=True,
                 tools=provider,
+                outcome=turn,
                 action="run_cycle",
                 cap=_react_loop_cap(),
                 images=all_figures,
@@ -2232,6 +3342,9 @@ class AnalystLeadAgent(AgentRole):
                 absolute_cap=_react_loop_absolute_cap(),
                 require_terminal=True,  # no escape path: turn_end is the only exit
                 terminal_tools=frozenset({TURN_END_TOOL}),
+                task_receipt=task_receipt,
+                turn_id=turn_id,
+                history_base=history_base,
             )
         finally:
             await driver.close()
@@ -2239,7 +3352,9 @@ class AnalystLeadAgent(AgentRole):
             provider.cycle = previous_cycle
             provider.turn_end_validator = previous_validator
 
-        report = _written_report(workspace)
+        # Only an accepted `turn_end` makes the draft the report (ruling D4); an unfiled draft is
+        # no decision, and the caller treats `None` as the failure it is.
+        report = _written_report(workspace) if turn.filed_form is not None else None
         outcome.report = report
         outcome.filed = TURN_END_TOOL if report is not None else None
         outcome.decision = cycle.brief
@@ -2247,6 +3362,7 @@ class AnalystLeadAgent(AgentRole):
             self._last_report = report
         return outcome
 
+    @_one_turn_at_a_time
     async def drive_authoring(
         self,
         tool_spec: ToolSpec,
@@ -2290,18 +3406,20 @@ class AnalystLeadAgent(AgentRole):
             monitor=self.monitor,
         )
         await session.connect()
-        # Publish the live session so a human interrupt can close it: this `finally` sits inside
-        # the cancelled scope, where its awaits die before the branch reset runs, so the interrupt
-        # path calls `aclose()` itself from shielded cleanup. Whichever gets there first clears the
-        # handle, and `aclose` is idempotent.
+        # Publish the live session so a human interrupt can close it: on a stop this `finally`
+        # leaves it to the interrupt cleanup, which resets the branch after the sandboxes are
+        # killed (D8). Whichever closes it clears the handle, and `aclose` is idempotent.
         if self.run_control is not None:
             self.run_control.authoring_session = session
         try:
             return await self._drive_authoring_loop(session, tool_spec, human_handler)
         finally:
-            if self.run_control is not None and self.run_control.authoring_session is session:
-                self.run_control.authoring_session = None
-            await session.aclose()
+            if _run_ending(self.run_control) and self.run_control.authoring_session is session:
+                pass  # the stop's cleanup resets it, after the sandboxes are killed (D8)
+            else:
+                await session.aclose()
+                if self.run_control is not None and self.run_control.authoring_session is session:
+                    self.run_control.authoring_session = None
 
     async def _drive_authoring_loop(
         self, session: Any, tool_spec: ToolSpec, human_handler: Any | None
@@ -2528,8 +3646,8 @@ def _model_label(model: CallableModel) -> str | None:
 _TERMINAL_REQUIRED_NUDGE = (
     "Your actions and conclusions only reach the harness as tool calls — a turn without one "
     "arrives as nothing, whatever text it carried, and cannot end your turn. To investigate "
-    "further, call the tool you need. To record or revise your conclusions, call edit_report, "
-    "and review_report to read back what you have written. When your report is complete, end "
+    "further, call the tool you need. To record your conclusions, call write_report, and "
+    "edit_report to revise what you have written. When your report is complete, end "
     "your turn with turn_end: composing the report and submitting it that way is the only way "
     "your work is concluded, and nothing is written on your behalf if you stop any other way."
 )
@@ -2541,6 +3659,51 @@ class ReactBudgetExhausted(RuntimeError):
     an unfiled result — is indistinguishable in the ledger from a role that was never asked to
     run, and it is how a completed 14-quantity reproduction was discarded on 2026-09-15.
     """
+
+
+def _provider_status(exc: BaseException) -> int | None:
+    """The HTTP status a provider error carries: ``status_code`` (Anthropic/OpenAI) or ``code``
+    (google-genai), else ``None``."""
+    for name in ("status_code", "code"):
+        value = getattr(exc, name, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+@dataclass
+class TurnOutcome:
+    """What one ReAct turn ended with, owned by that turn (D4/D5).
+
+    ``filed_form`` is ``(tool, arguments)`` of the terminal call the turn's handler accepted, or
+    ``None``: only an accepted ``turn_end`` advances a draft to a report (ruling D4).
+    ``requeued_from`` is ``(sender, kind)`` of each inbox entry drained but never shown when the
+    turn filed, put back in the seat's inbox (D5), so the idle seat is woken to read them.
+    """
+
+    filed_form: tuple[str, dict] | None = None
+    requeued_from: list[tuple[str, str]] = field(default_factory=list)
+
+
+class ProviderTurnFailed(RuntimeError):
+    """A unit's turn ended because its model provider failed in a way retry does not fix (D1).
+
+    Raised by :meth:`AgentRole._react_loop` when ``ModelHandle.call`` raises a provider error
+    (``is_provider_error``) — a 400 such as "prompt is too long", a 401, or a transient condition
+    whose retry budget is spent. The event ``<role>.<action>.provider_error`` is already in the
+    ledger when this is raised, and nothing was filed on the unit's behalf (§2b). A caller with
+    peers to carry on with contains it (the analyst debate drops that worker's report for the
+    round); a caller with none lets it end the run (CLAUDE.md §9.3.8: contained failure).
+    ``agent`` is the unit's key, ``action`` its loop, ``cause`` the provider's exception and
+    ``status_code`` the HTTP status it carries (``None`` for a connection failure).
+    """
+
+    def __init__(self, *, agent: str, action: str, cause: BaseException) -> None:
+        self.agent = agent
+        self.action = action
+        self.cause = cause
+        self.status_code = _provider_status(cause)
+        super().__init__(f"{agent}.{action}: provider error ended the turn: {cause!r}")
 
 
 #: Said once, at budget exhaustion, before the grace window opens.
@@ -2591,7 +3754,7 @@ _KEPT_PROVIDER_STATE = (
 #: Tools a resumed turn answers without running: the report is filed and final, and the cycle a
 #: lead's authoring tools belonged to has ended.
 _RESUME_CLOSED = frozenset(
-    {EDIT_REPORT_TOOL, "file_edit", AUTHOR_CHAIN_TOOL, SUBMIT_TOOL,
+    {EDIT_REPORT_TOOL, WRITE_REPORT_TOOL, "file_edit", AUTHOR_CHAIN_TOOL, SUBMIT_TOOL,
      RESPOND_TO_REVIEW_TOOL}
 )
 
@@ -2912,36 +4075,6 @@ def _default_sources() -> dict[str, QuerySource]:
         "nasa_ads": NasaAdsSource(),
         "web": WebSource(),
     }
-
-
-# Keys that belong to the transport protocol — not serialized as tool payload.
-# Per-field character caps written to memory.md (crash-prevention).
-_STDOUT_MEM_CAP = 8_000
-_STDERR_MEM_CAP = 2_000
-
-def _append_tool_results_to_memory(path: Path, results: Sequence[ToolResult]) -> None:
-    """Append bare terminal recordings of tool calls to the worker's memory file.
-
-    stdout and stderr are capped at write time so memory.md stays bounded.
-    """
-    import datetime
-    lines: list[str] = [f"\n## Tool calls — {datetime.datetime.now(datetime.UTC).isoformat(timespec='seconds')}"]
-    for r in results:
-        status = "OK" if r.exit_code == 0 else f"FAILED (exit {r.exit_code})"
-        lines.append(f"\n### {r.tool_name}  [{status}]  ({r.elapsed_s:.1f}s)")
-        if r.stdout:
-            text = r.stdout
-            if len(text) > _STDOUT_MEM_CAP:
-                text = text[:_STDOUT_MEM_CAP] + f"\n[stdout truncated — {len(r.stdout):,} chars total]"
-            lines.append(f"stdout:\n{text}")
-        if r.stderr:
-            text = r.stderr
-            if len(text) > _STDERR_MEM_CAP:
-                text = text[:_STDERR_MEM_CAP] + f"\n[stderr truncated — {len(r.stderr):,} chars total]"
-            lines.append(f"stderr:\n{text}")
-        if r.figures:
-            lines.append(f"figures: {[str(f.path) for f in r.figures]}")
-    append_memory(path, "\n".join(lines) + "\n")
 
 
 def _reply_dir_for(agent_folder):

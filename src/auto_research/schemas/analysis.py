@@ -19,17 +19,26 @@ class AnalystReport(FiguredReport):
     Extends :class:`FiguredReport`, so it carries ``cited_figures`` (the catalog handles the
     author selects) and the runtime-resolved, ordered ``figures`` (Figure 1 = ``figures[0]``);
     the prose refers to figures as "Figure 1", "Figure 2", … in ``cited_figures`` order (V-4).
+
+    ``summary`` defaults to empty (A5, 2026-10-18): the report is edited as one text document, so
+    a draft with findings and no summary yet is legal; ``turn_end`` refuses an empty summary.
     """
 
-    summary: NonEmptyStr = Field(
+    summary: str = Field(
+        default="",
         description=(
-            "The report's own abstract: what was done and what it found, in prose. Refer to "
-            'figures as "Figure 1", "Figure 2", … in cited_figures order.'
+            "A briefing of 3–5 sentences: what was asked, what was done, the headline result "
+            "and the outcome. The results themselves go in findings. Refer to figures as "
+            '"Figure 1", "Figure 2", … in cited_figures order.'
         )
     )
     findings: list[str] = Field(
         default_factory=list,
-        description="Key findings, each a self-contained prose string.",
+        description=(
+            "The results: one item per result, each a self-contained statement that cites the "
+            "receipts its numbers come from as [handle]. Every measured value, table row and "
+            "comparison belongs here."
+        ),
     )
     uncertainty: str | None = Field(
         default=None, description="The dominant uncertainties / caveats (optional)."
@@ -68,8 +77,8 @@ class AnalystReport(FiguredReport):
     status: Literal["succeeded", "failed", "needs_human"] = Field(
         default="failed",
         description=(
-            "Declare the outcome of YOUR work: 'succeeded' when you completed it, 'failed' when "
-            "you could not. An honest 'failed' is a correct, penalty-free answer — never "
+            "Declare the outcome of YOUR work: 'succeeded' when you completed it and findings hold "
+            "its results, 'failed' when you could not. An honest 'failed' is a correct, penalty-free answer — never "
             "fabricate a result to force 'succeeded'. Say in the summary what blocked you and "
             "what a person would need to do about it."
         ),

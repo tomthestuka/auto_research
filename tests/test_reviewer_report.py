@@ -199,14 +199,6 @@ def test_a_bare_paper_number_is_refused_with_a_hint_to_attribute_it(store):
     assert any("lib:p1" in p for p in _problems(report, store))
 
 
-def test_the_text_view_shows_the_draft_and_its_figures_when_no_tex_is_configured(store):
-    from auto_research.agents.reviewer_tools import reviewer_text_view
-
-    text, figures = reviewer_text_view(store)(_final())
-    assert "abstract:" in text and "Figure 1: [analyst_lead:f1]" in text
-    assert [f.caption for f in figures] == ["Figure 1 — PD vs energy"]
-
-
 def test_references_come_from_the_cited_paper_receipts(store, tmp_path):
     tex = render_report(_final(), store, tmp_path / "report", run_id="r1").tex_path.read_text()
     assert "Polarized X-rays from Cyg X-1" in tex
@@ -330,23 +322,6 @@ def test_a_turn_end_to_the_human_renders_and_compiles(store, tmp_path):
 
 
 # -- the reviewer's own tools -----------------------------------------------------------------
-
-
-from auto_research.agents.reviewer_tools import reviewer_draft_view  # noqa: E402
-
-
-@pytest.mark.skipif(not (shutil.which("lualatex") and shutil.which("pdftoppm")), reason="needs lualatex + pdftoppm")
-def test_the_draft_view_shows_rendered_pages(store, tmp_path):
-    view = reviewer_draft_view(tmp_path / "report", "r1", store)
-    text, pages = view(_final())
-    assert pages and pages[0].caption == "Draft page 1" and "page image" in text
-    assert not (tmp_path / "report" / "report.tex").exists()  # the final report is untouched
-
-
-def test_the_draft_view_shows_render_problems_instead_of_failing(store, tmp_path):
-    view = reviewer_draft_view(tmp_path / "report", "r1", store)
-    text, pages = view(_final(figures=["analyst_lead:r1"]))
-    assert pages == [] and "cannot be rendered yet" in text and "not a figure" in text
 
 
 def test_a_number_from_the_request_grounds_only_where_the_request_is_cited(store):

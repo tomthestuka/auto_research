@@ -25,8 +25,10 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
 - `DebateToConverge(max_rounds=3)` implements the Phase 1 analyst policy.
   It requires at least one worker, asks all workers for initial reports, checks
   convergence through the lead after each round, requests revisions with peer
-  reports when not converged, injects a truncated cross-worker tool-result
-  summary from `last_tool_results`, and returns a lead-adjudicated final report.
+  reports when not converged, gives each worker in a revision round or a rerun a task carrying a
+  truncated summary of its PEERS' last tool results (`_with_peer_tools`; built per worker and
+  per round, never written into the shared task, so it does not stack, holds no worker's own
+  calls and never reaches the lead — B8), and returns a lead-adjudicated final report.
   Optional `monitor` records worker reports, convergence verdicts, revisions,
   and lead adjudication. `registry` and `tool_retry_cap` are accepted for
   call-site compatibility but unused by the strategy.
@@ -73,6 +75,17 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   files `submit_terminal_report` (§9.6). That report flows to the reviewer (sole I/O) which
   adjudicates finalize vs. bounded rework; never fabricated. A cycle that files **no** form and
   wrote **no** report raises rather than composing one ([F6]).
+- **A worker's provider failure is contained (D1, CLAUDE.md §9.3.8).** A worker whose turn a
+  provider error ended (`agents.roles.ProviderTurnFailed`) filed nothing, so it contributes no
+  report to that worker pass: the report list stays aligned with `workers` by index, `None` for
+  the failed worker; the lead's `run_cycle` receives only the filed reports with their matching
+  `sources`, and a peer's revision sees only filed peers. Before each cycle that follows a pass
+  with a failed worker the lead gets a runtime **notice** in its inbox naming who filed nothing
+  and who filed (delivered at its loop's first boundary; navigation, never a receipt). Each round
+  is a new turn, so a failed worker is asked again in the next revision or rerun. With every
+  worker failed the lead still runs, on no reports, and files its own report. Only
+  `ProviderTurnFailed` is contained: `ReactBudgetExhausted`, our own exceptions and a lead's
+  `ProviderTurnFailed` propagate (the lead is the one unit that files the analysis result).
 - The round cap is hard, and it is enforced in **two** places that agree: consensus passes
   `rounds_left` into the cycle, and the `request_another_round` handler refuses the form once that
   reaches zero, naming the cap and pointing at `submit_adjudication`. So a lead at the cap files a
@@ -95,16 +108,24 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
 - `DebateToConverge(max_rounds=3, monitor=None, registry=None, tool_retry_cap=3,
   tool_author_cap=3, toolkit_root=None, worktree_base=None, direct_branch=None,
   human_handler=None, colead=None)` — bounded analyst debate strategy. Each worker gathers
-  evidence inside `AnalystWorkerAgent.analyze()`; the strategy injects a truncated shared
-  summary from each worker's `last_tool_results` before later rounds and deduplicates figures
-  onto the lead's final report so they flow to the reviewer. When `toolkit_root` is set it also
+  evidence inside `AnalystWorkerAgent.analyze()`; the strategy gives each worker a truncated
+  summary of its peers' `last_tool_results` in later rounds (`_with_peer_tools`, B8); the lead
+  owns the final report's figures. When `toolkit_root` is set it also
   runs the authoring/resume path (above). Method: `run(workers, lead, task)` → `AnalystReport`.
-  Internals: `_initial_reports(workers, task)`; `_revision_round(workers, task, reports, round)`
-  (one debate round, peers in view); `_resume_after_authoring(workers, task, outcome,
+  Internals: `_initial_reports(workers, task, *, phase="initial")` → reports aligned with
+  `workers`, `None` for a failed worker (`phase="rerun"` after authoring);
+  `_revision_round(workers, task, reports, round)` (one debate round, filed peers in view);
+  `_run_worker(worker, index, task, round, *, peer_reports=None, phase)` → the report, or `None`
+  when `ProviderTurnFailed` ended the turn, recorded as `analyst.worker.failed` (level 2; the
+  unit's own `analyst_worker.<action>.provider_error` is the level-1 line);
+  `_notify_lead(lead, workers, reports)` — the inbox notice (`analyst.lead.notice` in the ledger),
+  via `lead.run_control` (or `ensure_run_control()`); module-level `_filed(workers, reports)` →
+  `(sources, reports)` of the workers that filed, `_peers_for(reports, index)` skips `None`; `_resume_after_authoring(workers, task, outcome,
   reports_unchanged)` → `(reports, task)` — per-link provenance/failure notes, then
   `registry.reload()` + per-worker `sandbox.restart()` when ≥1 committed, then rerun the workers
   once; it **skips the rerun** when credits are spent with nothing committed (A11);
-  `_augment_with_peer_tools(workers, task)`; module-level
+  `_with_peer_tools(workers, task, index)` (worker ``index``'s task: the shared one plus its
+  peers' summary, `_peer_tool_summary(peers)` labelled by worker key); module-level
   `_augment_with_authored_tool(task, tool_spec, result)` (committed-tool provenance note),
   `_augment_with_failed_tool(task, tool_spec, result)` (failed-attempt note so a retry adapts), and
   `_augment_with_probe(task, verdict)` — hands the lead's `request_another_round` dispatch text to
@@ -139,3 +160,8 @@ Compacted 2026-08-05 and again 2026-09-24 (every entry); detail in git history.
 - 2026-09-24 — `IODebateToConverge` and its `IOAbstraction*` protocols deleted (the librarian is
   one loop).
 - 2026-09-25 — [E12] Wording only: the lead steers its coder with `message(to="coder")`.
+- 2026-10-18 — [D1, run 32814459] A worker's `ProviderTurnFailed` is contained: `_run_worker`
+  records `analyst.worker.failed` and returns `None`; the lead receives the filed reports and
+  sources only (`_filed`) plus an inbox notice (`_notify_lead`); peers skip `None`. Tests:
+  `tests/test_provider_containment.py`.
+- 2026-10-18 — [B8] `_augment_with_peer_tools` → `_with_peer_tools(workers, task, index)`: the peer-tool summary is built per worker for each revision round and rerun from its peers' `last_tool_results` (labelled by key) and never written back into the shared task — it had stacked every round, carried each worker's own calls back to it and reached the lead. The per-worker task is a `model_copy`, so no task field is dropped. Tests: `tests/test_consensus_peer_summary.py`.

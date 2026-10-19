@@ -12,11 +12,8 @@ from auto_research.sandbox.review import (
 )
 from auto_research.sandbox.runner import run_tool
 from auto_research.sandbox.workspace import (
-    append_memory,
     create_run_workspace,
     figures_dir,
-    memory_path,
-    read_memory,
     run_dir,
 )
 
@@ -25,15 +22,12 @@ __all__ = [
     "PersistentSandbox",
     "ToolkitRegistry",
     "ToolSpec",
-    "append_memory",
     "build_diff_bundle",
     "check_author_reviewer_decorrelation",
     "create_run_workspace",
     "figures_dir",
     "make_review_hook",
-    "memory_path",
     "propose_and_pr",
-    "read_memory",
     "run_dir",
     "run_tool",
     "select_decorrelated_member",

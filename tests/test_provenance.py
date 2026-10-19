@@ -235,7 +235,7 @@ def test_edit_report_serves_a_report_that_is_not_figured(tmp_path, store):
     from pydantic import Field
 
     from auto_research.agents.react import (
-        ReportWorkspace, edit_report_tool_def, execute_edit_report,
+        ReportWorkspace, edit_report_tool_def, execute_edit_report, execute_write_report,
     )
     from auto_research.schemas.base import MessageModel
 
@@ -244,18 +244,18 @@ def test_edit_report_serves_a_report_that_is_not_figured(tmp_path, store):
         rationale: str | None = Field(default=None, description="Why, in the reviewer's words.")
 
     spec = edit_report_tool_def(("abstract", "rationale"), (), Plain, "Write your review.")
-    props = spec["input_schema"]["properties"]
-    assert set(props) == {"abstract", "rationale"} and "cited_figures" not in props
-    assert props["rationale"]["description"] == "Why, in the reviewer's words."
-    assert spec["input_schema"]["required"] == ["abstract"] and spec["description"] == "Write your review."
+    # A7: Edit over the draft document; the role's own text follows the layout's edit text.
+    assert set(spec["input_schema"]["properties"]) == {"old_string", "new_string", "replace_all"}
+    assert "Write your review." in spec["description"] and "# abstract —" in spec["description"]
+    assert "# figures" not in spec["description"]
 
     r = _result(store, "PD=3.453")
     ws = ReportWorkspace(report_path=tmp_path / "rev.jsonl", report_model=Plain, catalog={},
                          prose_fields=("abstract", "rationale"), receipts=store,
                          provenance_check=lambda rep: check_bindings(rep.abstract, store).problems)
-    out = asyncio.run(execute_edit_report(ws, {"abstract": f"PD 3.453 [{r.handle}]"}))
+    out = asyncio.run(execute_write_report(ws, {"content": f"# abstract\nPD 3.453 [{r.handle}]\n"}))
     assert not out.is_error and "Provenance" not in out.text
-    out = asyncio.run(execute_edit_report(ws, {"abstract": "PD 3.45"}))
+    out = asyncio.run(execute_edit_report(ws, {"old_string": f"PD 3.453 [{r.handle}]", "new_string": "PD 3.45"}))
     assert "Provenance" in out.text
 
 

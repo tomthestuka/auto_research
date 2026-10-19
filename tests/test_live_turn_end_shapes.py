@@ -655,9 +655,9 @@ def test_shape_cited_figure_missing_on_disk(tmp_path):
         "cited_figure_missing_on_disk", tmp_path, rounds_left=0, seed_state=seed,
         instructions=(
             "FIRST, before anything else: worker w0 produced exactly one figure, addressed [w0:1]. "
-            "Call review_report to see your catalog, then write your report with edit_report "
-            "citing that figure in cited_figures as {'source': 'w0', 'index': 1}, and conclude "
-            "(rework=false). Citing that figure is the required part of this task."
+            "Write your report with write_report, placing that figure as the line '- [w0:1]' "
+            "under # figures, and conclude (false under # rework). Placing that figure is the "
+            "required part of this task."
         ),
     )
     _assert_refused_then_recovered("cited_figure_missing_on_disk", outcome, refusals, handle)

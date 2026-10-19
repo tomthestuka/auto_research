@@ -265,3 +265,130 @@ def test_record_context_edit_noop_when_empty():
     role = _bare_role()
     asyncio.run(role._record_context_edit(ModelResponse(), "analyze"))
     assert role.monitor.events == []
+
+
+# ── B5: clear tool inputs, keep report / channel / tool-search uses ───────────
+
+def _retuned() -> ContextEditingConfig:
+    return _enabled()._replace(
+        clear_tool_inputs=True, clear_at_least_tokens=60000,
+        exclude_tools=("edit_report", "write_report", "turn_end", "message", "view_receipt"),
+    )
+
+
+def test_the_retuned_edit_clears_inputs_and_excludes_only_declared_tools(monkeypatch):
+    from auto_research.env import ToolSearchConfig
+
+    monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
+    monkeypatch.setattr("auto_research.models.providers.anthropic.context_editing_config", _retuned)
+    monkeypatch.setattr(
+        "auto_research.models.providers.anthropic.tool_search_config",
+        lambda: ToolSearchConfig(enabled=True, anthropic_tool="tool_search_tool_bm25_20251119",
+                                 openai_tool="tool_search"),
+    )
+    tools = [
+        {"name": "edit_report", "description": "e", "input_schema": {"type": "object"}},
+        {"name": "message", "description": "m", "input_schema": {"type": "object"}},
+        {"name": "fit", "description": "f", "input_schema": {"type": "object"},
+         "defer_loading": True},
+    ]
+    asyncio.run(AnthropicProvider().call(_messages(), _cfg(), tools=tools, cache_prefix=True))
+    edit = _FakeAnthropic.store["create"]["request"]["context_management"]["edits"][0]
+    assert edit["clear_tool_inputs"] is True
+    assert edit["clear_at_least"] == {"type": "input_tokens", "value": 60000}
+    # Declared report and channel tools, plus the search tool that discovered `fit`.
+    assert edit["exclude_tools"] == ["edit_report", "message", "tool_search_tool_bm25"]
+
+
+def test_without_deferred_tools_no_search_tool_is_excluded(monkeypatch):
+    monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
+    monkeypatch.setattr("auto_research.models.providers.anthropic.context_editing_config", _retuned)
+    tools = [{"name": "echo", "description": "e", "input_schema": {"type": "object"}}]
+    asyncio.run(AnthropicProvider().call(_messages(), _cfg(), tools=tools, cache_prefix=True))
+    edit = _FakeAnthropic.store["create"]["request"]["context_management"]["edits"][0]
+    assert "exclude_tools" not in edit and edit["clear_tool_inputs"] is True
+
+
+def test_the_new_keys_are_read_from_config(monkeypatch):
+    monkeypatch.setattr(
+        "auto_research.env._orch_config",
+        lambda: {"context_mgmt_clear_tool_inputs": True,
+                 "context_mgmt_exclude_tools": ["edit_report", "turn_end"]},
+    )
+    cfg = context_editing_config()
+    assert cfg.clear_tool_inputs is True and cfg.exclude_tools == ("edit_report", "turn_end")
+    monkeypatch.setattr("auto_research.env._orch_config", lambda: {})
+    assert context_editing_config().exclude_tools == ("message", "wait_for_reply")
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("edit_report", ("edit_report",)),           # one name, not its letters
+    (["edit_report", None, 3], ("edit_report",)),
+    ({"edit_report": 1}, None),                  # not a list: the default
+    (None, None),
+])
+def test_a_malformed_exclusion_list_falls_back_or_keeps_names(monkeypatch, value, expected):
+    from auto_research.env import CONTEXT_EDITING_EXCLUDED_TOOLS
+
+    monkeypatch.setattr("auto_research.env._orch_config",
+                        lambda: {"context_mgmt_exclude_tools": value})
+    got = context_editing_config().exclude_tools
+    assert got == (expected if expected is not None else CONTEXT_EDITING_EXCLUDED_TOOLS)
+
+
+@pytest.mark.parametrize("value, expected", [(True, True), (False, False), ("false", False),
+                                             ("true", False), (None, False)])
+def test_clear_tool_inputs_takes_a_real_boolean_only(monkeypatch, value, expected):
+    monkeypatch.setattr("auto_research.env._orch_config",
+                        lambda: {"context_mgmt_clear_tool_inputs": value})
+    assert context_editing_config().clear_tool_inputs is expected
+
+
+def test_the_excluded_names_are_the_tools_they_mean():
+    """A rename of a report or channel tool must not silently drop its exclusion."""
+    from auto_research.agents import react
+    from auto_research.env import CONTEXT_EDITING_EXCLUDED_TOOLS
+
+    assert set(CONTEXT_EDITING_EXCLUDED_TOOLS) == {react.MESSAGE_TOOL, react.WAIT_FOR_REPLY_TOOL}
+
+
+def test_with_tool_search_off_nothing_is_deferred_or_excluded_for_search(monkeypatch):
+    from auto_research.env import ToolSearchConfig
+
+    monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
+    monkeypatch.setattr("auto_research.models.providers.anthropic.context_editing_config", _retuned)
+    monkeypatch.setattr(
+        "auto_research.models.providers.anthropic.tool_search_config",
+        lambda: ToolSearchConfig(enabled=False, anthropic_tool="tool_search_tool_bm25_20251119",
+                                 openai_tool="tool_search"),
+    )
+    tools = [{"name": "fit", "description": "f", "input_schema": {"type": "object"},
+              "defer_loading": True}]
+    asyncio.run(AnthropicProvider().call(_messages(), _cfg(), tools=tools, cache_prefix=True))
+    request = _FakeAnthropic.store["create"]["request"]
+    assert "exclude_tools" not in request["context_management"]["edits"][0]
+    assert all("defer_loading" not in t for t in request["tools"])
+
+
+def test_the_parse_path_carries_the_retuned_edit(monkeypatch):
+    monkeypatch.setattr("anthropic.AsyncAnthropic", _FakeAnthropic)
+    monkeypatch.setattr("auto_research.models.providers.anthropic.context_editing_config", _retuned)
+    tools = [{"name": "edit_report", "description": "e", "input_schema": {"type": "object"}}]
+    asyncio.run(AnthropicProvider().call(_messages(), _cfg(), schema=_Verdict, tools=tools,
+                                         cache_prefix=True))
+    edit = _FakeAnthropic.store["parse"]["request"]["context_management"]["edits"][0]
+    assert edit["clear_tool_inputs"] is True and edit["exclude_tools"] == ["edit_report"]
+
+
+def test_the_shipped_config_leaves_clearing_off():
+    """Ruling B12 (2026-10-18): measured, every clear rewrites the whole prompt cache, so clearing
+    ships off and server-side compaction bounds a turn; the clearing settings stay for re-enabling."""
+    import yaml
+    from pathlib import Path
+
+    example = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "config" / "orchestration.yaml.example").read_text()
+    )
+    assert example["context_mgmt_enabled"] is False
+    assert example["context_mgmt_exclude_tools"] == ["message", "wait_for_reply"]
+    assert example["compaction_enabled"] is True

@@ -10,8 +10,8 @@ Three tightly coupled responsibilities:
    per analyst worker so XSPEC session state (loaded spectra, fitted models,
    plots) accumulates across all debate rounds and rework cycles.
 3. **Run workspace** — per-run and per-agent folder layout under
-   `<runtime_dir>/runs/{run_id}/` (`runtime_dir` from `config/orchestration.yaml`); per-agent `memory.md` files
-   record tool call history as bare terminal recordings.
+   `<runtime_dir>/runs/{run_id}/` (`runtime_dir` from `config/orchestration.yaml`). Tool call
+   history lives in the run ledger (`agents/history.py`), not in the workspace.
 
 Tool-authoring (propose → branch → gate → review → commit → human-merge) lives in
 `merge_flow.py` (author harness + rework loop, step 2; **`approve_edit` atomic commit, step
@@ -27,7 +27,7 @@ sandbox/
 ├── registry.py       # ToolkitRegistry — manifest-based tool discovery
 ├── persistent.py     # PersistentSandbox — long-lived REPL subprocess per worker
 ├── runner.py         # run_tool()     — one-shot subprocess (kept for ad-hoc use)
-├── workspace.py      # per-run/agent folder layout and memory.md utilities
+├── workspace.py      # per-run/agent folder layout
 ├── analyst_env.sh    # dedicated headless analyst env (HEADAS, CALDB, no cruft)
 ├── builtin_server.py # MCP stdio server: bash_exec, list_dir
 ├── mcp_client.py     # MCPToolClient — manages stdio MCP server sessions
@@ -64,8 +64,7 @@ file, not a Python `TOOL_MANIFEST` dict). A call may request a shorter timeout v
 `AnalystWorkerAgent.analyze()` call. The worker's inner ReAct loop uses
 `SandboxToolProvider`, which exposes `ToolkitRegistry.tool_definitions()` and MCP
 tool schemas to provider-native function calling, dispatches returned calls into
-`PersistentSandbox`, and appends bare terminal recordings to the worker's private
-`memory.md`. `DebateToConverge` reads each worker's `last_tool_results` and injects
+`PersistentSandbox`; the run ledger records every call (the worker's session history). `DebateToConverge` reads each worker's `last_tool_results` and injects
 truncated peer summaries into later rounds.
 
 **`is_alive` flag and recovery:** if a worker's subprocess exits unexpectedly
@@ -471,19 +470,15 @@ class PersistentSandbox:
 
 ```python
 def create_run_workspace(run_id: str, agent_keys: list[str]) -> dict[str, Path]
-def memory_path(run_id: str, agent_key: str) -> Path
 def figures_dir(run_id: str, agent_key: str) -> Path
 def run_dir(run_id: str) -> Path
 def round_report_path(agent_dir_path: Path, *, role: str, model: str, round_n: int) -> Path
 def report_record_path(agent_dir_path: Path, filename: str) -> Path
 def report_dir(run_id: str) -> Path
-def append_memory(path: Path, text: str) -> None
-def read_memory(path: Path) -> str
 ```
 
 - `create_run_workspace()` creates `<runtime_dir>/runs/{run_id}/{key}/figures/`
   for each agent key and returns `{key: agent_dir}`.
-- `memory_path()` returns `{agent_dir}/memory.md` (parent created if absent).
 - `report_record_path(agent_dir, filename)` — where a role's report JSONL lives: for an agent
   folder `runs/<run>/<key>/`, `ledgers/<run>/reports/<key>/<filename>` (created), outside every
   allow-list (human 2026-09-25: a report read back with `read_file` minted the role's own typed
@@ -491,8 +486,7 @@ def read_memory(path: Path) -> str
 - `report_dir(run_id)` — the reviewer's report folder, `ledgers/<run>/reports/reviewer/report/`
   (with `figures/`); each report to the human gets `v<k>/` under it (`graph/builder`).
 - `round_report_path()` returns `report_record_path(agent_dir, "<role>_round<n>_report.jsonl")` —
-  the per-round inter-LLM report JSONL an analyst writes via `edit_report` (V-4), distinct from
-  the private `memory.md`. `n` is the monotonic debate round. `model` is accepted and unused: a filename is
+  the per-round inter-LLM report JSONL an analyst writes via `edit_report` (V-4). `n` is the monotonic debate round. `model` is accepted and unused: a filename is
   readable by any agent whose allow-list covers the run directory, so the member stays in the
   ledger (2026-09-03).
 - `append_memory()` appends bare terminal text; `read_memory()` returns contents or `""`.
@@ -1041,11 +1035,8 @@ the hook mapping a fake-model verdict — no live LLM).
   - `.shutdown()` — graceful stop.
   - `.is_alive` → `bool` — True while the current subprocess is running.
 - `create_run_workspace(run_id, agent_keys)` → `dict[str, Path]` — create workspace folders.
-- `memory_path(run_id, agent_key)` → `Path` — path to agent's `memory.md`.
 - `figures_dir(run_id, agent_key)` → `Path` — path to agent's `figures/` dir.
 - `run_dir(run_id)` → `Path` — path to run's root dir.
-- `append_memory(path, text)` — append to memory.md.
-- `read_memory(path)` → `str` — read memory.md or return `""`.
 - `run_tool(module, fn, args, *, timeout_s, workdir, toolkit_root, analyze_env=None, analyze_ini_sh=None)` →
   `ToolResult` — one-shot subprocess; kept for ad-hoc use. Keeps the valid figures and appends drop
   notes to `stderr`.
@@ -1565,3 +1556,12 @@ Compacted 2026-09-01, 2026-09-24 and 2026-10-07 (the 10-06/07 entries); detail i
 - 2026-10-17 — `coder_text_cap()` retired; `cap_text` takes an explicit limit. Coder prose, tool inputs/results, escalations, gate reasons and co-lead issues/rationale are recorded whole in the ledger (summaries and model-visible notes keep their short previews).
 - 2026-10-17 — Codex harness: `coder.turn_end` records the vendor error whole (the lead's copy stays at 600 chars), `coder.read_outside_allowlist` every path.
 - 2026-10-17 — `builtin_server.read_file` removed (first 64 KB, no offset): workers read through the shared in-process `read_file` (`agents/DOCS.md`). `bash_exec` and `list_dir` stay in the server.
+- 2026-10-18 — [B2] `memory.md` retired: `workspace.memory_path`, `append_memory` and `read_memory` deleted (and their `sandbox` exports); each seat's history is the run ledger (`agents/history.py`).
+- 2026-10-18 — [D8] `builtin_server.py` tracks its in-flight `bash_exec` commands (`_RUNNING`) and
+  kills their process groups when it exits (stdin closed, or SIGTERM via `_on_terminate`): each
+  command runs in its own session, outside the server's group, so a command a `/stop` interrupted
+  used to outlive the server when the jail was off.
+- 2026-10-18 — [D8 follow-ups] `AuthoringSession.aclose` marks the session closed only once every
+  step finished (`_closing` guards a concurrent call): a close a /stop cut short leaves it open, so
+  the stop's cleanup closes it again and the branch is still reset. The lead releases
+  `run_control.authoring_session` only after its own close returned.

@@ -309,6 +309,26 @@ def is_transient_provider_error(exc: BaseException, provider: str = "") -> bool:
     return isinstance(exc, (anthropic.APIConnectionError, openai.APIConnectionError))
 
 
+def is_provider_error(exc: BaseException) -> bool:
+    """True when ``exc`` came from a model provider's API: an error response or a failure to reach it.
+
+    The vendor SDKs' own base classes (``anthropic.APIError``, ``openai.APIError`` — which also
+    carries DeepSeek, Z.AI and Alibaba over the Responses dialect — and ``google.genai``'s
+    ``APIError``) plus raw ``httpx`` transport errors. What a unit's loop contains as that unit's
+    honest failure once :func:`call_with_transient_retry` has given up (CLAUDE.md §9.3.8). Our own
+    defects — a ``ValueError`` from request building, a ``TypeError`` in an adapter — are not
+    provider errors and keep propagating, unmasked.
+    """
+    import anthropic
+    import httpx
+    import openai
+    from google.genai import errors as genai_errors
+
+    return isinstance(
+        exc, (anthropic.APIError, openai.APIError, genai_errors.APIError, httpx.TransportError)
+    )
+
+
 async def call_with_transient_retry(
     provider_call: Callable[[], Awaitable[Any]],
     *,

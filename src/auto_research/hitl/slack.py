@@ -19,6 +19,8 @@ from typing import Any
 from auto_research.hitl.resolve import response_timeout_s
 from auto_research.schemas import HumanQuery, HumanResponse
 
+logger = logging.getLogger(__name__)
+
 
 class _SocketRotationDowngradeFilter(logging.Filter):
     """Demote slack_sdk's benign Socket Mode rotation ERROR to WARNING.
@@ -75,6 +77,8 @@ class SlackHandler:
         self._pending: dict[str, asyncio.Future[str]] = {}
         # HITL slash-command context (§12 Stage 3), wired by run_research via attach_commands.
         self._cmd_ctx: Any | None = None
+        self._command_tasks: set[asyncio.Task] = set()
+        self._command_names: dict[asyncio.Task, str] = {}  # task → its command word  # command handlers in flight (ruling D8)
 
         # Defer slack_bolt construction to start(): AsyncSocketModeHandler builds an aiohttp
         # session that needs a *running* event loop, but the handler is constructed
@@ -92,7 +96,9 @@ class SlackHandler:
             is_ours = not (event.get("bot_id") or event.get("subtype"))
             in_channel = event.get("channel") in (None, self.channel)
             if self._cmd_ctx is not None and text.startswith("/") and is_ours and in_channel:
-                await self.handle_command(event)   # a slash-command is never taken as a reply
+                # A slash-command is never taken as a reply, and runs in its own task so a
+                # `/stop` never waits behind a slow `/status` (ruling D8).
+                self._spawn(self.handle_command(event), text.split()[0].split("@", 1)[0])
             else:
                 self.on_message(event)
 
@@ -109,8 +115,39 @@ class SlackHandler:
             return
         from auto_research.hitl.commands import dispatch_command
 
-        reply = await dispatch_command(text, self._cmd_ctx)
-        await self.app.client.chat_postMessage(channel=self.channel, text=reply)
+        reply = await dispatch_command(text, self._cmd_ctx, ack=self._post)
+        if str(reply):
+            await self.app.client.chat_postMessage(channel=self.channel, text=reply)
+
+    async def _post(self, text: str) -> None:
+        """Post a command's acknowledgement. Deliberately not ``notify``: that name turns on the
+        seat-to-seat mirror, which Slack does not carry (§13), so the /stop checklist is recorded
+        as skipped here."""
+        await self.app.client.chat_postMessage(channel=self.channel, text=text)
+
+    def in_flight_commands(self) -> list[str]:
+        """The commands whose handlers are still running (each named once), for the /stop
+        checklist: a channel close cancels them, and the human is told which (D8)."""
+        current = asyncio.current_task()
+        names = [
+            self._command_names.get(task, "a command") for task in self._command_tasks
+            if task is not current and not task.done()
+            and self._command_names.get(task) != "/stop"
+        ]
+        return list(dict.fromkeys(names))
+
+    def _spawn(self, coro: Any, name: str = "a command") -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        self._command_tasks.add(task)
+        self._command_names[task] = name
+        task.add_done_callback(self._command_done)
+        return task
+
+    def _command_done(self, task: asyncio.Task) -> None:
+        self._command_tasks.discard(task)
+        self._command_names.pop(task, None)
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("Slack command handler failed: %r", task.exception())
 
     def on_message(self, event: dict[str, Any]) -> None:
         """Resolve a pending Future from a human reply.
@@ -155,6 +192,10 @@ class SlackHandler:
         self._started = True
 
     async def aclose(self) -> None:
+        current = asyncio.current_task()
+        for task in list(self._command_tasks):
+            if task is not current:
+                task.cancel()
         if self._started and self._socket is not None:
             await self._socket.disconnect_async()
             self._started = False

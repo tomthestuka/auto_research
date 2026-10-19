@@ -229,3 +229,55 @@ def test_a_document_with_no_recoverable_figures_says_so(tmp_path, monkeypatch):
     text = "\n".join(p.get("text") or "" for p in parts)
 
     assert "No figures could be recovered" in text
+
+
+# ── R2: a document nested in the tool result that opened it ───────────────────────
+
+
+def _opened(document: DocumentRef) -> list:
+    from auto_research.models.types import ModelResponse, ToolCall, ToolResultMessage, ToolResultPart
+
+    return [
+        ModelMessage(role="user", content="read the paper"),
+        ModelResponse(tool_calls=[ToolCall(id="c1", name="read_paper", arguments={"hit": 1})]),
+        ToolResultMessage(results=[ToolResultPart(
+            tool_call_id="c1", name="read_paper", content="the PDF is attached",
+            documents=[document],
+        )]),
+    ]
+
+
+def _request(provider_cls, provider_name, messages, monkeypatch) -> list:
+    import openai
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", _CaptureResponses)
+    cfg = RoleModelConfig(name="m", provider=provider_name, model="fake", vision=True,
+                          documents=True)
+    asyncio.run(provider_cls().call(messages, cfg))
+    return _CaptureResponses.store["request"]["input"]
+
+
+def test_a_nested_document_follows_its_result_on_openai(tmp_path, monkeypatch):
+    from auto_research.models.providers.openai import OpenAIProvider
+
+    document = _document(tmp_path / "paper.pdf")
+    items = _request(OpenAIProvider, "openai", _opened(document), monkeypatch)
+    kinds = [i.get("type") or i.get("role") for i in items]
+    at = kinds.index("function_call_output")
+    after = items[at + 1]
+    assert after["role"] == "user" and [p["type"] for p in after["content"]] == ["input_file"]
+    assert at + 2 == len(items), "nothing re-attached at the end of the request"
+
+
+def test_alibaba_reads_a_nested_document_through_the_substitution(tmp_path, monkeypatch):
+    """The residual: Alibaba's substitution runs on call-time documents, so a nested one moves
+    there and is read as extracted text, never sent as a file it cannot take."""
+    from auto_research.models.providers.dashscope import DashscopeProvider
+
+    document = _document(tmp_path / "paper.pdf")
+    _stub_parse(monkeypatch, ParsedDocument(text="PD = 4.01 %", figures=(), truncated=False))
+    items = _request(DashscopeProvider, "dashscope", _opened(document), monkeypatch)
+    parts = [p for i in items if isinstance(i, dict) for p in (i.get("content") or [])
+             if isinstance(p, dict)]
+    assert not [p for p in parts if p.get("type") == "input_file"]
+    assert any("PD = 4.01 %" in (p.get("text") or "") for p in parts)

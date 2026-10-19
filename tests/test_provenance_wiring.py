@@ -13,6 +13,7 @@ from auto_research.agents.react import (
     ReportWorkspace,
     SandboxToolProvider,
     execute_edit_report,
+    execute_write_report,
     lead_turn_problems,
     worker_report_problems,
 )
@@ -104,16 +105,14 @@ def test_worker_turn_end_refuses_an_ungrounded_number_then_accepts_it_cited(tmp_
     asyncio.run(prov.execute("research_toolkit.tk.fit", {}))
     ws = _workspace(tmp_path, ScopedLookup(store, own_source="analyst_worker_0"))
 
-    draft = asyncio.run(execute_edit_report(ws, {
-        "summary": "Polarisation measured.", "status": "succeeded",
-        "findings": ["PD is 3.45 %."],
-    }))
+    draft = asyncio.run(execute_write_report(ws, {"content": (
+        "# summary\nPolarisation measured.\n# status\nsucceeded\n# findings\n- PD is 3.45 %.\n"
+    )}))
     assert "Provenance" in draft.text
     assert any('"3.45"' in p for p in worker_report_problems(ws))
 
-    asyncio.run(execute_edit_report(ws, {
-        "summary": "Polarisation measured.", "status": "succeeded",
-        "findings": ["PD is 3.453 ± 0.194 % [analyst_worker_0:r1]."],
+    asyncio.run(execute_edit_report(ws, {  # A7: fix the one finding with an Edit
+        "old_string": "- PD is 3.45 %.", "new_string": "- PD is 3.453 ± 0.194 % [analyst_worker_0:r1].",
     }))
     assert worker_report_problems(ws) == []
 
@@ -122,8 +121,8 @@ def test_a_worker_cannot_ground_a_number_in_a_peers_unseen_receipt(tmp_path):
     store = ReceiptStore(tmp_path / "receipts")
     peer = store.mint(source="analyst_worker_1", kind="result", produced_by="research_toolkit.tk.fit", data="PD=5.1")
     ws = _workspace(tmp_path, ScopedLookup(store, own_source="analyst_worker_0"))
-    asyncio.run(execute_edit_report(ws, {
-        "summary": "s", "status": "succeeded", "findings": [f"PD 5.1 [{peer.handle}]"],
+    asyncio.run(execute_write_report(ws, {
+        "content": f"# summary\ns\n# status\nsucceeded\n# findings\n- PD 5.1 [{peer.handle}]\n",
     }))
     assert any("not a receipt you can cite" in p for p in worker_report_problems(ws))
 
@@ -136,8 +135,8 @@ def test_the_lead_may_cite_what_a_received_worker_report_cites(tmp_path):
     worker_report = AnalystReport(summary="s", findings=[f"PD 3.453 [{r.handle}]"], status="succeeded")
     ws = _workspace(tmp_path, _receipt_scope(store, "analyst_lead", [worker_report]), "analyst_lead")
     ws.prose_fields = react.LEAD_REPORT_FIELDS
-    asyncio.run(execute_edit_report(ws, {
-        "summary": "Adjudicated.", "status": "succeeded", "findings": [f"PD 3.453 [{r.handle}]"],
+    asyncio.run(execute_write_report(ws, {
+        "content": f"# summary\nAdjudicated.\n# status\nsucceeded\n# findings\n- PD 3.453 [{r.handle}]\n",
     }))
     assert lead_turn_problems(None, ws) == []
 

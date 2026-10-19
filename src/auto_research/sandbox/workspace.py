@@ -1,4 +1,4 @@
-"""Per-run workspace layout and per-agent memory utilities."""
+"""Per-run workspace layout."""
 
 from __future__ import annotations
 
@@ -144,22 +144,6 @@ def report_record_path(agent_dir_path: Path, filename: str) -> Path:
     return target
 
 
-def memory_path(run_id: str, agent_key: str) -> Path:
-    """Return (and ensure parent exists for) the agent's memory.md path — **beside the ledger**.
-
-    Not in the agent's folder (F22, 2026-10-06). The harness appends tool output to this file and
-    reads it into the next prompt, outside the jail; inside the agent's own writable folder, the
-    agent's shell could replace it with a symlink and have the harness append model-chosen text to
-    any host file (measured in a synthetic repro) or read any host file into the prompt. Out of every
-    allow-list, as report records already are. A run resumed from before the move starts with no
-    memory: the old location is agent-writable and is never read. The agent's working folder is
-    :func:`agent_dir`.
-    """
-    target = ledger_dir(run_id) / "memory" / agent_key / "memory.md"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    return target
-
-
 def create_run_workspace(run_id: str, agent_keys: list[str]) -> dict[str, Path]:
     """Create workspace folders for all agents and return {agent_key: agent_dir}."""
     result: dict[str, Path] = {}
@@ -177,8 +161,7 @@ def round_report_path(agent_dir_path: Path, *, role: str, model: str, round_n: i
     One file per debate round (``round_n`` counts monotonically across rework iterations, so
     nothing collides and the trail is continuous). The agent folder already disambiguates which
     worker, so the name carries ``<role>_round<n>``. This is the durable, ReAct-refined report the
-    agent writes via ``edit_report`` and reads back via ``review_report``; it is distinct from the
-    agent's private ``memory.md``.
+    agent writes via ``write_report`` and ``edit_report``.
 
     ``model`` is accepted and unused: the name used to carry a model slug, and a filename is
     readable by any agent whose allow-list covers the run directory — a coder's ``grep -rl`` over
@@ -186,25 +169,6 @@ def round_report_path(agent_dir_path: Path, *, role: str, model: str, round_n: i
     member wrote a report belongs in the ledger, the human's record.
     """
     return report_record_path(Path(agent_dir_path), f"{role}_round{round_n}_report.jsonl")
-
-
-def append_memory(path: Path, text: str) -> None:
-    """Append text to an agent's memory.md (bare terminal recording). A symlink is not followed."""
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
-    with os.fdopen(fd, "a", encoding="utf-8") as fh:
-        fh.write(text)
-        if not text.endswith("\n"):
-            fh.write("\n")
-
-
-def read_memory(path: Path) -> str:
-    """Return the full contents of memory.md, or empty string if absent. A symlink is not followed."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except FileNotFoundError:
-        return ""
-    with os.fdopen(fd, "r", encoding="utf-8") as fh:
-        return fh.read()
 
 
 def human_reply_dir(agent_folder: Path) -> Path:

@@ -97,7 +97,6 @@ class PaperReader:
         self.allowed = allowed
         self._mint = minter or mint_paper_receipt
         self.unreadable_action = unreadable_action
-        self._attached: set[str] = set()
 
     # ------------------------------------------------------------------ the tool
 
@@ -180,9 +179,8 @@ class PaperReader:
         return self._lookup() if callable(self._lookup) else self._lookup
 
     def _attach(self, receipt: Receipt) -> ToolOutcome:
-        if receipt.handle in self._attached:
-            return ToolOutcome(text=f"[{receipt.handle}] {receipt.title} is already attached above.")
-        self._attached.add(receipt.handle)
+        # The loop attaches a document once while the conversation carries it (R2), and again
+        # after a segment boundary dropped it, so the reader returns it every time.
         ids = format_ids(receipt.ids or {}) or "no identifiers recorded"
         return ToolOutcome(
             text=(

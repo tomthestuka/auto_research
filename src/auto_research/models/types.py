@@ -31,12 +31,21 @@ MessageRole = Literal["system", "user", "assistant"]
 
 
 class ModelMessage(BaseModel):
-    """One text message sent to an LLM provider."""
+    """One text message sent to an LLM provider, with the figures it carries (a user message)."""
 
     model_config = ConfigDict(extra="forbid")
 
     role: MessageRole
     content: str = Field(min_length=1)
+    figures: list[FigureRef] = Field(default_factory=list)
+    """Figures this user message carries — a turn's first-call figures (another agent's report)
+    and, at a turn boundary, the newest figures of the earlier turns. They sit in the message, so
+    every later call of the turn sends them at the same place: a conversation only ever grows at
+    its end within a turn (human ruling B6, 2026-10-18). Adapters render them after the text."""
+    documents: list[DocumentRef] = Field(default_factory=list)
+    """Documents this user message carries: after a segment boundary, those the latest round's
+    tools opened, which ride the message that restates that round (R2). Rendered after the
+    figures."""
 
 
 class ModelUsage(BaseModel):
@@ -107,6 +116,11 @@ class ToolResultPart(BaseModel):
     name: str = ""
     content: str = ""
     is_error: bool = False
+    receipt: str | None = None
+    """The handle of the text receipt the runtime minted for this output, when it minted one. Ours,
+    never sent: an adapter renders ``content`` and ``figures`` only. It is what lets an earlier
+    output be shrunk to one line that still says where the whole of it is (``agents.history``),
+    keyed on the part itself because call ids repeat on some paths."""
     figures: list[FigureRef] = Field(default_factory=list)
     """Figures the tool produced, carried at their own turn rather than through the
     call-time ``images=`` side-channel. Living at their turn, they slide into the
@@ -122,6 +136,10 @@ class ToolResultPart(BaseModel):
     required string. This docstring used to assert "an image turn adjacent to this
     tool-result turn", which read as a design invariant when it was one adapter's
     rendering choice."""
+    documents: list[DocumentRef] = Field(default_factory=list)
+    """Documents the tool opened (a paper), carried at the result that opened them (R2), so each
+    is sent once at its place in the conversation and falls inside the cached prefix, rather than
+    re-attached on every later call. Each adapter renders them as it renders ``figures``."""
 
 
 class ToolResultMessage(BaseModel):
@@ -381,6 +399,12 @@ class RoleModelConfig(BaseModel):
     documents: bool = False
     priceMTk: dict[str, float] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
+    context_tokens: int | None = Field(default=None, ge=1)
+    """An override of the member's input limit in tokens. Unset, the limit is litellm's
+    ``max_input_tokens`` for the model (``observability.costs.context_window_for``, the map prices
+    come from); set it where the usable limit is below that (a vendor that truncates silently).
+    The limit sets the media ceilings that depend on the window (Anthropic: 600 images per request
+    above 200k, 600 PDF pages at 1M) and the compaction trigger."""
     # --- coder-role fields (ignored by chat roles) ---
     harness: HarnessName | None = None
     """Author harness driving this member; required for the ``coder`` role."""
@@ -476,11 +500,17 @@ class ModelHandle:
             else ModelMessage.model_validate(message)
             for message in messages
         ]
-        if images and not self.config.vision:
+        if (images or any(isinstance(m, ModelMessage) and m.figures for m in normalized)) and (
+            not self.config.vision
+        ):
             raise ValueError(
                 f"role {self.role!r} member {self.config.name!r} is not configured for vision inputs"
             )
-        if documents and not self.config.documents:
+        if (documents or any(
+            (isinstance(m, ToolResultMessage) and any(p.documents for p in m.results))
+            or (isinstance(m, ModelMessage) and m.documents)
+            for m in normalized
+        )) and not self.config.documents:
             raise ValueError(
                 f"role {self.role!r} member {self.config.name!r} is not configured for document inputs"
             )

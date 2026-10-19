@@ -118,3 +118,4 @@ Compacted 2026-08-05 and again 2026-09-24 (detail in git history).
   `_responses._raise_billed`) and re-raises.
 - 2026-10-06 — `usage.default_sources` reads each run's ledger where it lives (ledger-side since
   2026-09-14; the run folder only for a pre-split run) and creates nothing (F22).
+- 2026-10-18 — [B5] `costs.context_window_for(config)`: a member's input limit, `config.context_tokens` when set, else litellm's `max_input_tokens` (the price map's own field).

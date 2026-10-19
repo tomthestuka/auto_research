@@ -42,11 +42,15 @@ providers by editing YAML alone
   raises `ValueError`.
 - `ModelHandle.call()` also accepts optional `DocumentRef` attachments. If
   documents are passed to a role member whose config has `documents: false`, it
-  raises `ValueError`. The Anthropic adapter places document blocks **at the front**
-  (a stable position right after `system`, before the conversation) with a
-  `cache_control` breakpoint on the last document, so documents that accumulate
-  append-only across a ReAct loop are cache-written once and cache-read on later
-  turns rather than re-billed each turn.
+  raises `ValueError`, and so do documents nested in a tool result. A document a tool opened
+  rides that result (`ToolResultPart.documents`, R2): Anthropic nests a `document` block in the
+  `tool_result` content ("Example of tool result with documents", handle-tool-calls), Responses
+  vendors put an `input_file` in the user item right after the `function_call_output` items,
+  Google a part after the function response — so it is sent once, at its place, inside the cached
+  prefix. Alibaba, which reads a document only as locally extracted text, moves a nested document
+  to its call-time substitution (`_media.hoist_documents`; residual: there it is re-sent at the end
+  of every call). Call-time `documents=` (a tool-less structured call) stay where they were: first
+  after `system` on Anthropic, last elsewhere.
 - **Figures carry pixels at the multimodal boundary, two ways.** A `FigureRef`'s
   bytes are loaded and base64'd into a native image block only inside the adapter —
   never elsewhere (figures otherwise travel as lightweight references). (1) **Cross-agent
@@ -75,15 +79,29 @@ providers by editing YAML alone
   `context_mgmt_trigger_tokens` input tokens, Anthropic clears the *oldest tool results*
   server-side (keeping the last `context_mgmt_keep_tool_uses`, clearing at least
   `context_mgmt_clear_at_least_tokens` per pass so the unavoidable cache-prefix invalidation is
-  amortized). The applied-edits report is normalized onto `ModelResponse.context_edits` and
+  amortized), with their arguments when `context_mgmt_clear_tool_inputs`, and never the tools in
+  `exclude_tools` (the configured names this request declares, plus the tool-search tool when the
+  request defers tools, so discovery blocks survive). With `compaction_enabled` the same block
+  carries a `compact_20260112` edit (beta `compact-2026-01-12`; `_compaction_edit`): trigger at
+  `compaction_trigger_fraction` of the member's input limit (at least the documented 50,000),
+  `instructions` = `prompts/session_compactor.md` (text only, as the docs require when tools are
+  declared). The response's `compaction` block rides `provider_parts` and is replayed with the
+  turn; a call that compacted bills the sum over every `usage.iterations` entry (the top level
+  excludes the compaction step), and `_context_edits` reports each as `{"type": "compaction", ...}`.
+  **OpenAI** compacts on its side too (`_responses._compaction_threshold`): `context_management:
+  [{"type": "compaction", "compact_threshold": N}]` (sent through `extra_body`) at the same
+  fraction of the member's input limit; the encrypted `compaction` output item rides
+  `provider_parts` and is replayed (developers.openai.com/api/docs/guides/compaction; probed live
+  5/5 on tool-call-only turns, `tests/test_live_openai_compaction.py`). The applied-edits report is normalized onto `ModelResponse.context_edits` and
   surfaced by `AgentRole` as a `<role>.<action>.context_edit` monitor event. Every other call
   (no `cache_prefix`, or disabled) stays on the non-beta namespace, byte-identical to before —
-  minimal blast radius. Anthropic-only (OpenAI's `responses.compact` needs stateful Responses;
-  Google has no equivalent). This is a *context-window pressure valve, not a cost lever*: with
+  minimal blast radius. Tool-result clearing is Anthropic-only. This is a *context-window pressure
+  valve, not a cost lever*: with
   prompt caching raw history is cheap and any clear breaks the cached prefix. **Live-verified
   2026-07-28** (`tests/test_live_context_editing.py`): the beta path cleared tool results and
   reported them on `context_edits`, and structured output still parses on the beta namespace.
-  Ships enabled (`context_mgmt_enabled: true`).
+  Clearing ships **off** (`context_mgmt_enabled: false`, ruling B12: each new clear rewrote the
+  whole prompt cache, measured).
 - **Provider-native tool search / deferred tool loading** (`tool_search_enabled` in
   `orchestration.yaml`, read via `env.tool_search_config`). A tool arriving with
   `defer_loading: true` (every `research_toolkit` tool — see `sandbox/DOCS.md`) is withheld from
@@ -330,6 +348,11 @@ turns on one distinction:
   Qwen's `cache_headers` enables the vendor's session cache on every request; Alibaba documents
   that cache as disabled by default. Callers still mark stable-prefix paths with `cache_prefix`
   through the common interface so the intent remains explicit across providers.
+- `media_limits(config: RoleModelConfig) -> MediaLimits | None` — the documented media ceilings a
+  member's requests meet (Anthropic per window via `_limits_for`, Google's `_LIMITS`, a Responses
+  vendor's `limits_for(model)`), read without building a client; `None` for a harness-only vendor.
+- `_media.media_load(messages) -> (images, base64_bytes)` and `_media.hoist_documents(messages) ->
+  (messages, documents)` — see the R2/R3 changelog entry.
 - `responses_vendors() -> tuple[ResponsesVendor, ...]` — every Responses-dialect descriptor, so
   a check can hold a property across all of them instead of per adapter.
 - `HarnessName` — which author harness drives a `coder` member: `claude_sdk` or `codex`. Legal
@@ -349,12 +372,19 @@ turns on one distinction:
   model response. ``id`` is the provider tool-call id, used to correlate a result back to the call
   when replaying a ReAct trajectory. ``arguments_error`` is set when the argument string did not
   parse (Responses dialect); ``_react`` answers such a call with an error result instead of running it.
+- `ModelMessage(role, content, figures=[], documents=[])` — a text message; a user message may carry figures
+  (the turn's first-call figures, a boundary transcript's newest sets), which every adapter renders
+  after the text (Anthropic content blocks, Responses `input_image` items, Gemini parts) and the
+  media plan counts (ruling B6: within a turn they stay at the same place on every call); `documents` likewise, after the figures — the latest round's documents after a segment
+  boundary.
 - `ToolResultPart(tool_call_id: str = "", name: str = "", content: str = "",
-  is_error: bool = False, figures: list[FigureRef] = [])` — one tool result fed back
-  to the model. Carries both ``tool_call_id`` (Anthropic/OpenAI) and ``name`` (Google)
+  is_error: bool = False, receipt: str | None = None, figures: list[FigureRef] = [],
+  documents: list[DocumentRef] = [])` — one
+  tool result fed back to the model; ``receipt`` names the output's text receipt (never sent). Carries both ``tool_call_id`` (Anthropic/OpenAI) and ``name`` (Google)
   so every adapter can build its native shape. ``figures`` are the figures the tool
   produced, carried as lightweight references at their own turn (so they persist in history
-  and cache), distinct from the call-time ``images=`` channel used for cross-agent figures.
+  and cache), distinct from the call-time ``images=`` channel used for cross-agent figures;
+  ``documents`` the documents it opened, carried the same way (R2).
   **The wire shape is each adapter's declared decision, not a contract of this type** — see
   the per-vendor table above.
 - `ToolResultMessage(role="tool", results: list[ToolResultPart])` — the neutral tool-result
@@ -393,8 +423,12 @@ turns on one distinction:
   no array to echo and is rebuilt from the interpreted views.
 - `RoleModelConfig(name: str, provider: ProviderName, model: str,
   vision: bool = False, documents: bool = False, priceMTk: dict[str, float] = {},
-  parameters: dict[str, Any] = {}, harness: HarnessName | None = None,
-  base_url: str | None = None, key_env: str | None = None)` — one model member from YAML. The
+  parameters: dict[str, Any] = {}, context_tokens: int | None = None,
+  harness: HarnessName | None = None, base_url: str | None = None, key_env: str | None = None)` —
+  one model member from YAML. `context_tokens` overrides the member's input limit, which is
+  otherwise litellm's `max_input_tokens` (`observability.costs.context_window_for`); the Anthropic
+  adapter reads that limit for its window-dependent ceilings (`anthropic._limits_for`: 600 images
+  above a 200k window, 600 PDF pages at 1M). The
   last three are the **coder-role** fields and are ignored by chat roles: which harness drives
   this model, the endpoint it is reached at when the vendor is not the harness's native one, and
   the environment variable holding that vendor's key.
@@ -428,6 +462,12 @@ turns on one distinction:
   Anthropic/OpenAI, or `code`, Google genai) and connection/timeout drops
   (`httpx.TransportError`, the SDKs' `APIConnectionError`). Auth/bad-request/other
   exceptions are not transient.
+- `retry.is_provider_error(exc) -> bool` — True when `exc` came from a model provider's API: an
+  error response or a failure to reach it (`anthropic.APIError`, `openai.APIError` — which also
+  carries DeepSeek, Z.AI and Alibaba — `google.genai.errors.APIError`, `httpx.TransportError`).
+  What an agent's ReAct loop contains as that agent's honest failure once
+  `call_with_transient_retry` has given up (`agents.roles.ProviderTurnFailed`, D1). Our own
+  defects (`ValueError`, `TypeError`, …) are not provider errors and propagate.
 - `retry.is_key_scoped_provider_error(exc, provider) -> bool` — True when the failure is a
   quota of the API **key**, not of the provider, judged in **that provider's own vocabulary**
   (`retry._PROVIDER_KEY_ERROR_RULES`, each entry citing the provider's error documentation).
@@ -635,3 +675,14 @@ Compacted 2026-09-01 and again 2026-09-24 (detail in git history).
 - 2026-09-25 — [I4] A non-JSON function-call argument string sets `ToolCall.arguments_error` (fault +
   raw text, capped 2000) instead of silently becoming `{}`; the loop returns it as an error result.
 - 2026-10-06 — [F26] receipted files read through `provenance.store.read_receipted` (read once, no symlink, hash-checked; a changed file is sent with a note and a `receipt.drift` alert). See `provenance/DOCS.md`.
+- 2026-10-18 — [D1, run 32814459] `retry.is_provider_error(exc)`: the vendor SDKs' own API error
+  bases plus `httpx.TransportError`. The retry policy is unchanged; the agent loop uses this to
+  turn what escapes retry into that agent's honest failure (`agents/DOCS.md`).
+- 2026-10-18 — [B4] `RoleModelConfig.context_tokens`; `anthropic._limits_for(config)` (600 images per request above a 200k window, 600 PDF pages at 1M, quoted from the vision and PDF docs); the media guard's image-count ceiling now withholds the OLDEST images (`plan_media` overflow), keeping the current turn's. The token budget itself lives in the agent loop (`agents/images.py`).
+- 2026-10-18 — [B3] `ToolResultPart.receipt`: the handle of the text receipt minted for an output (ours, never sent by an adapter); `agents.history` indexes earlier outputs by it.
+- 2026-10-18 — [B5] The clear edit carries `clear_tool_inputs` and `exclude_tools` (report and channel tools declared in the request, plus the tool-search tool when tools are deferred); `env.ContextEditingConfig` gained both fields, `env.CONTEXT_EDITING_EXCLUDED_TOOLS`; config parsing takes a real boolean and a list of names only. Deterministic tests in `tests/test_context_editing.py`; live probe `test_live_retuned_clearing_keeps_tool_search_and_reports` (three arms) prepared.
+- 2026-10-18 — [B6] Anthropic server-side compaction: `_compaction_edit`, `_compaction_iterations`, `_field`; `env.CompactionConfig` / `compaction_config`; a `compaction` entry on `ModelResponse.context_edits`; compaction tokens billed into `ModelUsage`.
+- 2026-10-18 — [B11 ruling] Clearing excludes only `message`, `wait_for_reply` and the tool-search tool.
+- 2026-10-18 — [ruling B6] `ModelMessage.figures` (rendered by all three adapter families, counted by `_media.iter_media`); the media guard fits every image to the strict edge (Anthropic 2000 px) from its first send, not only past 20 blocks (an image downscaled once a turn crossed the threshold had changed bytes already sent); the Anthropic adapter retries once with thinking stripped from the named message on a "bound to a different conversation" 400 (`_thinking_binding_refusal`, `_strip_thinking`; `{"type": "thinking_dropped"}` on `context_edits`); a compacting call's usage is the sum of all `usage.iterations`.
+- 2026-10-18 — [R2/R3] `ToolResultPart.documents`: a document rides the tool result that opened it — nested `document` block (Anthropic, `_document_blocks`), `input_file` after the results (Responses, `_document_items`), parts after the function response (Google, `_document_parts`); Alibaba hoists it to its substitution (`_media.hoist_documents`). `_media.iter_media` walks nested documents; `ModelHandle.call` refuses nested documents for a `documents: false` member. `providers.media_limits(config)` (a member's documented media ceilings, no client built) and `_media.media_load(messages)` (image blocks and base64 media bytes from disk) feed the agent loop's media trigger. Docs: clearing ships off (B12); OpenAI server compaction described; `_compaction_iterations` docstring corrected.
+- 2026-10-18 — [R2 review fixes] `ModelMessage.documents` (rendered after the message's figures by all three adapter families, walked by `_media.iter_media`, hoisted for Alibaba, refused for a `documents: false` member): after a segment boundary the latest round's documents ride the message that restates it.

@@ -27,7 +27,20 @@ fabrication, no silent hang: with no handler wired `human` is not an address, an
   is_error)` (never blocks), `ask_human(query, *, deliver, receipt_source)` (the background wait;
   raises `HumanInputRequired` unattended), `viewable(key)`, `outstanding(key)`. Routes: live seat →
   its `RunControl` inbox; a seat with a kept turn → inbox + resume task (registered on
-  `RunControl.register_resumed`, a notice to the sender when it ends); not started → inbox; human →
+  `RunControl.register_resumed`, a notice to the sender seat when it ends); not started → inbox;
+  `wake(key, entries)` (D5) resumes an idle seat with a kept turn for the texts its filing batch
+  drained and put back (`(sender, kind)` each), through `_resume_waiting(key)`: a seat's message,
+  the human's reply or a steer (`run_control.WAKING_KINDS`, from a seat or the human) wakes it; a
+  notice or a coder's text waits for its next turn; one resume reads them all; a sending seat
+  still in its own turn waits for it (`register_resumed`), one that has finished only gets the
+  end notice, so two idle seats never wait on each other (board D7). Every resume re-checks the
+  seat's inbox when it ends, so a text that arrived as it filed is read by one more resume. A
+  resumed turn that raises `ReactBudgetExhausted` ends the run (ruling D6): `_resume` records
+  `channel.resume.exhausted` (level 1), drains the seat's inbox, clears its kept turn, calls
+  `RunControl.fail(exc)` and re-raises (`_start_resume` reads the task's exception, so asyncio has
+  nothing to warn about); any other failure stays the sender's news (`channel.resume.error`). Every resume starts through `_start_resume`, which
+  marks the seat busy (`_resuming`) until its loop ends, so a text arriving in between joins the
+  inbox that resume reads (`_busy` routes it "live") instead of starting a second; human →
   background wait, reply (`kind="reply"`) or notice (timeout/fault) to the sender's inbox, a filed
   sender resumed reply-only. Texts mint no receipt; handles a text names are recorded as viewable
   (only those the sender itself can see). The human's files are minted with
@@ -62,7 +75,19 @@ fabrication, no silent hang: with no handler wired `human` is not an address, an
   live team/role/model roster), `/status [q]` (the `status_monitor` reporter *investigates* the
   run's ledger through `MonitorToolProvider` and answers — no fallback digest), `/steer <id> <msg>`
   (queue a message for a role's next step — addressed by its **roster id**, the number `/help`
-  prints; `all` broadcasts), `/stop` (interrupt the run now — see `graph/DOCS.md`). Every outcome is immediate and deterministic: an
+  prints; `all` broadcasts), `/stop` (interrupt the run now — see `graph/DOCS.md`). **Acks (ruling
+  D8):** `dispatch_command(text, ctx, *, ack=None)` sends `STOP_ACK` ("/stop received, cleaning
+  up…") or `STATUS_ACK` ("/status received, monitor agent investigating…") through the connector's
+  `ack` before the work starts; `/stop` then returns an empty reply (its outcome is the landing
+  checklist the run posts), `/status` the monitor's answer; `/steer` keeps its one reply with
+  buttons. Telegram and Slack run every command (and Telegram every button) in its own task
+  (`_spawn`), so `/stop` never queues behind a slow `/status`; `aclose` cancels the ones still
+  running; `in_flight_commands()` names the ones still running (for the /stop checklist). A
+  `/stop` while the run is already stopping or failing answers so, without a second stop; with no
+  run in flight (`RunControl.running` false) it still flags the stop (a reply-wait unblocks) and
+  answers that there is nothing to clean up; the ack is bounded (`_ACK_TIMEOUT_S`, 3 s); a `/status` whose monitor fails answers with
+  the error. Slack posts acks through `_post` (not `notify`, which would turn on the mirror), so on
+  Slack the landing checklist is recorded as skipped. Every outcome is immediate and deterministic: an
   unknown command, an unknown/out-of-range id, a role *name* where an id belongs, or a missing
   message answers with ⚠️ plus the valid options and queues nothing. `CommandContext` carries the run-scoped `run_control`/roster/JSONL/status
   hook, wired by `run_research` via each connector's `attach_commands`. `wait_reply_or_stop` is the
@@ -255,3 +280,25 @@ Compacted 2026-09-01 and 2026-09-24 (detail in git history).
   LIVE: one silent notify accepted.
 - 2026-10-06 — [F26] receipted files read through `provenance.store.read_receipted` (read once, no symlink, hash-checked; a changed file is sent with a note and a `receipt.drift` alert). See `provenance/DOCS.md`.
 - 2026-10-17 — Ledger fields recorded whole (user ruling): `channel.message` / `channel.reply` text and answers (were 4,000 chars), `hitl.command*` text and replies (were 400/200); one-line summaries keep their 80-char preview.
+- 2026-10-18 — [D5 ruling] `SeatRouter.wake(key, senders)`: a text that reached a seat during the
+  batch that filed is re-queued by the loop and resumes the idle seat through this, like any text
+  to an idle seat. `_resume` sends its end notice only to a sender that is a seat.
+
+- 2026-10-18 — [D5 review fixes] `wake(key, entries)` wakes only for message/reply/steer, registers
+  only senders still in their turn (else background; the deadlock of two idle seats waiting on
+  each other is gone), and notifies every sending seat (`_resume(..., notify=)`). New
+  `_start_resume` + `_resuming` / `_busy`: one resume per seat at a time, used by `_to_seat`,
+  `deliver` and `wake`; `state` reports a starting resume as working. `_WAKING_KINDS`.
+- 2026-10-18 — [D5 review 2] `_resume_waiting(key)` (peeks the inbox) serves `wake` and runs again
+  at the end of every `_resume`, so a text that reached a seat as its resumed turn filed is read;
+  only a seat's or the human's text wakes (`_wakes`), never a coder's.
+- 2026-10-18 — [D6 ruling] A resumed turn's `ReactBudgetExhausted` is no longer caught: `_resume`
+  records `channel.resume.exhausted`, keeps nothing for the seat, fails the run through
+  `RunControl.fail` and re-raises.
+- 2026-10-18 — [D8 ruling] `/stop` and `/status` answer at once (`STOP_ACK`, `STATUS_ACK`, the
+  `ack=` argument of `dispatch_command`); Telegram and Slack handle each command in its own task;
+  Slack `notify`; connectors' `aclose` cancels command tasks still running.
+- 2026-10-18 — [D8 review] `/stop` while already stopping answers so; bounded acks; `/status`
+  failures answered; Slack `_post` instead of `notify`; handler failures logged.
+- 2026-10-18 — [D8 follow-ups] `in_flight_commands()` on Telegram and Slack (each command task
+  named by its command word); `/stop` with no run in flight answers so.

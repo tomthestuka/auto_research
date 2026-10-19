@@ -132,6 +132,22 @@ def _rates_from_litellm(provider: ProviderName, model: str) -> TokenRates | None
     return None
 
 
+def context_window_for(config: RoleModelConfig) -> int | None:
+    """The member's input limit in tokens: ``config.context_tokens`` when set (an override, e.g. a
+    vendor that truncates silently before its window), else litellm's ``max_input_tokens`` — the
+    same maintained map prices come from (board B5, 2026-10-18). ``None`` when neither knows."""
+
+    if config.context_tokens:
+        return int(config.context_tokens)
+    cost = _litellm_model_cost()
+    for key in _litellm_candidates(config.provider, config.model):
+        entry = cost.get(key) or {}
+        window = entry.get("max_input_tokens")
+        if isinstance(window, int | float) and window > 0:
+            return int(window)
+    return None
+
+
 def _rates_from_config(config: RoleModelConfig) -> TokenRates:
     """Per-token rates from ``config.priceMTk`` (per-MTok → per-token), cache tiers defaulted."""
 

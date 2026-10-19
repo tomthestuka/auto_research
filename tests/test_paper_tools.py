@@ -80,7 +80,6 @@ def test_the_lookup_may_be_a_callable_for_per_round_scopes(tmp_path):
     reader = PaperReader(store, lambda: scopes[-1], source="w0")
     _run(reader.open_pdf(pdf))
     scopes.append(ScopedLookup(store, own_source="w0"))  # the next round's fresh scope
-    reader._attached.clear()
     _run(reader.open_pdf(pdf))
     assert scopes[-1].visible("lib:p1")
 

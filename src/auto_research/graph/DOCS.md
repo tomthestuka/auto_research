@@ -54,8 +54,8 @@ START ─► review ─assign_to─┬─ librarian ─► literature ─► rev
 **Tool execution inside `analysis_node`:** `analysis_node` calls
 `consensus_strategy.run(workers, lead, task)`. Each worker's
 `AnalystWorkerAgent.analyze()` runs the inner ReAct loop over `SandboxToolProvider`
-when sandbox + registry are attached, writes real `ToolResult`s to its private
-`memory_path`, and exposes `last_tool_results`. `DebateToConverge` injects a
+when sandbox + registry are attached, continues its session from the run ledger
+(`agents/history.py`), and exposes `last_tool_results`. `DebateToConverge` injects a
 truncated cross-worker summary into `task.instructions` for the next round.
 
 `ResearchState` carries: the request, the literature reports and their receipts, the latest analyst
@@ -98,14 +98,36 @@ the published artifact paths and handles (`report_artifacts`).
   The resolved handler reaches the seats through the quick channel: `attach_channel(seats, *,
   run_id, run_control, human_handler, monitor)` builds one `hitl.router.SeatRouter` over the
   reviewer, librarian, lead and workers (never the co-lead or status monitor), so any seat can
-  `message` any other or the human. `_interrupt_cleanup` starts with
-  `run_control.cancel_resumed()`, which cancels resumed seats and awaited human replies before the
-  sandboxes are killed.
+  `message` any other or the human. **A stop tears down leaf to root, in the run task (ruling
+  D8):** `_interrupt_cleanup` runs in the task that opened the MCP client (shielding it into
+  another task failed the anyio close, left the shell server running and turned the stop into a
+  bare `CancelledError`). Order: agents (`run_control.cancel_resumed()`, resumed seats and awaited
+  human replies) → each sandbox (`kill_now`) → the authoring branch (`session.aclose()`, patch
+  saved) → the MCP client → `run.interrupted` + `run.summary` → the landing checklist through the
+  connector's `notify` (`_stop_checklist`: every step in order — ✓, ✗ with the reason it failed, or
+  "– skipped (reason)" — then each command still running that the close cancels, read from the
+  connector's `in_flight_commands()` as "/status answer – cancelled by /stop", ending "cleanup
+  complete" or "cleanup finished with failures"; a reset with nothing to reset says so) → the connector's `aclose`, last. Every step is bounded and recorded
+  (`run.interrupt.step` / `step_error` / `step_timeout` / `step_skipped` with its reason), and the
+  caller gets `UserInterruptionError` with its artifacts. A reset `aclose` reports as failed (an
+  event, not a raise) is shown ✗ (read back from the ledger, `_ledger_mark`/`_ledger_since`). An
+  outer cancel during the cleanup (a caller's timeout), or one that landed together with the stop's
+  own (`_spend_cancels`, `outer_pending=`), is held until every step ran, then re-raised.
+  The lead's own unwinding leaves an open authoring link to this cleanup (no summary model call, no
+  reset before the sandboxes are killed). Once the run ends — by an error, a stop or a finish — the
+  run task is unregistered, so a late `/stop` cannot cancel the teardown, and the `finally` does
+  not repeat a cleanup that ran. The run's normal `finally` cancels
+  resumed seats too, on a finish or a crash (D5). A
+  `run_control.fatal` (a resumed seat's `ReactBudgetExhausted`, ruling D6) cancels the run task;
+  `run_research` then runs `_interrupt_cleanup(..., fatal=)` in the run task itself (kill, the
+  authoring-branch repair, close; recorded as `run.error`, not `run.interrupted`) and raises it.
+  Once `graph.ainvoke` returns, the run task is unregistered (nothing may cancel the teardown) and
+  `fatal` is checked once more. A human stop that came first wins over a later failure.
   Missing dependencies are constructed from `config/models.yaml`. Reads
   `tool_retry_cap`, `toolkit_root`, `analyze_env`, and `analyze_ini_sh` from
   `config/orchestration.yaml`.  Creates per-run workspace
   (`<runtime_dir>/runs/{run_id}/`; `runtime_dir` from `config/orchestration.yaml`), spawns one `PersistentSandbox`
-  per `AnalystWorkerAgent`, assigns each worker's `sandbox` and `memory_path`,
+  per `AnalystWorkerAgent`, assigns each worker's `sandbox`,
   then tears all sandboxes down after the graph completes or raises.
   Returns the request, final verdict, final state, and `RunMonitor`. Optional `run_id` pins
   the workspace/report/JSONL dir (defaults to an auto-generated uuid) — used by the detached
@@ -178,7 +200,7 @@ the published artifact paths and handles (`report_artifacts`).
 ## Dictionary-level reference
 - `ResearchState` — TypedDict for the graph state; `verdicts` is an accumulated list of
   `ReviewerReport`s, `verdict` the final one. Tool queues/results are not graph state; tool calls run inside analyst
-  workers and are recorded in per-worker `memory.md` files.
+  workers and are recorded in the run ledger, which is every seat's session history.
 - `IOAgentLike` — protocol with `async research(request, *, follow_up) -> LiteratureReport` and
   `last_receipts: dict[str, Receipt]`.
 - `ResearchState` literature keys: `literature: list[LiteratureReport]` (accumulated),
@@ -205,7 +227,7 @@ the published artifact paths and handles (`report_artifacts`).
   live beside the ledger.
 - `attach_worker_runtime(workers, *, run_id, registry, toolkit_root, analyze_env=None,
   analyze_ini_sh=None, repl_init_py=None, mcp_client=None, run_control=None)
-  -> list[PersistentSandbox]` — gives each `AnalystWorkerAgent` its stable key, memory path,
+  -> list[PersistentSandbox]` — gives each `AnalystWorkerAgent` its stable key,
   report directory, one persistent sandbox and the registry, and registers the sandbox's aborter
   so a human stop cancels an in-flight tool call. Returns the sandboxes for the caller to shut
   down. **Without it a worker has no tool loop**: `analyze()` runs its inner ReAct loop only when
@@ -286,3 +308,25 @@ entries); detail in git history.
 - 2026-10-17 — `report_html` in the state, `ResearchRun`, the detached result and the CLI; `publish_report(html_path=)` mints it as a `rev:` receipt; `run.report` names it.
 - 2026-10-17 — The human node attaches the published PDF, else the HTML page (`report_formats` without `tex`); the message says "The report is attached.".
 - 2026-10-17 — `_normalize_report_formats` accepts `html` and validates the configured default too; `compose_report` republishes only this run's formats (a resumed checkpoint's earlier PDF is not sent); `run.human.sent` records `attachment`.
+- 2026-10-18 — [B2] `attach_worker_runtime` no longer assigns a memory path (memory.md retired; the run ledger is every seat's session history).
+- 2026-10-18 — [D5 review] `run_research`'s `finally` cancels the run's channel tasks
+  (`run_control.cancel_resumed()`) before the sandboxes shut down, on a normal finish or a crash
+  too, so a seat woken as the run ended never outlives it (restarting a sandbox, spending after
+  `run.finish`).
+- 2026-10-18 — [D6 ruling] `run_research` raises `run_control.fatal` — set when a resumed seat
+  exhausts its caps in a channel task — whether it arrives as the run task's cancellation or after
+  the graph returned; recorded as `run.error` with `from: channel`.
+- 2026-10-18 — [D6 review] The fatal path runs the interrupt's kill-and-repair in the run task
+  (`_interrupt_cleanup(fatal=)`); the run task is unregistered when the graph returns; a stop that
+  came first wins.
+- 2026-10-18 — [D8 ruling] `/stop` cleans leaf to root in the run task (no shield): every step
+  recorded (`run.interrupt.step*`, skips with their reason), the landing checklist sent before the
+  connector closes, the connector closed last (`aclose` now found). Tests:
+  `tests/test_stop_teardown.py` (real `run_research`, real MCP server process checked gone).
+- 2026-10-18 — [D8 review] Outer cancels held during the stop cleanup; step 1 bounded
+  (`cancel_resumed(timeout=)`); a quietly failed reset shown ✗; the run task unregistered on every
+  way out; the `finally` skips a cleanup that ran.
+- 2026-10-18 — [D8 follow-ups] Checklist: a justified skip reads "– skipped (reason)", cancelled
+  in-flight commands are listed, a reset with nothing to reset says so, patch paths in backticks,
+  a step's own timeout message kept; an outer cancel landing with the stop is honoured after the
+  cleanup. Live: `tests/test_live_stop_telegram.py` (2 cells).

@@ -49,6 +49,8 @@ from auto_research.schemas import HumanAttachment, HumanQuery, HumanResponse
 # Telegram caps a message at 4096 chars; chunk the Markdown *before* rendering so each posted
 # message is self-contained valid HTML (a cut never splits a tag). Room left for header/hint.
 _TG_MSG_LIMIT = 4096
+logger = logging.getLogger(__name__)
+
 _CHUNK = 3000  # headroom under the 4096 cap for HTML-tag expansion + header/hint
 # Rich messages: 32768 chars and 500 blocks per message (Bot API "Rich Message Limits"). A
 # non-blank line is at most one block, so capping lines keeps a part under the block limit.
@@ -122,6 +124,9 @@ class TelegramHandler:
         # When set, a leading-'/' message is dispatched as a command (never a reply), and a
         # pending ask is released when /stop fires.
         self._cmd_ctx: Any | None = None
+        # Command and button handlers in flight, each in its own task (ruling D8).
+        self._command_tasks: set[asyncio.Task] = set()
+        self._command_names: dict[asyncio.Task, str] = {}  # task → its command word
 
         # Defer library construction to start() (Application.initialize needs a running loop); the
         # handler itself is built synchronously in resolve_handler. An injected app (tests) wires now.
@@ -150,11 +155,38 @@ class TelegramHandler:
     async def _on_media(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
         await self.handle_media(update)
 
-    async def _on_command(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
-        await self.handle_command(update)
+    async def _on_command(self, update: Any, context: Any = None) -> None:
+        # Run in its own task (ruling D8): the library processes updates one at a time, so a
+        # `/stop` sent while `/status` waits on its model would otherwise queue behind it.
+        self._spawn(self.handle_command(update), _command_word(update))
 
-    async def _on_callback(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
-        await self.handle_callback(update)
+    async def _on_callback(self, update: Any, context: Any = None) -> None:
+        self._spawn(self.handle_callback(update), "a button")
+
+    def in_flight_commands(self) -> list[str]:
+        """The commands whose handlers are still running (each named once), for the /stop
+        checklist: a channel close cancels them, and the human is told which (D8)."""
+        current = asyncio.current_task()
+        names = [
+            self._command_names.get(task, "a command") for task in self._command_tasks
+            if task is not current and not task.done()
+            and self._command_names.get(task) != "/stop"
+        ]
+        return list(dict.fromkeys(names))
+
+    def _spawn(self, coro: Any, name: str = "a command") -> asyncio.Task:
+        """Run a command or button handler beside the others; ``aclose`` cancels what is left."""
+        task = asyncio.create_task(coro)
+        self._command_tasks.add(task)
+        self._command_names[task] = name
+        task.add_done_callback(self._command_done)
+        return task
+
+    def _command_done(self, task: asyncio.Task) -> None:
+        self._command_tasks.discard(task)
+        self._command_names.pop(task, None)
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("Telegram command handler failed: %r", task.exception())
 
     async def _on_edit(self, update: Any, context: Any = None) -> None:  # pragma: no cover - wiring
         await self.handle_edit(update)
@@ -199,8 +231,9 @@ class TelegramHandler:
             return
         from auto_research.hitl.commands import dispatch_command
 
-        reply = await dispatch_command(text, self._cmd_ctx)
-        await self._send_md(str(reply), buttons=getattr(reply, "buttons", ()))
+        reply = await dispatch_command(text, self._cmd_ctx, ack=self._send_md)
+        if str(reply):
+            await self._send_md(str(reply), buttons=getattr(reply, "buttons", ()))
 
     async def handle_callback(self, update: Any) -> None:
         """Handle a button tap: run the action, acknowledge it, and post the result.
@@ -416,6 +449,10 @@ class TelegramHandler:
             pass
 
     async def aclose(self) -> None:
+        current = asyncio.current_task()
+        for task in list(self._command_tasks):
+            if task is not current:
+                task.cancel()
         if self._started and self.app is not None:
             try:
                 if getattr(self.app, "updater", None) is not None:
@@ -614,6 +651,14 @@ class TelegramHandler:
             query_id=query.id, answer=reply.text, attachments=reply.attachments,
             notes=notes + reply.notes,
         )
+
+
+def _command_word(update: Any) -> str:
+    """The command an update carries (``/status`` from ``/status what now?``)."""
+    msg = getattr(update, "effective_message", None) or getattr(update, "message", None)
+    text = (getattr(msg, "text", None) or "").strip()
+    word = text.split()[0].split("@", 1)[0] if text else ""
+    return word or "a command"
 
 
 def _inline_keyboard(buttons: tuple) -> Any:

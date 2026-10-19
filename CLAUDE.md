@@ -592,7 +592,7 @@ receipts" or "the first single-exit agent". Re-open the SDK question only with a
    │         harness tools ──► navigation receipts (read/list/web/shell)       │
    │         channel       ──► message · view_receipt · wait_for_reply · peers │
    │         spawn         ──► child units · coding pipeline   (only if given) │
-   │         report        ──► edit_report · review_report · turn_end          │
+   │         report        ──► write_report · edit_report · turn_end           │
    │                                                                           │
    │ execution (optional): REPL + shell, in an environment, under the jail     │
    │ turn_end validator: schema · role conditions · scoped grounding           │
@@ -770,7 +770,7 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
     `tool_request`);
   - routes, a `Literal` the graph reads (`assign_to`).
 
-  `edit_report`, `review_report` and `turn_end` are generated from the type.
+  `write_report`, `edit_report` and `turn_end` are generated from the type.
 - Role conditions become **validator functions** attached to the definition: today's
   `lead_turn_problems`, `worker_report_problems`, and the reviewer's render-and-compile. Each
   returns problems, which go back into the loop as an `is_error`. A validator cannot accept what a
@@ -925,15 +925,34 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   2026-09-24); numbers stay grounded.
 
 **Roles**
+- **Session history and context bounds (B1–B8, R2/R3/R7/R10, 2026-10-18; rulings B1, B3, B6–B14):** the ledger is
+  every seat's session history (`agents/history.py`); within a turn the conversation only grows at
+  its end; at a turn boundary the earlier turns become one transcript message (no earlier thinking
+  replayed), carrying the newest figure sets within 40k image tokens. Open edges: (a) not rebuilt:
+  structured calls outside a loop (the co-lead's verdict, the status monitor's answer-now, a
+  tool-less `_call`) and the input of a call that raised; (b) OpenAI's server compaction is wired
+  on a 5/5 probe of tool-call-only turns, not yet on a full run; (c) a segment boundary drops
+  tool-search discovery items, so a deferred tool is searched again, and the documents of the
+  condensed middle (the latest round's stay; the pin names every paper; the agent reopens one); (d) within a turn, media is
+  bounded by a segment boundary at 80% of a provider's image count or 70% of its request bytes,
+  so the guard's mid-turn eviction is a backstop; Alibaba still re-sends each document at the end
+  of every call (its documents are extracted locally); (e) Anthropic context editing ships off
+  (ruling B12: each clear rewrote the whole prompt cache, measured); (f) on an enforcing 5.1/5.5
+  Claude seat the adapter's safety net strips refused thinking and retries once
+  (`*.thinking_dropped`); (g) the librarian's turn start names no task receipt.
 - **Reviewer live-tested on the contrast seat only** (`qwen3.8-max`; configured seat ruled
   unnecessary). Residuals: a non-glyph compile failure leaves `.tex` and no PDF
-  (`renderer_error`, L1); tables typeset to 60 rows; the draft preview needs `pdftoppm`.
-- **`review_report` returns the whole citable catalogue by value every call** (18 image blocks
-  measured) — ruling 2026-09-10: leave it.
+  (`renderer_error`, L1); tables typeset to 60 rows.
 - **Paused-turn continuation guard has never run** (0 `paused` in 184 silent turns) — kept for the
   day a hosted vendor tool is declared.
 - **Unattended runs:** `human` is a `message` address only with a handler. On the author side the unattended case is classified before MCP flattens it. A channel fault now arrives as a notice, and the ledger keeps `channel.reply.error`. Batches published before 2026-09-01 ran with prompts naming tools the roles lacked.
 - **Worker `edit_report` misformatting** (whole report in `summary`) is mitigated by a soft note only.
+- **Provider-error containment covers the analyst workers only (D1, 2026-10-18):** a worker's
+  provider error that escapes retry ends its turn unfiled and the debate carries on; a lead,
+  librarian or reviewer `ProviderTurnFailed` is recorded (`provider_error`) and still ends the run,
+  and a co-lead provider error inside `submit_for_review` ends the lead's turn the same way.
+  Rulings pending: route a failed lead/librarian pass back to the reviewer; contain account-wide
+  errors (401/403, every key spent) or let them end the run.
 - **Evidence rule, open edges (2026-09-25):** a paper readable only as a web page grounds no
   value (the librarian records it as a gap); an ObsID or band restated in a worker's text needs the
   request's `input:` handle or a toolkit result carrying it (a dispatched task no longer grounds);
@@ -1082,3 +1101,27 @@ entry 2026-09-25, [R7] evidence rule, LIVE-VERIFIED 2026-09-26).
     `/data/fzhou/XSPEC/relxill` is on the read-only allow-list.
 - 2026-10-17 — **Provenance trail in an HTML report** (plan `tmp_plan_provenance_replay.md`, user rulings 2026-10-16/17; replay is the human's, the runtime re-runs nothing). The run ledger records every field whole (caps retired) and each worker call's runtime context, so `provenance.calls` rebuilds the exact arguments of any toolkit receipt, proven by its `args_sha256`; receipts name the observations a tool located by ObsID (`obsdb` inputs) and the toolkit root; `report_formats` gains `html`: `report.html`, every number opening its z-chain (data | tool, commit, environment, arguments, inputs, copy reproduce code), checked at the reviewer's `turn_end` and parsed back; one paged, bounded `read_file` for every role (workers and the status monitor included). §13: (a) narrowed; new entries for spelled-out numbers and report-table receipts (rulings pending). Live: `tests/test_live_provenance_html.py` (B1, B2, R1, R2, R4, R5).
 - 2026-10-17 — Rulings: a report table cited by receipt must be evidence (`render.check_table`, both formats); spelled-out numbers stay unchecked and the prompts ask for digits; `report_formats: [html]` in the live config, the page sent to the human when there is no PDF; the librarian's `web_fetch` description and the literature schema/refusal wording follow its deep-research scope.
+- 2026-10-18 — [D1, run 32814459] §13: provider-error containment covers the analyst workers
+  only; a worker's `ProviderTurnFailed` no longer ends the run, the other roles' still does
+  (rulings pending).
+- 2026-10-18 — §13: session-history coverage entry (B1, context-overflow plan).
+- 2026-10-18 — §13: the session-history entry rewritten for B1–B8 and rulings B1, B3, B6–B14 (context-overflow plan).
+- 2026-10-18 — [D4, D5 rulings] The absolute ceiling is a cap with the budget's grace window
+  (counted in model turns), then `ReactBudgetExhausted`; only an accepted `turn_end` advances a
+  draft to a report (per-turn `TurnOutcome`), closing an unfiled-draft return found while testing
+  D1. Texts that reach a seat during the batch that files are re-queued and resume it
+  (`SeatRouter.wake`).
+- 2026-10-18 — §13: the session-history entry updated for R2/R3/R7/R10 (documents ride their tool result; a media-pressure segment boundary on every provider; task figures once per session; a condensed seed pins earlier receipts) and OpenAI compaction wired on its probe.
+- 2026-10-18 — [D6 ruling, "crashes"] A resumed turn's `ReactBudgetExhausted` ends the run:
+  `SeatRouter._resume` records it and calls `RunControl.fail`, which cancels the run task, and
+  `run_research` raises it (§9.3.8: never caught).
+- 2026-10-18 — [B18 ruling] `review_report` erased for every role (an edit needs no full re-read;
+  each write/edit reply shows the change, a refused call shows the draft as text); a figure's
+  citable label arrives where the figure first appears (the tool result, a worker's
+  `your_figures`, the lead's `figure_catalog`); the reviewer's typeset preview goes, `turn_end`
+  still renders and compiles. §9.2/§9.8 name `write_report`; §13's whole-catalogue entry and the
+  preview's `pdftoppm` residual close.
+
+- 2026-10-18 — [D8 ruling] `/stop` cleans the tree leaf to root in the run task, every step bounded
+  and recorded, a landing checklist sent before the HITL connector closes last; `/stop` and
+  `/status` answer at once and commands run side by side.

@@ -76,6 +76,11 @@ class UserInterruptionError(RuntimeError):
         )
 
 
+#: Inbox kinds a seat is resumed to read (D5): a seat's message, the human's reply, a human steer.
+#: A notice waits for the seat's next turn; a coder's text belongs to the authoring turn.
+WAKING_KINDS = frozenset({"message", "reply", "steer"})
+
+
 class InboxEntry:
     """One text waiting for a seat: who sent it, what it says, and the receipt handles it names.
 
@@ -142,6 +147,11 @@ class RunControl:
         # The task running the pipeline, and the live authoring session (if any) — both set by
         # the runtime so an interrupt can cancel the one and reset the other's branch.
         self._run_task: asyncio.Task | None = None
+        # A failure that must end the run although it arose in a channel task nobody awaits —
+        # a resumed seat's `ReactBudgetExhausted` (ruling D6). Set by `fail`; `run_research`
+        # raises it.
+        self.fatal: BaseException | None = None
+        self._cancel_sent = False  # the run task's stop/failure cancel goes out once
         self.authoring_session: Any | None = None
 
     # ── stop ──────────────────────────────────────────────────────────────────
@@ -169,13 +179,50 @@ class RunControl:
         cancelling synchronously would race the interrupt's own cleanup — which closes the
         connector — against that reply. Yielding one loop turn lets the reply get in flight first.
 
-        Idempotent: a second interrupt on an already-cancelling task is a no-op.
+        Idempotent: a second interrupt on an already-cancelling task is a no-op. A run that a
+        channel failure is already ending (``fatal``, D6) ends with that failure; the stop is not
+        recorded over it.
         """
+        if self.fatal is not None or self.stop_requested:
+            # Already ending: a second /stop must not cancel the cleanup the first one started.
+            return False
         self.request_stop(reason, by=by)
         task = self._run_task
         if task is None or task.done():
             return False
-        asyncio.get_running_loop().call_soon(task.cancel)
+        asyncio.get_running_loop().call_soon(self._cancel_run)
+        return True
+
+    def _cancel_run(self) -> None:
+        """Cancel the run task as registered *now*: one that already finished its graph has
+        unregistered itself, and the stop's (or failure's) cancel is sent once."""
+        task = self._run_task
+        if task is not None and not task.done() and not self._cancel_sent:
+            self._cancel_sent = True
+            task.cancel()
+
+    @property
+    def running(self) -> bool:
+        """Whether a run task is registered and still running (a /stop has something to stop)."""
+        return self._run_task is not None and not self._run_task.done()
+
+    def fail(self, exc: BaseException) -> bool:
+        """End the run with ``exc``, raised from a background task (ruling D6).
+
+        A channel task's exception reaches no one unless awaited, so it is recorded here (the
+        first one wins) and the run task is cancelled the way an interrupt is; ``run_research``
+        sees ``fatal`` and raises it instead of treating the cancel as a stop. Only the first
+        failure counts, and none after a human stop. Returns whether a run task was cancelled.
+        """
+        if self.fatal is not None or self.stop_requested:
+            # The run is already ending: by an earlier failure, or by a human stop that came
+            # first (the stop wins; this failure is in the ledger).
+            return False
+        self.fatal = exc
+        task = self._run_task
+        if task is None or task.done():
+            return False
+        asyncio.get_running_loop().call_soon(self._cancel_run)
         return True
 
     # ── steer ─────────────────────────────────────────────────────────────────
@@ -250,6 +297,10 @@ class RunControl:
         """Pop the pending entries for ``agent_key`` and return their texts (``/steer``'s view)."""
         return [entry.text for entry in self.drain_inbox(agent_key)]
 
+    def peek_inbox(self, agent_key: str | None) -> list[InboxEntry]:
+        """The entries waiting for ``agent_key``, left in place (D5: whether to resume a seat)."""
+        return list(self._steer.get(agent_key or "", ()))
+
     def has_inbox(self, agent_key: str | None) -> bool:
         """Whether ``agent_key`` has an undelivered entry."""
         return bool(agent_key) and bool(self._steer.get(agent_key))
@@ -290,18 +341,25 @@ class RunControl:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
-    async def cancel_resumed(self) -> int:
+    async def cancel_resumed(self, timeout: float | None = None) -> int:
         """Cancel and await every channel task — resumed seats and awaited human replies — for
-        the interrupt cleanup; return how many were running."""
+        the interrupt cleanup; return how many were running.
+
+        ``timeout`` bounds the wait (D8): tasks still running past it raise ``TimeoutError`` naming
+        how many, so a seat stuck in its own cleanup is reported rather than waited on forever.
+        A cancel of the caller itself is never swallowed.
+        """
         tasks = [t for group in self._resumed.values() for t in group.values() if not t.done()]
         tasks += [t for t in self._background if not t.done()]
         for task in tasks:
             task.cancel()
-        for task in tasks:
-            try:
-                await task
-            except BaseException:  # noqa: BLE001 — a stop must not be defeated by what it stops
-                pass
+        if tasks:
+            done, pending = await asyncio.wait(tasks, timeout=timeout)
+            for task in done:
+                if not task.cancelled():
+                    task.exception()  # read: a stop is not defeated by what it stops
+            if pending:
+                raise TimeoutError(f"{len(pending)} channel task(s) still running")
         return len(tasks)
 
 

@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from auto_research.hitl.base import HumanHandler, HumanInputRequired, resolve_human
+from auto_research.run_control import WAKING_KINDS
 
 #: The human's address on the channel.
 HUMAN = "human"
@@ -67,6 +68,9 @@ class SeatRouter:
         self._viewable: dict[str, set[str]] = {}
         # seat → questions to the human still awaiting an answer.
         self._open_human: dict[str, int] = {}
+        # Seats a resume was started for and whose loop is not live yet (D5 review): a text in
+        # that window lands in the inbox the starting resume reads, never starts a second one.
+        self._resuming: set[str] = set()
 
     # ── the directory ────────────────────────────────────────────────────────
     def register(self, key: str, seat: Seat) -> None:
@@ -84,9 +88,13 @@ class SeatRouter:
     def seat(self, key: str) -> Seat:
         return self._seats[key]
 
+    def _busy(self, key: str) -> bool:
+        """Whether ``key``'s loop runs now or a resume of it is starting: a text reaches it there."""
+        return self.run_control.is_live(key) or key in self._resuming
+
     def state(self, key: str) -> str:
         """What ``key`` is doing now, as a seat choosing whom to text needs to know it."""
-        if self.run_control.is_live(key):
+        if self._busy(key):
             return "working now, reads a text at its next step"
         if getattr(self._seats.get(key), "has_kept_turn", lambda: False)():
             return "finished its turn, a text resumes it"
@@ -145,14 +153,13 @@ class SeatRouter:
         self._viewable.setdefault(to, set()).update(shown)
         self.run_control.add_steer(to, text, sender=sender, kind="message", handles=tuple(shown))
         seat = self._seats[to]
-        if self.run_control.is_live(to):
+        if self._busy(to):
             route, reply = "live", (
                 f"Delivered to {to}, which is working now and reads it at its next step."
             )
         elif getattr(seat, "has_kept_turn", lambda: False)():
             route = "resumed"
-            task = asyncio.create_task(self._resume(sender, to, seat))
-            self.run_control.register_resumed(sender, to, task)
+            self._start_resume(to, seat, sender=sender, waiting=[sender], notify=[sender])
             reply = (
                 f"Delivered to {to}, which had finished its turn and has been resumed to read it. "
                 "Its answer, if it sends one, arrives as a message; call wait_for_reply when you "
@@ -220,12 +227,11 @@ class SeatRouter:
             if (
                 entry_kind == "reply"
                 and seat is not None
-                and not self.run_control.is_live(sender)
+                and not self._busy(sender)
                 and getattr(seat, "has_kept_turn", lambda: False)()
             ):
                 # The seat filed while the human was answering: the reply resumes it, reply-only.
-                task = asyncio.create_task(self._resume(HUMAN, sender, seat))
-                self.run_control.register_background(task)
+                self._start_resume(sender, seat, sender=HUMAN, waiting=[], notify=[])
 
         self.ask_human(query, deliver=deliver, receipt_source=receipt_source)
         self._open_human[sender] = self._open_human.get(sender, 0) + 1
@@ -313,31 +319,112 @@ class SeatRouter:
         await deliver("\n\n".join(parts), tuple(minted), "reply")
 
     # ── resuming a dormant seat ──────────────────────────────────────────────
-    async def _resume(self, sender: str, key: str, seat: Seat) -> None:
-        await self._record(
-            "channel.resume", level=3, actor=key,
-            summary=f"{key} resumed to read a message from {sender}",
-            data={"seat": key, "from": sender},
+    def wake(self, key: str, entries: Iterable[tuple[str, str]]) -> None:
+        """Resume ``key`` to read texts put back in its inbox when its turn filed (D5).
+
+        ``entries`` are ``(sender, kind)`` of the texts that arrived during the batch that held an
+        accepted ``turn_end``: drained, never shown, re-queued by the loop. A seat's message, the
+        human's reply or a steer wakes the now-idle seat the way a text to an idle seat does
+        (``_resume_waiting``); a notice, or a coder's text (it belongs to the authoring turn),
+        waits for the seat's next turn. A seat whose resume is still ending is re-checked when it
+        ends, so nothing waits in an inbox nobody reads.
+        """
+        if any(self._wakes(sender, kind) for sender, kind in entries):
+            self._resume_waiting(key)
+
+    def _wakes(self, sender: str, kind: str) -> bool:
+        return kind in WAKING_KINDS and (sender == HUMAN or sender in self._seats)
+
+    def _resume_waiting(self, key: str) -> None:
+        """Start one resume of an idle ``key`` whose inbox holds a text that wakes it.
+
+        One resume reads them all. A sending seat still in its own turn waits for it like any
+        sender (``register_resumed``); one that has finished only gets the end notice, so two idle
+        seats never wait on each other (board D7). A no-op when the seat is busy (its loop, or a
+        starting resume, reads the inbox), has no kept turn, or holds nothing that wakes it.
+        """
+        seat = self._seats.get(key)
+        waiting = [e for e in self.run_control.peek_inbox(key) if self._wakes(e.sender, e.kind)]
+        if (
+            seat is None
+            or not waiting
+            or self._busy(key)
+            or not getattr(seat, "has_kept_turn", lambda: False)()
+        ):
+            return
+        named = list(dict.fromkeys(e.sender for e in waiting))
+        seats = [s for s in named if s in self._seats and s != key]
+        label = seats[0] if seats else HUMAN
+        self._start_resume(
+            key, seat, sender=label,
+            waiting=[s for s in seats if self.run_control.is_live(s)], notify=seats,
         )
+
+    def _start_resume(
+        self, key: str, seat: Seat, *, sender: str, waiting: list[str], notify: list[str]
+    ) -> None:
+        """Start one resume of ``key``: marked busy at once, so a text arriving before its loop
+        is live joins the inbox it reads. Each seat in ``waiting`` waits for it in its own
+        ``turn_end``; with none it runs in the background. ``notify`` hears how it ended."""
+        self._resuming.add(key)
+        task = asyncio.create_task(self._resume(sender, key, seat, notify=notify))
+        # A resume that fails the run re-raises (D6); its exception reached the run through
+        # `RunControl.fail`, so it is read here rather than left for the loop to warn about.
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        for waiter in waiting:
+            self.run_control.register_resumed(waiter, key, task)
+        if not waiting:
+            self.run_control.register_background(task)
+
+    async def _resume(
+        self, sender: str, key: str, seat: Seat, *, notify: Iterable[str] | None = None
+    ) -> None:
         try:
-            await seat.resume()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 — the resumed turn's failure is the sender's news
             await self._record(
-                "channel.resume.error", level=1, actor=key,
-                summary=f"{key}'s resumed turn failed: {exc!r}",
-                data={"seat": key, "from": sender, "error": repr(exc)},
+                "channel.resume", level=3, actor=key,
+                summary=f"{key} resumed to read a message from {sender}",
+                data={"seat": key, "from": sender},
             )
-            outcome = f"{key}'s resumed turn failed ({type(exc).__name__}: {exc})."
-        else:
-            await self._record(
-                "channel.resume.end", level=3, actor=key,
-                summary=f"{key} ended its resumed turn", data={"seat": key, "from": sender},
-            )
-            outcome = f"{key} ended its resumed turn."
-        if sender != HUMAN:
-            self.run_control.add_steer(sender, outcome, sender=key, kind="notice")
+            try:
+                await seat.resume()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — the resumed turn's failure is the sender's news
+                from auto_research.agents.roles import ReactBudgetExhausted
+
+                if isinstance(exc, ReactBudgetExhausted):
+                    # Ruling D6: a resumed turn that runs out of its caps ends the run, as a fresh
+                    # turn's does (§2b, §9.3.8). Nothing is kept for the seat; the run task is
+                    # cancelled with this as its failure, and the task fails with it too.
+                    await self._record(
+                        "channel.resume.exhausted", level=1, actor=key,
+                        summary=f"{key}'s resumed turn exhausted its caps — the run ends",
+                        data={"seat": key, "from": sender, "error": repr(exc)},
+                    )
+                    self.run_control.drain_inbox(key)
+                    if getattr(seat, "_kept_turn", None) is not None:
+                        seat._kept_turn = None  # an exhausted turn is never resumed again
+                    self.run_control.fail(exc)
+                    raise
+                await self._record(
+                    "channel.resume.error", level=1, actor=key,
+                    summary=f"{key}'s resumed turn failed: {exc!r}",
+                    data={"seat": key, "from": sender, "error": repr(exc)},
+                )
+                outcome = f"{key}'s resumed turn failed ({type(exc).__name__}: {exc})."
+            else:
+                await self._record(
+                    "channel.resume.end", level=3, actor=key,
+                    summary=f"{key} ended its resumed turn", data={"seat": key, "from": sender},
+                )
+                outcome = f"{key} ended its resumed turn."
+        finally:
+            self._resuming.discard(key)
+        for recipient in (notify if notify is not None else [sender]):
+            if recipient in self._seats:
+                self.run_control.add_steer(recipient, outcome, sender=key, kind="notice")
+        # A text that reached the seat as this resume filed, or after its loop ended, is read now.
+        self._resume_waiting(key)
 
     async def record_message(
         self, sender: str, to: str, text: str, *, route: str, is_error: bool = False

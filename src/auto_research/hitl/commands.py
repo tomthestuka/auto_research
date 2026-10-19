@@ -37,6 +37,12 @@ RosterEntry = tuple[str, str, str]
 # nothing was queued or acted on (a command either takes effect or says why, immediately).
 _REJECTED = "⚠️ "
 
+#: The immediate answer to the commands whose work takes a while (ruling D8): sent before the work
+#: starts, so the human knows the command landed. `/stop`'s outcome follows as the landing
+#: checklist; `/status`'s as the monitor agent's answer.
+STOP_ACK = "/stop received, cleaning up…"
+STATUS_ACK = "/status received, monitor agent investigating…"
+
 
 class CommandReply(str):
     """A command's Markdown reply, optionally carrying buttons.
@@ -101,11 +107,17 @@ def menu_commands() -> list[tuple[str, str]]:
     ]
 
 
-async def dispatch_command(text: str, ctx: CommandContext) -> str:
+async def dispatch_command(
+    text: str, ctx: CommandContext, *, ack: Callable[[str], Awaitable[Any]] | None = None
+) -> str:
     """Parse and run a ``/command …`` line; return Markdown to send back to the human.
 
     Every outcome is immediate and deterministic: a command either takes effect or answers with
     what was wrong and what the valid options are. Nothing is queued on a guess.
+
+    ``ack`` (a connector's send) answers ``/stop`` and ``/status`` at once, before their work
+    (ruling D8); ``/stop`` then returns an empty reply, since its outcome is the landing
+    checklist the run posts. Without ``ack`` the acknowledgement is ``/stop``'s reply.
     """
     text = (text or "").strip()
     parts = text.lstrip("/").split(maxsplit=1)
@@ -117,11 +129,28 @@ async def dispatch_command(text: str, ctx: CommandContext) -> str:
     if name in ("", "help"):
         reply, accepted = _help(ctx), True
     elif name == "stop":
-        reply, accepted = await _stop(ctx), True
+        ending = _already_ending(ctx.run_control)
+        if ending:
+            reply, accepted = f"/stop received; {ending}", True
+        elif not ctx.run_control.running:
+            # Still flagged, so a reply-wait in progress unblocks; but nothing will clean up.
+            _stop(ctx)
+            reply, accepted = "/stop received; no run is in flight, so there is nothing to clean up.", True
+        else:
+            if ack is not None:
+                await _ack(ack, STOP_ACK)
+            _stop(ctx)
+            reply, accepted = ("" if ack is not None else _STOP_REPLY), True
     elif name == "steer":
         reply, accepted = _steer(arg, ctx)
     elif name == "status":
-        reply, accepted = await _status(arg, ctx), True
+        if ack is not None:
+            await _ack(ack, STATUS_ACK)
+        try:
+            reply, accepted = await _status(arg, ctx), True
+        except Exception as exc:  # noqa: BLE001 — the human was told to wait; tell them why not
+            reply = f"{_REJECTED}/status could not answer: {type(exc).__name__}: {exc}"
+            accepted = False
     else:
         reply, accepted = f"{_REJECTED}Unknown command `/{name}`.\n\n{_help(ctx)}", False
 
@@ -131,6 +160,28 @@ async def dispatch_command(text: str, ctx: CommandContext) -> str:
         data={"command": name, "accepted": accepted, "reply": reply},
     )
     return reply
+
+
+#: How long an acknowledgement may hold up the command it acknowledges (a `/stop` waits for it).
+_ACK_TIMEOUT_S = 3.0
+
+
+async def _ack(send: Callable[[str], Awaitable[Any]], text: str) -> None:
+    """Send an acknowledgement, bounded; a slow or failed send never holds up or stops the
+    command it acknowledges."""
+    try:
+        await asyncio.wait_for(send(text), timeout=_ACK_TIMEOUT_S)
+    except Exception:  # noqa: BLE001 — the command still runs
+        pass
+
+
+def _already_ending(run_control: RunControl) -> str:
+    """Why a ``/stop`` has nothing to start, or ``""`` when it stops the run now."""
+    if getattr(run_control, "fatal", None) is not None:
+        return "the run is already ending on a failure and cleaning up."
+    if run_control.stop_requested:
+        return "the run is already stopping."
+    return ""
 
 
 async def _record_command(ctx: CommandContext, event: str, *, level: int, summary: str,
@@ -166,7 +217,7 @@ def _help(ctx: CommandContext) -> str:
     return "\n".join(lines)
 
 
-async def _stop(ctx: CommandContext) -> str:
+def _stop(ctx: CommandContext) -> None:
     """Stop the run — this is Ctrl-C, for a run that has no terminal to press it in.
 
     It interrupts: the run task is cancelled, whatever was in flight ends there, and cleanup is
@@ -182,12 +233,13 @@ async def _stop(ctx: CommandContext) -> str:
     write-up call after the stop is what crashed the 2026-07-29 run.
     """
     ctx.run_control.interrupt("human /stop", by="human")
-    return (
-        "🛑 **Stopping now.** Cancelling in-flight work, killing sandbox processes, resetting the "
-        "authoring branch if a tool was being written, then ending the run. No report is composed "
-        "— what the run already wrote to disk is its record. Relaunch with `resume=True` to "
-        "continue from the last completed step."
-    )
+
+
+#: `/stop`'s reply on a connector that sends no separate acknowledgement.
+_STOP_REPLY = (
+    f"{STOP_ACK} A checklist of every shutdown step follows when it ends. No report is composed; "
+    "relaunch with `resume=True` to continue from the last completed step."
+)
 
 
 def _steer(arg: str, ctx: CommandContext) -> tuple[str, bool]:

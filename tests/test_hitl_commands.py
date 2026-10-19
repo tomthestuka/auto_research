@@ -9,6 +9,7 @@ import json
 import pytest
 
 from auto_research.hitl.commands import (
+    STOP_ACK,
     CommandContext,
     dispatch_command,
     wait_reply_or_stop,
@@ -37,6 +38,22 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _stop_in_a_run(text: str, ctx: CommandContext) -> str:
+    """Dispatch a /stop while a run task is registered, as it is during a run."""
+
+    async def scenario():
+        run = asyncio.create_task(asyncio.sleep(3600))
+        ctx.run_control.register_run_task(run)
+        try:
+            return await dispatch_command(text, ctx)
+        finally:
+            run.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await run
+
+    return asyncio.run(scenario())
+
+
 # ── /help ─────────────────────────────────────────────────────────────────────
 
 def test_help_lists_commands_and_roster():
@@ -52,8 +69,8 @@ def test_unknown_command_falls_back_to_help():
 
 def test_botname_suffix_tolerated():
     ctx = _ctx()
-    out = _run(dispatch_command("/stop@my_bot", ctx))
-    assert ctx.run_control.stop_requested and "Stopping now" in out
+    out = _stop_in_a_run("/stop@my_bot", ctx)
+    assert ctx.run_control.stop_requested and STOP_ACK in out
 
 
 # ── /steer ────────────────────────────────────────────────────────────────────
@@ -132,9 +149,25 @@ def test_commands_are_recorded_in_the_run_ledger():
 
 def test_stop_requests_run_control():
     ctx = _ctx()
-    out = _run(dispatch_command("/stop", ctx))
+    out = _stop_in_a_run("/stop", ctx)
     assert ctx.run_control.stop_requested and ctx.run_control.stop_event.is_set()
-    assert "Stopping now" in out
+    assert STOP_ACK in out
+
+
+def test_stop_with_no_run_in_flight_promises_no_cleanup():
+    """Nothing is running (the graph finished, or none started): the stop is still flagged, so a
+    reply-wait unblocks, but the human is not told a checklist is coming."""
+    ctx = _ctx()
+    out = _run(dispatch_command("/stop", ctx))
+    assert ctx.run_control.stop_requested and "nothing to clean up" in out
+    assert STOP_ACK not in out
+
+
+def test_a_second_stop_says_the_run_is_already_stopping():
+    ctx = _ctx()
+    _stop_in_a_run("/stop", ctx)
+    out = _stop_in_a_run("/stop", ctx)
+    assert "already stopping" in out and STOP_ACK not in out
 
 
 # ── /status ───────────────────────────────────────────────────────────────────
@@ -160,8 +193,10 @@ def test_status_surfaces_a_reporter_failure_rather_than_a_lesser_view():
     async def _boom(question: str) -> str:
         raise RuntimeError("provider unavailable")
 
-    with pytest.raises(RuntimeError, match="provider unavailable"):
-        _run(dispatch_command("/status", _ctx(status_answer=_boom)))
+    # The failure is the answer (D8: the human was told the monitor is investigating, so it must
+    # hear how that ended), never a second view of the log.
+    reply = _run(dispatch_command("/status", _ctx(status_answer=_boom)))
+    assert "could not answer" in reply and "provider unavailable" in reply
 
 
 # ── wait_reply_or_stop ─────────────────────────────────────────────────────────
@@ -235,7 +270,7 @@ def test_stop_cancels_the_run_task():
 
     out, was_cancelled = asyncio.run(scenario())
     assert was_cancelled
-    assert "Stopping now" in out and "No report is composed" in out
+    assert STOP_ACK in out and "No report is composed" in out
 
 
 def test_stop_replies_before_the_cancellation_lands():
@@ -255,7 +290,7 @@ def test_stop_replies_before_the_cancellation_lands():
         return reply, still_running
 
     reply, still_running = asyncio.run(scenario())
-    assert still_running and "Stopping now" in reply
+    assert still_running and STOP_ACK in reply
 
 
 async def _busy_aborter() -> bool:
@@ -341,3 +376,87 @@ def test_malformed_button_payload_is_refused():
     from auto_research.hitl.commands import dispatch_callback
 
     assert "Unrecognized button" in _run(dispatch_callback("nonsense", _btn_ctx()))
+
+
+# ── ruling D8: answer at once, run commands side by side ─────────────────────────────────────
+
+
+def test_stop_acknowledges_before_the_run_is_cancelled():
+    from auto_research.hitl.commands import dispatch_command
+
+    async def scenario():
+        ctx = _ctx()
+        run = asyncio.create_task(asyncio.sleep(3600))
+        ctx.run_control.register_run_task(run)
+        seen = []
+
+        async def ack(text):
+            seen.append((text, ctx.run_control.stop_requested))
+
+        reply = await dispatch_command("/stop", ctx, ack=ack)
+        await asyncio.sleep(0)
+        cancelled = run.cancelled() or run.cancelling() > 0
+        run.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await run
+        return seen, reply, cancelled
+
+    seen, reply, cancelled = asyncio.run(scenario())
+    assert seen == [(STOP_ACK, False)]  # answered before anything was stopped
+    assert reply == "" and cancelled  # the outcome is the landing checklist, not a reply
+
+
+def test_status_acknowledges_before_the_monitor_answers():
+    from auto_research.hitl.commands import STATUS_ACK, dispatch_command
+
+    order = []
+
+    async def answer(question):
+        order.append("answer")
+        return "all quiet"
+
+    async def ack(text):
+        order.append(text)
+
+    ctx = _ctx()
+    ctx.status_answer = answer
+    reply = asyncio.run(dispatch_command("/status", ctx, ack=ack))
+    assert order == [STATUS_ACK, "answer"] and reply == "all quiet"
+
+
+def test_telegram_stop_never_waits_behind_a_slow_status():
+    """The library runs handlers one at a time; each command runs in its own task, so `/stop`
+    lands while `/status` still waits on its model."""
+    from auto_research.hitl.commands import STATUS_ACK
+    from auto_research.hitl.telegram import TelegramHandler
+    from tests.test_hitl import _FakeTGApp, _tg_update
+
+    async def scenario():
+        handler = TelegramHandler(app=_FakeTGApp(), chat_id="555")
+        ctx = _ctx()
+        run = asyncio.create_task(asyncio.sleep(3600))
+        ctx.run_control.register_run_task(run)
+        release = asyncio.Event()
+
+        async def slow_answer(question):
+            await release.wait()
+            return "the monitor's answer"
+
+        ctx.status_answer = slow_answer
+        handler.attach_commands(ctx)
+        await handler._on_command(_tg_update("/status"))
+        await handler._on_command(_tg_update("/stop"))
+        for _ in range(50):
+            await asyncio.sleep(0)
+        stopped_while_status_pending = ctx.run_control.stop_requested and not release.is_set()
+        sent_before = [m["text"] for m in handler.app.bot.sent]
+        release.set()
+        for _ in range(50):
+            await asyncio.sleep(0)
+        run.cancel()
+        return stopped_while_status_pending, sent_before, [m["text"] for m in handler.app.bot.sent]
+
+    stopped, before, after = asyncio.run(scenario())
+    assert stopped
+    assert any(STATUS_ACK in t for t in before) and any(STOP_ACK in t for t in before)
+    assert any("the monitor's answer" in t for t in after)

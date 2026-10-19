@@ -364,12 +364,10 @@ def _script_model():
                                      tool_calls=[ToolCall(id="c1", name="tk_load", arguments={})])
             if self.tool_iterations == 2:
                 return ModelResponse(content="writing it up", stop="tool_use", tool_calls=[
-                    ToolCall(id="c2", name="edit_report", arguments={
-                        "summary": "did the fit",
-                        "findings": ["chi2/dof=1.0"],
-                        "status": "succeeded",
-                        "cited_figures": [{"source": "self", "index": 1}],
-                    }),
+                    ToolCall(id="c2", name="write_report", arguments={"content": (
+                        "# summary\ndid the fit\n# status\nsucceeded\n# findings\n"
+                        "- chi2/dof=1.0\n# figures\n- [self:1]\n"
+                    )}),
                 ])
             return ModelResponse(content="done", stop="tool_use", tool_calls=[
                 ToolCall(id="c3", name="turn_end", arguments={"summary": "fit reported"}),
@@ -386,9 +384,16 @@ class TestWorkerReactLoop:
 
         from auto_research.agents.roles import AnalystWorkerAgent
         from auto_research.monitor import RunMonitor
+        import hashlib
+
+        # A real file: `turn_end` refuses a placed figure that is not on disk, and only an
+        # accepted `turn_end` makes the draft the report (ruling D4).
+        png = tmp_path / "fit.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\nfit")
         fig = {
-            "path": "/tmp/fit.png", "caption": "fit", "mime_type": "image/png",
-            "produced_by": "tk_load", "created_at": datetime.now(UTC).isoformat(), "sha256": "a" * 64,
+            "path": str(png), "caption": "fit", "mime_type": "image/png",
+            "produced_by": "tk_load", "created_at": datetime.now(UTC).isoformat(),
+            "sha256": hashlib.sha256(png.read_bytes()).hexdigest(),
         }
         # Tool returns a figure → exercises figure propagation onto the report.
         sb = _FakeSandbox(tool_fn=lambda m, f, a: {"exit_code": 0, "stdout": "loaded indices", "figures": [fig]})
@@ -407,7 +412,7 @@ class TestWorkerReactLoop:
         report = asyncio.run(w.analyze(AnalysisTask(question="q")))
         assert sb.tool_calls  # a tool actually ran inside the loop
         assert report.summary == "did the fit"
-        assert [str(f.path) for f in report.figures] == ["/tmp/fit.png"]  # real figure attached
+        assert [str(f.path) for f in report.figures] == [str(png)]  # real figure attached
         assert w.last_tool_results and w.last_tool_results[0].exit_code == 0
         # Input/output are separate events: `tool_call` (logged before the call runs, carrying
         # the args) and `tool_result` (logged on return, carrying the text). They share a
@@ -457,7 +462,7 @@ class TestWorkerReactLoop:
 
 
 # ---------------------------------------------------------------------------
-# normalize_tool_raw and _append_tool_results_to_memory
+# normalize_tool_raw
 # ---------------------------------------------------------------------------
 
 class TestNormalizeToolRaw:
@@ -517,44 +522,6 @@ class TestNormalizeToolRaw:
         # Only console_tail → stdout; stderr/figures/exit_code must not appear as JSON keys
         assert "stderr" not in result["stdout"]
         assert "exit_code" not in result["stdout"]
-
-
-class TestAppendToolResultsToMemory:
-    """Unit tests for stdout/stderr truncation in _append_tool_results_to_memory."""
-
-    def _make_result(self, stdout: str = "", stderr: str = "") -> ToolResult:
-        return ToolResult(
-            tool_name="test.tool", stdout=stdout, stderr=stderr,
-            exit_code=0, elapsed_s=0.1,
-        )
-
-    def test_short_output_written_verbatim(self, tmp_path: Path) -> None:
-        from auto_research.agents.roles import _append_tool_results_to_memory
-        mem = tmp_path / "memory.md"
-        r = self._make_result(stdout="short output")
-        _append_tool_results_to_memory(mem, [r])
-        assert "short output" in mem.read_text()
-
-    def test_long_stdout_truncated(self, tmp_path: Path) -> None:
-        from auto_research.agents.roles import _append_tool_results_to_memory, _STDOUT_MEM_CAP
-        mem = tmp_path / "memory.md"
-        big = "x" * (_STDOUT_MEM_CAP + 5000)
-        r = self._make_result(stdout=big)
-        _append_tool_results_to_memory(mem, [r])
-        content = mem.read_text()
-        # Truncation marker present and file is bounded
-        assert "truncated" in content
-        assert len(content) < _STDOUT_MEM_CAP + 500  # overhead for headers
-
-    def test_long_stderr_truncated(self, tmp_path: Path) -> None:
-        from auto_research.agents.roles import _append_tool_results_to_memory, _STDERR_MEM_CAP
-        mem = tmp_path / "memory.md"
-        big = "e" * (_STDERR_MEM_CAP + 3000)
-        r = self._make_result(stderr=big)
-        _append_tool_results_to_memory(mem, [r])
-        content = mem.read_text()
-        assert "truncated" in content
-        assert len(content) < _STDERR_MEM_CAP + 500
 
 
 # ---------------------------------------------------------------------------
@@ -1084,44 +1051,6 @@ def test_a_denied_path_is_still_denied_when_no_jail_is_running(monkeypatch, tmp_
     out = asyncio.run(prov.execute("mcp.builtin.bash_exec", {"command": "cat /etc/shadow"}))
     assert out.is_error and "path not permitted" in out.text
 
-
-def test_memory_lives_beside_the_ledger_and_is_never_followed_through_a_symlink(tmp_path, monkeypatch):
-    """F22: the harness appends tool output to memory.md and reads it into the next prompt,
-    outside the jail; inside the agent's own writable folder a planted symlink redirected both."""
-    from auto_research.sandbox import workspace
-
-    monkeypatch.setattr(workspace, "runtime_data_dir", lambda: tmp_path / "runtime")
-    path = workspace.memory_path("r1", "analyst_worker_0")
-    agent_folder = workspace.agent_dir("r1", "analyst_worker_0")
-    assert workspace.ledger_dir("r1") in path.parents
-    assert agent_folder not in path.parents
-
-    victim = tmp_path / "victim.txt"
-    victim.write_text("host\n")
-    path.unlink(missing_ok=True)
-    path.symlink_to(victim)
-    with pytest.raises(OSError):
-        workspace.append_memory(path, "model-chosen text")
-    with pytest.raises(OSError):
-        workspace.read_memory(path)
-    assert victim.read_text() == "host\n"
-
-
-def test_memory_at_the_old_agent_folder_location_is_never_read(tmp_path, monkeypatch):
-    """The old location is agent-writable: a file, a symlink, a FIFO there is never read (F22)."""
-    import os
-
-    from auto_research.sandbox import workspace
-
-    monkeypatch.setattr(workspace, "runtime_data_dir", lambda: tmp_path / "runtime")
-    folder = workspace.agent_dir("r1", "w0")
-    folder.mkdir(parents=True)
-    (folder / "memory.md").write_text("planted prior results\n")
-    assert workspace.read_memory(workspace.memory_path("r1", "w0")) == ""
-    folder2 = workspace.agent_dir("r1", "w1")
-    folder2.mkdir(parents=True)
-    os.mkfifo(folder2 / "memory.md")  # would hang a reader that opened it
-    assert workspace.read_memory(workspace.memory_path("r1", "w1")) == ""
 
 def test_a_private_param_dir_replaces_only_the_writable_half(tmp_path):
     from auto_research.sandbox.runner import with_private_param_dir

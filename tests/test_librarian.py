@@ -146,7 +146,8 @@ def test_read_paper_captures_hashes_and_stores_once(tmp_path):
     assert p.store.verify("lib:p1") is None
     # Reopening the same document returns the same handle and stores no second paper row.
     again = _run(p.execute("read_paper", {"hit": 1}))
-    assert "already attached" in again.text and not again.documents and len(p.captures) == 1
+    # The document comes back each time; the loop attaches it once while it is carried (R2).
+    assert again.documents and again.documents[0].sha256 == document.sha256 and len(p.captures) == 1
     assert len(p.storage.papers) == 1 and p.paper_ids == {"lib:p1": 1}
 
 
@@ -181,13 +182,16 @@ def _read_one(tmp_path):
     return p
 
 
-def _report(support=("lib:p1",), status="succeeded"):
-    return {
-        "summary": "One paper measures the lag.",
-        "findings": [{"claim": 'A lag of {{lib:p1 "12.5 ± 3.1 days" Table 1}}.', "support": list(support)}],
-        "gaps": [],
-        "status": status,
-    }
+_CLAIM = 'A lag of {{lib:p1 "12.5 ± 3.1 days" Table 1}}.'
+
+
+def _report(support=("lib:p1",), status="succeeded", claims=None, summary="One paper measures the lag."):
+    """A whole draft document for write_report (A7): (claim, support) items under # findings."""
+    claims = [(_CLAIM, list(support))] if claims is None else claims
+    lines = ["# summary", summary, "# status", status, "# findings"]
+    for claim, sup in claims:
+        lines += [f"- {claim}", "  support: " + ", ".join(sup)]
+    return {"content": "\n".join(lines) + "\n"}
 
 
 def test_turn_end_without_a_report_is_rejected_with_the_reason(tmp_path):
@@ -198,7 +202,7 @@ def test_turn_end_without_a_report_is_rejected_with_the_reason(tmp_path):
 
 def test_edit_report_persists_jsonl_and_flags_an_unopened_handle(tmp_path):
     p = _read_one(tmp_path)
-    outcome = _run(p.execute("edit_report", _report(support=("lib:p1", "lib:p7"))))
+    outcome = _run(p.execute("write_report", _report(support=("lib:p1", "lib:p7"))))
     assert not outcome.is_error and "lib:p7" in outcome.text
     saved = json.loads(p.report_path.read_text())
     assert saved["findings"][0]["support"] == ["lib:p1", "lib:p7"]
@@ -209,20 +213,20 @@ def test_edit_report_persists_jsonl_and_flags_an_unopened_handle(tmp_path):
     [
         (_report(support=()), "cites no document"),
         (_report(support=("lib:p7",)), "not a document you opened"),
-        ({"summary": "x", "findings": [], "status": "succeeded"}, "lists no findings"),
-        ({"summary": " ", "findings": [], "status": "failed"}, "summary is empty"),
+        ({"content": "# summary\nx\n# status\nsucceeded\n"}, "lists no findings"),
+        ({"content": "# summary\n# status\nfailed\n"}, "summary is empty"),
     ],
 )
 def test_turn_end_names_each_problem(tmp_path, report, reason):
     p = _read_one(tmp_path)
-    _run(p.execute("edit_report", report))
+    _run(p.execute("write_report", report))
     outcome = _run(p.execute("turn_end", {"summary": "done"}))
     assert outcome.is_error and reason in outcome.text
 
 
 def test_turn_end_rejects_a_document_changed_since_it_was_read(tmp_path):
     p = _read_one(tmp_path)
-    _run(p.execute("edit_report", _report()))
+    _run(p.execute("write_report", _report()))
     Path(p.captures["lib:p1"].path).write_text("tampered", encoding="utf-8")
     outcome = _run(p.execute("turn_end", {"summary": "done"}))
     assert outcome.is_error and "no longer match" in outcome.text
@@ -230,8 +234,8 @@ def test_turn_end_rejects_a_document_changed_since_it_was_read(tmp_path):
 
 def test_turn_end_accepts_an_honest_failure_with_no_findings(tmp_path):
     p = _provider(tmp_path)
-    _run(p.execute("edit_report", {"summary": "No source reachable.", "gaps": ["ADS 401"],
-                                   "status": "failed"}))
+    _run(p.execute("write_report", {"content": "# summary\nNo source reachable.\n# status\nfailed\n"
+                                                "# gaps\n- ADS 401\n"}))
     assert not _run(p.execute("turn_end", {"summary": "failed"})).is_error
 
 
@@ -239,8 +243,9 @@ def test_edit_report_schema_carries_the_model_descriptions_and_no_refs(tmp_path)
     spec = next(d for d in _provider(tmp_path).tool_definitions() if d["name"] == "edit_report")
     schema = json.dumps(spec["input_schema"])
     assert "$ref" not in schema and "$defs" not in schema
-    item = spec["input_schema"]["properties"]["findings"]["items"]["properties"]
-    assert item["support"]["description"].startswith("Handles of the documents")
+    # A7: the draft is a document; its layout names how a finding names its support.
+    assert "'support: lib:p1, lib:w2'" in spec["description"]
+    assert {d["name"] for d in _provider(tmp_path).tool_definitions()} >= {"edit_report", "write_report"}
 
 
 # ── captures ─────────────────────────────────────────────────────────────────────
@@ -281,19 +286,15 @@ def test_a_paper_citation_never_exempts_the_numbers_beside_it(tmp_path):
     """Human ruling 2026-09-24: each paper value is attributed; every other number is checked."""
     p = _read_one(tmp_path)
     _run(p.execute("web_fetch", {"url": "https://docs.example.org/lag"}))  # lib:w1: "12 . 5 days"
-    report = {
-        "summary": "Two sources.",
-        "findings": [
-            # An unattributed paper number: refused, with the attribution hint.
-            {"claim": "The paper reports a lag of 99.9 days [lib:p1].", "support": ["lib:p1"]},
-            # Attributed to the paper: accepted, collected for a person to check.
-            {"claim": 'The paper reports {{lib:p1 "a lag of 12.5 ± 3.1 days" Table 1}}.', "support": ["lib:p1"]},
-            # A web-only number no page carries: refused.
-            {"claim": "The page reports a lag of 77.7 days.", "support": ["lib:w1"]},
-        ],
-        "status": "succeeded",
-    }
-    _run(p.execute("edit_report", report))
+    report = _report(summary="Two sources.", claims=[
+        # An unattributed paper number: refused, with the attribution hint.
+        ("The paper reports a lag of 99.9 days [lib:p1].", ["lib:p1"]),
+        # Attributed to the paper: accepted, collected for a person to check.
+        ('The paper reports {{lib:p1 "a lag of 12.5 ± 3.1 days" Table 1}}.', ["lib:p1"]),
+        # A web-only number no page carries: refused.
+        ("The page reports a lag of 77.7 days.", ["lib:w1"]),
+    ])
+    _run(p.execute("write_report", report))
     outcome = _run(p.execute("turn_end", {"summary": "done"}))
     assert outcome.is_error and "99.9" in outcome.text and "77.7" in outcome.text
     assert "attribute it" in outcome.text
@@ -305,9 +306,8 @@ def test_a_paper_citation_never_exempts_the_numbers_beside_it(tmp_path):
 
 def test_an_attribution_must_say_where_in_the_paper(tmp_path):
     p = _read_one(tmp_path)
-    report = _report()
-    report["findings"][0]["claim"] = 'A lag of {{lib:p1 "12.5 ± 3.1 days"}}.'
-    _run(p.execute("edit_report", report))
+    report = _report(claims=[('A lag of {{lib:p1 "12.5 ± 3.1 days"}}.', ["lib:p1"])])
+    _run(p.execute("write_report", report))
     outcome = _run(p.execute("turn_end", {"summary": "done"}))
     assert outcome.is_error and "without saying where" in outcome.text
 
@@ -382,7 +382,7 @@ def test_research_loop_files_a_report_and_lays_down_memory(tmp_path, monkeypatch
     agent, storage = _agent(tmp_path, monkeypatch, [
         ("search_literature", {"source": "arxiv", "query": "lag"}),
         ("read_paper", {"hit": 1}),
-        ("edit_report", _report()),
+        ("write_report", _report()),
         ("turn_end", {"summary": "done"}),
     ])
     report = _run(agent.research(ResearchRequest(question="What lag is measured?")))
@@ -402,9 +402,10 @@ def test_research_loop_stays_in_the_loop_after_a_rejected_turn_end(tmp_path, mon
     agent, _ = _agent(tmp_path, monkeypatch, [
         ("search_literature", {"source": "arxiv", "query": "lag"}),
         ("read_paper", {"hit": 1}),
-        ("edit_report", _report(support=("lib:p9",))),
+        ("write_report", _report(support=("lib:p9",))),
         ("turn_end", {"summary": "done"}),  # rejected: lib:p9 was never opened
-        ("edit_report", _report()),
+        # A7: fix the one handle with an Edit; the rest of the draft stays.
+        ("edit_report", {"old_string": "support: lib:p9", "new_string": "support: lib:p1"}),
         ("turn_end", {"summary": "done"}),
     ])
     report = _run(agent.research(ResearchRequest(question="q")))
@@ -472,9 +473,8 @@ def test_a_librarian_cannot_cite_another_roles_receipt(tmp_path):
     p = _read_one(tmp_path)
     other = p.store.mint(source="analyst_worker_0", kind="result", produced_by="research_toolkit.xspec_utils.fit",
                          data="The fitted lag is 7.7 days.")
-    report = _report()
-    report["findings"].append({"claim": f"A fit gives 7.7 days [{other.handle}].", "support": ["lib:p1"]})
-    _run(p.execute("edit_report", report))
+    report = _report(claims=[(_CLAIM, ["lib:p1"]), (f"A fit gives 7.7 days [{other.handle}].", ["lib:p1"])])
+    _run(p.execute("write_report", report))
     outcome = _run(p.execute("turn_end", {"summary": "done"}))
     assert outcome.is_error and "not a receipt you can cite" in outcome.text
 

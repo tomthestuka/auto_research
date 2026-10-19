@@ -1,7 +1,7 @@
 """The reviewer's report surface and the check its ``turn_end`` runs.
 
 The reviewer files one :class:`~auto_research.schemas.review.ReviewerReport` per review through the
-shared ``edit_report`` / ``review_report`` / ``turn_end`` tools, like every other unit. What is the
+shared ``write_report`` / ``edit_report`` / ``turn_end`` tools, like every other unit. What is the
 reviewer's own lives here: which fields its ``edit_report`` declares, what each decision requires
 before the turn may end, and the render-and-compile step that makes the ``.tex`` part of the check
 rather than a step after it (CLAUDE.md §2b: a role's artifact is validated at its edge).
@@ -30,25 +30,20 @@ What ``turn_end`` refuses, and why each is here:
 
 from __future__ import annotations
 
-import hashlib
-import shutil
-import subprocess
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 
 from auto_research.provenance import ReceiptLookup, check_report_fields
 from auto_research.report.html import HtmlResult, render_html
 from auto_research.report.render import CompileResult, RenderResult, compile_report, render_report
-from auto_research.schemas.figures import FigureRef
 from auto_research.schemas.review import ReviewerReport
 
 #: The reviewer's receipt source key: its own opened papers and its rendered reports are ``rev:``.
 REVIEWER_SOURCE = "rev"
 
-#: The fields the reviewer's ``edit_report`` declares, every one a real ``ReviewerReport`` field
-#: whose prose the tool reads from that model's own ``Field(description=...)``.
+#: The fields the reviewer's report document holds, every one a real ``ReviewerReport`` field with a
+#: block in ``report_edit.REVIEWER_BLOCKS`` (whose hints the tool descriptions list).
 REVIEWER_REPORT_FIELDS: tuple[str, ...] = (
     "accepted", "rationale", "assign_to", "follow_up",
     "title", "abstract", "sections", "key_findings", "figures", "tables",
@@ -169,8 +164,9 @@ def reviewer_turn_problems(
     """
     if report is None:
         return [
-            "No report has been written. Call edit_report to write it — that call is the only way "
-            "your report is saved, and nothing is composed on your behalf."
+            "No report has been written. Write it with write_report (or fill the empty draft "
+            "with edit_report) — those calls are the only way your report is saved, and nothing "
+            "is composed on your behalf."
         ]
     problems: list[str] = []
     if not report.rationale.strip():
@@ -228,97 +224,9 @@ READ_PAPER_TOOL = "read_paper"
 
 #: The description the reviewer's ``edit_report`` carries; its field prose comes from the model.
 REVIEWER_EDIT_DESCRIPTION = (
-    "Write (or rewrite) your report — this is the ONLY way it is saved. Provide the whole report "
-    "each call; a call overwrites the last, so refine across calls. Write plain text: the harness "
-    "typesets the final report from it. Every number sits in a quote of the receipt it comes from, "
-    '{{handle "exact text"}}, or in text that cites that receipt as [handle]; any receipt you can '
-    "read may ground any field. Place figures by their receipt handle in `figures`. Free: costs no "
-    "tool budget."
+    "Write plain text: the harness typesets the final report from it. Every number sits in a quote "
+    'of the receipt it comes from, {{handle "exact text"}}, or in text that cites that receipt as '
+    "[handle]; any receipt you can read may ground any field. Place figures by their receipt "
+    "handle, one '- handle' line under # figures."
 )
 
-#: Rendered pages shown per draft preview; the media guard bounds a request, this bounds the draft.
-MAX_PREVIEW_PAGES = 12
-PREVIEW_DPI = 80
-
-
-def reviewer_draft_view(
-    report_dir: Path,
-    run_id: str,
-    lookup: ReceiptLookup,
-    *,
-    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-) -> Callable[[ReviewerReport], tuple[str, list[FigureRef]]]:
-    """``review_report``'s view of the reviewer's own draft: the rendered pages, as images.
-
-    The polishing pass (human 2026-09-24) happens at the source: the reviewer sees what its report
-    will look like and edits the report again, never the ``.tex``. The draft renders into
-    ``report_dir/draft/``, apart from the final report, and a render problem is shown in place of
-    pages so the view never fails the call.
-    """
-    draft_dir = report_dir / "draft"
-
-    def view(report: ReviewerReport) -> tuple[str, list[FigureRef]]:
-        shutil.rmtree(draft_dir, ignore_errors=True)
-        rendered = render_report(report, lookup, draft_dir, run_id=run_id, own_source=REVIEWER_SOURCE)
-        if rendered.problems:
-            return ("Your draft cannot be rendered yet:\n" + "\n".join(f"  - {p}" for p in rendered.problems), [])
-        compiled = compile_report(draft_dir, run=run)
-        notes = [f"  - {p}" for p in compiled.glyph_problems]
-        if compiled.pdf_path is None:
-            detail = "; ".join(compiled.errors) or "no PDF was produced"
-            return (f"Your draft rendered but did not compile ({detail}).\n" + "\n".join(notes), [])
-        pages = _rasterize(compiled.pdf_path, draft_dir, run=run)
-        text = (
-            f"Your draft as it will be typeset: {len(pages)} page image(s) attached"
-            + (f" (first {MAX_PREVIEW_PAGES} shown)" if len(pages) == MAX_PREVIEW_PAGES else "")
-            + ". Read them for wording, section order and figure/table placement, then edit_report "
-            "again to polish."
-        )
-        return ("\n".join([text, *notes]), pages)
-
-    return view
-
-
-def reviewer_text_view(lookup: ReceiptLookup) -> Callable[[ReviewerReport], tuple[str, list[FigureRef]]]:
-    """``review_report``'s view of the draft when no ``.tex`` is configured: its text and figures.
-
-    A reviewer report places figures by receipt handle, so the analysts' figure-record view cannot
-    show it; this reads each figure's receipt instead.
-    """
-
-    def view(report: ReviewerReport) -> tuple[str, list[FigureRef]]:
-        lines = [f"{label}: {value}" if isinstance(value, str) else f"{label}:\n" + "\n".join(
-            f"  - {item}" for item in value) for label, value in report.prose_fields().items()]
-        figures: list[FigureRef] = []
-        for number, handle in enumerate(report.figures, 1):
-            receipt = lookup.get(handle)
-            if receipt is not None and receipt.kind == "figure":
-                figures.append(receipt.to_figure_ref().model_copy(
-                    update={"caption": f"Figure {number} — {receipt.caption}"}))
-                lines.append(f"Figure {number}: [{handle}] {receipt.caption}")
-            else:
-                lines.append(f"Figure {number}: {handle} is not a figure receipt you can place.")
-        return ("Your current draft:\n\n" + "\n".join(lines), figures)
-
-    return view
-
-
-def _rasterize(
-    pdf: Path, out_dir: Path, *, run: Callable[..., subprocess.CompletedProcess] = subprocess.run
-) -> list[FigureRef]:
-    if not shutil.which("pdftoppm"):
-        return []
-    prefix = out_dir / "page"
-    run(
-        ["pdftoppm", "-r", str(PREVIEW_DPI), "-png", "-l", str(MAX_PREVIEW_PAGES), str(pdf), str(prefix)],
-        capture_output=True, timeout=120,
-    )
-    now = datetime.now(timezone.utc)
-    pages: list[FigureRef] = []
-    for number, png in enumerate(sorted(out_dir.glob("page-*.png")), 1):
-        pages.append(FigureRef(
-            path=png.resolve(), caption=f"Draft page {number}", mime_type="image/png",
-            produced_by="report_renderer", created_at=now,
-            sha256=hashlib.sha256(png.read_bytes()).hexdigest(),
-        ))
-    return pages

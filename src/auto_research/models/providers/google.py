@@ -211,6 +211,18 @@ def _part_from_dict(data: Mapping[str, Any], types: Any) -> Any | None:
         return None
 
 
+def _document_parts(document: Any, types: Any, plan: MediaPlan | None) -> list:
+    """One document as parts: a note when the guard altered or withheld it, then the bytes."""
+    resolved = plan.resolve(document) if plan is not None else MediaPlan().resolve(document)
+    if resolved.dropped:
+        return [types.Part.from_text(text=resolved.note or "")]
+    parts: list = []
+    if resolved.note:
+        parts.append(types.Part.from_text(text=resolved.note))
+    parts.append(types.Part.from_bytes(data=resolved.data, mime_type=resolved.mime))
+    return parts
+
+
 def _figure_parts(figure: FigureRef, types: Any, plan: MediaPlan | None = None) -> list:
     """Render one figure as Gemini ``Part``s: a caption then the image bytes.
 
@@ -286,13 +298,20 @@ def _to_gemini_contents(
             for part in message.results:
                 for figure in part.figures:
                     figure_parts.extend(_figure_parts(figure, types, plan))
+                for document in part.documents:  # a document the tool opened (R2)
+                    figure_parts.extend(_document_parts(document, types, plan))
             if figure_parts:
                 contents.append(types.Content(role="user", parts=figure_parts))
         elif message.role == "system":
             system_texts.append(message.content)
         else:
             role = "model" if message.role == "assistant" else "user"
-            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=message.content)]))
+            parts = [types.Part.from_text(text=message.content)]
+            for figure in message.figures:  # a user message carrying figures (B6)
+                parts.extend(_figure_parts(figure, types, plan))
+            for document in message.documents:  # and documents (R2)
+                parts.extend(_document_parts(document, types, plan))
+            contents.append(types.Content(role=role, parts=parts))
     return ("\n".join(system_texts) or None), contents
 
 

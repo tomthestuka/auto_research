@@ -44,8 +44,8 @@ roles:
         model: claude-sonnet-5
         vision: true
         priceMTk:
-          input: 3.0
-          output: 15.0
+          input: 2.0
+          output: 10.0
         parameters:
           thinking:
             type: adaptive
@@ -92,8 +92,8 @@ roles:
         vision: false
         documents: true
         priceMTk:
-          input: 3.0
-          output: 15.0
+          input: 2.0
+          output: 10.0
         parameters:
           thinking:
             type: adaptive
@@ -139,6 +139,21 @@ roles:
   # Summarises a finished authoring link's coding transcript into the outcome the lead reads.
   # A bounded single-shot summary against a fixed preserve-list; the verifiable facts (commit
   # sha, gate and review verdicts) are inserted by code, never written by this model.
+  # Condenses the middle of a long turn for members whose provider has no server-side compaction
+  # (B7). Optional: without it such a turn is not condensed and is recorded as such.
+  session_compactor:
+    members:
+      - name: gpt_5_6_luna
+        provider: openai
+        model: gpt-5.6-luna
+        vision: false
+        documents: false
+        priceMTk:
+          input: 0.5
+          output: 4.0
+        parameters:
+          reasoning:
+            effort: low
   compactor:
     members:
       - name: gpt_5_6_luna

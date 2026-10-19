@@ -2040,40 +2040,48 @@ class AuthoringSession:
         a second reset would discard a base ref's worth of nothing, but the disconnect and the
         patch artifact would be repeated for no reason.
         """
-        if self._closed:
+        # Closed only once everything below finished (D8): a close cut short by a cancel — a
+        # human /stop landing while the lead's own close disconnects the coder — leaves the
+        # session open, so the stop's cleanup closes it again and the branch is still reset.
+        # `_closing` keeps a second, concurrent call from running the same steps twice.
+        if self._closed or getattr(self, "_closing", False):
             return
-        self._closed = True
-        if self._env_tools is not None:
-            self._env_tools.close()  # a tool still running writes nothing into the tree being reset
-        # B2: the background drive dies before the backend goes away and before the tree is
-        # touched, so a coder cannot be writing into a worktree that is being reset under it.
-        await self._cancel_drive()
-        await self._backend.disconnect()
-        if self._direct_branch is not None:
-            # Git ignores bytecode and anything an untracked `.gitignore` hides, so `pending_changes`
-            # alone would miss a planted `numpy.pyc` or a hidden `json/` package (B3c-1 reviews
-            # 15-16): bytecode goes, and what was hidden becomes visible to the check and the reset.
-            for step in (remove_untracked_ignores, purge_bytecode):  # each on its own
+        self._closing = True
+        try:
+            if self._env_tools is not None:
+                self._env_tools.close()  # a tool still running writes nothing into the tree being reset
+            # B2: the background drive dies before the backend goes away and before the tree is
+            # touched, so a coder cannot be writing into a worktree that is being reset under it.
+            await self._cancel_drive()
+            await self._backend.disconnect()
+            if self._direct_branch is not None:
+                # Git ignores bytecode and anything an untracked `.gitignore` hides, so `pending_changes`
+                # alone would miss a planted `numpy.pyc` or a hidden `json/` package (B3c-1 reviews
+                # 15-16): bytecode goes, and what was hidden becomes visible to the check and the reset.
+                for step in (remove_untracked_ignores, purge_bytecode):  # each on its own
+                    try:
+                        await asyncio.to_thread(step, self._toolkit_root)
+                    except Exception as exc:  # noqa: BLE001 — reported like a failed reset, never raised
+                        await _emit(self._monitor, "coder.tree_reset.error", level=3,
+                                    summary=f"{step.__name__} failed: {type(exc).__name__}: {exc}",
+                                    data={"error": repr(exc)})
+            if self._direct_branch is not None and self.pending_changes():
+                await _reset_direct_tree(
+                    self._toolkit_root, base_ref=self._base_ref, artifact_dir=self._worktree_base,
+                    monitor=self._monitor, tool_spec=self.tool_spec,
+                )
+            if self._env_tools is not None:
+                # The candidate environments end with the attempt; a committed definition is built
+                # again from the branch (B3c-4).
                 try:
-                    await asyncio.to_thread(step, self._toolkit_root)
-                except Exception as exc:  # noqa: BLE001 — reported like a failed reset, never raised
-                    await _emit(self._monitor, "coder.tree_reset.error", level=3,
-                                summary=f"{step.__name__} failed: {type(exc).__name__}: {exc}",
+                    await asyncio.to_thread(self._env_tools.cleanup)
+                except Exception as exc:  # noqa: BLE001 — reported, never raised from close
+                    await _emit(self._monitor, "coder.env_cand.cleanup_error", level=3,
+                                summary=f"candidate environments not removed: {type(exc).__name__}: {exc}",
                                 data={"error": repr(exc)})
-        if self._direct_branch is not None and self.pending_changes():
-            await _reset_direct_tree(
-                self._toolkit_root, base_ref=self._base_ref, artifact_dir=self._worktree_base,
-                monitor=self._monitor, tool_spec=self.tool_spec,
-            )
-        if self._env_tools is not None:
-            # The candidate environments end with the attempt; a committed definition is built
-            # again from the branch (B3c-4).
-            try:
-                await asyncio.to_thread(self._env_tools.cleanup)
-            except Exception as exc:  # noqa: BLE001 — reported, never raised from close
-                await _emit(self._monitor, "coder.env_cand.cleanup_error", level=3,
-                            summary=f"candidate environments not removed: {type(exc).__name__}: {exc}",
-                            data={"error": repr(exc)})
+            self._closed = True
+        finally:
+            self._closing = False
 
 
 def _build_backend(

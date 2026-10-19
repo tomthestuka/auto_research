@@ -384,7 +384,8 @@ class _FakeTGBot:
         self.sent = []
         self._id = 100
 
-    async def send_message(self, *, chat_id, text, parse_mode=None, reply_markup=None):
+    async def send_message(self, *, chat_id, text, parse_mode=None, reply_markup=None,
+                           disable_notification=None):
         # Shape-complete with the real bot: `reply_markup` is how an inline keyboard rides along,
         # and a fake that omitted it hid the button path from the suite entirely.
         self._id += 1

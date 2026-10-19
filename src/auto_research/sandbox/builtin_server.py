@@ -87,6 +87,7 @@ def bash_exec(command: str, cwd: str | None = None, timeout_s: int = 60) -> dict
             cwd=cwd,
             start_new_session=True,
         )
+        _RUNNING.add(proc)
         try:
             stdout, stderr = proc.communicate(timeout=timeout_s)
             return {"stdout": stdout, "stderr": stderr, "exit_code": proc.returncode}
@@ -104,6 +105,9 @@ def bash_exec(command: str, cwd: str | None = None, timeout_s: int = 60) -> dict
         if proc is not None and proc.poll() is None:
             _kill_process_group(proc)
         return {"stdout": "", "stderr": str(exc), "exit_code": 1}
+    finally:
+        if proc is not None:
+            _RUNNING.discard(proc)
 
 
 @mcp.tool()
@@ -116,5 +120,28 @@ def list_dir(path: str) -> dict:
         return {"path": path, "entries": [], "error": str(exc)}
 
 
+#: Commands in flight. Each runs in its own session (so a timeout kills its whole group), which
+#: also puts it outside the server's own process group: when the server goes, it takes them with
+#: it explicitly, or a command a /stop interrupted outlives the run (ruling D8).
+_RUNNING: set[subprocess.Popen] = set()
+
+
+def _kill_running(*_: object) -> None:
+    for proc in list(_RUNNING):
+        if proc.poll() is None:
+            _kill_process_group(proc)
+
+
+def _on_terminate(signum: int, frame: object) -> None:
+    _kill_running()
+    os._exit(128 + signum)
+
+
 if __name__ == "__main__":
-    asyncio.run(mcp.run_stdio_async())
+    # The client closes stdin (the run ending) and then terminates the server; either way the
+    # commands in flight go first.
+    signal.signal(signal.SIGTERM, _on_terminate)
+    try:
+        asyncio.run(mcp.run_stdio_async())
+    finally:
+        _kill_running()
