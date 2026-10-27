@@ -12,6 +12,7 @@ import errno
 import hashlib
 import json
 import os
+import uuid
 import re
 import stat
 import threading
@@ -356,14 +357,7 @@ class ReceiptStore:
         if (data is None) == (path is None):
             raise ValueError("mint takes exactly one of data= or path=")
         if data is not None:
-            raw = data.encode("utf-8") if isinstance(data, str) else data
-            digest = sha256_bytes(raw)
-            stored = self.blobs / digest[:2] / digest
-            if not stored.is_file():
-                stored.parent.mkdir(parents=True, exist_ok=True)
-                tmp = stored.with_suffix(".tmp")
-                tmp.write_bytes(raw)
-                os.replace(tmp, stored)
+            stored, digest = self.put_blob(data)
         else:
             stored = Path(path).resolve()
             digest = sha256_file(stored)
@@ -404,6 +398,21 @@ class ReceiptStore:
                 handle.write(receipt.model_dump_json() + "\n")
             self._index(receipt)
         return receipt
+
+    def put_blob(self, data: bytes | str) -> tuple[Path, str]:
+        """Store bytes content-addressed under ``blobs/``; ``(path, sha256)``."""
+        raw = data.encode("utf-8") if isinstance(data, str) else data
+        digest = sha256_bytes(raw)
+        stored = self.blobs / digest[:2] / digest
+        if not stored.is_file():
+            stored.parent.mkdir(parents=True, exist_ok=True)
+            tmp = stored.with_suffix(f".{uuid.uuid4().hex}.tmp")
+            tmp.write_bytes(raw)
+            os.replace(tmp, stored)
+        return stored, digest
+
+    def blob_path(self, digest: str) -> Path:
+        return self.blobs / digest[:2] / digest
 
     def mint_input(
         self, text: str, *, kind: str = "result", produced_by: str = "dispatch"

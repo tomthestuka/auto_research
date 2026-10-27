@@ -83,8 +83,8 @@ The graph's `compose_report` node calls `publish_report`; the `.tex`/PDF already
 - `render_html(report, lookup, report_dir, *, run_id, numbers, ledger, own_source="rev", write=True) ->
   HtmlResult(html_path, problems, errors, chains)` — `numbers` is `check_report_fields(...,
   sources=True).numbers`; `ledger` the run's `monitor.jsonl` (absent: the chain shows no
-  arguments). `check_page(path) -> list[str]`; `reproduce_code(receipt, call) -> (code,
-  args_json)`; `HTML_NAME` (`report.html`).
+  arguments). `check_page(path) -> list[str]`; `reproduce_code(receipt, call, lookup=None) -> (code,
+  args_json)` (a `$ref` argument is resolved in the code from the parent's stored bytes); `HTML_NAME` (`report.html`).
 - `publish_report(..., html_path=None)` mints `report.html` as a `rev:` receipt like the others.
 
 ## Dependencies
@@ -105,28 +105,25 @@ The graph's `compose_report` node calls `publish_report`; the `.tex`/PDF already
   `JSONL_NAME` (`report.jsonl`).
 
 ## Changelog
-- 2026-06-03 -> 2026-06-12 — Report composition built: references, figure staging, JSONL/LaTeX writers,
-  ref validation, pdflatex compile loop.
-- 2026-06-22 -> 2026-07-06 — References became `\href{papers/<name>.pdf}{…}` links (`stage_papers`,
-  `validate_report_links`; `validate_latex_figures`); [D1] `_sanitize_href_display` wraps displays in
-  `\nolinkurl{}`.
-- 2026-08-10 — `_errors_with_context` pairs each `!` compile error with its `l.<n>` source line; the
-  reviewer's preamble mandates `graphicx`/`amsmath`/`amssymb`/`hyperref` ([D6]).
-- 2026-09-09 — F5e: `compose_latex_report` replaced by `ReviewerAgent.author_latex_report`, a ReAct loop
-  editing `report.tex` behind a validating `turn_end` ([D1] sanitizer and [D6] preamble carried over).
-  Superseded 09-24.
-- 2026-09-24 — Reviewer as a unit (5c): new `render.py` (`render_report`, `compile_report`,
-  `parse_delimited`, `latex_escape`), `figures.stage_figure_receipts` and `publish.py`; the harness
-  renders the reviewer's plain-text report. lualatex (ruling) with a fallback font chain; closes [D4], [D5], [C4].
-- 2026-09-24 — pdflatex path deleted: `references.py`, `stage_figures`, `stage_papers`,
-  `write_report_latex`, `_sanitize_href_display`, `validate_latex_figures`, `validate_report_links`,
-  `compile_latex`, and `config: report_retry_cap`.
-- 2026-09-24 — Ruling: paper values are attributed, not quoted; the renderer adds the verify-against-
-  the-PDFs list and `publish_report` writes it as `ResearchReport.paper_attributions`.
-- 2026-10-06 — [F26] receipted files read through `provenance.store.read_receipted` (read once, no symlink, hash-checked; a changed file is sent with a note and a `receipt.drift` alert). See `provenance/DOCS.md`.
-- 2026-10-17 — [provenance replay, step 3] `html.py`: `report.html` with per-number provenance popovers (z-chain, rebuilt arguments, copy reproduce code), its own parse-back check; `publish_report(html_path=)`.
-- 2026-10-17 — Step-3 review fixes: numbers keyed by the exact field text (whitespace around a field had unlinked them); `check_table` shared with tex (html-only had skipped the table checks); a receipt table shows its drift note; table cells rendered from their own spans (a cell holding " | " had unlinked its row); scope-only numbers list their holders; figures that are not images link instead of `<img>`; ids hashed unique; `check_page` adds duplicate ids, link schemes, forbidden tags, styles and the loose-number scan, and a refused page is removed; reproduce code checks identifiers and keeps comments one line.
-- 2026-10-17 — Step-3 re-review fixes: paragraph line breaks kept (a numbered list had removed the page); a locator shown only on paper attributions; the scoped popover names the reviewer's citable set; `check_table` refuses a quote split across cells (both formats); reproduce code notes the working folder, output arguments and session state; `check_page` refuses absolute and protocol-relative links.
-- 2026-10-17 — `_unbalanced` takes whole bindings out first (a quote holding braces, a dict a tool printed, had been refused).
-- 2026-10-17 — `check_table` refuses a table receipt that is not evidence (user ruling: a CSV a read or the shell produced is not "a table a tool computed"), in both formats.
-- 2026-10-17 — Figures are embedded in `report.html` as `data:image/…;base64` (the one file sent to a phone carries them; SVG is linked, never embedded); `check_page` accepts only those data URIs. A table receipt must be a toolkit producer's (not a read, the shell, a paper, a commit or the request).
+Compacted 2026-10-19 (every entry); detail in git history.
+
+- 2026-06-03 -> 2026-08-10 — pdflatex report: references, figure staging, JSONL/LaTeX writers, compile
+  loop, `\href` paper links, [D1] `_sanitize_href_display`, `_errors_with_context`, [D6] preamble.
+- 2026-09-09 — F5e: `compose_latex_report` → `ReviewerAgent.author_latex_report` (superseded 09-24).
+- 2026-09-24 — Reviewer as a unit (5c): `render.py` (`render_report`, `compile_report`, `parse_delimited`,
+  `latex_escape`), `figures.stage_figure_receipts`, `publish.py`; lualatex (ruling); closes [D4], [D5],
+  [C4]. Deleted `references.py`, `stage_figures`, `stage_papers`, `write_report_latex`,
+  `_sanitize_href_display`, `validate_latex_figures`, `validate_report_links`, `compile_latex`,
+  `report_retry_cap`. Ruling: paper values attributed (`paper_attributions`).
+- 2026-10-06 — [F26] receipted files read through `provenance.store.read_receipted`.
+- 2026-10-17 — Provenance replay step 3 (+ two review rounds): `html.py`, `report.html` with per-number
+  popovers, `publish_report(html_path=)`, `check_page`, `check_table` (both formats), `_unbalanced`.
+  User ruling: a table receipt must be evidence. Figures embedded as `data:image/…;base64`, SVG linked.
+- 2026-10-26 — `reproduce_code(lookup=)`: arguments passed by `$ref` stay references in the JSON and
+  a `_ref` resolver in the notebook lines reads each from the run's receipt store, so the rerun
+  receives the values the call did (driven by `tests/test_refs.py`).
+- 2026-10-26 — Review round 1: the chain's data column shows each result a step took by `$ref`
+  (`_ref_html`, "passed by $ref, step n"); the reproduce resolver reads the returned-value blob
+  and asserts its sha256 before use.
+- 2026-10-26 — Review round 2: `check_page` reads the two reproduce shapes as exact alternatives, and a
+  call with references must use the `_ref(...)` shape.

@@ -103,6 +103,14 @@ class SeatRouter:
     def viewable(self, key: str | None) -> set[str]:
         return set(self._viewable.get(key or "", ()))
 
+    def show(self, key: str, handles: Iterable[str]) -> None:
+        """Make ``handles`` viewable for ``key`` — the receipts a brief it was handed names.
+
+        Viewable, never citable, exactly like a message's: the seat can open them and pass them
+        to a tool by ``$ref``, and its claims rest on what its own tools return.
+        """
+        self._viewable.setdefault(key, set()).update(handles)
+
     def outstanding(self, key: str | None) -> list[str]:
         """What ``key`` could still hear back from: the human, and seats it resumed."""
         pending = ["the human"] if self._open_human.get(key or "", 0) > 0 else []

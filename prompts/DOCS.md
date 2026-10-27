@@ -97,57 +97,32 @@ logic here.
 - `status_monitor.md` — system prompt for the `/status` reporter over the monitor ledger.
 
 ## Changelog
-Compacted 2026-09-01, again 2026-09-24 and 2026-10-07 (detail in git history).
+Compacted 2026-09-01, again 2026-09-24, 2026-10-07 and 2026-10-19 (every entry); detail in git history.
 
-- 2026-05-26 -> 2026-06-22 — Prompt set built (reviewer, librarian, worker, lead, `coder`, and the
-  code-review-only `analyst_colead.md`); §9.6 failure classification + `ask_human`; `coder.md` package
-  shape, `obsdb_catalog` writer, `call_timeout_s`; analysis is tool-driven; positive-action style.
-- 2026-06-24 -> 2026-06-26 — `reviewer.md` flag→edge mapping (fix-list #1); lead: two-halves
-  structure, `obsdb_catalog` data policy, `plan_and_debate` for non-trivial design (fix-list #1–#4,
-  §5.5); `test_repro…` convention in lead/coder/co-lead; per-test-outcome determinism in `coder.md`.
-- 2026-06-30 -> 2026-07-02 — `analyst_colead.md` reduced to one approve-or-reject bar, all blockers
-  in round 1 (live run `…140117`); [A6] review figures only from a separate plotter tool, and
-  `coder.md`'s FigureRef capture convention (`save_path`/`save_path_prefix`).
-- 2026-07-29 — `status_monitor.md` added, moved out of a string literal in `hitl/commands.py` (§4).
-- 2026-09-01 — `ask_human`/`plan_and_debate` named conditionally in lead, reviewer and coder prompts
-  (absent headless); both published benchmark batches ran the old unconditional text.
-- 2026-09-09 — F8: lead and worker prompts sectioned, every prompt's lines ≤159 chars (guard test);
-  F5/F9: turns end with `turn_end`; status is agent-declared `succeeded`/`failed`, default `failed`.
-- 2026-09-24 — `librarian_io.md` rewritten for the research loop (plan→search→read→follow→stop, cite
-  by handle); 3–6-term queries, prefixed identifiers; papers read as attached PDFs and attributed with
-  their place (`{{lib:p3 "value" Table 2}}`), web pages quoted; domain-neutral examples.
-- 2026-09-24 — Provenance P2 (0f): worker and lead cite a receipt for every number, `{{handle "…"}}`
-  pins a span; ruling: the worker may do plain arithmetic on receipted numbers via `python -c`.
-- 2026-09-25 — [G15] `coder.md` gains "Results the runtime can cite — the return contract every
-  tool meets" (rules 1–5), matching the gate's `layer_b.returns.*` checks (peer 02).
-- 2026-09-25 — [R1/R2] `reviewer.md` rewritten for `assign_to`: scoping section, following up
-  results, Next steps, human reply as a nudge; `librarian_io.md`: every pass carries the
-  reviewer's questions.
-- 2026-09-25 — [E12] `analyst_worker.md`, `analyst_lead.md`, `coder.md`: `ask_human`,
-  `plan_and_debate` and `ask_lead` became `message` (to a member, `lead` or `human`) with
-  `wait_for_reply`; worker and lead gain a short "your team is one message away" paragraph (texts
-  are informal, claims rest on own receipts, a finished member is resumed, a filed report stays
-  filed). The conditional-address check in `tests/test_prompts.py` now keys on the `human` address.
-- 2026-09-25 — [E12] `analyst_lead.md`: `drive_coder` → `message` to `coder` throughout (the fold);
-  `mid_turn` kept.
-- 2026-09-25 — [R7] Evidence is produced, not read: `reviewer.md` ("Every number comes from
-  evidence": toolkit results, commits, papers; reads and messages are navigation; gaps in words;
-  follow_up exempt), `analyst_lead.md` (commit receipts; code facts in words), `analyst_worker.md`
-  (no `python -c` arithmetic: derived values from a toolkit tool, requested via `tool_request`),
-  `librarian_io.md` (a web page is a lead to its paper).
-- 2026-10-07 — **`analyst_colead.md`: production-threatening issues only** (user, after the B5 live
-  cell: 12 co-lead rejections over 3 tools). An issue is raised only when a real run would hit it and
-  nothing already catches it (gate in the package environment, jail, receipts, lead and reviewer,
-  human merge), and names that run; `lead_rebuttal` handling unchanged. **`coder.md`** (env plan T1):
-  each test marked by class per the toolkit's root `conftest.py` (unmarked, `slow`, `live` opt-in);
-  the gate's run has no network, so a tool also needs tests that pass offline.
-- 2026-10-17 — `status_monitor.md`: names its fourth tool, `read_file(offset, limit)` over the run's log.
-- 2026-10-17 — Reviewer and librarian prompts (user): the reviewer consults the librarian before each decision (new section "Consult the librarian before deciding"; librarian bullet, follow-up rule and team scope updated); the librarian is a deep research agent (published literature first and the only source backing a value, then documentation, software manuals, code repositories, data-product notes, conference material and community discussions via the `web` source and `web_fetch`; a web page supports a finding stated in words). `analyst_lead.md` librarian description widened to match. No code change: the librarian already had the `web` source.
-- 2026-10-17 — Stateless review of the prompt change applied: the reviewer assigns the librarian for researched answers and citable findings (keeping one pass to compare the analysis result with published values) and messages it for a quick check only after its first pass (a text to a seat that has not started is queued); a value from a librarian text becomes citable through `read_paper` or a filed report; the duplicated follow-up bullet removed; analysts look up what a data step needs, the librarian researches practice and pitfalls; `analyst_worker.md` librarian scope widened to match. Open (src/, not changed): `web_fetch` description still says to quote page text; `LiteratureFinding.claim`, `ReviewerReport` and reviewer refusal text still say literature.
-- 2026-10-17 — `reviewer.md`, `analyst_worker.md`, `analyst_lead.md`, `librarian_io.md`: write every number in digits (user ruling: a number spelled out is not grounded, so the agents write digits rather than the check reading words).
-- 2026-10-17 — The digits line drops its reason clause; "state … in words" became "without a value" (`analyst_lead.md`, `librarian_io.md`, and the grounding refusal in `provenance.bindings`), so a refusal never invites a spelled-out number; `reviewer.md` says a report goes to the human "as a document".
-- 2026-10-18 — [A1] "The report form": `analyst_worker.md` (Writing your report) and `analyst_lead.md` (How your turn works) give each field one job and say each field is its own argument of `edit_report` — `summary` a 3–5-sentence briefing, `findings` the results one per item with receipts, `cited_figures` an array of `{source, index}` objects (`self` for the worker, the worker key for the lead, with an example), `status` the outcome; `librarian_io.md` (What you produce) applies the same summary/findings split.
-- 2026-10-18 — [B6/B7] New `session_compactor.md` (prompt role `session_compactor`): condenses the middle of a long turn — the work in order with each result's receipt handle, numbers copied with their handle, decisions, failures, team texts, the report's state — under `Task` / `Done so far` / `Open` / `Next` in `<summary>` tags, text only. It is both the `instructions` of Anthropic's server-side compaction and the system prompt of the runtime's summariser for every other provider. `analyst_worker.md`: the earlier turns open each new turn, each earlier tool output one line with its `view_receipt` handle (memory.md retired).
-- 2026-10-18 — [A7] `analyst_worker.md`, `analyst_lead.md`, `librarian_io.md`, `reviewer.md`: the report is one text document, one `# <block>` per field, written with `write_report` and changed with `edit_report` (old_string copied exactly from the draft, replaced by new_string); "provide the whole report each call" removed; figures are `- [source:index]` lines under `# figures`; the worker's tool request is the `# tool_request` block.
-- 2026-10-18 — [B18] `review_report` erased: `analyst_worker.md` (a figure's `[self:index]` label arrives with the tool result that made it and in `your_figures`; receipts open each tool result), `analyst_lead.md` (`worker_reports` and `figure_catalog` in the task carry the reports and every figure's label), `librarian_io.md` (each opened document names its handle in its reply), `reviewer.md` (polish with `edit_report`; `turn_end` typesets and names what it cannot); "a refused call shows the document whole".
-
+- 2026-05-26 -> 2026-07-02 — Prompt set (reviewer, librarian, worker, lead, `coder`, `analyst_colead.md`);
+  §9.6 failure classification; positive-action style; fix-list #1–#4; `test_repro…` convention;
+  co-lead one approve-or-reject bar; [A6] separate plotter tool, `coder.md` FigureRef capture.
+- 2026-07-29 -> 2026-09-09 — `status_monitor.md` (§4); `ask_human`/`plan_and_debate` conditional; F8
+  sections, lines ≤159 chars; F5/F9 `turn_end`, status `succeeded`/`failed`, default `failed`.
+- 2026-09-24 — `librarian_io.md` research loop, paper values attributed; P2: a receipt for every
+  number, `{{handle "…"}}`; ruling: worker arithmetic via `python -c` (superseded by R7).
+- 2026-09-25 — [G15] `coder.md` return contract (rules 1–5); [R1/R2] `reviewer.md` for `assign_to`;
+  [E12] `message` + `wait_for_reply` replace `ask_human`/`plan_and_debate`/`ask_lead`/`drive_coder`;
+  [R7] evidence is produced, not read (derived values via `tool_request`).
+- 2026-10-07 — `analyst_colead.md`: production-threatening issues only (user, after the B5 live cell);
+  `coder.md` (T1): tests marked unmarked/`slow`/`live`, offline tests.
+- 2026-10-17 — `status_monitor.md` names `read_file(offset, limit)`; (user) reviewer consults the
+  librarian before deciding, librarian a deep research agent (+ stateless review); every number in
+  digits (user ruling); "in words" → "without a value".
+- 2026-10-18 — [A1] the report form; [B6/B7] `session_compactor.md` (role `session_compactor`); [A7]
+  report as one text document (`write_report`, `edit_report`, `# <block>`); [B18] `review_report` erased.
+- 2026-10-26 — Evidence-gated debate and receipt references (audit of run 32814459; research on
+  evidence-gated debate): `analyst_worker.md` — "Pass a tool's output on by reference" (`$ref`),
+  "Weighing what you are told" (every incoming text a claim to check: open its receipt or reproduce
+  it; settle your own result first; change a result for a receipt, with old value, new value and
+  the receipt; a questioned choice runs both ways). `analyst_lead.md` — "Adjudicating on evidence"
+  (open receipts before deciding; checked evidence outweighs agreement; a probe names the deciding
+  computation and keeps the dissent; handles, not numbers, in probes and briefs). `reviewer.md` —
+  name results by handle in `follow_up`; weigh claims by their receipts.
+- 2026-10-26 — `analyst_worker.md`: a call that types a value a tool result holds is answered with the
+  reference to write (user ruling, the runtime refuses the copy).

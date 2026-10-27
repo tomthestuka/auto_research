@@ -8,6 +8,7 @@ is overridden (and said so).
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import uuid
@@ -45,6 +46,8 @@ class CallReceipts:
     def header(self) -> str:
         """The line the model sees first, naming what it can cite from this call."""
         parts = [f"[receipt {self.result.handle}]"]
+        if self.result.parents:
+            parts[0] += " ← " + ", ".join(self.result.parents)
         for product in self.products:
             label = product.caption if product.kind == "figure" else Path(product.path).name
             # One line, whatever the tool put in a caption or a file name: a newline there would
@@ -224,6 +227,8 @@ def receipt_call(
     env: str | None = None,
     env_default: bool = True,
     env_untested: bool = False,
+    parents: Sequence[str] = (),
+    returned: Mapping[str, Any] | None = None,
 ) -> CallReceipts:
     """Mint the call's result receipt and one receipt per figure / data file it produced.
 
@@ -236,6 +241,11 @@ def receipt_call(
     (default: the configured allow-list). A tool's output, or a symlink planted in a writable
     folder, can name any host file; receipting one would put its bytes behind a handle any role
     can view (F22, 2026-10-06). Dropped with a note.
+
+    ``parents``: the receipts the call's ``$ref`` arguments resolved from (``provenance.refs``);
+    every receipt the call mints names them, beside the producers of the files it read.
+    ``returned``: the keys a toolkit tool returned beside its stdout; stored as one JSON blob and
+    named on the result receipt (``returned_sha256``), which is what a ``$ref`` resolves against.
     """
     reachable = reachable or _allow_listed
     state = state or CallInputs(started_ns=call_started_ns())
@@ -247,9 +257,18 @@ def receipt_call(
         toolkit_root=(Path(toolkit_root).resolve()
                       if commit is not None and produced_by.startswith(TOOLKIT_PRODUCER_PREFIX) else None),
         args=dict(args), inputs=state.inputs, failed=failed, env=env, env_default=env_default,
+        parents=list(parents),
         **({"env_untested": True} if env_untested else {}),
     )
     extra = dict(fields or {})
+    if returned:
+        # Key order as the tool returned it: a consumer may iterate the dict.
+        extra["returned_sha256"] = store.put_blob(json.dumps(dict(returned), default=str))[1]
+        # The call's arguments under their own hash (`args_sha256`), so a value the call was
+        # given and merely echoes is known as the caller's parameter (`refs.RetypeCheck`).
+        from auto_research.provenance.calls import canonical_args
+
+        store.put_blob(canonical_args(dict(args)))
     result = store.mint(kind=kind, data=text, **common, **extra)
     out = CallReceipts(result=result)
 

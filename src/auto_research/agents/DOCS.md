@@ -635,7 +635,9 @@ Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
     rebuilt from the ledger (`AgentRole._history_seed`, indexed), then the task and peer
     reports; runs the inner ReAct loop over `SandboxToolProvider` when `sandbox` + `registry`
     are attached and returns the `AnalystReport` it filed. With no sandbox/registry it falls
-    back to a plain structured call.
+    back to a plain structured call. The toolkit results its task names (`_brief_handles`: a
+    lead's probe, a reviewer's follow-up) become viewable on its channel (`SeatRouter.show`), and
+    its provider's `ref_handles` is its citable scope plus everything viewable, read at each call.
   - `last_tool_results` → `list[ToolResult]` — populated by the latest ReAct loop for
     consensus peer summaries.
   - `is_alive` → `bool` — `True` when no sandbox attached; delegates to
@@ -711,227 +713,161 @@ Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
   alone waits for the next turn.
 
 ## Changelog
-Compacted 2026-09-01 and again 2026-09-24 (every entry), and 2026-10-07 (the 2026-10-06/07
-entries); detail in git history.
+Compacted 2026-09-01 and again 2026-09-24 (every entry), 2026-10-07 (the 2026-10-06/07
+entries) and 2026-10-19 (every entry); detail in git history.
 
-- 2026-05-26 -> 2026-06-18 — Reviewer, librarian, worker and lead wrappers (native structured
+- 2026-05-26 -> 2026-06-30 — Reviewer, librarian, worker and lead wrappers (native structured
   output, bounded schema retries, `Sandbox`/`ReadOnly`/`SourceToolProvider`); Phase 2 added
   `clarify_for_author`, `AnalystColeadAgent.review_tool`, `ask_human`, `decide_authoring`,
-  `data_catalog`.
-- 2026-06-22 -> 2026-06-30 — `_react` returns `(messages, figures, documents)` with split call/result
-  events; `open_paper`; FS jail (`PathGuard`); `free_tools`/`absolute_cap`, `plan_and_debate`;
-  `finalize_authoring_outcome`; `drive_coder`/`submit_for_review`/`respond_to_review`,
-  `drive_authoring`.
-- 2026-07-06 -> 2026-07-14 — [F4] `_parse_tool_figures` drops a bad figure with a note; [A8] ordered
+  `data_catalog`. `_react` returns `(messages, figures, documents)`; `open_paper`; FS jail
+  (`PathGuard`); `free_tools`/`absolute_cap`, `plan_and_debate`; `finalize_authoring_outcome`;
+  `drive_coder`/`submit_for_review`/`respond_to_review`, `drive_authoring`.
+- 2026-07-06 -> 2026-07-31 — [F4] `_parse_tool_figures` drops a bad figure with a note; [A8] ordered
   `tool_specs` chain; [I1]/[I10]/[F8] `web_search` for every role, paged `web_fetch`, line-range
-  `read_file`; V-4 `edit_report`/`review_report` with cited figures replace figure-dedup.
-- 2026-07-20 -> 2026-07-28 — `data_catalog` served from `research_toolkit.catalog_utils`;
-  `_record_context_edit`; `AgentRole.run_control`/`agent_key` + steer inbox; deferred tool loading
-  under `tool_search_enabled` (LIVE-VERIFIED 2026-07-28, enabled).
-- 2026-07-29 -> 2026-07-31 — Events actored by indexed `agent_key`; stop-flag reading deleted (`/stop`
-  cancels); the lead publishes its `AuthoringSession` on `RunControl`; new `MonitorToolProvider`
-  (`brief_history`/`ledger_event`/`ledger_grep`) + `StatusMonitorAgent` (`status_react_loop_cap`).
+  `read_file`; V-4 `edit_report`/`review_report`; `data_catalog` from
+  `research_toolkit.catalog_utils`; `_record_context_edit`; `AgentRole.run_control`/`agent_key` +
+  steer inbox; deferred tool loading (`tool_search_enabled`, LIVE-VERIFIED 2026-07-28); stop-flag
+  reading deleted (`/stop` cancels); the lead's `AuthoringSession` on `RunControl`;
+  `MonitorToolProvider` (`brief_history`/`ledger_event`/`ledger_grep`) + `StatusMonitorAgent`
+  (`status_react_loop_cap`).
 - 2026-08-05 -> 2026-08-31 — `_react` appends the received `ModelResponse` whole (`AssistantToolUse`
-  deleted); terminal composes declare the loop's tools with `tool_choice="none"`; `_OPEN_PAPER_MAX_MB`
-  deleted (limits live in the adapters); [F11] a malformed `offset`/`limit` returns `is_error`.
-
-- 2026-09-01 — `_EVENT_ARG_CAP`/`_EVENT_RESULT_CAP` replaced by `_event_arg_cap()`/
-  `_event_result_cap()` reading `env.ledger_caps()`. New `tests/test_live_no_hitl.py`: headless roles
-  lose exactly `ask_human`/`plan_and_debate`; LIVE-VERIFIED, each role saw the closed channel.
-- 2026-09-02 — The lead became one ReAct loop filing forms (`run_cycle`: `author_chain`,
-  `hold_authoring`, `request_another_round`, `submit_adjudication`, `submit_terminal_report`);
-  `adjudicate`/`judge_convergence`/`decide_authoring`/`finalize_authoring_outcome` deleted.
-- 2026-09-02 — `_react` gained `terminal_tools`; drive tools declared on `cycle.authoring_enabled`
-  (`_authoring_declared()`); a committed link's coding span dropped; `drive_authoring` kept for the
-  benchmark. LIVE-VERIFIED (`tests/test_live_lead_cycle.py`); new `tests/test_live_form_shapes.py`.
-- 2026-09-02 — Forms topology LIVE-VERIFIED in production: an empty `author_chain` was refused and
-  refiled, a link committed, and the dropped span returned the lead to its pre-coding context.
-
-- 2026-09-12 — A1–A11: every form but `author_chain` deleted (with the stage constants,
+  deleted); terminal composes use `tool_choice="none"`; `_OPEN_PAPER_MAX_MB` deleted; [F11] a
+  malformed `offset`/`limit` returns `is_error`.
+- 2026-09-01 -> 2026-09-02 — `_event_arg_cap()`/`_event_result_cap()` read `env.ledger_caps()`;
+  `tests/test_live_no_hitl.py` LIVE-VERIFIED. The lead became one ReAct loop filing forms
+  (`run_cycle`: `author_chain`, `hold_authoring`, `request_another_round`, `submit_adjudication`,
+  `submit_terminal_report`;
+  `adjudicate`/`judge_convergence`/`decide_authoring`/`finalize_authoring_outcome` deleted);
+  `_react` `terminal_tools`; `_authoring_declared()`; LIVE-VERIFIED
+  (`tests/test_live_lead_cycle.py`, new `tests/test_live_form_shapes.py`) and in production.
+- 2026-09-12 -> 2026-09-13 — A1–A11: every lead form but `author_chain` deleted (stage constants,
   `_STAGE_FORMS`, `LEAD_CYCLE_TERMINALS`, `_author_chain`, `_drive_one_link`); `run_cycle` ends on
-  `turn_end` (`lead_turn_problems`); `_ChainDriver.advance` opens the next link on a tool result.
-- 2026-09-12 — `_react` gained `share_messages`; `AnalystReport` gained `rework`/`rationale`/
-  `what_to_probe`, `status` regained `needs_human`; `edit_report_tool_def(prose_fields,
-  status_values)` gives each role its surface; the reviewer loop gained `terminal_tools={turn_end}`.
-- 2026-09-12 — A2: one steer drain per iteration, held while the last turn has an unresolved
-  server-tool call (`_last_turn_has_unresolved_server_tool`); nothing appended to a paused turn.
-- 2026-09-12 — B3–B6: `drive_coder` returns at once (`start_drive`); new `check_coder`; a stopped
-  coder reaches the lead through A2's queue; B6 drop on committed links only (reversed 09-13).
-- 2026-09-12 — `tests/test_live_form_shapes.py` renamed `tests/test_live_lead_providers.py`: schema,
-  whole `run_cycle` and own-history replay cells per vendor.
-- 2026-09-12 — `check_coder` actually routed; `_ChainDriver._open` uses `start_drive`;
-  `execute_submit` refuses (budget-free) while the coder is working.
-- 2026-09-12 — `clarify_for_author` and `_ClarifyReply` deleted: the coder's question enters the
-  lead's loop via `_coder_questions` as a `[coder asks]` turn under A2's hold rule.
-
-- 2026-09-13 — `_drop_coding_middle` (it stranded an unpaired tool call) replaced by
-  `_compact_coding_span`: the opening call's answer becomes the link outcome, facts written in
-  Python; both arms compact (reverses B6). New `compactor` role; new `_unanswered_call_ids`.
-- 2026-09-13 — `_build_session` is the only method a test double replaces (`tests/chain_stub.py`
-  `StubSession`); new `AUTO_RESEARCH_LEAD_SEAT` for the chain live test.
-- 2026-09-15 — `check_coder` rate-limited (`check_coder_min_interval_s`, default 900 s; replaced
-  09-24) and the four strings urging polling corrected.
-- 2026-09-15 — Ruling: `turn_end` is the only exit. `_react` gained `require_terminal` (lead, then
-  worker): a silent turn gets `_TERMINAL_REQUIRED_NUDGE`, stating the channel rule (human wording);
-  the `len(content) > 40` finish test removed; `refusal`/`transient` still end the loop.
-- 2026-09-15 — Grace window (`react_grace_rounds`, default 20) once a budget is spent; closing it
-  unfiled raises `ReactBudgetExhausted`; `turn_end` joins `_CYCLE_FREE_TOOLS`. Escape shapes
-  (`escape_by_prose`/`_claiming_done`/`_idling`) in `test_live_turn_end_shapes.py`, all pass live.
-
-- 2026-09-24 — (95) Librarian: `research()` is one `_react` loop over new `LibrarianToolProvider`
-  filing a `LiteratureReport` ([I2], [I9], §2b); `compose_search_strategy` … `_dedup_results` (ten
-  pipeline methods) deleted; failures recorded as `librarian.source.error`.
-- 2026-09-24 — (85) `check_coder` replaced by blocking `wait_coder` (`env.coder_wait_limits_s`: floor
-  60 / default 300 / max 1800 s); `drive_coder` queues, `mid_turn` steers; `execute_submit` waits
-  (`_wait_before_submit`, `_submit_now`); `check_coder_min_interval_s` removed.
-- 2026-09-24 — (5c) `reviewer_tools.py`: the reviewer's report surface and `turn_end` check, which
-  renders and compiles the report; ruling: a number in `follow_up` must be grounded.
-- 2026-09-24 — (0f) Provenance P1/P2: both providers mint receipts per call (inputs hashed first,
-  figures re-hashed from the file, written files as `data`, `web_fetch` as `web`);
-  `report_provenance_problems` checks each report in `edit_report` (as notes) and at `turn_end`.
-- 2026-09-24 — `ReportWorkspace` gained `receipts`/`receipt_source`/`itemised`/`provenance_check`;
-  `edit_report_tool_def(..., report_model=)` derives properties from the model; `extra_tools`;
-  per-round `ScopedLookup` (`roles._receipt_scope`).
-- 2026-09-24 — Report tools serve a plain model (`_edit_plain_report`, `ReportWorkspace.draft_view`/
-  `edit_description`); `ReadOnlyToolProvider(include_open_paper=False)`;
-  `tests/test_provenance_wiring.py`.
-- 2026-09-24 — P7 live shapes (`ungrounded_number`, `unknown_handle`, `misquoted_span`,
-  `quote_without_text`, `flagged_quote`): four refused and recovered LIVE, `flagged_quote` never
-  reached; `LeadCycleOutcome.verdict` deleted; `coder_still_running` seed closes on wait/submit.
-- 2026-09-24 — `roles._mint_task_input` receipts the task on entry to `analyze`/`run_cycle`
-  (`[input:…]`).
-- 2026-09-24 — (5c) `ReviewerAgent` is one loop over one report on the generic `edit_report`;
-  `compose_machine_report`/`author_latex_report` deleted; §2b closed for the reviewer.
-- 2026-09-24 — (95) `search_literature` uses `search_with_match` with a fallback note; prompt tuned;
-  `read_paper` attaches the PDF natively (ruling: no Docling, no vendor citation feature).
-- 2026-09-24 — Shared `agents/paper_tools.py` (`read_paper`, `PaperReader`, `format_ids`,
-  `ids_from_stem`) serves librarian and reviewer (ruling); `ReviewerPaperReader` deleted.
-- 2026-09-24 — Librarian shape matrix (`tests/test_live_librarian_shapes.py`,
-  `test_librarian_shape_contract.py`); citations scoped via `ScopedLookup`. Rulings: papers cited,
-  never quoted (option A), then per-number attribution with a locator (`attributed_values`).
-- 2026-09-24 — Reviewer `review_report` without `tex` uses `reviewer_text_view` (crash fix); prompt
-  asks for located paper attributions. Shape `attribution_without_locator` LIVE-VERIFIED.
-- 2026-09-25 — [I4] `_react` answers a call carrying `arguments_error` with an `is_error` result asking
-  for valid JSON, and never executes the tool on empty arguments.
-- 2026-09-25 — [G14] `_parse_tool_figures` moved to `sandbox.runner.parse_tool_figures`;
-  `SandboxToolProvider` imports it (behaviour unchanged).
-- 2026-09-25 — [G15] `_normalize_tool_raw`, `_PROTOCOL_KEYS` and the result-text rule moved to
-  `sandbox.runner` (`normalize_tool_raw`, `PROTOCOL_KEYS`, `tool_text`); behaviour unchanged.
-- 2026-09-25 — [R1] `ReviewerAgent.review` is one turn of the sole-I/O reviewer: `stage` and
-  `iterations_left` replaced by `arrived`, `previous`, `human_nudges`, `human_files`, `budgets`,
-  `human_attended`; `reviewer_turn_problems` routes on `assign_to` (cap per team), refuses citing
-  an earlier published report, and `reviewer_scope` drops published reports. Role report JSONLs
-  (reviewer, librarian, workers, lead) move beside the ledger (human ruling: out of reach, since a
-  read-back minted a role's own typed numbers). `_react`: a call after an accepted terminal in the
-  same batch is answered and not run (found by an adversarial review: an `edit_report` after
-  `turn_end` replaced the filed report; human ruling, every role).
-- 2026-09-25 — [E12] Quick channel between any two seats: `ChannelTools` (in `_react`, which now
-  wraps `_react_loop`) adds `message` / `view_receipt` / `wait_for_reply` for every graph seat on a
-  `SeatRouter`; `message` never blocks, a finished seat is resumed on its kept turn
-  (`AgentRole.resume`, report final), texts mint no receipt, the human's reply is a nudge. Deleted
-  `ask_human`/`plan_and_debate` (defs, executors, provider branches, `_RECEIPTED` entries) and the
-  providers' `human_handler`/`include_plan_and_debate`/`asked_by`/`model` params; `wait_coder` →
-  `wait_for_reply`; `_coder_questions` deleted (the coder's question reaches the inbox).
-- 2026-09-25 — [E12] `list_peers` (free): each address with its role, model and state (working /
-  finished, a text resumes it / not started), the human when attended, and for the lead its coder.
-  `drive_coder` folded into `message(to="coder")` (user ruling): the lead's `coder` address is
-  declared for the whole authoring cycle, `mid_turn` kept as a coder-only field, the coder reads
-  `[Message from analyst_lead]`; `drive_coder_tool_def`/`DRIVE_CODER_TOOL` deleted,
-  `execute_drive_coder` → `execute_coder_message`; every model-facing mention rewritten.
-- 2026-09-25 — [E12] A seat whose loop can author (`_has_authoring_surface`: a live session or a
-  cycle enabling authoring) and has no router gets a one-seat `SeatRouter` from `_react` itself, so
-  the lead reaches its coder with `message(to="coder")` however it was built (only `run_research`
-  attached the team channel; `attach_lead_runtime` alone left the coder unreachable).
-- 2026-09-25 — [R7] `ReadOnlyToolProvider`: a committing `submit_for_review` mints a `commit`
-  receipt (`_commit_receipted`: tool, SHA, branch, gate/review passed, submissions used/cap), and the
-  in-process `data_catalog` is receipted under `research_toolkit.catalog_utils.data_catalog`.
-  `reviewer_tools.reviewer_claims` / `BRIEF_FIELDS`: the reviewer's `follow_up` is exempt from
-  grounding (a brief); `reviewer_scope` excludes only `input:` (published reports are not evidence).
-- 2026-10-06 -> 2026-10-07 — **Reach.** [F20] The `bash_exec` command-path scan stands down only
-  for a server whose launch recorded `jailed` (`_jail_supersedes_command_check` →
-  `ToolkitRegistry.mcp_jailed`), not on the config's `agent_os_jail`. [F22] A worker's cwd is its
-  own `report_dir`; memory.md moved beside the ledger; a human's files land in
-  `workspace.human_reply_dir`. 2026-10-07: `read_paper(path=)` (librarian, reviewer) reads only the
-  papers folder, where downloads land outside every role's write reach; a human's file stays a
-  `human` receipt.
-- 2026-10-06 — **Env plan B2a/B2b: workers see and choose environments.** `list_env`
-  (`list_env_tool_def`, `execute_list_env`; navigation): the catalogue with fingerprints and
-  `active`/`shell` flags, or one environment's packages, activation variable names and externals
-  (`sandbox.envs.describe`). Every sandbox result carries `[ran in <env> @ <fp12>]`; the turn-start
-  payload names the `environment` (`roles._environment_brief`). `use_env` (`use_env_tool_def`,
-  `execute_use_env`) points the worker's own shell at a catalogue environment (no name returns it;
-  a pipeline environment only when the shell server launched `jailed`); the result carries
-  `[shell in <env>]`. `sandbox.envs.in_environment` (shared with the coder) runs the command under
-  `/usr/bin/env -i` with the jail's `HOME`/`TMPDIR`/`PFILES`, sources the activation, puts the
-  prefix first on `PATH` and the toolkit on `PYTHONPATH`, restores shell state after it, and ends
-  the command with an error when activation fails. The environment is resolved by name every call;
-  a model-supplied `shell_env` is dropped.
-- 2026-10-06 — **Env plan B3b: routing.** `SandboxToolProvider._route_environment`: a toolkit call
-  runs in its package's tested environment (`registry.tool_env` → `ar-<id>`) or in the caller's
-  `env` choice (popped from the arguments; receipts `env_untested`; empty, `null` or `none` is no
-  choice). An unbuilt tested environment, or a pipeline one with the jail off, is an error result.
-  The header names `sandbox.call_environment` and flags an untested environment; a call the sandbox
-  never ran is unstamped. `prompts/analyst_worker.md` says how to choose.
-- 2026-10-06 — **Lead authoring (B3c-1, B3c-4).** `execute_respond_to_review` waits for a working
-  coder before the re-review, and a commit through it mints a `commit` receipt as
-  `submit_for_review` does. Both commit sites return `Not committed: <reason>` as an error, both
-  review calls return an error result on an unreadable changeset, and both answers append the
-  session's `env_note`. The in-process `data_catalog` runs committed toolkit code only
-  (`react._toolkit_clean_head`: an error while the toolkit is dirty; memo keyed on the toolkit
-  commit; re-import purges bytecode and imports under a private `sys.pycache_prefix`).
-- 2026-10-17 — [provenance replay, step 1] `SandboxToolProvider._redirect_figure_args` and the inline path/shell rewrites replaced by `_call_context` + `provenance.calls.resolve_call_args` (one statement of the rewrite); `ToolOutcome.call_context`; `AgentRole._react_loop` records the model's args, the result text and steer messages whole (the `_event_arg_cap`/`_event_result_cap`/`_cap_text` helpers are gone) and the call context on `*.tool_result`. Behaviour unchanged (the path guard still runs first, on the model's arguments, which the rewrite never touches).
-- 2026-10-17 — `ToolOutcome.receipt_call_id` (the minted receipts' `call_id`, from `SandboxToolProvider.execute` and `_receipted`), written as `call_id` on the `tool_result` ledger line; `_call_context` records `runtime_only` (`env` for a toolkit tool declaring none, `shell_env` for a wrapped shell command).
-- 2026-10-17 — [provenance replay, step 2] `SandboxToolProvider._inputs_before` passes the call's mission folders, so each ObsID an argument names is an `obsdb` input; `_receipted(toolkit_root=)` — the lead's in-process `data_catalog` receipt now names the toolkit root and commit.
-- 2026-10-17 — `_inputs_before` treats `obs_db_path` as a mission folder too; `_call_context` records the tool's `module` and `fn` (where a reader imports it from).
-- 2026-10-17 — [provenance replay, step 3] `ReviewerRender` dispatches per format (`tex`, `html`; one format's fault never stops another's), takes the run ledger and the reviewer's scope (`reviewer_turn_problems` passes it), keeps `html` and `html_errors`.
-- 2026-10-17 — `ReviewerRender(report, lookup, scope, numbers)` reuses the validator's own `check_report_fields(sources=True)` answer (`reviewer_turn_problems` computes it only when `html` is configured); each format path is isolated (an exception becomes that format's renderer error); the page is written only when no format has a problem that attempt; problems are deduplicated.
-- 2026-10-17 — `_inputs_before(named=)` passes the mission folders the model named itself; `_call_context` records `workdir` (the REPL's folder) for toolkit calls.
-- 2026-10-17 — [provenance replay, step 4b] One `read_file` for every role: `read_file_tool_def` + `execute_read_file` over `_page` (streamed, `offset`/`limit`, at most `_MAX_WINDOW_CHARS` = 100,000 characters per read in whole lines, a line over `_MAX_LINE_CHARS` cut with `… [+N chars]`, the footer naming the next offset). Reviewer/lead/co-lead as before; analyst workers now in-process through `SandboxToolProvider` (allow-list checked with links resolved, relative paths from the worker's folder, receipted as `read_file`, a record); the status monitor reads its own ledger with it (no path argument). `_page_text_lines` (web_fetch) shares `_page`.
-- 2026-10-17 — Step-4b review fixes: `_bounded_lines` reads a file in bounded chunks (a 300 MB newline-free file had taken the backend to 705 MB) and `_page` stops counting 20 MB past the window ("more lines follow"); a non-regular file (FIFO) and a file with a NUL in its first 8 KB are answered, not read; every read runs off the event loop with a 60 s answer (`_bounded_read`); with the jail on, a worker's read allowed only through the host `/tmp` is sent to its shell (`_in_host_tmp`: the shell's /tmp is private); the status monitor's `read_file` keeps `ledger_event`'s 32,000-character bound; `_int_arg` answers `None`/`inf`/`"2, "` offsets for `read_file` and `web_fetch` (web_fetch had raised out of the loop). Residuals: a read past its timeout leaves its thread behind; a symlink swapped between the guard and `open` (sabotage only).
-- 2026-10-17 — Reader re-review fixes (paging verified against a reference over 600 random files): the count-ahead cap counts newlines (a file of empty lines had been counted whole); the window bound counts each row's real width; a worker's path checks run off the event loop with the read, and its own folder is never taken for host /tmp; `ReadOnlyToolProvider._allowed` answers a NUL path (it had raised out of the turn); `_int_arg` treats only missing/None/"" as the default (`limit=0` is one line); the monitor's tool description names its own 32,000-character bound.
-- 2026-10-17 — The librarian's `web_fetch` description: a page is listed in a finding's support for what it says in words; a value on it points to the paper to open and attribute. Reviewer refusals and `_PASS_NAMES` say "research" for the librarian; the reviewer is told a report to the human goes "as a document".
-- 2026-10-18 — [A1–A4, run 32814459] Report form and diagnostics. `edit_report_tool_def`: the description and the `summary` / `findings` / `cited_figures` / `status` properties carry one definition of the form; `cited_figures[].source` is `self` on the worker surface and the worker key on the lead's. `execute_edit_report` refuses parameter markup naming a declared field inside any argument (`merged_parameter_problem`, also on the plain/reviewer path and the librarian's `_edit_report`), a non-array `cited_figures`/`findings` (`_list_field_problem`; `""`/`"null"` read as not sent) and a malformed entry (`_cited_entry_problem`, its example from `_example_source`) without saving; a saved draft notes dropped figures (`_dropped_figures_note`), a missing `status`, and results in `summary` (`report_shape_notes`, also the librarian's). `worker_report_problems` refuses a `succeeded` report with no findings and drops "or say why none apply"; refusals in it and in `lead_turn_problems` name the field and the fix (clause count unchanged for the lead; the no-findings refusal offers `rework` only while a round remains); the librarian's empty-summary refusal says what to write, and its `edit_report` reads "null" slots as not sent, names a non-list findings/gaps and notes an unsent status. The worker's unreachable "no status" refusal is removed (status defaults to `failed`; the save note covers it). Tests: `tests/test_report_diagnostics.py`. Live (opt-in `AUTO_RESEARCH_LIVE_REPORT_FORM=1`, `AUTO_RESEARCH_REPORT_FORM_SEATS` / `_LEAD_SEAT` / `_DRAWS`): `tests/test_live_report_form.py`. Blue workers ran 3 draws on each of claude-sonnet-5 and gpt-5.6-terra, and the blue lead on gpt-5.6-terra; all were first-try and filed the form. Red workers ran 2 draws per seat; each ended on a valid report, with a longest refusal run of 4. That run caught `</parameter name=…>`, which is now detected. Total $1.01.
-- 2026-10-18 — [B1] The ledger is the session history: `_react_loop` records `turn_start`, every returned model turn whole (`*.model_turn`), the silent-turn nudge (`*.nudge`), figures/documents/result receipt on `*.tool_result`, the grace suffix on `*.tools`, and the lead's coding-span compaction, each as a `data["history"]` part; new `agents/history.py` rebuilds each actor's turns and every call's input from the ledger. `resume()` records its kept turn as the base. `_mint_task_input` returns the handle, named on `turn_start`. No behaviour change to any request.
-- 2026-10-18 — [D1, run 32814459] Contained provider errors: `_react_loop` turns a provider error
-  that escapes retry into `ProviderTurnFailed`, recorded as `<role>.<action>.provider_error`;
-  texts held back from that call return to the inbox (`requeued`; delivered ones travel in the
-  ledger history) and a stale kept turn is cleared.
-  New `ProviderTurnFailed`, `_provider_status`. Tests:
-  `tests/test_provider_containment.py`.
-- 2026-10-18 — [B1 review] Fixes from the stateless review: the turn id is fixed before the loop and named by every part (a background resume beside a new turn had interleaved); a resume that ends unfiled becomes the next resume's base; messages, turns and tool sets ride as insertion-ordered JSON strings (`seed_json`, `response_json`, `tools_json` + `tools_sha256`), since the ledger sorts keys; `rebuild` refuses a results batch that does not answer the model turn before it and an in-memory monitor below chatter 10; the reviewer names its request receipt on `turn_start`; `_result_receipt` scans newest first.
-- 2026-10-18 — [B2/B3] Every graph seat continues its session from the ledger (`AgentRole._history_seed`, ruling "all"): worker, lead, reviewer, librarian open with their latest turn rebuilt in the `indexed` view; memory.md retired (`_append_tool_results_to_memory`, `_STDOUT_MEM_CAP`/`_STDERR_MEM_CAP` and `AnalystWorkerAgent(memory_path=)` deleted). `history.index_outputs`, `INDEX_MARK`, `INDEX_KEEP_CHARS`, `INDEX_ARGS_CHARS`, `Turn.handles`; `apply_view(..., receipts=)`. `view_receipt` pages a long text receipt (`offset`/`limit`). Tests: `tests/test_session_history.py`.
-- 2026-10-18 — [B4] Image budget: new `agents/images.py` (`IMAGE_BUDGET_TOKENS`, `IMAGE_LOW_WATER_TOKENS`, `image_tokens`, `figure_sets`, `plan_evictions`, `placeholder`, `apply_evictions`); `AgentRole._image_view` / `_figure_label`; `_react_loop` sends the budgeted view (D's containment wrap unchanged); `_history_model(evicted=)`; `history.rebuild` applies the recorded evictions. Tests: `tests/test_image_budget.py`.
-- 2026-10-18 — [B7 ruling] `ReviewerAgent.review`: a continuing session is handed only this turn's report (the newest literature report when `arrived="librarian"`, the analysis report when `"analysts"`; no earlier reviewer reports); a fresh session gets them all as before. The lead's payload already carried only the current round's worker reports. The image budget exempts no set (ruling B3). Window from litellm first (`observability.costs.context_window_for`, ruling B5).
-- 2026-10-18 — [B4 review] `plan_evictions` returns `(lasting, this_call_only)`: first-call figures evict conversation sets for that call only, and an over-budget first-call set is named in a user message (it had been dropped silently); image cost capped at the provider's processed size (an 8000x6000 image had cost 61k and could never be shown); set keys `"<id>#<n>"` (repeated ids had shared a key); `_figure_label` prefers this seat's own receipt; the media guard's count ceiling counts only images the provider takes.
-- 2026-10-18 — [B2/B3 review] `ToolResultPart.receipt` carries each output's handle (repeated call ids had indexed the wrong receipt and arguments); outputs with no receipt keep a 1,500-character head; `view_receipt` splits long lines into rows and pages at 20,000 characters (a one-line 100k result had been readable to its first 2,000 only); `_history_seed` is async (ledger read off the event loop), filters by run id, and is contained (unreadable → level-1 event, fresh seed); `_CarriedTools` keeps earlier turns' tools declared; `_react` drops the kept turn when a fresh turn raises; `figure_entries(prefer=)`.
-- 2026-10-18 — [B8 ruling] `IMAGE_LOW_WATER_TOKENS` = 20,000: eviction triggers at 40k and stops at 20k.
-- 2026-10-18 — [A rulings] Human rulings on A1/A2: the merged-parameter refusal (`merged_parameter_problem` and its tag patterns) is removed from every role's `edit_report` — markup in a text field is saved as text and the other notes and `turn_end` carry it; the 3,000-character / sentence-count note is replaced by a warning when the summary is longer than the findings combined, at `edit_report` (`report_shape_notes`, `carries_results`) and at `turn_end` (`execute_turn_end(..., warnings=)`, `report_warnings`, `LibrarianToolProvider._warnings`), which still files the report. The librarian's unopened-handle refusal names the per-pass fix (open it in this pass with `read_paper` or `web_fetch`). Tests: `tests/test_report_diagnostics.py`; `tests/test_live_report_form.py` drops the retired `memory_path` and counts a summary warning as a blue failure. Review fixes: the warning reaches only reports that carry results (where `turn_end` requires findings); on a refusal it follows the fix line as "Also noted", on acceptance it reads "Your report is filed as it stands. Note for your next report"; the live recorder passes `warnings` through.
-- 2026-10-18 — [B6/B7] Compaction: new `agents/compaction.py` (`plan_compaction`, `apply_compaction`, `CompactionPlan`, `summary_message`, `render_middle`, `pin_text`, `is_discovery_turn`, `has_server_compaction`, `KEEP_RECENT_TURNS`); `AgentRole._client_compaction`; `_react_loop` keeps a per-turn `session` (task index, produced receipts, prompt size), queues the pin after a server compaction and condenses before a call on the client path; `_record_context_edit` records `*.compaction`; `history.rebuild` replays `op: "compact"`. Prompt role `session_compactor`. Tests: `tests/test_compaction.py`.
-- 2026-10-18 — [B10 ruling] `tests/test_live_report_rounds.py` deleted: it seeded rounds through the retired memory.md and called `lead.adjudicate`, deleted 2026-09-02; round-1 figures staying citable is covered by the append-only catalog tests and asserted in the B9 live run.
-- 2026-10-18 — [rulings B6/B13/B14] Append-only turns: the B4 mid-turn eviction (`_image_view`, `plan_evictions`, `apply_evictions`) and `_CarriedTools` deleted; first-call figures ride the task message (`ModelMessage.figures`); the boundary seed is one transcript (`history.transcript`, `turn_figure_sets`, `TRANSCRIPT_MARK`; `images.keep_newest`; `_condensed_transcript`); `_client_compaction` became `_segment_boundary` (all earlier assistant turns removed); server compaction's pin restates the task; `_ChainDriver` cuts a finished link at the next complete tool round (`apply_cut`, `pending_cut`, the lead's `_segment_cut` hook); `_compact_coding_span` drops the closing turn. Tests updated: `test_session_history`, `test_image_budget`, `test_compaction`, `test_history_ledger`, `test_lead_forms`, `test_provider_containment`.
-- 2026-10-18 — [B8] `AgentRole.resume` resumes its kept turn from the ledger rebuild (`_kept_turn_rebuild`, `history.conversation(..., run_id=)`), which becomes the kept list; a rebuild that differs from the kept turn in memory is recorded at level 1 (`*.history.unreadable`) and the kept list is used.
-- 2026-10-18 — [D4 ruling] The absolute ceiling gets the budget's grace window (counted in model
-  turns), then `ReactBudgetExhausted`. Grace 0 on a terminal loop raises at the budget cap. Only an
-  accepted `turn_end` (`TurnOutcome.filed_form`, per turn) advances a draft to a report in
-  `analyze` / `run_cycle` / `research`. Six tests that passed only by returning an unfiled draft
-  after 600 turns now file for real (`test_lead_forms`, `test_report_authoring`, `test_sandbox`).
-  [D5 ruling] Texts that arrive in the batch that files are re-queued as they arrived and wake the
-  idle seat (`_requeue_unread`, `SeatRouter.wake`). Tests: `tests/test_react_ceiling.py`.
-- 2026-10-18 — [A5/A7, human rulings] The report is one text document edited like a file: new `agents/report_edit.py` (block tables, `render`/`parse`, Edit semantics `apply_edit`, `snippet`, `outline`, `change`, `edit_tool_def`/`write_tool_def`, `WRITE_REPORT_TOOL`); `react.py` `edit_report_tool_def` (now Edit: `old_string`/`new_string`/`replace_all`), new `write_report_tool_def`, `report_blocks`, `report_document`, `execute_edit_report(workspace, arguments, tool=)` + `execute_write_report`, both providers declare and route `write_report`; `review_report` shows the document; refusals name blocks (`# findings`, `# figures`, `# summary`); librarian (`_edit_report(arguments, tool)`, `_report_tool_defs`, document in `_review_text`) and reviewer (`REVIEWER_EDIT_DESCRIPTION` is now the role text after the layout) share it; `roles.py` adds `WRITE_REPORT_TOOL` to the free-tool sets and `_RESUME_CLOSED`. The interim field-by-field version (add_/replace_/remove_ ops, built the same day) is replaced. A6: a round's draft starts empty. Tests: `tests/test_report_edit.py`, `tests/test_report_diagnostics.py`; every report-tool test fake moved to `write_report`/`edit_report` documents.
-
-- 2026-10-18 — [D5 review fixes] Re-queued texts are the drained `InboxEntry` objects in arrival
-  order (`unshown`; `_requeue_unread(entries)` returns `(sender, kind)`); a seat's turns run one at
-  a time (`_one_turn_at_a_time` on analyze / run_cycle / research / review / resume) and the wake
-  is scheduled as the turn ends; `resume()` skips an empty inbox. Tests in
-  `tests/test_react_ceiling.py` (deadlock, live and idle senders, steer, notice, wake while
-  working, one resume for two texts, next fresh turn reads the text once).
-- 2026-10-18 — [A7 review fixes] `parse` refuses a header-like line that names no block of the role (`# Findings`, `# rework` on a worker), and a slip on a real header (`# findings:`, `#findings`), so nothing folds into the block above; a worker's `# status` is checked against the surface's `status_values` (`needs_human` stays the lead's); replies show the draft as stored (`report_edit.snippet(before, after)` diffs canonical renders; `reply_lines` echoes a write's stored draft when it differs from what was sent, blank lines included); outline notes say what an empty `# rework`/`# accepted`/`# assign_to` reads as; a librarian's support line is the item's last line, its handles are the tokens holding ':', brackets stripped; CRLF content is normalised. Live (`tests/test_live_report_form.py`, $0.42): blue 2 draws on each worker seat and the lead, all first-try with 0 refusals (one write of 1.3–2.9k characters, then edits of 0.5–1.5k); red 1 draw per seat, every attack refused with a reason, both ended on valid reports.
-- 2026-10-18 — [D5 review 2] The turn lock is per event loop and wakes only on a normal return;
-  `drive_authoring` is decorated too; `resume()` runs only for a waking text (message, reply,
-  steer). Tests: a woken resume behind the next fresh turn; the two-idle-seats test now asserts B
-  reads A's answer.
-- 2026-10-18 — [R7/R3/R2/R10, B8 review] A turn's task attaches each figure once per session and within the image budget (`_task_figures`, `_session_figures`; `peer_figures_not_attached` / `figures_not_attached`); the transcript names a task message's figures by receipt. Segment boundary on media pressure for every provider (`_media_trigger`, `compaction.MEDIA_*_FRACTION`). Documents nest in the result that opened them (`ToolResultPart.documents`); the loop calls with no call-time documents and attaches a carried document once; `PaperReader` no longer dedupes ("already attached" removed). A condensed boundary seed pins every earlier turn's receipts (`history.transcript_receipts`, `CONDENSED_NOTE`, `pin_text(earlier_turns=)`); a nested condensed summary keeps its mark. Tests: `test_image_budget`, `test_compaction`, `test_react_tools`, `test_history_ledger`, `test_session_history` (resume identity), `test_consensus_peer_summary` (previous round for every position), `test_librarian`, `test_paper_tools`.
-- 2026-10-18 — [R7/R3/R2/R10 review fixes] A segment boundary carries the latest round's documents on the message that restates it (`ModelMessage.documents`) and pins every opened paper's receipt (`_paper_handle`); the media trigger fires only when the kept media (task + latest round) are below the line, and bypasses the four-call wait unless the last summary failed (`session["failed"]`); the token estimate counts opened PDFs (`_document_tokens`, 3,000 tokens a page). R10 reads receipts from the rebuilt turns (`history.transcript_receipts` and its regexes removed: they pinned handles quoted in task text). An output kept whole in the indexed view names its receipt; `keep_newest` also caps by count (`IMAGE_BUDGET_COUNT`/`IMAGE_LOW_WATER_COUNT`). Tests in `test_compaction` (cut keeps the document and pins the paper, no refire on unremovable media, bytes trigger without back-off, naming, structural pin) and `test_media_guards` (nested/message documents budgeted, refusal for a `documents: false` member, Google nested parts).
-- 2026-10-18 — [B18, human ruling] `review_report` erased for every role: `REVIEW_REPORT_TOOL`, `review_report_tool_def`, `execute_review_report`, `_catalog_menu`, `_report_view`, `_receipt_menu`, `ReportWorkspace.source_reports`/`draft_view`, the reviewer's `reviewer_draft_view`/`reviewer_text_view` (typeset preview; `turn_end` still renders, compiles and refuses failures), the librarian's `_review_text` and tool, and its name in every free-tool set (`roles.py`, `LIBRARIAN_FREE_TOOLS`). Its content now appears where it first does, text only: `SandboxToolProvider` names each figure a tool result produced as `[self:k] caption`; `AnalystWorkerAgent.analyze` adds `your_figures` (earlier rounds' labels); `AnalystLeadAgent.run_cycle` adds `figure_catalog` (every worker figure by `[analyst_worker_i:k]` label, the image budget's left-out figures marked with their receipt handle in the same line, replacing `figures_not_attached`; `_figure_labels`); refused `write_report`/`edit_report` calls show the draft as stored; the librarian names the documents opened in the pass (`_opened_text`). Prompts, refusals and descriptions point at those places.
-- 2026-10-18 — [B18 review fixes] `_receipt_scope` admits the figure receipts of the reports a role received (`_receipt_handles_for_figures`), so `view_receipt` opens a placed or not-attached worker figure; every `figure_catalog` line carries its receipt handle, "(not attached)" past the image budget; the lead's attached images are captioned by their `[analyst_worker_i:k]` label (two workers' plots with one caption pair up); the unplaced-figures note carries captions; `report/DOCS.md` and `config/DOCS.md` lose their `review_report` mentions.
-
+  `turn_end` (`lead_turn_problems`); `_ChainDriver.advance`; `_react` `share_messages`;
+  `AnalystReport` gained `rework`/`rationale`/`what_to_probe`, `status` `needs_human`;
+  `edit_report_tool_def(prose_fields, status_values)`; reviewer `terminal_tools={turn_end}`. A2: one
+  steer drain per iteration (`_last_turn_has_unresolved_server_tool`). B3–B6: `start_drive`,
+  `check_coder`; `execute_submit` refuses while the coder works;
+  `clarify_for_author`/`_ClarifyReply` deleted (`_coder_questions`);
+  `tests/test_live_form_shapes.py` → `tests/test_live_lead_providers.py`. 09-13:
+  `_drop_coding_middle` → `_compact_coding_span` (reverses B6), `compactor` role,
+  `_unanswered_call_ids`; `_build_session` the only test seam (`tests/chain_stub.py` `StubSession`);
+  `AUTO_RESEARCH_LEAD_SEAT`.
+- 2026-09-15 — `check_coder` rate-limited (`check_coder_min_interval_s`, replaced 09-24). Ruling:
+  `turn_end` is the only exit: `_react` `require_terminal` (`_TERMINAL_REQUIRED_NUDGE`), the
+  `len(content) > 40` finish test removed; grace window `react_grace_rounds` (default 20), then
+  `ReactBudgetExhausted`; `turn_end` joins `_CYCLE_FREE_TOOLS`; escape shapes in
+  `test_live_turn_end_shapes.py`, all pass live.
+- 2026-09-24 — (95) Librarian: `research()` is one `_react` loop over `LibrarianToolProvider` filing
+  a `LiteratureReport` ([I2], [I9], §2b; ten pipeline methods deleted; `librarian.source.error`);
+  `search_with_match`; `read_paper` attaches the PDF natively (ruling: no Docling, no vendor
+  citation feature); shared `agents/paper_tools.py` (`read_paper`, `PaperReader`, `format_ids`,
+  `ids_from_stem`; `ReviewerPaperReader` deleted); rulings: papers cited, never quoted, then
+  per-number attribution with a locator (`attributed_values`);
+  `tests/test_live_librarian_shapes.py`.
+- 2026-09-24 — (85) Blocking `wait_coder` (`env.coder_wait_limits_s`) replaces `check_coder`
+  (`_wait_before_submit`, `_submit_now`). (5c) `reviewer_tools.py`; `ReviewerAgent` is one loop over
+  one report on `edit_report` (`compose_machine_report`/`author_latex_report` deleted; §2b closed);
+  ruling: a number in `follow_up` must be grounded.
+- 2026-09-24 — (0f) Provenance P1/P2: both providers mint receipts per call;
+  `report_provenance_problems` at `edit_report` (notes) and `turn_end`; `ReportWorkspace`
+  `receipts`/`receipt_source`/`itemised`/`provenance_check`/`draft_view`/`edit_description`;
+  `edit_report_tool_def(report_model=)`, `extra_tools`, `_edit_plain_report`; `ScopedLookup`
+  (`roles._receipt_scope`); `roles._mint_task_input` (`[input:…]`);
+  `ReadOnlyToolProvider(include_open_paper=False)`; `LeadCycleOutcome.verdict` deleted. P7 shapes:
+  four refused and recovered LIVE, `flagged_quote` never reached; `attribution_without_locator`
+  LIVE-VERIFIED.
+- 2026-09-25 — [I4] a call with `arguments_error` gets an `is_error` asking for valid JSON, never
+  run. [G14]/[G15] `parse_tool_figures`, `normalize_tool_raw`, `PROTOCOL_KEYS`, `tool_text` moved to
+  `sandbox.runner`. [R1] `ReviewerAgent.review` is one turn of the sole-I/O reviewer (`arrived`,
+  `previous`, `human_nudges`, `human_files`, `budgets`, `human_attended` replace
+  `stage`/`iterations_left`); `reviewer_turn_problems` routes on `assign_to`; role report JSONLs
+  beside the ledger (human ruling); a call after an accepted terminal in its batch is answered, not
+  run (human ruling, every role). [R7] a committing `submit_for_review` mints a `commit` receipt
+  (`_commit_receipted`); in-process `data_catalog` receipted; `reviewer_claims`/`BRIEF_FIELDS`
+  (`follow_up` exempt); `reviewer_scope` excludes only `input:`.
+- 2026-09-25 — [E12] Quick channel: `ChannelTools` (`_react` wraps `_react_loop`) with
+  `message`/`view_receipt`/`wait_for_reply`/`list_peers` on a `SeatRouter`; `AgentRole.resume`;
+  `ask_human`/`plan_and_debate` and the providers'
+  `human_handler`/`include_plan_and_debate`/`asked_by`/`model` params deleted; `wait_coder` →
+  `wait_for_reply`; `drive_coder` folded into `message(to="coder")` (user ruling;
+  `drive_coder_tool_def`/`DRIVE_CODER_TOOL` deleted, `execute_drive_coder` →
+  `execute_coder_message`); `_coder_questions` deleted; an authoring seat gets a one-seat
+  `SeatRouter` (`_has_authoring_surface`).
+- 2026-10-06 -> 2026-10-07 — [F20] the `bash_exec` path scan stands down only for a server recorded
+  `jailed` (`_jail_supersedes_command_check` → `ToolkitRegistry.mcp_jailed`). [F22] a worker's cwd
+  is its `report_dir`; memory.md beside the ledger; human files in `workspace.human_reply_dir`;
+  `read_paper(path=)` reads only the papers folder. Env B2a/B2b: `list_env` (`list_env_tool_def`,
+  `execute_list_env`), `use_env` (`use_env_tool_def`, `execute_use_env`), `[ran in <env> @
+  <fp12>]`/`[shell in <env>]`, `roles._environment_brief`, `sandbox.envs.in_environment` (model
+  `shell_env` dropped). B3b: `SandboxToolProvider._route_environment` (tested `ar-<id>` or the
+  caller's `env`, receipted `env_untested`). B3c-1/B3c-4: `execute_respond_to_review` waits for the
+  coder and mints a `commit` receipt; `Not committed: <reason>` as an error; `env_note`; in-process
+  `data_catalog` on committed code only (`react._toolkit_clean_head`).
+- 2026-10-17 — [provenance replay 1–4b] `_call_context` + `provenance.calls.resolve_call_args`
+  replace `_redirect_figure_args` (`ToolOutcome.call_context`, `runtime_only`, `module`/`fn`,
+  `workdir`); args, results and steers recorded whole
+  (`_event_arg_cap`/`_event_result_cap`/`_cap_text` removed); `ToolOutcome.receipt_call_id`;
+  `_inputs_before` mission folders (`obsdb` inputs, `obs_db_path`, `named=`);
+  `_receipted(toolkit_root=)`. `ReviewerRender(report, lookup, scope, numbers)` per format (`tex`,
+  `html`, `html_errors`). One `read_file` for every role (`read_file_tool_def`, `execute_read_file`,
+  `_page`, `_MAX_WINDOW_CHARS`, `_MAX_LINE_CHARS`, `_bounded_lines`, `_bounded_read`,
+  `_in_host_tmp`, `_int_arg`), workers through `SandboxToolProvider`, the monitor on its ledger.
+  Residuals: a timed-out read leaves its thread; a symlink swap (sabotage only). Librarian
+  `web_fetch` description and reviewer wording follow its research scope.
+- 2026-10-18 — [A1–A4, A rulings, run 32814459] Report-form diagnostics (`_list_field_problem`,
+  `_cited_entry_problem`, `_example_source`, `_dropped_figures_note`, `report_shape_notes`);
+  `merged_parameter_problem` removed (ruling); a summary longer than the findings warns and still
+  files (`carries_results`, `execute_turn_end(..., warnings=)`, `report_warnings`,
+  `LibrarianToolProvider._warnings`). LIVE `tests/test_live_report_form.py` ($1.01).
+- 2026-10-18 — [A5/A6/A7, human rulings] The report is one text document edited like a file:
+  `agents/report_edit.py` (`render`/`parse`, `apply_edit`, `snippet`, `outline`, `change`,
+  `edit_tool_def`/`write_tool_def`, `WRITE_REPORT_TOOL`); `edit_report` takes
+  `old_string`/`new_string`/`replace_all`; `write_report_tool_def`, `execute_write_report`,
+  `report_blocks`, `report_document`; a round's draft starts empty. LIVE ($0.42).
+- 2026-10-18 — [B1–B3, B8, B10] The ledger is the session history (`agents/history.py`;
+  `*.model_turn`, `*.nudge`; `seed_json`/`response_json`/`tools_json` + `tools_sha256`); every seat
+  continues from it (`AgentRole._history_seed`, ruling "all"; resume via `_kept_turn_rebuild`);
+  memory.md retired (`_append_tool_results_to_memory`, `_STDOUT_MEM_CAP`/`_STDERR_MEM_CAP`,
+  `AnalystWorkerAgent(memory_path=)` deleted); `history.index_outputs`,
+  `INDEX_MARK`/`INDEX_KEEP_CHARS`/`INDEX_ARGS_CHARS`, `Turn.handles`, `ToolResultPart.receipt`;
+  `view_receipt` pages; `tests/test_live_report_rounds.py` deleted.
+- 2026-10-18 — [B4–B8, B13/B14, rulings] `agents/images.py` (`IMAGE_BUDGET_TOKENS`,
+  `IMAGE_LOW_WATER_TOKENS` = 20,000, `image_tokens`, `figure_sets`, `keep_newest`,
+  `IMAGE_BUDGET_COUNT`/`IMAGE_LOW_WATER_COUNT`); `agents/compaction.py` (`plan_compaction`,
+  `apply_compaction`, `CompactionPlan`, `summary_message`, `render_middle`, `pin_text`,
+  `is_discovery_turn`, `has_server_compaction`, `KEEP_RECENT_TURNS`), prompt role
+  `session_compactor`; append-only turns: `_image_view`, `plan_evictions`, `apply_evictions`,
+  `_CarriedTools` deleted; one transcript seed (`history.transcript`, `turn_figure_sets`,
+  `TRANSCRIPT_MARK`, `_condensed_transcript`); `_client_compaction` → `_segment_boundary`;
+  `_ChainDriver` cuts (`apply_cut`, `pending_cut`, `_segment_cut`); a continuing reviewer gets only
+  this turn's report (B7); no image set exempt (B3); window from litellm (B5).
+- 2026-10-18 — [R2/R3/R7/R10] Task figures once per session (`_task_figures`, `_session_figures`);
+  media-pressure boundary on every provider (`_media_trigger`, `MEDIA_*_FRACTION`); documents ride
+  their result (`ToolResultPart.documents`, `ModelMessage.documents`); a condensed seed pins earlier
+  receipts (`CONDENSED_NOTE`, `pin_text(earlier_turns=)`, `_paper_handle`, `_document_tokens`;
+  `history.transcript_receipts` removed).
+- 2026-10-18 — [D1, run 32814459] Provider errors contained (`ProviderTurnFailed`,
+  `_provider_status`, `*.provider_error`). [D4/D5 rulings] the absolute ceiling gets the grace
+  window, then `ReactBudgetExhausted`; only an accepted `turn_end` files (`TurnOutcome.filed_form`);
+  texts in the filing batch are re-queued and wake the seat (`_requeue_unread`, `SeatRouter.wake`,
+  `_one_turn_at_a_time`).
+- 2026-10-18 — [B18, human ruling] `review_report` erased for every role (`REVIEW_REPORT_TOOL`,
+  `review_report_tool_def`, `execute_review_report`, `_catalog_menu`, `_report_view`,
+  `_receipt_menu`, `ReportWorkspace.source_reports`/`draft_view`,
+  `reviewer_draft_view`/`reviewer_text_view`, `_review_text`); figure labels where the figure
+  appears (`[self:k]`, `your_figures`, `figure_catalog`, `_figure_labels`, `_opened_text`;
+  `figures_not_attached` replaced); `_receipt_handles_for_figures`.
+- 2026-10-26 — Receipt references (`provenance.refs`; audit of run 32814459): `SandboxToolProvider`
+  resolves `{"$ref": …}` toolkit arguments before a call runs (`_resolve_refs`; a refusal is the
+  call's `is_error` and nothing runs), passes the parents to `receipt_call`, notes typed numbers a
+  usable result holds (`_retype_note`, since replaced by the refusal `_retyped`); `ref_handles=` (default: its own receipts); `analyze` wires
+  it and shows the task's named results (`_brief_handles`).
+- 2026-10-26 — Review round 1: `lead_turn_problems` refuses a `what_to_probe` naming a handle the
+  lead cannot open (`provenance.refs.brief_handle_problems`; `reviewer_turn_problems` does the same
+  for `follow_up`); `SandboxToolProvider` passes the tool's returned keys to `receipt_call`
+  (`returned=`) and resolves references and the retype note in a worker thread.
+- 2026-10-26 — `SandboxToolProvider._retyped`: a toolkit call that types a float a usable result
+  holds is refused before it runs, with the reference to write (`provenance.refs.RetypeCheck`).
+- 2026-10-26 — Review round 2: `lead_turn_problems(viewable=)` and `reviewer_turn_problems(viewable=)`
+  accept a brief handle a message showed the author (`AgentRole._viewable_by_message`,
+  `_seat_viewable`).

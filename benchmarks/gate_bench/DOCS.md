@@ -482,73 +482,40 @@ guard named fourteen at once, including the entry a paid run had reported that w
 seconds; that run cost $25.
 
 ## 6. Changelog
-Compacted 2026-09-01 and again 2026-09-24 (detail in git history).
+Compacted 2026-09-01, 2026-09-24 and 2026-10-19 (every entry); detail in git history.
 
-- 2026-08-14 -> 2026-08-17 — Corpus built (paper items 1–2): 40 entries (36 planted defects over
-  eight families, 4 clean controls) on `irf_epoch`/`qu_lag_dcf`/`toolargs`, production gate plus an
-  opt-in live co-lead leg; `pa_pd_stability` dropped ([F2] stale product); own toolkit branch.
-- 2026-08-17 — `hole_structural_unfalsifiable` planted against `structural.allowed_paths`; closed
-  2026-09-09 (F2, `structural.changes_allowed`); its recorded verdict predates the fix and credits
-  the co-lead.
-- 2026-08-17 — Instrument fixes: marked `synth260817-…` ObsIDs (real ObsIDs had voided all 31
-  synthetic verdicts), `.env` loaded, base-package defects fixed; `expected`/`known_hole` split (six
-  holes confirmed, [G7] on one trial); co-lead catches hand-attributed in `review_roster.json`.
-- 2026-08-17 — Baseline (the published 37-defect table), `logs/dev/gate-bench/20260817T203646Z/`:
-  41/41 as predicted, $4.52; all 37 defects stopped (scan 6, structural 2, determinism 1, tool-local
-  7, co-lead 21 read on-target, sweep 1); 4/4 controls approved.
-- 2026-08-17 — Layer ablations (paper item 2, Table 5), one trial each: 0/37 defects reach a commit
-  with the scan or tool-local tests off, 21/37 with the review off; the co-lead is the load-bearing
-  layer. Caveat: every plant is diff-visible; runtime-only fabrication is absent.
-- 2026-08-18 — Reviewer-model swap (paper §5.2): five models, 78 changesets, ~$56; detection 19–21/21,
-  false rejection 0–8/41. Matched controls added (one clean twin per defect, repeats give stability);
-  five defective controls repaired and re-run; 102/102 rejections hand-attributed.
-- 2026-08-18 — The truncation probe's honest twin is necessarily an oversized unrequested file, so
-  that control stays unrepairable. `reviewers.yaml`, `--reviewer`, `--compare`, `NO_AUTHOR`; run
-  directories carry reviewer and pid (same-second launches had shared one `records.jsonl`).
-- 2026-08-18 — Presentation: the swap table merged into the catch-rate table, then replaced by a
-  figure (`tmp_scripts/plot_model_swap.py`; ruling: count panels share a 0-100 per-cent axis); pair
-  discrimination dropped, instability a rate; `model_swap.md` still reports pairs.
-- 2026-08-22 — Ledger-derived half: `Mutant.author`/`attested`; `mutants_ledger.py` adds 18 defects +
-  18 matched controls (`claude-opus-5/ledger`) mined from 274 blocking co-lead issues; the original
-  78 entries labelled `claude-opus-5/blind`. Corpus 78 → 114.
-- 2026-08-22 -> 2026-08-23 — Codex-mined half (11 + 11, → 136); mutual audit and repair → 134 entries
-  (65 defects, 69 controls): Codex base p-value fixed (every control mislabelled its fixture),
-  stale-marker entry retired, `attested` → `<path>#sequence=<n>`, two entries made single-anchor.
-- 2026-08-23 — Authoring provenance makes no claim in the paper (the second half's brief had seen
-  this DOCS). Three live passes: 65/65 defects stopped (18 deterministic, 47 co-lead); false
-  rejections 24 → 22 → 11 of 69, each from a defect in our scaffolds (seven fixed).
-- 2026-08-23 — §5c rules added; tests split beside the instruments; `--concurrency` with a per-mutant
-  cost meter (identical outcomes at 8 vs serial).
-- 2026-08-28 — C5: `product_is_complete` certificate binds content (`rows_sha256`), the ground on
-  which GPT reviewers rejected 14–17/18 `ctl_led_*`; C4: `_chi2_sf` odd-dof seed fixed. Open:
-  `_weighted_stat` overflows silently.
-- 2026-08-28 — C1: every real-base entry carries a changeset-scoped `spec_behavior` (the 08-27 run
-  rejected every real-base changeset 8/8); C2 and `sci_bin_edge_inadequate` controls mapped to
-  bespoke twins; C5's `_SPEC`/README name the digest condition.
-- 2026-08-28 — Recorded, not fixed: adequate/inadequate control pairs are byte-identical twins
-  (weighting question); real-base specs name the invariant each defect breaks (state beside Table 3).
-- 2026-08-31 — `.git` leak closed (class-invariant, no pair verdict could flip): committer
-  `analyst`, branch `ai`, no remote; `_nondeterministic_test` marker → `demo_summary_cache_*`; `.git`
-  guard tests; corpus header 136 → 134; `table_catchrate.py` fails on an unknown family.
-- 2026-08-31 — Ruling: corpus frozen; a control is "honest", not unobjectionable (scaffold-quality
-  rejections are the false-rejection measurement); the `20260831T172738Z-swapfix` batch on frozen v1
-  is the headline, with earlier batches reported as pilots.
-- 2026-08-31 — Ruling on v1 label violations: exclude or footnote `led_total_on_a_different_sample`,
-  reclassify `ctl_hole_g7_review_truncation` rejections as justified, footnote the `_SPEC_QU_BIN`
-  real-base controls; the four-round repair history disclosed in the manuscript as a funnel.
-- 2026-08-31 — Ruling: v2 repairs land without a paid re-run (a confirmatory run only if a referee
-  asks); the 306-entry roster read (`review_roster_20260831_proposed.json`) merges after a ~30-verdict
-  human spot-sample, justification ruled per ground.
-- 2026-08-31 — Swapfix's 8 errored records: 2 `claude_opus_5` from our `read_file` offset crash
-  (fixed in `agents/react.py`; re-run on the frozen corpus and patched into that leg), 6 vendor
-  structured-output failures (deepseek 3, qwen 2, glm 1).
-- 2026-08-31 — Ruling: a gate-passed item with no vendor verdict counts as failing
-  (`swap._review_errored`, `Errors` column), replacing the swapfix table's 47/46/45 denominators.
-- 2026-09-03 — Pruning leak: `keep_only_passing_tests` left `.pytest_cache/.../lastfailed` naming the
-  broken honest test in the 20 pruned defect worktrees only; `qwen3_8_max` cited it in two catches
-  (`20260827T094057Z-swapclean`). Fix: `-p no:cacheprovider`; unfiltered pair-listing guard test.
-- 2026-09-03 — Scope: the 08-17 published table is clean; every swap batch from 08-26, incl. the
-  Table 3 / Fig. 4 source `20260831T172738Z-swapfix-*`, carried it. Ruling 2026-09-25: no agent consulted
-  it; published numbers stand (builder fixed 09-03). `_NOT_BEHAVIOURAL` lists corrected.
-- 2026-09-26 — `table_catchrate.py`: caption and headers rewritten for the manuscript's PI-review pass (co-lead column, "Defect class"/"Defects", "defect-free change" controls, the co-lead column counts every rejection); reviewer id printed as the model id (`gpt-5.6-sol`, was `gpt-5-6-sol`). The committed `catchrate.tex` had been hand-edited; it is regenerated again. Numbers unchanged.
-- 2026-10-06 — `commit_sweep(worktree, scanned, message, gate=None)` commits through the production path when given the gate's report (`approve_edit(manifest=, base=)`); a refusal (`refused`) counts as caught. The G3 hole it probes is closed in the gate (judged manifest; see `src/auto_research/sandbox/DOCS.md`).
+- 2026-08-14 -> 2026-08-17 — Corpus built (paper items 1–2): 40 entries (36 planted defects, 4 clean
+  controls) on `irf_epoch`/`qu_lag_dcf`/`toolargs`; `pa_pd_stability` dropped ([F2]).
+  `hole_structural_unfalsifiable` planted (closed 2026-09-09, F2, `structural.changes_allowed`; its
+  verdict credits the co-lead). Fixes: marked `synth260817-…` ObsIDs, `expected`/`known_hole` split
+  ([G7]), co-lead catches hand-attributed in `review_roster.json`.
+- 2026-08-17 — Baseline (published 37-defect table, `logs/dev/gate-bench/20260817T203646Z/`): 41/41,
+  $4.52, 37/37 defects stopped, 4/4 controls approved. Layer ablations (Table 5): the co-lead is the
+  load-bearing layer; every plant is diff-visible.
+- 2026-08-18 — Reviewer-model swap (paper §5.2): five models, 78 changesets, ~$56; matched controls
+  (one clean twin per defect); `reviewers.yaml`, `--reviewer`, `--compare`, `NO_AUTHOR`; run dirs
+  carry reviewer and pid. Ruling: count panels share a 0-100 per-cent axis (`plot_model_swap.py`).
+- 2026-08-22 -> 2026-08-23 — Ledger-derived half (`Mutant.author`/`attested`, `mutants_ledger.py`,
+  `claude-opus-5/ledger` vs `/blind`) and Codex-mined half; mutual audit → 134 entries (65 defects,
+  69 controls); `attested` → `<path>#sequence=<n>`. Authoring provenance makes no claim in the
+  paper. §5c rules; tests beside the instruments; `--concurrency` with a per-mutant cost meter.
+- 2026-08-28 — C5: `product_is_complete` binds content (`rows_sha256`); C4: `_chi2_sf` odd-dof seed;
+  C1: changeset-scoped `spec_behavior` on real-base entries; C2 and `sci_bin_edge_inadequate`
+  controls mapped to bespoke twins. Open: `_weighted_stat` overflows silently. Recorded, not fixed:
+  byte-identical adequate/inadequate pairs.
+- 2026-08-31 — `.git` leak closed (committer `analyst`, branch `ai`, no remote; guard tests);
+  `table_catchrate.py` fails on an unknown family. Rulings: corpus frozen; a control is "honest",
+  not unobjectionable; `20260831T172738Z-swapfix` on frozen v1 is the headline, earlier batches
+  pilots; v1 label violations: exclude or footnote `led_total_on_a_different_sample`, reclassify
+  `ctl_hole_g7_review_truncation` rejections as justified, footnote the `_SPEC_QU_BIN` real-base
+  controls, repair history disclosed as a funnel; v2 repairs land without a paid re-run; the
+  306-entry roster merges after a ~30-verdict spot-sample; a gate-passed item with no vendor verdict
+  counts as failing (`swap._review_errored`, `Errors`). `read_file` offset crash fixed
+  (`agents/react.py`).
+- 2026-09-03 — Pruning leak: `.pytest_cache` in the 20 pruned defect worktrees (every swap batch
+  from 08-26, incl. Table 3 / Fig. 4's source); fix `-p no:cacheprovider` + guard test. Ruling
+  2026-09-25: no agent consulted it; published numbers stand. `_NOT_BEHAVIOURAL` corrected.
+- 2026-09-26 — `table_catchrate.py` caption/headers for the PI-review pass; reviewer id printed as
+  the model id; `catchrate.tex` regenerated. Numbers unchanged.
+- 2026-10-06 — `commit_sweep(worktree, scanned, message, gate=None)` commits through the production
+  path (`approve_edit(manifest=, base=)`); `refused` counts as caught. G3 closed in the gate.

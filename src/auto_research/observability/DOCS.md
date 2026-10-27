@@ -100,22 +100,12 @@ and `usage.py` (cumulative spend rollup CLI).
   `python -m auto_research.observability.usage` CLI.
 
 ## Changelog
-Compacted 2026-08-05 and again 2026-09-24 (detail in git history).
+Compacted 2026-08-05, again 2026-09-24 and 2026-10-19 (every entry); detail in git history.
 
-- 2026-05-26 -> 2026-06-12 — LangSmith tracing, JSONL cost ledger, config-priced per-call costing,
-  config-driven runtime data dir, opt-in live LangSmith test, `plot_run.py` Gantt/cost plots.
-- 2026-07-22 — [I5] pricing litellm-first, config-fallback (`token_rates_for`/`TokenRates`); cache/
-  reasoning token classes + `price_source`; LangSmith runs annotated with `usage_metadata` + `cost_usd`;
-  new `usage.py` rollup CLI. Dep `litellm>=1.93`.
-- 2026-07-29 — [J1] `CostLedgerEntry`/`cost_entry_for`/`append_cost_entry`/`cost_ledger_path` replaced by
-  `CallCost`/`cost_for_call` + a `ContextVar`-found `CostMeter` emitting `cost.call` events;
-  `cost_ledger.jsonl` no longer written.
-- 2026-07-29 — Coder SDK spend via `record_session_total` (per-turn deltas); `usage.py` reads monitor
-  ledgers (`load_cost_records`); `CostMeter.seed_from_ledger` carries totals across a resume.
-- 2026-08-19 — `_rates_from_litellm` treats an entry with no positive rates as absent, so `priceMTk`
-  applies (litellm had priced `qwen3.7-plus` at $0).
-- 2026-09-09 — N6: `traced_model_call` records `billed_usage` from an exception (set by
-  `_responses._raise_billed`) and re-raises.
-- 2026-10-06 — `usage.default_sources` reads each run's ledger where it lives (ledger-side since
-  2026-09-14; the run folder only for a pre-split run) and creates nothing (F22).
-- 2026-10-18 — [B5] `costs.context_window_for(config)`: a member's input limit, `config.context_tokens` when set, else litellm's `max_input_tokens` (the price map's own field).
+- 2026-05-26 -> 2026-06-12 — LangSmith tracing, cost ledger, config pricing, runtime data dir, `plot_run.py`.
+- 2026-07-22 — [I5] litellm-first pricing (`token_rates_for`/`TokenRates`, `price_source`), `usage.py`.
+- 2026-07-29 -> 2026-08-19 — [J1] `CallCost`/`cost_for_call`/`CostMeter` (`cost.call`) replace
+  `CostLedgerEntry`/`cost_entry_for`/`append_cost_entry`/`cost_ledger_path`; `record_session_total`,
+  `load_cost_records`, `CostMeter.seed_from_ledger`; `_rates_from_litellm` ignores zero rates.
+- 2026-09-09 -> 2026-10-06 — N6 `traced_model_call` keeps `billed_usage`; F22 `usage.default_sources`.
+- 2026-10-18 — [B5] `costs.context_window_for(config)`.

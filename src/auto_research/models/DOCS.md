@@ -570,119 +570,51 @@ turns on one distinction:
   decoding); `tools=` uses `messages.create`.
 
 ## Changelog
-Compacted 2026-09-01 and again 2026-09-24 (detail in git history).
+Compacted 2026-09-01, again 2026-09-24, and 2026-10-19 (every entry); detail in git history.
 
-- 2026-05-26 -> 2026-06-22 — Provider abstraction built, native on OpenAI/Anthropic/Google: role groups,
+- 2026-05-26 -> 2026-06-22 — Provider abstraction, native on OpenAI/Anthropic/Google (role groups,
   structured output, function calling, ReAct replay, prefix caching, vision/document gates, usage,
-  `priceMTk`. `REQUIRED_ROLES` gained `coder` + `analyst_colead`; every configured role is required.
-- 2026-05-26 -> 2026-06-22 — Anthropic `cache_prefix` marks the stable prefix and the rolling tail
-  `ephemeral`, `documents` after `system` with a breakpoint on the last (an opened PDF caches once).
-- 2026-07-06 -> 2026-07-20 — [FIG-VIEW]+[V2]: all adapters send figure bytes as native image blocks
-  (call-time `images=`; a tool's own via `ToolResultPart.figures`); [V-4] dropped the `"Figure — "` prefix.
-- 2026-07-06 -> 2026-07-20 — `retry.call_with_transient_retry` wraps every `ModelHandle.call`
-  (overloaded/429/5xx/connection, `provider_retry_*` cooldowns); `_json.loads_first_json_object` on the
-  OpenAI + Google receive paths; the send side stays hand-sanitized for OpenAI strict mode.
-- 2026-07-22 -> 2026-07-28 — [I5]: `ModelUsage` gained `cache_read_tokens`/`cache_write_tokens`/
-  `reasoning_tokens`. Context editing: Anthropic-native `clear_tool_uses_20250919` on `cache_prefix`
-  paths (`context_mgmt_*`; `ModelResponse.context_edits`, `<role>.<action>.context_edit` event).
-- 2026-07-22 -> 2026-07-28 — Tool search / `defer_loading`: Anthropic `tool_search_tool_bm25_20251119`
-  (sent under its undated `name`), OpenAI `tool_search`, Google none; discovery blocks replayed,
-  `cache_control` kept off deferred tools. Both features LIVE-VERIFIED and enabled 07-28.
-- 2026-07-29 -> 2026-08-03 — Replay seam (four live 400s): `_as_input_item` filters Responses items at
-  capture (the API accepts less than it emits); `ToolCall.provider_fields` + an inverted
-  `_UNCARRIED_ITEM_TYPES` carry the provider's own record. `include_discovery` stopgap (replaced 08-05).
-- 2026-07-30 -> 2026-07-31 — Tombstone guard deleted (the state is unreachable; argument kept in the
-  module docstring). `status_monitor` joined `REQUIRED_ROLES`.
-- 2026-08-05 — `schema`/`tools` exclusivity removed (all providers accept both). The response IS the
-  assistant turn: `AssistantToolUse` deleted, `ConversationMessage = ModelMessage | ModelResponse |
-  ToolResultMessage`; `provider_blocks` → `provider_parts`, block allowlist deleted.
-- 2026-08-05 — Replay per each provider's docs: Anthropic and Google echo the whole array; OpenAI keeps a
-  capture-time projection derived from the SDK's `ResponseInputItemParam`; Google captures
-  `thought_signature` onto `provider_fields` ([I8], not live-verified). LIVE-VERIFIED on Anthropic + OpenAI.
-- 2026-08-06 — Each adapter builds ONE request, runs ONE extraction; `tool_choice` gains `"none"`
-  (OpenAI `"none"`, Anthropic `{"type": "none"}`, Google `mode="NONE"`), under which every replaying
-  compose declares its tools; `include_provider_parts` deleted. `stop_reason` deferred (see `stop`).
-- 2026-08-06 — [V-5]: new `providers/_media.py` (walk, plan, resize, page-count) + per-adapter `_LIMITS`
-  quoted from each provider's docs (Anthropic: >20 image blocks ⇒ 2000 px); closes [V-3]'s mime half;
-  `open_paper`'s 8 MB cap deleted; Files API deferred; deps `pillow`, `pypdf`. LIVE-VERIFIED (21 images).
-- 2026-08-10 -> 2026-08-17 — Key failover: `keys.py` per-provider key pool (`…_API_KEY` + optional
-  `…_FALLBACK`); `retry.is_key_scoped_provider_error` (429, `billing_error`, credit-balance 400) makes
-  `call_with_transient_retry` call `rotate_key` before its cooldown; 5xx/529 and 401 never rotate.
-- 2026-08-10 -> 2026-08-17 — Adapters pass `api_key=` explicitly; each switch emits
-  `provider.key_rotation` (slot, never key); preflight `api_key_fallbacks`; `ROTATING_PROVIDERS` guards
-  providers whose adapter ignores the pool. Anthropic only at first.
-- 2026-08-18 — OpenAI rotates: `is_key_scoped_provider_error`/`is_exhausted_key_error` take a required
-  `provider` and read a per-provider, cited rules table (OpenAI reports every quota as a 429; only `code`
-  separates the refilling one); an unrefillable quota raises once rotation is spent. Google unwired.
-- 2026-08-19 — `ProviderName` widened to harness-only vendors (DeepSeek, Z.AI, Alibaba) →
-  `HarnessOnlyProvider`, which raises on any chat; `RoleModelConfig` gained optional `harness`,
-  `base_url`, `key_env`.
-- 2026-08-24 — Responses factoring: `providers/_responses.py` holds the wire logic, each vendor a
-  cited `ResponsesVendor`; new `deepseek.py`, `zai.py`, `dashscope.py`. DeepSeek honours strict
-  `text.format` and rejects `prompt_cache_key`; Z.AI ignores `text.format` (`supports_strict_schema=False`).
-- 2026-08-24 — `MediaLimits.images_accepted` (a text-only model withholds figures with a note);
-  `resolve_vendor_key` moved into `keys.resolve_key` (old name re-exported). Qwen unverified then
-  (`AccessDenied.Unpurchased`; its documented hosts are workspace-scoped, noted in `dashscope.py`).
-- 2026-08-25 — Qwen keeps figures (`qwen3.8-max` lists image input) and the last live-verified tool-choice
-  shape; a terminal response emitting data plus a working tool is rejected as premature. Qwen sends
-  `x-dashscope-session-cache: enable` whenever `cache_prefix` is set.
-- 2026-08-25 — Null normalization tests the exact spelling (an enum/const/pattern `"null"` survives);
-  only a bare root `$ref` + `$defs` is expanded. Responses clients disable the SDK's hidden retries and
-  cap one HTTP attempt at 300 s (`retry.py` sole retry owner).
-- 2026-08-25 — DeepSeek text-only is policy (ruling: `images_accepted=False` stays while its vision model
-  is experimental), not a vendor limit. `deepseek-v4-pro` is reachable; its structured-output flags were
-  measured on `deepseek-v4-flash` only.
-- 2026-08-28 — `PROMPT_DUMP_ENV` (`AUTO_RESEARCH_PROMPT_DUMP`): `ModelHandle.call` appends one JSON record
-  of the whole request per call before dispatch; unset ⇒ byte-identical; dump failures swallowed.
-- 2026-09-02 — Ruling: `max_output_tokens` dropped wherever optional (an 8000 cap choked
-  `deepseek-v4-pro` into an empty, fully billed 200). Anthropic keeps `max_tokens` (required; the adapter
-  falls back to 1024), at the 21000 non-streaming maximum; `status_monitor` keeps 2048.
-- 2026-09-02 — `_media.nonmedia_weight` estimates a request's non-media bytes, passed by every adapter as
-  `plan_for_call(..., reserved_bytes=…)` (a 413 had passed the guard with 42 KB headroom). No
-  per-document byte cap (none documented). Residual: oldest-first eviction keeps one large document.
-- 2026-09-03 — `ResponsesVendor.accepts_inline_documents` (default `True`; Alibaba `False`, its
-  `input_file` takes URLs only) + new `_doc_parse` (Docling render-and-crop, sha256 disk cache): such a
-  vendor gets text plus figure crops. Ruling: `documents: false` members still raise on documents.
-
-- 2026-09-09 — F7: `_TRANSIENT_BODY_OVERRIDES` + `_transient_by_body` read the body only on statuses a
-  vendor mislabels (Alibaba 400 `ServiceUnavailable` throttle; DeepSeek 400 `insufficient_system_resource`),
-  markers matched as vocabulary; `is_transient_provider_error` gains optional `provider`.
-- 2026-09-09 — Anthropic's `enforced_spend_limit_reached` 429 joined `exhausted_codes`. F7 is NOT LIVE
-  TESTED: a gated throttle-provocation probe (`AUTO_RESEARCH_LIVE_THROTTLE_PROBE=1`) never provoked one.
-- 2026-09-09 — N6: `_responses.py` extraction raises go through `_raise_billed` (attaches `billed_usage`,
-  same exception type) and `traced_model_call` records it, so a rejected billable turn is billed.
-
-- 2026-09-10 — A1: on Anthropic a tool's figures nest inside its `tool_result`
-  (`anthropic._tool_result_block`; the no-figure path stays a bare string, byte-identical), as the
-  pending-server-tool rule requires. OpenAI/Alibaba unchanged. LIVE-VERIFIED 09-10.
-- 2026-09-10 — `_mark_last_block_cacheable` may mark a `tool_result` block (SDK-typed, undocumented);
-  `ToolResultPart.figures`' docstring no longer asserts an adjacent image turn.
-- 2026-09-11 — `"workspace api usage limits"` (Anthropic 400 `invalid_request_error`, `code` None) added
-  to `exhausted_message_markers`, so it rotates and retires the key; markers must be lowercase
-  (matched against `str(exc).lower()`).
-
-- 2026-09-12 — A1: `ModelResponse.has_unresolved_server_tool`, per adapter: Anthropic id-paired result
-  block; OpenAI client-mode tool search only; Google id-paired parts; Alibaba a non-terminal `status`;
-  DeepSeek/Z.AI none. Paired by id, never by name or OpenAI `call_id`; fails closed; `stop` no proxy.
-- 2026-09-12 — Recorded, not fixed (rulings): Google captures non-text, non-call parts twice; OpenAI's
-  message `phase` is not replayed. `deepseek.py`'s hosted-`web_search` comment corrected (*Ignored*).
-- 2026-09-13 — Alibaba's output-arm `DataInspectionFailed` 400 is retried as transient (our measurement:
-  42% stochastic; the vendor calls it terminal); `_TRANSIENT_BODY_OVERRIDES` gained excluded markers so
-  the input arm, the ambiguous message and `CustomRoleBlocked` stay fatal. Never rotates a key.
-- 2026-09-14 — An emit-tool call carrying nothing usable raises a `ValueError` naming `status`,
-  `incomplete_details`, `raw_argument_chars`, `json_fault` and the raw string (capped at
-  `_RAW_ARGUMENTS_CAP` = 2000), where it was silently `{}`. No control-flow change.
-- 2026-09-25 — [I4] A non-JSON function-call argument string sets `ToolCall.arguments_error` (fault +
-  raw text, capped 2000) instead of silently becoming `{}`; the loop returns it as an error result.
-- 2026-10-06 — [F26] receipted files read through `provenance.store.read_receipted` (read once, no symlink, hash-checked; a changed file is sent with a note and a `receipt.drift` alert). See `provenance/DOCS.md`.
-- 2026-10-18 — [D1, run 32814459] `retry.is_provider_error(exc)`: the vendor SDKs' own API error
-  bases plus `httpx.TransportError`. The retry policy is unchanged; the agent loop uses this to
-  turn what escapes retry into that agent's honest failure (`agents/DOCS.md`).
-- 2026-10-18 — [B4] `RoleModelConfig.context_tokens`; `anthropic._limits_for(config)` (600 images per request above a 200k window, 600 PDF pages at 1M, quoted from the vision and PDF docs); the media guard's image-count ceiling now withholds the OLDEST images (`plan_media` overflow), keeping the current turn's. The token budget itself lives in the agent loop (`agents/images.py`).
-- 2026-10-18 — [B3] `ToolResultPart.receipt`: the handle of the text receipt minted for an output (ours, never sent by an adapter); `agents.history` indexes earlier outputs by it.
-- 2026-10-18 — [B5] The clear edit carries `clear_tool_inputs` and `exclude_tools` (report and channel tools declared in the request, plus the tool-search tool when tools are deferred); `env.ContextEditingConfig` gained both fields, `env.CONTEXT_EDITING_EXCLUDED_TOOLS`; config parsing takes a real boolean and a list of names only. Deterministic tests in `tests/test_context_editing.py`; live probe `test_live_retuned_clearing_keeps_tool_search_and_reports` (three arms) prepared.
-- 2026-10-18 — [B6] Anthropic server-side compaction: `_compaction_edit`, `_compaction_iterations`, `_field`; `env.CompactionConfig` / `compaction_config`; a `compaction` entry on `ModelResponse.context_edits`; compaction tokens billed into `ModelUsage`.
-- 2026-10-18 — [B11 ruling] Clearing excludes only `message`, `wait_for_reply` and the tool-search tool.
-- 2026-10-18 — [ruling B6] `ModelMessage.figures` (rendered by all three adapter families, counted by `_media.iter_media`); the media guard fits every image to the strict edge (Anthropic 2000 px) from its first send, not only past 20 blocks (an image downscaled once a turn crossed the threshold had changed bytes already sent); the Anthropic adapter retries once with thinking stripped from the named message on a "bound to a different conversation" 400 (`_thinking_binding_refusal`, `_strip_thinking`; `{"type": "thinking_dropped"}` on `context_edits`); a compacting call's usage is the sum of all `usage.iterations`.
-- 2026-10-18 — [R2/R3] `ToolResultPart.documents`: a document rides the tool result that opened it — nested `document` block (Anthropic, `_document_blocks`), `input_file` after the results (Responses, `_document_items`), parts after the function response (Google, `_document_parts`); Alibaba hoists it to its substitution (`_media.hoist_documents`). `_media.iter_media` walks nested documents; `ModelHandle.call` refuses nested documents for a `documents: false` member. `providers.media_limits(config)` (a member's documented media ceilings, no client built) and `_media.media_load(messages)` (image blocks and base64 media bytes from disk) feed the agent loop's media trigger. Docs: clearing ships off (B12); OpenAI server compaction described; `_compaction_iterations` docstring corrected.
-- 2026-10-18 — [R2 review fixes] `ModelMessage.documents` (rendered after the message's figures by all three adapter families, walked by `_media.iter_media`, hoisted for Alibaba, refused for a `documents: false` member): after a segment boundary the latest round's documents ride the message that restates it.
+  `priceMTk`); `REQUIRED_ROLES` gained `coder`, `analyst_colead`; Anthropic `cache_prefix`.
+- 2026-07-06 -> 2026-07-20 — [FIG-VIEW][V2] native image blocks (`images=`,
+  `ToolResultPart.figures`); [V-4]; `retry.call_with_transient_retry` wraps every
+  `ModelHandle.call`; `_json.loads_first_json_object`.
+- 2026-07-22 -> 2026-07-31 — [I5] `ModelUsage` cache/reasoning tokens; Anthropic context editing
+  (`context_mgmt_*`, `ModelResponse.context_edits`); tool search / `defer_loading`, both
+  LIVE-VERIFIED and enabled 07-28; replay seam (`_as_input_item`, `ToolCall.provider_fields`,
+  `_UNCARRIED_ITEM_TYPES`); tombstone guard deleted; `status_monitor` joined `REQUIRED_ROLES`.
+- 2026-08-05 -> 2026-08-06 — The response is the assistant turn (`AssistantToolUse` deleted,
+  `ConversationMessage`, `provider_parts`); per-provider replay, LIVE-VERIFIED on Anthropic + OpenAI
+  ([I8] Google `thought_signature` not live-verified); one request, one extraction;
+  `tool_choice` `"none"`; `include_provider_parts` deleted; [V-5] `providers/_media.py` + per-adapter
+  `_LIMITS` (deps `pillow`, `pypdf`), LIVE-VERIFIED.
+- 2026-08-10 -> 2026-08-18 — Key failover: `keys.py` pool (`…_FALLBACK`),
+  `retry.is_key_scoped_provider_error`, `rotate_key`, `provider.key_rotation`, preflight
+  `api_key_fallbacks`, `ROTATING_PROVIDERS`; Anthropic, then OpenAI (`is_exhausted_key_error`,
+  per-provider rules table); Google unwired.
+- 2026-08-19 -> 2026-08-25 — `HarnessOnlyProvider`; `RoleModelConfig` `harness`/`base_url`/`key_env`;
+  `providers/_responses.py` + `ResponsesVendor`, new `deepseek.py`, `zai.py`, `dashscope.py`;
+  `MediaLimits.images_accepted`; `keys.resolve_key`; Qwen keeps figures,
+  `x-dashscope-session-cache`; `retry.py` sole retry owner. Ruling: DeepSeek text-only is policy.
+- 2026-08-28 — `PROMPT_DUMP_ENV` (`AUTO_RESEARCH_PROMPT_DUMP`).
+- 2026-09-02 -> 2026-09-03 — Ruling: `max_output_tokens` dropped wherever optional (Anthropic
+  `max_tokens` 21000, `status_monitor` 2048); `_media.nonmedia_weight`,
+  `plan_for_call(reserved_bytes=)`; `ResponsesVendor.accepts_inline_documents` + `_doc_parse`.
+  Ruling: `documents: false` members still raise on documents.
+- 2026-09-09 -> 2026-09-14 — F7 `_TRANSIENT_BODY_OVERRIDES`/`_transient_by_body` (NOT LIVE TESTED);
+  `enforced_spend_limit_reached` and `"workspace api usage limits"` exhaust a key; N6
+  `_raise_billed`; A1 Anthropic figures inside `tool_result` (`_tool_result_block`, LIVE-VERIFIED
+  09-10) and `ModelResponse.has_unresolved_server_tool`; Alibaba output-arm `DataInspectionFailed`
+  transient; an empty emit-tool call raises (`_RAW_ARGUMENTS_CAP`). Recorded, not fixed (rulings):
+  Google parts captured twice, OpenAI `phase` not replayed.
+- 2026-09-25 — [I4] `ToolCall.arguments_error`.
+- 2026-10-06 — [F26] receipted files read through `provenance.store.read_receipted`.
+- 2026-10-18 — Context-overflow work: [D1, run 32814459] `retry.is_provider_error`; [B4]
+  `RoleModelConfig.context_tokens`, `anthropic._limits_for`, image overflow withholds the oldest;
+  [B3] `ToolResultPart.receipt`; [B5] `clear_tool_inputs`/`exclude_tools`,
+  `env.CONTEXT_EDITING_EXCLUDED_TOOLS`; [B6] Anthropic compaction (`_compaction_edit`,
+  `_compaction_iterations`, `_field`, `env.CompactionConfig`/`compaction_config`); [B11 ruling]
+  clearing excludes only `message`, `wait_for_reply`, tool search; [ruling B6]
+  `ModelMessage.figures`, strict-edge fit from first send, `_thinking_binding_refusal`/
+  `_strip_thinking` (`thinking_dropped`); [R2/R3] `ToolResultPart.documents` (`_document_blocks`,
+  `_document_items`, `_document_parts`, `_media.hoist_documents`), `providers.media_limits`,
+  `_media.media_load`; clearing ships off (B12); [R2 review] `ModelMessage.documents`.

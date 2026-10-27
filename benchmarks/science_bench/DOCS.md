@@ -564,38 +564,26 @@ Nothing depends on this package.
   under the declared ceilings.
 
 ## 6. Changelog
-Compacted 2026-09-24 (detail in git history).
+Compacted 2026-09-24 and 2026-10-19 (every entry); detail in git history.
 
-- 2026-09-01 — Created (step 1): seat levels, two pinned seats, three axes, block 1's eleven-slot
-  array, block 0, `confirm_block`, opaque run identity, vendor ceilings. Ruling: `PINNED_EFFORT` is
-  `high` for every seat, not the design's `max` (both published batches used `high`).
-- 2026-09-01 — Steps 2b-5: `environment` (private trial world), `request` (frozen, hashed question),
-  `trial`, `__main__` (preflight, scheduler, status, leak scanner). Block 0's first launch leaked
-  (`science_bench` in paper paths), was killed, and relaunched after a structural word-list guard.
-- 2026-09-02 — Block 0 launches 2-3; launch 3 died at $19.43 on an empty `tool_specs`, which forced
-  the lead's `run_cycle` rebuild. Clone/jail fixes: `_rej` event lists copied (ruling), Codex jail
-  launcher out of the worktree, shell path scan stands down under the kernel jail.
-- 2026-09-02 — `trial.commit_reachability` checks each ledger commit SHA against `git rev-list --all`
-  before teardown (`commits_checked`/`commits_unreachable`). Open: `trial.wait_for` has no deadline.
-- 2026-09-03 — Leak scanner walks the parsed record, skipping opaque keys and base64 (attempt 6: 11 →
-  1 reported leaks). Ruling: `runtime_dir` stays on the allow-list; the actor-read check watches it.
+- 2026-09-01 — Created (steps 1, 2b-5): seat levels, two pinned seats, three axes, block 1's
+  eleven-slot array, block 0, `confirm_block`, opaque run identity, vendor ceilings; `environment`,
+  `request`, `trial`, `__main__` (preflight, scheduler, status, leak scanner). Ruling:
+  `PINNED_EFFORT` is `high` for every seat. Block 0's first launch leaked and was relaunched after a
+  structural word-list guard.
+- 2026-09-02 -> 2026-09-03 — Block 0 launches 2-3 (launch 3 died on an empty `tool_specs`, forcing
+  the lead's `run_cycle` rebuild); clone/jail fixes (`_rej` event lists copied, ruling).
+  `trial.commit_reachability` (`commits_checked`/`commits_unreachable`); open: `trial.wait_for` has
+  no deadline. Leak scanner walks the parsed record. Ruling: `runtime_dir` stays on the allow-list;
+  the actor-read check watches it.
 - 2026-09-08 — Ruling: the eleven-slot array is superseded by six runs (incumbent and contrast seat
-  trees x 3; attempt 6 is the incumbent's first); the array stays as `--block1`. Seats chosen per
-  seat, not on price; lowering effort rejected as the lever; `claude-haiku-4-5` excluded.
-- 2026-09-08 — New levels `gpt-5.6-terra` lead and `w4` = `claude-sonnet-5` + `qwen3.7-plus`;
-  `arms.pinned_parameters` public; `qwen3.7-plus` priced from the vendor page (litellm prices it 0).
-- 2026-09-08 — Scoring (steps 6-8), frozen before spend: `answer_key.json`, `extract.py`, `score.py`
-  (Tier 0 + Tier 1 signed z), `report.py`, `--score DIR` ($0 offline); [A20] via `lead_cycles` and
-  `terminals_relabelled`. Attempt 6: 14/14 within 3 sigma, mean |z| 1.00, `useful`, trap reproduced.
-- 2026-09-08 — Vendor concurrency measured (`tests/test_live_concurrency.py`): no refusals on the
-  three vendors; anchor at concurrency 2 and contrast at 3, run sequentially. Preflight keeps the
-  answer key outside every read root.
-- 2026-09-08 — Seat probe rewired onto the `graph.runtime` factories (its worker cell had no tools);
-  sandbox settings via `SandboxSettings.from_config`. LIVE-VERIFIED: all three seats hold.
-- 2026-09-10 — Answer key's `May_PD_{2-3,3-4,4-6,6-8}keV` corrected to Krawczynski+2022 Table S2
-  `PD - sum` (3.5/3.5/4.7/5.8 +/- 0.3/0.3/0.3/0.8) in key, CSV and `main.tex` (ruling); `approximate`
-  false on all 14. Attempt 6 stays 14/14; mean |z| 1.00 → 1.178, PD mean signed z -1.39 → -1.672.
-- 2026-09-10 — `main.tex` prose corrected to "all ten PD quantities lie below the published value,
-  by 0.2--2.4 sigma and by 1.6 sigma on average"; `--score DIR` regenerates any published batch.
+  trees x 3), kept as `--block1`; seats chosen per seat, not on price; lowering effort rejected as
+  the lever; `claude-haiku-4-5` excluded. New levels `gpt-5.6-terra` lead and `w4`;
+  `arms.pinned_parameters` public. Scoring frozen before spend: `answer_key.json`, `extract.py`,
+  `score.py`, `report.py`, `--score DIR`; [A20] via `lead_cycles`, `terminals_relabelled`. Seat
+  probe rewired onto the `graph.runtime` factories; LIVE-VERIFIED: all three seats hold.
+- 2026-09-10 — Ruling: answer key's `May_PD_{2-3,3-4,4-6,6-8}keV` corrected to Krawczynski+2022
+  Table S2 `PD - sum` in key, CSV and `main.tex`; `approximate` false on all 14; `main.tex` prose
+  corrected.
 - 2026-10-06 — **[F25] A trial's allow-list names `<runtime_dir>/runs`, not the whole runtime dir,
   and the trial's papers are read-only** (`environment.orchestration_config`), as in production.

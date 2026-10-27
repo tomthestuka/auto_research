@@ -132,36 +132,24 @@ Phase 1 ships two strategies — one for analyst debate, one for IO abstraction:
   every worker verbatim, which is what that form's description promises.
 
 ## Changelog
-Compacted 2026-08-05 and again 2026-09-24 (every entry); detail in git history.
+Compacted 2026-08-05 and again 2026-09-24 (every entry), and 2026-10-19 (every entry); detail in
+git history.
 
-- 2026-05-26 -> 2026-06-16 — `DebateToConverge` (cap-3 debate, lead adjudication, cross-worker
-  tool summaries, figure propagation) and `IODebateToConverge` built; step 7 added lead authoring/
-  resume: a commit reloads the registry, restarts sandboxes, reruns workers (`tool_author_cap`).
-- 2026-06-26 -> 2026-07-14 — A non-commit returns an honest terminal to the reviewer (§9.6); A1: the
-  lead drives authoring itself (`drive_authoring`); [A8] the whole `tool_specs` chain is authored,
-  then one rerun; V-4: the lead cites figures from a per-worker catalog (`_deduplicated` removed).
-- 2026-07-22 — [A11] reload/restart/rerun whenever ≥1 tool committed; a non-commit loops back
-  (`_augment_with_failed_tool`); §9.6 terminal only at credit exhaustion; `analyst.tool.chain_resume`.
-- 2026-07-31 — Pre-authoring stop poll removed (`_stop_requested` deleted: `/stop` cancels the task);
-  `run_control` still carried so the lead can publish its authoring session.
-- 2026-09-02 — `LeadLike` shrank to `run_cycle`; `_maybe_author_and_resume` replaced by
-  `_resume_after_authoring` + `_revision_round`; authoring ends the cycle; new `_augment_with_probe`;
-  a cycle with no form and no report raises ([F6]).
-- 2026-09-02 — The rerun follows `authored_chain or committed >= 1`, so a terminal filed mid-chain
-  still reloads, restarts and reruns; bounded by `tool_author_cap`.
-- 2026-09-09 — N11 (ruling): author credits are per analysis, never refilled by a send-back, held in
-  a mutable `_AuthorCredits` on the frozen strategy.
-- 2026-09-09 — F9 (ruling): the chain continues past a failed link, telling the lead why;
-  `AnalystReport.status` is agent-declared `succeeded|failed`, default `failed`, `needs_human`
-  retired. N4: unclean-branch error names paths; N8: `_worker_safe_reason` strips remediation.
-- 2026-09-12 — A8: `run` branches on the report's `rework`, not a filed form; `analyst.lead.cycle`
-  records `rework`/`status`. Ruling 18: commit and rework stay separate; a probe rides along with a
-  commit, charged to an author credit.
-- 2026-09-24 — `IODebateToConverge` and its `IOAbstraction*` protocols deleted (the librarian is
-  one loop).
+- 2026-05-26 -> 2026-07-22 — `DebateToConverge` (cap 3, lead adjudication, figure propagation) and
+  `IODebateToConverge`; lead authoring/resume (`tool_author_cap`; A1 `drive_authoring`); [A8] whole
+  `tool_specs` chain, then one rerun; V-4 per-worker figure catalog (`_deduplicated` removed); [A11]
+  rerun on ≥1 commit, a non-commit loops back (`_augment_with_failed_tool`), §9.6 terminal only at
+  credit exhaustion; `analyst.tool.chain_resume`.
+- 2026-07-31 — `_stop_requested` deleted (`/stop` cancels the task).
+- 2026-09-02 -> 2026-09-12 — `LeadLike` → `run_cycle`; `_resume_after_authoring` + `_revision_round`,
+  `_augment_with_probe`; a cycle with no form and no report raises ([F6]); rerun on
+  `authored_chain or committed >= 1`. Rulings: N11 per-analysis credits (`_AuthorCredits`); F9 the
+  chain continues past a failed link, `AnalystReport.status` `succeeded|failed`, `needs_human`
+  retired; N4, N8 (`_worker_safe_reason`); A8 `run` branches on `rework`; ruling 18 commit and
+  rework separate.
+- 2026-09-24 — `IODebateToConverge` and its `IOAbstraction*` protocols deleted.
 - 2026-09-25 — [E12] Wording only: the lead steers its coder with `message(to="coder")`.
-- 2026-10-18 — [D1, run 32814459] A worker's `ProviderTurnFailed` is contained: `_run_worker`
-  records `analyst.worker.failed` and returns `None`; the lead receives the filed reports and
-  sources only (`_filed`) plus an inbox notice (`_notify_lead`); peers skip `None`. Tests:
-  `tests/test_provider_containment.py`.
-- 2026-10-18 — [B8] `_augment_with_peer_tools` → `_with_peer_tools(workers, task, index)`: the peer-tool summary is built per worker for each revision round and rerun from its peers' `last_tool_results` (labelled by key) and never written back into the shared task — it had stacked every round, carried each worker's own calls back to it and reached the lead. The per-worker task is a `model_copy`, so no task field is dropped. Tests: `tests/test_consensus_peer_summary.py`.
+- 2026-10-18 — [D1, run 32814459] a worker's `ProviderTurnFailed` is contained
+  (`analyst.worker.failed`, `_filed`, `_notify_lead`). [B8] `_augment_with_peer_tools` →
+  `_with_peer_tools(workers, task, index)`: the peer-tool summary is built per worker, never written
+  into the shared task.

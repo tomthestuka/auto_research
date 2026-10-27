@@ -107,6 +107,12 @@ class Receipt(MessageModel):
     parser: str | None = Field(default=None, description="Text extractor and version, for paper/web.")
     # commit
     commit_sha: str | None = None
+    # result of a toolkit call
+    returned_sha256: Sha256 | None = Field(
+        default=None,
+        description="The JSON blob of the keys a toolkit tool returned beside its stdout, stored by the "
+        "runtime; what a `$ref` argument resolves against (provenance.refs).",
+    )
 
     @model_validator(mode="after")
     def _kind_matches_handle(self) -> "Receipt":

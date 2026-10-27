@@ -26,11 +26,16 @@ FIGURE_PATH_ARGS: dict[str, str] = {"save_path": ".png", "save_path_prefix": ""}
 _FIGURE_EXTENSIONS = (".png", ".pdf", ".jpg", ".jpeg", ".svg")
 
 
+def canonical_args(args: Any) -> str:
+    """The text ``args_digest`` hashes; stored as a blob, so ``blob_path(args_sha256)`` holds it."""
+    return json.dumps(args, sort_keys=True, default=str)
+
+
 def args_digest(args: Any) -> str:
     """The hash a receipt stamps for its call's arguments (``Receipt.args_sha256``)."""
     from auto_research.provenance.store import sha256_bytes
 
-    return sha256_bytes(json.dumps(args, sort_keys=True, default=str).encode("utf-8"))
+    return sha256_bytes(canonical_args(args).encode("utf-8"))
 
 
 def resolve_call_args(arguments: Mapping[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:

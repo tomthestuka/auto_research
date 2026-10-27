@@ -112,17 +112,11 @@ Each source module is independent; no source imports another.
   ingest (the caller falls back to metadata-only).
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — Source layer built: `QuerySource`, arXiv/NASA ADS/Tavily adapters,
-  PDF download/ingest helpers, ADS full-text resolver, ADS 404 degradation for no-esource records.
-- 2026-06-18 -> 2026-06-22 — `download_pdf` retries transient failures and returns `None` on ultimate
-  failure or a non-`%PDF-` body (`_is_pdf_bytes`; a stale non-PDF cache file is re-fetched).
-- 2026-07-13 — [I1] `WebSource`'s Tavily client is lazy (a `client` property); [I10] `WebSource.fetch`
-  (Tavily Extract) backs `web_fetch`.
-- 2026-08-03 — `resolve_ads_full_text` skips a malformed ADS record (relative URL, missing `link_type`)
-  instead of failing the whole source.
-- 2026-09-24 — `receipts.py` (P5): paper/web receipt minting, used by the librarian (`lib`) and the
-  reviewer (`rev`). [I9] closed: a failing source is a `librarian.source.error` event and an error outcome.
-- 2026-09-24 — arXiv search ANDs every term first, loose fallback only on zero results (reported to the
-  librarian). arXiv PDFs come from `export.arxiv.org` with pacing, a stop on 403, one retry on 406/429.
-- 2026-09-24 — Ruling: papers are cited, never text-matched — the paper receipt is the PDF itself.
-  Docling (and `parse_root`) left the librarian's path, then the interim pypdf text layer.
+Compacted 2026-10-19 (every entry); detail in git history.
+
+- 2026-05-26 -> 2026-08-03 — Source layer: `QuerySource`, arXiv/ADS/Tavily adapters, PDF helpers, ADS
+  full-text resolver; `download_pdf` retries, `None` on failure or non-PDF (`_is_pdf_bytes`); [I1]
+  lazy Tavily `client`; [I10] `WebSource.fetch`; `resolve_ads_full_text` skips malformed records.
+- 2026-09-24 — `receipts.py` (P5) paper/web receipts (`lib`, `rev`); [I9] closed
+  (`librarian.source.error`); arXiv ANDs terms first, PDFs from `export.arxiv.org`. Ruling: papers
+  cited, never text-matched; Docling, `parse_root`, then pypdf left the librarian's path.

@@ -101,14 +101,9 @@ Local development ingestion logs are written under `logs/dev/step-4/`.
   local paper ingestion utility.
 
 ## Changelog
-- 2026-05-26 -> 2026-06-12 — SQLite storage built: papers, memory with `mem_abbrev`, query log,
-  reserved embedding columns/table, paper ingestion/upserts, no-PDF metadata records, memory
-  replacement, local PDF ingestion, config-driven runtime DB path.
-- 2026-06-22 — Paper identity is the PDF hash: `papers.sha256` `NOT NULL UNIQUE`, `_upsert_paper`
-  dedups `ON CONFLICT(sha256)`; a no-PDF result is an orphan `memory` note (`paper_record_from_result`
-  removed). Requires a fresh DB.
-- 2026-06-23 — Added `check_database_health()` (+ `EXPECTED_TABLES`), registered in the launch
-  preflight as `database_health`: creates the schema if absent and verifies tables, so a fresh
-  run's first `text_search` no longer dies on `no such table: papers`.
-- 2026-09-24 — `librarian_io_enrich_stub` deleted (95). The librarian writes paper rows when it
-  opens a PDF and appends memory rows from its filed report's findings.
+Compacted 2026-10-19 (every entry); detail in git history.
+
+- 2026-05-26 -> 2026-06-23 — SQLite storage (papers, memory, `mem_abbrev`, query log, reserved
+  embeddings); paper identity is the PDF hash (`papers.sha256` unique; `paper_record_from_result`
+  removed; fresh DB); `check_database_health()` + `EXPECTED_TABLES` (preflight `database_health`).
+- 2026-09-24 — `librarian_io_enrich_stub` deleted; the librarian writes paper and memory rows.

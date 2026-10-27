@@ -196,46 +196,25 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   via point / clone / start-fresh.
 
 ## Changelog
-Compacted 2026-09-01, again 2026-09-24 (every entry) and 2026-10-07; detail in git history.
+Compacted 2026-09-01, again 2026-09-24 (every entry), 2026-10-07 and 2026-10-19 (every entry);
+detail in git history.
 
-- 2026-05-26 -> 2026-06-25 — Phase 1 package complete; Phase 2 begun (off-repo scratch, `ToolSpec`,
-  merge flow, gate). Added `.env` loading (`check_required_env`), `preflight.py` (`run_preflight`,
-  async), `hitl` + `human_handler`, `papers_dir()`, toolkit checks, `observations.py`.
-- 2026-07-14 -> 2026-07-16 — Installer increments 0–4: machine-local config gitignored with
-  `*.example`, `repl_init_py`/`analyze_probe` keys (+ `check_analyze_probe`), `install.sh` +
-  `python -m auto_research.setup` (typed domain deps; toolkit point/clone/start-fresh); 5 deferred.
-- 2026-07-16 -> 2026-07-22 — `env.ProviderRetryPolicy`/`provider_retry_policy()` back
-  `models.retry`; catalog read moved to `research_toolkit` `catalog_utils`; new `env.toolkit_root()`.
-- 2026-07-31 — `/stop` and Ctrl-C are one interrupt (`RunControl.interrupt` cancels the run task;
-  wind-down removed): new `UserInterruptionError`, `RunControl.register_run_task`/
-  `authoring_session`, `run_research(install_signal_handlers=)`.
-- 2026-08-10 -> 2026-08-19 — New preflight `api_key_fallbacks` (after `required_env`);
-  `check_required_env` derives keys from `config/models.yaml`, a member's `key_env` winning.
-- 2026-09-01 — Ledger caps moved to config (`LedgerCaps`/`ledger_caps()`, `ledger_*_cap`, 2k/4k →
-  100k), read at call time; constants `_EVENT_ARG_CAP`/`_EVENT_RESULT_CAP`/`CODER_TEXT_CAP` deleted.
-- 2026-09-12 — New `env.provider_key_aliases(provider)` derives the key variable from
-  `models.keys.env_var_names`, replacing the hand-written table, so every reader agrees.
-- 2026-09-25 — [E12] `RunControl` inboxes carry `InboxEntry` (sender, kind, handles) for every text a
-  seat receives; seat liveness, resumed-task and background-task registries, `cancel_resumed()`
-  called first in the interrupt cleanup.
-- 2026-10-06 — Env plan B1/B4 (`env`): `analysis_environment(config)` (the analysis environment as
-  one object for every reader), `host_environment()`, `env_lock_dir()`, `declared_externals(config)`
-  (the human's `env_externals`, by name), `env_catalogue(config)` (the analysis environment plus every
-  pipeline-built one, for `use_env` / `list_env`), `agent_conda_dirs` → `agent_conda_dir`;
-  `replay_environment(fingerprint)` rebuilds a receipt's stamped environment from the lock store into
-  `<runtime>/conda/replay/<fp16>`, reports whether its conda part matches and compares externals.
-- 2026-10-17 — Ledger caps retired (`LedgerCaps`, `ledger_caps()`, the `ledger_arg_cap` / `ledger_result_cap` / `ledger_coder_text_cap` keys): the ledger records every field whole (user ruling). Readers stay bounded by their own windows (`MonitorToolProvider`).
-- 2026-10-17 — CLI `--report-format` accepts `html`; its default is the configured `report_formats`.
-- 2026-10-18 — [D1] `InboxEntry` kind `requeued`, rendered as-is: a text held back from a seat's
-  failed model call goes back to its inbox unwrapped, so a repeated failure cannot nest it.
-- 2026-10-18 — [D5 review] The `requeued` kind is retired (re-queued texts keep their own sender
-  and kind); new `RunControl.peek_inbox` and `WAKING_KINDS`.
-- 2026-10-18 — [D6 ruling] `RunControl.fatal` / `fail(exc)`: how a resumed seat's
-  `ReactBudgetExhausted` reaches and ends the run.
-- 2026-10-18 — [D6 review] `fail` counts only the first failure and none after a stop; `interrupt`
-  after a failure is a no-op; both cancel through `_cancel_run` (late-firing safe, never twice).
-- 2026-10-18 — [D8] `interrupt` is a no-op once a stop was requested (a second `/stop` cannot
-  cancel the cleanup).
-- 2026-10-18 — [D8 review] `cancel_resumed(timeout=)` is bounded and never swallows its caller's
-  own cancel.
-- 2026-10-18 — [D8 follow-ups] `RunControl.running`; the run task's cancel is sent once.
+- 2026-05-26 -> 2026-06-25 — Phase 1 complete; Phase 2 begun: `check_required_env`, `preflight.py`
+  (`run_preflight`), `hitl` + `human_handler`, `papers_dir()`, toolkit checks, `observations.py`.
+- 2026-07-14 -> 2026-07-16 — Installer increments 0–4 (`*.example` config, `repl_init_py`/
+  `analyze_probe` + `check_analyze_probe`, `install.sh`, `python -m auto_research.setup`); 5 deferred.
+- 2026-07-16 -> 2026-07-22 — `env.ProviderRetryPolicy`/`provider_retry_policy()`, `env.toolkit_root()`.
+- 2026-07-31 — `/stop` and Ctrl-C are one interrupt: `UserInterruptionError`,
+  `RunControl.register_run_task`/`authoring_session`, `run_research(install_signal_handlers=)`.
+- 2026-08-10 -> 2026-09-12 — Preflight `api_key_fallbacks`; keys derived from `config/models.yaml`
+  (`key_env` wins), `env.provider_key_aliases(provider)`. 09-01: `LedgerCaps`/`ledger_caps()`.
+- 2026-09-25 — [E12] `RunControl` inboxes carry `InboxEntry`; seat liveness, resumed- and
+  background-task registries, `cancel_resumed()`.
+- 2026-10-06 — Env plan B1/B4: `analysis_environment`, `host_environment`, `env_lock_dir`,
+  `declared_externals`, `env_catalogue`, `agent_conda_dirs` → `agent_conda_dir`, `replay_environment`.
+- 2026-10-17 — Ledger caps retired (`LedgerCaps`, `ledger_caps()`, `ledger_*_cap`; user ruling: every
+  field whole); CLI `--report-format` accepts `html`, default the configured `report_formats`.
+- 2026-10-18 — [D1] `InboxEntry` kind `requeued`, retired by [D5 review] (`RunControl.peek_inbox`,
+  `WAKING_KINDS`); [D6 ruling] `RunControl.fatal`/`fail(exc)` end the run on a resumed seat's
+  `ReactBudgetExhausted`, [D6 review] first failure only, via `_cancel_run`; [D8] `interrupt` a no-op
+  after a stop request, `cancel_resumed(timeout=)` bounded, `RunControl.running`.

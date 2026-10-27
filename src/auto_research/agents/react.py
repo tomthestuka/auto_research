@@ -44,7 +44,7 @@ from auto_research.provenance.capture import inputs_before, receipt_call
 from auto_research.env import coder_wait_limits_s, tool_search_config
 from auto_research.observations import load_observations_config
 from auto_research.sandbox.fs_guard import GOVERNANCE_BASENAMES, PathGuard
-from auto_research.sandbox.runner import normalize_tool_raw, parse_tool_figures, tool_text
+from auto_research.sandbox.runner import PROTOCOL_KEYS, normalize_tool_raw, parse_tool_figures, tool_text
 
 
 def _jail_supersedes_command_check(registry: Any, kind: str) -> bool:
@@ -1294,7 +1294,10 @@ def _written_report(workspace: "ReportWorkspace | None") -> Any | None:
     return getattr(workspace, "written_report", None) if workspace is not None else None
 
 
-def lead_turn_problems(cycle: "LeadCycle | None", workspace: "ReportWorkspace | None") -> list[str]:
+def lead_turn_problems(
+    cycle: "LeadCycle | None", workspace: "ReportWorkspace | None",
+    viewable: Callable[[str], bool] | None = None,
+) -> list[str]:
     """What is wrong with the analyst lead's turn, for :func:`execute_turn_end` (A6).
 
     The lead's report **is** its decision, so completeness is checked here rather than by a schema:
@@ -1338,6 +1341,13 @@ def lead_turn_problems(cycle: "LeadCycle | None", workspace: "ReportWorkspace | 
                     "Your report asks for another round but rationale is empty. Say what evidence "
                     "gap or disagreement one more pass would close."
                 )
+            scope = getattr(workspace, "receipts", None)
+            if scope is not None:
+                from auto_research.provenance.refs import brief_handle_problems
+
+                problems.extend(brief_handle_problems(
+                    "what_to_probe", str(getattr(report, "what_to_probe", "") or ""),
+                    lambda h: scope.visible(h) or (viewable is not None and viewable(h))))
             if cycle is not None and cycle.rounds_left <= 0:
                 problems.append(
                     "No debate rounds remain, so another round cannot be granted. Conclude on the "
@@ -2641,6 +2651,8 @@ class SandboxToolProvider:
     receipt_source: str | None = None
     extra_tools: Sequence[ExtraTool] = ()
     sandbox: Any | None = None
+    ref_handles: Callable[[], Iterable[str]] | None = None
+    _retype_check: Any | None = None
 
     def __init__(
         self,
@@ -2655,10 +2667,15 @@ class SandboxToolProvider:
         receipts: Any | None = None,
         receipt_source: str | None = None,
         extra_tools: Sequence[ExtraTool] = (),
+        ref_handles: Callable[[], Iterable[str]] | None = None,
     ) -> None:
         self.registry = registry
         self.sandbox = sandbox
         self.cwd = cwd
+        # The receipts a `$ref` argument may name (provenance.refs): read at each call, so a handle
+        # a message names mid-turn is usable at once. None: only the agent's own receipts.
+        self.ref_handles = ref_handles
+        self._retype_check: Any | None = None
         # Provenance (P1): the run's ReceiptStore and this agent's source key. Every tool call
         # mints receipts; the model sees each result labelled with its handle.
         self.receipts = receipts
@@ -2843,6 +2860,7 @@ class SandboxToolProvider:
 
         untested = False  # set by a routed toolkit call (B3b)
         ran = False  # the sandbox ran the call: only then is it stamped with an environment
+        ref_parents: list[str] = []
         t0 = time.monotonic()
         state = None
         if not self.registry.is_known(kind):
@@ -2871,6 +2889,15 @@ class SandboxToolProvider:
             if env_error is not None:
                 return ToolOutcome(text=env_error, is_error=True)
             sent = {k: v for k, v in args.items() if not (k == "env" and "env" not in schema_props)}
+            # `$ref` arguments become the values the named receipts hold, before anything reads
+            # the call; the receipts are recorded as the call's parents. `args` keeps the
+            # references: that is what the ledger rebuilds and the receipt hashes.
+            sent, ref_parents, ref_error = await asyncio.to_thread(self._resolve_refs, sent)
+            if ref_error is None:
+                # A value copied by hand from a usable result is refused (user ruling 2026-10-26).
+                ref_error = await asyncio.to_thread(self._retyped, arguments)
+            if ref_error is not None:
+                return ToolOutcome(text=ref_error, is_error=True)
             state = await self._inputs_before(sent, named=arguments)
             raw = await self.sandbox.call_tool(
                 spec["module"], spec["fn"], sent, timeout_s=call_timeout,
@@ -2899,10 +2926,12 @@ class SandboxToolProvider:
                 args=args, text=text, failed=exit_code != 0, state=state, figures=figures,
                 cwd=self.cwd, toolkit_root=getattr(self.registry, "_root", None), env=env_fp,
                 env_default=getattr(self.sandbox, "environment", None) is None and not own_server,
-                env_untested=untested,
+                env_untested=untested, parents=ref_parents,
+                # What a toolkit tool returned beside its stdout: what a later `$ref` resolves.
+                returned={k: v for k, v in raw.items() if k not in PROTOCOL_KEYS} if ran else None,
             )
             figures = minted.figures
-            provenance_notes = minted.notes
+            provenance_notes = list(minted.notes)
             receipt_call_id = minted.result.call_id
             header = minted.header() + "\n"
             environment = getattr(self.sandbox, "call_environment", None) or getattr(self.sandbox, "environment", None)
@@ -2983,6 +3012,36 @@ class SandboxToolProvider:
         if match.owner == "pipeline" and not jail_enabled():
             return None, f"{want} runs only in the jail, which is off for this run.", False
         return match, None, untested
+
+    def _usable_handles(self) -> set[str]:
+        """The receipts this agent may pass on by ``$ref``: its own, plus ``ref_handles``."""
+        own = {r.handle for r in self.receipts.receipts(source=self.receipt_source)} if (
+            self.receipts is not None and self.receipt_source) else set()
+        return own | (set(self.ref_handles()) if self.ref_handles is not None else set())
+
+    def _resolve_refs(self, sent: Mapping[str, Any]) -> tuple[dict[str, Any], list[str], str | None]:
+        """``(arguments with references resolved, parent handles, error text or None)``."""
+        from auto_research.provenance.refs import RefError, refs_in, resolve_refs
+
+        if not refs_in(sent):
+            return dict(sent), [], None
+        if self.receipts is None:
+            return dict(sent), [], "References need the run's receipt store, which this agent has none of."
+        try:
+            resolved, parents = resolve_refs(sent, self.receipts, self._usable_handles().__contains__)
+        except RefError as exc:
+            return dict(sent), [], str(exc)
+        return resolved, parents, None
+
+    def _retyped(self, arguments: Mapping[str, Any]) -> str | None:
+        """The refusal for typed values a usable toolkit result already holds, or ``None``."""
+        if self.receipts is None:
+            return None
+        from auto_research.provenance.refs import RetypeCheck
+
+        if self._retype_check is None:
+            self._retype_check = RetypeCheck(self.receipts)
+        return self._retype_check.problem(arguments, self._usable_handles())
 
     async def _inputs_before(self, args: Mapping[str, Any], named: Mapping[str, Any] | None = None) -> Any:
         """Hash what the call's arguments name, before it runs (data roots and outputs skipped)."""

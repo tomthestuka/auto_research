@@ -256,77 +256,35 @@ the published artifact paths and handles (`report_artifacts`).
 - `DEFAULT_WORKER_COUNT` — default analyst worker count (currently 2).
 
 ## Changelog
-Compacted 2026-09-01 and again 2026-09-24 (every entry), and 2026-10-07 (the 2026-10-06/07
-entries); detail in git history.
+Compacted 2026-09-01 and again 2026-09-24 (every entry), 2026-10-07 (the 2026-10-06/07 entries),
+and 2026-10-19 (every entry); detail in git history.
 
-- 2026-05-26 -> 2026-06-26 — Six-node graph (`compose_report`, two capped feedback edges, Studio,
-  per-run workspace, per-worker sandbox, MCP lifecycle); HITL channel, async preflight and consensus
-  authoring wired. Reviewer is the sole I/O (§9.6): a report is always composed on finalize.
-- 2026-07-06 -> 2026-07-16 — [E5] `run_research_nohup` detached runs (reconnect by `run_id`,
-  `RunDied`); liveness treats a zombie as dead; `_spawn_orphaned` double-forks to survive IDE logout.
-- 2026-07-22 -> 2026-07-29 — Durable resume: `graph/checkpoint.py` (`AsyncSqliteSaver`, `resume=True`,
-  `checkpointer_available` preflight), `heal_toolkit_branch_if_dirty` before preflight, Stage 3
-  `CommandContext`; killed-and-resumed run LIVE-VERIFIED 2026-08-03.
-- 2026-07-29 — Cost meter installed before any model client; monitor `run_id` pinned to the run;
-  `cost_usd` on `run.finish`; `run.summary` on success and failure; `backend.log` appended.
-- 2026-07-31 — Interrupt: `/stop` or signals cancel the registered task; shielded `_interrupt_cleanup`
-  (kill → repair branch → close/record, each step bounded) raises `UserInterruptionError` with no
-  model call; `build_graph(run_control=)` and stop-aware edges deleted.
-- 2026-09-08 — Role wiring extracted into `readonly_tools_for`, `readonly_roots_for` and
-  `attach_worker_runtime`, called by `run_research` (behaviour-preserving); static guard
-  `tests/test_role_wiring_seams.py`.
-- 2026-09-24 — Literature node runs one librarian `research()` pass into `literature` /
-  `literature_receipts` (`IOAgentLike` shrank to it); workers and the lead get
-  `ReceiptStore.for_run` via `attach_worker_runtime` / `attach_lead_runtime`.
-- 2026-09-24 (5c) — Reviewer is a unit: `ReviewVerdict` → `ReviewerReport`, rendering inside its
-  `turn_end` (`ReviewerRender`), `compose_report` publishes with no model, new
-  `attach_reviewer_runtime`; `build_graph(storage=, report_retry_cap=)` → `receipts=`.
-- 2026-09-25 — [R1] The reviewer is the sole I/O (human ruling): START → `review`; one router on
-  `ReviewerReport.assign_to ∈ {librarian, analysts, human}` replaces the two stage-bound reviews
-  and flags; librarian passes accumulate; new `human` edge endpoint (blocking handler, PDF attached
-  via E11's `resolve_attachments`, reply text a nudge never a receipt, files `input:` receipts,
-  `done`/unattended/timeout end the run); report folders versioned `v<k>/` and moved beside the
-  ledger with every role's report JSONL; `build_graph(human_handler=)`; pre-change checkpoints
-  refused on resume. Deterministic only; live adversarial cells pending.
-- 2026-09-25 — [E12] (wording from auto-research-3b) The human handler reaches the seats through
-  `attach_channel` / `hitl.router.SeatRouter`; `readonly_tools_for` dropped `human_handler`/`model`;
-  `_interrupt_cleanup` cancels resumed seats first.
-- 2026-09-25 — [R1] LIVE-TESTED: `tests/test_live_reviewer_paths.py` graph cell (real reviewer + librarian, stub analysis, attacking human): START → review, librarian pass, three reports to the human in `v1`–`v3` with earlier PDFs re-verified, nudges minted nothing, exact `done` ended the run.
-- 2026-10-06 — **[F20] [F22] [F23] Shell server and run records.** `_builtin_server_config` launches
-  the shell server inside the OS jail (`jail.analysis_policy`: toolkit read-only, private `/tmp`,
-  cwd writable; `PYTHONNOUSERSITE=1`; private `PFILES` and home) and records `"jailed"` on the
-  returned config (read by the shell guard). Detached-run records (`backend.pid`, `result.json`,
-  the monitor) live beside the ledger; `overwrite=True` erases the ledger directory too. Workers'
-  REPL workdir is `agent_dir`.
-- 2026-10-06 — **Environments (env plan B2b, B3c-5).** `SandboxSettings.catalogue`
-  (`partial(env.env_catalogue, config)`) reaches each worker's sandbox via `attach_worker_runtime`;
-  the shell's jail binds `<runtime>/conda/envs` and `activation/` read-only. `run_research`
-  reconciles the pipeline's environments after preflight (`_reconcile_environments` →
-  `merge_flow.reconcile_environments`): missing or stale builds made, a drifted prefix kept aside
-  and rebuilt, changed externals reported, each a ledger event; a problem never stops the launch; a
-  stop kills the builds.
-- 2026-10-17 — `report_html` in the state, `ResearchRun`, the detached result and the CLI; `publish_report(html_path=)` mints it as a `rev:` receipt; `run.report` names it.
-- 2026-10-17 — The human node attaches the published PDF, else the HTML page (`report_formats` without `tex`); the message says "The report is attached.".
-- 2026-10-17 — `_normalize_report_formats` accepts `html` and validates the configured default too; `compose_report` republishes only this run's formats (a resumed checkpoint's earlier PDF is not sent); `run.human.sent` records `attachment`.
-- 2026-10-18 — [B2] `attach_worker_runtime` no longer assigns a memory path (memory.md retired; the run ledger is every seat's session history).
-- 2026-10-18 — [D5 review] `run_research`'s `finally` cancels the run's channel tasks
-  (`run_control.cancel_resumed()`) before the sandboxes shut down, on a normal finish or a crash
-  too, so a seat woken as the run ended never outlives it (restarting a sandbox, spending after
-  `run.finish`).
-- 2026-10-18 — [D6 ruling] `run_research` raises `run_control.fatal` — set when a resumed seat
-  exhausts its caps in a channel task — whether it arrives as the run task's cancellation or after
-  the graph returned; recorded as `run.error` with `from: channel`.
-- 2026-10-18 — [D6 review] The fatal path runs the interrupt's kill-and-repair in the run task
-  (`_interrupt_cleanup(fatal=)`); the run task is unregistered when the graph returns; a stop that
-  came first wins.
-- 2026-10-18 — [D8 ruling] `/stop` cleans leaf to root in the run task (no shield): every step
-  recorded (`run.interrupt.step*`, skips with their reason), the landing checklist sent before the
-  connector closes, the connector closed last (`aclose` now found). Tests:
-  `tests/test_stop_teardown.py` (real `run_research`, real MCP server process checked gone).
-- 2026-10-18 — [D8 review] Outer cancels held during the stop cleanup; step 1 bounded
-  (`cancel_resumed(timeout=)`); a quietly failed reset shown ✗; the run task unregistered on every
-  way out; the `finally` skips a cleanup that ran.
-- 2026-10-18 — [D8 follow-ups] Checklist: a justified skip reads "– skipped (reason)", cancelled
-  in-flight commands are listed, a reset with nothing to reset says so, patch paths in backticks,
-  a step's own timeout message kept; an outer cancel landing with the stop is honoured after the
-  cleanup. Live: `tests/test_live_stop_telegram.py` (2 cells).
+- 2026-05-26 -> 2026-06-26 — Six-node graph (`compose_report`, capped feedback edges, Studio,
+  per-run workspace, per-worker sandbox, MCP lifecycle); HITL, async preflight, consensus authoring.
+- 2026-07-06 -> 2026-07-31 — [E5] `run_research_nohup` (`RunDied`, `_spawn_orphaned`); durable
+  resume `graph/checkpoint.py` (`AsyncSqliteSaver`, `checkpointer_available`),
+  `heal_toolkit_branch_if_dirty`, LIVE-VERIFIED 2026-08-03; cost meter first, `cost_usd` on
+  `run.finish`, `run.summary`; interrupt: shielded `_interrupt_cleanup` → `UserInterruptionError`,
+  `build_graph(run_control=)` and stop-aware edges deleted.
+- 2026-09-08 — `readonly_tools_for`, `readonly_roots_for`, `attach_worker_runtime` extracted.
+- 2026-09-24 — Literature node runs one librarian `research()` pass; `ReceiptStore.for_run` via
+  `attach_worker_runtime`/`attach_lead_runtime`; (5c) `ReviewVerdict` → `ReviewerReport`,
+  `ReviewerRender`, `attach_reviewer_runtime`; `build_graph(storage=, report_retry_cap=)` →
+  `receipts=`.
+- 2026-09-25 — [R1] reviewer is the sole I/O (human ruling): START → `review`, one router on
+  `assign_to ∈ {librarian, analysts, human}`, `human` edge endpoint, `v<k>/` report folders,
+  `build_graph(human_handler=)`, pre-change checkpoints refused. LIVE-TESTED
+  (`tests/test_live_reviewer_paths.py` graph cell). [E12] `attach_channel`/`SeatRouter`;
+  `readonly_tools_for` dropped `human_handler`/`model`.
+- 2026-10-06 — [F20][F22][F23] `_builtin_server_config` jails the shell server
+  (`jail.analysis_policy`) and records `"jailed"`; detached-run records beside the ledger. B2b,
+  B3c-5: `SandboxSettings.catalogue`, `_reconcile_environments` →
+  `merge_flow.reconcile_environments`.
+- 2026-10-17 — `report_html` (state, `ResearchRun`, result, CLI; `publish_report(html_path=)`); the
+  human node attaches the PDF, else the HTML; `_normalize_report_formats` accepts `html`;
+  `run.human.sent` records `attachment`.
+- 2026-10-18 — [B2] no memory path in `attach_worker_runtime`. [D5 review] `finally` calls
+  `run_control.cancel_resumed()`. [D6 ruling + review] `run_research` raises `run_control.fatal`
+  (`run.error`, `from: channel`; `_interrupt_cleanup(fatal=)`). [D8 ruling + reviews] `/stop`
+  cleans leaf to root in the run task (`run.interrupt.step*`, landing checklist, connector closed
+  last). Live: `tests/test_live_stop_telegram.py` (2 cells).

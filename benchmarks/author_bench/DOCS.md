@@ -381,27 +381,20 @@ the author's vendor alone. `Leg.lead_correlated` now reports the second axis alo
 the measurement, not for this DOCS.
 
 ## 6. Changelog
-Compacted 2026-09-01 and again 2026-09-24 (detail in git history).
+Compacted 2026-09-01, 2026-09-24 and 2026-10-19 (every entry); detail in git history.
 
 - 2026-08-18 — Instrument built (paper item 4): `drive_authoring` trial unit, the frozen #2 brief,
-  base `fa99ef8`, per-trial clone/ledger/cost meter, unattended (`human_channel: none`, a raise
-  records `needs_human`); `--only` re-runs and `--rescore DIR...` merges batches.
-- 2026-08-18 — First batch (K=15) aborted at 48 min on OpenAI `429 insufficient_quota`; kept as
-  `logs/dev/author-bench/20260818T200942Z/` under `ABORTED.md`, not quotable. K set to 10.
-- 2026-08-20 -> 2026-08-23 — Model sweep (paper item 7): `legs.py` roster, `--legs`, per-leg records,
-  `--rescore` keyed on `(leg, trial)`; the single-leg report stays byte-identical to the published
-  batch. Tests moved to `benchmarks/author_bench/tests/` (08-23).
-- 2026-08-22 — `save_committed_patch` writes `committed.patch` per committed trial; the correlated
-  arm's five earlier committed trees are unrecoverable.
-- 2026-08-24 -> 2026-08-25 — Lead became a roster axis (`lead_provider`/`lead_model`,
-  `build_pinned_lead`); five panel-(b) legs under a `gpt-5.6-sol` lead; GLM rows capped at 2 in flight.
-- 2026-08-25 — Lead x co-lead grid `legs.GRID` (20 cells, pinned `deepseek-v4-flash` author, K=5),
-  `CURATED`/`GROUPS`; pinned parameters for all five vendors (Qwen at high effort); per-axis vision;
-  per-member preflight probe. `--detach`, `--status DIR`, `--resume DIR` (per-leg, `batch.json`).
-- 2026-08-27 — Leak fixed: trial paths and branch named the campaign and the leg's vendors to all
-  actors; now an opaque per-trial token. The 2026-08-26 100-trial grid is re-run, not reported.
-- 2026-09-21 — `tmp_scripts/plot_coder_sweep_cost.py` promoted to `plot_sweep_cost.py` (backs a
-  manuscript figure); output unchanged.
-- 2026-09-22 — `table_grid.py`/`plot_sweep_cost.py` use manuscript role names ("LLM reviewer",
-  "coder"); Claude arm drawn at full K=10 ($809.40); same-provider Claude arm no longer drawn.
-
+  base `fa99ef8`, per-trial clone/ledger/cost meter, unattended (`human_channel: none`); `--only`,
+  `--rescore DIR...`. First batch (K=15) aborted on OpenAI `429 insufficient_quota`, kept under
+  `ABORTED.md`, not quotable; K set to 10.
+- 2026-08-20 -> 2026-08-25 — Model sweep (paper item 7): `legs.py` roster, `--legs`, per-leg records
+  (single-leg report byte-identical to the published batch), `--rescore` keyed on `(leg, trial)`;
+  tests in `benchmarks/author_bench/tests/`; `save_committed_patch` (`committed.patch`); lead as a
+  roster axis (`lead_provider`/`lead_model`, `build_pinned_lead`); lead x co-lead grid `legs.GRID`
+  (20 cells, pinned `deepseek-v4-flash` author, K=5), `CURATED`/`GROUPS`, pinned parameters for all
+  five vendors, per-member preflight probe; `--detach`, `--status DIR`, `--resume DIR`.
+- 2026-08-27 — Leak fixed: trial paths and branch named the campaign and the leg's vendors; now an
+  opaque per-trial token. The 2026-08-26 100-trial grid is re-run, not reported.
+- 2026-09-21 -> 2026-09-22 — `plot_sweep_cost.py` promoted from `tmp_scripts/` (manuscript figure);
+  it and `table_grid.py` use manuscript role names ("LLM reviewer", "coder"); Claude arm at full
+  K=10; same-provider Claude arm no longer drawn.

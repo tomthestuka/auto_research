@@ -119,25 +119,15 @@ appends, and marks each conversation-bearing event with a `data["history"]` part
   recorded, so consumers render what the run computed instead of recomputing it.
 
 ## Changelog
-Compacted 2026-08-05 and again 2026-09-24 (detail in git history).
+Compacted 2026-08-05, again 2026-09-24 and 2026-10-19 (every entry); detail in git history.
 
-- 2026-05-28 -> 2026-06-23 — `RunMonitor` built: async-safe JSONL streaming, chatter-filtered events,
-  grouped Markdown, offline reconstruction, live `team(model)` progress lines, a `tooling`-team stream
-  (`coder.*`, `gate.result`, `review.result`, `commit`), and paired `*.tool_call`/`*.tool_result` events.
-- 2026-07-29 — [J1] the ledger is the single source of truth: `Preflight.run_checklist(monitor=…)` records
-  `preflight.<name>` + `preflight.summary` (guarded, [J2]); `MonitorEvent.cost_usd_total`,
-  `RunMonitor.cost_meter` and per-call `cost.call` replace `cost_ledger.jsonl`.
-- 2026-07-29 — `summary.py` derives `run.summary` from the event stream (`cost_usd` = sum of `cost.call`).
-  The monitor's `run_id` is the run's id; `__init__` appends and continues numbering; `write_jsonl()`
-  refuses to rewrite the live ledger.
-- 2026-09-01 — Per-field ledger caps are config (`ledger_arg_cap`/`ledger_result_cap`/
-  `ledger_coder_text_cap` via `env.ledger_caps()`), raised 2,000/4,000 → 100,000; trimmed fields keep
-  their `"[+N chars]"` marker.
-- 2026-09-01 — New events `coder.ask_human.unattended` (L3) and `coder.ask_human.error` (L1); neither is
-  followed by `.answer`.
-
-- 2026-09-25 — [R1] Verdict line reads `assign_to=` (the two flags are gone); `summary.py` takes the verdict from `reviewer.review.verdict` when assigned to the human and prints `reports to the human` from `run.finish.human_rounds`.
-- 2026-10-17 — Ledger fields recorded whole (the per-field caps are retired); `*.tool_result` carries `call_context` for a worker's call, so the `tool_call`/`tool_result` pair rebuilds the arguments it ran with.
-- 2026-10-17 — `*.tool_result` names the receipts' `call_id` when the call minted any (the receipt → ledger join). Channel messages, human replies and `/command` text are recorded whole too (`hitl.router`, `hitl.commands`).
-- 2026-10-18 — [B1] New history events from every ReAct loop: `*.turn_start` (L8), `*.model_turn` (L9, the returned turn whole), `*.nudge` (L4); `*.tool_result`, `*.tools`, the injected-message events and `analyst.tool.compacted` carry a `data["history"]` part. The JSONL is each agent's session history (`agents/history.py`); `monitor.md` grows by the model turns.
-- 2026-10-18 — [B6/B7] New events: `*.compaction` (L3; `server: true` for a provider-side compaction, else a `rewrite` history part with `op: "compact"`), `*.compaction_pin` (L4), `*.compaction_failed` (L2), `*.history.unreadable` (L1), `*.history.unavailable` (L3).
+- 2026-05-28 -> 2026-06-23 — `RunMonitor`: JSONL streaming, grouped Markdown, offline reconstruction,
+  progress lines, `tooling`-team stream, paired `*.tool_call`/`*.tool_result`.
+- 2026-07-29 — [J1] ledger is the single source of truth: `preflight.<name>`/`.summary` ([J2]),
+  `MonitorEvent.cost_usd_total`, `RunMonitor.cost_meter`, `cost.call`; `summary.py` (`run.summary`).
+- 2026-09-01 — Ledger caps in config; `coder.ask_human.unattended` (L3), `coder.ask_human.error` (L1).
+- 2026-09-25 — [R1] verdict line `assign_to=`; `summary.py` reads `reviewer.review.verdict`.
+- 2026-10-17 — Fields recorded whole (caps retired); `*.tool_result` carries `call_context`, `call_id`.
+- 2026-10-18 — [B1] `*.turn_start` (L8), `*.model_turn` (L9), `*.nudge` (L4), `data["history"]` parts;
+  [B6/B7] `*.compaction` (L3), `*.compaction_pin` (L4), `*.compaction_failed` (L2),
+  `*.history.unreadable` (L1), `*.history.unavailable` (L3).

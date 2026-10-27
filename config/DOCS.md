@@ -319,33 +319,21 @@ The same numbers are kept in `tests/test_live_coder_matrix.py: _PRICES` for the 
 that file constructs, since a live leg needs them without being configured here.
 
 ## Changelog
-Compacted 2026-09-01, 2026-09-24 and 2026-10-07 (detail in git history).
+Compacted 2026-09-01, 2026-09-24, 2026-10-07 and 2026-10-19 (every entry); detail in git history.
 
-- 2026-05-26 -> 2026-06-24 — Config surface built: model groups/pricing, vision/document flags,
-  `runtime_dir`, ReAct/structured caps, report formats, `coder` + non-Anthropic `analyst_colead`.
-  `code_gate.yaml` (no-fabrication scan); `human_channel` + ping timeout; `tool_author_branch`/
-  `tool_author_cap`; `observations.yaml` → one `obs_db_root`, missions found by `catalog.json`;
-  `sandbox_call_timeout_s` (300; per-tool `call_timeout_s` override, no clamp);
-  `react_loop_absolute_cap` (60) caps all ReAct iterations, `react_loop_cap` only budgeted ones.
-- 2026-07-06 -> 2026-07-08 — [C1] `synthetic`/`illustrative` family → `finding_vocabulary`
-  (fabrication phrases and RNG stay hard-fail). Reviewer's Anthropic member → `claude-fable-5`;
-  `thinking: {type: adaptive}` on every Anthropic chat member (coder excluded, `effort` unset),
-  `max_tokens` raised (≤21333). Live-verified.
-- 2026-07-14 -> 2026-07-28 — Machine-local config (installer inc. 0): live files gitignored with
-  `*.example` templates; new `repl_init_py`, `analyze_probe`. `context_mgmt_*` and
-  `tool_search_enabled` added off (NOT LIVE TESTED), flipped `true` 07-28 after live tests passed.
-- 2026-08-19 -> 2026-08-20 — Token-rate table for `glm-*`/`qwen*` (litellm prices them at zero).
-  `agent_os_jail` + `agent_fs_readonly` added (default off); HEASoft release root joins the list.
-- 2026-09-24 — `librarian_react_loop_cap` 1 → 40; `io_search_max_iterations` removed.
-  `check_coder_min_interval_s` replaced by `coder_wait_floor_s`/`_default_s`/`_max_s` (`wait_coder`).
-- 2026-09-25 — Added `telegram_rich_messages` (default `true`).
-- 2026-10-06 -> 2026-10-07 — `orchestration.yaml`: `env_externals` (`{name: {root, stamps}}`,
-  HEASoft and CALDB here; stamp files hashed into every receipt's environment fingerprint, env plan
-  B1); `/data/fzhou/XSPEC/relxill` added to `agent_fs_allow` and `agent_fs_readonly` (`ar-xspec`'s
-  boot file loads relxill from it inside the jail).
-- 2026-10-18 — [B4] `context_tokens` per chat member (values quoted from each provider's model page); Claude Sonnet 5 `priceMTk` 3/15 → 2/10 (the introductory price became standard, about-claude/pricing).
-- 2026-10-18 — [B5 ruling] `context_tokens` is an override only: the window comes from litellm first (board B5); no member sets it today.
-- 2026-10-18 — [B5] `context_mgmt_clear_tool_inputs: true`, `context_mgmt_clear_at_least_tokens: 60000`; new key `context_mgmt_exclude_tools`.
-- 2026-10-18 — [B6/B7] `compaction_enabled: true`, `compaction_trigger_fraction: 0.9`; new role `session_compactor` (gpt-5.6-luna).
-- 2026-10-18 — [B11 ruling] `context_mgmt_exclude_tools: [message, wait_for_reply]` (code default the same).
-- 2026-10-18 — [B12 ruling] `context_mgmt_enabled: false` (config and .example); compaction (`compaction_enabled: true`) bounds a turn.
+- 2026-05-26 -> 2026-06-24 — Config surface: model groups/pricing, vision/document flags, `runtime_dir`,
+  caps, report formats, `coder` + non-Anthropic `analyst_colead`, `code_gate.yaml`, `human_channel`,
+  `tool_author_branch`/`_cap`, `obs_db_root`, `sandbox_call_timeout_s` (300), `react_loop_absolute_cap` (60).
+- 2026-07-06 -> 2026-07-08 — [C1] `finding_vocabulary`; `claude-fable-5` reviewer member; adaptive
+  `thinking` on Anthropic chat members, `max_tokens` raised. Live-verified.
+- 2026-07-14 -> 2026-08-20 — `*.example` templates; `repl_init_py`, `analyze_probe`; `context_mgmt_*`,
+  `tool_search_enabled` (NOT LIVE TESTED, on 07-28 after live tests); `glm-*`/`qwen*` rates;
+  `agent_os_jail`, `agent_fs_readonly` (default off).
+- 2026-09-24 -> 2026-09-25 — `librarian_react_loop_cap` 40; `io_search_max_iterations` removed;
+  `coder_wait_floor_s`/`_default_s`/`_max_s` replace `check_coder_min_interval_s`; `telegram_rich_messages`.
+- 2026-10-06 -> 2026-10-07 — `env_externals` (env plan B1); `/data/fzhou/XSPEC/relxill` in
+  `agent_fs_allow`/`agent_fs_readonly`.
+- 2026-10-18 — [B4] `context_tokens`, Sonnet 5 `priceMTk` 2/10; [B5 ruling] `context_tokens` override
+  only; [B5] `context_mgmt_clear_*`, `context_mgmt_exclude_tools` ([B11 ruling] `[message,
+  wait_for_reply]`); [B6/B7] `compaction_*`, role `session_compactor`; [B12 ruling]
+  `context_mgmt_enabled: false`.

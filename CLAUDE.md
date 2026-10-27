@@ -443,7 +443,10 @@ generalised and corrected.
   run, cached by path, size and mtime); an input whose bytes an earlier receipt produced links it as
   a parent, so a result's ancestry is walkable and `failed` / `synthetic` (P2 §9.5) flags propagate to
   every descendant. A flagged receipt can be cited to describe what happened; it cannot ground a
-  number.
+  number. A value passes from one toolkit call to the next **by reference** (2026-10-26): an
+  argument `{"$ref": "<handle>#<json-pointer>"}` is resolved by the runtime from the stored result
+  and that receipt becomes the call's parent; only a toolkit result in the caller's reach resolves
+  (user rulings: a handle it can open but not cite counts; a typed float a usable result holds is refused with the reference to write).
 - **One store per run** (`ReceiptStore.for_run`), append-only, replayed on resume, so a handle
   means the same artifact everywhere. It lives beside the run's ledger, outside every role's
   allow-list, so no role can read another's evidence and re-mint it as its own. Each unit cites through a scoped view: its own receipts, the
@@ -1043,85 +1046,49 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 
 Phases 1–2: see `CLAUDE_p1.md` and the compacted changelog at the end of `CLAUDE_p2.md` (its last
 entry 2026-09-25, [R7] evidence rule, LIVE-VERIFIED 2026-09-26).
+Compacted 2026-10-19 (every entry); detail in git history.
 
-- 2026-09-27 — **Phase 3 opened: MTA as an agent SDK.** The Phase 2 file moved to `CLAUDE_p2.md`
-  (spec archived, P2 §9 still authoritative for the coding pipeline as built); this file redrafted:
-  three-package trust boundary (§2), SDK-neutrality rules (§3), the SDK protocol preamble (§4),
-  model specs passed in rather than read (§6), receipt source and toolkit generalisation (§7),
-  Phases 1–2 retrospective (§8), the Phase 3 spec (§9: the unit, the non-configurable invariants,
-  the Claude-Agent-SDK-shaped API, toolkits and sandbox per unit, two subagent kinds, the
-  inventory of special cases, build order 0–9, open questions), deferrals (§12). §2b, §3–§7, §10, §11, §13
-  carried verbatim, with Phase 3 notes appended. **DRAFT — §9 awaits debate with the human before step 0.**
-- 2026-10-06 — **§3 hard rules: two testing and review rules added** (human). A stateless
-  adversarial code-review agent runs after every module change (weaknesses, shortcut logic,
-  tradeoffs); every test, deterministic or live, drives the module API rather than a hand-rolled
-  equivalent of production logic.
-- 2026-10-06 — **Phase 3 rescoped (human ruling): generalize the MTA unit inside this repository;
-  not an SDK.** The 2026-09-27 SDK draft is withdrawn after a landscape investigation (agent-SDK
-  vendors, conformance-suite precedent, framework defaults read from source, prior art on five
-  candidate contributions; findings in `tmp_landscape_071526.md` §7b).
-  - §1 rewritten; §2 back to two repositories, plus the boundary around the human's conda
-    environments.
-  - §3 Phase 3 additions replaced: generalize, don't extend; behaviour parity; the shared
-    execution layer with the F18 environments stream. The human's two 2026-10-06 hard rules kept.
-  - §4/§6/§7 notes rewritten without SDK framing; §7 adds the environment fingerprint.
-  - §9 rewritten: scope and what was decided against; the unit; invariants; what a definition
-    holds; toolkits, sandbox, execution and environments per unit (F18's settled decisions
-    summarised); two subagent kinds; validators; the dissolution table; build order 0–7; five open
-    questions.
-  - §10 SDK notes removed; §12 records the SDK and the conformance suite as parked.
-- 2026-10-06 — **Environment rulings and F20 folded in** (from the F18 work stream's plan,
-  approved by the human 2026-10-06; confirmed with that stream before editing).
-  - §2 and §9.6: environments are defined in the toolkit, built only by the coding pipeline, and
-    used read-only by every unit. Also: routing per toolkit call (tested default, "untested env"
-    flag on an override), visible rebuild on drift, storage apart from the human conda cache, the
-    sequencing of the toolkit step, accepted residual risks.
-  - §8, §9.1, §9.6, §9.9, §9.10 step 3 and §13: F20 closed — the REPL and the shell server share
-    `jail.analysis_policy`; the shell guard stands down only for a server recorded jailed.
-  - §9.5: the toolkit contract gains environment definitions.
-  - §9.11 q5 replaced by F21 (the REPL boot file is not mounted in the jail).
-- 2026-10-06 — **§9.6 residual risks:** a file a build's package script writes outside the conda
-  records is accepted as escaping the fingerprint (human ruling, after nine review rounds of the
-  environment builder; `verify` checks records and pins only).
-- 2026-10-07 — **Environment stream built and LIVE-VERIFIED (plan B1–B6, T1); F18 closed.** §9.6
-  status, sequencing and rulings recorded here (B3c naming: no environment field in briefs, the target
-  package's `env:` decides, extend before create, no id suffix, an environment change re-tests every
-  package naming it; conda over pixi; no build resource limits; the sabotage residual; the "derived
-  from cited receipts" rule removed); §9.10 step 4 Done; §9.11 q5 and F21 narrowed; §13 environment
-  residuals and [R8] provenance edges.
-  - B5 live cell (`tests/test_live_env_pipeline.py`): a worker's missing Boost.Python runtime became
-    the pipeline-built `ar-sherpana` (Python 3.9, boost 1.87, hdf5 1.12), built on commit; gate tests
-    and worker calls ran in it, a second run reused it. Five harness bugs fixed (symlinked build
-    paths, 4 MB record cap, `-P` on Python < 3.11, the REPL's 64 KB line limit, run-ending input
-    hashing).
-  - T1: `research_toolkit` root `conftest.py` (unmarked / `slow` / `live`, live opt-in) and
-    `envs/xspec/` (`ar-xspec`: 232 packages, `ixpeobssim` as a hashed wheel, HEASoft/CALDB
-    activation, XSPEC + relxill boot file), named by `xspec_utils`. Parity: 421/426 in `ar-xspec`,
-    the same five failures in the human environment. Jailed probe: relxillCp loads once
-    `/data/fzhou/XSPEC/relxill` is on the read-only allow-list.
-- 2026-10-17 — **Provenance trail in an HTML report** (plan `tmp_plan_provenance_replay.md`, user rulings 2026-10-16/17; replay is the human's, the runtime re-runs nothing). The run ledger records every field whole (caps retired) and each worker call's runtime context, so `provenance.calls` rebuilds the exact arguments of any toolkit receipt, proven by its `args_sha256`; receipts name the observations a tool located by ObsID (`obsdb` inputs) and the toolkit root; `report_formats` gains `html`: `report.html`, every number opening its z-chain (data | tool, commit, environment, arguments, inputs, copy reproduce code), checked at the reviewer's `turn_end` and parsed back; one paged, bounded `read_file` for every role (workers and the status monitor included). §13: (a) narrowed; new entries for spelled-out numbers and report-table receipts (rulings pending). Live: `tests/test_live_provenance_html.py` (B1, B2, R1, R2, R4, R5).
-- 2026-10-17 — Rulings: a report table cited by receipt must be evidence (`render.check_table`, both formats); spelled-out numbers stay unchecked and the prompts ask for digits; `report_formats: [html]` in the live config, the page sent to the human when there is no PDF; the librarian's `web_fetch` description and the literature schema/refusal wording follow its deep-research scope.
-- 2026-10-18 — [D1, run 32814459] §13: provider-error containment covers the analyst workers
-  only; a worker's `ProviderTurnFailed` no longer ends the run, the other roles' still does
-  (rulings pending).
-- 2026-10-18 — §13: session-history coverage entry (B1, context-overflow plan).
-- 2026-10-18 — §13: the session-history entry rewritten for B1–B8 and rulings B1, B3, B6–B14 (context-overflow plan).
-- 2026-10-18 — [D4, D5 rulings] The absolute ceiling is a cap with the budget's grace window
-  (counted in model turns), then `ReactBudgetExhausted`; only an accepted `turn_end` advances a
-  draft to a report (per-turn `TurnOutcome`), closing an unfiled-draft return found while testing
-  D1. Texts that reach a seat during the batch that files are re-queued and resume it
-  (`SeatRouter.wake`).
-- 2026-10-18 — §13: the session-history entry updated for R2/R3/R7/R10 (documents ride their tool result; a media-pressure segment boundary on every provider; task figures once per session; a condensed seed pins earlier receipts) and OpenAI compaction wired on its probe.
-- 2026-10-18 — [D6 ruling, "crashes"] A resumed turn's `ReactBudgetExhausted` ends the run:
-  `SeatRouter._resume` records it and calls `RunControl.fail`, which cancels the run task, and
-  `run_research` raises it (§9.3.8: never caught).
-- 2026-10-18 — [B18 ruling] `review_report` erased for every role (an edit needs no full re-read;
-  each write/edit reply shows the change, a refused call shows the draft as text); a figure's
-  citable label arrives where the figure first appears (the tool result, a worker's
-  `your_figures`, the lead's `figure_catalog`); the reviewer's typeset preview goes, `turn_end`
-  still renders and compiles. §9.2/§9.8 name `write_report`; §13's whole-catalogue entry and the
-  preview's `pdftoppm` residual close.
-
-- 2026-10-18 — [D8 ruling] `/stop` cleans the tree leaf to root in the run task, every step bounded
-  and recorded, a landing checklist sent before the HITL connector closes last; `/stop` and
-  `/status` answer at once and commands run side by side.
+- 2026-09-27 -> 2026-10-06 — **Phase 3 opened, then rescoped.** 09-27: Phase 2 spec moved to
+  `CLAUDE_p2.md` (P2 §9 still authoritative for the coding pipeline as built); an MTA-as-agent-SDK
+  draft. 10-06 human ruling: generalize the MTA unit inside this repository, not an SDK; draft
+  withdrawn (`tmp_landscape_071526.md` §7b). §1 rewritten; §2 two repositories plus the human's
+  conda environments; §3 Phase 3 additions replaced (generalize, don't extend; behaviour parity;
+  shared execution layer with F18); §4/§6/§7 notes rewritten (§7: environment fingerprint); §9
+  rewritten (build order 0–7, five open questions); §12 parks the SDK and the conformance suite.
+- 2026-10-06 — §3 hard rules (human): stateless adversarial code review after every module change;
+  every test drives the module API.
+- 2026-10-06 -> 2026-10-07 — **Environment stream; F18 and F20 closed.** 10-06 rulings into §2,
+  §9.5, §9.6 (toolkit-defined, pipeline-built, used read-only; per-call routing, "untested env"
+  flag; visible rebuild on drift; storage apart from the human conda cache; residual risks incl.
+  files a package script writes outside the conda records). F20: REPL and shell server share
+  `jail.analysis_policy` (§8, §9.1, §9.6, §9.9, §9.10 step 3, §13); §9.11 q5 → F21. 10-07: plan
+  B1–B6, T1 built and LIVE-VERIFIED; B3c naming rulings, conda over pixi, no build limits, the
+  sabotage residual, the "derived from cited receipts" rule removed; §9.10 step 4 Done; §13
+  environment residuals and [R8]. B5 live cell `tests/test_live_env_pipeline.py` (`ar-sherpana`,
+  five harness bugs fixed); T1: toolkit root `conftest.py` (unmarked / `slow` / `live`),
+  `envs/xspec/` (`ar-xspec`) named by `xspec_utils`.
+- 2026-10-17 — **Provenance trail in an HTML report** (plan `tmp_plan_provenance_replay.md`, user
+  rulings 2026-10-16/17; replay is the human's). Ledger records every field whole and each worker
+  call's runtime context; `provenance.calls` rebuilds a receipt's arguments (`args_sha256`); `obsdb`
+  inputs; `report_formats` gains `html` (`report.html`, z-chain per number, checked at the
+  reviewer's `turn_end`); one paged, bounded `read_file` for every role. Rulings: a receipt-cited
+  report table must be evidence (`render.check_table`); spelled-out numbers stay unchecked, prompts
+  ask for digits; `report_formats: [html]` live. §13 (a) narrowed, new entries. Live:
+  `tests/test_live_provenance_html.py` (B1, B2, R1, R2, R4, R5).
+- 2026-10-18 — **Context-overflow plan** (§13 session-history entry; B1–B8, R2/R3/R7/R10, rulings
+  B1, B3, B6–B14); OpenAI compaction wired on its probe.
+- 2026-10-18 — **D rulings.** [D1, run 32814459] §13: provider-error containment covers the analyst
+  workers only (rulings pending). [D4, D5] the absolute ceiling is a cap with a grace window, then
+  `ReactBudgetExhausted`; only an accepted `turn_end` advances a draft (`TurnOutcome`); texts during
+  the filing batch re-queued (`SeatRouter.wake`). [D6] a resumed turn's `ReactBudgetExhausted` ends
+  the run (`SeatRouter._resume` → `RunControl.fail`, §9.3.8). [D8] `/stop` cleans leaf to root,
+  bounded and recorded, landing checklist; `/stop` and `/status` answer at once.
+- 2026-10-18 — [B18 ruling] `review_report` erased for every role; a figure's citable label arrives
+  where the figure first appears; the reviewer's typeset preview goes (`turn_end` still renders and
+  compiles). §9.2/§9.8 name `write_report`; §13 whole-catalogue entry and `pdftoppm` residual close.
+- 2026-10-26 — **Receipt references (bug fix, audit of run 32814459).** No call had a parent: agents
+  retyped one tool's output into the next call's arguments, and two hand-built plot inputs carried
+  altered error bars. §7 "Inputs and ancestry": toolkit arguments pass by `{"$ref": …}`
+  (`provenance.refs`), resolved by the runtime with the receipt as parent. Prompts: workers and the
+  lead weigh every incoming text as a claim to check against receipts; probes, briefs and
+  `follow_up` name results by handle.

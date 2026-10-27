@@ -30,11 +30,12 @@ What ``turn_end`` refuses, and why each is here:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from auto_research.provenance import ReceiptLookup, check_report_fields
+from auto_research.provenance.refs import brief_handle_problems
 from auto_research.report.html import HtmlResult, render_html
 from auto_research.report.render import CompileResult, RenderResult, compile_report, render_report
 from auto_research.schemas.review import ReviewerReport
@@ -155,6 +156,7 @@ def reviewer_turn_problems(
     scope: Sequence[str],
     budgets: Mapping[str, int],
     render: ReviewerRender | None = None,
+    viewable: Callable[[str], bool] | None = None,
 ) -> list[str]:
     """Everything that stands between the reviewer's report and the end of its turn.
 
@@ -186,6 +188,10 @@ def reviewer_turn_problems(
                 f"follow_up is empty. It is handed to the {team} verbatim as their task: write the "
                 "questions to answer or the steps to run."
             )
+        readable = set(scope)
+        problems.extend(brief_handle_problems(
+            "follow_up", report.follow_up,
+            lambda h: h in readable or (viewable is not None and viewable(h))))
         if budgets.get(team, 0) <= 0:
             problems.append(
                 f"No {_PASS_NAMES[team]} remain in this run, so the {team} cannot be assigned. "

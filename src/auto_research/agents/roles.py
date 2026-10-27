@@ -573,6 +573,10 @@ class AgentRole:
         )
         return None, True
 
+    def _viewable_by_message(self, handle: str) -> bool:
+        """A handle a message this seat received named: openable, so a brief may name it."""
+        return _seat_viewable(self, handle)
+
     def ensure_run_control(self) -> Any:
         """This seat's RunControl, creating one when the role runs without a run (a benchmark's
         lead), so the coder's messages still reach its inbox."""
@@ -1906,7 +1910,7 @@ class ReviewerAgent(AgentRole):
         def validator() -> list[str]:
             problems = reviewer_turn_problems(
                 workspace.written_report, lookup=lookup, scope=reviewer_scope(lookup),
-                budgets=budgets, render=render,
+                budgets=budgets, render=render, viewable=self._viewable_by_message,
             )
             if not problems:
                 accepted.append(True)
@@ -2334,12 +2338,27 @@ class AnalystWorkerAgent(AgentRole):
         cwd = self.report_dir
         task_receipt = _mint_task_input(self.receipts, task)
         workspace = self._make_report_workspace(peer_reports)
+        # The toolkit results the task names (a lead's probe, a reviewer's follow-up): openable and
+        # passable by `$ref`, never citable — the worker's claims rest on what its tools return.
+        brief = _brief_handles(self.receipts, task)
+        channel = getattr(self, "channel", None)
+        if channel is not None and brief:
+            channel.show(self.agent_key, brief)
+        scope = getattr(workspace, "receipts", None)
+
+        def ref_handles() -> set[str]:
+            usable = set(scope.handles()) if scope is not None else set()
+            if channel is not None:
+                usable |= channel.viewable(self.agent_key)
+            return usable | set(brief)
+
         provider = SandboxToolProvider(
             self.registry, self.sandbox, cwd=cwd, web_source=WebSource(),
             figure_sink=self._figure_catalog["self"],
             report_workspace=workspace,
             receipts=self.receipts,
             receipt_source=self.agent_key if self.receipts is not None else None,
+            ref_handles=ref_handles,
         )
         history, history_base = await self._history_seed()
         peer_figures, not_attached = self._task_figures(peer_figures, continued=bool(history))
@@ -2472,6 +2491,22 @@ def _mint_task_input(store: ReceiptStore | None, task: Any) -> str | None:
     if text.strip():
         return store.mint_input(text).handle
     return None
+
+
+def _seat_viewable(seat: Any, handle: str) -> bool:
+    """Whether a message the seat received named ``handle`` (openable with ``view_receipt``)."""
+    channel = getattr(seat, "channel", None)
+    return channel is not None and handle in channel.viewable(getattr(seat, "agent_key", None))
+
+
+def _brief_handles(store: ReceiptStore | None, task: Any) -> list[str]:
+    """The toolkit results a task's text names — the handles a probe or follow-up points at."""
+    if store is None or task is None:
+        return []
+    from auto_research.provenance.refs import handles_in_brief
+
+    text = "\n".join(filter(None, [getattr(task, "question", ""), getattr(task, "instructions", "")]))
+    return handles_in_brief(store, text)
 
 
 def _receipt_scope(
@@ -3309,7 +3344,7 @@ class AnalystLeadAgent(AgentRole):
         previous_validator = getattr(provider, "turn_end_validator", None)
         provider.report_workspace = workspace
         provider.cycle = cycle
-        provider.turn_end_validator = lambda: lead_turn_problems(cycle, workspace)
+        provider.turn_end_validator = lambda: lead_turn_problems(cycle, workspace, viewable=self._viewable_by_message)
 
         driver = _ChainDriver(
             lead=self,

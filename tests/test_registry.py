@@ -78,8 +78,11 @@ def test_manifest_description_wins_over_function_docstring(tmp_path, cleanup_mod
     reg.load()
     assert reg.spec("docs_utils.t1")["description"] == "the authored brief"
     # ...and it reaches the model-facing definitions too (names are sanitized there).
+    # Every toolkit tool's description ends with how to pass another tool's output on (`$ref`).
+    from auto_research.sandbox.registry import REF_NOTE
+
     descriptions = [d["description"] for d in reg.tool_definitions()]
-    assert "the authored brief" in descriptions
+    assert "the authored brief" + REF_NOTE in descriptions
 
 
 def test_reload_picks_up_modified_manifest(tmp_path, cleanup_modules):
@@ -174,8 +177,10 @@ def test_a_package_names_the_environment_its_tools_run_in(tmp_path, cleanup_modu
     reg = ToolkitRegistry(tmp_path)
     assert reg.tool_env("stack_utils.fit") == "sherpa" and reg.tool_env("plain_utils.look") is None
     defs = {d["name"]: d for d in reg.tool_definitions()}
-    assert defs["stack_utils_fit"]["description"].endswith("Runs in its tested environment ar-sherpa.")
-    assert defs["plain_utils_look"]["description"] == "looks"
+    from auto_research.sandbox.registry import REF_NOTE
+
+    assert defs["stack_utils_fit"]["description"] == "fits\n\nRuns in its tested environment ar-sherpa." + REF_NOTE
+    assert defs["plain_utils_look"]["description"] == "looks" + REF_NOTE
     assert "env" in defs["plain_utils_look"]["input_schema"]["properties"]
     _write_tool_config(tmp_path, "stack_utils", "default_call_timeout_s: 60\n")
     reg.reload()

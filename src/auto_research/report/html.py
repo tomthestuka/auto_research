@@ -143,13 +143,16 @@ class _Chains:
         produced = {r.handle: i for i, step in enumerate(steps, 1) for r in step.receipts}
         rows: list[str] = ['<div class="col-h">data</div><div class="col-h">tool</div>']
         for number, step in enumerate(steps, 1):
-            inputs = step.first.inputs
-            for k, item in enumerate(inputs):
+            # What the call read: the files its arguments named, then the results it took by `$ref`.
+            from_files = {item.receipt for item in step.first.inputs if item.receipt}
+            inputs = [_input_html(item, produced) for item in step.first.inputs] + [
+                _ref_html(parent, produced) for parent in step.first.parents if parent not in from_files]
+            for k, item_html in enumerate(inputs):
                 arrow = "─┐" if k < len(inputs) - 1 else "─┘"
-                rows.append(f'<div class="data">{_input_html(item, produced)} <span class="arw">{arrow}</span></div>'
+                rows.append(f'<div class="data">{item_html} <span class="arw">{arrow}</span></div>'
                             '<div class="tool gap"></div>')
             rows.append(f'<div class="data arw-cell"><span class="arw">{"└─►" if inputs else "─►"}</span></div>'
-                        f'<div class="tool">{_tool_html(step, number)}</div>')
+                        f'<div class="tool">{_tool_html(step, number, self.lookup)}</div>')
             env = _env_label(step.first)
             outs = " ".join(_output_html(r, r.handle == handle) for r in step.receipts)
             rows.append(f'<div class="data">{outs} <span class="arw">◄─{escape(env)}─┘</span></div>'
@@ -159,6 +162,12 @@ class _Chains:
 
 def _short(text: str, n: int = 12) -> str:
     return text[:n]
+
+
+def _ref_html(handle: str, produced: Mapping[str, int]) -> str:
+    """A result the call took by ``$ref`` (``provenance.refs``): its handle and the step that made it."""
+    step = f", step {produced[handle]}" if handle in produced else ""
+    return f'<span class="node">{escape(handle)} <span class="muted">[passed by $ref{step}]</span></span>'
 
 
 def _input_html(item: InputFile, produced: Mapping[str, int]) -> str:
@@ -215,7 +224,7 @@ def _env_label(receipt: Receipt) -> str:
     return f"{name} @ env:{receipt.env[:12]}" + (", untested" if receipt.env_untested else "")
 
 
-def _tool_html(step: _Step, number: int) -> str:
+def _tool_html(step: _Step, number: int, lookup: ReceiptLookup | None = None) -> str:
     receipt = step.first
     name, toolkit = _tool_name(receipt)
     parts = [f'<div class="tname{"" if toolkit else " grey"}">{number}. {escape(name)}</div>']
@@ -225,7 +234,7 @@ def _tool_html(step: _Step, number: int) -> str:
         args = json.dumps(step.call.sent_args, indent=1, sort_keys=True, default=str)
         parts.append(f'<details><summary>arguments</summary><pre class="args">{escape(args)}</pre></details>')
         if toolkit:
-            code, args_json = reproduce_code(receipt, step.call)
+            code, args_json = reproduce_code(receipt, step.call, lookup)
             parts.append(
                 f'<button type="button" class="copy" data-code="{escape(code)}" '
                 f'data-args="{escape(args_json)}">copy reproduce code</button>'
@@ -236,9 +245,29 @@ def _tool_html(step: _Step, number: int) -> str:
     return "".join(parts)
 
 
-def reproduce_code(receipt: Receipt, call: LedgerCall) -> tuple[str, str]:
-    """The notebook lines that rerun one toolkit call by hand, and the arguments JSON in them."""
+def reproduce_code(
+    receipt: Receipt, call: LedgerCall, lookup: ReceiptLookup | None = None
+) -> tuple[str, str]:
+    """The notebook lines that rerun one toolkit call by hand, and the arguments JSON in them.
+
+    Arguments passed by ``$ref`` (``provenance.refs``) stay references in the JSON; the lines add a
+    resolver that reads each named result from the run's receipt store, so the rerun receives the
+    same values the call did.
+    """
+    from auto_research.provenance.refs import refs_in, split_ref
+
     args_json = json.dumps(call.sent_args, sort_keys=True, default=str)
+    stored: dict[str, tuple[str, str]] = {}
+    for ref in refs_in(call.sent_args):
+        handle = split_ref(ref)[0]
+        named = lookup.get(handle) if lookup is not None else None
+        if named is None:
+            stored[handle] = ("<not in this run's store>", "")
+        elif named.returned_sha256:  # the keys the tool returned, stored by the runtime
+            blob = Path(named.path).parent.parent / named.returned_sha256[:2] / named.returned_sha256
+            stored[handle] = (str(blob), named.returned_sha256)
+        else:
+            stored[handle] = (str(named.path), named.sha256)
     root = str(receipt.toolkit_root) if receipt.toolkit_root else "<toolkit root>"
     fn = str(call.context.get("fn") or receipt.produced_by.rsplit(".", 1)[-1])
     module = str(call.context.get("module") or "")
@@ -267,7 +296,40 @@ def reproduce_code(receipt: Receipt, call: LedgerCall) -> tuple[str, str]:
     else:
         lines.append(f"# import the tool's function from its module under {one_line(root)}")
         fn = "tool"
-    lines += [f"args = json.loads({args_json!r})", f"out = {fn}(**args)"]
+    if stored:
+        lines += [
+            '# {"$ref": "<handle>#<pointer>"} arguments are earlier results\' values: _ref reads each',
+            "# from the run's receipt store (the JSON a tool returned), checked against its hash",
+            "import hashlib",
+            f"_STORED = {stored!r}",
+            "def _ref(value):",
+            "    if isinstance(value, str) and value.lstrip().startswith('{') and '$ref' in value:",
+            "        try:",
+            "            value = json.loads(value)  # a reference the model wrote as a JSON string",
+            "        except ValueError:",
+            "            return value",
+            "    if isinstance(value, dict) and list(value) == ['$ref']:",
+            "        handle, _, pointer = value['$ref'].partition('#')",
+            "        pointer = '' if pointer.strip() == '/' else pointer",
+            "        path, sha = _STORED[handle.strip()]",
+            "        with open(path, 'rb') as f:",
+            "            raw = f.read()",
+            "        assert hashlib.sha256(raw).hexdigest() == sha, f'{handle}: stored bytes changed'",
+            "        out = json.loads(raw.decode('utf-8').split('\\n--- console ---\\n')[0])",
+            "        for token in pointer.strip().split('/')[1:]:",
+            "            token = token.replace('~1', '/').replace('~0', '~')",
+            "            out = out[int(token)] if isinstance(out, list) else out[token]",
+            "        return out",
+            "    if isinstance(value, dict):",
+            "        return {k: _ref(v) for k, v in value.items()}",
+            "    if isinstance(value, list):",
+            "        return [_ref(v) for v in value]",
+            "    return value",
+            f"args = _ref(json.loads({args_json!r}))",
+        ]
+    else:
+        lines.append(f"args = json.loads({args_json!r})")
+    lines.append(f"out = {fn}(**args)")
     return "\n".join(lines), args_json
 
 
@@ -672,8 +734,15 @@ def check_page(path: Path) -> list[str]:
         errors.append(f"report.html carries inline handlers or styles: {', '.join(sorted(set(scan.handlers)))}")
     for code, args_json in scan.codes:
         try:
-            literal = re.search(r"^args = json\.loads\((.*)\)$", code, re.MULTILINE)
-            if literal is None or json.loads(ast.literal_eval(literal.group(1))) != json.loads(args_json):
+            # A call that took results by `$ref` has its literal wrapped in `_ref(...)`
+            # (provenance.refs), and only such a call: the two shapes are exact alternatives.
+            from auto_research.provenance.refs import refs_in
+
+            expected = json.loads(args_json)
+            shape = (r"^args = _ref\(json\.loads\((.*)\)\)$" if refs_in(expected)
+                     else r"^args = json\.loads\((.*)\)$")
+            literal = re.search(shape, code, re.MULTILINE)
+            if literal is None or json.loads(ast.literal_eval(literal.group(1))) != expected:
                 raise ValueError("arguments differ")
         except (ValueError, SyntaxError) as exc:
             errors.append(f"report.html: a reproduce block's arguments do not parse ({exc})")

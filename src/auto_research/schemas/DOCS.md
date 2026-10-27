@@ -138,8 +138,9 @@ carried by **reference** (`FigureRef`), never embedded
   lowercase hexadecimal digest.
 - `Receipt(handle, kind, path, sha256, produced_by, created_at, call_id=None,
   toolkit_commit=None, toolkit_root=None, env=None, env_untested=False, args_sha256=None, inputs=[], parents=[], flags=[], caption=None,
-  mime_type=None, title=None, ids={}, source_sha256=None, parser=None, commit_sha=None)` — the
-  runtime's record of one artifact; `.source` is the handle's source; `.to_figure_ref()`.
+  mime_type=None, title=None, ids={}, source_sha256=None, parser=None, commit_sha=None, returned_sha256=None)` — the
+  runtime's record of one artifact (`returned_sha256`: the JSON blob of the keys a toolkit tool
+  returned beside its stdout, what a `$ref` resolves against); `.source` is the handle's source; `.to_figure_ref()`.
 - `InputFile(path, sha256, basis="content"|"listing"|"obsdb", receipt=None)` — one input a call read;
   `obsdb` is an observation the tool located from its ObsID (`<mission folder>/<obsid>`, hashed over
   its catalog entry and its folder listing). `Receipt.toolkit_root` names the toolkit checkout the
@@ -289,51 +290,31 @@ carried by **reference** (`FigureRef`), never embedded
   one verify-list shape across roles (human ruling); title and ids resolve from the receipt.
 
 ## Changelog
-Compacted 2026-10-07 (detail in git history).
+Compacted 2026-10-07 and 2026-10-19 (every entry); detail in git history.
 
-- 2026-05-26 -> 2026-06-12 — Full Pydantic v2 protocol: research/search/analysis/review messages,
-  `FigureRef`/`DocumentRef`, function-call tool envelopes, sandbox results, report + LaTeX schemas.
-- 2026-06-12 -> 2026-06-16 — Phase 2: `ToolSpec`/`ValidationDataset`/`ProposedCheck`,
+- 2026-05-26 -> 2026-06-16 — Pydantic v2 protocol (messages, `FigureRef`/`DocumentRef`, tool envelopes,
+  sandbox results, report + LaTeX). Phase 2: `ToolSpec`/`ValidationDataset`/`ProposedCheck`,
   `AnalystReport.tool_request`/`status`, `CheckResult`, `GateReport`, `ToolReviewVerdict`,
   `MergeFlowResult`, `HumanQuery`/`HumanResponse`, `AuthoringDecision`.
-- 2026-06-18 -> 2026-06-24 — `ReviewVerdict` fields described, plus `cited_paths`; worker→lead
-  `AnalystToolRequest` split from lead→coder `ToolSpec`; `ProposedCheck.params` dropped (OpenAI strict).
-- 2026-06-29 — `HumanQuery` carries one Markdown `message` (was `question`+`context`) + `headline`.
-- 2026-07-06 -> 2026-07-09 — [A8] `AuthoringDecision.tool_specs: list[ToolSpec]` (validator:
-  `should_author ⇒ ≥1`). [A12] `ToolSpec.target_domain`/`disposition` documented as advisory.
-- 2026-07-14 — [V-4] `FigureCitation{source, index}` + `FiguredReport` base (`cited_figures`,
-  runtime-resolved `figures`); `AnalystReport` extends it; citation replaces figure-dedup.
-- 2026-09-02 — Every model-filled field carries `Field(description=...)` (a `#` comment never reaches the
-  model); `AuthoringDecision` is harness-constructed from a filed form. Guard:
-  `tests/test_schema_descriptions.py`.
-- 2026-09-09 — F9: `AnalystReport.status` is agent-declared `Literal["succeeded", "failed"]`, default
-  `failed` (was `ok`); `needs_human` retired. The lead's `submit_terminal_report` kept
-  `failed`/`needs_human` (deleted 09-12).
-- 2026-09-12 — A3: `AnalystReport` gained `rework`, `rationale`, `what_to_probe`; `status` regained
-  `needs_human`, barred from workers by the `edit_report` surface, not the type. Conditional
-  requirements checked at `turn_end`, not in the schema; a `LeadReport` subclass rejected.
-- 2026-09-24 — Provenance: `Receipt` (`schemas/artifacts.py`), runtime-minted, with input hashes, parents
-  and propagating `failed`/`synthetic` flags; `FigureRef` unchanged (`Receipt.to_figure_ref`).
-- 2026-09-24 — `literature.py`: `LiteratureReport` + `LiteratureFinding`, filed by the librarian through
-  `turn_end` into `state["literature"]`.
-- 2026-09-24 — `review.py`: `ReviewerReport`, `ReviewerSection`, `ReviewerTable`. Deleted: `LatexReport`,
-  `ReviewVerdict`, `ReportSection`, `Reference`; `ResearchReport` is the published envelope (filed
-  report + receipt closure + artifact handles).
-- 2026-09-24 — `PaperAttribution` (`handle`, `value`, `locator`), the one shape of every verify-against-
-  the-PDF list (ruling: papers cited, never text-checked): `ResearchReport.paper_attributions`,
-  `LiteratureReport.attributed_values`; the interim `AttributedValue` removed.
-- 2026-09-25 — [E11] `HumanAttachment`; `HumanQuery.attachments`/`reply_dir`, `HumanResponse.attachments`/
-  `notes`; `HumanQueryKind` gains `report` (for R1's human node).
-- 2026-09-25 — [R1] `ReviewerReport`: `needs_more_literature`/`needs_analysis_rework` and the
-  `rework` property replaced by `assign_to: Assignee | None` (`librarian | analysts | human`).
-- 2026-09-25 — [R7] `Receipt.arg_numbers` is legacy (kept for replay); the shell grounds nothing
-  (`provenance.store.is_evidence`).
-- 2026-10-06 — Env plan B1/B3b: `Receipt.env` (fingerprint of the environment the producing call ran
-  in) and `Receipt.env_untested` (a toolkit call run outside its package's tested environment by the
-  caller's choice; still evidence), set on every receipt of the call by
-  `capture.receipt_call(env_untested=)`.
-- 2026-10-17 — `InputFile.basis` gains `obsdb`; `Receipt.toolkit_root` (provenance replay, step 2).
-- 2026-10-17 — `LiteratureFinding.claim` / `LiteratureReport` / `ReviewerReport` descriptions follow the librarian's deep-research scope ("research", not "literature"; numbers attributed to papers, web pages support words).
-- 2026-10-18 — [A1] One definition of the report form in the field descriptions: `AnalystReport.summary` a 3–5-sentence briefing, `findings` the results (one item per result, citing receipts), `status` `succeeded` when findings hold the results; `FigureCitation.source` `self` for a worker, the worker key for the lead; `FiguredReport.cited_figures` an array of `{source, index}` objects; `LiteratureReport.summary` / `findings` the same briefing / results split.
-- 2026-10-18 — `ToolResult` is recorded in the run ledger, every seat's session history (`memory.md` retired by B2); the entry no longer names it.
-- 2026-10-18 — [A7] `AnalystReport.summary` defaults to "" (was a required non-empty string): the report is edited as one text document, so a draft with findings and no summary yet is legal; `turn_end` refuses an empty summary.
+- 2026-06-18 -> 2026-07-14 — `ReviewVerdict.cited_paths`; `AnalystToolRequest` split from `ToolSpec`;
+  `ProposedCheck.params` dropped; `HumanQuery.message` + `headline`; [A8] `AuthoringDecision.tool_specs`;
+  [A12] advisory `ToolSpec.target_domain`/`disposition`; [V-4] `FigureCitation`, `FiguredReport`.
+- 2026-09-02 -> 2026-09-12 — `Field(description=...)` on every model-filled field
+  (`tests/test_schema_descriptions.py`); F9 `AnalystReport.status` `succeeded|failed`, default `failed`;
+  A3 `rework`, `rationale`, `what_to_probe`, `needs_human` (conditions at `turn_end`; `LeadReport` rejected).
+- 2026-09-24 — `Receipt` (`schemas/artifacts.py`, `to_figure_ref`); `LiteratureReport`/`LiteratureFinding`;
+  `ReviewerReport`/`ReviewerSection`/`ReviewerTable`, `ResearchReport` the published envelope; deleted
+  `LatexReport`, `ReviewVerdict`, `ReportSection`, `Reference`. Ruling (papers cited, never text-checked):
+  `PaperAttribution`, `ResearchReport.paper_attributions`, `LiteratureReport.attributed_values`;
+  `AttributedValue` removed.
+- 2026-09-25 — [E11] `HumanAttachment`, `HumanQuery.attachments`/`reply_dir`, `HumanResponse.attachments`/
+  `notes`, `HumanQueryKind` `report`; [R1] `ReviewerReport.assign_to` replaces `needs_more_literature`/
+  `needs_analysis_rework`/`rework`; [R7] `Receipt.arg_numbers` legacy.
+- 2026-10-06 — Env plan B1/B3b: `Receipt.env`, `Receipt.env_untested`.
+- 2026-10-17 — `InputFile.basis` `obsdb`, `Receipt.toolkit_root` (replay step 2); literature and reviewer
+  descriptions follow the librarian's deep-research scope.
+- 2026-10-18 — [A1] report-form field descriptions (`AnalystReport`, `FigureCitation.source`,
+  `FiguredReport.cited_figures`, `LiteratureReport`); `ToolResult` entry drops `memory.md` (B2);
+  [A7] `AnalystReport.summary` defaults to "" (`turn_end` refuses an empty one).
+- 2026-10-26 — `Receipt.returned_sha256` (receipt references, `provenance.refs`): a toolkit
+  tool's returned keys, stored by the runtime beside its result text.

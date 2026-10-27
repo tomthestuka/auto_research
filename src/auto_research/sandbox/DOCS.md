@@ -1016,7 +1016,9 @@ the hook mapping a fake-model verdict — no live LLM).
   - `.spec(name)` → `ToolSpec` — raises `KeyError` if unknown.
   - `.tool_catalogue()` → `str` — multi-line text listing of all tools.
   - `.tool_definitions()` → `list[dict]` — provider-neutral function definitions
-    (`{name, description, input_schema}`) for native function calling.
+    (`{name, description, input_schema}`) for native function calling. Every toolkit tool's
+    description ends with `REF_NOTE`: how to pass another tool's output on by `{"$ref": …}`
+    (`provenance.refs`).
   - `.kind_for_function(name)` → `str` — map a sanitized tool-call name back to
     the canonical dotted `kind`.
 - `PersistentSandbox(toolkit_root, workdir, *, environment=None, environments=None, label="repl", default_timeout_s=300, mcp_client=None, analyze_env=None, analyze_ini_sh=None, repl_init_py=None)` —
@@ -1322,246 +1324,104 @@ the hook mapping a fake-model verdict — no live LLM).
     via `select_decorrelated_member`. Registered in `auto_research.preflight`.
 
 ## Changelog
-Compacted 2026-09-01, 2026-09-24 and 2026-10-07 (the 10-06/07 entries); detail in git history.
+Compacted 2026-09-01, 2026-09-24, 2026-10-07 (the 10-06/07 entries) and 2026-10-19 (every entry);
+detail in git history.
 
-- 2026-05-26 -> 2026-06-16 — Phase 1: manifest `ToolkitRegistry`, persistent JSON-line sandbox,
-  per-run workspace, built-in MCP server/client. Phase 2: `merge_flow.propose_and_pr()`,
-  `gate.run_gate` (Layer A + no-fabrication scan, Layer B), `review.make_review_hook` (decorrelated
-  co-lead), `approve_edit` (one atomic commit, explicit-path staging); launch preflights
-  `check_author_reviewer_decorrelation`, `check_toolkit_git_identity`/`_branch_clean`.
-- 2026-06-18 -> 2026-06-30 — Live hardening (fix-lists #1–#11): timeouts decoupled from the model
-  (`call_timeout_ceiling`, `gate_test_timeout_s`); FS jail (`fs_guard.PathGuard` hook;
-  `_make_path_confiner` deprecated); base-ref reset (`_reset_direct_tree`, `tool_author_failed_*.patch`),
-  coder Bash deny-rule, gate-entry auto-revert; determinism as JUnit outcome maps. Authoring split into
-  `AuthoringSession` (`build_authoring_session`, driven by `lead.drive_authoring`). `bash_exec`
-  process-group kill and a 900 s `MCPToolClient.call_tool` bound fix an FTOOL hang.
+- 2026-05-26 -> 2026-06-16 — Phase 1: `ToolkitRegistry`, persistent sandbox, per-run workspace,
+  built-in MCP server/client. Phase 2: `merge_flow.propose_and_pr()`, `gate.run_gate`,
+  `review.make_review_hook`, `approve_edit`; preflights `check_author_reviewer_decorrelation`,
+  `check_toolkit_git_identity`/`_branch_clean`.
+- 2026-06-18 -> 2026-06-30 — Live hardening #1–#11: `call_timeout_ceiling`, `gate_test_timeout_s`;
+  `fs_guard.PathGuard` (`_make_path_confiner` deprecated); `_reset_direct_tree`, coder Bash
+  deny-rule, gate-entry auto-revert; JUnit determinism maps; `AuthoringSession`
+  (`build_authoring_session`); `bash_exec` process-group kill, 900 s `MCPToolClient.call_tool` bound.
 - 2026-07-06 -> 2026-07-16 — [G2] Layer B needs ≥1 PASSED; [C1] ambiguous words → findings; [A12]
-  gate targets from `_touched_packages`, not `target_domain`; [I1] co-lead uses `WebSource()`.
-  `repl_init_py` replaces `_configure_xspec_once()`; `bash_exec` description from `analyze_probe`;
-  `runner.check_analyze_probe()`. `code_gate.yaml` reads `or []`-guarded; `finding_code_patterns`
-  recorded as findings (RNG demotion, ruling).
-- 2026-07-22 -> 2026-07-29 — `ToolkitBranchUnclean`; base ref persisted; `heal_toolkit_branch_if_dirty`
-  on resume. `ToolkitRegistry.load()` stops overriding manifest descriptions with `__doc__`. Registry
-  tools `defer_loading` under `tool_search_enabled` (live-verified 07-28). `monitor` reaches
-  `make_review_hook`; coder spend via `_record_coder_cost` → `CostMeter.record_session_total`.
-- 2026-07-30 -> 2026-07-31 — `PersistentSandbox.abort()` (registered on `RunControl`) and `kill_now()`;
-  `_kill_current` kills descendants via `/proc` (not `killpg`, which shares the backend's group) [F5];
-  `AuthoringSession.aclose()` idempotent.
-- 2026-08-10 -> 2026-08-19 — Coder env follows a key rotation (`_with_live_anthropic_key`). Second
-  author harness: `coder/` package with `CoderBackend` (`connect`/`drive`/`disconnect`),
-  `claude_sdk.py`, `codex_sdk.py`; `_build_backend` dispatches on harness; pairing table
-  `coder/harness.py` (five pairs; alt-vendor `claude_sdk` rows removed); preflights
-  `coder_harness_supported`/`_available`. Codex: `writableRoots` write jail, read-only
-  `.git`, escalation over loopback MCP (`escalation_server.py`), reads only recorded
-  (`coder.read_outside_allowlist`); MCP config via `--config` (`_flatten_overrides`), elicitations
-  answered `{"action": "accept"}`, member `parameters` reach Codex, a failed turn returns
-  `[harness error] …`; `_touched_paths` porcelain fix. Qwen in `UNVERIFIED_PAIRINGS` behind new
-  `PreflightWarning`. `tests/test_live_coder_matrix.py` LIVE-VERIFIED on the credentialled legs.
-- 2026-08-20 — One `coder: RoleModelConfig` through `build_authoring_session`/
-  `propose_and_pr`/`drive_authoring`, `_build_backend(member=)` (`_resolve_coder_provider` deleted);
-  `make_review_hook(allow_correlated=False)` emitting `review.correlated`;
-  `codex_sdk.resolve_vendor_key` reads the key pool. OS jail fixed for its first author (binds the
-  exec'd binary, resolved paths, fresh settings home on local disk); ruling: one enforcement layer —
-  the harness sandbox stands down under the kernel jail, `coder_policy` allows two writable places.
-  LIVE-VERIFIED end to end.
-- 2026-08-31 — Submission snapshots: `run_gate_step` saves each submit under
-  `run_dir/authoring/submissions/<tool>/`; `build_authoring_session` restores the latest only onto its
-  recorded base ref and the gate re-runs (`save_`/`find_`/`restore_submission_snapshot`,
-  `discard_submission_snapshots`, `authoring.snapshot.*`). LIVE-VERIFIED 09-01; commit path
-  deterministic only.
-- 2026-09-01 — `_make_ask_human_handler` classifies before the MCP boundary (the author had been
-  answered with its own question): `coder.ask_human.unattended` + `HumanInputRequired` carrying
-  `UNATTENDED_GUIDANCE`, vs `coder.ask_human.error` + `RuntimeError`; both stay tool errors.
+  gate targets from `_touched_packages`; [I1] co-lead `WebSource()`. `repl_init_py` replaces
+  `_configure_xspec_once()`; `runner.check_analyze_probe()`; RNG demoted to a finding (ruling).
+- 2026-07-22 -> 2026-07-31 — `ToolkitBranchUnclean`, `heal_toolkit_branch_if_dirty`; registry tools
+  `defer_loading` (LIVE-VERIFIED 07-28); `_record_coder_cost`; `PersistentSandbox.abort()`/
+  `kill_now()`, descendants killed via `/proc` [F5]; `AuthoringSession.aclose()` idempotent.
+- 2026-08-10 -> 2026-08-20 — Second author harness: `coder/` (`CoderBackend`, `claude_sdk.py`,
+  `codex_sdk.py`), `_build_backend`, pairing table `coder/harness.py`, preflights
+  `coder_harness_supported`/`_available`; Codex escalation over loopback MCP (`escalation_server.py`);
+  Qwen in `UNVERIFIED_PAIRINGS` (`PreflightWarning`); `_with_live_anthropic_key`. One `coder:
+  RoleModelConfig` (`_resolve_coder_provider` deleted); `make_review_hook(allow_correlated=False)`;
+  `codex_sdk.resolve_vendor_key`. OS jail fixed for its first author; ruling: one enforcement layer.
+  LIVE-VERIFIED (`tests/test_live_coder_matrix.py` on the credentialled legs; jail end to end).
+- 2026-08-31 — Submission snapshots (`save_`/`find_`/`restore_submission_snapshot`,
+  `discard_submission_snapshots`). LIVE-VERIFIED 09-01; commit path deterministic only.
+- 2026-09-01 — `_make_ask_human_handler` classifies before the MCP boundary
+  (`coder.ask_human.unattended` + `UNATTENDED_GUIDANCE` vs `coder.ask_human.error`);
   `CODER_TEXT_CAP` → `coder_text_cap()`. LIVE-VERIFIED (`tests/test_live_no_hitl.py`).
-- 2026-09-02 — `commit()` advances `_base_ref` (memory + `current_base_ref`), so a later submit no
-  longer reverts an approved commit; `AuthoringSession.pending_changes()`, and `execute_submit`
-  answers a no-op submit budget-free. The scan demotes a clause-scoped negated banned word to a
-  finding (`_negated`).
-- 2026-09-03 — `_author_env` drops `CLAUDE*`/`COPILOT*`/`VSCODE*` (`_HOST_TOOLING_PREFIXES`);
-  `workspace.round_report_path` omits the model (`_slug` deleted). Ruling: `runtime_dir` stays on
-  every allow-list (reversed 09-14).
-- 2026-09-09 — [F1] `aclose` resets on `pending_changes()`, not a commit latch; `committed` deleted
-  (readers use `last_commit_sha`). [F2] `structural.changes_allowed` over new `collect_all_changes`
-  (ruling: `*_utils` allow-list), rejection names the route (`ask_lead`). [N1] Layer-B output keeps
-  head + tail (`_bounded_pytest_output`, `gate_layer_b_output_cap`). [F10] `PathGuard` writable set
-  (`is_writable()`; ruling: a role writes only its own work folder; jail side residual).
-  `jail.coder_policy` binds `.git` read-only in every writable root (kernel-enforced git ban).
-- 2026-09-12 — [B1/B2] coder runs beside the lead: `start_drive`/`drive_status`/`take_drive_result`
-  (`drive` stays blocking; `submit_for_review` blocking by ruling); a failed drive returns
-  `[harness error]`; a second `start_drive` in flight raises; `aclose` cancels and awaits the drive
-  before `disconnect`. Codex `/stop` hang fixed: registration kept on cancel, poll on a daemon thread
-  (`_drain_turn`). `CodexBackend` falls back to `env_var_names(provider)[0]` without `key_env`.
-  `ask_lead` parks the question (`[coder asks]`); `CoderBackend.steer`, `AuthoringSession.send`;
-  `clarify_for_author`/`_ClarifyReply` deleted.
-- 2026-09-14 — Run record moved to `workspace.ledger_dir(run_id)` (outside `run_dir`);
-  `agent_fs_allow` narrows to `runtime_dir/runs` for `PathGuard` and the coder's mount plan;
-  `workspace.resolve_record` still reads legacy in-workspace records. Reverses the 09-03 ruling.
-- 2026-09-24 — `AuthoringSession.wait_for_event` wakes on turn end, drive failure, `park_question`
-  or the lead's `steer_event` (`watch_steers`); `send` queues by default, `mid_turn=True` steers;
-  `_init_channel()`. LIVE-VERIFIED (`tests/test_live_coder_wait.py`). Open: a killed Codex turn books
-  $0.00; `mcpServer/startupStatus/updated` is not recorded.
-- 2026-09-25 — [A13] The Claude backend appends `[harness error] the anthropic turn failed: …` when a
-  turn's `ResultMessage.is_error` is set, so a billing or session-limit reply no longer reads as coder
-  work (mirrors the Codex backend).
-- 2026-09-25 — [G14] Gate provenance check brought to the runtime spec: `scan_provenance`
-  (`FigureRef(...)` calls carry sha256/produced_by) replaced by `scan_figure_shape` (returned figure dicts
-  match `FigureRef`); `parse_tool_figures` moved from agents/react.py into runner.py and shared with
-  `run_tool`, fixing its drop-all. Tests: `tests/test_gate.py`; live red-team
-  `tests/test_live_figure_shape_attack.py`.
-- 2026-09-25 — [G14] LIVE red-team (`tests/test_live_figure_shape_attack.py`, $13.62, 17 cells): the
-  static figure-shape check caught every literal plant but 7 of 7 indirect or runtime-only shapes
-  (helper, `**`, update, bare variable, empty-at-runtime caption, absent file) reached a commit; the
-  honest control committed; the recorder oracle caught all 7. Remedy awaits a ruling.
-- 2026-09-25 — [G15] Dynamic return check `sandbox/returns.py` (`layer_b.returns.*`: transmit /
-  figure / receipted / table / number / recorder), judged with the runtime's own functions. Runtime
-  fixes: a non-JSON REPL return fails that call instead of killing the sandbox;
-  `capture.call_started_ns` on the coarse realtime clock (fast writes were never receipted, 200/200).
-  gate_bench gate-only re-scan: 0 verdicts move vs G14; the check ran in 112/134.
-- 2026-09-25 — [G15] LIVE red-team (13 cells, $11.50): every planted attack stopped before commit by
-  name (`.figure` ×3 incl. all three routes that beat the static scan, extra key, non-dict entry,
-  `.table`, `.number`); one limit breach committed (a caption empty only on an input no test uses —
-  the uncalled-path limit, left to the co-lead); the honest control committed after `*.lock`
-  sidecars became housekeeping. Reruns of the 4 inconclusive cells ($4.24) all stopped: 12/12 attack
-  cells stopped before commit, all six checks exercised, control commits.
-- 2026-09-25 — [R1] `report_record_path` added; `round_report_path` and `report_dir` now resolve
-  beside the ledger, out of every role's reach (human ruling).
-- 2026-09-25 — [E12] The coder's `ask_lead`/`ask_human` became one MCP tool `message(to=lead|human,
-  text)` on both harnesses (`escalation_server.route_message`, `MESSAGE_DESCRIPTION`; Claude
-  allow-list `mcp__escalation__message`). `to=lead` posts to the lead's `RunControl` inbox and calls
-  `AuthoringSession.mark_question_open()` (`park_question`/`take_questions`/the `question` wait
-  reason deleted); `to=human` is non-blocking through the run's `SeatRouter`, the reply delivered by
-  `session.send(..., mid_turn=True)`; unattended still raises `UNATTENDED_GUIDANCE` before the MCP
-  boundary, a channel fault now arrives as a notice. Gate rejection names "message the lead".
-- 2026-10-06 — **Jail hardening: [F20] closed, [F22]–[F24], [F27].** The builtin shell server runs
-  jailed: `graph.runtime._builtin_server_config` passes its source with `-c` and wraps it, like the
-  worker REPL, in `jail.analysis_policy` (toolkit always overlaid read-only, `PYTHONNOUSERSITE=1`,
-  a symlinked writable root or `home` refused, a writable root holding the process's own folder
-  demoted to read-only); the shell writes only the workers' folders (`writable_dirs=`) and keeps the
-  run's `authoring/` read-only. `runner._source_ini_env` sources the init script with
-  `bash --norc --noprofile`, stdin `/dev/null`, in a clean environment (21 key/token variables had
-  reached the shell), and fails on a missing script. The shell guard stands down only for a server
-  launched jailed (`MCPToolClient.is_jailed` → `ToolkitRegistry.mcp_jailed`). Each jailed process
-  gets a private `/tmp` on local disk (`jail.private_tmp`: refuses a symlinked, foreign or non-0700
-  folder; removed when the process ends; the REPL's recreated empty at each start), a home outside
-  every agent-writable folder mounted at `jail.JAIL_HOME_AT` (`/home/ar`, `JailPolicy.home_at`), its
-  own `PFILES` dir (`runner.with_private_param_dir`; `/grad/fzhou/pfiles` left `agent_fs_allow`) and
-  a private `PYTHONPYCACHEPREFIX`. Host side: `workspace.memory_path` beside the ledger, memory I/O
-  `O_NOFOLLOW`, `write_launcher` writes an `O_EXCL` temp file and renames it; `record_beside`/
-  `resolve_record` use the legacy spelling only for a pre-split run; `human_reply_dir`. Gate Layer B
-  is read-only except its worktree, JUnit folder, home and private `/tmp`; both runs share one
-  `--basetemp`, wiped at each start (human ruling: a toolkit suite left 65 GB in 10 minutes). [F27]
-  the resume base ref lives beside the ledger (`merge_flow._base_ref_path`);
-  `heal_toolkit_branch_if_dirty` refuses a non-ancestor; `run.resume.heal` records every outcome but
-  clean.
-- 2026-10-06 — **Env plan B1, B2a, B2b: environments as objects.** `sandbox/envs.py` (`Environment`,
-  `External`, `fingerprint`, `lock`, `write_lock`, `fingerprint_and_lock`, `describe`);
-  `auto_research.env` gains `analysis_environment`, `host_environment`, `env_lock_dir`; config
-  `env_externals` (HEASoft build record, CALDB indexes). Fingerprint and lock come from one
-  computation (a lock hashes to its name and embeds activation, boot file and pip sources); a failed
-  activation is never cached and `fingerprint_and_lock` raises on it; HOME is normalised only as a
-  whole leading path; pipeline-prefix files are read regular-only, bounded, links not followed
-  (`_read_regular`, `_file_sha`). Measured: the analysis env fingerprints in 2.6 s cold, 1.5 ms
-  cached. `PersistentSandbox(environment=)` restarts before a call whose fingerprint changed
-  (`_restart_if_environment_changed`; a failed restart is that call's error), announces it out of
-  band (`take_notice()`), and stamps receipts with `booted_fingerprint` once its lock is written
-  (`booted_lock_written`); shell (MCP) receipts are unstamped; fingerprints print as `env:<hex12>`.
-  `use_env`: build records carry name, activation, boot file and externals
-  (`env_build.built_environments`); `shell_environment` holds the chosen name, resolved per call, its
-  activation sourced inside the jailed shell (`envs.in_environment`) and never in the runtime (a
-  pipeline activation is fingerprinted by its bytes; `activation_env()` refuses it).
-- 2026-10-06 — **Env plan B3a: definitions and the builder.** `sandbox/env_build.py` (read/validate,
-  builder, lock verification); `env.agent_conda_dir`, `env.conda_executable`. `env.pip` takes only
-  `name==version --hash=sha256:…`, installed `--isolated --require-hashes --only-binary=:all:`.
-  `build(conda_dir=, jailed=)` stages the definition once (`build-*/def/<name>/`, read through one
-  `O_DIRECTORY | O_NOFOLLOW` descriptor) and validates, builds and verifies the copy, jailed
-  (`build_policy`) with its own home, cache and `/tmp`, only the target prefix writable; records in
-  `<conda_dir>/built/` (`build_record`) and the install lock outside every jail; completion marker
-  `.ar-built`; activation and boot file a content-addressed copy (`<conda_dir>/activation/`); a
-  sticky `built/unjailed.json` bars jailed reuse after an unjailed build. Built envs are `ar-<name>`;
-  a rebuild moves the finished build aside (`.prev-<sha8>-<rand6>`) first. Caps: definition files
-  4 MB, `env.yaml` 16 KB and 64 brackets, no YAML anchors. `verify` checks the conda records against
-  the lock and the pins by dist-info + METADATA, one install each (`_pin_dist_infos`), and refuses
-  `pyvenv.cfg`, `bin/python*._pth` and a linked `lib`/`site-packages`; the start-up-file hunt was
-  dropped by human ruling (a file a build drops outside its records is an accepted residual).
-  `jail_argv` adds `--new-session` to every jailed process (TIOCSTI reproduced). No CPU/memory/
-  process limit on builds: ruling 2026-10-06. Ten review rounds (the loop stopped after 9 by the
-  user's instruction, then a final review). Live-verified build; `~/.conda/environments.txt`
-  untouched.
-- 2026-10-06 — **Env plan B3c-1: the gate admits environment definitions; [G3] closed.** Gated files
-  (`gate._gated`): a `*_utils` file or `envs/<name>/{env.yaml,env.lock,env.pip,activate.sh,boot.py}`;
-  never `.gitignore`/`.gitattributes`/`.gitmodules`, a name with a glob character or not UTF-8.
-  Layer A adds `structural.env_definition.<name>` (`check_env_definitions`: the definition validates
-  and ships with a package naming it; a deletion is admitted unless a package still names it),
-  `structural.env_resolves`, `structural.tests_left_tree_unchanged`, `no_fabrication.line_endings`
-  (lone CR) and `no_fabrication.encoding` (a non-UTF-8 cookie); the AST scans count lines as git
-  does and scope a node by every line it spans. The gate records `GateReport.manifest`
-  (`gate.changeset_manifest`: path → `<mode>:<sha256>` | `deleted`) and `GateReport.base`; Layer B
-  runs on a clean export of HEAD from raw objects plus the manifest (`gate._export_judged`) with the
-  real worktree masked (`JailPolicy.masked`). `approve_edit(manifest=, base=)` stages exactly the
-  judged bytes with no git filters (`merge_flow._stage_judged`), runs no hook, and refuses if HEAD or
-  a judged file moved; `AuthoringSession` refuses a commit whose changeset is not the reviewed one
-  (`_reviewed_manifest`). Tree hygiene at gate entry, commit, failure reset, close and heal:
-  `_restore_owner_access` (owner access restored; FIFOs, sockets, devices and nested `.git` removed),
-  `remove_untracked_ignores` (`gate.untracked_ignore_files`), `purge_bytecode` over the whole toolkit
-  tree. Every git call has a timeout (`_GIT_TIMEOUT_S` = 300 s; `gate._clear_index_lock`) and decodes
-  with `surrogateescape`. gate_bench's `commit_sweep` commits through the production path. Closing
-  ruling on the threat model: an honest coder under pressure and real tooling inconsistencies;
-  deliberate sabotage is bounded by the jail, the read-only `.git`, the co-lead and the human merge,
-  an accepted residual. 31 review rounds.
-- 2026-10-06 — **Env plan B3c-3 and B3c-2: the coder's environment tools; Layer B in the package's
-  environment.** `env_build.solve`/`pin_wheels`; `coder/env_tools.CandidateEnvs` (`env_solve`,
-  `env_pin_wheels`, `cand_env_activate`) on both escalation servers; candidates built per attempt
-  under `<worktree_base>/envs_cand/<tool>`, read-only in the author jail (`coder_policy(readonly=)`,
-  `CodexBackend(jail_readonly=)`), `active/bin` first on the author's `PATH`; the wrappers run
-  through `envs.in_environment` from a clean environment (a missing `python`/`pytest`/`pip` stubbed,
-  exit 127); `CandidateEnvs.close()` runs first in `aclose`; Codex `tool_timeout_sec = 3600`. The seed
-  lists environments (`_environment_context`); `prompts/coder.md` gains *Your package's software
-  environment*. Live-verified. Layer B: `gate._run_layer_b`/`_gate_environment` run the tests through
-  `envs.in_environment` (`_default_test_runner(environment=)`, `_jailed_pytest(extra_ro=)`), watched
-  tools grouped per environment, gate builds per definition digest with a one-day prune.
-  `tests/conftest.py` points `agent_conda_dir()` and `env_lock_dir()` at a temporary folder.
-- 2026-10-06 — **Env plan B3c-4, B3c-5, B4: build on commit, launch reconcile and drift, replay.**
-  `merge_flow.committed_environments`/`build_committed_environments`/`deleted_environments`;
-  `AuthoringSession.commit` builds after a direct-branch commit (`_build_environments`; ledger
-  `env.build`/`env.build.error`/`env.forget`; `env_note` on the lead's answer); a stop kills the build
-  (`StoppableRunner`). Derived builds write records (with `base`) and are listed via
-  `env.env_catalogue`; a reused build refreshes its record (`_record_fields`).
-  `merge_flow.reconcile_environments`, run after preflight by `graph.runtime._reconcile_environments`:
-  missing or stale builds rebuilt; drift (hand-installed or removed distributions included, against
-  `installed_dists`) kept as `ar-<id>.drift-<fp8>` with its lock and rebuilt, restored if the rebuild
-  fails; an invalid definition is `failed`, never drift; external stamp changes reported.
-  `env_build.replay` + `env.replay_environment(fingerprint)` rebuild a lock's conda part into its own
-  prefix and compare (a changed prefix kept aside; the lock must hash to its fingerprint).
-  Live-verified replay on a conda-forge env. Residual: `propose_and_pr` leaves `env_note` to the
-  ledger.
-- 2026-10-06 — **Env plan B3b: routing.** `ToolkitRegistry.tool_env` + the `env` argument and
-  description line in `tool_definitions`; `PersistentSandbox` REPL pool (`call_tool(environment=)`,
-  `label=`, `call_environment`; closed by `restart`/`shutdown`, killed by `abort`/`kill_now`, kept by
-  a restart of the worker's own REPL, `_restart_own`). A REPL starts before its call is stamped; a
-  pipeline activation or coder-written boot file is bound as a file and refused unjailed when the
-  jail is configured; activation output and the boot file's fd 1 go to stderr
-  (`in_environment(quiet=True)`; an XSPEC banner had broken the protocol); a REPL that dies attaches
-  its stderr tail to the error (`_stderr_tail`). Residual: a boot file that raises is swallowed.
-- 2026-10-07 — **B5 live-cell fixes; T1/B6 docs.** `build_policy` and `pin_wheels` bind the staged
-  definition and the candidate prefix as spelled (under a symlinked conda dir, `/data` →
-  `/nfsdata1`, every candidate build had failed in a second); `verify` caps `_MAX_RECORD` 64 MB,
-  `_MAX_RECORDS_TOTAL` 1 GB (libboost-headers' record exceeded 4 MB); the REPL drops `-P` (3.11+
-  only) and removes its working folder from `sys.path` itself (residual: the shell server keeps
-  `-P`, so the analysis interpreter must be 3.11+, 3.13 today); REPL protocol line limit 256 MB
-  (`_PROTOCOL_LINE_LIMIT`; asyncio's default 64 KB). `prompts/analyst_lead.md` and
-  `prompts/analyst_worker.md` say when to ask for a package environment. Docs only: the
-  `PersistentSandbox` entry names the `environment`/pool signature. Jailed probe through the module
-  API: `xspec.Model("relxillCp")` builds in a routed `ar-xspec` REPL, so the toolkit's `boot.py`
-  runs (F21 narrowed to the default REPL).
-- 2026-10-17 — `coder_text_cap()` retired; `cap_text` takes an explicit limit. Coder prose, tool inputs/results, escalations, gate reasons and co-lead issues/rationale are recorded whole in the ledger (summaries and model-visible notes keep their short previews).
-- 2026-10-17 — Codex harness: `coder.turn_end` records the vendor error whole (the lead's copy stays at 600 chars), `coder.read_outside_allowlist` every path.
-- 2026-10-17 — `builtin_server.read_file` removed (first 64 KB, no offset): workers read through the shared in-process `read_file` (`agents/DOCS.md`). `bash_exec` and `list_dir` stay in the server.
-- 2026-10-18 — [B2] `memory.md` retired: `workspace.memory_path`, `append_memory` and `read_memory` deleted (and their `sandbox` exports); each seat's history is the run ledger (`agents/history.py`).
-- 2026-10-18 — [D8] `builtin_server.py` tracks its in-flight `bash_exec` commands (`_RUNNING`) and
-  kills their process groups when it exits (stdin closed, or SIGTERM via `_on_terminate`): each
-  command runs in its own session, outside the server's group, so a command a `/stop` interrupted
-  used to outlive the server when the jail was off.
-- 2026-10-18 — [D8 follow-ups] `AuthoringSession.aclose` marks the session closed only once every
-  step finished (`_closing` guards a concurrent call): a close a /stop cut short leaves it open, so
-  the stop's cleanup closes it again and the branch is still reset. The lead releases
-  `run_control.authoring_session` only after its own close returned.
+- 2026-09-02 — `commit()` advances `_base_ref`; `AuthoringSession.pending_changes()`; negated banned
+  word → finding (`_negated`). 09-03: `_HOST_TOOLING_PREFIXES`; `_slug` deleted; ruling: `runtime_dir`
+  on every allow-list (reversed 09-14).
+- 2026-09-09 — [F1] `committed` deleted (`last_commit_sha`); [F2] `structural.changes_allowed` over
+  `collect_all_changes` (ruling: `*_utils` allow-list); [N1] `_bounded_pytest_output`,
+  `gate_layer_b_output_cap`; [F10] `PathGuard.is_writable()` (ruling: own work folder only).
+  `jail.coder_policy` binds `.git` read-only.
+- 2026-09-12 — [B1/B2] coder beside the lead: `start_drive`/`drive_status`/`take_drive_result`
+  (`submit_for_review` blocking, ruling); Codex `/stop` hang fixed (`_drain_turn`);
+  `CoderBackend.steer`, `AuthoringSession.send`; `clarify_for_author`/`_ClarifyReply` deleted.
+- 2026-09-14 — Run record in `workspace.ledger_dir(run_id)`; `agent_fs_allow` narrows to
+  `runtime_dir/runs`. Reverses the 09-03 ruling.
+- 2026-09-24 — `AuthoringSession.wait_for_event`, `watch_steers`, `send(mid_turn=True)`,
+  `_init_channel()`. LIVE-VERIFIED (`tests/test_live_coder_wait.py`). Open: a killed Codex turn
+  books $0.00; `mcpServer/startupStatus/updated` not recorded.
+- 2026-09-25 — [A13] Claude backend appends `[harness error]` on `ResultMessage.is_error`. [G14]
+  `scan_provenance` → `scan_figure_shape`; `parse_tool_figures` moved into runner.py. LIVE red-team
+  ($13.62, 17 cells): 7 of 7 indirect shapes reached a commit. [G15] dynamic return check
+  `sandbox/returns.py` (`layer_b.returns.*`); `capture.call_started_ns` on the coarse clock. LIVE
+  red-team ($11.50 + $4.24 reruns): 12/12 attack cells stopped before commit, control commits.
+  [R1] `report_record_path`; reports beside the ledger (human ruling). [E12] coder `ask_lead`/
+  `ask_human` → one MCP tool `message(to=lead|human, text)` (`escalation_server.route_message`,
+  `MESSAGE_DESCRIPTION`, `AuthoringSession.mark_question_open()`; `park_question`/`take_questions`
+  deleted).
+- 2026-10-06 — **Jail hardening: [F20] closed, [F22]–[F24], [F27].** Builtin shell server jailed
+  under `jail.analysis_policy` (`graph.runtime._builtin_server_config`, `writable_dirs=`);
+  `runner._source_ini_env` in a clean environment; guard stands down only for a jailed server
+  (`MCPToolClient.is_jailed` → `ToolkitRegistry.mcp_jailed`). Per jailed process: `jail.private_tmp`,
+  `jail.JAIL_HOME_AT` (`JailPolicy.home_at`), `runner.with_private_param_dir`,
+  `PYTHONPYCACHEPREFIX`. `workspace.memory_path` beside the ledger; `human_reply_dir`. Layer B
+  shares one `--basetemp`, wiped per start (human ruling). [F27] `merge_flow._base_ref_path`;
+  `heal_toolkit_branch_if_dirty` refuses a non-ancestor; `run.resume.heal`.
+- 2026-10-06 -> 2026-10-07 — **Env plan.**
+  - B1, B2a, B2b: `sandbox/envs.py` (`Environment`, `External`, `fingerprint`, `lock`, `write_lock`,
+    `fingerprint_and_lock`, `describe`); `env.analysis_environment`/`host_environment`/
+    `env_lock_dir`; config `env_externals`. `PersistentSandbox(environment=)`
+    (`_restart_if_environment_changed`, `take_notice()`, `booted_fingerprint`,
+    `booted_lock_written`). `use_env` (`env_build.built_environments`, `shell_environment`,
+    `envs.in_environment`).
+  - B3a: `sandbox/env_build.py`; `env.agent_conda_dir`, `env.conda_executable`; jailed staged
+    `build(conda_dir=, jailed=)` (`build_policy`, `build_record`, `.ar-built`, sticky
+    `built/unjailed.json`), envs `ar-<name>`; `verify` (`_pin_dist_infos`; start-up-file hunt
+    dropped, human ruling); `jail_argv --new-session`; no build limits (ruling 2026-10-06).
+    Live-verified build.
+  - B3c-1, [G3] closed: `gate._gated` admits `envs/<name>/…`; `check_env_definitions`,
+    `structural.env_resolves`, `structural.tests_left_tree_unchanged`,
+    `no_fabrication.line_endings`/`.encoding`; `GateReport.manifest` (`gate.changeset_manifest`),
+    `GateReport.base`, `gate._export_judged`, `JailPolicy.masked`; `approve_edit(manifest=, base=)`
+    (`merge_flow._stage_judged`), `_reviewed_manifest`; `_restore_owner_access`,
+    `remove_untracked_ignores`, `purge_bytecode`, `_GIT_TIMEOUT_S`. Ruling: an honest coder under
+    pressure; sabotage an accepted residual.
+  - B3c-3, B3c-2: `env_build.solve`/`pin_wheels`; `coder/env_tools.CandidateEnvs` (`env_solve`,
+    `env_pin_wheels`, `cand_env_activate`), `coder_policy(readonly=)`, `CodexBackend(jail_readonly=)`.
+    Live-verified. Layer B in the package's environment (`gate._run_layer_b`/
+    `_gate_environment`).
+  - B3c-4, B3c-5, B4: `merge_flow.committed_environments`/`build_committed_environments`/
+    `deleted_environments`/`reconcile_environments`; `_build_environments`, `StoppableRunner`,
+    `env.env_catalogue`; drift kept as `ar-<id>.drift-<fp8>`; `env_build.replay`,
+    `env.replay_environment(fingerprint)` (live-verified). Residual: `env_note` left to the ledger.
+  - B3b routing: `ToolkitRegistry.tool_env`, `env` argument; `PersistentSandbox` REPL pool
+    (`call_tool(environment=)`, `call_environment`, `_restart_own`); `in_environment(quiet=True)`;
+    `_stderr_tail`. Residual: a boot file that raises is swallowed.
+  - 10-07 B5 live-cell fixes: paths bound as spelled; `_MAX_RECORD`, `_MAX_RECORDS_TOTAL`; REPL drops
+    `-P` (residual: shell server keeps it, 3.11+); `_PROTOCOL_LINE_LIMIT`. T1/B6 docs; relxillCp
+    loads in a routed `ar-xspec` REPL (F21 narrowed to the default REPL).
+- 2026-10-17 — `coder_text_cap()` retired (`cap_text` takes a limit); coder, co-lead and Codex
+  `coder.turn_end` text recorded whole in the ledger. `builtin_server.read_file` removed.
+- 2026-10-18 — [B2] `memory.md` retired: `workspace.memory_path`, `append_memory`, `read_memory`
+  deleted. [D8] `builtin_server.py` kills in-flight `bash_exec` groups on exit (`_RUNNING`,
+  `_on_terminate`); `AuthoringSession.aclose` marks closed only after every step (`_closing`).
+- 2026-10-26 — `registry.REF_NOTE` appended to every toolkit tool's description (receipt
+  references, `provenance.refs`; the constraint lives where the model reads it).

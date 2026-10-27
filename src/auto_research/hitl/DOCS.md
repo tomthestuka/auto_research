@@ -25,7 +25,7 @@ fabrication, no silent hang: with no handler wired `human` is not an address, an
   `record_message(sender, to, text, *, route)` (ledgers the lead's text to its coder),
   `send(sender, to, text, *, handles, scope, receipt_source, reply_dir, kind, model) -> (text,
   is_error)` (never blocks), `ask_human(query, *, deliver, receipt_source)` (the background wait;
-  raises `HumanInputRequired` unattended), `viewable(key)`, `outstanding(key)`. Routes: live seat →
+  raises `HumanInputRequired` unattended), `viewable(key)`, `show(key, handles)` (a brief's handles made viewable), `outstanding(key)`. Routes: live seat →
   its `RunControl` inbox; a seat with a kept turn → inbox + resume task (registered on
   `RunControl.register_resumed`, a notice to the sender seat when it ends); not started → inbox;
   `wake(key, entries)` (D5) resumes an idle seat with a kept turn for the texts its filing batch
@@ -240,65 +240,36 @@ protocol, §7).
   noticed once (`_unrouted_albums`).
 
 ## Changelog
-Compacted 2026-09-01 and 2026-09-24 (detail in git history).
+Compacted 2026-09-01 and 2026-09-24, and 2026-10-19 (every entry); detail in git history.
 
 - 2026-06-15 -> 2026-06-29 — Package built (Phase 2 step 5): `HumanQuery`/`HumanResponse`,
   `HumanHandler` + `resolve_human`, `resolve_handler`, CLI/Slack/WhatsApp connectors,
-  `make_human_channel_check`; shared `response_timeout_s()` (1 h); one Markdown `message` rendered
-  per surface; WhatsApp/Twilio deprecated.
-- 2026-07-02 -> 2026-07-16 — Telegram is the recommended channel ([E4]): long polling, reply-to
-  routing (`message_id→Future`), `_md_to_html`/`_chunk_md`; `start()` pins `httpx`/`httpcore` to
-  WARNING so the bot token no longer reaches logs.
-- 2026-07-22 -> 2026-07-30 — `commands.py` (`dispatch_command`, `CommandContext`,
-  `make_status_answer`, `wait_reply_or_stop`) over `RunControl`; Telegram + Slack `attach_commands`
-  (CLI/WhatsApp not command-wired); roster-id targets, `hitl.command`/`.reply` ledger events.
-  Rulings: `/stop` forceful with no modifier; buttons replace flags (`CommandReply` with `.buttons`).
-- 2026-07-31 — `/stop` calls `RunControl.interrupt()` (scheduled; no report composed). `/status`
-  runs a `StatusMonitorAgent` over `MonitorToolProvider`; `_status_digest`/`_deterministic_status`
-  deleted, no fallback (ruling).
-- 2026-09-12 — CLI prompt timeout no longer hangs exit: stdin is read on a daemon thread
-  (`_read_stdin_line`, ruling); a late answer is a no-op.
-- 2026-09-25 — [E8] Telegram sends queries and command replies as Bot API 10.1 rich messages (native
-  tables/math/headings) via `do_api_request`, falling back to HTML chunked at block boundaries with a
-  table ladder (`<pre>` → bullets) and grouped/expandable quotes; edits routed apart (an edited command
-  no longer re-runs; an edited taken answer gets a notice). `telegram_rich_messages` flag. LIVE-VERIFIED
-  (both sends accepted; 34-payload attack corpus `tests/test_live_telegram_attack.py`: 30 rich, 4
-  fell back, 0 errors). Slack dropped by ruling (bolt-python#1529).
-- 2026-09-25 — [E11] Media on the Telegram channel, both directions: `hitl/attachments.py`
-  (`resolve_attachments`, `mint_reply_attachments`); files embedded in the rich message (Bot API 10.2
-  `media`), photo/document replies as the fallback, inbound photos/documents/albums saved into
-  `reply_dir`, notes for what could not travel. CLI/Slack/WhatsApp unchanged (ruling: Telegram only).
-  LIVE: embedded rich message and both replies accepted by the Bot API; the reply leg is by hand.
-- 2026-09-25 — [E12] `router.py`: `SeatRouter`, the quick channel between any two seats with the
-  human one endpoint; `message` never blocks (the human's reply arrives in the sender's inbox as a
-  nudge), a finished seat is resumed, texts mint no receipt, seat-to-seat texts mirrored via
-  `notify` (`channel_mirror`). `ask_human` retired everywhere.
-- 2026-09-25 — [E12] `SeatRouter.seat`/`state` (for `list_peers`) and `record_message` (the lead's
-  `message(to="coder")`, routed by the lead's channel layer, is ledgered as `channel.message`).
-- 2026-09-25 — `TelegramHandler.notify` (silent, answers nothing) for the seat-to-seat mirror; a plain
-  reply matching no single open question now gets a notice instead of being dropped (rulings: both).
-  LIVE: one silent notify accepted.
-- 2026-10-06 — [F26] receipted files read through `provenance.store.read_receipted` (read once, no symlink, hash-checked; a changed file is sent with a note and a `receipt.drift` alert). See `provenance/DOCS.md`.
-- 2026-10-17 — Ledger fields recorded whole (user ruling): `channel.message` / `channel.reply` text and answers (were 4,000 chars), `hitl.command*` text and replies (were 400/200); one-line summaries keep their 80-char preview.
-- 2026-10-18 — [D5 ruling] `SeatRouter.wake(key, senders)`: a text that reached a seat during the
-  batch that filed is re-queued by the loop and resumes the idle seat through this, like any text
-  to an idle seat. `_resume` sends its end notice only to a sender that is a seat.
-
-- 2026-10-18 — [D5 review fixes] `wake(key, entries)` wakes only for message/reply/steer, registers
-  only senders still in their turn (else background; the deadlock of two idle seats waiting on
-  each other is gone), and notifies every sending seat (`_resume(..., notify=)`). New
-  `_start_resume` + `_resuming` / `_busy`: one resume per seat at a time, used by `_to_seat`,
-  `deliver` and `wake`; `state` reports a starting resume as working. `_WAKING_KINDS`.
-- 2026-10-18 — [D5 review 2] `_resume_waiting(key)` (peeks the inbox) serves `wake` and runs again
-  at the end of every `_resume`, so a text that reached a seat as its resumed turn filed is read;
-  only a seat's or the human's text wakes (`_wakes`), never a coder's.
-- 2026-10-18 — [D6 ruling] A resumed turn's `ReactBudgetExhausted` is no longer caught: `_resume`
-  records `channel.resume.exhausted`, keeps nothing for the seat, fails the run through
-  `RunControl.fail` and re-raises.
-- 2026-10-18 — [D8 ruling] `/stop` and `/status` answer at once (`STOP_ACK`, `STATUS_ACK`, the
-  `ack=` argument of `dispatch_command`); Telegram and Slack handle each command in its own task;
-  Slack `notify`; connectors' `aclose` cancels command tasks still running.
-- 2026-10-18 — [D8 review] `/stop` while already stopping answers so; bounded acks; `/status`
-  failures answered; Slack `_post` instead of `notify`; handler failures logged.
-- 2026-10-18 — [D8 follow-ups] `in_flight_commands()` on Telegram and Slack (each command task
-  named by its command word); `/stop` with no run in flight answers so.
+  `make_human_channel_check`, `response_timeout_s()`; WhatsApp/Twilio deprecated.
+- 2026-07-02 -> 2026-07-16 — [E4] Telegram recommended: long polling, reply-to routing,
+  `_md_to_html`/`_chunk_md`; `httpx`/`httpcore` pinned to WARNING (no bot token in logs).
+- 2026-07-22 -> 2026-07-31 — `commands.py` (`dispatch_command`, `CommandContext`,
+  `make_status_answer`, `wait_reply_or_stop`) over `RunControl`; Telegram + Slack `attach_commands`;
+  `hitl.command`/`.reply` events; `/stop` → `RunControl.interrupt()`; `/status` runs a
+  `StatusMonitorAgent` (`_status_digest`/`_deterministic_status` deleted). Rulings: `/stop` forceful,
+  buttons replace flags (`CommandReply.buttons`), no status fallback.
+- 2026-09-12 — CLI stdin read on a daemon thread (`_read_stdin_line`, ruling).
+- 2026-09-25 — [E8] Telegram Bot API 10.1 rich messages (`do_api_request`), HTML fallback with a
+  table ladder; edits routed apart; `telegram_rich_messages`. LIVE-VERIFIED (34-payload attack
+  corpus). Slack dropped by ruling (bolt-python#1529).
+- 2026-09-25 — [E11] Telegram media both ways: `hitl/attachments.py` (`resolve_attachments`,
+  `mint_reply_attachments`); ruling: Telegram only. LIVE: embedded rich message and both replies
+  accepted; the reply leg by hand.
+- 2026-09-25 — [E12] `router.py` `SeatRouter` (quick channel, human one endpoint, texts mint no
+  receipt, `channel_mirror`; `seat`/`state`/`record_message`); `ask_human` retired.
+  `TelegramHandler.notify`; an unmatched plain reply gets a notice (rulings). LIVE: one silent notify.
+- 2026-10-06 — [F26] receipted files read through `provenance.store.read_receipted`.
+- 2026-10-17 — Ledger fields recorded whole (user ruling): `channel.message`/`channel.reply`,
+  `hitl.command*`.
+- 2026-10-18 — [D5 ruling + reviews] `SeatRouter.wake(key, entries)`: a seat's or the human's text
+  reaching a seat during its filing batch resumes it; `_start_resume`, `_resuming`/`_busy`,
+  `_resume_waiting`, `_wakes`, `_WAKING_KINDS`. [D6 ruling] `_resume` records
+  `channel.resume.exhausted`, calls `RunControl.fail`, re-raises. [D8 ruling + reviews]
+  `STOP_ACK`/`STATUS_ACK` (`dispatch_command(ack=)`), one task per command, Slack `_post`, `aclose`
+  cancels command tasks, `in_flight_commands()`.
+- 2026-10-26 — `SeatRouter.show(key, handles)`: the toolkit results a worker's task names become
+  viewable for it (openable and passable by `$ref`, never citable), like a message's handles.

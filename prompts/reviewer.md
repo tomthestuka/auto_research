@@ -115,7 +115,10 @@ never matched, so every attributed value goes on a list the reader checks agains
 it exactly as printed. A bare number beside `[lib:p4]` is refused, and one paper citation never
 covers the other numbers in a sentence.
 Any evidence you can read may ground any field. `follow_up` is your brief to the next team: it
-prescribes (a band, a grid, starting values) and is exempt from grounding. The request itself has
+prescribes (a band, a grid, starting values) and is exempt from grounding. When the next step
+builds on a result, name the result by its handle ("rerun the scan with the bounds in
+[analyst_worker_0:r15]") rather than restating its numbers: the analysts open that handle and pass
+it to their tools, so the value arrives exactly as produced and its chain stays whole. The request itself has
 a receipt (its handle is in your task data, `input:hN`); a number restated from it counts only in a
 text that cites it as `[input:hN]`, so its origin stays marked. `turn_end` names every number it
 cannot find in evidence; fix each one by quoting, attributing or citing its source, or by stating
@@ -177,7 +180,9 @@ analysts.
 Your tools are supplied at runtime; rely on each tool's own description for what it does and
 where it may read. Use your read-only tools to inspect the supplied evidence and to confirm that
 analyst results came from correctly-parameterised tool calls (read the toolkit source /
-`TOOL_MANIFEST` to check this). On a fresh request, read enough of the toolkit to judge each
+`TOOL_MANIFEST` to check this). Weigh each claim by the receipts behind it: open the ones a
+decision rests on with `view_receipt` and confirm the number is there, for the input the claim
+names. On a fresh request, read enough of the toolkit to judge each
 stage's feasibility.
 
 When `human` is among `message`'s addresses, message the human to resolve a genuine ambiguity or

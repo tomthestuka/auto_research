@@ -47,6 +47,17 @@ class ToolSpec(TypedDict):
 # No hard upper clamp — ``tool_config.yaml`` is trusted human/coder-set infra, never LLM input.
 _CALL_TIMEOUT_FALLBACK_S = 300
 
+#: Appended to every toolkit tool's description: how to pass another tool's output on
+#: (``auto_research.provenance.refs``). The constraint lives where the model reads it.
+REF_NOTE = (
+    '\n\nAny argument value (a number, a list, a dict) can be {"$ref": "<receipt handle>#/<key>/<index>"}: the runtime passes '
+    "the value at that place in the named tool result, exactly as the tool returned it, and "
+    "records the result this call used. Pass another tool's output on this way, e.g. "
+    '{"$ref": "analyst_worker_0:r3#/bins"}; "#" alone passes the whole returned value. A value an '
+    "earlier tool result returned reaches a call this way only: a call that types one runs once it "
+    "carries the reference the reply names."
+)
+
 
 def _discover_manifest_packages(root: Path) -> list[str]:
     """Find every ``<domain>_utils`` package under ``root`` that could expose TOOL_MANIFEST.
@@ -276,6 +287,7 @@ class ToolkitRegistry:
                 schema["properties"] = properties
                 if env:
                     description += f"\n\nRuns in its tested environment ar-{env}."
+            description += REF_NOTE
             defs.append({"name": self._function_name(kind), "description": description, "input_schema": schema})
         for kind, desc in self._mcp_tools.items():
             defs.append(

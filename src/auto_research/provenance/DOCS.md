@@ -24,6 +24,26 @@ report prose ──► check_bindings / check_report_fields ──► problems (
 - **Inputs are hashed once per run** (cache key: path, size, mtime); a directory is hashed by its
   listing. An input whose bytes an in-run receipt produced links to it as a parent (the in-toto
   materials→products chain), so ancestry is walkable.
+- **References link a call to the results it used** (`refs.py`, 2026-10-26). A toolkit argument
+  `{"$ref": "<handle>#<json-pointer>"}` is replaced, before the call runs, by the value at that
+  pointer in the JSON the receipt holds; the receipt becomes a parent of everything the call mints.
+  Only a toolkit result the caller may use resolves (its own, the request, receipts cited in reports
+  it received, handles named in a message or brief to it); a navigation receipt, a failed result
+  or changed bytes is refused with a sentence the model acts on. The ledger and the receipt's
+  `args_sha256` keep the references as written; the values they stand for are fixed by the
+  parent's hash and the pointer. This replaced the retyping measured in run 32814459, where every
+  derived input was typed into the arguments, so no call had a parent and two hand-built plot
+  inputs carried altered error bars. A typed float of 4+ significant digits that a usable result
+  holds is a copy, and the call is refused before it runs with the reference to write
+  (`RetypeCheck`; user ruling 2026-10-26, replacing the after-call note, which a live model
+  ignored). A match is never an edge by itself: repeated runs return identical values, so the
+  model's reference makes the link.
+  A toolkit tool prints summary lines with its result and returns the dict beside them (coder
+  contract rule 5), and the result text keeps only the print; so `receipt_call(returned=)` stores
+  the returned keys as one JSON blob named on the receipt (`returned_sha256`, hash-checked on every
+  read), and a reference resolves against that. A brief that names a handle its author cannot
+  open is refused at the author's `turn_end` (`brief_handle_problems`: the lead's `what_to_probe`,
+  the reviewer's `follow_up`), so a brief hands on only what its author could, as a message does.
 - **Evidence vs record** (human ruling 2026-09-25: "citing in a report must be to sth it has
   produced, not just read"). Every receipt is a record; only `store.is_evidence(receipt)` receipts
   back a number: a toolkit tool's return and its files/figures (producer `research_toolkit.*`), a
@@ -80,8 +100,14 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   (live) plus admitted handles and their ancestors; `.admit(handles)`, `.handles()`.
 - `capture.inputs_before(store, args, *, cwd, skip_keys, observation_paths=None) -> CallInputs` and
   `capture.receipt_call(store, *, source, produced_by, args, text, failed, state, figures, cwd,
-  toolkit_root, kind, fields) -> CallReceipts` — one tool call to receipts; `.header()` is the line
-  the model sees. `capture.toolkit_commit(root)` reads HEAD (read-only).
+  toolkit_root, kind, fields, parents=()) -> CallReceipts` — one tool call to receipts; `parents`
+  (the call's `$ref` receipts) go on every receipt it mints; `.header()` is the line the model sees
+  (`[receipt h] ← parents`). `capture.toolkit_commit(root)` reads HEAD (read-only).
+- `refs.resolve_refs(args, store, usable) -> (resolved_args, parents)` — every `{"$ref": …}` in an
+  argument tree replaced by its value; `usable(handle)` is the caller's scope; raises `RefError`
+  (its message is the model's) on the first that does not resolve, so nothing runs.
+  `ledger_calls(...).sent_args` keep the references; `report.html.reproduce_code` resolves them
+  from the store for a rerun.
 - Invariant: every problem string names what is wrong and what to do, because it is returned to
   the model as a `turn_end` refusal. Only a receipt the text itself cites produces a problem; a
   scope receipt that is missing, stale or flagged silently grounds nothing.
@@ -131,73 +157,79 @@ report renderer.
   `BindingResult.numbers` keyed by text (what a report page shows as each number's source).
 - `bindings.ungrounded_numbers(prose, usable, *, masked)` — the number-grounding loop, used
   by `check_bindings` and the gate.
+- `refs.REF_KEY = "$ref"`; `refs.is_ref(value)` (exactly one key, a string); `refs.split_ref(text)
+  -> (handle, pointer)` (no `#`: the whole value); `refs.refs_in(args) -> list[str]`.
+- `refs.passable(store, handle) -> bool` — a toolkit tool's result (kind `result`, evidence, not
+  `input:`); the only kind a reference resolves.
+- `refs.returned_value(store, handle)` — the receipt's JSON, its `CONSOLE_SEPARATOR` tail set
+  aside (`sandbox.runner.normalize_tool_raw` writes it); `RefError` on changed bytes or plain text.
+- `refs.resolve_one(store, text, usable) -> (value, handle)`; RFC 6901 pointers (`~0`, `~1`); a
+  miss names the keys or the index bound that exist.
+- `refs.handles_in_brief(store, text) -> list[str]` — the toolkit results a brief names, bracketed
+  or bare.
+- `refs.RetypeCheck(store).problem(typed_args, handles) -> str | None` — the refusal for a call
+  whose typed floats of 4+ significant digits a usable result holds: per argument, the reference
+  to write (`{"$ref": "<handle>#<pointer>"}`, newest result first, up to 3); integers (counts,
+  ObsIDs) and short floats are parameters and pass; each receipt's floats cached once per store.
+- `refs.unviewable_handles(text, viewable)`, `refs.brief_handle_problems(field, text, viewable)` —
+  the handles a brief names that its author cannot open, and the `turn_end` refusal naming them.
+- `ReceiptStore.put_blob(data) -> (path, sha256)` (content-addressed, atomic) and
+  `ReceiptStore.blob_path(sha256)`; `receipt_call(returned=)` sets `returned_sha256`.
 
 ## Changelog
-Compacted 2026-10-07 (the 2026-10-06/07 entries); detail in git history.
+Compacted 2026-10-07 (the 2026-10-06/07 entries) and 2026-10-19 (every entry); detail in git history.
 
-- 2026-09-24 — Created (P0): `Receipt` schema, the run store, and the scoped-grounding check with its
-  normalisation, boundary rule and exemptions. P1: `capture.py` (inputs hashed before a call; result,
-  figure — re-hashed from the file — and data receipts after), `ReceiptStore.for_run`, `ScopedLookup`.
-- 2026-09-24 — `check_report_fields` gains `scope` and one resolution cache per report. Grammar: a digit
-  after letter+hyphen is not a number (`Cyg X-1`); `2-8` is a range. Residual: a file a tool locates
-  itself from an identifier is not hashed.
-- 2026-09-24 — Inputs are receipts: `ReceiptStore.mint_input(text, kind=, produced_by=)` under source
-  `input`, visible to every unit, but grounding only a text that cites `[input:…]` (kept out of the
-  report-wide union and `scope`).
-- 2026-09-24 — `normalise` folds math alphanumerics (U+1D400–U+1D7FF only) and, for paper/web, rejoins
-  line-broken words and keeps a table-row sign glued to its number. `Receipt.source_path`/`source_sha256`
-  name a paper's original file (`verify()` refuses a missing or changed one).
-- 2026-09-24 — Refusal hints: the closest passage (whole words, itself quotable), the other visible
-  receipt holding the quote, never unsigned text for a signed quote.
-- 2026-09-24 — Exempt as names, not values: ordinals (`worker 0`, `DU 2`, `round 3`), list enumerators,
-  DOIs/bibcodes/`astro-ph/…`/prefixed arXiv ids, HTTP status codes with reason phrase, sexagesimal
-  coordinates.
-- 2026-09-24 — Ruling: papers are cited, not checked — `store.text()` is `None` for `%PDF-` bytes. The
-  interim `cited_only_kinds` (sentence-scoped) was superseded the same day by attribution
-  (ruling): `{{h "value" <locator>}}` for `ATTRIBUTION_KINDS` (`paper`), value unmatched.
-- 2026-09-24 — `paper_attributions(prose, lookup, *, own_source)` returns `PaperAttribution` (alias
-  `Attribution`), the one verify-list shape; `check_bindings(support=…)` only grounds. Limit: an
-  attributed value is unverified.
-- 2026-09-24 — Laundering closed: the store lives beside the ledger (`record_beside(run_dir,
-  "receipts")`), outside every allow-list; numbers typed into a `SHELL_TOOLS` command
-  (`Receipt.arg_numbers`, `ReceiptStore.typed_numbers`) never ground. Residual: via a toolkit-written file.
-- 2026-09-25 — [G15] `data_products`, `checkable_text`, `ungrounded_numbers` factored out for the
-  gate's return check; `call_started_ns` moved to the coarse realtime clock (200/200 fast writes had
-  read as older than their own call, so were never receipted).
-- 2026-09-25 — [R7] `is_evidence` (human ruling): only toolkit returns, commits, papers and the
-  request ground; `_Resolved.entry` refuses a cited record by name and skips it in scope. Deleted
-  the shell typed-number machinery (`_Resolved.typed`, `echoes`, `ReceiptStore.typed_numbers`,
-  `capture.typed_numbers_in`); `Receipt.arg_numbers` kept as a legacy field. `store.text` reads
-  `commit` receipts.
-- 2026-10-06 — **[F22] [F26] Receipted files.** A figure or data file is receipted only if it is not
-  a symlink and resolves inside the allow-list (`capture.receipt_call(reachable=)`, default
-  `_allow_listed`; the host `/tmp` excluded while jailed). `ReceiptStore.for_run` never uses a
-  legacy in-run-folder store (`record_beside(..., legacy_ok=False)`). Human ruling 2026-10-06
-  (alert, still send): `store.read_receipted(path, sha256)` opens component by component without
-  following links (`_open_without_symlinks`), reads once and hashes what it returns; changed bytes
-  come back with a model-visible `[changed]` note and a `receipt.drift` ledger event
-  (`install_drift_alert`, once per file and bytes per run). Used by the media layer, report figure
-  staging, human attachments, `store.text` and `text_with_note` (`view_receipt`); citations at
-  `turn_end` refuse changed bytes.
-- 2026-10-06 — **Env plan B1–B3b: every receipt names its environment.** `Receipt.env`
-  (fingerprint) via `ReceiptStore.mint(env=)` / `capture.receipt_call(env=)`;
-  `ReceiptStore.default_env` (the orchestrator's, set by `run_research`) for a call naming none;
-  with `env_default=`, a call whose environment cannot be fingerprinted, or a configured
-  non-builtin MCP server's call, stays unstamped. Worker sandbox calls stamp the REPL's
-  fingerprint, its lock under `<runtime>/conda/locks/`. `Receipt.env_untested` /
-  `receipt_call(env_untested=)`: run outside the package's tested environment, still evidence.
-  `NOT_EVIDENCE_NAMES['list_env']`. Grounding exempts a hex identifier (12+ lowercase hex with a
-  letter a–d or f) and `env:<hex>`.
-- 2026-10-07 — **Input hashing never ends a call (B5 live cell).** `ReceiptStore.hash_input` lists a
-  folder with `surrogateescape` (a non-UTF-8 name had ended a run) and leaves one of more than
-  `_MAX_LISTED_FILES` (20,000) files unhashed; `capture.inputs_before` skips an input whose hashing
-  fails (§9.3.8).
-- 2026-10-17 — [provenance replay, step 1] `calls.py`: the call-argument rewrite moved here from `agents.react` (`resolve_call_args`, `FIGURE_PATH_ARGS`), `args_digest` (now what `ReceiptStore.mint` stamps), `ledger_calls` and `calls_by_receipt`. A receipt's exact arguments are rebuilt from the ledger, never stored; the hash proves the rebuild.
-- 2026-10-17 — Step-1 review fixes: `calls_by_receipt` joins by identity (the receipt's `call_id`, recorded on the `tool_result` line) and keeps the hash as proof — order pairing had matched a receipt to a not-run twin of another tool; `ledger_calls` drops calls that minted nothing and skips malformed lines; `LedgerCall.sent_args`.
-- 2026-10-17 — Step-1 re-review fixes: `ledger_calls` pairs a `tool_call` with its `tool_result` by actor, loop (`<role>.<action>`), tool and id (two overlapping loops of one actor reusing an id had crossed), streams the file, and skips a call whose context does not parse; `sent_args` documents the shell's activation wrapper. Residual: `args_digest` uses `default=str` (a non-JSON argument value hashes as its string; adapters pass JSON values).
-- 2026-10-17 — [provenance replay, step 2] Obs-db inputs (`hash_obsdb_entry`, `inputs_before(observation_paths=)`, store helpers `_listing`/`_catalog_entries`); `receipt_call` stamps `toolkit_root` beside `toolkit_commit`. Closes §13 (a) for ObsIDs in an obs-db catalog.
-- 2026-10-17 — Step-2 review fixes: ObsIDs are found through dicts (the real `load_data` passes `epoch={...}`, so none had been recorded), relative mission folders resolve against `cwd`, an uncatalogued observation folder is a `listing` input, `obs_db_path` is a mission folder (never listed whole: the IXPE folder took 2.9 s per call and then failed the 20,000-file limit); `receipt_call` stamps `toolkit_root` (resolved) on toolkit producers only; `_listing` stats each file once and skips a file removed while listed. Residuals: the observation is hashed before the call (a reduction writing into it during the call is not seen); an `obsdb` input links no in-run receipt that wrote the folder; the lead's in-process `data_catalog` records no input.
-- 2026-10-17 — [provenance replay, step 3] `number_sources` / `NumberSource` and `BindingResult.numbers` (`sources=True`): the grounding check's own per-number answer, shared with `ungrounded_numbers` through `_scanned_numbers`.
-- 2026-10-17 — Step-2 re-review fixes: `is_synthetic_path` also matches the obs-db's hand-authored fixtures (`synth_<name>`); the uncatalogued fallback lives in `hash_obsdb_entry` (fresh listing, ObsID-like names only, never a mission folder) and the catalog is read once per folder; a call naming no observation records `catalog.json` (the lead's in-process `data_catalog` too, through `_receipted(state=)`); integer ObsIDs and `./x`, `x/` forms; a NUL or loop in a path records nothing instead of ending the call; mission folders in sorted order; `_listing` skips any unreadable entry.
-- 2026-10-17 — `inputs_before(named_folders=)`: `catalog.json` is recorded only for a mission folder the caller named (an auto-filled `<mission>_path` had put every mission's catalog into every call's inputs).
-- 2026-10-17 — A cited non-evidence receipt's refusal ends "state anything else without a value" (it had said "in words", inviting a spelled-out number).
+- 2026-09-24 — Created (P0/P1): `Receipt`, the run store, scoped grounding (normalisation, boundary
+  rule, exemptions); `capture.py`, `ReceiptStore.for_run`, `ScopedLookup`; `check_report_fields(scope=)`;
+  `ReceiptStore.mint_input` (source `input`, grounds only a text citing `[input:…]`); math-alphanumeric
+  folding; `Receipt.source_path`/`source_sha256`; refusal hints; `Cyg X-1`, `2-8` a range; exempt
+  names (ordinals, enumerators, DOIs/bibcodes/arXiv ids, HTTP codes, sexagesimal coordinates).
+- 2026-09-24 — Ruling: papers cited, not checked; attribution `{{h "value" <locator>}}` for
+  `ATTRIBUTION_KINDS` (supersedes `cited_only_kinds`); `paper_attributions` → `PaperAttribution` (alias
+  `Attribution`). Laundering closed: store beside the ledger (`record_beside`), shell-typed numbers
+  never ground (`Receipt.arg_numbers`, `ReceiptStore.typed_numbers`).
+- 2026-09-25 — [G15] `data_products`, `checkable_text`, `ungrounded_numbers`; `call_started_ns` on the
+  coarse realtime clock. [R7] `is_evidence` (human ruling); deleted `_Resolved.typed`, `echoes`,
+  `ReceiptStore.typed_numbers`, `capture.typed_numbers_in`; `Receipt.arg_numbers` legacy.
+- 2026-10-06 — [F22] [F26] only non-symlink, allow-listed files receipted (`receipt_call(reachable=)`,
+  `_allow_listed`; `record_beside(..., legacy_ok=False)`). Human ruling 2026-10-06 (alert, still send):
+  `store.read_receipted`, `_open_without_symlinks`, `[changed]` note, `receipt.drift`
+  (`install_drift_alert`); `turn_end` refuses changed bytes.
+- 2026-10-06 — Env plan B1–B3b: `Receipt.env` (`mint(env=)`, `receipt_call(env=)`, `default_env`),
+  `Receipt.env_untested` (still evidence); `NOT_EVIDENCE_NAMES['list_env']`; hex ids, `env:<hex>` exempt.
+- 2026-10-07 — B5 live cell: input hashing never ends a call (`hash_input` `surrogateescape`,
+  `_MAX_LISTED_FILES`; `inputs_before` skips a failure, §9.3.8).
+- 2026-10-17 — Provenance replay step 1 (+ two review rounds): `calls.py` — `resolve_call_args`,
+  `FIGURE_PATH_ARGS` (from `agents.react`), `args_digest` (stamped by `mint`), `ledger_calls`,
+  `calls_by_receipt` (joined by `call_id`, hash as proof), `LedgerCall.sent_args`. Residual:
+  `args_digest` uses `default=str`.
+- 2026-10-17 — Step 2 (+ two review rounds): obs-db inputs (`hash_obsdb_entry`,
+  `inputs_before(observation_paths=, named_folders=)`, `_listing`, `_catalog_entries`); `toolkit_root`
+  stamped on toolkit producers; `is_synthetic_path` matches `synth_<name>`; `_receipted(state=)`.
+  Closes §13 (a) for catalogued ObsIDs. Residuals: observation hashed before the call; an `obsdb`
+  input links no in-run receipt.
+- 2026-10-17 — Step 3: `number_sources`/`NumberSource`, `BindingResult.numbers` (`sources=True`),
+  `_scanned_numbers`. A non-evidence refusal ends "without a value" (was "in words").
+- 2026-10-26 — Bug fix (audit of run 32814459: no call had a parent; retyped plot inputs altered):
+  `refs.py` (`resolve_refs`, `RefError`, `passable`, `returned_value`, `handles_in_brief`,
+  `RetypeLint`); `receipt_call(parents=)`; `CallReceipts.header` names parents. User rulings
+  2026-10-26: a reference may name a receipt the caller can open but not cite; a typed number gets a
+  note, not an edge (the "typed numbers are not evidence" rule is a later ruling).
+- 2026-10-26 — Adversarial review round 1 (all confirmed, fixed): references resolve against the
+  returned keys (`returned_sha256`, `put_blob`, `blob_path`; real toolkit results are print + JSON
+  line, which the text-only resolver refused); pointer indexes match `0|[1-9][0-9]{0,8}` (a `²` or a
+  5000-digit index raised past the provider); brief handles checked against the author's reach
+  (`brief_handle_problems`); resolution and lint off the event loop, lint cache per store, floats
+  only; refusal of an inherited `failed` says so.
+- 2026-10-26 — Live B1 (claude-sonnet-5): a reference written as a JSON string into a number-typed
+  argument now resolves (`refs._ref_text`; also in the reproduce code), and `#/` means the whole
+  value. `REF_NOTE` names numbers among the values a reference can fill.
+- 2026-10-26 — User ruling (live B2: a peer's scalar typed twice, the note ignored): a typed copy is
+  refused before the call runs (`RetypeCheck`, replacing `RetypeLint`); `REF_NOTE` and the worker
+  prompt say so.
+- 2026-10-26 — Adversarial review round 2 (all confirmed, fixed): `RetypeCheck` ignores floats the
+  producing call was given (echoed parameters such as `cl`, `e_edges`; `receipt_call` stores the
+  call's arguments as the blob `args_sha256` names, `calls.canonical_args`), names only results a
+  reference resolves (no failed ones), scans 4+-digit floats only and skips returned values over
+  2 MB; the returned blob keeps the tool's key order; the brief check reads bracketed handles
+  only and accepts handles a message showed the author (`viewable=`).
