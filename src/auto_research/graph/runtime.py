@@ -403,6 +403,21 @@ def attach_reviewer_runtime(
         _attach_monitor(reviewer, run_monitor)
 
 
+def attach_librarian_runtime(io_agent: Any, *, run_id: str) -> None:
+    """The librarian's working folder (its per-pass report JSONL) and the run's ONE receipt store,
+    so its paper/web handles share counters with every other role's. The seam a live cell driving
+    a real librarian uses, as :func:`attach_lead_runtime` is the lead's; a pre-wired field stays."""
+    try:
+        if getattr(io_agent, "agent_key", None) is None:
+            io_agent.agent_key = "librarian_io"
+        if getattr(io_agent, "report_dir", None) is None:
+            io_agent.report_dir = agent_dir(run_id, "librarian_io")
+        if getattr(io_agent, "receipts", None) is None:
+            io_agent.receipts = ReceiptStore.for_run(run_dir(run_id))
+    except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it
+        pass
+
+
 def attach_lead_runtime(
     lead: Any,
     *,
@@ -806,17 +821,7 @@ async def run_research(
     analyst_keys = [f"analyst_worker_{i}" for i in range(len(workers))]
     agent_keys = ["reviewer", "analyst_lead", "librarian_io"] + analyst_keys
     create_run_workspace(run_id, agent_keys)
-    # The librarian's working folder (its per-pass report JSONL) and the run's ONE receipt store,
-    # so its paper/web handles share counters with every other role's.
-    try:
-        if getattr(io_agent, "report_dir", None) is None:
-            io_agent.report_dir = agent_dir(run_id, "librarian_io")
-        if getattr(io_agent, "receipts", None) is None:
-            from auto_research.provenance.store import ReceiptStore
-
-            io_agent.receipts = ReceiptStore.for_run(run_dir(run_id))
-    except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it
-        pass
+    attach_librarian_runtime(io_agent, run_id=run_id)
 
     # Give the reviewer and lead a read-only inspection loop (run artifacts +
     # knowledge base), unless a caller pre-wired their own tools.

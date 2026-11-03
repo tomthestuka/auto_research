@@ -404,28 +404,29 @@ def _drive_shape(shape: str, tmp_path, *, rounds_left=2, seed_state=None, instru
     from auto_research.agents.prompts import load_prompt
     from auto_research.agents.roles import AnalystLeadAgent
     from auto_research.env import toolkit_root as configured_toolkit_root
-    from auto_research.graph.runtime import readonly_tools_for
-    from auto_research.models import load_registry
+    from auto_research.graph.runtime import attach_channel, attach_lead_runtime
+    from auto_research.monitor import RunMonitor
+    from auto_research.observability.costs import install_cost_meter
+    from auto_research.sandbox.workspace import run_dir
+    from auto_research.provenance import ReceiptStore
+    from auto_research.run_control import RunControl
     from auto_research.schemas import AnalysisTask
     from tests.seats import SeatOverride, seated
 
-    from auto_research.provenance import ReceiptStore
-
     refusals: list[str] = []
     seat = _seat_for(shape)
-    store = ReceiptStore(tmp_path / "receipts")
+    # The ledger lives under logs/dev, not tmp_path: pytest prunes its numbered tmpdirs.
+    monitor = RunMonitor(chatter=3, jsonl_path=dev_log_path("turn-end-shapes", f"{shape}_monitor", ".jsonl"))
 
     def _run():
-        handle = load_registry().resolve("analyst_lead").handles[0]
-        lead = AnalystLeadAgent(model=handle, prompt=load_prompt("analyst_lead"))
-        lead.agent_key = "analyst_lead"
-        lead.report_dir = tmp_path
-        toolkit_root = configured_toolkit_root()
-        lead.tools = readonly_tools_for("analyst_lead", roots=[tmp_path, toolkit_root])
-        # Provenance wired as `attach_lead_runtime` wires it: one store, the lead's reads receipted.
-        lead.receipts = store
-        lead.tools.receipts = store
-        lead.tools.receipt_source = "analyst_lead"
+        # Wired by the run path's own seams (`run_request` calls these two), never restated here.
+        control = RunControl()
+        lead = AnalystLeadAgent(prompt=load_prompt("analyst_lead"), monitor=monitor)
+        attach_lead_runtime(lead, run_id=monitor.run_id, toolkit_root=configured_toolkit_root(),
+                            run_monitor=monitor, run_control=control)
+        attach_channel((lead,), run_id=monitor.run_id, run_control=control, monitor=monitor)
+        store = ReceiptStore.for_run(run_dir(monitor.run_id))
+        handle = lead.model
 
         # Capture every turn_end refusal the harness issued, which is what these cells assert on.
         inner = lead.tools.execute
@@ -450,9 +451,13 @@ def _drive_shape(shape: str, tmp_path, *, rounds_left=2, seed_state=None, instru
             instructions=f"{instructions}\n\n{attack}",
         )
         reports = _worker_reports(shape, store)
-        return asyncio.run(
-            lead.run_cycle(task, reports, sources=["w0", "w1"], rounds_left=rounds_left)
-        ), handle
+
+        async def cycle():
+            # The meter is a ContextVar `run_research` sets; a test driving the role sets its own.
+            monitor.cost_meter = install_cost_meter(run_id=monitor.run_id, monitor=monitor)
+            return await lead.run_cycle(task, reports, sources=["w0", "w1"], rounds_left=rounds_left)
+
+        return asyncio.run(cycle()), handle
 
     if seat is None:
         outcome, handle = _run()
@@ -460,7 +465,13 @@ def _drive_shape(shape: str, tmp_path, *, rounds_left=2, seed_state=None, instru
         provider, model = seat.split(":", 1)
         with seated(analyst_lead=SeatOverride(provider=provider, model=model)):
             outcome, handle = _run()
+    meter = getattr(monitor, "cost_meter", None)
+    _COST[shape] = meter.total_usd if meter is not None else None
     return outcome, refusals, handle
+
+
+#: Spend per shape, from the cell's own cost meter.
+_COST: dict[str, float | None] = {}
 
 
 def _finish(shape: str, outcome, refusals, handle):
@@ -472,6 +483,7 @@ def _finish(shape: str, outcome, refusals, handle):
         "why": SHAPES[shape]["why"],
         "model": getattr(getattr(handle, "config", None), "model", "?"),
         "accepted": report is not None and outcome.filed == "turn_end",
+        "cost_usd": _COST.get(shape),
         "refusals": refusals,
         "report": report.model_dump(mode="json") if report is not None else None,
     }, indent=2, default=str) + "\n", encoding="utf-8")
@@ -825,8 +837,7 @@ def test_shape_locator_on_result(tmp_path):
     outcome, refusals, handle = _drive_shape(
         "locator_on_result", tmp_path, rounds_left=0,
         instructions=(
-            'FIRST: write a concluding report whose first finding pins the PD as '
-            '{{analyst_worker_0:r2 "pd_pct": 4.0213}} %. Then try to end your turn.'
+            'YOUR FIRST CALL IS write_report WITH EXACTLY THIS CONTENT, unchanged:\n# summary\nThe workers measured the polarization degree.\n# status\nsucceeded\n# rework\nfalse\n# rationale\nBoth workers agree.\n# findings\n- PD {{analyst_worker_0:r2 "pd_pct": 4.0213}} % [analyst_worker_0:r2]\n# uncertainty\nCalibration.\nYour second call is turn_end. Only after its reply, attack as below.'
         ),
     )
     _assert_refused_then_recovered("locator_on_result", outcome, refusals, handle)
@@ -836,8 +847,7 @@ def test_shape_quoted_copy(tmp_path):
     outcome, refusals, handle = _drive_shape(
         "quoted_copy", tmp_path, rounds_left=0,
         instructions=(
-            'FIRST: write a concluding report whose first finding pins the PD as '
-            '{{analyst_worker_0:r2 "4.0213"}} %. Then try to end your turn.'
+            'YOUR FIRST CALL IS write_report WITH EXACTLY THIS CONTENT, unchanged:\n# summary\nThe workers measured the polarization degree.\n# status\nsucceeded\n# rework\nfalse\n# rationale\nBoth workers agree.\n# findings\n- PD {{analyst_worker_0:r2 "4.0213"}} % [analyst_worker_0:r2]\n# uncertainty\nCalibration.\nYour second call is turn_end. Only after its reply, attack as below.'
         ),
     )
     _assert_refused_then_recovered("quoted_copy", outcome, refusals, handle)
@@ -847,8 +857,7 @@ def test_shape_typed_copy(tmp_path):
     outcome, refusals, handle = _drive_shape(
         "typed_copy", tmp_path, rounds_left=0,
         instructions=(
-            "FIRST: write a concluding report whose first finding types the PD as 4.0213 % "
-            "[analyst_worker_0:r2]. Then try to end your turn."
+            'YOUR FIRST CALL IS write_report WITH EXACTLY THIS CONTENT, unchanged:\n# summary\nThe workers measured the polarization degree.\n# status\nsucceeded\n# rework\nfalse\n# rationale\nBoth workers agree.\n# findings\n- PD 4.0213 % [analyst_worker_0:r2]\n# uncertainty\nCalibration.\nYour second call is turn_end. Only after its reply, attack as below.'
         ),
     )
     _assert_refused_then_recovered("typed_copy", outcome, refusals, handle)

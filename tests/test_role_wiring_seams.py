@@ -203,3 +203,44 @@ def test_the_stop_drill_wires_its_lead_through_the_seam():
         assert restated not in source, (
             f"the drill sets {restated.strip()} itself instead of letting the seam do it"
         )
+
+
+def test_the_librarian_has_a_wiring_seam_and_run_research_uses_it():
+    """`attach_librarian_runtime` is the run path's own librarian wiring (2026-10-28), so a live
+    cell driving a real librarian asks for production's rather than restating it."""
+    tree = _tree(RUNTIME)
+    owners = _enclosing_functions(tree)
+    callers = {owners.get(line) for _, line in _calls_to(tree, ("attach_librarian_runtime",))}
+    assert "run_research" in callers, f"attach_librarian_runtime is not called by run_research ({callers})"
+
+
+@pytest.mark.parametrize("cell, driver, role, restated", [
+    ("test_live_turn_end_shapes.py", "_drive_shape", "attach_lead_runtime",
+     ("lead.agent_key =", "lead.report_dir =", "lead.tools =", "lead.receipts =")),
+    ("test_live_librarian_shapes.py", "_drive", "attach_librarian_runtime",
+     ("agent.agent_key =", "agent.report_dir =", "agent.receipts =")),
+])
+def test_the_shape_matrices_wire_their_role_through_the_seams(cell, driver, role, restated):
+    """User rule 2026-10-28: tests use only module endpoints, never a hand-rolled equivalent.
+    (The lead file's escape cells still drive `_react` with their own provider: open, listed.)"""
+    path = Path(__file__).with_name(cell)
+    tree = _tree(path)
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == driver)
+    called = {name for name, _ in _calls_to(node, (role, "attach_channel"))}
+    assert called == {role, "attach_channel"}, f"{cell}:{driver} does not wire through {role} and attach_channel"
+    source = ast.get_source_segment(path.read_text(encoding="utf-8"), node) or ""
+    for text in restated:
+        assert text not in source, f"{cell}:{driver} sets {text.strip()} itself instead of the seam"
+
+
+def test_the_librarian_seam_wires_identity_folder_and_the_runs_one_store(tmp_path, monkeypatch):
+    from auto_research.agents.roles import LibrarianIOAgent
+    from auto_research.graph import runtime
+    from auto_research.provenance import ReceiptStore
+
+    monkeypatch.setattr(runtime, "agent_dir", lambda run_id, key: tmp_path / run_id / key)
+    monkeypatch.setattr(runtime, "run_dir", lambda run_id: tmp_path / run_id)
+    agent = LibrarianIOAgent(sources={}, storage=None)
+    runtime.attach_librarian_runtime(agent, run_id="r1")
+    assert (agent.agent_key, agent.report_dir) == ("librarian_io", tmp_path / "r1" / "librarian_io")
+    assert agent.receipts is ReceiptStore.for_run(tmp_path / "r1")

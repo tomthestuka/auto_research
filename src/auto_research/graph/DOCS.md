@@ -217,6 +217,9 @@ the published artifact paths and handles (`report_artifacts`).
   web_source=None, human_handler=None)` — the reviewer's production wiring (tools via
   `readonly_tools_for("reviewer")`, `report_dir`, the run's `ReceiptStore`), called by
   `run_research` and by live cells so they drive the same reviewer.
+- `attach_librarian_runtime(io_agent, *, run_id)` — the librarian's production wiring (its key,
+  its report folder, the run's one `ReceiptStore`; a pre-wired field stays), called by
+  `run_research` and by live cells so they drive the same librarian.
 - `readonly_tools_for(role, *, roots, retrieval=None, web_source=None) -> ReadOnlyToolProvider` — the read-only inspection loop production gives the
   `reviewer` or the `analyst_lead`. The two differ on purpose: the lead gets the data catalog and,
   when a human is reachable, the budget-free design channel, and is denied the paper knowledge
@@ -288,3 +291,7 @@ and 2026-10-19 (every entry); detail in git history.
   (`run.error`, `from: channel`; `_interrupt_cleanup(fatal=)`). [D8 ruling + reviews] `/stop`
   cleans leaf to root in the run task (`run.interrupt.step*`, landing checklist, connector closed
   last). Live: `tests/test_live_stop_telegram.py` (2 cells).
+- 2026-11-03 — `attach_librarian_runtime` extracted from `run_request` (behaviour-preserving), so the
+  librarian's live shape cells wire it through the seam; the lead's shape cells now use
+  `attach_lead_runtime` + `attach_channel` with a run monitor and cost meter
+  (`tests/test_role_wiring_seams.py` guards both).
