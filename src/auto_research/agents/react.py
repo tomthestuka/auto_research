@@ -557,7 +557,7 @@ async def execute_view_receipt(
         )
     text, changed = store.text_with_note(handle) if hasattr(store, "text_with_note") else (store.text(handle), None)
     text = text or ""
-    head = f"{handle} ({receipt.produced_by}):\n" + (f"{changed}\n" if changed else "")
+    head = f"{handle} ({receipt.produced_by}{_made_from(receipt)}):\n" + (f"{changed}\n" if changed else "")
     paged = "offset" in arguments or "limit" in arguments or len(text) > _VIEW_TEXT_CAP
     if not paged:
         return ToolOutcome(text=f"{head}{text}")
@@ -585,6 +585,28 @@ async def execute_view_receipt(
     if window["start_line"] < max(1, offset):
         note = f"[the receipt has {len(rows)} lines; here is the last]\n"
     return ToolOutcome(text=f"{head}{note}{window['content']}")
+
+
+def _made_from(receipt: Any) -> str:
+    """What a toolkit result's call was given, as the runtime recorded it: the earlier results it
+    took by reference and the inputs it read (files its arguments named, and an observation named
+    by ObsID; a data root itself and other identifier-located inputs are not recorded, CLAUDE.md
+    §13). Other receipts carry no such line."""
+    from auto_research.provenance.store import TOOLKIT_PRODUCER_PREFIX
+
+    if getattr(receipt, "kind", None) != "result" or not str(getattr(receipt, "produced_by", "")).startswith(
+        TOOLKIT_PRODUCER_PREFIX
+    ):
+        return ""
+    inputs = list(getattr(receipt, "inputs", None) or [])
+    from_files = {item.receipt for item in inputs if getattr(item, "receipt", None)}
+    by_ref = [p for p in (getattr(receipt, "parents", None) or []) if p not in from_files]
+    files = [Path(str(item.path)).name for item in inputs]
+    shown = lambda names: ", ".join(names[:6]) + (f" and {len(names) - 6} more" if len(names) > 6 else "")
+    if not by_ref and not files:
+        return "; its call took no earlier result by reference and read no recorded file"
+    parts = ([f"took {shown(by_ref)} by reference"] if by_ref else []) + ([f"read {shown(files)}"] if files else [])
+    return "; its call " + " and ".join(parts)
 
 
 async def execute_wait_for_reply(
@@ -3013,9 +3035,12 @@ class SandboxToolProvider:
         return match, None, untested
 
     def _usable_handles(self) -> set[str]:
-        """The receipts a ``$ref`` may name: every receipt of the run (view is global, user ruling
-        2026-10-27); ``resolve_one`` then admits only a usable toolkit result."""
-        return {r.handle for r in self.receipts.receipts()} if self.receipts is not None else set()
+        """The receipts a ``$ref`` may name: this agent's own results (user ruling 2026-11-03). A
+        value from a peer's result enters a call once a tool of this agent's has produced it, so
+        no echo can turn another agent's result into this one's evidence."""
+        if self.receipts is None or not self.receipt_source:
+            return set()
+        return {r.handle for r in self.receipts.receipts(source=self.receipt_source)}
 
     def _resolve_refs(self, sent: Mapping[str, Any]) -> tuple[dict[str, Any], list[str], str | None]:
         """``(arguments with references resolved, parent handles, error text or None)``."""
@@ -3039,7 +3064,7 @@ class SandboxToolProvider:
 
         if self._retype_check is None:
             self._retype_check = RetypeCheck(self.receipts)
-        return self._retype_check.problem(arguments, self._usable_handles(), own_source=self.receipt_source)
+        return self._retype_check.problem(arguments, self._usable_handles())
 
     async def _inputs_before(self, args: Mapping[str, Any], named: Mapping[str, Any] | None = None) -> Any:
         """Hash what the call's arguments name, before it runs (data roots and outputs skipped)."""

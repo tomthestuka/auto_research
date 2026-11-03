@@ -30,6 +30,7 @@ from auto_research.models.providers.anthropic import (
 from auto_research.models.providers.google import GoogleProvider
 from auto_research.models.providers.openai import OpenAIProvider, _as_input_item
 from auto_research.models.types import ModelHandle, ModelMessage, RoleModelConfig
+from tests.media_files import png_bytes
 
 
 def _pin_context_editing(monkeypatch, *, enabled: bool):
@@ -71,8 +72,8 @@ def _messages():
     return [ModelMessage(role="system", content="sys"), ModelMessage(role="user", content="hi")]
 
 
-# Minimal PNG header bytes — enough to assert the adapter loads and base64s the file.
-_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake-plot-pixels"
+# A real (tiny) PNG: the media check withholds bytes that do not decode as an image.
+_PNG_BYTES = png_bytes()
 
 
 def _figure(tmp_path):

@@ -241,7 +241,10 @@ def test_b1_a_chained_analysis_passes_every_result_on_by_reference(member):
 
 
 @pytest.mark.parametrize("member", SEATS)
-def test_b2_b3_the_chain_crosses_workers_briefs_and_reaches_the_report(member):
+def test_b2_b3_a_peer_result_is_reproduced_its_chain_stays_whole_and_reaches_the_report(member):
+    """User ruling 2026-11-03: a `$ref` names the caller's own results only, so worker 1, briefed
+    with worker 0's fit, reproduces it with its own runs; every worker-1 step's ancestry stays
+    within worker 1 and reaches worker 1's own extraction."""
     from auto_research.schemas import AnalysisTask
 
     team = _Team(f"b2_m{member}", member, n=2)
@@ -278,19 +281,20 @@ def test_b2_b3_the_chain_crosses_workers_briefs_and_reaches_the_report(member):
     w0_extracts = {r.handle for r in _toolkit(store, "analyst_worker_0", EXTRACT)}
     w0_fits = {r.handle for r in _toolkit(store, "analyst_worker_0", FIT)}
     w1_steps = _toolkit(store, "analyst_worker_1", LIMITS) + _toolkit(store, "analyst_worker_1", PLOT)
+    w1_extracts = {r.handle for r in _toolkit(store, "analyst_worker_1", EXTRACT)}
     crossed = [r.handle for r in w1_steps if set(r.parents) & (w0_fits | w0_extracts)]
     brief_limits = [r for r in _toolkit(store, "analyst_worker_1", LIMITS) if r.handle in briefed[1:]]
     problems = []
     if not w1_steps:
         problems.append("worker 1 ran neither faraday_rm_limits nor plot_pa_energy_fit")
-    problems += [f"{r.handle} ({r.produced_by}) does not reach worker 0's extraction"
-                 for r in w1_steps if not _reaches(store, r.handle, w0_extracts)]
-    if not crossed:
-        problems.append("no worker-1 step names a worker-0 receipt as its parent")
+    problems += [f"{r.handle} ({r.produced_by}) does not reach worker 1's own extraction"
+                 for r in w1_steps if not _reaches(store, r.handle, w1_extracts)]
+    if crossed:
+        problems.append(f"worker-1 steps name worker-0 receipts as parents: {crossed}")
     if not briefed:
         problems.append("worker 0 produced no fit to brief")
-    elif not any(briefed[0] in r.parents for r in brief_limits):
-        problems.append(f"the briefed handle {briefed[0]} did not become the recomputation's parent")
+    elif not brief_limits:
+        problems.append(f"the brief naming {briefed[0]} produced no recomputation of worker 1's own")
 
     review = _review(team, r1)
     page_problems = review.get("page_problems", [])
@@ -350,7 +354,7 @@ def _review(team: _Team, report) -> dict[str, Any]:
 # -- R1 / R2: references that must not resolve; values typed by hand -----------------------------
 
 
-def test_r1_a_reference_to_a_read_an_unseen_peer_result_or_a_missing_key_is_refused():
+def test_r1_a_reference_to_a_read_a_peer_result_or_a_missing_key_is_refused():
     from auto_research.schemas import AnalysisTask
 
     team = _Team("r1", 0, n=2)
@@ -381,7 +385,7 @@ def test_r1_a_reference_to_a_read_an_unseen_peer_result_or_a_missing_key_is_refu
                    if (store.get(p) is not None and not store.get(p).produced_by.startswith("research_toolkit."))]
     seen = {
         "navigation": any("a place to look" in t for t in errors),
-        "unseen peer": any("not a receipt you can pass on" in t for t in errors),
+        "peer result": any("is analyst_worker_0's result" in t and "reproduce" in t for t in errors),
         "missing key": any("no key 'no_such_key'" in t for t in errors),
     }
     _record("r1", {"model": team.model, "run_id": team.run_id, "ledger": team.ledger, "refusals": seen,

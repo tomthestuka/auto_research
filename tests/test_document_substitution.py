@@ -32,6 +32,7 @@ from auto_research.models.providers import _responses
 from auto_research.models.providers._doc_parse import ParsedDocument
 from auto_research.models.types import ModelMessage, RoleModelConfig
 from auto_research.schemas import DocumentRef, FigureRef
+from tests.media_files import pdf_bytes
 
 
 def _png(path: Path, size=(40, 30)) -> Path:
@@ -52,7 +53,7 @@ def _figure(path: Path, caption: str = "Fig. 1. Polarization vs energy.") -> Fig
 
 
 def _document(path: Path) -> DocumentRef:
-    path.write_bytes(b"%PDF-1.4 pretend")
+    path.write_bytes(pdf_bytes("pretend"))
     return DocumentRef(
         path=path,
         title="Krawczynski et al. 2022",

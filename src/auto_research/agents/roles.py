@@ -2477,7 +2477,7 @@ def _mint_task_input(store: ReceiptStore | None, task: Any) -> str | None:
 
 def _for_reader(item: Any, store: ReceiptStore | None) -> Any:
     """A report or task as another unit reads it: each value reference followed by its value
-    (``{{h#/k}} (= 2.72)``), so the reader reasons with the number and cites it by the reference."""
+    (``2.72 [h#/k]``): the reader reasons with the number, opens its source, and sees a typed one."""
     dumped = item.model_dump(mode="json")
     if store is None:
         return dumped

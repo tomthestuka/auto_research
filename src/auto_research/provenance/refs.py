@@ -5,9 +5,11 @@ replaces it, before the call runs, with the value at that pointer in the JSON th
 records the receipt as a parent of everything the call mints. The tool receives a plain value — the
 same Python object the producing tool returned, every digit of it — and never sees the reference.
 
-A reference resolves any toolkit result of the run (any unit may open any receipt, user ruling
-2026-10-27); a receipt of something a role read is a place to look and is refused, and so is a
-failed result or one whose bytes changed. Every refusal is a sentence the model reads and acts on. Standard library only.
+A reference resolves only the caller's own toolkit results (user ruling 2026-11-03): any unit may
+open any receipt, but a value from a peer's result enters a call once the caller's own tool has
+produced it, so a tool echoing it back cannot make it the caller's evidence. A receipt of
+something a role read is a place to look and is refused, and so is a failed result or one whose
+bytes changed. Every refusal is a sentence the model reads and acts on. Standard library only.
 """
 
 from __future__ import annotations
@@ -44,7 +46,8 @@ _INDEX = re.compile(r"0|[1-9][0-9]{0,8}")
 
 #: A typed float this long (significant digits) that a usable receipt holds is a copy (RetypeCheck).
 _LINT_MIN_DIGITS = 4
-#: A typed float this long that rounds one of the caller's own results is a copy too.
+#: A typed float this long that rounds one of the caller's own results is a copy too, and the
+#: shortest a peer's value must be to count as one (a shorter value is a constant or a choice).
 _ROUNDED_MIN_DIGITS = 6
 
 
@@ -117,8 +120,9 @@ def unviewable_handles(text: str, viewable: Callable[[str], bool]) -> list[str]:
 
 
 def brief_handle_problems(field: str, text: str, viewable: Callable[[str], bool]) -> list[str]:
-    """A brief names results by handle for the next team to open and pass on; each must be a
-    receipt of this run. A ``turn_end`` refusal, or nothing."""
+    """A brief names results by handle for the next team to open (the unit that made one passes it
+    on by reference; another reproduces it); each must be a receipt of this run. A ``turn_end``
+    refusal, or nothing."""
     unknown = unviewable_handles(text, viewable)
     if not unknown:
         return []
@@ -193,10 +197,19 @@ def resolve_one(store: ReceiptStore, text: str, usable: Callable[[str], bool]) -
     """``(value, handle)`` for one reference string, or :class:`RefError` saying why not."""
     handle, pointer = split_ref(text)
     receipt = store.get(handle) if handle else None
-    if receipt is None or not usable(handle):
+    if receipt is None:
         raise RefError(
             f"{handle or '(no handle)'} is not a receipt of this run: copy the handle exactly as a "
-            "tool result, report or message shows it, as {\"$ref\": \"<handle>#/<key>\"}."
+            "tool result shows it, as {\"$ref\": \"<handle>#/<key>\"}."
+        )
+    if receipt.source == INPUT_SOURCE:
+        what = "the request" if receipt.produced_by == "research_request" else NOT_EVIDENCE_NAMES.get(
+            receipt.produced_by, "a task text")
+        raise RefError(f"{handle} is {what}: type a value it states as a parameter.")
+    if passable(store, handle) and not usable(handle):
+        raise RefError(
+            f"{handle} is {receipt.source}'s result. A call passes on its own agent's results: "
+            "reproduce the value with a tool run of yours, then pass your result by reference."
         )
     if not passable(store, handle):
         what = NOT_EVIDENCE_NAMES.get(receipt.produced_by, f"a {receipt.kind} receipt")
@@ -286,6 +299,7 @@ class RetypeCheck:
         self._held = _HELD.setdefault(store, {})
         self._texts: dict[str, str] = {}
         self._numbers: dict[str, list[tuple[float, str]]] = {}
+        self._given: dict[str, set[str]] = {}
 
     def _floats_of(self, handle: str) -> dict[str, str]:
         """``{float text: pointer}`` for the 4+-digit floats a result returned that its own call
@@ -297,7 +311,7 @@ class RetypeCheck:
                 self.store.blob_path(receipt.returned_sha256)) > _MAX_SCANNED_BYTES
             if not too_big:
                 try:
-                    given = {text for text, _ in _floats(self._args_of(handle))}
+                    given = self._chosen_by(handle)
                     for text, path in _floats(returned_value(self.store, handle)):
                         if _significant(text) >= _LINT_MIN_DIGITS and text not in given:
                             held.setdefault(text, path)
@@ -326,6 +340,12 @@ class RetypeCheck:
             self._numbers[handle] = [(float(text), pointer) for text, pointer in self._floats_of(handle).items()]
         return self._numbers[handle]
 
+    def _chosen_by(self, handle: str) -> set[str]:
+        """The floats a result's own call was given, read as the tool received them (cached)."""
+        if handle not in self._given:
+            self._given[handle] = {text for text, _ in _floats(_as_received(self._args_of(handle)))}
+        return self._given[handle]
+
     def _read_text(self, handle: str) -> str:
         """The stored text of a receipt of something the caller read or ran (cached; empty when
         its bytes changed or are not text)."""
@@ -337,18 +357,21 @@ class RetypeCheck:
             self._texts[handle] = text
         return self._texts[handle]
 
-    def problem(
-        self, typed_args: Mapping[str, Any], handles: Iterable[str], *, own_source: str | None = None
-    ) -> str | None:
+    def problem(self, typed_args: Mapping[str, Any], handles: Iterable[str]) -> str | None:
         """The refusal for a call whose typed floats are copies, or ``None``.
 
-        A copy is a 4+-digit float that a usable toolkit result holds exactly; that one of the
-        caller's own results (``own_source``) holds with its sign flipped or rounded to the digits
-        typed (run faraday-refs-20261026: ``|ci_lo|`` typed as ``0.37959418926306543`` passed the
-        exact check); or that appears in the text of any file read or shell output of the run (30
-        values typed from a CSV a worker had read reached a fit without the CSV as an input).
+        A copy is a 4+-digit float that one of the caller's own results (``handles``) holds
+        exactly, with its sign flipped, or rounded to the digits typed (6+) (run
+        faraday-refs-20261026: ``|ci_lo|`` typed as ``0.37959418926306543`` passed the exact
+        check); a 6+-digit float a peer's result holds exactly or sign-flipped, unless the caller
+        gave it to an earlier call or a task text states it (answered with "reproduce it"; shorter
+        values are constants and chosen parameters, and a rounded match run-wide would collide with
+        them); or a value found in the text of any file read or shell output of the run (30 values
+        typed from a CSV a worker had read reached a fit without the CSV as an input).
         """
-        typed = [(text, path) for text, path in _floats(dict(typed_args))
+        # The arguments as the tool will receive them: the REPL parses a string holding a JSON
+        # container, and a number written as a string is a number to a tool that converts it.
+        typed = [(text, path) for text, path in _floats(_as_received(dict(typed_args)))
                  if _significant(text) >= _LINT_MIN_DIGITS]
         if not typed:
             return None
@@ -356,12 +379,22 @@ class RetypeCheck:
         usable = [h for h in handles if passable(self.store, h)
                   and "failed" not in self.store.get(h).flags]
         usable.sort(key=lambda h: self.store.get(h).created_at, reverse=True)  # newest first
+        mine = set(usable)
         # Any seat may open any receipt (view is global), so a value seen in a peer's read or shell
         # output is a copy as much as one from the caller's own.
-        read = [r.handle for r in self.store.receipts() if r.produced_by in NOT_EVIDENCE_NAMES]
-        # A near value (rounded, sign-flipped) counts only in the caller's own results: run-wide, a
-        # chosen parameter would collide with some peer's value as the run grows.
-        own = [h for h in usable if own_source is None or self.store.get(h).source == own_source]
+        # A task text (the request, a brief) states parameters; a file the human sent is material
+        # read, like any file (the human gives direction, never materials, ruling 2026-09-25).
+        read = [r.handle for r in self.store.receipts() if r.produced_by in NOT_EVIDENCE_NAMES
+                and (r.source != INPUT_SOURCE or r.produced_by == "human_reply")]
+        # A peer's result holding the value: typing it would make the peer's value this caller's.
+        peers = [r.handle for r in self.store.receipts(kind="result")
+                 if r.handle not in mine and passable(self.store, r.handle) and "failed" not in r.flags]
+        # A value the caller chose before (an argument of its own earlier calls) or a task text
+        # states (the request, a brief prescribing a starting value) is a parameter, whatever a
+        # peer's result also returned.
+        chosen = set().union(*(self._chosen_by(h) for h in usable)) if usable else set()
+        asked = [self._read_text(r.handle) for r in self.store.receipts(source=INPUT_SOURCE)
+                 if r.produced_by != "human_reply"]
         lines: list[str] = []
         for text, arg_path in typed:
             name = arg_path.lstrip("/") or "(whole)"
@@ -374,7 +407,7 @@ class RetypeCheck:
             # Rounding counts only for a long typed value: a short one collides with chosen parameters.
             rounded_ok = _significant(text) >= _ROUNDED_MIN_DIGITS
             near = [(h, p, "with its sign flipped" if v == -value else "rounded")
-                    for h in own for v, p in self._numbers_of(h)
+                    for h in usable for v, p in self._numbers_of(h)
                     if v == -value or (rounded_ok and v != value and abs(v - value) <= half)]
             if near:
                 h, pointer, how = near[0]
@@ -385,6 +418,19 @@ class RetypeCheck:
                     "tool_request"
                 )
                 continue
+            if (rounded_ok and text not in chosen
+                    and not any(bounded_find(hay, text) for hay in asked)):
+                flipped = repr(-value)
+                peer = next(((h, held[text], "") if text in held else (h, held[flipped], " with its sign flipped")
+                             for h in peers if text in (held := self._floats_of(h)) or flipped in held), None)
+                if peer is not None:
+                    h, pointer, how = peer
+                    lines.append(
+                        f"argument {name} = {text} is {self.store.get(h).source}'s result "
+                        f"({h}#{pointer}){how}: reproduce it with a tool run of yours, then pass "
+                        "your result by reference"
+                    )
+                    continue
             seen = next((h for h in read if bounded_find(self._read_text(h), text)), None)
             if seen is not None:
                 what = NOT_EVIDENCE_NAMES[self.store.get(seen).produced_by]
@@ -397,9 +443,32 @@ class RetypeCheck:
         shown = lines[:8] + ([f"... and {len(lines) - 8} more"] if len(lines) > 8 else [])
         return (
             "This call was not run: it types values that a tool result or a file already holds. "
-            "Pass each one where it comes from, so it arrives exactly as produced and the call "
-            "records where it came from:\n- " + "\n- ".join(shown)
+            "Each needs to arrive from where it was produced, so the call records where it came "
+            "from:\n- " + "\n- ".join(shown)
         )
+
+
+_NUMBER = re.compile(r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?")
+
+
+def _as_received(value: Any) -> Any:
+    """An argument tree as a tool receives it: a string holding a JSON container parsed (the REPL
+    does, ``sandbox.persistent``), a string holding one decimal number read as that float."""
+    if isinstance(value, str):
+        text = value.strip()
+        if text[:1] in ("{", "["):
+            try:
+                return _as_received(json.loads(text))
+            except ValueError:
+                return value
+        if _NUMBER.fullmatch(text) and any(c in text for c in ".eE"):
+            return float(text)
+        return value
+    if isinstance(value, dict):
+        return {key: _as_received(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_as_received(item) for item in value]
+    return value
 
 
 def _last_place(text: str) -> float:

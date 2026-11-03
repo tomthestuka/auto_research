@@ -14,7 +14,7 @@ tool call / fetch / ask_human ──► ReceiptStore.mint ──► receipts.jso
                                          │ handle "<source>:<letter><n>"
 report prose ──► check_bindings / check_report_fields ──► problems (turn_end refuses) + bindings
                      ├ render_bindings (quote → text, cite → marker, value → display) for a page
-                     └ render_values ({{h#/k}} → "{{h#/k}} (= 2.72)") for a model reading the report
+                     └ render_values ({{h#/k}} → "2.72 [h#/k]") for a model reading the report
 ```
 
 - **Receipts are runtime-minted.** The sha256 is computed over the bytes the runtime stored; the
@@ -28,9 +28,10 @@ report prose ──► check_bindings / check_report_fields ──► problems (
 - **References link a call to the results it used** (`refs.py`, 2026-10-26). A toolkit argument
   `{"$ref": "<handle>#<json-pointer>"}` is replaced, before the call runs, by the value at that
   pointer in the JSON the receipt holds; the receipt becomes a parent of everything the call mints.
-  Any toolkit result of the run resolves (view is global, user ruling 2026-10-27; citing stays
-  scoped); a navigation receipt, a failed result or changed bytes is refused with a sentence the
-  model acts on. The ledger and the receipt's
+  Only the caller's own toolkit results resolve (user ruling 2026-11-03, the unit's input
+  validator): another unit's result is refused with "reproduce it with a tool run of yours", so no
+  tool echo can make a peer's value the caller's evidence; a navigation receipt, a failed result or
+  changed bytes is refused with a sentence the model acts on. The ledger and the receipt's
   `args_sha256` keep the references as written; the values they stand for are fixed by the
   parent's hash and the pointer. This replaced the retyping measured in run 32814459, where every
   derived input was typed into the arguments, so no call had a parent and two hand-built plot
@@ -105,7 +106,7 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   `bindings.display_value(value) -> str` (an int whole, a float to `DISPLAY_DIGITS` significant
   digits, `e` notation outside 1e-3..1e6); `bindings.referenced_value(lookup, binding)`;
   `bindings.render_values(prose, lookup, *, own_source=None) -> str` — each reference followed by
-  `(= value)`, for a model; `DISPLAY_DIGITS = 3`, `COPY_MIN_DIGITS = 3`.
+  its value and source, `2.72 [h#/k]`, for a model (a number with no source was typed); `DISPLAY_DIGITS = 3`, `COPY_MIN_DIGITS = 3`.
 - `RunView(store)` — a `ScopedLookup` that sees every receipt of the run (viewing, never citing).
 - `ReceiptStore.for_run(run_dir) -> ReceiptStore` — the one store per run in this process; every
   role gets its store here (two instances on one directory would mint duplicate handles).
@@ -275,3 +276,24 @@ Compacted 2026-10-07 (the 2026-10-06/07 entries) and 2026-10-19 (every entry); d
   quotes and attributions whole (they were stripped to their text). `RetypeCheck`: navigation
   receipts are scanned run-wide (view is global), sign and rounding only over the caller's own
   results, rounding only for 6+ typed digits (a 4-digit parameter collided with peers' values).
+- 2026-11-03 — `$ref` resolves only the caller's own results (`SandboxToolProvider._usable_handles`
+  = its own source); `resolve_one` names a peer's result as such; `RetypeCheck` refuses a typed
+  value a peer's result holds exactly, with "reproduce it". (User ruling: an input validator that
+  checks the referenced data's owner is self.)
+- 2026-11-03 — Review of the input validator (confirmed, fixed): `RetypeCheck` reads the arguments as
+  the tool receives them (`_as_received`: a JSON-container string parsed as the REPL does, a number
+  string as its float); a peer's value is refused exactly, sign-flipped or rounded (6+ digits),
+  unless the caller chose it before or the request states it; `resolve_one` names the request and
+  a place to look by what they are before the owner check; the refusal header no longer says
+  "pass" where the line says "reproduce". `render_values` shows `2.72 [h#/k]` (user ruling): a
+  number with no source after it was typed.
+- 2026-11-03 — Second review of the input validator (confirmed, fixed): a written `[handle#…]`
+  source tag is leftover markup (it would pass for a rendered reference); a peer's value is matched
+  only at 6+ significant digits, exactly or sign-flipped (a run-wide rounded match refused fresh
+  parameters, a short one refused constants); briefs and the request are task texts whose values
+  are parameters, not files read; the arguments a result's call was given are read as the tool
+  received them (`_chosen_by`, cached); `RetypeCheck.problem(typed_args, handles)` (no
+  `own_source`).
+- 2026-11-03 — A file the human sent is a file read again for the copy check (not a task text);
+  the prose check reads a result's arguments as the tool received them; a written `[handle#…]` is
+  named whole in its refusal, with `[handle]` offered for citing a whole result.

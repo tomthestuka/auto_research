@@ -28,6 +28,7 @@ from auto_research.models.providers.openai import OpenAIProvider
 from auto_research.models.providers.zai import ZaiProvider
 from auto_research.models.types import CHAT_PROVIDERS, ModelMessage, RoleModelConfig
 from auto_research.schemas import FigureRef
+from tests.media_files import png_bytes
 
 
 ADAPTERS: tuple[type[ResponsesProvider], ...] = (
@@ -326,7 +327,7 @@ def _figure(tmp_path) -> FigureRef:
     from datetime import datetime
 
     path = tmp_path / "plot.png"
-    payload = b"\x89PNG\r\n\x1a\n" + b"pixels"
+    payload = png_bytes()
     path.write_bytes(payload)
     return FigureRef(
         path=path,

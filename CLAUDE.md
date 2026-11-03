@@ -449,9 +449,11 @@ generalised and corrected.
   and that receipt becomes the call's parent; only a toolkit result in the caller's reach resolves
   (user rulings: a handle it can open but not cite counts; a typed float a usable result holds is refused with the reference to write).
   **View is global, citing is scoped** (user ruling 2026-10-27): any unit opens any receipt of the
-  run (`view_receipt`, a `$ref`, a message's handles); a `$ref` resolves any toolkit result; what a
-  unit may rest a number on stays its scope. A copy typed into a call is refused exactly, with its
-  sign flipped, rounded, or taken from a file the caller read or a shell output it ran.
+  run (`view_receipt`, a message's handles); what a unit may rest a number on stays its scope. A
+  `$ref` resolves only the caller's own results (ruling 2026-11-03, §9.3.9): a peer's value enters
+  a call once the caller's own tool has reproduced it. A copy typed into a call is refused
+  exactly, with its sign flipped, rounded, or taken from a peer's result, a file read or a shell
+  output.
 - **One store per run** (`ReceiptStore.for_run`), append-only, replayed on resume, so a handle
   means the same artifact everywhere. It lives beside the run's ledger, outside every role's
   allow-list, so no role can read another's evidence and re-mint it as its own. Each unit cites through a scoped view: its own receipts, the
@@ -463,7 +465,7 @@ generalised and corrected.
   locator (`{{lib:p3 "4.0 ± 0.2 %" Table 2}}`), attributes the value instead, and only a paper
   takes a locator. **A value a tool returned is written as its reference** (user ruling
   2026-10-27), `{{handle#/json-pointer}}`: the validator reads it from the returned value and
-  renders it, at 3 significant digits for every reader (a model reads `{{h#/k}} (= 2.72)`), with
+  renders it, at 3 significant digits for every reader (a model reads `2.72 [h#/k]`, so a typed number is the one with no source), with
   the full value one click away on the page; a typed or quoted copy of a returned value is refused
   with its reference. A task's own numbers ground a text only where it cites
   `[input:…]`, for every unit including the reviewer, so a value handed in by the question cannot
@@ -608,6 +610,8 @@ receipts" or "the first single-exit agent". Re-open the SDK question only with a
    │         report        ──► write_report · edit_report · turn_end           │
    │                                                                           │
    │ execution (optional): REPL + shell, in an environment, under the jail     │
+   │ input validator: tool inputs — $ref owner is self · copy refusal          │
+   │                  model inputs — media decode before a provider sees them  │
    │ turn_end validator: schema · role conditions · scoped grounding           │
    └─────────────────────────────────┬─────────────────────────────────────────┘
                                      │  the only exit
@@ -642,6 +646,18 @@ refusal and never remove a built-in one.
    through the pipeline's worktree, none into the human's conda environments or package cache.
 8. **Contained failure.** A tool or provider exception becomes an `is_error` result or that unit's
    honest failure, never a dead run (handoff F6/F15/E2). `ReactBudgetExhausted` is never caught.
+9. **Inputs are validated** (user rulings 2026-11-03): the **input validator** is a standard
+   component of the unit, the `turn_end` validator's twin — one binds what goes in, the other what
+   leaves. Two jobs:
+   - **Tool inputs, before a call runs.** A `$ref` resolves only a result the unit itself
+     produced, so no tool echo can turn another unit's value into this unit's evidence. A typed
+     copy is refused, read as the tool receives it, with the reference to write (the unit's own
+     result: exact, sign-flipped, or rounded at 6+ digits) or the run to reproduce (a peer's
+     6+-digit value exact or sign-flipped, a value from a file read or shell output). A value the
+     unit chose before or a task text states is a parameter.
+   - **Model inputs, before a provider sees them.** Every image and PDF must decode; one that does
+     not is withheld with a note the model reads, never sent (a provider refuses it with a 400 that
+     ended the lead's turn; `models/providers/_media.py`).
 
 ### 9.4 What a unit definition holds
 
@@ -657,6 +673,7 @@ refusal and never remove a built-in one.
 | sandbox | global `agent_os_jail` + allow-list | per unit (§9.6) |
 | subagents | lead → coder only; graph routing elsewhere | none, units, and/or the coding pipeline (§9.7) |
 | caps | per-role config keys | per unit |
+| input validator | `SandboxToolProvider` (tool inputs) and the provider media guard (model inputs) | one component of every unit, its rules per unit where two roles need different ones |
 
 Where definitions live — Python next to `graph/runtime.py` with values read from
 `orchestration.yaml`, or a per-unit block in the YAML — is open ([§9.11](#911-open-questions)).
@@ -802,6 +819,7 @@ Where definitions live — Python next to `graph/runtime.py` with values read fr
 | `merge_flow` reading toolkit root, branch and caps from config for the lead | the coding pipeline granted per unit, targeting that unit's toolkit |
 | `author_chain` on the lead only | kind-B spawn for any granted unit |
 | per-role `*_turn_problems` functions | validators attached to a definition |
+| input checks in `SandboxToolProvider` and the media guard | the unit's input validator, beside its `turn_end` validator |
 
 ### 9.10 Build order (Phase 3)
 
@@ -811,7 +829,7 @@ before moving on, and stop to verify the checkpoint. Statuses: **Todo** · **Don
 | # | Status | What is being built | Checkpoint (what works after) |
 |---|---|---|---|
 | 0 | Todo | **Invariant freeze** — §9.3 collected as one deterministic test module over today's code, from the existing per-role tests. | Green on the current tree; it is the parity oracle for every later step. |
-| 1 | Todo | **One unit** — `_react` + channel + report tools + `turn_end` as one unit; the four roles become definitions with validators; exceptions contained at the unit boundary (§9.3.8). | Each role's tests pass through the unit; one live cell per role. |
+| 1 | Todo | **One unit** — `_react` + channel + report tools + `turn_end` + the input validator (§9.3.9) as one unit; the four roles become definitions with validators; exceptions contained at the unit boundary (§9.3.8). | Each role's tests pass through the unit; one live cell per role; every unit's tool and model inputs pass the one input validator. |
 | 2 | Todo | **Toolkits per unit** + the generalised evidence predicate. | Two units with different toolkits in one run; a tool of an unregistered toolkit grounds nothing. |
 | 3 | Todo | **Sandbox + execution per unit; one launcher** (absorbs `jail.analysis_policy`, landed with F20). | Jail on/off per unit; every process a unit starts goes through the launcher; a unit with no backend has no shell. |
 | 4 | Done (2026-10-07, on today's backend, ahead of 1–3) | **Environments** — the F18 work stream's build list, plugged into the execution backend and the coding pipeline. | Receipts carry environment fingerprints; a toolkit call runs in its package's tested environment; human environments untouched. |
@@ -937,6 +955,13 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   faraday-refs-20261026) has no returned value to point into, so its numbers stay typed-and-cited;
   the copy check on typed numbers starts at 3 significant digits; values a model computes by hand
   and types into a call are found by nothing (no receipt holds them).
+- **Input validator, accepted limits (rulings 2026-11-03):** a toolkit tool run on a file a peer's
+  tool wrote yields the caller's own result (the peer's file is a recorded input, so ancestry holds);
+  left as is until evidence shows it is used to launder. The data catalog's source names come from
+  event-file headers no receipt hashes, and keep each header's spelling ("Cyg X-1" / "CYG X-1").
+- **Reduction products share one path per ObsID and selection** (parked): a re-reduction with other
+  settings replaces the file an earlier result points to (seen as `receipt.drift`, run
+  faraday-refs-20261026). Workers run one after another within a round; only a resumed seat overlaps.
 - **Numbers written as words are not grounded** (found live 2026-10-17): the number scan reads digits only. Ruling 2026-10-17: the check stays on digits; every role's prompt says to write numbers in digits.
 - **Report fields are checked for emptiness, not content** — accepted limit, every role (ruling
   2026-09-24); numbers stay grounded.
@@ -1113,3 +1138,13 @@ Compacted 2026-10-19 (every entry); detail in git history.
   references entry. Also: inbox texts name sender, receipts and reply address; `available_toolkits`
   deleted; a toolkit package that fails to import is refused at launch; the reproduce code runs the
   toolkit at the result's commit; the chain popover shows values, hashes folded.
+- 2026-11-03 — §9.2/§9.3.9: the **input validator** is part of the unit (user ruling): a `$ref`
+  resolves only the unit's own results, and a typed copy is refused before the call runs. §7
+  updated. Toolkit: `ai-xspec` (run faraday-refs-20261026's tools, bundled to
+  `ar_runtime/backups/`) replaced by a fresh branch from `main`; `catalog_utils` names each
+  ObsID's source on `main`. `graph.runtime.attach_librarian_runtime` extracted; the lead and
+  librarian shape cells wire through the seams.
+- 2026-11-03 — §9.2/§9.3.9/§9.4/§9.9/§9.10 step 1: the input validator has two jobs (user ruling):
+  tool inputs (owner-only `$ref`, copy refusal) and model inputs (media that does not decode is
+  withheld with a note); it generalises with the unit in Phase 3. §13 input-validator limits.
+

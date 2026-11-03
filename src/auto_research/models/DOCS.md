@@ -618,3 +618,13 @@ Compacted 2026-09-01, again 2026-09-24, and 2026-10-19 (every entry); detail in 
   `_strip_thinking` (`thinking_dropped`); [R2/R3] `ToolResultPart.documents` (`_document_blocks`,
   `_document_items`, `_document_parts`, `_media.hoist_documents`), `providers.media_limits`,
   `_media.media_load`; clearing ships off (B12); [R2 review] `ModelMessage.documents`.
+- 2026-11-03 — `_media.py`: the input validator's media check (user ruling). An image that does not
+  decode fully (`_decodes_as_image`) or a PDF that does not parse to a page is withheld with
+  `undecodable_note` — a provider refused such bytes with a 400 that ended the lead's turn once any
+  unit could open any receipt. Tests send real files (`tests/media_files.py`).
+- 2026-11-03 — Media check review (confirmed, fixed): verdicts and PDF page counts cached by content
+  digest (a full decode cost ~31 ms an image per call); bytes of another type than declared are sent
+  as what they are, or withheld when the provider does not take that type; HEIC/HEIF (no decoder
+  here) pass unchecked; a decompression-bomb-sized image is named as such; only decodable images
+  count toward the image limit; the unplanned fallback checks too; the note asks the producer for a
+  readable copy.

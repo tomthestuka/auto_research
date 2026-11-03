@@ -29,10 +29,11 @@ lose real fidelity on a hi-res-tier model for nothing.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from auto_research.schemas import DocumentRef, FigureRef
@@ -123,7 +124,13 @@ class MediaPlan:
         from auto_research.provenance.store import read_receipted
 
         read = read_receipted(ref.path, getattr(ref, "sha256", None), label=Path(ref.path).name)
-        return Resolved(data=read.data, mime=ref.mime_type, note=read.note)
+        name, mime = Path(ref.path).name, ref.mime_type
+        if read.data is not None and isinstance(ref, FigureRef) and mime not in _UNCHECKED_IMAGE_MIMES \
+                and not _decodes_as_image(read.data):
+            return Resolved(None, mime, undecodable_note(name, "an image"))
+        if read.data is not None and mime == "application/pdf" and not _pdf_page_count(read.data):
+            return Resolved(None, mime, undecodable_note(name, "a PDF"))
+        return Resolved(data=read.data, mime=mime, note=read.note)
 
 
 def iter_media(
@@ -227,19 +234,20 @@ def plan_media(
     # evidence is what the model sees (it used to be the newest that went, run 32814459 review).
     # Only images the provider takes count: one withheld for its type or for a text-only model is
     # gone already and must not push a sendable one out.
-    image_count = sum(
-        1 for item in items
-        if item.is_image and limits.images_accepted
+    # An image that does not decode is withheld too, so it must not push a decodable one out.
+    sendable = [
+        item.is_image and limits.images_accepted
         and (not limits.image_mimes or item.mime in limits.image_mimes)
-    )
+        and (item.mime in _UNCHECKED_IMAGE_MIMES or _decodes_path(item))
+        for item in items
+    ]
+    image_count = sum(sendable)
     overflow = max(0, image_count - limits.max_images) if limits.max_images else 0
     images_seen = 0
-    for item in items:
-        if item.is_image and limits.images_accepted and (
-            not limits.image_mimes or item.mime in limits.image_mimes
-        ):
+    for item, counts in zip(items, sendable):
+        if counts:
             images_seen += 1
-        resolved = _resolve_one(item, limits, max_edge, images_seen, overflow)
+        resolved = _resolve_one(item, limits, max_edge, images_seen if counts else None, overflow)
         plan._by_ref[id(item.ref)] = resolved
         if not resolved.dropped:
             kept.append((item, resolved))
@@ -248,8 +256,16 @@ def plan_media(
     return plan
 
 
+def _decodes_path(item: MediaItem) -> bool:
+    """Whether the item's file decodes as an image (a missing file counts: its read note says why)."""
+    try:
+        return _decodes_as_image(item.path.read_bytes())
+    except OSError:
+        return True
+
+
 def _resolve_one(
-    item: MediaItem, limits: MediaLimits, max_edge: int, image_index: int, overflow: int = 0
+    item: MediaItem, limits: MediaLimits, max_edge: int, image_index: int | None, overflow: int = 0
 ) -> Resolved:
     """Per-item checks: mime, count, pages, bytes, dimensions."""
     name = item.path.name
@@ -273,7 +289,7 @@ def _resolve_one(
                 f"[withheld] {name}: {item.mime} is not an image type this provider accepts "
                 f"({', '.join(sorted(limits.image_mimes))}).",
             )
-        if image_index <= overflow:
+        if image_index is not None and image_index <= overflow:  # None: not counted (withheld anyway)
             return Resolved(
                 None,
                 item.mime,
@@ -322,6 +338,16 @@ def _resolve_image(item: MediaItem, limits: MediaLimits, max_edge: int) -> Resol
 
 
 def _resolve_image_bytes(item: MediaItem, data: bytes, limits: MediaLimits, max_edge: int) -> Resolved:
+    if item.mime not in _UNCHECKED_IMAGE_MIMES:
+        decodes, actual, reason = _image_verdict(data)
+        if not decodes:
+            return Resolved(None, item.mime, undecodable_note(item.path.name, "an image", reason))
+        if actual and actual != item.mime:
+            # A tool declared one type for bytes of another; a provider refuses the mismatch.
+            if limits.image_mimes and actual not in limits.image_mimes:
+                return Resolved(None, item.mime, undecodable_note(
+                    item.path.name, "an image", f"its bytes are {actual}, which this provider does not take"))
+            item = replace(item, mime=actual)
     width, height = _dimensions(data)
     too_wide = bool(max_edge) and max(width, height) > max_edge
     too_big = bool(limits.max_image_bytes) and len(data) > limits.max_image_bytes
@@ -360,6 +386,8 @@ def _resolve_document(item: MediaItem, limits: MediaLimits) -> Resolved:
 
 
 def _resolve_document_bytes(item: MediaItem, data: bytes, limits: MediaLimits) -> Resolved:
+    if item.mime == "application/pdf" and not _pdf_page_count(data):
+        return Resolved(None, item.mime, undecodable_note(item.path.name, "a PDF"))
     if limits.max_doc_bytes and len(data) > limits.max_doc_bytes:
         return Resolved(
             None,
@@ -419,6 +447,50 @@ def _apply_request_budget(
         total -= size
 
 
+def undecodable_note(name: str, kind: str, reason: str = "") -> str:
+    """The note a model reads in place of media whose bytes do not decode (the unit's input
+    validator, its media check, user ruling 2026-11-03): a provider refuses such bytes with a 400
+    that would end the turn, so they are withheld and the model is told what to do."""
+    why = reason or f"its bytes do not decode as {kind}"
+    return (f"[withheld] {name}: {why}, so it was not sent; the stored artifact is unchanged. Ask "
+            "whoever produced it (the tool that wrote it, the librarian that fetched it, the human "
+            "who sent it) for a readable copy.")
+
+
+#: Decode verdicts by content digest: an image or a PDF is re-sent on every call of a turn, and a
+#: full decode costs tens of milliseconds an image (measured, 2000x1500 PNG) on the event loop.
+_VERDICTS: dict[bytes, tuple[bool, str | None, str]] = {}
+_VERDICT_CAP = 2048
+#: Formats a provider takes that this host's image library cannot open: sent unchecked.
+_UNCHECKED_IMAGE_MIMES = frozenset({"image/heic", "image/heif"})
+_PIL_MIMES = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp", "GIF": "image/gif"}
+
+
+def _image_verdict(data: bytes) -> tuple[bool, str | None, str]:
+    """``(decodes, the mime its bytes are, reason)`` for an image, cached by digest."""
+    key = hashlib.blake2b(data, digest_size=16).digest()
+    if key not in _VERDICTS:
+        from PIL import Image
+
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                image.load()
+                verdict = (True, _PIL_MIMES.get(image.format or ""), "")
+        except Image.DecompressionBombError:
+            verdict = (False, None, "it is too large to decode safely")
+        except Exception:  # noqa: BLE001 — any decode failure is the answer
+            verdict = (False, None, "")
+        if len(_VERDICTS) >= _VERDICT_CAP:
+            _VERDICTS.clear()
+        _VERDICTS[key] = verdict
+    return _VERDICTS[key]
+
+
+def _decodes_as_image(data: bytes) -> bool:
+    """Whether the bytes decode fully as an image (a truncated or stub file does not)."""
+    return _image_verdict(data)[0]
+
+
 def _dimensions(data: bytes) -> tuple[int, int]:
     from PIL import Image
 
@@ -452,14 +524,23 @@ def _resize(data: bytes, mime: str, max_edge: int) -> tuple[bytes | None, tuple[
         return None, (0, 0)
 
 
-def _pdf_page_count(data: bytes) -> int:
-    """Page count, or 0 when the file cannot be parsed (the byte checks still apply)."""
-    try:
-        from pypdf import PdfReader
+_PAGES: dict[bytes, int] = {}
 
-        return len(PdfReader(io.BytesIO(data)).pages)
-    except Exception:  # noqa: BLE001
-        return 0
+
+def _pdf_page_count(data: bytes) -> int:
+    """Page count, or 0 when the file cannot be parsed (cached by digest: a paper is re-sent on
+    every call, and parsing a 34 MB one costs ~90 ms)."""
+    key = hashlib.blake2b(data, digest_size=16).digest()
+    if key not in _PAGES:
+        try:
+            from pypdf import PdfReader
+
+            _PAGES[key] = len(PdfReader(io.BytesIO(data)).pages)
+        except Exception:  # noqa: BLE001
+            _PAGES[key] = 0
+        if len(_PAGES) > _VERDICT_CAP:
+            _PAGES.clear()
+    return _PAGES[key]
 
 
 def caption_with_note(caption: str, resolved: Resolved) -> str:
@@ -538,6 +619,7 @@ __all__ = [
     "MediaPlan",
     "Resolved",
     "caption_with_note",
+    "undecodable_note",
     "iter_media",
     "nonmedia_weight",
     "plan_for_call",

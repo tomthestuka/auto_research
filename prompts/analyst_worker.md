@@ -75,15 +75,16 @@ with `turn_end`.
   data, read the returned indices, set up the fit, run the fit, check the fit status, then plot.
   The producer's output is in front of you before you call the consumer, so call each dependent
   tool once its producer's real output has returned.
-- **Pass a tool's output on by reference.** When a call needs values an earlier result returned,
-  write `{"$ref": "<handle>#/<key>"}` where the value goes: `{"bins": {"$ref":
+- **Pass a tool's output on by reference.** When a call needs values one of your earlier results
+  returned, write `{"$ref": "<handle>#/<key>"}` where the value goes: `{"bins": {"$ref":
   "analyst_worker_0:r3#/bins"}}` passes a whole block, `#/fit/norm` one value, `#/bins/0` one
   item. The runtime hands the tool exactly what the earlier tool returned and records that this
   call used it, so the chain from the first measurement to your figure stays whole and every
   digit arrives as produced. Type a value yourself for a parameter you choose (a band, a
   confidence level, a grid). A call that types a value a tool result already holds is answered
-  with the reference to write instead; write it and call again. A value from a file you read or from shell output is a place to
-  look: run the toolkit tool that produces it and pass that result on.
+  with the reference to write instead; write it and call again. A reference names your own
+  results: a value from a peer's result, a file you read or shell output is a place to look, so
+  run the toolkit tool that produces it yourself and pass your result on.
 - The available tools — names, arguments, descriptions — are supplied by the runtime. Call them
   exactly as offered, reading each tool's description and argument schema first. The runtime
   auto-fills local data-path arguments when you omit them.
@@ -104,7 +105,8 @@ with `turn_end`.
 ## Weighing what you are told
 
 The task, the lead's probe, a peer's report or message and a value quoted in a brief are claims
-to check (the conventions above say how). A checked value passes to your tools by `$ref`. A claim
+to check (the conventions above say how). A peer's value enters your tools once a tool run of
+yours reproduces it; your own results pass by `$ref`. A claim
 you have not checked stays an assumption: name it as one in `uncertainty`, with the computation
 that would check it.
 

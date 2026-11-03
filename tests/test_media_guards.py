@@ -39,6 +39,7 @@ from auto_research.models.types import (
     ToolResultPart,
 )
 from auto_research.schemas import DocumentRef, FigureRef
+from tests.media_files import pdf_bytes, png_bytes
 
 _ANTHROPIC_LIKE = MediaLimits(
     image_mimes=frozenset({"image/png", "image/jpeg"}),
@@ -448,9 +449,9 @@ def test_a_document_changed_after_its_receipt_is_sent_with_a_note_in_the_request
 
     monkeypatch.setattr(anthropic, "AsyncAnthropic", _CaptureAnthropic)
     pdf = tmp_path / "paper.pdf"
-    pdf.write_bytes(b"%PDF-1.4 original")
+    pdf.write_bytes(pdf_bytes("original"))
     document = _document(pdf)
-    pdf.write_bytes(b"%PDF-1.4 swapped after the receipt")
+    pdf.write_bytes(pdf_bytes("swapped after the receipt"))
     convo = [ModelMessage(role="user", content="read this")]
     cfg = RoleModelConfig(name="m", provider="anthropic", model="fake", vision=True)
 
@@ -471,7 +472,7 @@ def test_anthropic_nests_a_document_in_the_tool_result_that_opened_it(tmp_path, 
 
     monkeypatch.setattr(anthropic, "AsyncAnthropic", _CaptureAnthropic)
     pdf = tmp_path / "paper.pdf"
-    pdf.write_bytes(b"%PDF-1.4 paper")
+    pdf.write_bytes(pdf_bytes("paper"))
     document = _document(pdf)
     convo = [
         ModelMessage(role="user", content="read it"),
@@ -497,9 +498,9 @@ def test_nested_and_message_documents_count_against_the_request_ceiling(tmp_path
     from auto_research.models.types import ToolResultPart
 
     small = tmp_path / "small.pdf"
-    small.write_bytes(b"%PDF-1.4 " + b"s" * 1024)
+    small.write_bytes(pdf_bytes("s", pad=1024))
     big = tmp_path / "big.pdf"
-    big.write_bytes(b"%PDF-1.4 " + b"b" * 25_164_990)  # 33,553,333 bytes as base64
+    big.write_bytes(pdf_bytes("b", pad=25_164_990 - len(pdf_bytes("b"))))  # ~33.55 MB as base64
     first, second = _document(small), _document(big)
     convo = [
         ToolResultMessage(results=[ToolResultPart(tool_call_id="c1", name="read",
@@ -520,7 +521,7 @@ def test_a_member_without_documents_refuses_a_nested_or_carried_document(tmp_pat
     monkeypatch.setenv("AUTO_RESEARCH_RUNTIME_DIR", str(tmp_path))
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
     pdf = tmp_path / "p.pdf"
-    pdf.write_bytes(b"%PDF-1.4 p")
+    pdf.write_bytes(pdf_bytes("p"))
     document = _document(pdf)
     handle = ModelHandle(
         role="analyst_worker",
@@ -541,7 +542,7 @@ def test_google_renders_a_nested_document_after_the_function_response(tmp_path):
     from auto_research.models.types import ModelResponse, ToolCall, ToolResultPart
 
     pdf = tmp_path / "p.pdf"
-    pdf.write_bytes(b"%PDF-1.4 paper")
+    pdf.write_bytes(pdf_bytes("paper"))
     document = _document(pdf)
     convo = [
         ModelMessage(role="user", content="read"),
@@ -554,3 +555,50 @@ def test_google_renders_a_nested_document_after_the_function_response(tmp_path):
     assert contents[-2].parts[0].function_response is not None
     (part,) = contents[-1].parts
     assert part.inline_data.mime_type == "application/pdf"
+
+
+def test_media_that_does_not_decode_is_withheld_with_a_note_and_real_media_is_sent(tmp_path):
+    """The unit's input validator, its media check (user ruling 2026-11-03): a provider refuses
+    undecodable bytes with a 400 that ended the lead's turn ("Could not process image", "The PDF
+    specified was not valid"), so they are withheld and the model is told what to do."""
+    stub_png = tmp_path / "stub.png"
+    stub_png.write_bytes(b"\x89PNG stub")
+    stub_pdf = tmp_path / "stub.pdf"
+    stub_pdf.write_bytes(b"%PDF-1.7\nstub")
+    real_png = tmp_path / "real.png"
+    real_png.write_bytes(png_bytes())
+    real_pdf = tmp_path / "real.pdf"
+    real_pdf.write_bytes(pdf_bytes("real"))
+    figures = [_figure(stub_png), _figure(real_png)]
+    documents = [_document(stub_pdf), _document(real_pdf)]
+    plan = plan_media(iter_media([_turn_with(figures)], documents=documents), _ANTHROPIC_LIKE)
+    for ref, kind in ((figures[0], "an image"), (documents[0], "a PDF")):
+        resolved = plan.resolve(ref)
+        assert resolved.dropped and f"its bytes do not decode as {kind}" in resolved.note
+    assert not plan.resolve(figures[1]).dropped and not plan.resolve(documents[1]).dropped
+
+
+def test_a_mislabelled_image_is_sent_as_what_its_bytes_are_and_only_decodable_images_count(tmp_path):
+    """Review 2026-11-03: a JPEG a tool declared image/png decodes, but a provider refuses the
+    mismatch; and a withheld undecodable image must not push a sendable one past the count."""
+    import io
+
+    from PIL import Image
+
+    jpeg = tmp_path / "plot.png"
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 6), (200, 30, 30)).save(buffer, "JPEG")
+    jpeg.write_bytes(buffer.getvalue())
+    figure = _figure(jpeg, mime="image/png")
+    resolved = plan_media(iter_media([_turn_with([figure])]), _ANTHROPIC_LIKE).resolve(figure)
+    assert not resolved.dropped and resolved.mime == "image/jpeg"
+
+    stub = tmp_path / "stub.png"
+    stub.write_bytes(b"\x89PNG stub")
+    older, newer = tmp_path / "a.png", tmp_path / "b.png"
+    older.write_bytes(png_bytes(color=(1, 2, 3)))
+    newer.write_bytes(png_bytes(color=(4, 5, 6)))
+    figures = [_figure(older), _figure(stub), _figure(newer)]
+    limits = MediaLimits(image_mimes=_ANTHROPIC_LIKE.image_mimes, max_images=2)
+    plan = plan_media(iter_media([_turn_with(figures)]), limits)
+    assert [plan.resolve(f).dropped for f in figures] == [False, True, False]

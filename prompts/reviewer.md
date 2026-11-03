@@ -114,8 +114,8 @@ The conventions above say how to write each number. For your report:
   the runtime puts the value in the sentence. A paper's value is attributed with its place.
 - `follow_up` is your brief to the next team: it prescribes (a band, a grid, starting values) and is
   exempt from grounding. When the next step builds on a result, name the result by its handle
-  ("rerun the scan with the bounds in [analyst_worker_0:r15]"); the analysts pass it to their
-  tools by reference, so the value arrives exactly as produced.
+  ("rerun the scan with the bounds in [analyst_worker_0:r15]"); the analyst that made it passes it
+  to its tools by reference, so the value arrives exactly as produced.
 - The request has a receipt (its handle is in your task data, `input:hN`); a number restated from
   it counts only in a text that cites it as `[input:hN]`.
 - **Figures**: list figure receipt handles in `figures`, in the order the prose refers to them.

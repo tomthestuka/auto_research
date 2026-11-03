@@ -427,7 +427,7 @@ def test_a_value_reference_reads_the_returned_value_and_a_typed_copy_is_refused(
     assert ok.problems == [] and ok.cited == [r.handle]
     assert display_value(9.553035400135778) == "9.55"
     assert render_values(f"limit {{{{{r.handle}#/band/stat_deg}}}} deg", store) == (
-        f"limit {{{{{r.handle}#/band/stat_deg}}}} (= 9.55) deg")
+        f"limit 9.55 [{r.handle}#/band/stat_deg] deg")
 
     (typed,) = check_bindings(f"The band limit is 9.553035400135778 deg [{r.handle}].", store).problems
     assert f'"9.553035400135778" → {{{{{r.handle}#/band/stat_deg}}}}' in typed
@@ -719,7 +719,7 @@ def test_a_key_with_spaces_and_a_whole_value_are_referenced_and_leftover_markup_
     assert f"{{{{{banded.handle}#/2-3 keV/q}}}}" in copied
     whole = _result(store, json.dumps(4.0213))
     assert check_bindings(f"PD {{{{{whole.handle}#}}}} %.", store).problems == []
-    assert render_values(f"PD {{{{{whole.handle}#}}}} %", store) == f"PD {{{{{whole.handle}#}}}} (= 4.02) %"
+    assert render_values(f"PD {{{{{whole.handle}#}}}} %", store) == f"PD 4.02 [{whole.handle}#] %"
     for bad in (f"PD {{{{{whole.handle} / pd}}}} %.", "PD {{lib:p1 12.5 Table 2}}."):
         problems = check_bindings(bad, store).problems
         assert any("markup the check reads as nothing" in p for p in problems), bad
@@ -755,4 +755,14 @@ def test_a_report_handed_to_a_model_keeps_its_quotes_and_attributions_whole(stor
     read = _for_reader(AnalystReport(summary="s", findings=[finding], status="succeeded"), store)
     assert read["findings"] == [
         f'PD {{{{lib:p3 "4.0 ± 0.2 %" Table 2}}}}; slope {{{{{r.handle} "slope = 1.27"}}}}; '
-        f"fit {{{{{r.handle}#/slope}}}} (= 1.27) [{r.handle}]"]
+        f"fit 1.27 [{r.handle}#/slope] [{r.handle}]"]
+
+
+def test_a_written_source_tag_is_refused_since_it_would_pass_for_a_rendered_reference(store):
+    """Review 2026-11-03: "2.72 [h#/k]" is how the runtime shows a referenced value to a reader; a
+    writer typing it would pass a typed number off as one."""
+    r1 = _result(store, json.dumps({"fit": {"kT": 9.9912}}))
+    r2 = _result(store, "chi2 = 2.72")
+    problems = check_bindings(f"kT = 2.72 [{r1.handle}#/fit/kT], fit quality [{r2.handle}].", store).problems
+    assert any("markup the check reads as nothing" in p and "{{handle#/key}}" in p for p in problems)
+

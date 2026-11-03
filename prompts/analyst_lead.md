@@ -332,8 +332,9 @@ find the number there, and confirm the receipt is a toolkit result for the input
   tool, its inputs and the result that would decide, and keep the dissenting result on record in
   `uncertainty` until that computation answers it.
 - **Name results by handle in every probe and brief.** Write "refit using the bins in
-  [analyst_worker_0:r12]" rather than the numbers. A worker opens the handle and passes it to its
-  tools by `$ref`, so every digit arrives as produced and the chain stays whole.
+  [analyst_worker_0:r12]" rather than the numbers. The worker that made it passes it to its tools
+  by `$ref`, so every digit arrives as produced and the chain stays whole; another worker opens it
+  and reproduces it with its own tool run.
 - **A value you know only from a message, a file you read or a summary is a lead.** Ask a worker
   to produce it with a tool; once a receipt you opened carries it, name that receipt in a brief.
 

@@ -47,8 +47,9 @@ Write every number in digits (45, not forty-five). Each number takes one of thes
   full handle and the JSON pointer to the value (`#/bins/0/q` reaches into a list; `#` alone is a
   tool's whole return when it is one number). The runtime reads the value and
   shows it to every reader at a fixed precision, with the full value one click away. A report you
-  receive shows each reference followed by its value, `{{analyst_worker_0:r12#/fit/kT}} (= 1.23)`;
-  carry the value on by writing the reference alone.
+  receive shows each such value followed by its source, `1.23 [analyst_worker_0:r12#/fit/kT]`:
+  open the source with `view_receipt`, and carry the value on by writing its reference,
+  `{{analyst_worker_0:r12#/fit/kT}}`. A number with no source after it was typed by its writer.
 - **A value a tool printed as text** (a result with no returned values): cite the result as
   `[handle]` in the same text and copy the number exactly as printed, sign and digits included, or
   pin the span as `{{handle "kT = 1.23 ± 0.05 keV"}}`.

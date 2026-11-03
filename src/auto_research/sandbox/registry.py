@@ -55,10 +55,11 @@ _CALL_TIMEOUT_FALLBACK_S = 300
 REF_NOTE = (
     '\n\nAny argument value (a number, a list, a dict) can be {"$ref": "<receipt handle>#/<key>/<index>"}: the runtime passes '
     "the value at that place in the named tool result, exactly as the tool returned it, and "
-    "records the result this call used. Pass another tool's output on this way, e.g. "
-    '{"$ref": "analyst_worker_0:r3#/bins"}; "#" alone passes the whole returned value. A value an '
-    "earlier tool result returned reaches a call this way only: a call that types one runs once it "
-    "carries the reference the reply names."
+    "records the result this call used. Pass the output of one of your earlier calls on this way, "
+    'e.g. {"$ref": "analyst_worker_0:r3#/bins"}; "#" alone passes the whole returned value. A '
+    "reference names your own results; a peer's value reaches your calls once a tool run of yours "
+    "reproduces it. A value an earlier tool result returned reaches a call this way only: a call "
+    "that types one runs once it carries the reference the reply names."
 )
 
 

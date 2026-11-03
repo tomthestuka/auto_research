@@ -217,9 +217,10 @@ the published artifact paths and handles (`report_artifacts`).
   web_source=None, human_handler=None)` — the reviewer's production wiring (tools via
   `readonly_tools_for("reviewer")`, `report_dir`, the run's `ReceiptStore`), called by
   `run_research` and by live cells so they drive the same reviewer.
-- `attach_librarian_runtime(io_agent, *, run_id)` — the librarian's production wiring (its key,
-  its report folder, the run's one `ReceiptStore`; a pre-wired field stays), called by
-  `run_research` and by live cells so they drive the same librarian.
+- `attach_librarian_runtime(io_agent, *, run_id, run_control=None)` — the librarian's production
+  wiring (its key, its report folder, its stop channel, the run's one `ReceiptStore`; a pre-wired
+  field stays; a store that cannot open raises), called by `run_research` and by live cells so
+  they drive the same librarian.
 - `readonly_tools_for(role, *, roots, retrieval=None, web_source=None) -> ReadOnlyToolProvider` — the read-only inspection loop production gives the
   `reviewer` or the `analyst_lead`. The two differ on purpose: the lead gets the data catalog and,
   when a human is reachable, the budget-free design channel, and is denied the paper knowledge
@@ -295,3 +296,9 @@ and 2026-10-19 (every entry); detail in git history.
   librarian's live shape cells wire it through the seam; the lead's shape cells now use
   `attach_lead_runtime` + `attach_channel` with a run monitor and cost meter
   (`tests/test_role_wiring_seams.py` guards both).
+- 2026-11-03 — `attach_librarian_runtime(io_agent, *, run_id, run_control=None)` owns the
+  librarian's key, folder, stop channel and store; a store that cannot open raises (a swallowed
+  one left the librarian on a store of its own). The lead's shape cells (refusal and escape) build
+  the lead through one `_wired_lead` (workspace, `attach_lead_runtime` with the web source,
+  `attach_channel`); the escape cells drive `run_cycle` (they drove `_react` on a provider with
+  no `turn_end`). `tests/test_role_wiring_seams.py` guards seam-owned fields by AST.

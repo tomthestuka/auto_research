@@ -403,19 +403,23 @@ def attach_reviewer_runtime(
         _attach_monitor(reviewer, run_monitor)
 
 
-def attach_librarian_runtime(io_agent: Any, *, run_id: str) -> None:
-    """The librarian's working folder (its per-pass report JSONL) and the run's ONE receipt store,
-    so its paper/web handles share counters with every other role's. The seam a live cell driving
-    a real librarian uses, as :func:`attach_lead_runtime` is the lead's; a pre-wired field stays."""
-    try:
-        if getattr(io_agent, "agent_key", None) is None:
-            io_agent.agent_key = "librarian_io"
-        if getattr(io_agent, "report_dir", None) is None:
-            io_agent.report_dir = agent_dir(run_id, "librarian_io")
-        if getattr(io_agent, "receipts", None) is None:
-            io_agent.receipts = ReceiptStore.for_run(run_dir(run_id))
-    except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it
-        pass
+def attach_librarian_runtime(
+    io_agent: Any, *, run_id: str, run_control: RunControl | None = None
+) -> None:
+    """The librarian's key, working folder (its per-pass report JSONL), stop channel and the run's
+    ONE receipt store, so its paper/web handles share counters with every other role's. The seam a
+    live cell driving a real librarian uses, as :func:`attach_lead_runtime` is the lead's; a
+    pre-wired field stays. A store that cannot open raises: a swallowed one would leave the
+    librarian minting into a store of its own."""
+    store = ReceiptStore.for_run(run_dir(run_id))
+    for name, value in (("agent_key", "librarian_io"), ("report_dir", agent_dir(run_id, "librarian_io")),
+                        ("receipts", store), ("run_control", run_control)):
+        if value is None or getattr(io_agent, name, None) is not None:
+            continue
+        try:
+            setattr(io_agent, name, value)
+        except (AttributeError, TypeError):  # a duck-typed fake that does not take the field
+            pass
 
 
 def attach_lead_runtime(
@@ -821,7 +825,7 @@ async def run_research(
     analyst_keys = [f"analyst_worker_{i}" for i in range(len(workers))]
     agent_keys = ["reviewer", "analyst_lead", "librarian_io"] + analyst_keys
     create_run_workspace(run_id, agent_keys)
-    attach_librarian_runtime(io_agent, run_id=run_id)
+    attach_librarian_runtime(io_agent, run_id=run_id, run_control=run_control)
 
     # Give the reviewer and lead a read-only inspection loop (run artifacts +
     # knowledge base), unless a caller pre-wired their own tools.
@@ -870,13 +874,12 @@ async def run_research(
 
     # HITL /steer, /stop: give every role a stable steer key (workers/lead already keyed above)
     # and the shared RunControl its ReAct loop consults. Best-effort so duck-typed fakes are fine.
-    for target, key in ((reviewer, "reviewer"), (io_agent, "librarian_io")):
-        try:
-            if getattr(target, "agent_key", None) is None:
-                target.agent_key = key
-            target.run_control = run_control
-        except Exception:  # noqa: BLE001
-            pass
+    try:
+        if getattr(reviewer, "agent_key", None) is None:
+            reviewer.agent_key = "reviewer"
+        reviewer.run_control = run_control
+    except Exception:  # noqa: BLE001
+        pass
     for worker in workers:
         try:
             worker.run_control = run_control

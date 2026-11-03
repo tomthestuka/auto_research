@@ -130,18 +130,25 @@ def test_a_reference_to_what_a_role_read_is_refused_and_nothing_runs(tmp_path):
     assert len(store.receipts(source="analyst_worker_0")) == 1
 
 
-def test_any_result_of_the_run_resolves_and_a_handle_not_in_it_is_refused(tmp_path):
+def test_a_call_passes_on_only_its_own_results_and_a_peer_value_is_reproduced(tmp_path):
+    """User ruling 2026-11-03: a $ref resolves the caller's own results only, so a tool echoing a
+    peer's value cannot make it the caller's evidence; typing that value is refused the same way."""
     store = ReceiptStore(tmp_path / "receipts")
     peer = _provider(tmp_path, store, source="analyst_worker_1")
     asyncio.run(peer.execute(EXTRACT, {"obsid": "01"}))  # analyst_worker_1:r1
 
-    worker = _provider(tmp_path, store)  # never handed it: view is global (ruling 2026-10-27)
+    worker = _provider(tmp_path, store)
     out = asyncio.run(worker.execute(FIT, {"bins": {"$ref": "analyst_worker_1:r1#/bins"}}))
-    assert not out.is_error
-    assert store.get("analyst_worker_0:r1").parents == ["analyst_worker_1:r1"]
-
+    assert out.is_error and "is analyst_worker_1's result" in out.text and "reproduce" in out.text
+    out = asyncio.run(worker.execute(FIT, {"bins": [], "cl": BINS[0]["q"]}))  # typed from the peer
+    assert out.is_error and "is analyst_worker_1's result (analyst_worker_1:r1#/bins/0/q)" in out.text
     out = asyncio.run(worker.execute(FIT, {"bins": {"$ref": "analyst_worker_1:r9#/bins"}}))
     assert out.is_error and "not a receipt of this run" in out.text
+    assert worker.sandbox.tool_calls == []
+
+    asyncio.run(worker.execute(EXTRACT, {"obsid": "01"}))  # analyst_worker_0:r1, its own run
+    out = asyncio.run(worker.execute(FIT, {"bins": {"$ref": "analyst_worker_0:r1#/bins"}}))
+    assert not out.is_error and store.get("analyst_worker_0:r2").parents == ["analyst_worker_0:r1"]
 
 
 def test_a_pointer_token_a_model_could_write_never_raises_past_the_provider(tmp_path):
@@ -229,49 +236,6 @@ def test_the_reproduce_code_feeds_the_tool_the_values_the_call_received(tmp_path
     namespace: dict = {}
     exec(code, namespace)  # noqa: S102 — the generated notebook lines, run as a human would
     assert namespace["out"] == tools.sandbox.tool_calls[1][2] == {"bins": BINS[0]}
-
-
-def test_a_worker_passes_on_any_result_of_the_run_whether_or_not_its_brief_names_it(tmp_path):
-    """The role's own wiring (`AnalystWorkerAgent.analyze`): view is global (ruling 2026-10-27)."""
-    from types import SimpleNamespace
-
-    from auto_research.provenance.capture import receipt_call
-    from auto_research.schemas import AnalysisTask
-
-    store = ReceiptStore(tmp_path / "receipts")
-    peer = receipt_call(store, source="analyst_worker_0", produced_by=EXTRACT, args={"obsid": "01"},
-                        text="extract: 2 bins", failed=False, returned={"bins": BINS}).result
-
-    class _Model:
-        config = SimpleNamespace(model="fake")
-
-        def __init__(self):
-            self.turn = 0
-
-        async def call(self, messages, **kwargs):
-            self.turn += 1
-            if self.turn == 1:
-                return ModelResponse(tool_calls=[ToolCall(id="f", name=FIT, arguments={
-                    "bins": {"$ref": f"{peer.handle}#/bins"}})])
-            if self.turn == 2:
-                return ModelResponse(tool_calls=[ToolCall(id="w", name="write_report", arguments={
-                    "content": "# summary\nrefit the briefed bins\n# status\nfailed\n"})])
-            return ModelResponse(tool_calls=[ToolCall(id="t", name="turn_end", arguments={})])
-
-    def worker(name: str):
-        agent = AnalystWorkerAgent(model=_Model(), sandbox=_FakeSandbox(tool_fn=_tool), registry=_FakeRegistry(known={FIT}, mcp=set()))
-        agent.agent_key, agent.report_dir, agent.receipts = name, tmp_path / name, store
-        return agent
-
-    briefed = worker("analyst_worker_1")
-    asyncio.run(briefed.analyze(AnalysisTask(question="refit", instructions=f"Use the bins in [{peer.handle}].")))
-    assert briefed.sandbox.tool_calls[0][2] == {"bins": BINS}
-    assert store.get("analyst_worker_1:r1").parents == [peer.handle]
-
-    unbriefed = worker("analyst_worker_2")
-    asyncio.run(unbriefed.analyze(AnalysisTask(question="refit")))
-    assert unbriefed.sandbox.tool_calls[0][2] == {"bins": BINS}
-    assert store.get("analyst_worker_2:r1").parents == [peer.handle]
 
 
 def test_a_reference_reads_the_returned_value_and_refuses_it_once_tampered(tmp_path):
@@ -429,3 +393,61 @@ def test_a_value_copied_from_a_file_the_caller_read_is_refused_with_the_file(tmp
                            data="x,7.6543219\n")
     out = asyncio.run(tools.execute(FIT, {"bins": [{"pa": 7.6543219}]}))  # a peer's read: view is global
     assert out.is_error and f"copied from {peer_read.handle}" in out.text
+
+
+def test_a_copy_hidden_in_a_json_string_or_a_number_string_is_refused(tmp_path):
+    """Review 2026-11-03: the REPL parses a string holding a JSON container, so the check reads the
+    arguments as the tool receives them."""
+    store = ReceiptStore(tmp_path / "receipts")
+    tools = _provider(tmp_path, store)
+    asyncio.run(tools.execute(EXTRACT, {"obsid": "01"}))  # r1 holds BINS
+    for args in ({"bins": json.dumps(BINS)}, {"bins": [], "cl": repr(BINS[0]["q"])}):
+        out = asyncio.run(tools.execute(FIT, args))
+        assert out.is_error and "analyst_worker_0:r1#/bins/0/q" in out.text, args
+    assert len(tools.sandbox.tool_calls) == 1
+
+
+def test_a_long_peer_value_is_refused_exact_or_sign_flipped_but_constants_and_choices_run(tmp_path):
+    """Review 2026-11-03: a peer's value is matched at 6+ significant digits, exactly or
+    sign-flipped; a rounded run-wide match collided with fresh parameters and is not made, and a
+    shorter value (a constant such as 2.7063) is the caller's to choose."""
+    store = ReceiptStore(tmp_path / "receipts")
+    store.mint_input("Fit at 0.6827 confidence.", kind="human", produced_by="research_request")
+    peer = _provider(tmp_path, store, source="analyst_worker_1")
+    asyncio.run(peer.execute(EXTRACT, {"obsid": "01"}))  # analyst_worker_1:r1 holds BINS
+    store.mint(source="analyst_worker_1", kind="result", produced_by=FIT, data=json.dumps({"k": 2.7063}))
+    worker = _provider(tmp_path, store)
+    q = BINS[0]["q"]
+    for typed, how in ((q, ""), (-q, " with its sign flipped")):
+        out = asyncio.run(worker.execute(FIT, {"bins": [], "cl": typed}))
+        assert out.is_error and f"is analyst_worker_1's result (analyst_worker_1:r1#/bins/0/q){how}:" in out.text
+    for chosen in (round(q, 8), 2.7063, 0.6827):  # rounded, a constant, the request's value: all run
+        out = asyncio.run(worker.execute(FIT, {"bins": [], "cl": chosen}))
+        assert not out.is_error, (chosen, out.text)
+
+    fresh = 1.23456789  # chosen by the worker first, returned by a peer later: still the worker's
+    assert not asyncio.run(worker.execute(FIT, {"bins": [], "cl": fresh})).is_error
+    store.mint(source="analyst_worker_1", kind="result", produced_by=FIT, data=json.dumps({"x": fresh}))
+    assert not asyncio.run(worker.execute(FIT, {"bins": [], "cl": fresh})).is_error
+
+
+def test_a_value_a_brief_prescribes_is_typed_as_a_parameter(tmp_path):
+    """Review 2026-11-03: a brief is a task text, not a file read: its starting value is typed."""
+    store = ReceiptStore(tmp_path / "receipts")
+    brief = store.mint_input("Start the fit at norm = 0.0123456789.")
+    store.mint(source="analyst_worker_1", kind="result", produced_by=FIT, data=json.dumps({"norm": 0.0123456789}))
+    worker = _provider(tmp_path, store)
+    assert not asyncio.run(worker.execute(FIT, {"bins": [], "norm": 0.0123456789})).is_error
+    out = asyncio.run(worker.execute(FIT, {"bins": {"$ref": f"{brief.handle}#"}}))
+    assert out.is_error and "is a task brief: type a value it states as a parameter" in out.text
+
+
+def test_a_reference_to_the_request_or_a_place_to_look_is_named_by_what_it_is(tmp_path):
+    store = ReceiptStore(tmp_path / "receipts")
+    request = store.mint_input("Fit ObsID 01.", kind="human", produced_by="research_request")
+    shell = store.mint(source="analyst_worker_1", kind="result", produced_by="mcp.builtin.bash_exec", data="{}")
+    worker = _provider(tmp_path, store)
+    out = asyncio.run(worker.execute(FIT, {"bins": {"$ref": f"{request.handle}#"}}))
+    assert out.is_error and "is the request: type a value it states as a parameter" in out.text
+    out = asyncio.run(worker.execute(FIT, {"bins": {"$ref": f"{shell.handle}#"}}))
+    assert out.is_error and "shell output" in out.text and "'s result" not in out.text

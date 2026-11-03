@@ -41,7 +41,9 @@ QUOTE_RE = re.compile(rf'\{{\{{\s*(?P<h>{_H})\s+"(?P<q>[^"\n]+)"(?P<loc>[^}}\n]*
 #: only: ``self:`` would resolve to whoever copies the reference.
 VALUE_RE = re.compile(rf"\{{\{{\s*(?P<h>{HANDLE_PATTERN})#(?P<p>(?:/[^{{}}\n]*?)?)\s*\}}\}}")
 #: What is left of ``{{`` markup once every binding is taken out: written as a binding, read as none.
-_MARKUP_LEFT = re.compile(r"\{\{|\}\}")
+#: Also a value's source as the runtime renders it for a reader (``2.72 [h#/k]``): typed by a
+#: writer it would pass for a referenced value, so it is markup to rewrite as ``{{h#/k}}``.
+_MARKUP_LEFT = re.compile(rf"\{{\{{|\}}\}}|\[{HANDLE_PATTERN}#[^\]\n]*\]")
 
 #: Kinds a value is ATTRIBUTED to rather than quoted from (human ruling 2026-09-24: papers are
 #: cited, never text-checked). ``{{lib:p3 "4.0 ± 0.2 %" Table 2}}`` names the paper and where in it;
@@ -543,8 +545,10 @@ class _Resolved:
                 from auto_research.provenance.refs import RetypeCheck
 
                 store = getattr(self.lookup, "store", self.lookup)
-                try:
-                    given = {number for number, _ in _numeric_leaves(RetypeCheck(store)._args_of(handle))}
+                from auto_research.provenance.refs import _as_received
+
+                try:  # read as the tool received them, as the call-side check does
+                    given = {number for number, _ in _numeric_leaves(_as_received(RetypeCheck(store)._args_of(handle)))}
                 except (ValueError, AttributeError):
                     given = set()
                 for number, pointer in _numeric_leaves(value):
@@ -747,12 +751,14 @@ def check_bindings(
     rest = prose
     for binding in reversed(result.bindings):
         rest = rest[: binding.start] + " " * (binding.end - binding.start) + rest[binding.end :]
-    if _MARKUP_LEFT.search(rest):
-        at = _MARKUP_LEFT.search(rest).start()
+    if (left := _MARKUP_LEFT.search(rest)) is not None:
+        token = prose[left.start():left.end()] if left.group().startswith("[") else ""
+        shown = f"`{token}`" if token else f"…{_context(prose, left.start(), left.start() + 2)}…"
         result.problems.append(
-            f"{label}: …{_context(prose, at, at + 2)}… has {{{{ }}}} markup the check reads as nothing. "
-            'Write a value reference as {{handle#/key}} with the full handle, a quote as {{handle "exact '
-            'text"}}, or a paper\'s value as {{lib:p4 "value" Table 2}}.'
+            f"{label}: {shown} is markup the check reads as nothing. For one value a tool returned, "
+            "write {{handle#/key}} with the full handle (a value shown to you as \"2.72 [handle#/key]\" "
+            'is written {{handle#/key}}); to cite a result as a whole, write [handle]; a quote is '
+            '{{handle "exact text"}}, and a paper\'s value {{lib:p4 "value" Table 2}}.'
         )
     for handle in scope:
         if handle in usable:
@@ -897,14 +903,15 @@ def render_bindings(
 
 
 def render_values(prose: str, lookup: ReceiptLookup, *, own_source: str | None = None) -> str:
-    """The text a model reads: each value reference followed by its value, ``{{h#/k}} (= 2.72)``,
-    so it can reason with the number and cite it onward by the reference. A reference that cannot
-    be read stays as written."""
+    """The text a model reads: each value reference as its value followed by its source,
+    ``2.72 [h#/k]`` (user ruling 2026-11-03), so a reader reasons with the number, opens the source
+    with ``view_receipt``, and sees every number that carries no source as typed by its writer. A
+    reference that cannot be read stays as written."""
 
     def show(binding: Binding) -> str:
         written = prose[binding.start:binding.end]
         try:
-            return f"{written} (= {display_value(referenced_value(resolved, binding))})"
+            return f"{display_value(referenced_value(resolved, binding))} [{binding.handle}#{binding.pointer}]"
         except Exception:  # noqa: BLE001 — the writer's check already named it
             return written
 

@@ -639,7 +639,7 @@ Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
     rebuilt from the ledger (`AgentRole._history_seed`, indexed), then the task and peer
     reports; runs the inner ReAct loop over `SandboxToolProvider` when `sandbox` + `registry`
     are attached and returns the `AnalystReport` it filed. With no sandbox/registry it falls
-    back to a plain structured call. Its `$ref`s resolve any toolkit result of the run.
+    back to a plain structured call. Its `$ref`s resolve its own results only.
   - The task and peer reports reach the model through `_for_reader`: each value reference
     followed by its value (`provenance.bindings.render_values`); the lead's `worker_reports` and
     the reviewer's `analysis_report` / `literature_reports` the same way.
@@ -882,3 +882,11 @@ entries) and 2026-10-19 (every entry); detail in git history.
   hard-coded field that controlled nothing and misled a lead); reports and tasks handed to a model
   render value references with their values (`_for_reader`); the message tool description says the
   recipient sees every handle a text names; `load_prompt` prepends `conventions.md` for unit roles.
+- 2026-11-03 — A worker's `$ref`s resolve its own results only (`_usable_handles`); prompts and
+  `REF_NOTE` say a peer's value enters a call once the worker's own tool run reproduces it.
+- 2026-11-03 — `view_receipt` names what a result was made from (`_made_from`: the results passed to
+  its call by reference and the files it read, or "typed arguments only"), so a reader holding a
+  handle can tell a passed value from a typed one (user ruling).
+- 2026-11-03 — `_made_from` states what the runtime recorded, for toolkit results only: "its call
+  took … by reference and read …", or "took no earlier result by reference and read no recorded
+  file".

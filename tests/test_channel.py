@@ -461,3 +461,23 @@ def test_seat_to_seat_texts_are_mirrored_to_the_human_and_human_texts_are_not():
 
     _run(scenario())
     assert posted == ["💬 analyst_lead → analyst_worker_0\n\nwhich band?"]
+
+
+def test_a_viewed_result_says_what_its_call_was_given(tmp_path):
+    """User rule 2026-11-03: a reader holding a handle can see whether a result's values were passed
+    by reference; only a toolkit result carries the line, and it states what the runtime recorded."""
+    from auto_research.schemas.artifacts import InputFile
+
+    store = ReceiptStore(tmp_path / "receipts")
+    tool = "research_toolkit.tk.fit"
+    typed = store.mint(source="analyst_worker_1", kind="result", produced_by=tool, data="x = 1.2345")
+    data = store.mint(source="analyst_worker_1", kind="data", produced_by=tool, data="E,q")
+    chained = store.mint(source="analyst_worker_1", kind="result", produced_by=tool, data="y = 2.5",
+                         parents=[typed.handle, data.handle],
+                         inputs=[InputFile(path=tmp_path / "bands.csv", sha256="0" * 64, receipt=data.handle)])
+    shell = store.mint(source="analyst_worker_1", kind="result", produced_by="mcp.builtin.bash_exec", data="ls")
+    first = lambda h: _run(execute_view_receipt(store, {"handle": h})).text.splitlines()[0]
+    assert first(typed.handle) == (f"{typed.handle} ({tool}; its call took no earlier result by "
+                                   "reference and read no recorded file):")
+    assert first(chained.handle) == f"{chained.handle} ({tool}; its call took {typed.handle} by reference and read bands.csv):"
+    assert first(shell.handle) == f"{shell.handle} (mcp.builtin.bash_exec):"

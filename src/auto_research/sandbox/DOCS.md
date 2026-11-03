@@ -1431,3 +1431,4 @@ detail in git history.
   package that fails to import or has no manifest is refused at launch, never skipped silently.
 - 2026-10-27 — `import_errors` also records a failed `reload` (the stale module is evicted so
   `load` reports why) and an unreadable `tool_config.yaml` (its `env:` routing would drop silently).
+- 2026-11-03 — `REF_NOTE`: a reference names the caller's own results.

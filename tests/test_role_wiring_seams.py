@@ -214,33 +214,103 @@ def test_the_librarian_has_a_wiring_seam_and_run_research_uses_it():
     assert "run_research" in callers, f"attach_librarian_runtime is not called by run_research ({callers})"
 
 
-@pytest.mark.parametrize("cell, driver, role, restated", [
-    ("test_live_turn_end_shapes.py", "_drive_shape", "attach_lead_runtime",
-     ("lead.agent_key =", "lead.report_dir =", "lead.tools =", "lead.receipts =")),
-    ("test_live_librarian_shapes.py", "_drive", "attach_librarian_runtime",
-     ("agent.agent_key =", "agent.report_dir =", "agent.receipts =")),
+#: The fields the role seams own: a live cell that sets one itself restates production's wiring.
+_SEAM_OWNED = {"agent_key", "report_dir", "tools", "receipts", "receipt_source", "monitor",
+               "run_control", "channel"}
+
+
+def _restated_fields(tree: ast.AST) -> list[str]:
+    """Every seam-owned field the code assigns (``x.f = …``, ``x.y.f = …``, ``x.f += …``,
+    ``setattr(x, "f", …)``, ``x.__dict__.update(f=…)``), with its line."""
+    found: list[str] = []
+    for node in ast.walk(tree):
+        targets = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            targets = [node.target]
+        for target in targets:  # the field assigned is the target's last attribute
+            for sub in (target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]):
+                if isinstance(sub, ast.Attribute) and sub.attr in _SEAM_OWNED:
+                    found.append(f"{sub.attr} (line {node.lineno})")
+        if isinstance(node, ast.Call):
+            name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+            if name == "setattr" and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant) \
+                    and node.args[1].value in _SEAM_OWNED:
+                found.append(f"setattr {node.args[1].value} (line {node.lineno})")
+            if name == "update" and isinstance(node.func, ast.Attribute) and \
+                    getattr(node.func.value, "attr", "") == "__dict__":
+                found += [f"__dict__ {k.arg} (line {node.lineno})" for k in node.keywords if k.arg in _SEAM_OWNED]
+    return found
+
+
+@pytest.mark.parametrize("cell, builder, role", [
+    ("test_live_turn_end_shapes.py", "_wired_lead", "attach_lead_runtime"),
+    ("test_live_librarian_shapes.py", "_drive", "attach_librarian_runtime"),
 ])
-def test_the_shape_matrices_wire_their_role_through_the_seams(cell, driver, role, restated):
-    """User rule 2026-10-28: tests use only module endpoints, never a hand-rolled equivalent.
-    (The lead file's escape cells still drive `_react` with their own provider: open, listed.)"""
-    path = Path(__file__).with_name(cell)
-    tree = _tree(path)
-    node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == driver)
+def test_the_shape_matrices_wire_their_role_through_the_seams_and_restate_nothing(cell, builder, role):
+    """User rule 2026-10-28: tests use only module endpoints, never a hand-rolled equivalent. The
+    builder calls the seams, and nowhere in the file is a field the seams own assigned by hand."""
+    tree = _tree(Path(__file__).with_name(cell))
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == builder)
     called = {name for name, _ in _calls_to(node, (role, "attach_channel"))}
-    assert called == {role, "attach_channel"}, f"{cell}:{driver} does not wire through {role} and attach_channel"
-    source = ast.get_source_segment(path.read_text(encoding="utf-8"), node) or ""
-    for text in restated:
-        assert text not in source, f"{cell}:{driver} sets {text.strip()} itself instead of the seam"
+    assert called == {role, "attach_channel"}, f"{cell}:{builder} does not wire through {role} and attach_channel"
+    restated = _restated_fields(tree)
+    assert not restated, f"{cell} sets seam-owned fields itself: {restated}"
 
 
-def test_the_librarian_seam_wires_identity_folder_and_the_runs_one_store(tmp_path, monkeypatch):
+def test_the_restatement_guard_sees_the_evasions_a_review_found():
+    """Review 2026-11-03: the substring guard passed setattr, no-space assignment, aliasing and
+    __dict__.update. The AST guard must see every one."""
+    for code in ('setattr(lead, "agent_key", "x")', 'lead.agent_key="x"', "l = lead\nl.tools = None",
+                 'lead.__dict__.update(receipts=1)', "lead.tools.receipts = s", "lead.run_control += 1"):
+        assert _restated_fields(ast.parse(code)), code
+    assert not _restated_fields(ast.parse("lead.tools.execute = record\nlead.model = counting"))
+
+
+def test_run_research_wires_the_librarian_only_through_its_seam():
+    tree = _tree(RUNTIME)
+    run = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_request")
+    inline = [
+        f"{sub.attr} (line {node.lineno})" for node in ast.walk(run) if isinstance(node, ast.Assign)
+        for target in node.targets for sub in ast.walk(target)
+        if isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name) and sub.value.id == "io_agent"
+        and sub.attr in _SEAM_OWNED
+    ]
+    assert not inline, f"run_request sets the librarian's fields inline: {inline}"
+
+
+def test_the_librarian_seam_wires_identity_folder_stop_channel_and_the_runs_one_store(tmp_path, monkeypatch):
     from auto_research.agents.roles import LibrarianIOAgent
     from auto_research.graph import runtime
     from auto_research.provenance import ReceiptStore
+    from auto_research.run_control import RunControl
 
-    monkeypatch.setattr(runtime, "agent_dir", lambda run_id, key: tmp_path / run_id / key)
-    monkeypatch.setattr(runtime, "run_dir", lambda run_id: tmp_path / run_id)
+    runs = tmp_path / "runtime" / "runs"  # the production layout: the ledger lands beside runs/
+    monkeypatch.setattr(runtime, "agent_dir", lambda run_id, key: runs / run_id / key)
+    monkeypatch.setattr(runtime, "run_dir", lambda run_id: runs / run_id)
+    control = RunControl()
     agent = LibrarianIOAgent(sources={}, storage=None)
-    runtime.attach_librarian_runtime(agent, run_id="r1")
-    assert (agent.agent_key, agent.report_dir) == ("librarian_io", tmp_path / "r1" / "librarian_io")
-    assert agent.receipts is ReceiptStore.for_run(tmp_path / "r1")
+    runtime.attach_librarian_runtime(agent, run_id="r1", run_control=control)
+    assert (agent.agent_key, agent.report_dir, agent.run_control) == ("librarian_io", runs / "r1" / "librarian_io", control)
+    assert agent.receipts is ReceiptStore.for_run(runs / "r1")
+    assert tmp_path in agent.receipts.root.parents  # nothing written outside this test's folder
+
+    prewired = LibrarianIOAgent(sources={}, storage=None)
+    prewired.agent_key, prewired.report_dir = "librarian_x", tmp_path / "mine"
+    runtime.attach_librarian_runtime(prewired, run_id="r1")
+    assert (prewired.agent_key, prewired.report_dir) == ("librarian_x", tmp_path / "mine")  # a pre-wired field stays
+
+
+def test_no_live_cell_builds_a_seat_without_its_call_settings():
+    """A bare `SeatOverride(provider, model)` drops the seat's pinned settings: an Anthropic seat then
+    runs without thinking at the API's 1024-token fallback, which cut every long report draft of the
+    2026-11-03 shape re-run mid-argument. Live cells use `tests.seats.seat` (pinned settings) or pass
+    `parameters=` explicitly."""
+    bare = []
+    for path in sorted(Path(__file__).parent.glob("test_live_*.py")):
+        for node in ast.walk(_tree(path)):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == "SeatOverride" \
+                    and not any(k.arg == "parameters" for k in node.keywords):
+                bare.append(f"{path.name}:{node.lineno}")
+    assert not bare, f"seats built without their call settings: {bare}"

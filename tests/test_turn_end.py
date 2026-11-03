@@ -248,13 +248,12 @@ def test_figures_nest_inside_the_tool_result_not_after_it(tmp_path):
     from auto_research.models.types import ToolResultMessage, ToolResultPart
     from auto_research.schemas import FigureRef
 
-    import base64
     from datetime import UTC, datetime
 
     png = tmp_path / "f.png"
-    png.write_bytes(base64.b64decode(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
-    ))
+    from tests.media_files import png_bytes
+
+    png.write_bytes(png_bytes())  # a real image: the media check withholds bytes that do not decode
     fig = FigureRef(
         path=str(png), caption="PD(E)", mime_type="image/png",
         produced_by="research_toolkit.t.plot", sha256="a" * 64, created_at=datetime.now(UTC),

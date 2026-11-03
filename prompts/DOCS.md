@@ -138,3 +138,7 @@ Compacted 2026-09-01, again 2026-09-24, 2026-10-07 and 2026-10-19 (every entry);
   channel moved to it). `reviewer.md`: "Writing for the human" (a plain-English briefing), numbers
   as value references, derived results checked against the source by a tool. Number forms in
   every role follow value references (`{{h#/key}}`).
+- 2026-11-03 — `analyst_worker.md`, `analyst_lead.md`, `reviewer.md`: a `$ref` names the worker's own
+  results; a peer's value enters a worker's calls once its own tool run reproduces it.
+- 2026-11-03 — `conventions.md`: a report a unit receives shows each referenced value followed by
+  its source, `1.23 [h#/k]`; a number with no source was typed by its writer.
