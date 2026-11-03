@@ -16,8 +16,9 @@ inbox (``RunControl``), read at its next loop boundary or by ``wait_for_reply``.
 LLM↔LLM reuses the human transport: the inbox that carries a human ``/steer`` carries a seat's text,
 and the human's reply travels the same :class:`~auto_research.hitl.base.HumanHandler` every role
 already used. **Texts are informal**: nothing here mints a receipt for a text, and a handle a text
-names becomes *viewable* for the recipient (``view_receipt``), never citable — every claim a seat
-makes rests on its own evidence. The files a human sends are the one exception: they are minted as
+names or attaches is listed for the recipient, never admitted to its citable scope — every claim a
+seat makes rests on its own evidence. Any seat may open any receipt of the run (user ruling
+2026-10-27), so the list says what to open; it grants nothing. The files a human sends are the one exception: they are minted as
 the sender's own receipts by ``hitl.attachments.mint_reply_attachments``.
 """
 
@@ -64,8 +65,6 @@ class SeatRouter:
         # The run's ReceiptStore: where the human's files are minted, and what view_receipt reads.
         self.store = store
         self._seats: dict[str, Seat] = {}
-        # seat → handles a delivered text named: shown by view_receipt, never admitted to a scope.
-        self._viewable: dict[str, set[str]] = {}
         # seat → questions to the human still awaiting an answer.
         self._open_human: dict[str, int] = {}
         # Seats a resume was started for and whose loop is not live yet (D5 review): a text in
@@ -100,17 +99,6 @@ class SeatRouter:
             return "finished its turn, a text resumes it"
         return "not started, reads a text when its turn begins"
 
-    def viewable(self, key: str | None) -> set[str]:
-        return set(self._viewable.get(key or "", ()))
-
-    def show(self, key: str, handles: Iterable[str]) -> None:
-        """Make ``handles`` viewable for ``key`` — the receipts a brief it was handed names.
-
-        Viewable, never citable, exactly like a message's: the seat can open them and pass them
-        to a tool by ``$ref``, and its claims rest on what its own tools return.
-        """
-        self._viewable.setdefault(key, set()).update(handles)
-
     def outstanding(self, key: str | None) -> list[str]:
         """What ``key`` could still hear back from: the human, and seats it resumed."""
         pending = ["the human"] if self._open_human.get(key or "", 0) > 0 else []
@@ -124,7 +112,6 @@ class SeatRouter:
         text: str,
         *,
         handles: Iterable[str] = (),
-        scope: Any | None = None,
         receipt_source: str | None = None,
         reply_dir: Path | None = None,
         kind: str = "clarify_science",
@@ -143,7 +130,7 @@ class SeatRouter:
                     True,
                 )
             return await self._to_human(
-                sender, text, handles=handles, scope=scope, receipt_source=receipt_source,
+                sender, text, handles=handles, receipt_source=receipt_source,
                 reply_dir=reply_dir, kind=kind, model=model,
             )
         if to == sender or to not in self._seats:
@@ -152,13 +139,12 @@ class SeatRouter:
                 f"Seats you can reach: {', '.join(self.directory(sender)) or 'none'}.",
                 True,
             )
-        return await self._to_seat(sender, to, text, handles=handles, scope=scope)
+        return await self._to_seat(sender, to, text, handles=handles)
 
     async def _to_seat(
-        self, sender: str, to: str, text: str, *, handles: list[str], scope: Any | None
+        self, sender: str, to: str, text: str, *, handles: list[str]
     ) -> tuple[str, bool]:
-        shown, problems = self._shareable(handles, scope)
-        self._viewable.setdefault(to, set()).update(shown)
+        shown, problems = self._named(handles, text)
         self.run_control.add_steer(to, text, sender=sender, kind="message", handles=tuple(shown))
         seat = self._seats[to]
         if self._busy(to):
@@ -186,16 +172,17 @@ class SeatRouter:
         await self._mirror(f"💬 {sender} → {to}\n\n{text}")
         return reply + "".join(f"\n{p}" for p in problems), False
 
-    def _shareable(self, handles: list[str], scope: Any | None) -> tuple[list[str], list[str]]:
-        """The handles the sender can itself see (only those may be shown to the recipient)."""
-        shown: list[str] = []
-        problems: list[str] = []
-        for handle in dict.fromkeys(handles):
-            visible = scope is not None and getattr(scope, "visible", lambda _h: False)(handle)
-            if visible:
-                shown.append(handle)
-            else:
-                problems.append(f"{handle} is not a receipt you can see, so it was not shared.")
+    def _named(self, attached: list[str], text: str) -> tuple[list[str], list[str]]:
+        """The receipts a text attaches or names, in order, listed for its recipient; a sentence
+        per attached handle that is not in this run (a handle-shaped word in prose is no claim)."""
+        from auto_research.provenance.refs import handles_named
+
+        named = list(dict.fromkeys([*attached, *handles_named(text)]))
+        if self.store is None:  # a router with no store (a test seat): nothing to check against
+            return named, []
+        shown = [h for h in named if self.store.get(h) is not None]
+        problems = [f"{h} is not a receipt of this run, so it was not listed; copy the handle exactly."
+                    for h in dict.fromkeys(attached) if self.store.get(h) is None]
         return shown, problems
 
     async def _to_human(
@@ -204,7 +191,6 @@ class SeatRouter:
         text: str,
         *,
         handles: list[str],
-        scope: Any | None,
         receipt_source: str | None,
         reply_dir: Path | None,
         kind: str,
@@ -216,10 +202,12 @@ class SeatRouter:
         if handles:
             from auto_research.hitl.attachments import resolve_attachments
 
-            if scope is None:
-                problems = [f"{h} was not attached: this seat has no receipts." for h in handles]
+            from auto_research.provenance.store import RunView
+
+            if self.store is None:
+                problems = [f"{h} was not attached: this run keeps no receipts." for h in handles]
             else:
-                attachments, problems = resolve_attachments(scope, handles)
+                attachments, problems = resolve_attachments(RunView(self.store), handles)
         query = HumanQuery(
             kind=kind if kind in ("clarify_science", "clarify_code", "blocked") else "clarify_science",
             message=text, asked_by=sender, model=model, attachments=attachments,

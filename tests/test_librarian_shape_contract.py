@@ -19,8 +19,9 @@ LIBRARIAN_CLAUSES = (
     "finding_without_support", "support_not_opened",
 )
 BINDING_CLAUSES = (
-    "unresolved", "flagged_quote", "attribution_without_locator", "quote_without_text",
-    "misquoted_span", "ungrounded_number",
+    "unresolved", "flagged_reference", "flagged_quote", "unreadable_reference",
+    "attribution_without_locator", "locator_on_result", "quoted_copy", "quote_without_text",
+    "misquoted_span", "leftover_markup", "typed_copy", "ungrounded_number",
 )
 
 

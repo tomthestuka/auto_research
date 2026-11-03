@@ -318,3 +318,6 @@ Compacted 2026-10-07 and 2026-10-19 (every entry); detail in git history.
   [A7] `AnalystReport.summary` defaults to "" (`turn_end` refuses an empty one).
 - 2026-10-26 — `Receipt.returned_sha256` (receipt references, `provenance.refs`): a toolkit
   tool's returned keys, stored by the runtime beside its result text.
+- 2026-10-27 — `ReviewerSection.body`, `ReviewerTable` and `rows` descriptions: a value a tool
+  returned is written as its reference `{{handle#/key}}`; a built table's numeric cell is a value
+  reference or a paper attribution.

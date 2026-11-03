@@ -144,8 +144,10 @@ returned tool-call name back to the canonical `kind` the sandbox routes on.
 Invariants:
 - `load()` prepends `toolkit_root` to `sys.path` only during import, then
   removes it. No ambient path pollution.
-- Tools in packages not in `_MANIFEST_MODULES` are silently skipped; add the
-  package name to `_MANIFEST_MODULES` to enable discovery.
+- A `*_utils` package that fails to import, or exposes no `TOOL_MANIFEST`, contributes no tools
+  and is recorded in `import_errors` (`{package: reason}`, logged); `check_toolkit_manifests(root=None)`
+  is the launch-time preflight that refuses a toolkit with any (2026-10-27; it was skipped
+  silently before).
 
 ### `envs.py` — software environments as objects (env plan B1, handoff [F18])
 
@@ -1425,3 +1427,7 @@ detail in git history.
   `_on_terminate`); `AuthoringSession.aclose` marks closed only after every step (`_closing`).
 - 2026-10-26 — `registry.REF_NOTE` appended to every toolkit tool's description (receipt
   references, `provenance.refs`; the constraint lives where the model reads it).
+- 2026-10-27 — `ToolkitRegistry.import_errors` and the `check_toolkit_manifests` preflight: a toolkit
+  package that fails to import or has no manifest is refused at launch, never skipped silently.
+- 2026-10-27 — `import_errors` also records a failed `reload` (the stale module is evicted so
+  `load` reports why) and an unreadable `tool_config.yaml` (its `env:` routing would drop silently).

@@ -84,7 +84,15 @@ The graph's `compose_report` node calls `publish_report`; the `.tex`/PDF already
   HtmlResult(html_path, problems, errors, chains)` — `numbers` is `check_report_fields(...,
   sources=True).numbers`; `ledger` the run's `monitor.jsonl` (absent: the chain shows no
   arguments). `check_page(path) -> list[str]`; `reproduce_code(receipt, call, lookup=None) -> (code,
-  args_json)` (a `$ref` argument is resolved in the code from the parent's stored bytes); `HTML_NAME` (`report.html`).
+  args_json)` (a `$ref` argument is resolved in the code from the parent's stored bytes; the
+  toolkit runs at the receipt's stamped commit — the checkout when its HEAD is that commit, else
+  that commit extracted with `git archive` into a temp folder; an in-process call with no recorded
+  module imports through its package's `TOOL_MANIFEST`); `HTML_NAME` (`report.html`).
+- A value reference `{{h#/pointer}}` renders at `provenance.bindings.display_value` (`2.48e7` as
+  2.48×10⁷ in HTML, `$2.48\times10^{7}$` in TeX); in HTML it opens a value-first popover (the full
+  value, the field, the result's chain one click further). A chain step shows its arguments as
+  `key = value` (a `$ref` argument as the value it carried and its source), inputs by name, and
+  hashes, commit and environment fingerprint in a collapsed **verify** section.
 - `publish_report(..., html_path=None)` mints `report.html` as a `rev:` receipt like the others.
 
 ## Dependencies
@@ -127,3 +135,13 @@ Compacted 2026-10-19 (every entry); detail in git history.
   and asserts its sha256 before use.
 - 2026-10-26 — Review round 2: `check_page` reads the two reproduce shapes as exact alternatives, and a
   call with references must use the `_ref(...)` shape.
+- 2026-10-27 — Value references render at their display value with a value-first popover (HTML)
+  and typeset in TeX; chain steps show arguments as values and fold hashes into **verify**; the
+  reproduce code runs the toolkit at the result's commit and imports an in-process call through
+  its manifest (run faraday-refs-20261026: 218 of 249 blocks ran the live checkout; the lead's
+  `data_catalog` block raised `NameError`). `_unbalanced` reads value references.
+- 2026-10-27 — Stateless review (confirmed, fixed): the reproduce code evicts the toolkit package from
+  `sys.modules` (a second block ran the first block's commit), extracts the commit when the checkout
+  is dirty, names git's reason when a commit cannot be read, and falls back for a Python without
+  extraction filters; only a float value is typeset as ×10ⁿ (`source1` read as `sourc×10¹`); a
+  nested `$ref` argument shows its value; one `_Resolved` per page.

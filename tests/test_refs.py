@@ -19,7 +19,7 @@ from auto_research.models import ModelResponse, ToolCall
 from auto_research.monitor.events import RunMonitor
 from auto_research.provenance import ReceiptStore
 from auto_research.provenance.calls import calls_by_receipt, ledger_calls
-from auto_research.provenance.refs import CONSOLE_SEPARATOR, handles_in_brief, returned_value
+from auto_research.provenance.refs import CONSOLE_SEPARATOR, handles_named, returned_value
 from auto_research.sandbox.runner import normalize_tool_raw
 from tests.test_sandbox import _FakeRegistry, _FakeSandbox
 
@@ -60,12 +60,12 @@ class _ScriptedModel:
         return ModelResponse(content="done")
 
 
-def _provider(tmp_path, store, *, ref_handles=None, source="analyst_worker_0"):
+def _provider(tmp_path, store, *, source="analyst_worker_0"):
     registry = _FakeRegistry(known={EXTRACT, FIT, BASH}, mcp={BASH},
                              schema={"properties": {"bins": {}, "cl": {}, "obsid": {}}})
     return SandboxToolProvider(registry, _FakeSandbox(tool_fn=_tool, mcp_fn=lambda k, a: {
         "exit_code": 0, "stdout": json.dumps({"bins": BINS}), "stderr": ""}),
-        cwd=tmp_path / source, receipts=store, receipt_source=source, ref_handles=ref_handles)
+        cwd=tmp_path / source, receipts=store, receipt_source=source)
 
 
 def _run(tmp_path, calls, store):
@@ -130,22 +130,18 @@ def test_a_reference_to_what_a_role_read_is_refused_and_nothing_runs(tmp_path):
     assert len(store.receipts(source="analyst_worker_0")) == 1
 
 
-def test_a_peer_result_resolves_only_once_it_was_handed_over(tmp_path):
+def test_any_result_of_the_run_resolves_and_a_handle_not_in_it_is_refused(tmp_path):
     store = ReceiptStore(tmp_path / "receipts")
     peer = _provider(tmp_path, store, source="analyst_worker_1")
     asyncio.run(peer.execute(EXTRACT, {"obsid": "01"}))  # analyst_worker_1:r1
-    ref = {"bins": {"$ref": "analyst_worker_1:r1#/bins"}}
 
-    alone = _provider(tmp_path, store)
-    out = asyncio.run(alone.execute(FIT, ref))
-    assert out.is_error and "not a receipt you can pass on" in out.text
-
-    handed: set[str] = set()
-    worker = _provider(tmp_path, store, ref_handles=lambda: handed)
-    handed.add("analyst_worker_1:r1")  # read at call time: a message naming it mid-turn counts
-    out = asyncio.run(worker.execute(FIT, ref))
+    worker = _provider(tmp_path, store)  # never handed it: view is global (ruling 2026-10-27)
+    out = asyncio.run(worker.execute(FIT, {"bins": {"$ref": "analyst_worker_1:r1#/bins"}}))
     assert not out.is_error
     assert store.get("analyst_worker_0:r1").parents == ["analyst_worker_1:r1"]
+
+    out = asyncio.run(worker.execute(FIT, {"bins": {"$ref": "analyst_worker_1:r9#/bins"}}))
+    assert out.is_error and "not a receipt of this run" in out.text
 
 
 def test_a_pointer_token_a_model_could_write_never_raises_past_the_provider(tmp_path):
@@ -211,13 +207,9 @@ def test_values_copied_by_hand_are_refused_with_the_reference_to_write(tmp_path)
     assert not out.is_error and store.get("analyst_worker_0:r2").parents == ["analyst_worker_0:r1"]
 
 
-def test_a_brief_names_only_toolkit_results(tmp_path):
-    store = ReceiptStore(tmp_path / "receipts")
-    tools = _provider(tmp_path, store)
-    asyncio.run(tools.execute(EXTRACT, {"obsid": "01"}))  # r1, a toolkit result
-    asyncio.run(tools.execute(BASH, {"command": "ls"}))   # r2, shell output
-    text = "Refit with the bins of [analyst_worker_0:r1] and analyst_worker_0:r2; see analyst_worker_0:r9."
-    assert handles_in_brief(store, text) == ["analyst_worker_0:r1"]
+def test_a_text_names_its_handles_bracketed_or_bare_once_each():
+    text = "Refit with [analyst_worker_0:r1] and analyst_worker_0:r2, then [analyst_worker_0:r1]; see lib:p3."
+    assert handles_named(text) == ["analyst_worker_0:r1", "analyst_worker_0:r2", "lib:p3"]
 
 
 def test_the_reproduce_code_feeds_the_tool_the_values_the_call_received(tmp_path, monkeypatch):
@@ -239,8 +231,8 @@ def test_the_reproduce_code_feeds_the_tool_the_values_the_call_received(tmp_path
     assert namespace["out"] == tools.sandbox.tool_calls[1][2] == {"bins": BINS[0]}
 
 
-def test_a_worker_passes_on_a_result_its_brief_names_and_nothing_else(tmp_path):
-    """The role's own wiring (`AnalystWorkerAgent.analyze`): a result the task names is passable."""
+def test_a_worker_passes_on_any_result_of_the_run_whether_or_not_its_brief_names_it(tmp_path):
+    """The role's own wiring (`AnalystWorkerAgent.analyze`): view is global (ruling 2026-10-27)."""
     from types import SimpleNamespace
 
     from auto_research.provenance.capture import receipt_call
@@ -267,8 +259,7 @@ def test_a_worker_passes_on_a_result_its_brief_names_and_nothing_else(tmp_path):
             return ModelResponse(tool_calls=[ToolCall(id="t", name="turn_end", arguments={})])
 
     def worker(name: str):
-        agent = AnalystWorkerAgent(model=_Model(), available_toolkits=[],
-                                   sandbox=_FakeSandbox(tool_fn=_tool), registry=_FakeRegistry(known={FIT}, mcp=set()))
+        agent = AnalystWorkerAgent(model=_Model(), sandbox=_FakeSandbox(tool_fn=_tool), registry=_FakeRegistry(known={FIT}, mcp=set()))
         agent.agent_key, agent.report_dir, agent.receipts = name, tmp_path / name, store
         return agent
 
@@ -279,25 +270,8 @@ def test_a_worker_passes_on_a_result_its_brief_names_and_nothing_else(tmp_path):
 
     unbriefed = worker("analyst_worker_2")
     asyncio.run(unbriefed.analyze(AnalysisTask(question="refit")))
-    assert unbriefed.sandbox.tool_calls == []  # the reference was refused; nothing ran
-
-
-def test_a_brief_naming_a_result_its_author_cannot_open_is_refused_at_turn_end(tmp_path):
-    from auto_research.agents.reviewer_tools import reviewer_turn_problems
-    from auto_research.schemas.review import ReviewerReport
-
-    store = ReceiptStore(tmp_path / "receipts")
-    for source in ("analyst_worker_0", "analyst_worker_1"):
-        store.mint(source=source, kind="result", produced_by=EXTRACT, data=json.dumps({"bins": BINS}))
-    report = ReviewerReport(rationale="r", assign_to="analysts",
-                            follow_up="Rerun the scan with the bounds in [analyst_worker_1:r1].")
-    problems = reviewer_turn_problems(report, lookup=store, scope=["analyst_worker_0:r1"],
-                                      budgets={"analysts": 1})
-    assert any("analyst_worker_1:r1, which you cannot open" in p for p in problems)
-    report.follow_up = "Rerun the scan with the bounds in [analyst_worker_0:r1]."
-    problems = reviewer_turn_problems(report, lookup=store, scope=["analyst_worker_0:r1"],
-                                      budgets={"analysts": 1})
-    assert not any("cannot open" in p for p in problems)
+    assert unbriefed.sandbox.tool_calls[0][2] == {"bins": BINS}
+    assert store.get("analyst_worker_2:r1").parents == [peer.handle]
 
 
 def test_a_reference_reads_the_returned_value_and_refuses_it_once_tampered(tmp_path):
@@ -394,7 +368,7 @@ def test_a_reference_keeps_the_key_order_the_tool_returned(tmp_path):
     assert list(tools.sandbox.tool_calls[1][2]["bins"]) == ["2-3 keV", "3-5 keV", "10-12 keV"]
 
 
-def test_the_brief_check_reads_bracketed_handles_and_accepts_what_a_message_showed(tmp_path):
+def test_the_brief_check_reads_bracketed_handles_and_refuses_one_not_in_the_run(tmp_path):
     from auto_research.agents.reviewer_tools import reviewer_turn_problems
     from auto_research.schemas.review import ReviewerReport
 
@@ -402,13 +376,15 @@ def test_the_brief_check_reads_bracketed_handles_and_accepts_what_a_message_show
     store.mint(source="analyst_worker_1", kind="result", produced_by=EXTRACT, data=json.dumps({"bins": BINS}))
     report = ReviewerReport(rationale="r", assign_to="analysts",
                             follow_up="Fit powerlaw:p1 with gauss:r2 using [analyst_worker_1:r1].")
-    refused = reviewer_turn_problems(report, lookup=store, scope=[], budgets={"analysts": 1})
-    assert [p for p in refused if "cannot open" in p] == [
-        "follow_up names analyst_worker_1:r1, which you cannot open. Name the results you can open "
-        "(your own, and those the reports you received cite), copying each handle exactly."]
-    shown = reviewer_turn_problems(report, lookup=store, scope=[], budgets={"analysts": 1},
-                                   viewable={"analyst_worker_1:r1"}.__contains__)
-    assert not [p for p in shown if "cannot open" in p]
+    in_run = lambda h: store.get(h) is not None  # the runtime's predicate (roles._seat_viewable)
+    ok = reviewer_turn_problems(report, lookup=store, scope=[], budgets={"analysts": 1}, viewable=in_run)
+    assert not [p for p in ok if "of this run" in p]
+    mistyped = report.model_copy(update={"follow_up": "Fit using [analyst_worker_1:r7]."})
+    refused = reviewer_turn_problems(mistyped, lookup=store, scope=[], budgets={"analysts": 1},
+                                     viewable=in_run)
+    assert [p for p in refused if "of this run" in p] == [
+        "follow_up names analyst_worker_1:r7, which is not a receipt of this run. Copy each handle "
+        "exactly as a tool result or report shows it."]
 
 
 def test_the_page_check_refuses_a_reproduce_block_of_the_wrong_shape(tmp_path):
@@ -422,3 +398,34 @@ def test_the_page_check_refuses_a_reproduce_block_of_the_wrong_shape(tmp_path):
         page.write_text(f'<html><body><button class="copy" data-code="{escape(code)}" '
                         f'data-args="{escape(args)}">c</button><script></script></body></html>')
         assert [e for e in check_page(page) if "reproduce block" in e], code
+
+
+def test_a_negated_or_rounded_copy_is_refused_with_the_reference(tmp_path):
+    """Run faraday-refs-20261026: ``|ci_lo|`` typed as 0.37959418926306543 passed the exact check."""
+    store = ReceiptStore(tmp_path / "receipts")
+    tools = _provider(tmp_path, store)
+    asyncio.run(tools.execute(EXTRACT, {"obsid": "01"}))  # r1 holds BINS
+    q = BINS[1]["q"]  # negative in BINS
+    out = asyncio.run(tools.execute(FIT, {"bins": [], "cl": -q}))
+    assert out.is_error and "with its sign flipped" in out.text and "analyst_worker_0:r1#/bins/1/q" in out.text
+    out = asyncio.run(tools.execute(FIT, {"bins": [], "cl": round(BINS[0]["q"], 8)}))
+    assert out.is_error and "rounded" in out.text and "analyst_worker_0:r1#/bins/0/q" in out.text
+    assert len(tools.sandbox.tool_calls) == 1  # neither copy ran
+    # A chosen 4-digit parameter near a result runs: short values collide (review 2026-10-27).
+    out = asyncio.run(tools.execute(FIT, {"bins": [], "cl": round(BINS[0]["q"], 5)}))
+    assert not out.is_error
+
+
+def test_a_value_copied_from_a_file_the_caller_read_is_refused_with_the_file(tmp_path):
+    """Run faraday-refs-20261026: 30 values typed from a CSV the worker had read reached a fit."""
+    store = ReceiptStore(tmp_path / "receipts")
+    read = store.mint(source="analyst_worker_0", kind="result", produced_by="read_file",
+                      data="E,pa\n2.5,12.3456789\n3.5,13.987654\n")
+    tools = _provider(tmp_path, store)
+    out = asyncio.run(tools.execute(FIT, {"bins": [{"pa": 12.3456789}]}))
+    assert out.is_error and f"copied from {read.handle}, a file you read" in out.text
+    assert tools.sandbox.tool_calls == []
+    peer_read = store.mint(source="analyst_worker_1", kind="result", produced_by="read_file",
+                           data="x,7.6543219\n")
+    out = asyncio.run(tools.execute(FIT, {"bins": [{"pa": 7.6543219}]}))  # a peer's read: view is global
+    assert out.is_error and f"copied from {peer_read.handle}" in out.text

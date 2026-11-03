@@ -171,7 +171,6 @@ def _worker(tmp_path, adapter, index: int, monitor: RunMonitor) -> AnalystWorker
     worker = AnalystWorkerAgent(
         model=handle,
         prompt="p",
-        available_toolkits=[],
         sandbox=_FakeSandbox(tool_fn=lambda m, f, a: {
             "exit_code": 0, "stdout": "loaded", "figures": [fig]}),
         registry=_FakeRegistry(known={"tk_load"}, mcp=set()),
@@ -548,7 +547,7 @@ def test_a_text_held_behind_a_server_tool_is_requeued_once(tmp_path, monkeypatch
         asyncio.run(worker.analyze(AnalysisTask(question="q")))
     assert not any("background region" in _text(m) for m in adapter.requests[0])
     entries = worker.run_control.drain_inbox("analyst_worker_0")
-    assert [e.render() for e in entries] == ["[Human steer] check the background region"]
+    assert [e.render().split("\n\n")[0] for e in entries] == ["[Human steer] check the background region"]
     (event,) = _events(monitor, "analyst_worker.analyze.provider_error")
     assert event.data["requeued_texts"] == 1
 

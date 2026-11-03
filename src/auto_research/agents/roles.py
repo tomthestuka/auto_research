@@ -574,7 +574,7 @@ class AgentRole:
         return None, True
 
     def _viewable_by_message(self, handle: str) -> bool:
-        """A handle a message this seat received named: openable, so a brief may name it."""
+        """A receipt of this run: any seat may open it, so a brief may name it (view is global)."""
         return _seat_viewable(self, handle)
 
     def ensure_run_control(self) -> Any:
@@ -1931,12 +1931,12 @@ class ReviewerAgent(AgentRole):
             "arrived": arrived,
             "your_turn": _review_instruction(arrived, budgets, human_attended),
             "your_earlier_reports": [_earlier_report(r) for r in previous],
-            "literature_reports": [lit.model_dump(mode="json") for lit in literature_now],
+            "literature_reports": [_for_reader(lit, self.receipts) for lit in literature_now],
             "literature_documents": [
                 {"handle": h, "title": getattr(r, "title", None), "ids": getattr(r, "ids", {})}
                 for h, r in (literature_receipts or {}).items()
             ],
-            "analysis_report": report_now.model_dump(mode="json") if report_now else None,
+            "analysis_report": _for_reader(report_now, self.receipts) if report_now else None,
             "human_nudges": list(human_nudges),
             "human_files": [_human_file(store, h) for h in human_files],
             "figures_you_can_place": [
@@ -2256,7 +2256,6 @@ class AnalystWorkerAgent(AgentRole):
     def __init__(
         self,
         *,
-        available_toolkits: Sequence[str] = ("research_toolkit.xspec_utils",),
         sandbox: Any | None = None,  # PersistentSandbox | None — avoid circular import
         registry: Any | None = None,  # ToolkitRegistry | None
         worker_index: int = 0,
@@ -2274,7 +2273,6 @@ class AnalystWorkerAgent(AgentRole):
             prompt=prompt,
             monitor=monitor,
         )
-        self.available_toolkits = tuple(available_toolkits)
         self.sandbox = sandbox
         self.registry = registry
         self.worker_index = worker_index
@@ -2314,9 +2312,8 @@ class AnalystWorkerAgent(AgentRole):
         self.last_tool_results = []
         self._figure_catalog.setdefault("self", [])
         payload = {
-            "task": task.model_dump(mode="json"),
-            "peer_reports": [report.model_dump(mode="json") for report in peer_reports],
-            "available_toolkits": list(self.available_toolkits),
+            "task": _for_reader(task, self.receipts),
+            "peer_reports": [_for_reader(report, self.receipts) for report in peer_reports],
             # The software environment its tools run in, named up front (env plan B2a); `list_env`
             # shows its packages.
             "environment": _environment_brief(self.sandbox),
@@ -2338,27 +2335,12 @@ class AnalystWorkerAgent(AgentRole):
         cwd = self.report_dir
         task_receipt = _mint_task_input(self.receipts, task)
         workspace = self._make_report_workspace(peer_reports)
-        # The toolkit results the task names (a lead's probe, a reviewer's follow-up): openable and
-        # passable by `$ref`, never citable — the worker's claims rest on what its tools return.
-        brief = _brief_handles(self.receipts, task)
-        channel = getattr(self, "channel", None)
-        if channel is not None and brief:
-            channel.show(self.agent_key, brief)
-        scope = getattr(workspace, "receipts", None)
-
-        def ref_handles() -> set[str]:
-            usable = set(scope.handles()) if scope is not None else set()
-            if channel is not None:
-                usable |= channel.viewable(self.agent_key)
-            return usable | set(brief)
-
         provider = SandboxToolProvider(
             self.registry, self.sandbox, cwd=cwd, web_source=WebSource(),
             figure_sink=self._figure_catalog["self"],
             report_workspace=workspace,
             receipts=self.receipts,
             receipt_source=self.agent_key if self.receipts is not None else None,
-            ref_handles=ref_handles,
         )
         history, history_base = await self._history_seed()
         peer_figures, not_attached = self._task_figures(peer_figures, continued=bool(history))
@@ -2493,20 +2475,30 @@ def _mint_task_input(store: ReceiptStore | None, task: Any) -> str | None:
     return None
 
 
+def _for_reader(item: Any, store: ReceiptStore | None) -> Any:
+    """A report or task as another unit reads it: each value reference followed by its value
+    (``{{h#/k}} (= 2.72)``), so the reader reasons with the number and cites it by the reference."""
+    dumped = item.model_dump(mode="json")
+    if store is None:
+        return dumped
+    from auto_research.provenance.bindings import render_values
+
+    def walk(value: Any) -> Any:
+        if isinstance(value, str):
+            return render_values(value, store) if "{{" in value else value
+        if isinstance(value, list):
+            return [walk(v) for v in value]
+        if isinstance(value, dict):
+            return {k: walk(v) for k, v in value.items()}
+        return value
+
+    return walk(dumped)
+
+
 def _seat_viewable(seat: Any, handle: str) -> bool:
-    """Whether a message the seat received named ``handle`` (openable with ``view_receipt``)."""
-    channel = getattr(seat, "channel", None)
-    return channel is not None and handle in channel.viewable(getattr(seat, "agent_key", None))
-
-
-def _brief_handles(store: ReceiptStore | None, task: Any) -> list[str]:
-    """The toolkit results a task's text names — the handles a probe or follow-up points at."""
-    if store is None or task is None:
-        return []
-    from auto_research.provenance.refs import handles_in_brief
-
-    text = "\n".join(filter(None, [getattr(task, "question", ""), getattr(task, "instructions", "")]))
-    return handles_in_brief(store, text)
+    """Whether ``handle`` is a receipt of the seat's run (openable with ``view_receipt``)."""
+    store = getattr(seat, "receipts", None)
+    return store is not None and store.get(handle) is not None
 
 
 def _receipt_scope(
@@ -3126,7 +3118,6 @@ class AnalystLeadAgent(AgentRole):
     def __init__(
         self,
         *,
-        available_toolkits: Sequence[str] = ("research_toolkit.xspec_utils",),
         model: CallableModel | None = None,
         model_group: ModelGroupHandle | None = None,
         model_name: str | None = None,
@@ -3140,7 +3131,6 @@ class AnalystLeadAgent(AgentRole):
             prompt=prompt,
             monitor=monitor,
         )
-        self.available_toolkits = tuple(available_toolkits)
         # V-4: stable working-folder key + report dir (set by runtime). The lead's figure catalog is
         # keyed by *worker* source (one list per worker), accumulated append-only across debate rounds
         # AND rework iterations (the lead instance persists), so a figure produced any round stays
@@ -3288,10 +3278,9 @@ class AnalystLeadAgent(AgentRole):
             return outcome
 
         payload = {
-            "task": task.model_dump(mode="json"),
-            "worker_reports": [report.model_dump(mode="json") for report in reports],
+            "task": _for_reader(task, self.receipts),
+            "worker_reports": [_for_reader(report, self.receipts) for report in reports],
             "worker_sources": source_keys,
-            "available_toolkits": list(self.available_toolkits),
             "your_turn": _cycle_instruction(cycle, reports, rounds_left),
         }
         history, history_base = await self._history_seed()
@@ -3889,7 +3878,6 @@ class ChannelTools:
             text, is_error = await router.send(
                 key or role.role, str(arguments.get("to") or ""), str(arguments.get("text") or ""),
                 handles=[str(h) for h in (arguments.get("attachments") or [])],
-                scope=scope,
                 receipt_source=getattr(scope, "own_source", None)
                 or getattr(self._base, "receipt_source", None),
                 reply_dir=_reply_dir_for(getattr(self._base, "cwd", None) or getattr(role, "report_dir", None)),
@@ -3907,8 +3895,9 @@ class ChannelTools:
                 f"\n- coder — the coding agent writing the tool you briefed; {state}."
             ))
         if name == VIEW_RECEIPT_TOOL:
+            store = router.store if router.store is not None else getattr(role, "receipts", None)
             return await execute_view_receipt(
-                _seat_scope(self._base), router.viewable(key), router.store, arguments,
+                store, arguments,
                 images_ok=bool(getattr(getattr(role.model, "config", None), "vision", True)),
             )
         if name == WAIT_FOR_REPLY_TOOL:

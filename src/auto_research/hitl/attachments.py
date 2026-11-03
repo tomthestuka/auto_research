@@ -39,17 +39,18 @@ def _file_for(receipt: Receipt) -> tuple[Path, str]:
 def resolve_attachments(
     lookup: Any, handles: Iterable[str]
 ) -> tuple[list[HumanAttachment], list[str]]:
-    """Resolve receipt handles to attachments inside ``lookup`` (the sender's ``ScopedLookup``).
+    """Resolve receipt handles to attachments inside ``lookup`` (the run's ``RunView``: any receipt
+    of the run may be shown, user ruling 2026-10-27).
 
     Returns the attachments and one model-readable sentence per handle that could not be attached:
-    not a receipt the sender may cite, or bytes that no longer match the receipt's hash.
+    not a receipt of the run, or bytes that no longer match the receipt's hash.
     """
     attachments: list[HumanAttachment] = []
     problems: list[str] = []
     for handle in dict.fromkeys(h.strip() for h in handles if h and h.strip()):
         receipt = lookup.get(handle)
         if receipt is None:
-            problems.append(f"{handle} is not a receipt you can cite, so it was not attached.")
+            problems.append(f"{handle} is not a receipt of this run, so it was not attached.")
             continue
         path, filename = _file_for(receipt)
         # The bytes sent are the bytes checked (F26): read once without following a symlink, kept

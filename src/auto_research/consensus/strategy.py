@@ -299,6 +299,14 @@ class DebateToConverge:
         if outcome.committed >= 1:
             if self.registry is not None and hasattr(self.registry, "reload"):
                 self.registry.reload()
+                broken = dict(getattr(self.registry, "import_errors", None) or {})
+                if broken:  # the commit's package (or another) now exposes no tools: say so loudly
+                    await _record(
+                        self.monitor, "analyst.toolkit.load_error", level=2,
+                        summary="toolkit packages expose no tools after the reload: "
+                        + "; ".join(f"{pkg} ({why})" for pkg, why in sorted(broken.items())),
+                        data={"import_errors": broken},
+                    )
             for worker in workers:
                 sandbox = getattr(worker, "sandbox", None)
                 if sandbox is not None and hasattr(sandbox, "restart"):

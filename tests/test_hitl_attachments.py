@@ -24,7 +24,10 @@ def _png(path: Path, size=(40, 30)) -> Path:
 # ── resolve_attachments / mint_reply_attachments ─────────────────────────────
 
 
-def test_resolve_attaches_what_the_sender_may_cite_and_names_the_rest(tmp_path):
+def test_resolve_attaches_any_receipt_of_the_run_and_names_the_rest(tmp_path):
+    """The router resolves a text's attachments through the run's `RunView` (view is global)."""
+    from auto_research.provenance import RunView
+
     store = ReceiptStore(tmp_path / "receipts")
     fig = store.mint(source="analyst_worker_0", kind="figure", produced_by="t",
                      path=_png(tmp_path / "w0" / "pd.png"), caption="PD vs energy", mime_type="image/png")
@@ -34,18 +37,16 @@ def test_resolve_attaches_what_the_sender_may_cite_and_names_the_rest(tmp_path):
     text = store.mint(source="analyst_worker_0", kind="result", produced_by="t", data="fit ok")
     peer = store.mint(source="analyst_worker_1", kind="figure", produced_by="t",
                       path=_png(tmp_path / "w1" / "x.png"), caption="peer", mime_type="image/png")
-    scope = ScopedLookup(store, own_source="analyst_worker_0")
-
     atts, problems = resolve_attachments(
-        scope, [fig.handle, data.handle, text.handle, peer.handle, fig.handle, " "]
+        RunView(store), [fig.handle, data.handle, text.handle, peer.handle, fig.handle, " ", "analyst_worker_9:r4"]
     )
 
-    assert [a.handle for a in atts] == [fig.handle, data.handle, text.handle]  # deduped, ordered
+    assert [a.handle for a in atts] == [fig.handle, data.handle, text.handle, peer.handle]  # deduped, ordered
     assert atts[0].filename == "pd.png" and atts[0].mime_type == "image/png"
     assert atts[0].caption == "PD vs energy"
     assert atts[1].mime_type == "text/csv"
     assert atts[2].filename == "analyst_worker_0_r1.txt" and atts[2].mime_type == "text/plain"
-    assert problems == [f"{peer.handle} is not a receipt you can cite, so it was not attached."]
+    assert problems == ["analyst_worker_9:r4 is not a receipt of this run, so it was not attached."]
 
 
 def test_bytes_changed_after_their_receipt_are_still_sent_with_an_alert(tmp_path):

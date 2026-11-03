@@ -122,7 +122,7 @@ def test_live_one_seat_two_turns_compaction_and_boundary_eviction(tmp_path, monk
     monkeypatch.setattr(AnthropicProvider, "call", observed)
 
     worker = AnalystWorkerAgent(
-        model=handle, available_toolkits=[], sandbox=_FakeSandbox(tool_fn=plot),
+        model=handle, sandbox=_FakeSandbox(tool_fn=plot),
         registry=_FakeRegistry(known={"tk_plot"}, mcp=set()), monitor=monitor,
     )
     worker.agent_key = KEY

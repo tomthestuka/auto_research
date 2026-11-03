@@ -145,7 +145,7 @@ def test_a_text_to_a_seat_that_has_not_started_waits_in_its_inbox():
     assert control.resumed_by("analyst_worker_0") == []
 
 
-def test_a_text_mints_no_receipt_and_a_named_handle_is_viewable_never_citable(tmp_path):
+def test_a_text_mints_no_receipt_lists_the_handles_it_names_and_widens_no_citable_scope(tmp_path):
     store = ReceiptStore(tmp_path / "receipts")
     figure = tmp_path / "fig.png"
     figure.write_bytes(b"\x89PNG\r\n\x1a\nfake")
@@ -153,7 +153,9 @@ def test_a_text_mints_no_receipt_and_a_named_handle_is_viewable_never_citable(tm
         source="analyst_worker_0", kind="figure", produced_by="plot", path=figure,
         caption="light curve", mime_type="image/png",
     )
-    sender_scope = ScopedLookup(store, own_source="analyst_worker_0")
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake paper")
+    paper = store.mint(source="lib", kind="paper", produced_by="read_paper", path=pdf, title="A paper")
     recipient_scope = ScopedLookup(store, own_source="analyst_lead")
     before = len(store.receipts())
 
@@ -162,20 +164,46 @@ def test_a_text_mints_no_receipt_and_a_named_handle_is_viewable_never_citable(tm
     router.register("analyst_worker_0", SimpleNamespace())
     router.register("analyst_lead", SimpleNamespace(has_kept_turn=lambda: False))
     text, is_error = _run(router.send(
-        "analyst_worker_0", "analyst_lead", "see the dip",
-        handles=[minted.handle, "analyst_worker_1:f9"], scope=sender_scope,
+        "analyst_worker_0", "analyst_lead", f"see the dip; the value is in [{paper.handle}]",
+        handles=[minted.handle, "analyst_worker_1:f9"],
     ))
-    assert not is_error and "analyst_worker_1:f9 is not a receipt you can see" in text
+    assert not is_error and "analyst_worker_1:f9 is not a receipt of this run" in text
     assert len(store.receipts()) == before, "a text is informal: nothing is minted for it"
     assert not recipient_scope.visible(minted.handle), "a text widens no citable scope"
-    shown = _run(execute_view_receipt(
-        recipient_scope, router.viewable("analyst_lead"), store, {"handle": minted.handle}
-    ))
+    (entry,) = control.drain_inbox("analyst_lead")
+    assert entry.handles == (minted.handle, paper.handle)  # attached, then named in the prose
+    rendered = entry.render()
+    assert rendered.startswith("[Message from analyst_worker_0] see the dip")
+    assert f"open each with view_receipt): {minted.handle}, {paper.handle}" in rendered
+    assert 'message(to="analyst_worker_0")' in rendered
+
+
+def test_any_seat_opens_any_receipt_of_the_run_and_a_paper_arrives_as_its_pdf(tmp_path):
+    store = ReceiptStore(tmp_path / "receipts")
+    figure = tmp_path / "fig.png"
+    figure.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    minted = store.mint(source="analyst_worker_0", kind="figure", produced_by="plot", path=figure,
+                        caption="light curve", mime_type="image/png")
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake paper")
+    paper = store.mint(source="lib", kind="paper", produced_by="read_paper", path=pdf, title="A paper")
+
+    shown = _run(execute_view_receipt(store, {"handle": minted.handle}))  # never sent to anyone
     assert not shown.is_error and shown.figures and shown.figures[0].sha256 == minted.sha256
-    refused = _run(execute_view_receipt(
-        recipient_scope, router.viewable("analyst_lead"), store, {"handle": "analyst_worker_1:f9"}
-    ))
-    assert refused.is_error
+    opened = _run(execute_view_receipt(store, {"handle": paper.handle}))
+    assert not opened.is_error and opened.documents and opened.documents[0].sha256 == paper.sha256
+    refused = _run(execute_view_receipt(store, {"handle": "analyst_worker_1:f9"}))
+    assert refused.is_error and "not a receipt of this run" in refused.text
+
+
+def test_a_steer_and_a_reply_name_the_human_as_the_address_and_a_notice_names_none():
+    from auto_research.run_control import InboxEntry
+
+    steer = InboxEntry("human", "check the background", kind="steer").render()
+    assert steer.startswith("[Human steer] check the background") and 'message(to="human")' in steer
+    reply = InboxEntry("human", "use 2-8 keV", kind="reply").render()
+    assert reply.startswith("[Reply from the human] use 2-8 keV") and 'message(to="human")' in reply
+    assert InboxEntry("runtime", "w0 ended its turn.", kind="notice").render() == "[Notice] w0 ended its turn."
 
 
 # ── the human ─────────────────────────────────────────────────────────────────
@@ -203,7 +231,7 @@ def test_a_text_to_the_human_returns_at_once_and_the_reply_arrives_as_a_nudge(tm
                 break
             await asyncio.sleep(0.01)
         [entry] = control.drain_inbox("analyst_lead")
-        assert entry.kind == "reply" and entry.render() == "[Reply from the human] use 2-8 keV"
+        assert entry.kind == "reply" and entry.render().startswith("[Reply from the human] use 2-8 keV")
         assert router.outstanding("analyst_lead") == []
 
     before = len(store.receipts())

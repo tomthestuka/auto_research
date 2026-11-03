@@ -46,6 +46,12 @@ PROMPT_FILENAMES: dict[PromptRole, str] = {
 
 FORBIDDEN_RUNTIME_REFERENCES = ("CLAUDE.md", "DOCS.md", "AGENTS.md")
 
+#: The roles that are team units: each one's system prompt is the shared conventions, then its own.
+UNIT_ROLES: frozenset[PromptRole] = frozenset({"reviewer", "librarian_io", "analyst_worker", "analyst_lead"})
+
+#: What every unit follows (receipts, evidence, how to write a number, the channel, the one exit).
+CONVENTIONS_FILENAME = "conventions.md"
+
 
 def prompts_dir(root: Path | None = None) -> Path:
     """Return the directory containing runtime prompt files."""
@@ -56,12 +62,19 @@ def prompts_dir(root: Path | None = None) -> Path:
 
 
 def load_prompt(role: PromptRole, *, root: Path | None = None) -> str:
-    """Load one runtime prompt and reject build-time governance references."""
+    """Load one runtime prompt and reject build-time governance references.
 
-    prompt_path = prompts_dir(root) / PROMPT_FILENAMES[role]
-    content = prompt_path.read_text(encoding="utf-8").strip()
-    forbidden = [name for name in FORBIDDEN_RUNTIME_REFERENCES if name in content]
-    if forbidden:
-        names = ", ".join(forbidden)
-        raise ValueError(f"Runtime prompt {prompt_path} references forbidden file(s): {names}")
-    return content
+    A unit role's prompt is ``conventions.md`` followed by the role's own file: what every unit
+    follows, then its job and the scope it owns in the graph.
+    """
+
+    names = ([CONVENTIONS_FILENAME] if role in UNIT_ROLES else []) + [PROMPT_FILENAMES[role]]
+    parts = []
+    for name in names:
+        prompt_path = prompts_dir(root) / name
+        content = prompt_path.read_text(encoding="utf-8").strip()
+        forbidden = [ref for ref in FORBIDDEN_RUNTIME_REFERENCES if ref in content]
+        if forbidden:
+            raise ValueError(f"Runtime prompt {prompt_path} references forbidden file(s): {', '.join(forbidden)}")
+        parts.append(content)
+    return "\n\n".join(parts)

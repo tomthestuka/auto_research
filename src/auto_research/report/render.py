@@ -111,7 +111,9 @@ def _inline(text: str, ctx: _Context) -> str:
     marked = text
     for binding in reversed(parse_bindings(text, own_source=ctx.own_source)):
         ctx.note(binding.handle)
-        if binding.quote is None:
+        if binding.pointer is not None:
+            latex = _value_latex(binding, ctx)
+        elif binding.quote is None:
             latex = ctx.cite(binding.handle)
         elif binding.locator:
             # A value attributed to a paper: typeset as written, followed by its reference, so the
@@ -121,6 +123,18 @@ def _inline(text: str, ctx: _Context) -> str:
             latex = latex_escape(binding.quote)
         marked = marked[: binding.start] + slot(latex) + marked[binding.end :]
     return _SLOT_RE.sub(lambda m: rendered[int(m.group(1))], latex_escape(marked))
+
+
+def _value_latex(binding, ctx: _Context) -> str:
+    """A value reference typeset at its display form (``2.48e7`` → $2.48\\times10^{7}$)."""
+    from auto_research.provenance.bindings import display_value, referenced_value
+
+    value = referenced_value(ctx.lookup, binding)
+    shown = display_value(value)
+    mantissa, sep, power = shown.partition("e")
+    if isinstance(value, float) and sep and re.fullmatch(r"-?[0-9]+", power):
+        return f"${latex_escape(mantissa)}\\times10^{{{int(power)}}}$"
+    return latex_escape(shown)
 
 
 def _block(text: str, ctx: _Context) -> str:
@@ -234,7 +248,7 @@ def check_table(
         rows = ", ".join("the columns" if i == 0 else f"row {i}" for i in split)
         return None, None, [
             f"{label}: a quote or citation in {rows} is split across cells. Keep each "
-            '{{handle "…"}} and [handle] within one cell.'
+            '{{handle#/key}}, {{handle "…"}} and [handle] within one cell.'
         ]
     return None, None, []
 
@@ -242,9 +256,9 @@ def check_table(
 def _unbalanced(cell: str) -> bool:
     """A cell holding part of a quote binding: once its whole bindings are taken out (a quote may
     itself hold braces, a dict a tool printed), a ``{{`` or ``}}`` is left over."""
-    from auto_research.provenance.bindings import QUOTE_RE
+    from auto_research.provenance.bindings import QUOTE_RE, VALUE_RE
 
-    rest = QUOTE_RE.sub("", cell)
+    rest = QUOTE_RE.sub("", VALUE_RE.sub("", cell))
     return bool(re.search(r"\{\{\s*[\w-]+:[a-z]\d", rest)) or '"}}' in rest
 
 

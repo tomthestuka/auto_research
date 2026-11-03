@@ -183,7 +183,7 @@ def test_analyst_worker_agent_exposes_toolkit_as_available_context_only():
 
     assert report.summary == "Analysis complete."
     payload = _user_payload(fake)
-    assert payload["available_toolkits"] == ["research_toolkit.xspec_utils"]
+    assert "available_toolkits" not in payload
     assert "xspec_utils" not in fake.messages[0].content
 
 

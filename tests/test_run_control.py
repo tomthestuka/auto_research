@@ -446,7 +446,7 @@ def test_several_held_injections_keep_their_order():
         m.content for m in model.calls[2]
         if isinstance(m, ModelMessage) and m.content.startswith("[Human steer]")
     ]
-    assert texts == ["[Human steer] first", "[Human steer] second"]
+    assert [t.split("\n\n")[0] for t in texts] == ["[Human steer] first", "[Human steer] second"]
 
 
 def test_a_paused_turn_mid_server_tool_is_resent_with_nothing_appended():

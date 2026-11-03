@@ -78,6 +78,7 @@ def test_build_default_preflight_registers_known_checks():
     assert "toolkit_root_configured" in names
     assert "toolkit_git_identity" in names
     assert "toolkit_branch_clean" in names
+    assert "toolkit_manifests" in names
     # toolkit_root must be validated before the git-identity check that assumes it exists.
     assert names.index("toolkit_root_configured") < names.index("toolkit_git_identity")
     # The human-channel ping is only registered when a handler is resolved.

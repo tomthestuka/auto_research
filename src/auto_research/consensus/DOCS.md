@@ -153,3 +153,5 @@ git history.
   (`analyst.worker.failed`, `_filed`, `_notify_lead`). [B8] `_augment_with_peer_tools` →
   `_with_peer_tools(workers, task, index)`: the peer-tool summary is built per worker, never written
   into the shared task.
+- 2026-10-27 — After a commit's registry reload, `analyst.toolkit.load_error` (level 2) names every
+  package that exposes no tools (`ToolkitRegistry.import_errors`).

@@ -22,6 +22,13 @@ runtime prompt text that names build-time governance files.
 
 ## Interfaces / Contracts
 Runtime prompt files:
+- `conventions.md` — what every unit follows, loaded before the role's own file for the
+  reviewer, librarian, worker and lead (`agents.prompts.UNIT_ROLES`): the report and `turn_end`
+  as the one exit, receipts and handles (the same string for everyone; `view_receipt` opens any),
+  evidence versus where to look, the four ways to write a number (a value reference
+  `{{h#/key}}`, a printed value cited and copied, a paper attribution, a derived number from a
+  tool), derivations in sympy inside toolkit tools carrying their conventions, the team channel,
+  and honest outcomes. Each role file then holds its job and the scope it owns.
 - `reviewer.md` — the sole I/O: scopes each request (science case, distinguishing observables,
   staged plan with feasibility checks, every named resource confirmed), assigns each step with
   `assign_to` (librarian as often as needed, analysts, or the human), follows up results that
@@ -126,3 +133,8 @@ Compacted 2026-09-01, again 2026-09-24, 2026-10-07 and 2026-10-19 (every entry);
   name results by handle in `follow_up`; weigh claims by their receipts.
 - 2026-10-26 — `analyst_worker.md`: a call that types a value a tool result holds is answered with the
   reference to write (user ruling, the runtime refuses the copy).
+- 2026-10-27 — `conventions.md` added and loaded first for every unit role; the four role prompts
+  trimmed to their job and scope (report mechanics, the one exit, evidence and number forms, the
+  channel moved to it). `reviewer.md`: "Writing for the human" (a plain-English briefing), numbers
+  as value references, derived results checked against the source by a tool. Number forms in
+  every role follow value references (`{{h#/key}}`).

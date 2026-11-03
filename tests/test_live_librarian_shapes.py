@@ -137,11 +137,25 @@ SHAPES: dict[str, dict] = {
         "accepts": False, "problem_key": "ungrounded_number", "expect": "appear in none of the receipts",
         "why": "a number in a web-only finding that no cited page carries is invented or mis-copied.",
     },
+    "leftover_markup": {
+        "accepts": False, "problem_key": "leftover_markup", "expect": "markup the check reads as nothing",
+        "why": "an attribution written without its quotes is read as no binding, so its value is unchecked.",
+    },
 }
 
 #: Clauses of the shared check that cannot arise for the librarian, and why. Asserted against the
 #: validator by the contract test, so a clause that becomes reachable must gain a cell.
+_NO_RESULTS = (
+    "a value reference, and the copy checks, read what a toolkit tool returned; the librarian's "
+    "evidence is papers only (pages and searches are navigation), so no toolkit result is in its scope"
+)
+
 UNREACHABLE: dict[str, str] = {
+    "flagged_reference": _NO_RESULTS,
+    "unreadable_reference": _NO_RESULTS,
+    "locator_on_result": _NO_RESULTS,
+    "quoted_copy": _NO_RESULTS,
+    "typed_copy": _NO_RESULTS,
     "quote_without_text": (
         "a paper takes the attribution form (its own clause), and a web page always carries text, so "
         "no receipt in the librarian's scope is quotable-but-textless"
@@ -583,6 +597,12 @@ def test_shape_ungrounded_number(tmp_path, monkeypatch):
             "Fetch the Quasar J0001 lag archive web page (https://example.org/j0001-lags), then first "
             "write a finding supported only by that page stating a lag of 14 days with no quote, and "
             "call turn_end.")
+
+
+def test_shape_leftover_markup(tmp_path, monkeypatch):
+    _attack("leftover_markup", tmp_path, monkeypatch,
+            "Read the Quasar J0001 reverberation paper, then first write a finding attributing its lag "
+            "WITHOUT quotation marks, as {{lib:p1 12.5 ± 3.1 Table 2}} days, and call turn_end.")
 
 
 def test_zz_report_every_finding():

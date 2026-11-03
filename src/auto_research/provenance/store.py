@@ -608,3 +608,20 @@ class ScopedLookup:
         if not self.visible(handle):
             return f"{handle} is not a receipt you can cite."
         return self.store.verify(handle)
+
+
+class RunView(ScopedLookup):
+    """Every receipt in the run: what any unit may open (user ruling 2026-10-27, view is global).
+
+    ``view_receipt``, a ``$ref`` and the handles a message carries read through this. Opening is
+    not citing: what a unit may rest a number on is its own :class:`ScopedLookup`.
+    """
+
+    def __init__(self, store: ReceiptStore) -> None:
+        super().__init__(store, own_source="")
+
+    def visible(self, handle: str) -> bool:
+        return self.store.get(handle) is not None
+
+    def handles(self) -> list[str]:
+        return [r.handle for r in self.store.receipts()]

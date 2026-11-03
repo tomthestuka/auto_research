@@ -397,8 +397,9 @@ def message_tool_def(directory: Sequence[str]) -> dict:
             "call wait_for_reply when you need it before going on. A member that has finished its "
             "turn is resumed to read your text and can answer, though its filed report stays as "
             "filed. Texts are informal: rest every claim in your report on your own evidence. "
-            "To show a receipt, name its handle in attachments — the human receives the file, and "
-            f"a team member can open it with view_receipt.{human_note}{coder_note} "
+            "Name receipts by handle: the recipient sees each handle your text names or attaches "
+            "and can open it with view_receipt, and the human receives each attached one as a "
+            f"file.{human_note}{coder_note} "
             f"You can reach: {reach}."
         ),
         "input_schema": {
@@ -474,10 +475,10 @@ def view_receipt_tool_def() -> dict:
         "name": VIEW_RECEIPT_TOOL,
         "description": (
             "Show one receipt by its handle: a figure as an image, a text receipt (a tool output, "
-            "a page) as its text, a long one page by page. Works for your own receipts, the ones "
-            "you may cite, and any a message you received named; an earlier output shown as one "
-            "line names the handle that reads it back in full. Viewing shows you the content; your "
-            "report still cites only your own evidence."
+            "a page, a paper) as its text, a long one page by page. Opens any receipt of this run, "
+            "whoever made it; an earlier output shown as one line names the handle that reads it "
+            "back in full. Viewing shows you the content; your report cites the evidence in your "
+            "own scope."
         ),
         "input_schema": {
             "type": "object",
@@ -505,31 +506,26 @@ def view_receipt_tool_def() -> dict:
 
 
 async def execute_view_receipt(
-    lookup: Any | None,
-    viewable: Iterable[str],
     store: Any | None,
     arguments: Mapping[str, Any],
     *,
     images_ok: bool = True,
 ) -> ToolOutcome:
-    """Show a receipt this seat may see: in its citable scope, or named by a message it received.
+    """Show any receipt of the run (view is global, user ruling 2026-10-27).
 
     Mints nothing and admits nothing — a peer's figure seen here stays the peer's evidence.
     """
     handle = str(arguments.get("handle") or "").strip()
-    visible = bool(handle) and (
-        (lookup is not None and lookup.visible(handle)) or handle in set(viewable)
-    )
-    store = store if store is not None else getattr(lookup, "store", None)
-    if not visible or store is None:
+    if store is None:
+        return ToolOutcome(text="This run keeps no receipts, so there is nothing to view.", is_error=True)
+    receipt = store.get(handle) if handle else None
+    if receipt is None:
         return ToolOutcome(
-            text=f"{handle or '(no handle)'} is not a receipt you can view: view your own receipts, "
-            "the ones you may cite, and any a message you received named.",
+            text=f"{handle or '(no handle)'} is not a receipt of this run. Copy the handle exactly "
+            "as a tool result, report or message shows it; a handle is the same string for every "
+            "member of the team.",
             is_error=True,
         )
-    receipt = store.get(handle)
-    if receipt is None:
-        return ToolOutcome(text=f"{handle} is not in this run.", is_error=True)
     # No refusal on changed bytes: the readers below (the media layer for a figure, `store.text`
     # for text) check the bytes they use against the receipt and send a changed file with a
     # model-visible note and a ledger alert (F26, human ruling 2026-10-06).
@@ -542,9 +538,17 @@ async def execute_view_receipt(
             )
         return ToolOutcome(text=f"{handle}: {caption}", figures=[receipt.to_figure_ref()])
     if receipt.kind == "paper":
+        # The receipted PDF itself, as the librarian's reader attaches it (the receipted hash, not
+        # the file's current one); the provider's media guard decides whether it fits.
+        try:
+            doc = document_from_file(
+                Path(receipt.source_path or receipt.path), title=f"[{handle}] {receipt.title or ''}",
+                sha256=receipt.source_sha256 or receipt.sha256,
+            )
+        except OSError as exc:
+            return ToolOutcome(text=f"{handle}: the PDF cannot be read ({type(exc).__name__}).", is_error=True)
         return ToolOutcome(
-            text=f"{handle} is a paper ({receipt.title or 'untitled'}); open it with the paper "
-            "reader where you have one, or ask its owner to quote what you need."
+            text=f"[{handle}] {receipt.title or 'untitled'} — the PDF is attached.", documents=[doc],
         )
     if receipt.kind in ("data", "commit"):
         return ToolOutcome(
@@ -1398,10 +1402,10 @@ _FIGURE_SOURCE_LEAD = (
 #: What the analysts' edit tools add after the layout: how numbers and figures are cited.
 _ANALYST_EVIDENCE = (
     "Every number in your prose comes from a receipt: each tool result is labelled "
-    "[receipt <handle>], and a finding cites the receipts its numbers come from as [handle] (or "
-    "pins one exact span as {{handle \"copied text\"}}). Copy numbers exactly as the receipt prints "
-    "them, sign and digits included; compute any derived value with a tool so the calculation has "
-    "its own receipt. turn_end refuses a number that no receipt the text cites carries, naming it."
+    "[receipt <handle>]. Write a value a tool returned as its reference, {{handle#/key}}, which the "
+    "runtime fills in; a value a tool printed as text in a finding that cites that result as "
+    "[handle], copied exactly. Compute any derived value with a tool so the calculation has its "
+    "own receipt. turn_end names each number it cannot place."
 )
 
 
@@ -2651,7 +2655,6 @@ class SandboxToolProvider:
     receipt_source: str | None = None
     extra_tools: Sequence[ExtraTool] = ()
     sandbox: Any | None = None
-    ref_handles: Callable[[], Iterable[str]] | None = None
     _retype_check: Any | None = None
 
     def __init__(
@@ -2667,14 +2670,10 @@ class SandboxToolProvider:
         receipts: Any | None = None,
         receipt_source: str | None = None,
         extra_tools: Sequence[ExtraTool] = (),
-        ref_handles: Callable[[], Iterable[str]] | None = None,
     ) -> None:
         self.registry = registry
         self.sandbox = sandbox
         self.cwd = cwd
-        # The receipts a `$ref` argument may name (provenance.refs): read at each call, so a handle
-        # a message names mid-turn is usable at once. None: only the agent's own receipts.
-        self.ref_handles = ref_handles
         self._retype_check: Any | None = None
         # Provenance (P1): the run's ReceiptStore and this agent's source key. Every tool call
         # mints receipts; the model sees each result labelled with its handle.
@@ -3014,10 +3013,9 @@ class SandboxToolProvider:
         return match, None, untested
 
     def _usable_handles(self) -> set[str]:
-        """The receipts this agent may pass on by ``$ref``: its own, plus ``ref_handles``."""
-        own = {r.handle for r in self.receipts.receipts(source=self.receipt_source)} if (
-            self.receipts is not None and self.receipt_source) else set()
-        return own | (set(self.ref_handles()) if self.ref_handles is not None else set())
+        """The receipts a ``$ref`` may name: every receipt of the run (view is global, user ruling
+        2026-10-27); ``resolve_one`` then admits only a usable toolkit result."""
+        return {r.handle for r in self.receipts.receipts()} if self.receipts is not None else set()
 
     def _resolve_refs(self, sent: Mapping[str, Any]) -> tuple[dict[str, Any], list[str], str | None]:
         """``(arguments with references resolved, parent handles, error text or None)``."""
@@ -3041,7 +3039,7 @@ class SandboxToolProvider:
 
         if self._retype_check is None:
             self._retype_check = RetypeCheck(self.receipts)
-        return self._retype_check.problem(arguments, self._usable_handles())
+        return self._retype_check.problem(arguments, self._usable_handles(), own_source=self.receipt_source)
 
     async def _inputs_before(self, args: Mapping[str, Any], named: Mapping[str, Any] | None = None) -> Any:
         """Hash what the call's arguments name, before it runs (data roots and outputs skipped)."""

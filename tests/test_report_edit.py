@@ -424,8 +424,7 @@ def test_a_worker_task_lists_earlier_figures_and_the_tool_result_labels_new_ones
 
     model.call = recording
     worker = AnalystWorkerAgent(
-        model=model, available_toolkits=[],
-        sandbox=_FakeSandbox(tool_fn=lambda m, f, a: {"exit_code": 0, "stdout": "ok", "figures": [fig]}),
+        model=model, sandbox=_FakeSandbox(tool_fn=lambda m, f, a: {"exit_code": 0, "stdout": "ok", "figures": [fig]}),
         registry=_FakeRegistry(known={"tk_load"}, mcp=set()),
     )
     worker.report_dir = tmp_path / "w0"

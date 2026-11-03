@@ -147,6 +147,7 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
         check_os_jail_harness,
         check_os_jail_probe,
     )
+    from auto_research.sandbox.registry import check_toolkit_manifests
     from auto_research.sandbox.review import check_author_reviewer_decorrelation
     from auto_research.sandbox.runner import check_analyze_probe
     from auto_research.storage import check_database_health
@@ -168,6 +169,7 @@ def build_default_preflight(human_handler: Any | None = None) -> Preflight:
     preflight.register("toolkit_root_configured", check_toolkit_root_configured)
     preflight.register("toolkit_git_identity", check_toolkit_git_identity)
     preflight.register("toolkit_branch_clean", check_toolkit_branch_clean)
+    preflight.register("toolkit_manifests", check_toolkit_manifests)
     preflight.register("catalog_health", check_catalog_health)
     preflight.register("analyze_probe", check_analyze_probe)
     if human_handler is not None:

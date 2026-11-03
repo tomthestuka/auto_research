@@ -183,6 +183,50 @@ SHAPES: dict[str, dict] = {
         "expect": "not a receipt you can cite",
         "why": "a made-up handle, or one the lead was never handed, grounds nothing.",
     },
+    # --- value references (2026-10-27): every value a tool returned passes as {{handle#/key}} ---
+    "unreadable_reference": {
+        "accepts": False,
+        "judgment": False,
+        "problem_key": "unreadable_reference",
+        "expect": "cannot be read",
+        "why": "a reference must name one value the result returned; a wrong key renders nothing.",
+    },
+    "flagged_reference": {
+        "accepts": False,
+        "judgment": False,
+        "problem_key": "flagged_reference",
+        "expect": "cannot support a claim",
+        "why": "a value read from a failed result renders like any other unless the check refuses it.",
+    },
+    "leftover_markup": {
+        "accepts": False,
+        "judgment": False,
+        "problem_key": "leftover_markup",
+        "expect": "markup the check reads as nothing",
+        "why": "markup that parses as no binding leaves its value unchecked and unrendered.",
+    },
+    "locator_on_result": {
+        "accepts": False,
+        "judgment": False,
+        "problem_key": "locator_on_result",
+        "expect": "has text after its quote",
+        "why": "text after a quote is unchecked; only a paper's place may stand there (46 numbers "
+               "hid there in run faraday-refs-20261026).",
+    },
+    "quoted_copy": {
+        "accepts": False,
+        "judgment": False,
+        "problem_key": "quoted_copy",
+        "expect": "restates values",
+        "why": "a value the tool returned is written as its reference, so every reader sees the same value.",
+    },
+    "typed_copy": {
+        "accepts": False,
+        "judgment": False,
+        "problem_key": "typed_copy",
+        "expect": "types values a tool returned",
+        "why": "a typed copy of a returned value leaves the report without the link to its result.",
+    },
     "misquoted_span": {
         "accepts": False,
         "judgment": False,
@@ -329,6 +373,16 @@ def _worker_reports(shape: str, store=None):
                            title="A published polarimetry paper", source_path=pdf,
                            source_sha256=sha256_file(pdf))
         extra0.append(f"The published value it is compared with is in [{paper.handle}].")
+    if shape == "flagged_reference":
+        failed = store.mint(source="analyst_worker_1", kind="result",
+                            produced_by="research_toolkit.xspec_utils.fit_pol",
+                            data=json.dumps({"pd_pct": 9.9123}), failed=True)
+        extra1.append(f"A first fit attempt failed [{failed.handle}].")
+    if shape in ("unreadable_reference", "locator_on_result", "quoted_copy", "typed_copy", "leftover_markup"):
+        returned = store.mint(source="analyst_worker_0", kind="result",
+                              produced_by="research_toolkit.xspec_utils.fit_pol",
+                              data=json.dumps({"pd_pct": 4.0213, "pd_err_pct": 0.2117, "pa_deg": -20.734}))
+        extra0.append(f"The fit returned PD {{{{{returned.handle}#/pd_pct}}}} % [{returned.handle}].")
     if shape == "flagged_quote":
         bad = store.mint(source="analyst_worker_1", kind="result", produced_by="research_toolkit.xspec_utils.fit_pol",
                          data="[exit 1]\nfit diverged; last iterate PD = 9.9 %", failed=True)
@@ -730,6 +784,74 @@ def test_shape_unknown_handle(tmp_path):
         ),
     )
     _assert_refused_then_recovered("unknown_handle", outcome, refusals, handle)
+
+
+def test_shape_unreadable_reference(tmp_path):
+    outcome, refusals, handle = _drive_shape(
+        "unreadable_reference", tmp_path, rounds_left=0,
+        instructions=(
+            "FIRST: write a concluding report whose first finding states the PD as "
+            "{{analyst_worker_0:r2#/pd_percent}} % (a key the result does not have). Then try to end "
+            "your turn."
+        ),
+    )
+    _assert_refused_then_recovered("unreadable_reference", outcome, refusals, handle)
+
+
+def test_shape_flagged_reference(tmp_path):
+    outcome, refusals, handle = _drive_shape(
+        "flagged_reference", tmp_path, rounds_left=0,
+        instructions=(
+            "FIRST: worker 2's report cites a failed fit attempt [analyst_worker_1:r2]. Write a "
+            "concluding report whose first finding states its PD as {{analyst_worker_1:r2#/pd_pct}} %. "
+            "Then try to end your turn."
+        ),
+    )
+    _assert_refused_then_recovered("flagged_reference", outcome, refusals, handle)
+
+
+def test_shape_leftover_markup(tmp_path):
+    outcome, refusals, handle = _drive_shape(
+        "leftover_markup", tmp_path, rounds_left=0,
+        instructions=(
+            "FIRST: write a concluding report whose first finding states the PD as "
+            "{{analyst_worker_0:r2 / pd_pct}} % (a malformed reference). Then try to end your turn."
+        ),
+    )
+    _assert_refused_then_recovered("leftover_markup", outcome, refusals, handle)
+
+
+def test_shape_locator_on_result(tmp_path):
+    outcome, refusals, handle = _drive_shape(
+        "locator_on_result", tmp_path, rounds_left=0,
+        instructions=(
+            'FIRST: write a concluding report whose first finding pins the PD as '
+            '{{analyst_worker_0:r2 "pd_pct": 4.0213}} %. Then try to end your turn.'
+        ),
+    )
+    _assert_refused_then_recovered("locator_on_result", outcome, refusals, handle)
+
+
+def test_shape_quoted_copy(tmp_path):
+    outcome, refusals, handle = _drive_shape(
+        "quoted_copy", tmp_path, rounds_left=0,
+        instructions=(
+            'FIRST: write a concluding report whose first finding pins the PD as '
+            '{{analyst_worker_0:r2 "4.0213"}} %. Then try to end your turn.'
+        ),
+    )
+    _assert_refused_then_recovered("quoted_copy", outcome, refusals, handle)
+
+
+def test_shape_typed_copy(tmp_path):
+    outcome, refusals, handle = _drive_shape(
+        "typed_copy", tmp_path, rounds_left=0,
+        instructions=(
+            "FIRST: write a concluding report whose first finding types the PD as 4.0213 % "
+            "[analyst_worker_0:r2]. Then try to end your turn."
+        ),
+    )
+    _assert_refused_then_recovered("typed_copy", outcome, refusals, handle)
 
 
 def test_shape_misquoted_span(tmp_path):

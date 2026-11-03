@@ -277,8 +277,9 @@ is assembled from runtime-safe sources — real toolkit source, `prompts/coder.m
 and config — never from a `DOCS.md`.**
 
 **Phase 3:** the text every unit needs — how `turn_end`, receipts, citation syntax and the channel
-work — may move into one shared file in `prompts/` that is loaded before each role's own prompt.
-It is a runtime prompt, so this rule binds it: no `DOCS.md`, no `CLAUDE.md`.
+work — lives in `prompts/conventions.md`, loaded before each unit role's own prompt (2026-10-27,
+`agents.prompts.UNIT_ROLES`); the role file holds its job and the scope it owns. It is a runtime
+prompt, so this rule binds it: no `DOCS.md`, no `CLAUDE.md`.
 
 
 ---
@@ -447,6 +448,10 @@ generalised and corrected.
   argument `{"$ref": "<handle>#<json-pointer>"}` is resolved by the runtime from the stored result
   and that receipt becomes the call's parent; only a toolkit result in the caller's reach resolves
   (user rulings: a handle it can open but not cite counts; a typed float a usable result holds is refused with the reference to write).
+  **View is global, citing is scoped** (user ruling 2026-10-27): any unit opens any receipt of the
+  run (`view_receipt`, a `$ref`, a message's handles); a `$ref` resolves any toolkit result; what a
+  unit may rest a number on stays its scope. A copy typed into a call is refused exactly, with its
+  sign flipped, rounded, or taken from a file the caller read or a shell output it ran.
 - **One store per run** (`ReceiptStore.for_run`), append-only, replayed on resume, so a handle
   means the same artifact everywhere. It lives beside the run's ledger, outside every role's
   allow-list, so no role can read another's evidence and re-mint it as its own. Each unit cites through a scoped view: its own receipts, the
@@ -455,7 +460,12 @@ generalised and corrected.
   the receipts its numbers come from as `[handle]`, and every number in it must appear, on token
   boundaries, in one of them; other fields are grounded by all the evidence the report cites.
   `{{handle "…"}}` pins an exact span of a text receipt; for a paper the same form, with a
-  locator (`{{lib:p3 "4.0 ± 0.2 %" Table 2}}`), attributes the value instead. A task's own numbers ground a text only where it cites
+  locator (`{{lib:p3 "4.0 ± 0.2 %" Table 2}}`), attributes the value instead, and only a paper
+  takes a locator. **A value a tool returned is written as its reference** (user ruling
+  2026-10-27), `{{handle#/json-pointer}}`: the validator reads it from the returned value and
+  renders it, at 3 significant digits for every reader (a model reads `{{h#/k}} (= 2.72)`), with
+  the full value one click away on the page; a typed or quoted copy of a returned value is refused
+  with its reference. A task's own numbers ground a text only where it cites
   `[input:…]`, for every unit including the reviewer, so a value handed in by the question cannot
   reappear as a finding unmarked. Measured before the ruling, over 231 real reports: a median
   worker report states ~240 numbers and 98% of its decimals already appear verbatim in that run's
@@ -923,6 +933,10 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   authoritative. The flagged-quote shape is pinned deterministically only.
 - **Paper values are attributed, not verified** (ruling 2026-09-24) — a model can still attribute a
   wrong number; the `paper_attributions` list makes it cheap to check.
+- **Value references (2026-10-27):** a toolkit result printed only as text (33 of 407 in run
+  faraday-refs-20261026) has no returned value to point into, so its numbers stay typed-and-cited;
+  the copy check on typed numbers starts at 3 significant digits; values a model computes by hand
+  and types into a call are found by nothing (no receipt holds them).
 - **Numbers written as words are not grounded** (found live 2026-10-17): the number scan reads digits only. Ruling 2026-10-17: the check stays on digits; every role's prompt says to write numbers in digits.
 - **Report fields are checked for emptiness, not content** — accepted limit, every role (ruling
   2026-09-24); numbers stay grounded.
@@ -1092,3 +1106,10 @@ Compacted 2026-10-19 (every entry); detail in git history.
   (`provenance.refs`), resolved by the runtime with the receipt as parent. Prompts: workers and the
   lead weigh every incoming text as a claim to check against receipts; probes, briefs and
   `follow_up` name results by handle.
+- 2026-10-27 — **Batch after run faraday-refs-20261026** (user rulings 2026-10-27; audit in
+  session scratch). §4: `prompts/conventions.md` built, loaded before every unit role. §7: value
+  references `{{h#/pointer}}` rendered by the validator; a locator only on a paper (46 of 83 result
+  numbers had hidden, unchecked, in one); view global, citing scoped; wider copy refusal. §13 value
+  references entry. Also: inbox texts name sender, receipts and reply address; `available_toolkits`
+  deleted; a toolkit package that fails to import is refused at launch; the reproduce code runs the
+  toolkit at the result's commit; the chain popover shows values, hashes folded.

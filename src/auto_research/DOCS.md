@@ -79,6 +79,8 @@ Async-first throughout ([CLAUDE.md §10](../../CLAUDE.md#10-tech-stack--conventi
   `config/orchestration.yaml` and is a directory — every runtime path hint derives from it),
   `sandbox.merge_flow.check_toolkit_git_identity` (the `research_toolkit` checkout has a git
   commit identity, so a runtime tool commit can't fail mid-flow),
+  `sandbox.registry.check_toolkit_manifests` (every `*_utils` package imports and exposes a
+  `TOOL_MANIFEST`; a failing one would reach the analysts as missing tools and nothing else),
   `observations.check_catalog_health` (every mission's local data catalog is healthy via
   `research_toolkit`'s detect-only `obsdb_catalog.healthcheck`),
   `sandbox.runner.check_analyze_probe` (runs the configured `analyze_probe` stack smoke-test under
@@ -218,3 +220,6 @@ detail in git history.
   `WAKING_KINDS`); [D6 ruling] `RunControl.fatal`/`fail(exc)` end the run on a resumed seat's
   `ReactBudgetExhausted`, [D6 review] first failure only, via `_cancel_run`; [D8] `interrupt` a no-op
   after a stop request, `cancel_resumed(timeout=)` bounded, `RunControl.running`.
+- 2026-10-27 — Preflight gains `toolkit_manifests` (`sandbox.registry.check_toolkit_manifests`).
+  `run_control.InboxEntry.render` names the sender, the receipts a text names, and the address that
+  answers it (a human steer and reply included).

@@ -109,7 +109,6 @@ def _worker(tmp_path, adapter, monitor, *, missing_figure: bool = True) -> Analy
             provider=adapter,
         ),
         prompt="p",
-        available_toolkits=[],
         sandbox=_FakeSandbox(tool_fn=lambda m, f, a: {
             "exit_code": 0, "stdout": "loaded", "figures": [missing]}),
         registry=_FakeRegistry(known={"tk_load"}, mcp=set()),
@@ -426,7 +425,7 @@ def test_a_human_steer_in_the_filing_batch_wakes_the_seat(tmp_path):
     asyncio.run(_main())
     (resume,) = adapter.later_requests
     texts = [_text(m) for m in resume]
-    assert texts.count("[Human steer] check the background region") == 1
+    assert [t.split("\n\n")[0] for t in texts].count("[Human steer] check the background region") == 1
 
 
 def test_a_notice_in_the_filing_batch_waits_for_the_next_turn(tmp_path):

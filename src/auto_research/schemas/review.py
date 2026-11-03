@@ -16,10 +16,10 @@ class ReviewerSection(MessageModel):
     body: str = Field(
         description=(
             "The section's prose, in plain text. Separate paragraphs with a blank line and start a "
-            "bullet line with '- '. Write symbols as Unicode (χ², ±, σ, ≲). Put every number "
-            'inside a quote of the receipt it comes from, {{handle "exact text"}}, or in text '
-            "that cites that receipt as [handle]; attribute a paper's value with where it is, "
-            '{{lib:p4 "value" Table 2}}. Refer to the k-th entry of `figures` as '
+            "bullet line with '- '. Write symbols as Unicode (χ², ±, σ, ≲). Write a value a tool "
+            "returned as its reference, {{handle#/key}}, which the runtime fills in; copy a value a "
+            "tool printed as text exactly, in text that cites that receipt as [handle]; attribute a "
+            'paper\'s value with where it is, {{lib:p4 "value" Table 2}}. Refer to the k-th entry of `figures` as '
             "'Figure k' and the k-th entry of `tables` as 'Table k'."
         ),
     )
@@ -30,7 +30,8 @@ class ReviewerTable(MessageModel):
 
     Fill exactly one form. A table a tool computed is cited by its receipt and typeset from the
     receipt's stored bytes; a table you build yourself (this work against a paper, say) is written
-    as columns and rows, with every numeric cell a quote.
+    as columns and rows, each numeric cell a value reference, a quote of a printed value, or a paper
+    attribution.
     """
 
     caption: str = Field(description="The table caption, in plain text.")
@@ -50,8 +51,9 @@ class ReviewerTable(MessageModel):
         default_factory=list,
         description=(
             "For a table you build: one list of cells per row, as many cells as there are columns. "
-            'Write every numeric cell as a quote, {{handle "exact text"}}, or a paper\'s value as '
-            '{{lib:p4 "value" Table 2}}.'
+            "Write every numeric cell as the reference to the value a tool returned, {{handle#/key}}; "
+            'a value a tool printed as text as a quote of it, {{handle "exact text"}}; or a paper\'s '
+            'value as {{lib:p4 "value" Table 2}}.'
         ),
     )
 

@@ -13,7 +13,8 @@ from the receipts it cites runs at the role's single exit, `turn_end` (CLAUDE.md
 tool call / fetch / ask_human ──► ReceiptStore.mint ──► receipts.jsonl (append-only) + blobs/<sha>
                                          │ handle "<source>:<letter><n>"
 report prose ──► check_bindings / check_report_fields ──► problems (turn_end refuses) + bindings
-                     └ render_bindings (quote → text, cite → marker) for the finished view
+                     ├ render_bindings (quote → text, cite → marker, value → display) for a page
+                     └ render_values ({{h#/k}} → "{{h#/k}} (= 2.72)") for a model reading the report
 ```
 
 - **Receipts are runtime-minted.** The sha256 is computed over the bytes the runtime stored; the
@@ -27,23 +28,39 @@ report prose ──► check_bindings / check_report_fields ──► problems (
 - **References link a call to the results it used** (`refs.py`, 2026-10-26). A toolkit argument
   `{"$ref": "<handle>#<json-pointer>"}` is replaced, before the call runs, by the value at that
   pointer in the JSON the receipt holds; the receipt becomes a parent of everything the call mints.
-  Only a toolkit result the caller may use resolves (its own, the request, receipts cited in reports
-  it received, handles named in a message or brief to it); a navigation receipt, a failed result
-  or changed bytes is refused with a sentence the model acts on. The ledger and the receipt's
+  Any toolkit result of the run resolves (view is global, user ruling 2026-10-27; citing stays
+  scoped); a navigation receipt, a failed result or changed bytes is refused with a sentence the
+  model acts on. The ledger and the receipt's
   `args_sha256` keep the references as written; the values they stand for are fixed by the
   parent's hash and the pointer. This replaced the retyping measured in run 32814459, where every
   derived input was typed into the arguments, so no call had a parent and two hand-built plot
   inputs carried altered error bars. A typed float of 4+ significant digits that a usable result
-  holds is a copy, and the call is refused before it runs with the reference to write
-  (`RetypeCheck`; user ruling 2026-10-26, replacing the after-call note, which a live model
-  ignored). A match is never an edge by itself: repeated runs return identical values, so the
+  holds exactly, with its sign flipped, or rounded to the digits typed is a copy, and the call is
+  refused before it runs with the reference to write (`RetypeCheck`; user ruling 2026-10-26,
+  replacing the after-call note, which a live model ignored; sign and rounding added 2026-10-27
+  after a `|ci_lo|` typed as `0.37959418926306543` passed in run faraday-refs-20261026). So is one
+  found in the text of a file the caller read or a shell output it ran: the refusal names the
+  file to pass, or a tool to request. A match is never an edge by itself: repeated runs return identical values, so the
   model's reference makes the link.
   A toolkit tool prints summary lines with its result and returns the dict beside them (coder
   contract rule 5), and the result text keeps only the print; so `receipt_call(returned=)` stores
   the returned keys as one JSON blob named on the receipt (`returned_sha256`, hash-checked on every
-  read), and a reference resolves against that. A brief that names a handle its author cannot
-  open is refused at the author's `turn_end` (`brief_handle_problems`: the lead's `what_to_probe`,
-  the reviewer's `follow_up`), so a brief hands on only what its author could, as a message does.
+  read), and a reference resolves against that. A brief that names a handle not in the run is
+  refused at the author's `turn_end` (`brief_handle_problems`: the lead's `what_to_probe`, the
+  reviewer's `follow_up`).
+- **View is global, citing is scoped** (user ruling 2026-10-27). Any unit opens any receipt of the
+  run (`RunView`: `view_receipt`, a `$ref`, a message's handles); what it may rest a number on is
+  its own `ScopedLookup`.
+- **Value references** (user ruling 2026-10-27: every value passes as a handle, the validator
+  renders it). Report prose writes `{{<handle>#/<json-pointer>}}`; `check_bindings` resolves it
+  against the result's returned value (`refs.returned_value`) in the writer's citing scope and
+  refuses a flagged result, a text-only one, a missing key or a pointer at a list or dict. The value
+  is shown at `DISPLAY_DIGITS` (3) significant digits (`display_value`), the full value one click
+  away on the page. A typed number of `COPY_MIN_DIGITS` (3)+ significant digits that a cited
+  structured result returned (echoed arguments aside) is refused with its reference, and so is a
+  quote of one; an ungrounded number that rounds a returned value is answered with the reference
+  that renders it. Text after a quote is accepted only for a paper: in run faraday-refs-20261026,
+  `{{h "key": 2.71}}` read `key` as the quote and hid 46 of 83 numbers in the unchecked locator.
 - **Evidence vs record** (human ruling 2026-09-25: "citing in a report must be to sth it has
   produced, not just read"). Every receipt is a record; only `store.is_evidence(receipt)` receipts
   back a number: a toolkit tool's return and its files/figures (producer `research_toolkit.*`), a
@@ -82,7 +99,14 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   Implements `ReceiptLookup`. Thread-safe minting (one lock).
 - `check_bindings(prose, lookup, *, own_source, scope, exempt_spans, label) -> BindingResult`.
 - `check_report_fields(fields, lookup, *, own_source, itemised=("findings",)) -> BindingResult`.
-- `render_bindings(prose, *, own_source, quote, cite) -> str`.
+- `render_bindings(prose, *, own_source, quote, cite, value=None) -> str` — `value(binding)`
+  renders a value reference (left as written without one).
+- `bindings.VALUE_RE`; `Binding.pointer` (a value reference's JSON pointer, else `None`);
+  `bindings.display_value(value) -> str` (an int whole, a float to `DISPLAY_DIGITS` significant
+  digits, `e` notation outside 1e-3..1e6); `bindings.referenced_value(lookup, binding)`;
+  `bindings.render_values(prose, lookup, *, own_source=None) -> str` — each reference followed by
+  `(= value)`, for a model; `DISPLAY_DIGITS = 3`, `COPY_MIN_DIGITS = 3`.
+- `RunView(store)` — a `ScopedLookup` that sees every receipt of the run (viewing, never citing).
 - `ReceiptStore.for_run(run_dir) -> ReceiptStore` — the one store per run in this process; every
   role gets its store here (two instances on one directory would mint duplicate handles).
 - `store.is_evidence(receipt) -> bool`; `TOOLKIT_PRODUCER_PREFIX = "research_toolkit."`,
@@ -165,14 +189,16 @@ report renderer.
   aside (`sandbox.runner.normalize_tool_raw` writes it); `RefError` on changed bytes or plain text.
 - `refs.resolve_one(store, text, usable) -> (value, handle)`; RFC 6901 pointers (`~0`, `~1`); a
   miss names the keys or the index bound that exist.
-- `refs.handles_in_brief(store, text) -> list[str]` — the toolkit results a brief names, bracketed
-  or bare.
-- `refs.RetypeCheck(store).problem(typed_args, handles) -> str | None` — the refusal for a call
-  whose typed floats of 4+ significant digits a usable result holds: per argument, the reference
-  to write (`{"$ref": "<handle>#<pointer>"}`, newest result first, up to 3); integers (counts,
-  ObsIDs) and short floats are parameters and pass; each receipt's floats cached once per store.
+- `refs.handles_named(text) -> list[str]` — every handle-shaped string a text names, bracketed or
+  bare, once each (a message's handles).
+- `refs.RetypeCheck(store).problem(typed_args, handles, *, own_source=None) -> str | None` — the
+  refusal for a call whose typed floats of 4+ significant digits are copies: held exactly by a
+  usable result (the reference to write, newest first, up to 3), held with the sign flipped or
+  rounded to the digits typed, or found in the text of `own_source`'s navigation receipts (the
+  file to pass instead); integers and short floats are parameters and pass; each receipt read once.
 - `refs.unviewable_handles(text, viewable)`, `refs.brief_handle_problems(field, text, viewable)` —
-  the handles a brief names that its author cannot open, and the `turn_end` refusal naming them.
+  the handles a brief names that are not receipts of the run, and the `turn_end` refusal naming
+  them.
 - `ReceiptStore.put_blob(data) -> (path, sha256)` (content-addressed, atomic) and
   `ReceiptStore.blob_path(sha256)`; `receipt_call(returned=)` sets `returned_sha256`.
 
@@ -233,3 +259,19 @@ Compacted 2026-10-07 (the 2026-10-06/07 entries) and 2026-10-19 (every entry); d
   reference resolves (no failed ones), scans 4+-digit floats only and skips returned values over
   2 MB; the returned blob keeps the tool's key order; the brief check reads bracketed handles
   only and accepts handles a message showed the author (`viewable=`).
+- 2026-10-27 — Batch after run faraday-refs-20261026 (user rulings 2026-10-27). Value references
+  `{{h#/pointer}}` in report prose (`VALUE_RE`, `display_value`, `render_values`,
+  `referenced_value`); text after a quote refused on a non-paper receipt; typed and quoted copies of
+  returned values refused with the reference; rounded numbers answered with it. `RunView`: view is
+  global, citing stays scoped; a `$ref` resolves any toolkit result of the run; `handles_in_brief`
+  replaced by `handles_named`. `RetypeCheck` refuses sign-flipped and rounded copies and values
+  copied from the caller's own reads and shell output.
+- 2026-10-27 — Stateless review (all confirmed, fixed): a reference to a flagged result is refused;
+  `VALUE_RE` takes full handles only (a `self:` reference would bind to whoever copies it), keys
+  with spaces, and `{{h#}}` for a whole return; leftover `{{`/`}}` markup is refused (it was read as
+  nothing); a quote overlapping a reference is no binding; the copy check skips integers, exempt
+  shapes and values the cited request states; the rounding hint names only a result the text cites,
+  and only when one value fits; returned values over 2 MB are not parsed; `render_values` leaves
+  quotes and attributions whole (they were stripped to their text). `RetypeCheck`: navigation
+  receipts are scanned run-wide (view is global), sign and rounding only over the caller's own
+  results, rounding only for 6+ typed digits (a 4-digit parameter collided with peers' values).

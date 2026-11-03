@@ -67,7 +67,7 @@ class _Model:
 def _worker(tmp_path, model, store, monitor):
     sandbox = _FakeSandbox(tool_fn=lambda m, f, a: {"exit_code": 0, "stdout": BIG})
     worker = AnalystWorkerAgent(
-        model=model, available_toolkits=[], sandbox=sandbox,
+        model=model, sandbox=sandbox,
         registry=_FakeRegistry(known={"tk_fit"}, mcp=set()), monitor=monitor, prompt="worker",
     )
     worker.agent_key = KEY

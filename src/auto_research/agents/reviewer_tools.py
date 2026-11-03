@@ -230,9 +230,10 @@ READ_PAPER_TOOL = "read_paper"
 
 #: The description the reviewer's ``edit_report`` carries; its field prose comes from the model.
 REVIEWER_EDIT_DESCRIPTION = (
-    "Write plain text: the harness typesets the final report from it. Every number sits in a quote "
-    'of the receipt it comes from, {{handle "exact text"}}, or in text that cites that receipt as '
-    "[handle]; any receipt you can read may ground any field. Place figures by their receipt "
-    "handle, one '- handle' line under # figures."
+    "Write plain text: the harness typesets the final report from it. Write a value a tool "
+    "returned as its reference, {{handle#/key}}, which the runtime fills in; copy a value a tool "
+    "printed as text exactly, in text that cites that receipt as [handle]; attribute a paper's value with its "
+    'place, {{lib:p4 "value" Table 2}}. Place figures by their receipt handle, one "- handle" '
+    "line under # figures."
 )
 

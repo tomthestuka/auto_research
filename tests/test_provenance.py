@@ -408,9 +408,41 @@ def test_a_paper_value_must_be_attributed_with_a_locator(store, tmp_path):
     assert [(a.handle, a.value, a.locator) for a in got] == [(p.handle, "4.0 ± 0.2 %", "Table 2")]
 
 
-def test_a_locator_on_a_text_quote_is_allowed_and_ignored(store):
+def test_text_after_a_quote_is_refused_unless_the_receipt_is_a_paper(store):
+    """Run faraday-refs-20261026: ``{{h "key": 2.71}}`` read ``key`` as the quote and the number as
+    a place in a paper — unchecked, and dropped from the page. Only a paper takes a place."""
     r = _result(store, "PD = 4.02 +/- 0.21 %")
-    assert check_bindings(f'{{{{{r.handle} "PD = 4.02 +/- 0.21 %" line 1}}}}', store).problems == []
+    (problem,) = check_bindings(f'{{{{{r.handle} "PD = 4.02 +/- 0.21 %" line 1}}}}', store).problems
+    assert 'has text after its quote ("line 1")' in problem
+    keyed = _result(store, json.dumps({"pa_deg": 2.719744765227451}))
+    (problem,) = check_bindings(f'PA {{{{{keyed.handle} "pa_deg": 2.719744765227451}}}}', store).problems
+    assert f"write {{{{{keyed.handle}#/pa_deg}}}}" in problem
+
+
+def test_a_value_reference_reads_the_returned_value_and_a_typed_copy_is_refused(store):
+    from auto_research.provenance.bindings import display_value, render_values
+
+    r = _result(store, json.dumps({"band": {"stat_deg": 9.553035400135778, "n": 7}, "rows": [1, 2]}))
+    ok = check_bindings(f"The band limit is {{{{{r.handle}#/band/stat_deg}}}} deg.", store)
+    assert ok.problems == [] and ok.cited == [r.handle]
+    assert display_value(9.553035400135778) == "9.55"
+    assert render_values(f"limit {{{{{r.handle}#/band/stat_deg}}}} deg", store) == (
+        f"limit {{{{{r.handle}#/band/stat_deg}}}} (= 9.55) deg")
+
+    (typed,) = check_bindings(f"The band limit is 9.553035400135778 deg [{r.handle}].", store).problems
+    assert f'"9.553035400135778" → {{{{{r.handle}#/band/stat_deg}}}}' in typed
+    (rounded,) = check_bindings(f"The band limit is 9.55 deg [{r.handle}].", store).problems
+    assert f"it rounds {{{{{r.handle}#/band/stat_deg}}}}" in rounded
+    (quoted,) = check_bindings(f'Limit {{{{{r.handle} "9.553035400135778"}}}} deg.', store).problems
+    assert "restates values" in quoted
+    (wrong,) = check_bindings(f"Limit {{{{{r.handle}#/band/stat}}}}.", store).problems
+    assert "no key 'stat'" in wrong and "n, stat_deg" in wrong
+    (whole,) = check_bindings(f"Rows {{{{{r.handle}#/rows}}}}.", store).problems
+    assert "points at a list" in whole
+    text = _result(store, "PD = 4.02 +/- 0.21 %")
+    (plain,) = check_bindings(f"PD {{{{{text.handle}#/pd}}}}.", store).problems
+    assert "holds text, not a returned value" in plain
+    assert check_bindings(f"PD 4.02 [{text.handle}].", store).problems == []  # text output: typed is fine
 
 
 def test_the_run_store_lives_outside_the_readable_workspace(tmp_path):
@@ -669,3 +701,58 @@ def test_a_parsed_document_cache_under_a_symlinked_root_keeps_its_figures(tmp_pa
     (crop,) = parsed.figures
     data, note = _media._read_item(_media.MediaItem(crop, True, crop.path, "image/png"))
     assert data == b"\x89PNG crop" and note is None
+
+
+def test_a_reference_to_a_flagged_result_is_refused(store):
+    bad = store.mint(source="analyst_worker_0", kind="result", produced_by="research_toolkit.tk.fit",
+                     data=json.dumps({"pd": 4.02}), failed=True)
+    (problem,) = check_bindings(f"PD {{{{{bad.handle}#/pd}}}}.", store).problems
+    assert "marked failed" in problem
+
+
+def test_a_key_with_spaces_and_a_whole_value_are_referenced_and_leftover_markup_is_refused(store):
+    from auto_research.provenance.bindings import render_values
+
+    banded = _result(store, json.dumps({"2-3 keV": {"q": 0.012345}}))
+    assert check_bindings(f"q is {{{{{banded.handle}#/2-3 keV/q}}}}.", store).problems == []
+    (copied,) = check_bindings(f"q is 0.012345 [{banded.handle}].", store).problems
+    assert f"{{{{{banded.handle}#/2-3 keV/q}}}}" in copied
+    whole = _result(store, json.dumps(4.0213))
+    assert check_bindings(f"PD {{{{{whole.handle}#}}}} %.", store).problems == []
+    assert render_values(f"PD {{{{{whole.handle}#}}}} %", store) == f"PD {{{{{whole.handle}#}}}} (= 4.02) %"
+    for bad in (f"PD {{{{{whole.handle} / pd}}}} %.", "PD {{lib:p1 12.5 Table 2}}."):
+        problems = check_bindings(bad, store).problems
+        assert any("markup the check reads as nothing" in p for p in problems), bad
+    own = check_bindings("PD {{self:r1#/pd}} %.", store, own_source=whole.source).problems
+    assert any("self:r1, which is not a receipt you can cite" in p for p in own)  # never the writer's r1
+
+
+def test_honest_restatements_are_not_copies(store):
+    request = store.mint_input("Fit ObsID 1200120101 at 8.60 kpc.", kind="human", produced_by="research_request")
+    r = _result(store, json.dumps({"obsid": 1200120101, "d": 8.6, "channels": 1024, "year": 2023.0}))
+    text = f"ObsID 1200120101 at 8.60 kpc [{request.handle}] uses 1024 channels [{r.handle}]."
+    assert not [p for p in check_bindings(text, store).problems if "types values" in p]
+
+
+def test_a_rounded_hint_names_only_a_result_the_text_cites_and_only_when_one_fits(store):
+    cited = _result(store, json.dumps({"pd": 0.4712}))
+    other = _result(store, json.dumps({"chi2": 0.5123}))
+    (alone,) = check_bindings(f"PD is 0.47 [{cited.handle}].", store, scope=[other.handle]).problems
+    assert f"it rounds {{{{{cited.handle}#/pd}}}}" in alone
+    (none,) = check_bindings(f"PD is 0.51 [{cited.handle}].", store, scope=[other.handle]).problems
+    assert other.handle not in none.split("receipts it cites")[1]
+
+
+def test_a_report_handed_to_a_model_keeps_its_quotes_and_attributions_whole(store):
+    from types import SimpleNamespace
+
+    from auto_research.agents.roles import _for_reader
+    from auto_research.schemas import AnalystReport
+
+    r = _result(store, json.dumps({"slope": 1.2714}))
+    finding = (f'PD {{{{lib:p3 "4.0 ± 0.2 %" Table 2}}}}; slope {{{{{r.handle} "slope = 1.27"}}}}; '
+               f"fit {{{{{r.handle}#/slope}}}} [{r.handle}]")
+    read = _for_reader(AnalystReport(summary="s", findings=[finding], status="succeeded"), store)
+    assert read["findings"] == [
+        f'PD {{{{lib:p3 "4.0 ± 0.2 %" Table 2}}}}; slope {{{{{r.handle} "slope = 1.27"}}}}; '
+        f"fit {{{{{r.handle}#/slope}}}} (= 1.27) [{r.handle}]"]

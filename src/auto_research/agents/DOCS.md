@@ -188,8 +188,10 @@ in its inbox (`RunControl`, drained at the loop's one boundary under A2's hold r
 `InboxEntry.render`); to a seat that finished its turn it lands there and **resumes that seat's normal
 loop** in the background (`AgentRole.resume` on the turn `_react` kept); to a seat that has not
 started it waits; to the human the router awaits the handler in the background and posts the reply
-to the sender's inbox. **Texts are informal**: none mints a receipt or widens a citable scope; a
-handle a text names becomes *viewable* by the recipient only. The human's text is a nudge (never a
+to the sender's inbox. **Texts are informal**: none mints a receipt or widens a citable scope. Each
+text renders as `[Message from X]` / `[Human steer]` / `[Reply from the human]` / `[Notice]`, the
+receipts it names, and the address that answers its sender (`InboxEntry.render`). `view_receipt`
+opens any receipt of the run (view is global, user ruling 2026-10-27), a paper as its PDF. The human's text is a nudge (never a
 receipt); the files the human sends are the sender's receipts (`hitl.attachments`). `ChannelTools`
 also holds `turn_end` while a seat this one resumed is still in its turn, and in a resumed turn
 declares exactly the finished turn's tool set, refuses the tools that would re-file
@@ -427,9 +429,10 @@ Anthropic adapter strip thinking from the named message to the end and retry onc
 
 ## Interfaces / Contracts
 Prompt loading:
-- `load_prompt(role, root=None) -> str` loads `prompts/<role>.md`, strips leading
-  and trailing whitespace, and raises `ValueError` if the prompt text references
-  build-time governance filenames.
+- `load_prompt(role, root=None) -> str` loads `prompts/<role>.md` — for a unit role
+  (`UNIT_ROLES`: reviewer, librarian, worker, lead) `prompts/conventions.md` first, then the
+  role's file (`CONVENTIONS_FILENAME`) — strips each, and raises `ValueError` if either references
+  a build-time governance filename.
 - `prompts_dir(root=None) -> Path` returns the prompt directory, allowing tests to
   inject a temporary prompt root.
 - `PROMPT_FILENAMES` maps runtime prompt roles to their Markdown filenames, including
@@ -606,8 +609,9 @@ Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
   `WAIT_FOR_REPLY_TOOL`, `CHANNEL_TOOLS`; `message_tool_def(directory)` (a `coder` address adds the
   instruction note and `mid_turn`), `list_peers_tool_def()`, `execute_list_peers(router, sender,
   label)`, `execute_coder_message(session, text, *, mid_turn=False)`, `view_receipt_tool_def()`,
-  `wait_for_reply_tool_def()`; `execute_view_receipt(lookup, viewable, store, arguments, *,
-  images_ok)` (mints and admits nothing); `execute_wait_for_reply(run_control, agent_key,
+  `wait_for_reply_tool_def()`; `execute_view_receipt(store, arguments, *, images_ok)` (any receipt
+  of the run: a figure as its image, a paper as its PDF document, text paged; mints and admits
+  nothing); `execute_wait_for_reply(run_control, agent_key,
   arguments, *, outstanding)` (a seat with no coder; `execute_wait_coder` serves the lead's coder).
 - `ReviewerAgent` — the reviewer as a unit. Method: `review(...)` (see Interfaces); attributes
   `receipts`, `report_dir`.
@@ -628,16 +632,17 @@ Reviewer report surface and check (`reviewer_tools.py`, 2026-09-24; wired into
   `SEARCH_LITERATURE_TOOL`, `READ_PAPER_TOOL`, `WEB_FETCH_TOOL`, `TEXT_SEARCH_TOOL`,
   `LIBRARIAN_FREE_TOOLS`, `READ_WINDOW_CHARS = 24_000`. `SourceToolProvider` (the old
   librarian's `react.py` provider) is deleted.
-- `AnalystWorkerAgent(*, available_toolkits, sandbox=None, registry=None,
+- `AnalystWorkerAgent(*, sandbox=None, registry=None,
   worker_index=0, ...)` —
   analyst worker wrapper.
   - `analyze(task, *, peer_reports=())` → `AnalystReport`. Opens with its earlier turns
     rebuilt from the ledger (`AgentRole._history_seed`, indexed), then the task and peer
     reports; runs the inner ReAct loop over `SandboxToolProvider` when `sandbox` + `registry`
     are attached and returns the `AnalystReport` it filed. With no sandbox/registry it falls
-    back to a plain structured call. The toolkit results its task names (`_brief_handles`: a
-    lead's probe, a reviewer's follow-up) become viewable on its channel (`SeatRouter.show`), and
-    its provider's `ref_handles` is its citable scope plus everything viewable, read at each call.
+    back to a plain structured call. Its `$ref`s resolve any toolkit result of the run.
+  - The task and peer reports reach the model through `_for_reader`: each value reference
+    followed by its value (`provenance.bindings.render_values`); the lead's `worker_reports` and
+    the reviewer's `analysis_report` / `literature_reports` the same way.
   - `last_tool_results` → `list[ToolResult]` — populated by the latest ReAct loop for
     consensus peer summaries.
   - `is_alive` → `bool` — `True` when no sandbox attached; delegates to
@@ -871,3 +876,9 @@ entries) and 2026-10-19 (every entry); detail in git history.
 - 2026-10-26 — Review round 2: `lead_turn_problems(viewable=)` and `reviewer_turn_problems(viewable=)`
   accept a brief handle a message showed the author (`AgentRole._viewable_by_message`,
   `_seat_viewable`).
+- 2026-10-27 — Batch after run faraday-refs-20261026 (user rulings 2026-10-27): view is global
+  (`execute_view_receipt(store, arguments)` opens any receipt, a paper as its PDF; `$ref` resolves
+  any toolkit result; `_brief_handles`/`ref_handles` removed); `available_toolkits` deleted (a
+  hard-coded field that controlled nothing and misled a lead); reports and tasks handed to a model
+  render value references with their values (`_for_reader`); the message tool description says the
+  recipient sees every handle a text names; `load_prompt` prepends `conventions.md` for unit roles.

@@ -30,7 +30,13 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from auto_research.provenance import ReceiptLookup, parse_bindings
-from auto_research.provenance.bindings import ATTRIBUTION_KINDS, NumberSource
+from auto_research.provenance.bindings import (
+    ATTRIBUTION_KINDS,
+    NumberSource,
+    _Resolved,
+    display_value,
+    referenced_value,
+)
 from auto_research.provenance.calls import LedgerCall, calls_by_receipt, ledger_calls
 from auto_research.provenance.store import NOT_EVIDENCE_NAMES, TOOLKIT_PRODUCER_PREFIX, is_evidence
 from auto_research.report.figures import stage_figure_receipts
@@ -155,13 +161,10 @@ class _Chains:
                         f'<div class="tool">{_tool_html(step, number, self.lookup)}</div>')
             env = _env_label(step.first)
             outs = " ".join(_output_html(r, r.handle == handle) for r in step.receipts)
-            rows.append(f'<div class="data">{outs} <span class="arw">◄─{escape(env)}─┘</span></div>'
+            arrow = f"◄─{escape(env)}─┘" if env else "◄─┘"
+            rows.append(f'<div class="data">{outs} <span class="arw">{arrow}</span></div>'
                         '<div class="tool gap"></div>')
         return f'<div class="zchain">{"".join(rows)}</div>'
-
-
-def _short(text: str, n: int = 12) -> str:
-    return text[:n]
 
 
 def _ref_html(handle: str, produced: Mapping[str, int]) -> str:
@@ -171,17 +174,17 @@ def _ref_html(handle: str, produced: Mapping[str, int]) -> str:
 
 
 def _input_html(item: InputFile, produced: Mapping[str, int]) -> str:
-    sha = f'<code class="sha">{_short(item.sha256)}</code>'
+    """An input by name; its path and hash one click further (a reader wants what, not which bytes)."""
     if item.receipt and item.receipt in produced:
         return (f'<span class="node">{escape(Path(item.path).name)} '
-                f'<span class="muted">[{escape(item.receipt)}, step {produced[item.receipt]}]</span> {sha}</span>')
+                f'<span class="muted">[{escape(item.receipt)}, step {produced[item.receipt]}]</span></span>')
     if item.basis == "obsdb":
         mission, obsid = Path(item.path).parent.name, Path(item.path).name
-        return (f'<details class="node"><summary>obs-db {escape(mission)}/{escape(obsid)} {sha}</summary>'
+        return (f'<details class="node"><summary>observation {escape(mission)} {escape(obsid)}</summary>'
                 f'<div>catalog entry + folder listing of <code>{escape(str(item.path))}</code><br>'
                 f'sha256 <code>{escape(item.sha256)}</code></div></details>')
     what = "folder listing" if item.basis == "listing" else "file"
-    return (f'<details class="node"><summary>{escape(Path(item.path).name)} {sha}</summary>'
+    return (f'<details class="node"><summary>{escape(Path(item.path).name)}</summary>'
             f'<div>{what} <code>{escape(str(item.path))}</code><br>sha256 <code>{escape(item.sha256)}</code>'
             + (f'<br>made by {escape(item.receipt)}' if item.receipt else "") + "</div></details>")
 
@@ -190,9 +193,8 @@ def _output_html(receipt: Receipt, final: bool) -> str:
     label = receipt.caption or (Path(receipt.path).name if receipt.kind in ("data", "figure") else f"{receipt.kind} text")
     flags = f' <span class="flag">{escape(", ".join(receipt.flags))}</span>' if receipt.flags else ""
     mark = ' <span class="here">← the number is here</span>' if final else ""
-    return (f'<details class="node{" final" if final else ""}"><summary>{escape(receipt.handle)} '
-            f'{escape(label)}{flags}{mark}</summary><div>{escape(receipt.kind)}, sha256 '
-            f'<code>{escape(receipt.sha256)}</code></div></details>')
+    return (f'<span class="node{" final" if final else ""}">{escape(receipt.handle)} '
+            f'{escape(label)}{flags}{mark}</span>')
 
 
 def _tool_name(receipt: Receipt) -> tuple[str, bool]:
@@ -219,20 +221,17 @@ def _env_record(fingerprint: str | None) -> dict:
 
 def _env_label(receipt: Receipt) -> str:
     if not receipt.env:
-        return "environment not recorded"
-    name = _env_record(receipt.env).get("environment") or "environment"
-    return f"{name} @ env:{receipt.env[:12]}" + (", untested" if receipt.env_untested else "")
+        return "environment not recorded" if receipt.produced_by.startswith(TOOLKIT_PRODUCER_PREFIX) else ""
+    name = _env_record(receipt.env).get("environment") or "its environment"
+    return name + (", untested" if receipt.env_untested else "")
 
 
 def _tool_html(step: _Step, number: int, lookup: ReceiptLookup | None = None) -> str:
     receipt = step.first
     name, toolkit = _tool_name(receipt)
     parts = [f'<div class="tname{"" if toolkit else " grey"}">{number}. {escape(name)}</div>']
-    if receipt.toolkit_commit:
-        parts.append(f'<div class="muted">commit <code>{escape(receipt.toolkit_commit[:12])}</code></div>')
     if step.call is not None:
-        args = json.dumps(step.call.sent_args, indent=1, sort_keys=True, default=str)
-        parts.append(f'<details><summary>arguments</summary><pre class="args">{escape(args)}</pre></details>')
+        parts.append(_arguments_html(step.call.sent_args, lookup))
         if toolkit:
             code, args_json = reproduce_code(receipt, step.call, lookup)
             parts.append(
@@ -240,9 +239,43 @@ def _tool_html(step: _Step, number: int, lookup: ReceiptLookup | None = None) ->
                 f'data-args="{escape(args_json)}">copy reproduce code</button>'
             )
     elif receipt.args_sha256:
-        parts.append('<div class="muted">arguments: not rebuilt from the ledger (hash '
-                     f'<code>{escape(receipt.args_sha256[:12])}</code>)</div>')
+        parts.append('<div class="muted">arguments: not rebuilt from the ledger</div>')
+    verify = [f"toolkit commit <code>{escape(receipt.toolkit_commit)}</code>"] if receipt.toolkit_commit else []
+    if receipt.env:
+        verify.append(f"environment fingerprint <code>{escape(receipt.env)}</code>")
+    if receipt.args_sha256:
+        verify.append(f"arguments sha256 <code>{escape(receipt.args_sha256)}</code>")
+    verify += [f"{escape(r.handle)} sha256 <code>{escape(r.sha256)}</code>" for r in step.receipts]
+    parts.append(f'<details class="verify"><summary>verify</summary><div>{"<br>".join(verify)}</div></details>')
     return "".join(parts)
+
+
+#: An argument longer than this is shown cut, with the whole value one click further.
+_ARG_SHOWN = 160
+
+
+def _arguments_html(args: Mapping[str, object], lookup: ReceiptLookup | None) -> str:
+    """The call's arguments as a reader wants them: one line each, a value passed by ``$ref``
+    shown as the value it carried and the result it came from."""
+    from auto_research.provenance.refs import RefError, refs_in, resolve_refs
+
+    store = getattr(lookup, "store", lookup)
+    rows = []
+    for key, value in sorted(args.items()):
+        source = ""
+        refs = refs_in(value) if store is not None else []
+        if refs:
+            try:
+                value = resolve_refs({key: value}, store, lambda _h: True)[0][key]
+                source = f' <span class="muted">← {escape(", ".join(refs))}</span>'
+            except (RefError, OSError, ValueError):
+                pass  # a failed, changed or unreadable result: the reference is shown as written
+        text = value if isinstance(value, str) else json.dumps(value, default=str)
+        shown = escape(text if len(text) <= _ARG_SHOWN else text[:_ARG_SHOWN] + "…")
+        whole = (f'<details><summary>whole value</summary><pre class="args">{escape(text)}</pre></details>'
+                 if len(text) > _ARG_SHOWN else "")
+        rows.append(f"<div><code>{escape(str(key))}</code> = <code>{shown}</code>{source}{whole}</div>")
+    return f'<div class="args">{"".join(rows)}</div>' if rows else ""
 
 
 def reproduce_code(
@@ -272,6 +305,7 @@ def reproduce_code(
     fn = str(call.context.get("fn") or receipt.produced_by.rsplit(".", 1)[-1])
     module = str(call.context.get("module") or "")
     importable = fn.isidentifier() and all(part.isidentifier() for part in module.split(".")) and bool(module)
+    package = (module if importable else receipt.produced_by.removeprefix(TOOLKIT_PRODUCER_PREFIX)).split(".", 1)[0]
     record = _env_record(receipt.env)
 
     def one_line(text: object) -> str:
@@ -290,11 +324,41 @@ def reproduce_code(
     lines.append("# arguments naming output files point into the run's folders: change them to a scratch "
                  "folder so the run's receipted files stay as they are")
     lines.append("# a fresh interpreter: a tool relying on an earlier call's session needs that call first")
-    lines += ["import json, sys", f"sys.path.insert(0, {root!r})"]
+    lines.append("import json, sys")
+    if receipt.toolkit_commit and receipt.toolkit_root:
+        # The toolkit as it was when this result was made: the checkout when it is at that commit,
+        # else that commit extracted beside it (`git archive`, which leaves the checkout untouched).
+        lines += [
+            "import io, subprocess, tarfile, tempfile",
+            f"_root, _commit = {root!r}, {receipt.toolkit_commit!r}",
+            "_git = lambda *a: subprocess.run(['git', '-C', _root, *a], capture_output=True)",
+            "_head = _git('rev-parse', 'HEAD').stdout.decode().strip()",
+            "_dirty = _git('status', '--porcelain', '--untracked-files=no').stdout.strip()",
+            "if _head != _commit or _dirty:  # another commit, or uncommitted edits: use the commit itself",
+            "    _out = _git('archive', _commit)",
+            "    if _out.returncode:",
+            "        raise RuntimeError(f'toolkit commit {_commit} cannot be read from {_root}: ' + _out.stderr.decode())",
+            "    _root = tempfile.mkdtemp(prefix='toolkit-' + _commit[:8] + '-')",
+            "    _tar = tarfile.open(fileobj=io.BytesIO(_out.stdout))",
+            "    try:",
+            "        _tar.extractall(_root, filter='data')",
+            "    except TypeError:  # a Python without extraction filters",
+            "        _tar.extractall(_root)",
+            "sys.path.insert(0, _root)",
+            f"for _name in [m for m in sys.modules if m.split('.')[0] == {package!r}]:",
+            "    del sys.modules[_name]  # an earlier block's toolkit version, imported in this interpreter",
+        ]
+    else:
+        lines.append(f"sys.path.insert(0, {root!r})")
     if importable:
         lines.append(f"from {module} import {fn}")
     else:
-        lines.append(f"# import the tool's function from its module under {one_line(root)}")
+        # A call the runtime made in-process records no module: the package's manifest names it.
+        lines += [
+            "import importlib",
+            f"_spec = importlib.import_module({package!r}).TOOL_MANIFEST[{receipt.produced_by!r}]",
+            "tool = getattr(importlib.import_module(_spec['module']), _spec['fn'])",
+        ]
         fn = "tool"
     if stored:
         lines += [
@@ -362,6 +426,7 @@ class _Prose:
     problems: list[str] = field(default_factory=list)
     cited: list[str] = field(default_factory=list)
     held: list[str] = field(default_factory=list)
+    _values: object = None
 
     def note(self, handle: str) -> None:
         if handle not in self.cited:
@@ -376,7 +441,18 @@ class _Prose:
         for binding in bindings:
             self.note(binding.handle)
             pid = self.chains.want(binding.handle)
-            if binding.quote is None:
+            if binding.pointer is not None:
+                try:
+                    if self._values is None:
+                        self._values = _Resolved(self.lookup)  # each result parsed once per page
+                    value = referenced_value(self._values, binding)
+                except Exception as exc:  # noqa: BLE001 — the turn_end check refuses these first
+                    self.problems.append(f"{label}: {{{{{binding.handle}#{binding.pointer}}}}} cannot be read ({exc}).")
+                    continue
+                shown = display_value(value)
+                html = (f'<button type="button" class="num" popovertarget="{self._value_pop(binding, value, shown, pid)}" '
+                        f'popovertargetaction="show">{_number_html(shown, value)}</button>')
+            elif binding.quote is None:
                 html = (f'<button type="button" class="cite" popovertarget="{pid}" popovertargetaction="show">'
                         f"[{escape(binding.handle)}]</button>")
             else:
@@ -410,6 +486,23 @@ class _Prose:
                              f'<button type="button" class="{cls}" popovertarget="{pid}" popovertargetaction="show">'
                              f"{escape(number.value)}</button>"))
         return sorted(segments)
+
+    def _value_pop(self, binding, value: object, shown: str, chain: str) -> str:
+        """A referenced value's popover, value first: the full value, the field and the result it
+        is read from, and a button to the chain that produced that result."""
+        pid = f"val-{len(self.held) + 1}"
+        receipt = self.lookup.get(binding.handle)
+        tool = _tool_name(receipt)[0] if receipt is not None else binding.handle
+        full = repr(value) if isinstance(value, float) else json.dumps(value, ensure_ascii=False)
+        self.held.append(
+            f'<div popover id="{pid}" class="chain-pop"><div class="pop-head"><strong>{_number_html(shown, value)}</strong>'
+            f'<button type="button" class="close" popovertarget="{pid}" popovertargetaction="hide" '
+            f'aria-label="Close">×</button></div><p>Full value <code>{escape(full)}</code></p>'
+            f"<p>Field <code>{escape(binding.pointer or '')}</code> of what {escape(tool)} returned, "
+            f'result <button type="button" class="cite" popovertarget="{chain}" popovertargetaction="show">'
+            f"[{escape(binding.handle)}]</button>, which shows how it was produced.</p></div>"
+        )
+        return pid
 
     def _held(self, value: str, handles: Sequence[str]) -> str:
         pid = f"held-{len(self.held) + 1}"
@@ -462,6 +555,15 @@ class _Prose:
             out.append(f"<{tag}>{_render_range(joined, segments, start, end)}</{tag}>")
             start = end + 3
         return "".join(out)
+
+
+def _number_html(shown: str, value: object) -> str:
+    """A displayed value in HTML: a float's ``2.48e7`` typeset as 2.48×10<sup>7</sup>; any other
+    value (a string such as ``source1``) as written."""
+    mantissa, sep, power = shown.partition("e")
+    if isinstance(value, float) and sep and re.fullmatch(r"-?[0-9]+", power):
+        return f"{escape(mantissa)}×10<sup>{int(power)}</sup>"
+    return escape(shown)
 
 
 def _render_range(text: str, segments: Sequence[tuple[int, int, str]], start: int, end: int) -> str:

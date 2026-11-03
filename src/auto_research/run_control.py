@@ -86,7 +86,7 @@ class InboxEntry:
 
     The same queue carries a human ``/steer``, a human's reply to a seat's ``message``, and a text
     from another seat (E12). A text is informal: it is never a receipt, and the handles it names
-    only become *viewable* for the recipient, never citable.
+    are listed for the recipient to open, never admitted to its citable scope.
     """
 
     __slots__ = ("sender", "text", "handles", "kind")
@@ -102,23 +102,30 @@ class InboxEntry:
         self.kind = kind
 
     def render(self) -> str:
-        """The user turn the recipient reads."""
-        if self.kind == "steer":
-            return f"[Human steer] {self.text}"
-        if self.kind == "reply":
-            return f"[Reply from the human] {self.text}"
+        """The user turn the recipient reads: who sent it, the text, where an answer goes, and the
+        receipts the text names (any seat may open any receipt, so the list grants nothing)."""
+        named = (
+            "\n\nReceipts this text names (open each with view_receipt): " + ", ".join(self.handles)
+            if self.handles else ""
+        )
         if self.kind == "notice":
-            return f"[Notice] {self.text}"
+            return f"[Notice] {self.text}{named}"
         if self.sender == "coder":
             return (
-                f"[Message from the coder] {self.text}\n\nAnswer it with message(to=\"coder\") — that "
-                "reaches the coder inside the turn it is still running, so it does not have to stop "
-                "and wait."
+                f"[Message from the coder] {self.text}{named}\n\nAnswer it with message(to=\"coder\") "
+                "— that reaches the coder inside the turn it is still running, so it does not have to "
+                "stop and wait."
             )
+        if self.kind == "steer":
+            return (
+                f"[Human steer] {self.text}{named}\n\n(From the human: act on it in your work, and "
+                'answer with message(to="human") when it asks you a question.)'
+            )
+        head = "[Reply from the human]" if self.kind == "reply" else f"[Message from {self.sender}]"
         return (
-            f"[Message from {self.sender}] {self.text}\n\n"
-            f"(Reply with message(to=\"{self.sender}\") when an answer helps; texts are informal, so "
-            "rest every claim on your own evidence.)"
+            f"{head} {self.text}{named}\n\n"
+            f"(Answer the sender with message(to=\"{self.sender}\") when an answer helps; texts are "
+            "informal, so rest every claim on your own evidence.)"
         )
 
 

@@ -56,10 +56,29 @@ def test_runtime_prompt_has_no_governance_references(role: str) -> None:
 
 
 def test_loader_rejects_governance_references(tmp_path: Path) -> None:
+    (tmp_path / "conventions.md").write_text("Team conventions.", encoding="utf-8")
     (tmp_path / "reviewer.md").write_text("Do not load DOCS.md", encoding="utf-8")
 
     with pytest.raises(ValueError, match="forbidden file"):
         load_prompt("reviewer", root=tmp_path)
+    (tmp_path / "reviewer.md").write_text("The reviewer's job.", encoding="utf-8")
+    (tmp_path / "conventions.md").write_text("See AGENTS.md", encoding="utf-8")
+    with pytest.raises(ValueError, match="conventions.md references forbidden"):
+        load_prompt("reviewer", root=tmp_path)
+
+
+def test_a_unit_prompt_is_the_conventions_then_its_role_and_a_non_unit_prompt_is_its_own(
+    tmp_path: Path,
+) -> None:
+    from auto_research.agents.prompts import UNIT_ROLES
+
+    (tmp_path / "conventions.md").write_text("Team conventions.", encoding="utf-8")
+    for role in PROMPT_FILENAMES:
+        (tmp_path / PROMPT_FILENAMES[role]).write_text(f"The {role} job.", encoding="utf-8")
+    assert UNIT_ROLES == {"reviewer", "librarian_io", "analyst_worker", "analyst_lead"}
+    for role in PROMPT_FILENAMES:
+        expected = (f"Team conventions.\n\nThe {role} job." if role in UNIT_ROLES else f"The {role} job.")
+        assert load_prompt(role, root=tmp_path) == expected  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------- HITL tools are offered conditionally

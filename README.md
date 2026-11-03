@@ -498,7 +498,11 @@ call's input files and links the receipts that produced them, and propagates `fa
 `synthetic` marks. The model sees each result labelled `[receipt <handle>]`; a report's findings
 cite the receipts their numbers come from, and every role's `turn_end` refuses a number that no
 cited receipt carries (*scoped grounding*). A task's own numbers count only where the task is cited
-(`[input:…]`), so a value handed in by the question cannot reappear as a finding unmarked.
+(`[input:…]`), so a value handed in by the question cannot reappear as a finding unmarked. A value a
+tool returned is written as its reference, `{{analyst_worker_0:r12#/fit/kT}}`: the runtime fills it
+in at three significant digits, with the full value and the chain that produced it one click away
+on the HTML report, and refuses a typed copy of it. Any role may open any receipt of the run;
+what it may cite stays scoped.
 
 ---
 

@@ -24,12 +24,15 @@ hand-editable.
 from __future__ import annotations
 
 import importlib
+import logging
 import re
 import sys
 from pathlib import Path
 from typing import Any, TypedDict
 
 import yaml
+
+_log = logging.getLogger(__name__)
 
 
 class ToolSpec(TypedDict):
@@ -94,6 +97,8 @@ class ToolkitRegistry:
         self._default_call_timeout_s: int = _CALL_TIMEOUT_FALLBACK_S
         # The manifest packages imported on the last load() — reused by reload().
         self._manifest_packages: list[str] = []
+        #: package → why it exposed no tools on the last load (an import error, no TOOL_MANIFEST).
+        self.import_errors: dict[str, str] = {}
         self._loaded = False
 
     # ------------------------------------------------------------------
@@ -105,6 +110,7 @@ class ToolkitRegistry:
         if self._loaded:
             return
         self._call_timeout_ceiling = {}
+        self.import_errors = {}
         try:
             from auto_research.env import sandbox_call_timeout_default
 
@@ -123,11 +129,15 @@ class ToolkitRegistry:
                     # The manifest entry IS the agent-facing interface (§9.2 two halves):
                     # ``skills/TOOL_MANIFEST`` is the ai-half, ``lib/`` docstrings are the
                     # human-half. The description is taken verbatim from the manifest.
-                    manifest: dict[str, ToolSpec] = getattr(mod, "TOOL_MANIFEST", {})
+                    manifest: dict[str, ToolSpec] | None = getattr(mod, "TOOL_MANIFEST", None)
+                    if not manifest:
+                        self.import_errors[pkg] = "it exposes no TOOL_MANIFEST"
+                        continue
                     self._tools.update(manifest)
                     self._load_tool_config(pkg, list(manifest.keys()))
-                except Exception:  # noqa: BLE001
-                    pass  # package not installed or missing manifest – skip silently
+                except Exception as exc:  # noqa: BLE001 — recorded, and refused at launch
+                    self.import_errors[pkg] = f"{type(exc).__name__}: {exc}"
+                    _log.warning("toolkit package %s exposes no tools: %s", pkg, self.import_errors[pkg])
         finally:
             if inserted:
                 sys.path.remove(root_str)
@@ -155,6 +165,7 @@ class ToolkitRegistry:
         inserted = root_str not in sys.path
         if inserted:
             sys.path.insert(0, root_str)
+        failed: dict[str, str] = {}
         try:
             for pkg in candidates:
                 for mod_name in (f"{pkg}.skills", pkg):
@@ -162,8 +173,10 @@ class ToolkitRegistry:
                     if mod is not None:
                         try:
                             importlib.reload(mod)
-                        except Exception:  # noqa: BLE001 — a broken in-progress edit must not crash discovery
-                            pass
+                        except Exception as exc:  # noqa: BLE001 — recorded, never crashes discovery
+                            failed.setdefault(pkg, f"reload: {type(exc).__name__}: {exc}")
+                            for stale in [m for m in sys.modules if m.split(".")[0] == pkg]:
+                                del sys.modules[stale]  # so load() imports afresh and records why
         finally:
             if inserted:
                 sys.path.remove(root_str)
@@ -171,6 +184,8 @@ class ToolkitRegistry:
         self._tool_env = {}
         self._loaded = False
         self.load()
+        for pkg, why in failed.items():
+            self.import_errors.setdefault(pkg, why)
 
     def load_mcp(self, client: Any) -> None:
         """Index tools from a started MCPToolClient into the registry."""
@@ -228,9 +243,11 @@ class ToolkitRegistry:
             return
         try:
             cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-        except Exception:  # noqa: BLE001 — a malformed config must not break discovery
+        except Exception as exc:  # noqa: BLE001 — recorded: its tools would run outside their environment
+            self.import_errors[pkg] = f"tool_config.yaml unreadable: {type(exc).__name__}: {exc}"
             return
         if not isinstance(cfg, dict):
+            self.import_errors[pkg] = "tool_config.yaml is not a mapping"
             return
         env = cfg.get("env")
         if isinstance(env, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,47}", env):
@@ -330,3 +347,23 @@ class ToolkitRegistry:
             for kind, desc in self._mcp_tools.items():
                 lines.append(f"  {kind}: {desc}")
         return "\n".join(lines)
+
+
+def check_toolkit_manifests(root: Path | None = None) -> None:
+    """Launch-time preflight (no LLM): every ``*_utils`` package of ``toolkit_root`` imports in the
+    orchestration environment and exposes a ``TOOL_MANIFEST``. A package that does not would
+    reach the analysts as missing tools and nothing else (found 2026-10-27: the loader skipped
+    such a package silently). Registered in ``auto_research.preflight``.
+    """
+    if root is None:
+        from auto_research.sandbox.merge_flow import _resolve_toolkit_root
+
+        root = _resolve_toolkit_root()
+    registry = ToolkitRegistry(root)
+    registry.load()
+    if registry.import_errors:
+        raise RuntimeError(
+            "toolkit packages expose no tools: "
+            + "; ".join(f"{pkg} ({why})" for pkg, why in sorted(registry.import_errors.items()))
+            + f". Fix them in {root} before launching."
+        )

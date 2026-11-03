@@ -5,11 +5,7 @@ You file a report that the reviewer reads beside the analysts' work and uses to 
 
 ## What you produce
 
-One report, submitted with `turn_end`. The report is one text document, one `# <block>` header
-per field (a refused call shows it whole). Write it with `write_report` (the whole document) and
-change it with `edit_report`: `old_string`, copied exactly from the draft, is replaced by
-`new_string`, and everything else stays as it is. A finding is a `- ` item followed by an indented
-`support: lib:p1, lib:w2` line. Each reply shows the changed lines and a one-line outline. The
+One report. A finding is a `- ` item followed by an indented `support: lib:p1, lib:w2` line. The
 blocks:
 - **summary** — a briefing of 3–5 sentences: what you searched, what you read, and the headline
   of what your sources establish for this request. The reader turns to findings for the claims.
@@ -56,13 +52,11 @@ their context. A later pass builds on what earlier passes found, so its question
   List a finding's supporting handles in its `support`.
 - Write a paper's identifier with its prefix, as the tools show it — `arXiv:2101.00001`,
   `doi:10.1000/xyz`, `bibcode 2021ApJ...900....1A` — so it reads as a name and not as a value.
-- Write every number in digits (45, not forty-five).
-- **A value from a paper is attributed, with its place.** Write it as
-  `{{lib:p3 "a lag of 12.5 ± 3.1 days" Table 2}}`: the handle, the value exactly as the paper
-  prints it (sign, digits, uncertainty, unit), and where it is — a table, figure, section or page.
-  The paper's text is not checked, so a person checks every attributed value against the PDF; the
-  place is what makes that quick. Any number outside an attribution is checked like any other, so
-  a number from a paper written without its attribution is refused.
+- **A value from a paper is attributed, with its place**: `a lag of {{lib:p3 "12.5 ± 3.1" Table 2}}
+  days`, the value exactly as the paper prints it (sign, digits, uncertainty) inside the quote, the
+  surrounding words your own, and its place (a table, figure, section or page) after the quote. A
+  person checks every attributed value against the PDF, and the place makes that quick. Any
+  number outside an attribution is checked like any other.
 - **A web page supports what it says in words.** Documentation, a code repository or a
   discussion can support a finding about a method, a convention, a tool's behaviour or a known
   issue: cite the page's handle in `support`. A value found on a page points to the paper that

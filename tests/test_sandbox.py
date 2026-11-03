@@ -401,7 +401,6 @@ class TestWorkerReactLoop:
         monitor = RunMonitor(chatter=7)
         w = AnalystWorkerAgent(
             model=_script_model(),
-            available_toolkits=[],
             sandbox=sb,
             registry=reg,
             monitor=monitor,
@@ -440,7 +439,7 @@ class TestWorkerReactLoop:
         from auto_research.agents.roles import AnalystWorkerAgent
         sb = _RestartableFakeSandbox()
         reg = _FakeRegistry(known={"tk_load"}, mcp=set())
-        w = AnalystWorkerAgent(model=_script_model(), available_toolkits=[], sandbox=sb, registry=reg)
+        w = AnalystWorkerAgent(model=_script_model(), sandbox=sb, registry=reg)
         asyncio.run(w.analyze(AnalysisTask(question="q")))
         assert sb.starts == 1
 
@@ -456,7 +455,7 @@ class TestWorkerReactLoop:
                     "summary": "no tools", "findings": [], "figures": [], "uncertainty": None,
                 })
 
-        w = AnalystWorkerAgent(model=_PlainModel(), available_toolkits=[])  # no sandbox/registry
+        w = AnalystWorkerAgent(model=_PlainModel())  # no sandbox/registry
         report = asyncio.run(w.analyze(AnalysisTask(question="q")))
         assert report.summary == "no tools"
 

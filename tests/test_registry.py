@@ -185,3 +185,32 @@ def test_a_package_names_the_environment_its_tools_run_in(tmp_path, cleanup_modu
     _write_tool_config(tmp_path, "stack_utils", "default_call_timeout_s: 60\n")
     reg.reload()
     assert reg.tool_env("stack_utils.fit") is None
+
+
+def test_a_package_that_fails_to_import_or_has_no_manifest_is_recorded_and_refused_at_launch(
+    tmp_path, cleanup_modules
+):
+    from auto_research.sandbox.registry import check_toolkit_manifests
+
+    _write_pkg(tmp_path, "alpha_utils", {"alpha_utils.t1": "first"})
+    broken = _write_pkg(tmp_path, "beta_utils", {"beta_utils.t1": "second"})
+    (broken / "__init__.py").write_text("import a_module_that_is_not_installed\n")
+    empty = tmp_path / "gamma_utils"
+    empty.mkdir()
+    (empty / "__init__.py").write_text("")
+
+    reg = ToolkitRegistry(tmp_path)
+    reg.load()
+    assert "alpha_utils.t1" in reg.list_tools()
+    assert set(reg.import_errors) == {"beta_utils", "gamma_utils"}
+    assert "ModuleNotFoundError" in reg.import_errors["beta_utils"]
+    assert reg.import_errors["gamma_utils"] == "it exposes no TOOL_MANIFEST"
+    with pytest.raises(RuntimeError, match=r"beta_utils \(ModuleNotFoundError.*gamma_utils"):
+        check_toolkit_manifests(tmp_path)
+
+
+def test_a_toolkit_whose_packages_all_load_passes_the_launch_check(tmp_path, cleanup_modules):
+    from auto_research.sandbox.registry import check_toolkit_manifests
+
+    _write_pkg(tmp_path, "delta_utils", {"delta_utils.t1": "first"})
+    check_toolkit_manifests(tmp_path)

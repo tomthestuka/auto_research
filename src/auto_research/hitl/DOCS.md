@@ -23,9 +23,9 @@ fabrication, no silent hang: with no handler wired `human` is not an address, an
   `register(key, seat)`, `directory(sender)` (every other seat, then `human` when attended),
   `seat(key)`, `state(key)` (working / finished / not started, for `list_peers`),
   `record_message(sender, to, text, *, route)` (ledgers the lead's text to its coder),
-  `send(sender, to, text, *, handles, scope, receipt_source, reply_dir, kind, model) -> (text,
+  `send(sender, to, text, *, handles, receipt_source, reply_dir, kind, model) -> (text,
   is_error)` (never blocks), `ask_human(query, *, deliver, receipt_source)` (the background wait;
-  raises `HumanInputRequired` unattended), `viewable(key)`, `show(key, handles)` (a brief's handles made viewable), `outstanding(key)`. Routes: live seat →
+  raises `HumanInputRequired` unattended), `outstanding(key)`. Routes: live seat →
   its `RunControl` inbox; a seat with a kept turn → inbox + resume task (registered on
   `RunControl.register_resumed`, a notice to the sender seat when it ends); not started → inbox;
   `wake(key, entries)` (D5) resumes an idle seat with a kept turn for the texts its filing batch
@@ -42,8 +42,11 @@ fabrication, no silent hang: with no handler wired `human` is not an address, an
   marks the seat busy (`_resuming`) until its loop ends, so a text arriving in between joins the
   inbox that resume reads (`_busy` routes it "live") instead of starting a second; human →
   background wait, reply (`kind="reply"`) or notice (timeout/fault) to the sender's inbox, a filed
-  sender resumed reply-only. Texts mint no receipt; handles a text names are recorded as viewable
-  (only those the sender itself can see). The human's files are minted with
+  sender resumed reply-only. Texts mint no receipt; the handles a text attaches or names in its
+  prose that are receipts of the run travel with it (`InboxEntry.handles`) and are listed for the
+  recipient, who may open any receipt anyway (view is global, user ruling 2026-10-27); an attached
+  handle not in the run is named back to the sender. A human attachment resolves through the run's
+  `RunView`. The human's files are minted with
   `attachments.mint_reply_attachments(..., parent=None)` — the reply text is never a receipt.
   Mirror: seat-to-seat texts are posted with the handler's `notify(text)` when it has one and
   `orchestration.yaml: channel_mirror` is on. Ledger: `channel.message`, `channel.reply`,
@@ -273,3 +276,10 @@ Compacted 2026-09-01 and 2026-09-24, and 2026-10-19 (every entry); detail in git
   cancels command tasks, `in_flight_commands()`.
 - 2026-10-26 — `SeatRouter.show(key, handles)`: the toolkit results a worker's task names become
   viewable for it (openable and passable by `$ref`, never citable), like a message's handles.
+- 2026-10-27 — `SeatRouter.viewable`/`show` and `send(scope=)` removed: view is global (user ruling).
+  A text's handles are the receipts it attaches or names in its prose (`refs.handles_named`),
+  listed for the recipient; an attached handle not in the run is named back to the sender; a human
+  attachment resolves through `RunView`.
+- 2026-10-27 — Review: a router with no store lists a text's handles unchecked; `resolve_attachments`
+  reads through `RunView` ("not a receipt of this run"). A human steer renders "act on it, answer
+  with message(to=\"human\") when it asks you a question".
