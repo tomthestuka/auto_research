@@ -204,7 +204,12 @@ the published artifact paths and handles (`report_artifacts`).
 - `IOAgentLike` — protocol with `async research(request, *, follow_up) -> LiteratureReport` and
   `last_receipts: dict[str, Receipt]`.
 - `ResearchState` literature keys: `literature: list[LiteratureReport]` (accumulated),
-  `literature_receipts: dict[str, Receipt]` (merged).
+  `literature_receipts: dict[str, Receipt]` (merged): the receipts each filed `LiteratureReport`
+  cites (its findings' `support` handles and the handles bound in its summary and claims), never
+  every document the librarian opened (`_literature_cited`; user ruling 2026-11-03: only a report
+  filed through `turn_end` is citable downstream, the edge worker → lead's shape). The reviewer
+  admits them to its scope and lists them as `literature_documents`; any other document stays
+  viewable with `view_receipt`.
 - `ReviewerLike` — protocol with `async review(request, *, arrived="request", literature=(),
   literature_receipts=None, report=None, previous=(), human_nudges=(), human_files=(),
   budgets=None, human_attended=False, render=None) -> ReviewerReport`.
@@ -302,3 +307,15 @@ and 2026-10-19 (every entry); detail in git history.
   the lead through one `_wired_lead` (workspace, `attach_lead_runtime` with the web source,
   `attach_channel`); the escape cells drive `run_cycle` (they drove `_react` on a provider with
   no `turn_end`). `tests/test_role_wiring_seams.py` guards seam-owned fields by AST.
+- 2026-11-03 — The librarian → reviewer edge carries only what the filed `LiteratureReport` cites
+  (`_literature_cited`), not `io_agent.last_receipts` whole (user ruling 2026-11-03: briefs and
+  documents read are informal; in a graph of MTA units only a report filed through `turn_end` is
+  citable). `test_graph.py`'s librarian opens a page it does not cite.
+- 2026-11-03 — Review of that edge (9 findings): `_literature_cited` reads `self:` as the librarian's
+  (`librarian_tools.LIBRARIAN_SOURCE`) in claims, summary and `support`, and counts the handles a
+  gap cites; the reviewer reads the lead's `self:` citations as the lead's
+  (`roles.LEAD_KEY`, which `attach_lead_runtime` sets). Left as they are: a fake librarian without a
+  store keeps only this pass's cited documents; a checkpoint written before the change keeps every
+  document it merged. A paper the reviewer opens itself by path stays its own reading (it reuses
+  the paper's handle by hash).
+

@@ -268,6 +268,9 @@ def test_loader_authoring_end_to_end(tmp_path):
     """Drive the full lead-driven authoring path on a from-scratch toolkit and verify it reaches a
     terminal outcome without crashing. Observational: the authored tool is judged by a human from
     the logged JSONL/MD against the E5 rubric."""
+    from dotenv import load_dotenv
+
+    load_dotenv()  # surface live LLM credentials, as the other cells in this module do
     fake_tk = _scaffold_fake_toolkit(tmp_path)
     ts = datetime.now().strftime("%Y%m%dT%H%M%S")
 

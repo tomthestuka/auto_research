@@ -36,7 +36,8 @@ def _no_data_roots(monkeypatch):
 
 
 def _provider(tmp_path, store, tool_fn, schema=None):
-    reg = _FakeRegistry(known={"research_toolkit.tk.fit"}, mcp=set(), schema=schema or {"properties": {}})
+    reg = _FakeRegistry(known={"research_toolkit.tk.fit"}, mcp=set(), schema=schema or {"properties": {
+        "out_path": {"kind": "path"}, "csv_path": {"kind": "path"}}})
     return SandboxToolProvider(
         reg, _FakeSandbox(tool_fn=tool_fn), cwd=tmp_path,
         receipts=store, receipt_source="analyst_worker_0",
@@ -71,7 +72,7 @@ def test_figure_hash_is_the_files_not_the_tools_and_a_missing_figure_is_dropped(
     assert [f.caption for f in out.figures] == ["PD vs E"]
     assert out.figures[0].sha256 == hashlib.sha256(png.read_bytes()).hexdigest()
     assert "does not match the file" in out.text and "ghost" in out.text
-    assert "[analyst_worker_0:f1] PD vs E" in out.text
+    assert "[analyst_worker_0:f1] PD vs E" in out.text  # the runtime's header, a display form
 
 
 def test_a_written_file_is_a_data_receipt_and_links_the_next_call_as_its_child(tmp_path):
@@ -112,7 +113,7 @@ def test_worker_turn_end_refuses_an_ungrounded_number_then_accepts_it_cited(tmp_
     assert any('"3.45"' in p for p in worker_report_problems(ws))
 
     asyncio.run(execute_edit_report(ws, {  # A7: fix the one finding with an Edit
-        "old_string": "- PD is 3.45 %.", "new_string": "- PD is 3.453 ± 0.194 % [analyst_worker_0:r1].",
+        "old_string": "- PD is 3.45 %.", "new_string": '- PD is {{analyst_worker_0:r1 "PD=3.453 +/- 0.194 %"}}.',
     }))
     assert worker_report_problems(ws) == []
 
@@ -122,7 +123,7 @@ def test_a_worker_cannot_ground_a_number_in_a_peers_unseen_receipt(tmp_path):
     peer = store.mint(source="analyst_worker_1", kind="result", produced_by="research_toolkit.tk.fit", data="PD=5.1")
     ws = _workspace(tmp_path, ScopedLookup(store, own_source="analyst_worker_0"))
     asyncio.run(execute_write_report(ws, {
-        "content": f"# summary\ns\n# status\nsucceeded\n# findings\n- PD 5.1 [{peer.handle}]\n",
+        "content": f"# summary\ns\n# status\nsucceeded\n# findings\n- PD 5.1 {{{{{peer.handle}}}}}\n",
     }))
     assert any("not a receipt you can cite" in p for p in worker_report_problems(ws))
 
@@ -132,11 +133,11 @@ def test_the_lead_may_cite_what_a_received_worker_report_cites(tmp_path):
 
     store = ReceiptStore(tmp_path / "receipts")
     r = store.mint(source="analyst_worker_0", kind="result", produced_by="research_toolkit.tk.fit", data="PD=3.453")
-    worker_report = AnalystReport(summary="s", findings=[f"PD 3.453 [{r.handle}]"], status="succeeded")
+    worker_report = AnalystReport(summary="s", findings=[f'PD {{{{{r.handle} "PD=3.453"}}}}'], status="succeeded")
     ws = _workspace(tmp_path, _receipt_scope(store, "analyst_lead", [worker_report]), "analyst_lead")
     ws.prose_fields = react.LEAD_REPORT_FIELDS
     asyncio.run(execute_write_report(ws, {
-        "content": f"# summary\nAdjudicated.\n# status\nsucceeded\n# findings\n- PD 3.453 [{r.handle}]\n",
+        "content": f'# summary\nAdjudicated.\n# status\nsucceeded\n# findings\n- PD {{{{{r.handle} "PD=3.453"}}}}\n',
     }))
     assert lead_turn_problems(None, ws) == []
 
@@ -156,7 +157,8 @@ def test_a_submit_that_commits_mints_a_commit_receipt_the_lead_may_cite(tmp_path
     out = prov._commit_receipted(session, None, ToolOutcome(text="committed"))
     (commit,) = store.receipts(kind="commit")
     assert is_evidence(commit) and out.text.startswith(f"[receipt {commit.handle}]")
-    assert check_bindings(f"committed in 2 of 5 submissions [{commit.handle}]", store).problems == []
+    assert check_bindings(f"committed in {{{{{commit.handle}#/submissions_used}}}} of "
+                          f"{{{{{commit.handle}#/submit_cap}}}} submissions", store).problems == []
     # A submit that did not commit (the SHA did not move) mints nothing.
     prov._commit_receipted(session, "da3ba8b909aa", ToolOutcome(text="rejected"))
     assert len(store.receipts(kind="commit")) == 1

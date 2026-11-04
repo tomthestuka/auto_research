@@ -1,19 +1,22 @@
 """Binding claims to receipts: the check every role's ``turn_end`` runs over its report prose.
 
-Two forms of citation live in prose:
+One citing syntax (user ruling 2026-11-03), every form inside ``{{ }}``:
 
-* ``[src:r12]`` cites a whole receipt. It scopes the text it sits in: every number in that text
-  must appear, on token boundaries, in one of the receipts the text cites (*scoped grounding*).
-* ``{{src:r12 "PD = 4.02 ± 0.21 %"}}`` pins an exact span. The quote must be a bounded substring
-  of that receipt's stored text.
-* ``{{src:r12#/pd/value}}`` is a value reference (user ruling 2026-10-27, every value passes as a
-  handle): the runtime reads the value at that JSON pointer of the result the tool returned and
-  renders it (:func:`display_value`), so the model never types it. A typed number a cited result
-  returned is refused with the reference to write.
+* ``{{src:r12}}`` cites a whole receipt: what a statement without a number rests on.
+* ``{{src:r12#/pd/value}}`` is a value reference (user ruling 2026-10-27): the runtime reads the
+  value at that JSON pointer of the result the tool returned and renders it
+  (:func:`display_value`), so the model never types it; ``#/$args/<name>`` reaches a value the
+  call was given (a parameter typed with its reason, or passed by reference).
+* ``{{src:r12 "PD = 4.02 ± 0.21 %"}}`` pins an exact span of a text receipt (a value a tool only
+  printed, the request's own words).
+* ``{{lib:p4 "1.10 ± 0.08" Table 2}}`` attributes a paper's value, with its place.
 
-A number found in none of its cited receipts is a problem, named with its context, so the role
-fixes it inside its loop: cite the receipt it came from, quote it, or compute it with a tool so the
-arithmetic becomes a receipt too. A receipt flagged ``failed`` or ``synthetic`` grounds nothing.
+A number is grounded by its own binding only: a number typed in prose outside one is refused,
+named with its context and with the binding to write where one is found (a reference into a cited
+result, a call's argument, a rounded value), so the role fixes it inside its loop. No citation
+grounds a neighbouring typed number (the former ``[src:r12]`` scoping, retired 2026-11-03; a
+written ``[src:r12]`` is refused as markup). A receipt flagged ``failed`` or ``synthetic`` grounds
+nothing.
 
 Everything here is pure: the caller supplies the prose and a :class:`ReceiptLookup`. The same
 functions serve every unit (worker, lead, reviewer, librarian); a caller with markup (LaTeX)
@@ -34,7 +37,8 @@ from auto_research.provenance.store import INPUT_SOURCE, NOT_EVIDENCE_NAMES, is_
 from auto_research.schemas.artifacts import HANDLE_PATTERN, PaperAttribution, Receipt
 
 _H = rf"(?:self|{HANDLE_PATTERN.split(':', 1)[0]}):[frdpwhc][1-9][0-9]*"
-CITE_RE = re.compile(rf"\[(?P<h>{_H})\]")
+#: A whole-receipt citation: ``{{analyst_worker_0:r12}}`` (or ``{{self:r12}}``).
+CITE_RE = re.compile(rf"\{{\{{\s*(?P<h>{_H})\s*\}}\}}")
 QUOTE_RE = re.compile(rf'\{{\{{\s*(?P<h>{_H})\s+"(?P<q>[^"\n]+)"(?P<loc>[^}}\n]*)\}}\}}')
 #: A value reference: ``{{analyst_worker_0:r12#/pd/value}}`` (RFC 6901 pointer, no spaces).
 #: ``{{h#}}`` names the whole returned value; a key may hold spaces (``#/2-3 keV/q``). A full handle
@@ -42,8 +46,16 @@ QUOTE_RE = re.compile(rf'\{{\{{\s*(?P<h>{_H})\s+"(?P<q>[^"\n]+)"(?P<loc>[^}}\n]*
 VALUE_RE = re.compile(rf"\{{\{{\s*(?P<h>{HANDLE_PATTERN})#(?P<p>(?:/[^{{}}\n]*?)?)\s*\}}\}}")
 #: What is left of ``{{`` markup once every binding is taken out: written as a binding, read as none.
 #: Also a value's source as the runtime renders it for a reader (``2.72 [h#/k]``): typed by a
-#: writer it would pass for a referenced value, so it is markup to rewrite as ``{{h#/k}}``.
-_MARKUP_LEFT = re.compile(rf"\{{\{{|\}}\}}|\[{HANDLE_PATTERN}#[^\]\n]*\]")
+#: writer it would pass for a referenced value, so it is markup to rewrite as ``{{h#/k}}``; and the
+#: retired bracket citation ``[h]``, rewritten ``{{h}}``.
+_MARKUP_LEFT = re.compile(rf"\{{\{{|\}}\}}|\[{HANDLE_PATTERN}#[^\]\n]*\]|\[[^\]\n]*?(?<![\w:]){_H}(?![\w])[^\]\n]*\]")
+
+#: A paper's place, the only text a locator holds (review 2026-11-03: words or a typed number after
+#: a paper's quote were masked from the number scan): "Table 2", "Fig. 3b", "Eq. 4", "§2.1", "p. 7",
+#: "Table 2, row 3", "Figs. 2–4".
+_PLACE = (r"(?:Tables?|Tab\.|Fig(?:ure)?s?\.?|Eqs?\.?|Equations?|Sec(?:tion)?s?\.?|§|pp?\.|pages?|"
+          r"Appendix|App\.|rows?|col(?:umn)?s?\.?|lines?|panels?)\s*[A-Z]?\d+[a-z]?(?:\.\d+)*")
+LOCATOR_RE = re.compile(rf"(?:{_PLACE})(?:\s*(?:[–\-,;]|and|of|in)?\s*(?:{_PLACE}|[A-Z]?\d+[a-z]?))*\s*", re.IGNORECASE)
 
 #: Kinds a value is ATTRIBUTED to rather than quoted from (human ruling 2026-09-24: papers are
 #: cited, never text-checked). ``{{lib:p3 "4.0 ± 0.2 %" Table 2}}`` names the paper and where in it;
@@ -92,7 +104,7 @@ _EXEMPT_RES = (
     # (measured live 2026-09-24: "Worker 0 … worker 1" refused in four of ten lead cells)
     re.compile(
         r"\b(?:analyst[ _]?worker|worker|analyst|round|rounds|step|steps|link|links|iteration|"
-        r"DU|detector unit|chain link|slot|trial|cell)[ _]?#?\d+\b",
+        r"DU|detector unit|chain link|slot|trial|cell)[ _]?#?\d+\b(?![.,]\d)",
         re.IGNORECASE,
     ),
     # an astronomical source designation: "GRS 1915+105", "4U 1630−47", "Swift J1727.8−1613"
@@ -120,7 +132,7 @@ _MAX_LISTED = 8
 DISPLAY_DIGITS = 3
 
 #: A typed number with at least this many significant digits that a cited result returned is a
-#: copy: refused with the reference to write (the prose twin of ``refs.RetypeCheck``).
+#: copy: refused with the reference to write.
 COPY_MIN_DIGITS = 3
 
 
@@ -478,6 +490,7 @@ class _Resolved:
         self.raw: dict[str, str] = {}
         self._returned: dict[str, tuple[object, str | None]] = {}
         self._leaves: dict[str, dict[float, str]] = {}
+        self._given: dict[str, dict[float, str]] = {}
 
     def entry(self, handle: str) -> tuple[Receipt | None, str | None, str | None]:
         """``(receipt, problem, normalised text)``; ``receipt`` is None when it cannot be used."""
@@ -520,10 +533,10 @@ class _Resolved:
                 self._returned[handle] = (None, (
                     f"{handle} returned more than {_MAX_RETURNED_BYTES // 1_000_000} MB; reference a "
                     "result that summarises it"))
-            elif not passable(store, handle):
+            elif not (passable(store, handle) or receipt.kind == "commit"):  # a commit's record is JSON
                 self._returned[handle] = (None, (
                     f"{handle} is a {receipt.kind} receipt, not a toolkit result that returned values; "
-                    "cite it as [handle] or quote its text"))
+                    "cite it as {{handle}} or quote its text"))
             else:
                 try:
                     self._returned[handle] = (returned_value(store, handle), None)
@@ -542,13 +555,11 @@ class _Resolved:
             value, problem = self.returned(handle)
             held: dict[float, str] = {}
             if problem is None:
-                from auto_research.provenance.refs import RetypeCheck
+                from auto_research.provenance.refs import received_arguments
 
                 store = getattr(self.lookup, "store", self.lookup)
-                from auto_research.provenance.refs import _as_received
-
-                try:  # read as the tool received them, as the call-side check does
-                    given = {number for number, _ in _numeric_leaves(_as_received(RetypeCheck(store)._args_of(handle)))}
+                try:  # read as the tool received them: a value a reference carried was given too
+                    given = {number for number, _ in _numeric_leaves(received_arguments(store, handle))}
                 except (ValueError, AttributeError):
                     given = set()
                 for number, pointer in _numeric_leaves(value):
@@ -556,6 +567,30 @@ class _Resolved:
                         held.setdefault(number, pointer)
             self._leaves[handle] = held
         return self._leaves[handle]
+
+    def given(self, handle: str) -> dict[float, str]:
+        """``{number: "/$args/…" pointer}`` for every number a cited result's call was given as a
+        chosen parameter or by reference: what a report writes as ``{{handle#/$args/…}}``, with its
+        reason, instead of copying the tool's echo of it (user ruling 2026-11-03)."""
+        if handle not in self._given:
+            from auto_research.provenance.refs import ARGS_POINTER, RefError, argument_value, call_arguments
+
+            store = getattr(self.lookup, "store", self.lookup)
+            held: dict[float, str] = {}
+            try:
+                names = list(call_arguments(store, handle)) if self.entry(handle)[0] is not None else []
+            except (ValueError, AttributeError):
+                names = []
+            for name in names:
+                base = f"{ARGS_POINTER}/{str(name).replace('~', '~0').replace('/', '~1')}"
+                try:
+                    value = argument_value(store, handle, base)
+                except (RefError, OSError, ValueError, AttributeError):
+                    continue  # a setting, a path or a default: no reason to show
+                for number, pointer in _numeric_leaves(value):
+                    held.setdefault(number, base + pointer)
+            self._given[handle] = held
+        return self._given[handle]
 
     def _checked_text(self, handle: str, receipt) -> tuple[str | None, str | None]:
         """The problem refusing this citation, or the text it is checked against.
@@ -588,36 +623,62 @@ class _Resolved:
 def _reference_problem(resolved: "_Resolved", binding: Binding) -> str | None:
     """Why a value reference cannot stand, or ``None``: its result is flagged, returned no values,
     or holds no single value at the pointer."""
-    from auto_research.provenance.refs import RefError, _pointer
+    from auto_research.provenance.refs import RefError
 
     receipt, _, _ = resolved.entry(binding.handle)
     ref = f"{{{{{binding.handle}#{binding.pointer}}}}}"
     if receipt is not None and receipt.flags:
         return (f"{ref} reads {binding.handle}, which is marked {', '.join(receipt.flags)}; a value "
                 "from it cannot support a claim. Reference a result without that mark.")
-    value, problem = resolved.returned(binding.handle)
-    if problem:
-        return f"{ref} cannot be read: {problem}."
+    from auto_research.provenance.refs import ARGS_POINTER, passable
+
+    pointer = binding.pointer or ""
+    if pointer == ARGS_POINTER or pointer.startswith(ARGS_POINTER + "/"):
+        # The call's arguments, not what it returned: the returned value's size is no bar.
+        store = getattr(resolved.lookup, "store", resolved.lookup)
+        if receipt is None or not passable(store, binding.handle):
+            entry_problem = resolved.entry(binding.handle)[1]
+            return f"{ref} cannot be read: {(entry_problem or 'not a toolkit result').removeprefix('cites ')}."
+        value = None
+    else:
+        value, problem = resolved.returned(binding.handle)
+        if problem:
+            return f"{ref} cannot be read: {problem}."
     try:
-        found = _pointer(value, binding.pointer, binding.handle)
+        found = _at(resolved, binding, value)
     except RefError as exc:
         return f"{ref} cannot be read: {exc}"
     if isinstance(found, (dict, list)):
         inside = ", ".join(map(str, list(found)[:20])) if isinstance(found, dict) else f"0..{len(found) - 1}"
         return (f"{ref} points at a {type(found).__name__}, not one value; point at a value inside "
                 f"it ({inside}).")
+    echoed = (value is not None and isinstance(found, (int, float)) and not isinstance(found, bool)
+              and found in resolved.given(binding.handle) and found not in resolved.leaves(binding.handle))
+    if echoed:
+        arg = resolved.given(binding.handle)[found]
+        return (f"{ref} reads the tool's echo of a value its call was given; write the call's "
+                f"argument, {{{{{binding.handle}#{arg}}}}}, which shows who chose it and why.")
     return None
 
 
 def referenced_value(resolved_or_lookup: "_Resolved | ReceiptLookup", binding: Binding) -> object:
     """The value a reference the check accepted names (raises when it cannot be read)."""
-    from auto_research.provenance.refs import _pointer
-
     resolved = resolved_or_lookup if isinstance(resolved_or_lookup, _Resolved) else _Resolved(resolved_or_lookup)
     value, problem = resolved.returned(binding.handle)
     if problem:
         raise ValueError(problem)
-    return _pointer(value, binding.pointer or "", binding.handle)
+    return _at(resolved, binding, value)
+
+
+def _at(resolved: "_Resolved", binding: Binding, returned: object) -> object:
+    """The value a reference names: in the result's returned value, or under ``/$args`` in the
+    arguments its call ran with (a parameter it chose, with the reason recorded beside it)."""
+    from auto_research.provenance.refs import ARGS_POINTER, _pointer, argument_value
+
+    pointer = binding.pointer or ""
+    if pointer == ARGS_POINTER or pointer.startswith(ARGS_POINTER + "/"):
+        return argument_value(getattr(resolved.lookup, "store", resolved.lookup), binding.handle, pointer)
+    return _pointer(returned, pointer, binding.handle)
 
 
 def _copies(
@@ -634,6 +695,10 @@ def _copies(
             continue  # an integer (a count, an ObsID, a channel) is a parameter, as in a tool call
         refs = [f"{{{{{h}#{leaves[number]}}}}}" for h in handles
                 if number in (leaves := resolved.leaves(h))]
+        # A value the call was given (chosen, or passed by reference), echoed by the tool: its
+        # reference is the call's argument, which carries who chose it and why.
+        refs += [f"{{{{{h}#{given[number]}}}}}" for h in handles
+                 if number in (given := resolved.given(h)) and number not in resolved.leaves(h)]
         if refs:
             found.append(" or ".join(dict.fromkeys(refs[:3])))
     return "; ".join(dict.fromkeys(found))
@@ -653,6 +718,17 @@ def _rounded_from(resolved: "_Resolved", token: str, handles: Iterable[str]) -> 
     ]
     # One candidate is a lead; several mean the digits fit more than one value, so none is named.
     return f"it rounds {found[0]}; write that reference if that is the value meant" if len(found) == 1 else ""
+
+
+def _quotable(token: str, usable: Mapping[str, str], prose: str, m: re.Match) -> str:
+    """The quote to write for a typed number a readable text receipt prints (a result with no
+    returned values, the request): ``{{handle "<the number>"}}``, for up to three receipts that
+    hold it (the writer picks the one the value came from)."""
+    if _significant_digits(token) < COPY_MIN_DIGITS:
+        return ""  # a short number appears in many receipts by chance; a quote of it binds nothing
+    needle = normalise(token, "result")
+    holders = [h for h, hay in usable.items() if bounded_find(hay, needle)]
+    return " or ".join(f'{{{{{h} "{token}"}}}}' for h in holders[:3])
 
 
 def check_bindings(
@@ -714,6 +790,12 @@ def check_bindings(
                     "in it the value is. Add the table, figure, section or page after the quote, "
                     f'e.g. {{{{{binding.handle} "{binding.quote}" Table 2}}}}.'
                 )
+            elif not LOCATOR_RE.fullmatch(binding.locator):
+                result.problems.append(
+                    f'{label}: {{{{{binding.handle} "{binding.quote}" {binding.locator}}}}} holds more than '
+                    "a place after its quote. The place is a table, figure, equation, section or page "
+                    "(Table 2, Fig. 3, Eq. 4, §2.1, p. 7); write the rest of the sentence outside the citation."
+                )
             continue
         if binding.locator:
             # Only a paper takes a place after its quote. Anything else there was text the check
@@ -730,6 +812,14 @@ def check_bindings(
                 f"returned, write {ref}; the runtime fills the value in."
             )
             continue
+        bare = binding.quote.strip()
+        if NUMBER_RE.fullmatch(bare) and _significant_digits(bare) < COPY_MIN_DIGITS:
+            result.problems.append(
+                f'{label}: the quote "{bare}" is a bare number, which a receipt can hold by chance. '
+                f'Quote the words that say what it is, e.g. {{{{{binding.handle} "n_bins = {bare}"}}}}, '
+                "or reference the value a tool returned."
+            )
+            continue
         copied = _copies(resolved, binding.quote, [binding.handle])
         if copied:
             result.problems.append(
@@ -740,7 +830,7 @@ def check_bindings(
         if hay is None:
             result.problems.append(
                 f"{label} quotes {binding.handle}, a {receipt.kind} with no text to quote. Cite it "
-                f"as [{binding.handle}] instead."
+                f"as {{{{{binding.handle}}}}} instead."
             )
         elif not bounded_find(hay, normalise(binding.quote, receipt.kind)):
             hint = _quote_hint(resolved, binding.handle, binding.quote, receipt.kind)
@@ -755,77 +845,60 @@ def check_bindings(
         token = prose[left.start():left.end()] if left.group().startswith("[") else ""
         shown = f"`{token}`" if token else f"…{_context(prose, left.start(), left.start() + 2)}…"
         result.problems.append(
-            f"{label}: {shown} is markup the check reads as nothing. For one value a tool returned, "
-            "write {{handle#/key}} with the full handle (a value shown to you as \"2.72 [handle#/key]\" "
-            'is written {{handle#/key}}); to cite a result as a whole, write [handle]; a quote is '
-            '{{handle "exact text"}}, and a paper\'s value {{lib:p4 "value" Table 2}}.'
+            f"{label}: {shown} is markup the check reads as nothing. Every citation is written "
+            "inside {{ }}: one value a tool returned is {{handle#/key}} with the full handle (a value "
+            'shown to you as "2.72 [handle#/key]" is written {{handle#/key}}); a whole result is '
+            '{{handle}}; a quote is {{handle "exact text"}}; a paper\'s value {{lib:p4 "value" Table 2}}.'
         )
-    for handle in scope:
-        if handle in usable:
-            continue
-        receipt, _, hay = resolved.entry(handle)
-        if receipt is not None and not receipt.flags and hay is not None:
-            usable[handle] = hay
-
-    # ``support``: handles backing the text as a whole (a finding's support list); they ground its
-    # numbers like scope. A paper in it grounds nothing (it has no text) and exempts nothing: each
-    # paper value is attributed explicitly (human ruling 2026-09-24, superseding a per-sentence
-    # exemption that let one paper citation carry every number beside it).
-    for handle in support:
-        receipt, _, hay = resolved.entry(handle)
-        if receipt is not None and not receipt.flags and hay is not None:
-            usable.setdefault(handle, hay)
     masked = [(b.start, b.end) for b in result.bindings] + list(exempt_spans)
+    scanned = _scanned_numbers(prose, masked)
+    if scanned:
+        # Scope and support only suggest a citation (2026-11-03), so they are read only when a
+        # number needs one.
+        for handle in scope:
+            if handle in usable:
+                continue
+            receipt, _, hay = resolved.entry(handle)
+            if receipt is not None and not receipt.flags and hay is not None:
+                usable[handle] = hay
+
+        # ``support``: handles backing the text as a whole (a finding's support list); they ground its
+        # numbers like scope. A paper in it grounds nothing (it has no text) and exempts nothing: each
+        # paper value is attributed explicitly (human ruling 2026-09-24, superseding a per-sentence
+        # exemption that let one paper citation carry every number beside it).
+        for handle in support:
+            receipt, _, hay = resolved.entry(handle)
+            if receipt is not None and not receipt.flags and hay is not None:
+                usable.setdefault(handle, hay)
     if sources:
         result.numbers[prose] = number_sources(prose, usable, masked=masked)
-    ungrounded = ungrounded_numbers(prose, usable, masked=masked)
-    unmet = {m.start() for m in ungrounded}
-    # A value the cited request states is the request's, restated where it is cited (2026-09-24).
-    asked = [usable[h] for h in cited_here if h.startswith(f"{INPUT_SOURCE}:")]
-    typed = [
-        f'"{m.group()}" → {refs}' for m in _scanned_numbers(prose, masked)
-        if m.start() not in unmet
-        and not any(bounded_find(hay, normalise(m.group(), "result")) for hay in asked)
-        and (refs := _copies(resolved, m.group(), usable))
-    ]
-    if typed:
-        result.problems.append(
-            f"{label} types values a tool returned: {'; '.join(typed[:_MAX_LISTED])}"
-            f"{f' and {len(typed) - _MAX_LISTED} more' if len(typed) > _MAX_LISTED else ''}. Write "
-            "each as its reference in place of the number; the runtime fills the value in, so "
-            "every reader sees the same value and can follow it to its result."
-        )
-    missing: list[str] = [
-        f'"{m.group()}" (…{_context(prose, m.start(), m.end())}…)'
-        + (f" — {near}" if (near := _rounded_from(resolved, m.group(), cited_here)) else "")
-        for m in ungrounded
-    ]
-    if missing:
-        named = list(dict.fromkeys(cited_here))
-        others = len(usable) - len(named)
-        where = ", ".join(f"[{h}]" for h in named) or "none cited in this text"
-        if others > 0:
-            where += f", plus {others} more in scope"
-        if not usable:
-            where = "no receipt at all"
-        shown = "; ".join(missing[:_MAX_LISTED])
-        more = f" and {len(missing) - _MAX_LISTED} more" if len(missing) > _MAX_LISTED else ""
+    # A number is grounded by its own binding only (user ruling 2026-11-03): every number outside one
+    # is unbound. The receipts this text cites, its scope and its support only suggest the binding.
+    hint_from = list(dict.fromkeys([*cited_here, *usable]))
+    unbound: list[str] = []
+    for m in scanned:
+        refs = _copies(resolved, m.group(), hint_from)
+        hint = (f" → {refs}" if refs else
+                f" — {near}" if (near := _rounded_from(resolved, m.group(), cited_here)) else
+                f" → {quoted}" if (quoted := _quotable(m.group(), usable, prose, m)) else "")
+        unbound.append(f'"{m.group()}" (…{_context(prose, m.start(), m.end())}…){hint}')
+    if unbound:
+        shown = "; ".join(unbound[:_MAX_LISTED])
+        more = f" and {len(unbound) - _MAX_LISTED} more" if len(unbound) > _MAX_LISTED else ""
         papers = [
             b.handle for b in result.bindings
             if (r := resolved.entry(b.handle)[0]) is not None and r.kind in ATTRIBUTION_KINDS
         ] + [h for h in support if (r := resolved.entry(h)[0]) is not None and r.kind in ATTRIBUTION_KINDS]
         attribute = ""
         if papers:
-            first = missing[0].split('"')[1]
-            attribute = (
-                " If a value comes from a paper, attribute it with where it is in the paper: "
-                f'{{{{{papers[0]} "{first}" Table 2}}}}.'
-            )
+            attribute = (" A value from a paper is attributed with where it is in the paper: "
+                         f'{{{{{papers[0]} "<value>" Table 2}}}}.')
         result.problems.append(
-            f"{label} states numbers that appear in none of the receipts it cites ({where}): "
-            f"{shown}{more}. Write a value a tool returned as {{{{handle#/key}}}} — the runtime "
-            'fills it in — quote a text output exactly as {{handle "…"}}, or compute a derived '
-            f"number with a tool and reference that result.{attribute}"
+            f"{label} types numbers outside a citation: {shown}{more}. Each number is written as its "
+            "own citation, which the runtime checks and renders: a value a tool returned "
+            "{{handle#/key}}, a value a call was given {{handle#/$args/<name>}}, a value a tool only "
+            'printed {{handle "exact text"}}, the request\'s words {{input:hN "exact text"}}; a '
+            f"derived number comes from a tool, so reference that result.{attribute}"
         )
     return result
 

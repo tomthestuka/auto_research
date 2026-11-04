@@ -18,7 +18,7 @@ The document, for an analyst worker::
     # status
     succeeded
     # findings
-    - first result, citing [analyst_worker_0:r3]
+    - first result, {{analyst_worker_0:r3#/fit/kT}} keV
     - second result, which runs on
       to a second line
     # figures
@@ -60,7 +60,8 @@ ANALYST_BLOCKS: tuple[Block, ...] = (
     Block("what_to_probe", "what_to_probe", "text",
           "what the analysts do next, handed to every worker verbatim (with rework true)"),
     Block("findings", "findings", "list",
-          "the results: one '- ' item per result, each citing the receipts its numbers come from as [handle]"),
+          "the results: one '- ' item per result, each number its own citation ({{handle#/key}}, "
+          "{{handle \"exact text\"}}), a statement without a number citing what it rests on as {{handle}}"),
     Block("figures", "cited_figures", "figures",
           "the figures placed: one '- [source:index]' line per figure, by the label it was shown with; "
           "the k-th line is 'Figure k' in your prose"),

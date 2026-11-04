@@ -265,7 +265,9 @@ def build_graph(
         )
         return {
             "literature": [report],
-            "literature_receipts": dict(io_agent.last_receipts),
+            # What the filed report cites, as on every edge (user ruling 2026-11-03): the reviewer
+            # may open anything the librarian opened, and cite only what its report rests on.
+            "literature_receipts": _literature_cited(report, io_agent),
             "lit_iterations": state.get("lit_iterations", 0) + 1,
             "arrived": "librarian",
         }
@@ -552,6 +554,35 @@ async def _record(
     if monitor is not None:
         team = event.split(".", 1)[0]
         await monitor.record(team, event, level=level, summary=summary, actor=actor, data=data)
+
+
+def _literature_cited(report: Any, io_agent: Any) -> dict[str, Any]:
+    """The receipts a filed ``LiteratureReport`` cites: its findings' ``support`` handles and the
+    handles bound in its summary, claims and gaps (``self:`` read as the librarian's, as its
+    ``turn_end`` reads it). Only a report filed through ``turn_end`` is citable downstream; the
+    documents the librarian opened and its report does not cite stay viewable, never citable."""
+    from auto_research.agents.librarian_tools import LIBRARIAN_SOURCE
+    from auto_research.provenance import parse_bindings
+
+    def bound(text: str) -> list[str]:
+        return [b.handle for b in parse_bindings(text or "", own_source=LIBRARIAN_SOURCE)]
+
+    cited: list[str] = []
+    for finding in getattr(report, "findings", None) or []:
+        cited.extend(f"{LIBRARIAN_SOURCE}:{h.split(':', 1)[1]}" if h.startswith("self:") else h
+                     for h in getattr(finding, "support", None) or [])
+        cited.extend(bound(getattr(finding, "claim", "")))
+    cited.extend(bound(getattr(report, "summary", "")))
+    for gap in getattr(report, "gaps", None) or []:
+        cited.extend(bound(gap))
+    store = getattr(io_agent, "receipts", None)
+    opened = dict(getattr(io_agent, "last_receipts", None) or {})
+    out: dict[str, Any] = {}
+    for handle in dict.fromkeys(cited):
+        receipt = opened.get(handle) or (store.get(handle) if store is not None else None)
+        if receipt is not None:
+            out[handle] = receipt
+    return out
 
 
 def _latest_verdict(state: ResearchState) -> ReviewerReport | None:

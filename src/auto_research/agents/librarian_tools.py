@@ -62,6 +62,8 @@ TEXT_SEARCH_TOOL = "text_search"
 #: Tools that write or read back the librarian's own report, or submit it: report authoring, not
 #: evidence gathering, so they cost no tool budget (the same ruling as the analysts').
 LIBRARIAN_FREE_TOOLS = frozenset({EDIT_REPORT_TOOL, WRITE_REPORT_TOOL, TURN_END_TOOL})
+#: The librarian's receipt source: its papers and pages are ``lib:pN`` / ``lib:wN``.
+LIBRARIAN_SOURCE = "lib"
 
 #: Characters of a web page shown per read. A page ends at a line break, so a number is never cut
 #: in two across pages; the quote check runs against the whole text regardless.
@@ -93,7 +95,7 @@ class LibrarianToolProvider:
         papers_dir: Path,
         web_source: Any | None = None,
         retrieval: Any | None = None,
-        source_key: str = "lib",
+        source_key: str = LIBRARIAN_SOURCE,
         record: Recorder | None = None,
         downloader: Callable[[str, Path], Path | None] | None = None,
         paper_minter: Callable[..., Receipt | None] | None = None,
@@ -522,9 +524,9 @@ class LibrarianToolProvider:
         is cited, never text-matched (human ruling 2026-09-24), so a value taken from a paper is
         written as an **attribution** with its place (``{{lib:p3 "12.5 ± 3.1 days" Table 2}}``),
         unverified here and collected for a person to check (:meth:`attributed_values`). Every
-        number outside a binding is checked as usual against the web extracts cited — a paper
-        grounds nothing, so a paper citation never exempts the numbers beside it. Gaps state what
-        was not found, so their citations are checked and their numbers are not.
+        number is its own citation (2026-11-03), so a number outside a binding is refused — a paper
+        citation never exempts the numbers beside it. Gaps state what was not found, so their
+        citations are checked and their numbers are not.
         """
         problems: list[str] = []
         for n, finding in enumerate(report.findings, 1):

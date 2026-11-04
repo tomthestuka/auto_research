@@ -307,6 +307,14 @@ class DebateToConverge:
                         + "; ".join(f"{pkg} ({why})" for pkg, why in sorted(broken.items())),
                         data={"import_errors": broken},
                     )
+                unchecked = list(getattr(self.registry, "manifest_errors", None) or [])
+                if unchecked:  # a tool whose arguments declare no kind refuses every call: say so
+                    await _record(
+                        self.monitor, "analyst.toolkit.load_error", level=2,
+                        summary="toolkit arguments the input validator cannot check after the reload: "
+                        + "; ".join(unchecked),
+                        data={"manifest_errors": unchecked},
+                    )
             for worker in workers:
                 sandbox = getattr(worker, "sandbox", None)
                 if sandbox is not None and hasattr(sandbox, "restart"):

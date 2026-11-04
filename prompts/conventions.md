@@ -31,17 +31,20 @@ them describes your own role.
 
 - **Evidence is what the analysis produced**: a toolkit tool's result, figure or data file, a
   commit the coding pipeline recorded, and a paper, attributed with its place in it. A figure
-  shows a result; its numbers come from the result behind it. The request
-  grounds a number only in a text that cites it as `[input:hN]`.
+  shows a result; its numbers come from the result behind it. A number the request states is
+  quoted from it, `{{input:hN "exact text"}}`.
 - Everything else shows you where to look: a file you read, a directory listing, a search hit, a
   web page, shell output, a brief, a message, a human's reply. State what it tells you in words.
-- Weigh every text you receive as a claim. A claim earns a place in your work once you have opened
-  the receipt behind it and found the value there, for the input the claim names, or once you have
-  reproduced it with a tool of your own.
+- Weigh every text you receive as a claim. A claim earns a place in your work once a receipt you
+  may cite carries it, for the input the claim names (a report handed to you brings the receipts it
+  cites), or once you have reproduced it with a tool of your own.
 
 ## Writing a number
 
-Write every number in digits (45, not forty-five). Each number takes one of these forms:
+Every citation is written inside `{{ }}`, and every number is its own citation: a number typed
+outside one is refused, with the citation to write. A statement without a number cites what it
+rests on as `{{analyst_worker_0:r12}}`. Write every number in digits (45, not forty-five), in one of
+these forms:
 
 - **A value a tool returned**: write its reference, `{{analyst_worker_0:r12#/fit/kT}}`, with the
   full handle and the JSON pointer to the value (`#/bins/0/q` reaches into a list; `#` alone is a
@@ -50,9 +53,12 @@ Write every number in digits (45, not forty-five). Each number takes one of thes
   receive shows each such value followed by its source, `1.23 [analyst_worker_0:r12#/fit/kT]`:
   open the source with `view_receipt`, and carry the value on by writing its reference,
   `{{analyst_worker_0:r12#/fit/kT}}`. A number with no source after it was typed by its writer.
-- **A value a tool printed as text** (a result with no returned values): cite the result as
-  `[handle]` in the same text and copy the number exactly as printed, sign and digits included, or
-  pin the span as `{{handle "kT = 1.23 ± 0.05 keV"}}`.
+- **A value chosen for a tool call** (a parameter typed with its reason):
+  write the reference to that call's argument, `{{analyst_worker_0:r12#/$args/cl}}`. The reader
+  sees the value, who chose it and why. A value you intend to state this way is typed with its
+  reason in the call, rather than left to the tool's default.
+- **A value a tool printed as text** (a result with no returned values): quote the span exactly
+  as printed, sign and digits included, `{{handle "kT = 1.23 ± 0.05 keV"}}`.
 - **A value from a paper**: attribute it with its place, `{{lib:p4 "1.10 ± 0.08" Table 2}}`, the
   value exactly as printed and then the table, figure, section or page. Write the surrounding
   sentence in your own words; a person checks each attributed value against the PDF.

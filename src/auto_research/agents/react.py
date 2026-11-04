@@ -713,10 +713,12 @@ def data_catalog_tool_def() -> dict | None:
         spec = manifest[_CATALOG_UTILS_KIND]
     except Exception:  # noqa: BLE001 — toolkit absent/misconfigured; skip the tool, don't crash
         return None
+    from auto_research.sandbox.registry import provider_schema
+
     return {
         "name": DATA_CATALOG_TOOL,
         "description": spec["description"],
-        "input_schema": spec.get("args_schema") or {"type": "object", "properties": {}},
+        "input_schema": provider_schema(spec.get("args_schema"), references=False),
     }
 
 
@@ -765,9 +767,25 @@ async def execute_data_catalog(arguments: Mapping[str, Any]) -> ToolOutcome:
             previous = sys.pycache_prefix
             sys.pycache_prefix = tempfile.mkdtemp(prefix="ar-lead-pycache-")
             try:
-                _catalog_read_fn = (head, _import_from_toolkit("catalog_utils.lib.catalog_read", "data_catalog"))
+                _catalog_read_fn = (head, _import_from_toolkit("catalog_utils.lib.catalog_read", "data_catalog"),
+                                    _import_from_toolkit("catalog_utils", "TOOL_MANIFEST")[_CATALOG_UTILS_KIND])
             finally:
                 sys.pycache_prefix = previous
+        # The input validator, as on a worker's call: each argument arrives the way its kind
+        # allows (the committed manifest's kinds, read with the committed code above).
+        from auto_research.provenance.calls import resolve_call_args
+        from auto_research.provenance.inputs import RefError, check_arguments, declared_defaults, tool_values
+
+        schema = _catalog_read_fn[2].get("args_schema")
+        problem = check_arguments(_CATALOG_UTILS_KIND, arguments, schema)
+        if problem is not None:
+            return ToolOutcome(text=problem, is_error=True)
+        completed = resolve_call_args(arguments, {"defaults": declared_defaults(schema)})
+        try:
+            arguments = tool_values(completed, schema, None, lambda _h: False).sent
+        except RefError as exc:
+            return ToolOutcome(text=str(exc), is_error=True)
+        obs_db_path = str(arguments.get("obs_db_path") or "").strip()
         raw_min = arguments.get("min_level")
         text = _catalog_read_fn[1](obs_db_path, min_level=int(raw_min) if raw_min is not None else None)
     except Exception as exc:  # noqa: BLE001 — malformed catalog / missing toolkit → recoverable
@@ -996,11 +1014,11 @@ _CLAIM_FIELDS: tuple[str, ...] = ("summary", "findings", "uncertainty", "rationa
 
 
 def report_provenance_problems(workspace: "ReportWorkspace | None", report: Any) -> list[str]:
-    """The numbers in ``report``'s prose that its cited receipts do not carry, plus stale files.
+    """The numbers in ``report``'s prose typed outside a citation, plus stale files.
 
-    The shared half of every unit's ``turn_end``: each cited receipt resolves, is re-hashed, and
-    every number in a finding appears in a receipt that finding cites (scoped grounding, human
-    ruling 2026-09-24). A cited figure whose file is gone is refused here too, for every role.
+    The shared half of every unit's ``turn_end``: each cited receipt resolves and is re-hashed, and
+    every number is its own citation (one citing syntax, user ruling 2026-11-03). A cited figure
+    whose file is gone is refused here too, for every role.
     """
     if workspace is None or report is None:
         return []
@@ -1425,9 +1443,10 @@ _FIGURE_SOURCE_LEAD = (
 _ANALYST_EVIDENCE = (
     "Every number in your prose comes from a receipt: each tool result is labelled "
     "[receipt <handle>]. Write a value a tool returned as its reference, {{handle#/key}}, which the "
-    "runtime fills in; a value a tool printed as text in a finding that cites that result as "
-    "[handle], copied exactly. Compute any derived value with a tool so the calculation has its "
-    "own receipt. turn_end names each number it cannot place."
+    "runtime fills in; a value you chose for a call as {{handle#/$args/<name>}}; a value a tool only "
+    'printed as a quote, {{handle "exact text"}}. A statement without a number cites what it rests '
+    "on as {{handle}}. Compute any derived value with a tool so the calculation has its own receipt. "
+    "turn_end names each number it cannot place."
 )
 
 
@@ -2677,7 +2696,6 @@ class SandboxToolProvider:
     receipt_source: str | None = None
     extra_tools: Sequence[ExtraTool] = ()
     sandbox: Any | None = None
-    _retype_check: Any | None = None
 
     def __init__(
         self,
@@ -2696,7 +2714,6 @@ class SandboxToolProvider:
         self.registry = registry
         self.sandbox = sandbox
         self.cwd = cwd
-        self._retype_check: Any | None = None
         # Provenance (P1): the run's ReceiptStore and this agent's source key. Every tool call
         # mints receipts; the model sees each result labelled with its handle.
         self.receipts = receipts
@@ -2910,13 +2927,12 @@ class SandboxToolProvider:
             if env_error is not None:
                 return ToolOutcome(text=env_error, is_error=True)
             sent = {k: v for k, v in args.items() if not (k == "env" and "env" not in schema_props)}
-            # `$ref` arguments become the values the named receipts hold, before anything reads
-            # the call; the receipts are recorded as the call's parents. `args` keeps the
-            # references: that is what the ledger rebuilds and the receipt hashes.
-            sent, ref_parents, ref_error = await asyncio.to_thread(self._resolve_refs, sent)
-            if ref_error is None:
-                # A value copied by hand from a usable result is refused (user ruling 2026-10-26).
-                ref_error = await asyncio.to_thread(self._retyped, arguments)
+            # The input validator (CLAUDE.md §9.3.9): each argument, as the model wrote it, arrives
+            # the way its kind allows; then references become the values the caller's own
+            # receipts hold (recorded as the call's parents) and each typed parameter's reason is
+            # set aside. `args` keeps both: that is what the ledger rebuilds and the receipt hashes.
+            sent, ref_parents, ref_error = await asyncio.to_thread(
+                self._validated, kind, arguments, sent, spec.get("args_schema"))
             if ref_error is not None:
                 return ToolOutcome(text=ref_error, is_error=True)
             state = await self._inputs_before(sent, named=arguments)
@@ -3042,29 +3058,22 @@ class SandboxToolProvider:
             return set()
         return {r.handle for r in self.receipts.receipts(source=self.receipt_source)}
 
-    def _resolve_refs(self, sent: Mapping[str, Any]) -> tuple[dict[str, Any], list[str], str | None]:
-        """``(arguments with references resolved, parent handles, error text or None)``."""
-        from auto_research.provenance.refs import RefError, refs_in, resolve_refs
+    def _validated(
+        self, kind: str, arguments: Mapping[str, Any], completed: Mapping[str, Any], schema: Any,
+    ) -> tuple[dict[str, Any], list[str], str | None]:
+        """The input validator for one toolkit call: ``(the values the tool receives, parent
+        handles, refusal text or None)``. ``arguments`` are the model's, ``completed`` the call's
+        arguments after the runtime filled paths and defaults."""
+        from auto_research.provenance.inputs import RefError, check_arguments, tool_values
 
-        if not refs_in(sent):
-            return dict(sent), [], None
-        if self.receipts is None:
-            return dict(sent), [], "References need the run's receipt store, which this agent has none of."
+        problem = check_arguments(kind, arguments, schema, runtime=frozenset({"env"}))
+        if problem is not None:
+            return dict(completed), [], problem
         try:
-            resolved, parents = resolve_refs(sent, self.receipts, self._usable_handles().__contains__)
+            values = tool_values(completed, schema, self.receipts, self._usable_handles().__contains__)
         except RefError as exc:
-            return dict(sent), [], str(exc)
-        return resolved, parents, None
-
-    def _retyped(self, arguments: Mapping[str, Any]) -> str | None:
-        """The refusal for typed values a usable toolkit result already holds, or ``None``."""
-        if self.receipts is None:
-            return None
-        from auto_research.provenance.refs import RetypeCheck
-
-        if self._retype_check is None:
-            self._retype_check = RetypeCheck(self.receipts)
-        return self._retype_check.problem(arguments, self._usable_handles())
+            return dict(completed), [], str(exc)
+        return values.sent, values.parents, None
 
     async def _inputs_before(self, args: Mapping[str, Any], named: Mapping[str, Any] | None = None) -> Any:
         """Hash what the call's arguments name, before it runs (data roots and outputs skipped)."""
@@ -3094,6 +3103,8 @@ class SandboxToolProvider:
           by name on every call so a rebuilt one is the current build; ``None`` for its own;
         - ``observation_paths``: the configured mission folders a toolkit tool's ``<mission>_path``
           arguments take when the model leaves them empty;
+        - ``defaults``: the defaults the tool's manifest declares for its parameters, passed when
+          the model leaves one out, so the call records the value the tool ran with;
         - ``module`` / ``fn``: where a toolkit tool's code is (the registry's manifest entry);
         - ``figure_args`` / ``figures_dir`` / ``stamp_ms``: figure outputs are placed under
           the worker's figures folder (any toolkit tool following the ``_FIGURE_PATH_ARGS``
@@ -3132,6 +3143,11 @@ class SandboxToolProvider:
         paths = {name: path for name, path in _observation_path_args().items() if name in schema_props}
         if paths:
             context["observation_paths"] = paths
+        from auto_research.provenance.inputs import declared_defaults
+
+        defaults = declared_defaults(spec.get("args_schema"))
+        if defaults:
+            context["defaults"] = defaults
         if "env" not in schema_props:
             # The caller's `env` picks the environment (`_route_environment`) and is never sent.
             context["runtime_only"] = ["env"]

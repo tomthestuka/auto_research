@@ -256,13 +256,19 @@ _ARG_SHOWN = 160
 
 def _arguments_html(args: Mapping[str, object], lookup: ReceiptLookup | None) -> str:
     """The call's arguments as a reader wants them: one line each, a value passed by ``$ref``
-    shown as the value it carried and the result it came from."""
+    shown as the value it carried and the result it came from, a typed parameter as its value and
+    the reason it was chosen."""
     from auto_research.provenance.refs import RefError, refs_in, resolve_refs
+
+    from auto_research.provenance.refs import typed_parameter
 
     store = getattr(lookup, "store", lookup)
     rows = []
     for key, value in sorted(args.items()):
         source = ""
+        typed = typed_parameter(value)
+        if typed is not None:  # a parameter the caller chose: the value, then why
+            value, source = typed[0], f' <span class="muted">chosen: {escape(typed[1])}</span>'
         refs = refs_in(value) if store is not None else []
         if refs:
             try:
@@ -278,6 +284,27 @@ def _arguments_html(args: Mapping[str, object], lookup: ReceiptLookup | None) ->
     return f'<div class="args">{"".join(rows)}</div>' if rows else ""
 
 
+def _arguments_inlined(value: object, store: object) -> object:
+    """``value`` with each reference into an earlier call's arguments (``#/$args/…``) written as
+    the value it names: a parameter the run chose, which a notebook takes as typed."""
+    from auto_research.provenance.refs import ARGS_POINTER, RefError, _ref_text, argument_value, split_ref
+
+    text = _ref_text(value)
+    if text is not None:
+        handle, pointer = split_ref(text)
+        if pointer == ARGS_POINTER or pointer.startswith(ARGS_POINTER + "/"):
+            try:
+                return argument_value(store, handle, pointer)
+            except (RefError, OSError, ValueError):
+                return value
+        return value
+    if isinstance(value, dict):
+        return {k: _arguments_inlined(v, store) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_arguments_inlined(v, store) for v in value]
+    return value
+
+
 def reproduce_code(
     receipt: Receipt, call: LedgerCall, lookup: ReceiptLookup | None = None
 ) -> tuple[str, str]:
@@ -287,20 +314,28 @@ def reproduce_code(
     resolver that reads each named result from the run's receipt store, so the rerun receives the
     same values the call did.
     """
-    from auto_research.provenance.refs import refs_in, split_ref
+    from auto_research.provenance.refs import refs_in, split_ref, typed_parameter
 
-    args_json = json.dumps(call.sent_args, sort_keys=True, default=str)
-    stored: dict[str, tuple[str, str]] = {}
-    for ref in refs_in(call.sent_args):
+    # A typed parameter reaches the tool as its value; its reason stays in the call's record.
+    sent = {key: (typed[0] if (typed := typed_parameter(value)) is not None else value)
+            for key, value in call.sent_args.items()}
+    store = getattr(lookup, "store", lookup)
+    if store is not None:
+        sent = _arguments_inlined(sent, store)
+    args_json = json.dumps(sent, sort_keys=True, default=str)
+    stored: dict[str, tuple[str, str, str]] = {}  # handle -> (path, sha256, "json" | "file")
+    for ref in refs_in(sent):
         handle = split_ref(ref)[0]
         named = lookup.get(handle) if lookup is not None else None
         if named is None:
-            stored[handle] = ("<not in this run's store>", "")
+            stored[handle] = ("<not in this run's store>", "", "json")
+        elif named.kind == "data":  # a file a tool wrote: passed as its path
+            stored[handle] = (str(named.path), named.sha256, "file")
         elif named.returned_sha256:  # the keys the tool returned, stored by the runtime
             blob = Path(named.path).parent.parent / named.returned_sha256[:2] / named.returned_sha256
-            stored[handle] = (str(blob), named.returned_sha256)
+            stored[handle] = (str(blob), named.returned_sha256, "json")
         else:
-            stored[handle] = (str(named.path), named.sha256)
+            stored[handle] = (str(named.path), named.sha256, "json")
     root = str(receipt.toolkit_root) if receipt.toolkit_root else "<toolkit root>"
     fn = str(call.context.get("fn") or receipt.produced_by.rsplit(".", 1)[-1])
     module = str(call.context.get("module") or "")
@@ -363,7 +398,7 @@ def reproduce_code(
     if stored:
         lines += [
             '# {"$ref": "<handle>#<pointer>"} arguments are earlier results\' values: _ref reads each',
-            "# from the run's receipt store (the JSON a tool returned), checked against its hash",
+            "# from the run's receipt store (the JSON a tool returned, or a file's path), checked against its hash",
             "import hashlib",
             f"_STORED = {stored!r}",
             "def _ref(value):",
@@ -375,10 +410,14 @@ def reproduce_code(
             "    if isinstance(value, dict) and list(value) == ['$ref']:",
             "        handle, _, pointer = value['$ref'].partition('#')",
             "        pointer = '' if pointer.strip() == '/' else pointer",
-            "        path, sha = _STORED[handle.strip()]",
+            "        if pointer.strip().startswith('/$args'):",
+            "            raise RuntimeError(f'{handle}#{pointer}: the earlier call\\'s recorded arguments could not be read when this page was made')",
+            "        path, sha, form = _STORED[handle.strip()]",
             "        with open(path, 'rb') as f:",
             "            raw = f.read()",
             "        assert hashlib.sha256(raw).hexdigest() == sha, f'{handle}: stored bytes changed'",
+            "        if form == 'file':",
+            "            return path  # a file a tool wrote, passed as its path",
             "        out = json.loads(raw.decode('utf-8').split('\\n--- console ---\\n')[0])",
             "        for token in pointer.strip().split('/')[1:]:",
             "            token = token.replace('~1', '/').replace('~0', '~')",
@@ -465,26 +504,12 @@ class _Prose:
                     html += f' <span class="muted" data-loc="1">({escape(binding.locator)})</span>'
             segments.append((binding.start, binding.end, html))
         for number in self.numbers.get(text, []):
-            evidence = [h for h in number.handles if (r := self.lookup.get(h)) is not None and is_evidence(r)]
-            if not evidence:
-                self.problems.append(
-                    f'{label}: "{number.value}" appears in no receipt the report can show as its source. '
-                    "Cite the toolkit result it comes from as [handle] in the same text."
-                )
-                continue
-            own = [h for h in evidence if h in cited_here]
-            if own:
-                self.note(own[0])
-                pid = self.chains.want(own[0])
-                cls = "num"
-            else:
-                # Grounded only by the report's wider scope: the text names none of the receipts
-                # holding it, so the page lists them all rather than presenting one as its source.
-                pid = self._held(number.value, evidence)
-                cls = "num scoped"
-            segments.append((number.start, number.end,
-                             f'<button type="button" class="{cls}" popovertarget="{pid}" popovertargetaction="show">'
-                             f"{escape(number.value)}</button>"))
+            # Every number is its own citation (2026-11-03): one the check left unbound is a
+            # renderer-side refusal, never a button that would present it as sourced.
+            self.problems.append(
+                f'{label}: "{number.value}" is typed outside a citation. Write it as its own '
+                'citation, {{handle#/key}} or {{handle "exact text"}}.'
+            )
         return sorted(segments)
 
     def _value_pop(self, binding, value: object, shown: str, chain: str) -> str:
@@ -494,30 +519,24 @@ class _Prose:
         receipt = self.lookup.get(binding.handle)
         tool = _tool_name(receipt)[0] if receipt is not None else binding.handle
         full = repr(value) if isinstance(value, float) else json.dumps(value, ensure_ascii=False)
+        from auto_research.provenance.refs import ARGS_POINTER, argument_source
+
+        pointer = binding.pointer or ""
+        cite = (f'<button type="button" class="cite" popovertarget="{chain}" popovertargetaction="show">'
+                f"[{escape(binding.handle)}]</button>")
+        if pointer == ARGS_POINTER or pointer.startswith(ARGS_POINTER + "/"):
+            # A value the call was given, not one it returned: who set it and why.
+            name = pointer[len(ARGS_POINTER) + 1:]
+            store = getattr(self.lookup, "store", self.lookup)
+            where = (f"<p>Argument <code>{escape(name)}</code> of the {escape(tool)} call {cite}, "
+                     f"{escape(argument_source(store, binding.handle, pointer))}.</p>")
+        else:
+            where = (f"<p>Field <code>{escape(pointer)}</code> of what {escape(tool)} returned, "
+                     f"result {cite}, which shows how it was produced.</p>")
         self.held.append(
             f'<div popover id="{pid}" class="chain-pop"><div class="pop-head"><strong>{_number_html(shown, value)}</strong>'
             f'<button type="button" class="close" popovertarget="{pid}" popovertargetaction="hide" '
-            f'aria-label="Close">×</button></div><p>Full value <code>{escape(full)}</code></p>'
-            f"<p>Field <code>{escape(binding.pointer or '')}</code> of what {escape(tool)} returned, "
-            f'result <button type="button" class="cite" popovertarget="{chain}" popovertargetaction="show">'
-            f"[{escape(binding.handle)}]</button>, which shows how it was produced.</p></div>"
-        )
-        return pid
-
-    def _held(self, value: str, handles: Sequence[str]) -> str:
-        pid = f"held-{len(self.held) + 1}"
-        listed = handles[:12]
-        items = "".join(
-            f'<li><button type="button" class="cite" popovertarget="{self.chains.want(h)}" '
-            f'popovertargetaction="show">[{escape(h)}]</button></li>' for h in listed
-        )
-        more = f"<p class=\"muted\">and {len(handles) - len(listed)} more.</p>" if len(handles) > len(listed) else ""
-        self.held.append(
-            f'<div popover id="{pid}" class="chain-pop"><div class="pop-head"><strong>Where '
-            f'“{escape(value)}” appears</strong><button type="button" class="close" popovertarget="{pid}" '
-            'popovertargetaction="hide" aria-label="Close">×</button></div><p>The text cites none of the '
-            f"receipts holding this value; it appears in {len(handles)} receipt(s) the reviewer could "
-            f"cite:</p><ul>{items}</ul>{more}</div>"
+            f'aria-label="Close">×</button></div><p>Full value <code>{escape(full)}</code></p>{where}</div>'
         )
         return pid
 

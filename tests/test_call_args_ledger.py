@@ -50,7 +50,9 @@ def _run(tmp_path, calls, sandbox=None, known=(TOOL, BASH), action="analyze", st
     ledger = tmp_path / "monitor.jsonl"
     sandbox = sandbox or _FakeSandbox(tool_fn=lambda m, f, a: {"exit_code": 0, "stdout": "PD=3.4", "stderr": ""})
     registry = _FakeRegistry(known=set(known), mcp={BASH},
-                             schema={"properties": {"obsid": {}, "ixpe_path": {}, "save_path": {}, "note": {}}})
+                             schema={"properties": {"obsid": {"kind": "setting"}, "ixpe_path": {"kind": "path"},
+                                                    "save_path": {"kind": "path"}, "out_path": {"kind": "path"},
+                                                    "note": {"kind": "setting"}}})
     tools = SandboxToolProvider(registry, sandbox, cwd=tmp_path / "w0", receipts=store,
                                 receipt_source="analyst_worker_0")
     worker = AnalystWorkerAgent(model=_ScriptedModel(calls), prompt="p",

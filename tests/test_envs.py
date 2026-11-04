@@ -376,7 +376,7 @@ def test_list_env_names_the_active_environment_and_shows_its_packages(tmp_path, 
     import re
 
     (handle,) = re.findall(r"\bw0:[a-z]\d+", detail.text)
-    problems = check_bindings(f"numpy is 2.1.0 [{handle}]", store).problems
+    problems = check_bindings(f"numpy is 2.1.0 {{{{{handle}}}}}", store).problems
     assert any("environment listing" in p for p in problems), problems
 
 
@@ -491,7 +491,7 @@ def test_restating_a_fingerprint_is_not_an_ungrounded_number(tmp_path):
 
     store = ReceiptStore(tmp_path / "receipts")
     r = store.mint(source="w0", kind="result", produced_by="research_toolkit.x_utils.t", data="PD 4.0")
-    assert check_bindings(f"PD is 4.0 [{r.handle}] (ran in astropy @ 98f519c9189d)", store).problems == []
+    assert check_bindings(f'{{{{{r.handle} "PD 4.0"}}}} (ran in astropy @ 98f519c9189d)', store).problems == []
 
 
 def test_a_tool_cannot_write_into_the_runtime_header(tmp_path, monkeypatch):
@@ -532,7 +532,7 @@ def test_an_exponent_written_in_digits_is_not_a_hex_identifier(tmp_path):
 
     store = ReceiptStore(tmp_path / "receipts")
     r = store.mint(source="w0", kind="result", produced_by="research_toolkit.x_utils.t", data="PD 4.0")
-    problems = check_bindings(f"N is 602214076000e12 [{r.handle}]", store).problems
+    problems = check_bindings(f"N is 602214076000e12 {{{{{r.handle}}}}}", store).problems
     assert problems, "an all-digit exponent number was waved through as an identifier"
 
 
@@ -541,7 +541,7 @@ def test_a_restated_fingerprint_is_exempt_whatever_its_digits(tmp_path):
 
     store = ReceiptStore(tmp_path / "receipts")
     r = store.mint(source="w0", kind="result", produced_by="research_toolkit.x_utils.t", data="PD 4.0")
-    assert check_bindings(f"PD is 4.0 [{r.handle}] (env:1234e5678901)", store).problems == []
+    assert check_bindings(f'{{{{{r.handle} "PD 4.0"}}}} (env:1234e5678901)', store).problems == []
 
 
 def test_a_caption_cannot_forge_a_header_line(tmp_path):

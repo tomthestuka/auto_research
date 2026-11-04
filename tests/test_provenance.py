@@ -116,28 +116,30 @@ def test_paper_normalisation_rejoins_spaced_number_tokens():
 
 # -- scoped grounding -------------------------------------------------------------------------
 
-def test_a_cited_number_grounds_and_an_uncited_one_is_rejected(store):
+def test_a_number_is_grounded_by_its_own_citation_never_by_one_beside_it(store):
+    """User ruling 2026-11-03: one citing syntax; a citation grounds no neighbouring typed number."""
     r = _result(store, "PD=3.453 +/- 0.194 %, PA=-20.67 +/- 1.61 deg")
-    ok = check_bindings(f"PD is 3.453 ± 0.194 % [{r.handle}].", store)
+    ok = check_bindings(f'PD is {{{{{r.handle} "PD=3.453 +/- 0.194 %"}}}}.', store)
     assert ok.problems == []
-    bad = check_bindings(f"PD is 3.45 % [{r.handle}].", store)
-    assert len(bad.problems) == 1 and '"3.45"' in bad.problems[0]
+    bad = check_bindings(f"PD is 3.453 % {{{{{r.handle}}}}}.", store)
+    assert len(bad.problems) == 1 and '"3.453"' in bad.problems[0]
+    assert f'{{{{{r.handle} "3.453"}}}}' in bad.problems[0]  # the quote that binds it
 
 
-def test_unicode_minus_in_prose_grounds_against_ascii_output(store):
+def test_unicode_minus_in_a_quote_matches_ascii_output(store):
     r = _result(store, "PA=-20.67")
-    assert check_bindings(f"PA = −20.67° [{r.handle}]", store).problems == []
+    assert check_bindings(f'PA {{{{{r.handle} "PA=−20.67"}}}}', store).problems == []
 
 
 def test_sign_flip_in_prose_is_rejected(store):
     r = _result(store, "PA=-20.67")
-    assert check_bindings(f"PA = 20.67° [{r.handle}]", store).problems
+    assert check_bindings(f"PA = 20.67° {{{{{r.handle}}}}}", store).problems
 
 
 def test_no_citation_means_nothing_grounds(store):
     _result(store, "PD=3.453")
     res = check_bindings("PD is 3.453 %.", store)
-    assert "no receipt at all" in res.problems[0]
+    assert "types numbers outside a citation" in res.problems[0]
 
 
 def test_pinned_quote_must_be_exact(store):
@@ -148,14 +150,14 @@ def test_pinned_quote_must_be_exact(store):
 
 def test_flagged_receipt_grounds_nothing(store):
     r = _result(store, "PD=3.4", failed=True)
-    assert check_bindings(f"PD 3.4 [{r.handle}]", store).problems
+    assert check_bindings(f"PD 3.4 {{{{{r.handle}}}}}", store).problems
     assert "marked failed" in check_bindings(f'{{{{{r.handle} "PD=3.4"}}}}', store).problems[0]
 
 
 def test_unknown_handle_and_self_alias(store):
-    assert "not a receipt" in check_bindings("see [w:r9]", store).problems[0]
+    assert "not a receipt" in check_bindings("see {{w:r9}}", store).problems[0]
     r = _result(store, "N=12", source="analyst_worker_0")
-    assert check_bindings("N=12 [self:r1]", store, own_source="analyst_worker_0").problems == []
+    assert check_bindings('{{self:r1 "N=12"}}', store, own_source="analyst_worker_0").problems == []
     assert r.handle == "analyst_worker_0:r1"
 
 
@@ -175,15 +177,15 @@ def test_findings_are_scoped_per_item_and_summary_by_the_whole_report(store):
     a = _result(store, "PD=3.453")
     b = _result(store, "PA=-20.67")
     res = check_report_fields({
-        "summary": "PD 3.453 and PA -20.67.",
-        "findings": [f"PD 3.453 [{a.handle}]", f"PA -20.67 [{a.handle}]", f"PA -20.67 [{b.handle}]"],
+        "summary": f'PD {{{{{a.handle} "PD=3.453"}}}} and PA {{{{{b.handle} "PA=-20.67"}}}}.',
+        "findings": [f'{{{{{a.handle} "PD=3.453"}}}}', f'{{{{{a.handle} "PA=-20.67"}}}}', f'{{{{{b.handle} "PA=-20.67"}}}}'],
     }, store)
-    assert len(res.problems) == 1 and res.problems[0].startswith("finding 2")
+    assert len(res.problems) == 1 and res.problems[0].startswith("finding 2")  # quoted from the wrong one
 
 
 def test_render_replaces_quotes_and_cites(store):
     r = _result(store, "PD = 4.02 %")
-    prose = f'We find {{{{{r.handle} "PD = 4.02 %"}}}} [{r.handle}].'
+    prose = f'We find {{{{{r.handle} "PD = 4.02 %"}}}} {{{{{r.handle}}}}}.'
     out = render_bindings(prose, quote=lambda q: q.replace("%", r"\%"), cite=lambda h: "")
     assert out == r"We find PD = 4.02 \% ."
 
@@ -196,7 +198,10 @@ def test_a_broken_scope_receipt_grounds_nothing_and_raises_nothing(store, tmp_pa
     good = _result(store, "PD=3.453")
     res = check_report_fields({"summary": "PD 3.453."}, store, itemised=(),
                               scope=[stale.handle, good.handle])
-    assert res.problems == []
+    # The typed number is refused (no citation binds it); the stale scope receipt raises nothing
+    # and the hint names only the good one.
+    assert len(res.problems) == 1 and f'{{{{{good.handle} "3.453"}}}}' in res.problems[0]
+    assert stale.handle not in res.problems[0]
 
 
 def test_normalised_texts_are_computed_once_per_report(store):
@@ -214,8 +219,8 @@ def test_normalised_texts_are_computed_once_per_report(store):
         def text(self, h):
             return store.text(h)
 
-    check_report_fields({"summary": f"PD 3.453 [{r.handle}]",
-                         "findings": [f"PD 3.453 [{r.handle}]"] * 5}, Counting())
+    check_report_fields({"summary": f"PD 3.453 {{{{{r.handle}}}}}",
+                         "findings": [f"PD 3.453 {{{{{r.handle}}}}}"] * 5}, Counting())
     assert calls == [r.handle]
 
 
@@ -225,8 +230,8 @@ def test_source_names_with_a_hyphenated_number_are_not_numbers(store):
 
 def test_a_range_grounds_against_the_same_range(store):
     r = _result(store, "fit in the 2-8 keV band; also 1.2e-3")
-    assert check_bindings(f"Fit the 2-8 keV band [{r.handle}].", store).problems == []
-    assert check_bindings(f"The value 3 [{r.handle}].", store).problems  # exponent is not "3"
+    assert check_bindings(f'Fit the {{{{{r.handle} "2-8 keV"}}}} band.', store).problems == []
+    assert check_bindings(f"The value 3 {{{{{r.handle}}}}}.", store).problems  # exponent is not "3"
 
 
 def test_edit_report_serves_a_report_that_is_not_figured(tmp_path, store):
@@ -253,9 +258,9 @@ def test_edit_report_serves_a_report_that_is_not_figured(tmp_path, store):
     ws = ReportWorkspace(report_path=tmp_path / "rev.jsonl", report_model=Plain, catalog={},
                          prose_fields=("abstract", "rationale"), receipts=store,
                          provenance_check=lambda rep: check_bindings(rep.abstract, store).problems)
-    out = asyncio.run(execute_write_report(ws, {"content": f"# abstract\nPD 3.453 [{r.handle}]\n"}))
+    out = asyncio.run(execute_write_report(ws, {"content": f'# abstract\nPD {{{{{r.handle} "PD=3.453"}}}}\n'}))
     assert not out.is_error and "Provenance" not in out.text
-    out = asyncio.run(execute_edit_report(ws, {"old_string": f"PD 3.453 [{r.handle}]", "new_string": "PD 3.45"}))
+    out = asyncio.run(execute_edit_report(ws, {"old_string": f'PD {{{{{r.handle} "PD=3.453"}}}}', "new_string": "PD 3.45"}))
     assert "Provenance" in out.text
 
 
@@ -270,7 +275,8 @@ def test_inputs_are_citable_by_every_unit_but_ground_only_when_cited(store):
     assert ask.handle in view.handles()
     # Visible is not in scope: a number the task stated is repeatable only with the task cited.
     assert check_bindings("We analysed ObsID 02008401.", view).problems
-    assert check_bindings(f"We analysed ObsID 02008401 [{ask.handle}].", view).problems == []
+    assert check_bindings(f"We analysed ObsID 02008401 {{{{{ask.handle}}}}}.", view).problems  # beside it: no
+    assert check_bindings(f'We analysed ObsID {{{{{ask.handle} "02008401"}}}}.', view).problems == []
 
 
 def test_math_alphanumerics_fold_but_superscripts_do_not():
@@ -331,7 +337,7 @@ def test_a_signed_value_in_a_table_row_is_not_read_as_a_range(store):
     r = store.mint(source="lib", kind="result", produced_by="research_toolkit.t.extract",
                    data="Cyg X-1 4.1 ± 0.2 −22 ± 2 [31]\nband 2 - 8 keV")
     assert check_bindings(f'{{{{{r.handle} "−22 ± 2"}}}}', store).problems == []
-    assert check_bindings(f"PA = −22 ± 2 [{r.handle}]", store).problems == []
+    assert check_bindings(f"PA = −22 ± 2 {{{{{r.handle}}}}}", store).problems  # typed beside a citation
     hay = normalise("band 2 - 8 keV", "web")  # page text spaces a range; normalised both ways
     for q in ("2 - 8 keV", "2-8 keV"):
         assert bounded_find(hay, normalise(q, "web")), q
@@ -371,7 +377,7 @@ def test_an_input_grounds_only_the_text_that_cites_it(store):
     ask = store.mint_input("Analyse NuSTAR ObsID 30001011002.", kind="human", produced_by="research_request")
     res = check_report_fields({
         "title": "Triage of NuSTAR ObsID 30001011002",
-        "follow_up": [f"Re-reduce ObsID 30001011002 [{ask.handle}]"],
+        "follow_up": [f'Re-reduce ObsID {{{{{ask.handle} "30001011002"}}}}'],
     }, store, itemised=(), scope=[ask.handle])
     assert len(res.problems) == 1 and res.problems[0].startswith("title")
 
@@ -395,8 +401,8 @@ def test_a_paper_value_must_be_attributed_with_a_locator(store, tmp_path):
 
     p = _paper(store, tmp_path)
     # one paper citation never exempts the numbers beside it
-    res = check_bindings(f"The published PD is 4.0 ± 0.2 % [{p.handle}].", store)
-    assert res.problems and "attribute it" in res.problems[0]
+    res = check_bindings(f"The published PD is 4.0 ± 0.2 % {{{{{p.handle}}}}}.", store)
+    assert res.problems and "attributed with where it is in the paper" in res.problems[0]
     # attributed without a locator: refused, naming what to add
     res = check_bindings(f'PD {{{{{p.handle} "4.0 ± 0.2 %"}}}}.', store)
     assert "without saying where" in res.problems[0]
@@ -429,9 +435,9 @@ def test_a_value_reference_reads_the_returned_value_and_a_typed_copy_is_refused(
     assert render_values(f"limit {{{{{r.handle}#/band/stat_deg}}}} deg", store) == (
         f"limit 9.55 [{r.handle}#/band/stat_deg] deg")
 
-    (typed,) = check_bindings(f"The band limit is 9.553035400135778 deg [{r.handle}].", store).problems
-    assert f'"9.553035400135778" → {{{{{r.handle}#/band/stat_deg}}}}' in typed
-    (rounded,) = check_bindings(f"The band limit is 9.55 deg [{r.handle}].", store).problems
+    (typed,) = check_bindings(f"The band limit is 9.553035400135778 deg {{{{{r.handle}}}}}.", store).problems
+    assert '"9.553035400135778" (' in typed and f"→ {{{{{r.handle}#/band/stat_deg}}}}" in typed
+    (rounded,) = check_bindings(f"The band limit is 9.55 deg {{{{{r.handle}}}}}.", store).problems
     assert f"it rounds {{{{{r.handle}#/band/stat_deg}}}}" in rounded
     (quoted,) = check_bindings(f'Limit {{{{{r.handle} "9.553035400135778"}}}} deg.', store).problems
     assert "restates values" in quoted
@@ -442,7 +448,8 @@ def test_a_value_reference_reads_the_returned_value_and_a_typed_copy_is_refused(
     text = _result(store, "PD = 4.02 +/- 0.21 %")
     (plain,) = check_bindings(f"PD {{{{{text.handle}#/pd}}}}.", store).problems
     assert "holds text, not a returned value" in plain
-    assert check_bindings(f"PD 4.02 [{text.handle}].", store).problems == []  # text output: typed is fine
+    (printed,) = check_bindings(f"PD 4.02 {{{{{text.handle}}}}}.", store).problems  # a printed value is quoted
+    assert f'{{{{{text.handle} "4.02"}}}}' in printed
 
 
 def test_the_run_store_lives_outside_the_readable_workspace(tmp_path):
@@ -465,12 +472,12 @@ def test_the_shell_grounds_nothing_even_arithmetic(store):
     ):
         r = receipt_call(store, source="analyst_worker_0", produced_by=shell,
                          args={"command": command}, text=out, failed=False).result
-        problems = check_bindings(f"{prose} [{r.handle}]", store).problems
+        problems = check_bindings(f"{prose} {{{{{r.handle}}}}}", store).problems
         assert any("shell output" in p for p in problems), (command, problems)
     # a toolkit tool echoing its own parameter (a band edge) grounds as ever
     fit = receipt_call(store, source="analyst_worker_0", produced_by="research_toolkit.xspec_utils.fit",
                        args={"emin": 2, "emax": 8}, text="fit 2-8 keV: PD=4.0", failed=False).result
-    assert check_bindings(f"PD 4.0 in 2-8 keV [{fit.handle}]", store).problems == []
+    assert check_bindings(f'{{{{{fit.handle} "fit 2-8 keV: PD=4.0"}}}}', store).problems == []
 
 
 @pytest.mark.parametrize("producer,kind,what", [
@@ -489,7 +496,7 @@ def test_what_a_role_read_is_recorded_but_never_evidence(store, tmp_path, produc
     else:
         r = store.mint(source="rev", kind=kind, produced_by=producer, data="    31\tPD = 4.4", title="T")
     assert not is_evidence(r)
-    cited = check_bindings(f"PD = 4.4 [{r.handle}]", store).problems
+    cited = check_bindings(f"PD = 4.4 {{{{{r.handle}}}}}", store).problems
     assert any(what in p and "not evidence" in p for p in cited), cited
     # In scope it grounds nothing and raises nothing — including a line-number prefix (R7).
     assert check_bindings("inclination 31 deg", store, scope=[r.handle]).problems
@@ -650,7 +657,7 @@ def test_a_citation_whose_bytes_changed_is_refused(store, tmp_path):
     r = store.mint(source="analyst_worker_0", kind="data",
                    produced_by="research_toolkit.x_utils.t", path=data)
     data.write_text("PD,9.9\n")
-    problems = check_bindings(f"PD is 9.9 [{r.handle}]", store).problems
+    problems = check_bindings(f"PD is 9.9 {{{{{r.handle}}}}}", store).problems
     assert any("no longer match" in p for p in problems), problems
 
 
@@ -667,7 +674,7 @@ def test_a_citation_check_reads_the_receipt_once(store, tmp_path, monkeypatch):
     monkeypatch.setattr(store, "read", lambda h: calls.append(h) or real_read(h))
     monkeypatch.setattr(store, "verify", lambda h: pytest.fail("a second, separate check"))
     monkeypatch.setattr(store, "text", lambda h: pytest.fail("a second, separate read"))
-    assert check_bindings(f"PD is 4.0 [{r.handle}]", store).problems == []
+    assert check_bindings(f'PD is {{{{{r.handle} "PD,4.0"}}}}', store).problems == []
     assert calls == [r.handle]
 
 
@@ -715,7 +722,7 @@ def test_a_key_with_spaces_and_a_whole_value_are_referenced_and_leftover_markup_
 
     banded = _result(store, json.dumps({"2-3 keV": {"q": 0.012345}}))
     assert check_bindings(f"q is {{{{{banded.handle}#/2-3 keV/q}}}}.", store).problems == []
-    (copied,) = check_bindings(f"q is 0.012345 [{banded.handle}].", store).problems
+    (copied,) = check_bindings(f"q is 0.012345 {{{{{banded.handle}}}}}.", store).problems
     assert f"{{{{{banded.handle}#/2-3 keV/q}}}}" in copied
     whole = _result(store, json.dumps(4.0213))
     assert check_bindings(f"PD {{{{{whole.handle}#}}}} %.", store).problems == []
@@ -730,17 +737,22 @@ def test_a_key_with_spaces_and_a_whole_value_are_referenced_and_leftover_markup_
 def test_honest_restatements_are_not_copies(store):
     request = store.mint_input("Fit ObsID 1200120101 at 8.60 kpc.", kind="human", produced_by="research_request")
     r = _result(store, json.dumps({"obsid": 1200120101, "d": 8.6, "channels": 1024, "year": 2023.0}))
-    text = f"ObsID 1200120101 at 8.60 kpc [{request.handle}] uses 1024 channels [{r.handle}]."
+    text = f"ObsID 1200120101 at 8.60 kpc {{{{{request.handle}}}}} uses 1024 channels {{{{{r.handle}}}}}."
     assert not [p for p in check_bindings(text, store).problems if "types values" in p]
 
 
-def test_a_rounded_hint_names_only_a_result_the_text_cites_and_only_when_one_fits(store):
+def test_a_rounded_hint_names_a_cited_result_and_only_when_one_fits(store):
+    """A typed number is refused whatever it sits beside; the rounding hint reads only the results
+    the text cites (the scope is too large to search per number, review 2026-11-03)."""
     cited = _result(store, json.dumps({"pd": 0.4712}))
     other = _result(store, json.dumps({"chi2": 0.5123}))
-    (alone,) = check_bindings(f"PD is 0.47 [{cited.handle}].", store, scope=[other.handle]).problems
+    (alone,) = check_bindings(f"PD is 0.47 {{{{{cited.handle}}}}}.", store, scope=[other.handle]).problems
     assert f"it rounds {{{{{cited.handle}#/pd}}}}" in alone
-    (none,) = check_bindings(f"PD is 0.51 [{cited.handle}].", store, scope=[other.handle]).problems
-    assert other.handle not in none.split("receipts it cites")[1]
+    (scoped,) = check_bindings(f"PD is 0.51 {{{{{cited.handle}}}}}.", store, scope=[other.handle]).problems
+    assert "it rounds" not in scoped
+    twin = _result(store, json.dumps({"x": 0.4749}))
+    (ambiguous,) = check_bindings(f"PD is 0.47 {{{{{cited.handle}}}}} {{{{{twin.handle}}}}}.", store).problems
+    assert "it rounds" not in ambiguous
 
 
 def test_a_report_handed_to_a_model_keeps_its_quotes_and_attributions_whole(store):
@@ -751,11 +763,11 @@ def test_a_report_handed_to_a_model_keeps_its_quotes_and_attributions_whole(stor
 
     r = _result(store, json.dumps({"slope": 1.2714}))
     finding = (f'PD {{{{lib:p3 "4.0 ± 0.2 %" Table 2}}}}; slope {{{{{r.handle} "slope = 1.27"}}}}; '
-               f"fit {{{{{r.handle}#/slope}}}} [{r.handle}]")
+               f"fit {{{{{r.handle}#/slope}}}} {{{{{r.handle}}}}}")
     read = _for_reader(AnalystReport(summary="s", findings=[finding], status="succeeded"), store)
     assert read["findings"] == [
         f'PD {{{{lib:p3 "4.0 ± 0.2 %" Table 2}}}}; slope {{{{{r.handle} "slope = 1.27"}}}}; '
-        f"fit 1.27 [{r.handle}#/slope] [{r.handle}]"]
+        f"fit 1.27 [{r.handle}#/slope] {{{{{r.handle}}}}}"]
 
 
 def test_a_written_source_tag_is_refused_since_it_would_pass_for_a_rendered_reference(store):
@@ -763,6 +775,52 @@ def test_a_written_source_tag_is_refused_since_it_would_pass_for_a_rendered_refe
     writer typing it would pass a typed number off as one."""
     r1 = _result(store, json.dumps({"fit": {"kT": 9.9912}}))
     r2 = _result(store, "chi2 = 2.72")
-    problems = check_bindings(f"kT = 2.72 [{r1.handle}#/fit/kT], fit quality [{r2.handle}].", store).problems
+    problems = check_bindings(f"kT = 2.72 [{r1.handle}#/fit/kT], fit quality {{{{{r2.handle}}}}}.", store).problems
     assert any("markup the check reads as nothing" in p and "{{handle#/key}}" in p for p in problems)
 
+
+
+def test_the_retired_bracket_citation_is_refused_with_the_one_to_write(store):
+    """User ruling 2026-11-03: one citing syntax. A written ``[handle]`` is markup the check reads
+    as nothing, answered with the ``{{handle}}`` form."""
+    r = _result(store, "The fit converged.")
+    (problem,) = check_bindings(f"The fit converged [{r.handle}].", store).problems
+    assert f"`[{r.handle}]`" in problem and "a whole result is {{handle}}" in problem
+    assert check_bindings(f"The fit converged {{{{{r.handle}}}}}.", store).problems == []
+
+
+def test_a_paper_locator_holds_a_place_and_nothing_else(store, tmp_path):
+    """Review 2026-11-03: text after a paper's quote was masked from the number scan."""
+    p = _paper(store, tmp_path)
+    for place in ("Table 2", "Fig. 3b", "Eq. 4", "§2.1", "p. 7", "Table 2, row 3", "Figs. 2–4"):
+        assert check_bindings(f'PD {{{{{p.handle} "4.0 ± 0.2 %" {place}}}}}.', store).problems == [], place
+    (escape,) = check_bindings(f'{{{{{p.handle} "4.0 ± 0.2 %" Table 2, and our PD is 4.02 per cent}}}}', store).problems
+    assert "holds more than a place" in escape
+
+
+def test_an_ordinal_never_swallows_a_decimal_and_a_bare_short_quote_binds_nothing(store):
+    r = _result(store, "n = 3 bins; trial 4 of 5")
+    for text in ("trial 4.02 per cent", "DU 4.02", "step 2.41"):
+        assert any("types numbers outside a citation" in p for p in check_bindings(text, store).problems), text
+    assert check_bindings("in trial 4 of the scan", store).problems == []
+    (bare,) = check_bindings(f'a {{{{{r.handle} "3"}}}} sigma limit', store).problems
+    assert "is a bare number" in bare
+    (hint,) = check_bindings(f"a 3 sigma limit {{{{{r.handle}}}}}", store).problems
+    assert f'{{{{{r.handle} "3"}}}}' not in hint  # no quote suggested for a number a receipt holds by chance
+
+
+def test_every_bracket_holding_a_handle_is_retired_markup(store):
+    a, b = _result(store, "x"), _result(store, "y")
+    for text in (f"see [{a.handle}, {b.handle}]", f"see [ {a.handle} ]", f"see [{a.handle}; table]"):
+        assert any("markup the check reads as nothing" in p for p in check_bindings(text, store).problems), text
+
+
+def test_scope_is_read_only_when_a_number_needs_a_citation(store, monkeypatch):
+    from auto_research.provenance.bindings import _Resolved
+
+    seen = []
+    real = _Resolved.entry
+    monkeypatch.setattr(_Resolved, "entry", lambda self, h: seen.append(h) or real(self, h))
+    scope = [_result(store, f"v {i}.5").handle for i in range(5)]
+    assert check_bindings("No number here.", store, scope=scope).problems == []
+    assert seen == []

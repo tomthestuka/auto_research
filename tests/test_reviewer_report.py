@@ -63,10 +63,10 @@ def _final(**overrides) -> ReviewerReport:
     fields = dict(
         accepted=True,
         assign_to="human",
-        rationale='Agrees with the literature [lib:p1].',
+        rationale='Agrees with the literature {{lib:p1}}.',
         title="Cyg X-1 polarization",
         abstract='We find {{analyst_lead:r1 "PD = 4.02 ± 0.21 %"}}, consistent with {{lib:p1 "PD = 4.0 ± 0.2 %" Table 2}}.',
-        sections=[ReviewerSection(heading="Results", body='Figure 1 shows it [analyst_lead:f1]. Table 1 compares.')],
+        sections=[ReviewerSection(heading="Results", body='Figure 1 shows it {{analyst_lead:f1}}. Table 1 compares.')],
         key_findings=['The fit gives {{analyst_lead:r1 "chi2/dof = 1.8"}}.'],
         figures=["analyst_lead:f1"],
         tables=[ReviewerTable(caption="Benchmark", receipt="analyst_lead:d1")],
@@ -195,7 +195,7 @@ def test_a_paper_value_is_typeset_with_its_reference_and_listed_for_verification
 
 
 def test_a_bare_paper_number_is_refused_with_a_hint_to_attribute_it(store):
-    report = _final(key_findings=["The paper reports 7.7 % [lib:p1]."])
+    report = _final(key_findings=["The paper reports 7.7 % {{lib:p1}}."])
     assert any("lib:p1" in p for p in _problems(report, store))
 
 
@@ -254,7 +254,7 @@ def test_a_report_with_no_assignee_is_refused(store):
 
 
 def test_a_report_to_the_human_needs_its_parts(store):
-    problems = _problems(ReviewerReport(rationale="Holds [lib:p1].", assign_to="human"), store)
+    problems = _problems(ReviewerReport(rationale="Holds {{lib:p1}}.", assign_to="human"), store)
     for name in ("title", "abstract", "sections", "key_findings"):
         assert any(f"and {name} is empty" in p for p in problems)
 
@@ -262,19 +262,19 @@ def test_a_report_to_the_human_needs_its_parts(store):
 @pytest.mark.parametrize("team,cap_words", [("librarian", "research passes"),
                                             ("analysts", "analysis passes")])
 def test_an_assignment_needs_a_follow_up_and_a_pass_left(store, team, cap_words):
-    report = ReviewerReport(rationale="Short [lib:p1].", assign_to=team)
+    report = ReviewerReport(rationale="Short {{lib:p1}}.", assign_to=team)
     problems = _problems(report, store, lit=0, ana=0)
     assert any("follow_up is empty" in p and team in p for p in problems)
     assert any(f"No {cap_words} remain" in p for p in problems)
 
 
 def test_the_other_teams_cap_does_not_block_an_assignment(store):
-    report = ReviewerReport(rationale="Short [lib:p1].", assign_to="analysts", follow_up="Refit.")
+    report = ReviewerReport(rationale="Short {{lib:p1}}.", assign_to="analysts", follow_up="Refit.")
     assert _problems(report, store, lit=0, ana=1) == []
 
 
 def test_an_assignment_does_not_need_the_report_parts(store):
-    report = ReviewerReport(rationale="Short [lib:p1].", assign_to="librarian", follow_up="Search.")
+    report = ReviewerReport(rationale="Short {{lib:p1}}.", assign_to="librarian", follow_up="Search.")
     assert _problems(report, store) == []
 
 
@@ -285,17 +285,19 @@ def test_an_unknown_assignee_is_refused_by_the_schema():
 
 def test_a_brief_prescribes_numbers_without_grounding_but_a_claim_does_not(store):
     # Human ruling 2026-09-25: follow_up is a prescription, not a claim.
-    brief = ReviewerReport(rationale="r [lib:p1]", assign_to="analysts",
+    brief = ReviewerReport(rationale="r {{lib:p1}}", assign_to="analysts",
                            follow_up="Fit the 3-7 keV band from starting spins 0, 0.5 and 0.9.")
     assert _problems(brief, store) == []
-    claim = ReviewerReport(rationale="The fit used 3-7 keV [lib:p1].", assign_to="analysts",
+    claim = ReviewerReport(rationale="The fit used 3-7 keV {{lib:p1}}.", assign_to="analysts",
                            follow_up="Refit.")
-    assert any("rationale states numbers" in p for p in _problems(claim, store))
+    assert any("rationale types numbers outside a citation" in p for p in _problems(claim, store))
 
 
-def test_any_readable_receipt_grounds_any_field(store):
-    # The abstract cites nothing, yet its number is in a receipt the reviewer can read.
-    assert _problems(_final(abstract="PD is 4.02 here."), store) == []
+def test_a_readable_receipt_suggests_the_citation_but_grounds_no_typed_number(store):
+    """User ruling 2026-11-03: a number is grounded by its own citation only. The abstract types a
+    number a receipt the reviewer can read prints: refused, with the quote to write."""
+    (problem,) = [p for p in _problems(_final(abstract="PD is 4.02 here."), store) if "4.02" in p]
+    assert "types numbers outside a citation" in problem and ' "4.02"}}' in problem
 
 
 def test_a_broken_receipt_the_report_never_cites_is_not_the_models_problem(store):
@@ -336,7 +338,7 @@ def test_a_number_from_the_request_grounds_only_where_the_request_is_cited(store
     uncited = ReviewerReport(rationale="Check the 7.7 value.", assign_to="librarian", follow_up="Search.")
     assert any("7.7" in p for p in reviewer_turn_problems(
         uncited, lookup=lookup, scope=reviewer_scope(lookup), budgets=budgets))
-    cited = ReviewerReport(rationale=f"Check the 7.7 value [{request.handle}].", assign_to="librarian",
+    cited = ReviewerReport(rationale=f'Check {{{{{request.handle} "PD = 7.7 %"}}}}.', assign_to="librarian",
                            follow_up="Search.")
     assert reviewer_turn_problems(
         cited, lookup=lookup, scope=reviewer_scope(lookup), budgets=budgets) == []
@@ -354,7 +356,7 @@ def test_an_earlier_published_report_neither_grounds_nor_can_be_cited(store, tmp
     uncited = ReviewerReport(rationale="Check the 7.7 value.", assign_to="analysts", follow_up="Refit.")
     assert any("7.7" in p for p in reviewer_turn_problems(
         uncited, lookup=lookup, scope=reviewer_scope(lookup), budgets=budgets))
-    cited = ReviewerReport(rationale=f"Check the 7.7 value [{published.handle}].", assign_to="analysts",
+    cited = ReviewerReport(rationale=f"Check the 7.7 value {{{{{published.handle}}}}}.", assign_to="analysts",
                            follow_up="Refit.")
     assert any("earlier published report" in p for p in reviewer_turn_problems(
         cited, lookup=lookup, scope=reviewer_scope(lookup), budgets=budgets))
@@ -372,15 +374,15 @@ def test_every_turn_end_clause_has_a_live_attack_cell(store, tmp_path):
     published_file = tmp_path / "earlier.jsonl"
     published_file.write_text('{"spin": "0.973"}')
     published = store.mint(source="rev", kind="data", produced_by="report_renderer", path=published_file)
-    task = dict(rationale="r [lib:p1]", assign_to="analysts", follow_up="Refit.")
+    task = dict(rationale="r {{lib:p1}}", assign_to="analysts", follow_up="Refit.")
     triggers = {
         "no_report": (None, {}),
         "empty_rationale": (ReviewerReport(**{**task, "rationale": ""}), {}),
         "no_assignee": (_final(assign_to=None), {}),
         "empty_follow_up": (ReviewerReport(**{**task, "follow_up": ""}), {}),
         "cap_spent": (ReviewerReport(**task), {"ana": 0}),
-        "human_missing_parts": (ReviewerReport(rationale="r [lib:p1]", assign_to="human", title="T"), {}),
-        "cites_published_report": (ReviewerReport(**{**task, "rationale": f"Check [{published.handle}]."}), {}),
+        "human_missing_parts": (ReviewerReport(rationale="r {{lib:p1}}", assign_to="human", title="T"), {}),
+        "cites_published_report": (ReviewerReport(**{**task, "rationale": f"Check {{{{{published.handle}}}}}."}), {}),
         "ungrounded_number": (_final(abstract="The spin is 0.8127."), {}),
         "uncited_input": (ReviewerReport(**{**task, "rationale": "Fit ObsID 30001011002."}), {}),
         "render_refused": (_final(figures=["analyst_lead:r1"]),

@@ -10,7 +10,7 @@ carry on from your text alone.
 ## What to preserve
 
 - **The work done**, step by step in order: which tool ran on what, and what it showed, each with
-  the receipt handle it came from (`[analyst_worker_0:r12]`), so the agent can open it again with
+  the receipt handle it came from (`analyst_worker_0:r12`), so the agent can open it again with
   `view_receipt` before it relies on it.
 - **The numbers that matter**, copied exactly as the tool output gave them, each next to the handle
   of the output it came from. The agent will cite the receipt, so a number with its handle is

@@ -873,7 +873,55 @@ def check_structural(
     out.append(CheckResult(
         name="structural.tool_manifest_entry", layer="A", passed=found, detail=detail,
     ))
+
+    # (d) every argument of every tool in a touched package declares its kind (and an optional
+    #     parameter its default): the input validator refuses a call it cannot check, so a tool
+    #     committed without them could never run (``provenance.inputs.manifest_problems``).
+    from auto_research.provenance.inputs import manifest_problems
+
+    unchecked: list[str] = []
+    for pkg_name, pkg_root in packages.items():
+        manifest = pkg_root / "skills" / "__init__.py"
+        if not manifest.is_file():
+            continue
+        entries = _manifest_literal(manifest.read_text(encoding="utf-8"))
+        if entries is None:
+            unchecked.append(f"{pkg_name}: TOOL_MANIFEST is not a pure-data dict literal")
+            continue
+        for tool, spec in entries.items():
+            unchecked.extend(manifest_problems(str(tool), spec.get("args_schema") if isinstance(spec, dict) else None))
+    out.append(CheckResult(
+        name="structural.argument_kinds", layer="A", passed=not unchecked,
+        detail="" if not unchecked else (
+            "; ".join(unchecked) + ". Each args_schema property declares \"kind\": \"data\" (another "
+            "tool's output, passed by reference), \"parameter\" (a number that changes the science; "
+            "an optional one declares \"default\"), \"path\" or \"setting\"."
+        ),
+    ))
     return out
+
+
+def _manifest_literal(source: str) -> dict | None:
+    """The ``TOOL_MANIFEST`` dict literal evaluated as data (no code runs), or ``None`` when the
+    source does not parse or the manifest is not a literal."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+        else:
+            continue
+        if "TOOL_MANIFEST" in names:
+            try:
+                value = ast.literal_eval(node.value)
+            except (ValueError, SyntaxError, TypeError):
+                return None
+            return value if isinstance(value, dict) else None
+    return None
 
 
 def untracked_ignore_files(worktree: Path) -> list[str]:

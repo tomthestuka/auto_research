@@ -46,8 +46,9 @@ def _toolkit(tmp_path):
 
 def _call(tmp_path, store, args, toolkit_root=None, kind=TOOL):
     registry = _FakeRegistry(known={TOOL, "mcp.builtin.bash_exec"}, mcp={"mcp.builtin.bash_exec"},
-                             schema={"properties": {"obsid": {}, "obsids": {}, "epoch": {}, "ixpe_path": {},
-                                                    "obs_db_path": {}, "infile": {}}})
+                             schema={"properties": {"obsid": {"kind": "setting"}, "obsids": {"kind": "setting"},
+                                                    "epoch": {"kind": "setting"}, "ixpe_path": {"kind": "path"},
+                                                    "obs_db_path": {"kind": "path"}, "infile": {"kind": "path"}}})
     registry._root = toolkit_root
     provider = SandboxToolProvider(registry, _FakeSandbox(tool_fn=lambda m, f, a: {"exit_code": 0, "stdout": "ok"}),
                                    cwd=tmp_path, receipts=store, receipt_source="analyst_worker_0")
@@ -133,7 +134,9 @@ def test_the_leads_data_catalog_names_its_toolkit_root_and_commit(tmp_path, monk
 
     root, _ = _toolkit(tmp_path)
     (root / "catalog_utils" / "lib").mkdir(parents=True)
-    (root / "catalog_utils" / "__init__.py").write_text("TOOL_MANIFEST = {}\n")
+    (root / "catalog_utils" / "__init__.py").write_text(
+        "TOOL_MANIFEST = {'research_toolkit.catalog_utils.data_catalog': {'args_schema': {'properties': "
+        "{'obs_db_path': {'kind': 'path'}, 'min_level': {'kind': 'setting'}}}}}\n")
     (root / "catalog_utils" / "lib" / "__init__.py").write_text("")
     (root / "catalog_utils" / "lib" / "catalog_read.py").write_text(
         "def data_catalog(obs_db_path, min_level=None):\n    return f'2 observations in {obs_db_path}'\n")

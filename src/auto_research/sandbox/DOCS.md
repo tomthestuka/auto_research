@@ -148,6 +148,15 @@ Invariants:
   and is recorded in `import_errors` (`{package: reason}`, logged); `check_toolkit_manifests(root=None)`
   is the launch-time preflight that refuses a toolkit with any (2026-10-27; it was skipped
   silently before).
+- Every `args_schema` property declares a `kind` (`data`, `parameter`, `path`, `setting`) and an
+  optional parameter a `default` (2026-11-03; the input validator, `provenance.inputs`). `load()`
+  records every tool the validator cannot check in `manifest_errors` (never raises, a malformed
+  schema included); `check_toolkit_manifests` refuses them at launch with the run's
+  `disabled_tools` applied, and the consensus loop logs them after a reload.
+- `provider_schema(schema, *, references=True)` is the schema a provider receives: `kind` and
+  `default` taken out and said in the description (`_KIND_NOTES`); `data`, `parameter` and `path`
+  left untyped (a reference, a value with its reason under `value`, or text); `references=False`
+  for a path taking typed values only (the lead's in-process `data_catalog`, `_TYPED_NOTES`).
 
 ### `envs.py` — software environments as objects (env plan B1, handoff [F18])
 
@@ -1019,8 +1028,15 @@ the hook mapping a fake-model verdict — no live LLM).
   - `.tool_catalogue()` → `str` — multi-line text listing of all tools.
   - `.tool_definitions()` → `list[dict]` — provider-neutral function definitions
     (`{name, description, input_schema}`) for native function calling. Every toolkit tool's
-    description ends with `REF_NOTE`: how to pass another tool's output on by `{"$ref": …}`
-    (`provenance.refs`).
+    description ends with `REF_NOTE` (how a value arrives: a reference to one's own result, or a
+    typed parameter with its reason), and its schema is `provider_schema(args_schema)`.
+  - `.manifest_errors` → `list[str]` — why loaded tools cannot be validated (`provenance.inputs.manifest_problems`).
+- `provider_schema(schema, *, references=True)` → `dict`; `REF_NOTE`, `_KIND_NOTES`, `_TYPED_NOTES`.
+- `gate.check_structural` check (d) `structural.argument_kinds` — every tool in a touched package
+  declares its kinds (`_manifest_literal`: the `TOOL_MANIFEST` literal read as data, no code run;
+  a manifest that is not a pure literal fails). Accepted limit: a manifest changed after its
+  literal (`TOOL_MANIFEST[...] = …`, `.update`) passes the gate; the registry's `manifest_errors`
+  and the call-time refusal still stop the tool, so it commits a tool that never runs.
   - `.kind_for_function(name)` → `str` — map a sanitized tool-call name back to
     the canonical dotted `kind`.
 - `PersistentSandbox(toolkit_root, workdir, *, environment=None, environments=None, label="repl", default_timeout_s=300, mcp_client=None, analyze_env=None, analyze_ini_sh=None, repl_init_py=None)` —
@@ -1432,3 +1448,13 @@ detail in git history.
 - 2026-10-27 — `import_errors` also records a failed `reload` (the stale module is evicted so
   `load` reports why) and an unreadable `tool_config.yaml` (its `env:` routing would drop silently).
 - 2026-11-03 — `REF_NOTE`: a reference names the caller's own results.
+- 2026-11-03 — Argument kinds (plan `tmp_plan_handles_only.md`, build items 1, 2 and the gate part
+  of 5): `provider_schema`, `_KIND_NOTES`/`_TYPED_NOTES`, `REF_NOTE` rewritten, `manifest_errors`,
+  `check_toolkit_manifests` refuses kindless manifests (with `disabled_tools` applied); the gate's
+  `structural.argument_kinds` (`_manifest_literal`). Stateless review (8 findings): fixed —
+  malformed manifests are problems, never crashes (`manifest_problems` on a non-object schema);
+  paths untyped so the reference they offer fits; the lead's catalog definition offers no
+  reference; a default on any kind is said; preflight honours `disabled_tools`; tests for the
+  reload event and the lead's definition. Accepted: manifest mutation after the literal (see the
+  gate entry); an untyped parameter on Gemini is unprobed (Google is not an active seat).
+

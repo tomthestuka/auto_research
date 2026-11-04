@@ -33,12 +33,12 @@ def store(tmp_path: Path) -> ReceiptStore:
 def _report() -> ReviewerReport:
     return ReviewerReport(
         accepted=True,
-        rationale="Agrees [lib:p1].",
+        rationale="Agrees {{lib:p1}}.",
         assign_to="human",
         title="T",
         abstract='We find {{analyst_lead:r1 "PD = 4.02"}}.',
-        sections=[ReviewerSection(heading="R", body="See [analyst_lead:r1].")],
-        key_findings=["Holds [lib:p1]."],
+        sections=[ReviewerSection(heading="R", body="See {{analyst_lead:r1}}.")],
+        key_findings=["Holds {{lib:p1}}."],
         tables=[ReviewerTable(caption="c", receipt="analyst_lead:d1")],
     )
 
@@ -89,7 +89,7 @@ def test_the_jsonl_is_written_only_when_configured(store, tmp_path):
 
 def test_a_flag_on_a_cited_receipt_marks_the_published_report(store, tmp_path):
     store.mint(source="analyst_lead", kind="result", produced_by="research_toolkit.xspec_utils.fit", data="PD = 9.9", failed=True)
-    report = _report().model_copy(update={"key_findings": ["Failed run [analyst_lead:r2]."]})
+    report = _report().model_copy(update={"key_findings": ["Failed run {{analyst_lead:r2}}."]})
     result = publish_report(
         report, store=store, run_id="r1", request_question="Q?", report_dir=tmp_path / "report",
         formats=["jsonl"],
@@ -106,7 +106,7 @@ class _Reviewer:
 
     async def review(self, request, *, arrived="request", report=None, **_):
         if arrived == "request":
-            return ReviewerReport(rationale="ok [lib:p1]", assign_to="analysts", follow_up="analyse")
+            return ReviewerReport(rationale="ok {{lib:p1}}", assign_to="analysts", follow_up="analyse")
         return _report()
 
 
@@ -201,3 +201,23 @@ def test_report_formats_normalization():
     assert _normalize_report_formats(["jsonl", "tex"], []) == ["jsonl", "tex"]
     with pytest.raises(ValueError, match="Unknown report_formats"):
         _normalize_report_formats(["pdf"], [])
+
+
+def test_a_table_cites_in_one_cell_and_refuses_a_flagged_receipt(tmp_path):
+    """Review 2026-11-03: a whole-receipt citation in a cell read as split; a failed result's table
+    was typeset as computed values."""
+    import json as _json
+
+    from auto_research.provenance import ReceiptStore
+    from auto_research.report.render import check_table
+    from auto_research.schemas.review import ReviewerTable
+
+    store = ReceiptStore(tmp_path / "receipts")
+    good = store.mint(source="analyst_worker_0", kind="result", produced_by="research_toolkit.t.fit",
+                      data="E,PD\n2,4.0\n")
+    bad = store.mint(source="analyst_worker_0", kind="result", produced_by="research_toolkit.t.fit",
+                     data="E,PD\n2,4.0\n", failed=True)
+    cited = ReviewerTable(caption="Fit", columns=["band", "note"], rows=[["soft", f"see {{{{{good.handle}}}}}"]])
+    assert check_table(cited, 1, store)[2] == []
+    flagged = ReviewerTable(caption="Fit", receipt=bad.handle)
+    assert any("marked failed" in p for p in check_table(flagged, 2, store)[2])

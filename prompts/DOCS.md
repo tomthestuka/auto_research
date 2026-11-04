@@ -142,3 +142,9 @@ Compacted 2026-09-01, again 2026-09-24, 2026-10-07 and 2026-10-19 (every entry);
   results; a peer's value enters a worker's calls once its own tool run reproduces it.
 - 2026-11-03 — `conventions.md`: a report a unit receives shows each referenced value followed by
   its source, `1.23 [h#/k]`; a number with no source was typed by its writer.
+- 2026-11-03 — One citing syntax (build item 9): `conventions.md` states that every citation is
+  inside `{{ }}` and every number is its own citation (a whole result `{{handle}}`, a printed value
+  quoted, the request quoted); worker, lead, reviewer and compactor prompts follow. Earlier the same
+  day: argument kinds (a parameter typed with its reason, a path as text or a file reference, data
+  from one's own tools), `{{h#/$args/<name>}}` for a chosen value, a brief's value typed with its
+  reason; brief parameters purged.

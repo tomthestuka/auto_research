@@ -68,7 +68,9 @@ def run(tmp_path, monkeypatch):
     store = ReceiptStore(tmp_path / "receipts")
     ledger = tmp_path / "monitor.jsonl"
     registry = _FakeRegistry(known={LOAD, FIT}, mcp=set(),
-                             schema={"properties": {"obsid": {}, "ixpe_path": {}, "out_path": {}, "csv_path": {}}})
+                             schema={"properties": {"obsid": {"kind": "setting"}, "ixpe_path": {"kind": "path"},
+                                                    "out_path": {"kind": "path"}, "csv_path": {"kind": "path"},
+                                                    "model": {"kind": "setting"}}})
     registry._root = root
     sandbox = _FakeSandbox(tool_fn=tool)
     tools = SandboxToolProvider(registry, sandbox, cwd=work, receipts=store,
@@ -92,11 +94,11 @@ def run_received(run):
 
 def _report(**overrides) -> ReviewerReport:
     fields = dict(
-        accepted=True, assign_to="human", rationale="The fit converged [analyst_worker_0:r2].",
+        accepted=True, assign_to="human", rationale="The fit converged {{analyst_worker_0:r2}}.",
         title="Cyg X-1 polarization",
         abstract='We find {{analyst_worker_0:r2 "PD = 4.02 ± 0.21 %"}}.',
-        sections=[ReviewerSection(heading="Fit", body="The fit gives chi2/dof of 1.8 [analyst_worker_0:r2].\n\n- PD is 4.02 [analyst_worker_0:r2]")],
-        key_findings=["PD 4.02 ± 0.21 % [analyst_worker_0:r2]."],
+        sections=[ReviewerSection(heading="Fit", body='The fit gives {{analyst_worker_0:r2 "chi2/dof = 1.8"}}.\n\n- PD is {{analyst_worker_0:r2 "PD = 4.02 ± 0.21 %"}}')],
+        key_findings=['{{analyst_worker_0:r2 "PD = 4.02 ± 0.21 %"}}.'],
     )
     fields.update(overrides)
     return ReviewerReport(**fields)
@@ -143,7 +145,7 @@ def test_every_number_opens_the_chain_that_produced_it(tmp_path, run):
     scan = _Scan()
     scan.feed(page)
     numbers = {text for _, text in scan.buttons}
-    assert {"PD = 4.02 ± 0.21 %", "4.02", "0.21", "1.8"} <= numbers
+    assert {"PD = 4.02 ± 0.21 %", "chi2/dof = 1.8"} <= numbers
     r2 = _pid("analyst_worker_0:r2")
     assert {target for target, _ in scan.buttons} == {r2} <= scan.ids
     chain = page[page.index(f'id="{r2}"'):]
@@ -158,7 +160,7 @@ def test_every_number_opens_the_chain_that_produced_it(tmp_path, run):
 def test_a_numbered_list_keeps_its_page(tmp_path, run):
     store, ledger, _, _ = run
     problems, render = _render(tmp_path, store, ledger, _report(sections=[ReviewerSection(
-        heading="Steps", body="Steps:\n1. The fit converged [analyst_worker_0:r2].\n2. The model is adequate.")]))
+        heading="Steps", body="Steps:\n1. The fit converged {{analyst_worker_0:r2}}.\n2. The model is adequate.")]))
     assert problems == [] and render.html_errors == [] and render.html.html_path.is_file()
 
 
@@ -203,7 +205,7 @@ def test_model_text_and_tool_arguments_stay_inert(tmp_path, run):
     # Numberless, so the grounding check accepts it and the page is rendered.
     attack = '<script>alert("x")</script><img src=x onerror=alert("y")> </div><div popover id="chain-x">'
     problems, render = _render(tmp_path, store, ledger, _report(
-        title=f"Report {attack}", sections=[ReviewerSection(heading=attack, body=f"{attack} PD is 4.02 [analyst_worker_0:r2].")],
+        title=f"Report {attack}", sections=[ReviewerSection(heading=attack, body=f"{attack} PD is {{{{analyst_worker_0:r2 \"PD = 4.02 ± 0.21 %\"}}}}.")],
     ))
     assert problems == []
     page = render.html.html_path.read_text()
@@ -252,11 +254,11 @@ def _page_numbers(render):
 def test_whitespace_around_a_field_never_unlinks_its_numbers(tmp_path, run):
     store, ledger, _, _ = run
     problems, render = _render(tmp_path, store, ledger, _report(
-        abstract="\nWe find PD of 4.02 [analyst_worker_0:r2].\n",
-        sections=[ReviewerSection(heading=" Fit ", body="\n\nThe fit gives 1.8 [analyst_worker_0:r2].\n")],
+        abstract='\nWe find {{analyst_worker_0:r2 "PD = 4.02 ± 0.21 %"}}.\n',
+        sections=[ReviewerSection(heading=" Fit ", body='\n\nThe fit gives {{analyst_worker_0:r2 "chi2/dof = 1.8"}}.\n')],
     ))
     assert problems == [] and render.html_errors == []
-    assert {"4.02", "1.8"} <= set(_page_numbers(render))
+    assert {"PD = 4.02 ± 0.21 %", "chi2/dof = 1.8"} <= set(_page_numbers(render))
 
 
 @pytest.mark.parametrize("table, expect", [
@@ -274,18 +276,19 @@ def test_an_html_only_report_checks_its_tables_like_tex(tmp_path, run, table, ex
 def test_a_cell_holding_the_separator_keeps_its_rows_numbers_linked(tmp_path, run):
     store, ledger, _, _ = run
     table = ReviewerTable(caption="Fit", columns=["quantity | unit", "value"],
-                          rows=[["PD | %", "4.02 [analyst_worker_0:r2]"]])
+                          rows=[["PD | %", '{{analyst_worker_0:r2 "PD = 4.02 ± 0.21 %"}}']])
     problems, render = _render(tmp_path, store, ledger, _report(tables=[table]))
     assert problems == [] and render.html_errors == []
-    assert "4.02" in _page_numbers(render)
+    assert "PD = 4.02 ± 0.21 %" in _page_numbers(render)
 
 
-def test_a_number_only_the_wider_scope_holds_lists_every_holder(tmp_path, run):
-    """A title cites nothing: its number is grounded by the report's scope, and the page says so."""
+def test_a_typed_number_the_reports_receipts_print_is_refused_with_the_quote_to_write(tmp_path, run):
+    """User ruling 2026-11-03: a number is grounded by its own citation only; a title typing one is
+    refused before anything renders, and told the quote that binds it."""
     store, ledger, _, _ = run
-    _, render = _render(tmp_path, store, ledger, _report(title="PD of 4.02 in Cyg X-1"))
-    page = render.html.html_path.read_text()
-    assert 'class="num scoped"' in page and "The text cites none of the receipts holding this value" in page
+    problems, render = _render(tmp_path, store, ledger, _report(title="PD of 4.02 in Cyg X-1"))
+    assert any('{{analyst_worker_0:r2 "4.02"}}' in p for p in problems), problems
+    assert render.html is None or render.html.html_path is None
 
 
 def test_a_renderer_fault_in_one_format_never_stops_the_other(tmp_path, run, monkeypatch):

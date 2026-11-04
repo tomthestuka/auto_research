@@ -175,7 +175,8 @@ def test_execute_data_catalog_delegates_to_catalog_utils(monkeypatch):
         return "Local ixpe data (1 ObsIDs):\n- 01002901: max_level=3, products=[level2_evt, pcube]"
 
     monkeypatch.setattr(react, "_toolkit_clean_head", lambda: "head1")
-    monkeypatch.setattr(react, "_catalog_read_fn", ("head1", _fake_read))
+    _spec = {"args_schema": {"properties": {"obs_db_path": {"kind": "path"}, "min_level": {"kind": "setting"}}}}
+    monkeypatch.setattr(react, "_catalog_read_fn", ("head1", _fake_read, _spec))
 
     out = asyncio.run(react.execute_data_catalog({"obs_db_path": "/data/x/IXPE", "min_level": 2}))
     assert not out.is_error
@@ -225,7 +226,9 @@ def test_data_catalog_runs_committed_toolkit_code_only(tmp_path, monkeypatch, re
     root = tmp_path / "toolkit"
     lib = root / "catalog_utils" / "lib"
     lib.mkdir(parents=True)
-    (root / "catalog_utils" / "__init__.py").write_text("")
+    (root / "catalog_utils" / "__init__.py").write_text(
+        "TOOL_MANIFEST = {'research_toolkit.catalog_utils.data_catalog': {'args_schema': {'properties': "
+        "{'obs_db_path': {'kind': 'path'}, 'min_level': {'kind': 'setting'}}}}}\n")
     (lib / "__init__.py").write_text("")
     (lib / "catalog_read.py").write_text("def data_catalog(path, min_level=None):\n    return 'v1'\n")
     (root / ".gitignore").write_text("__pycache__/\n*.pyc\n")  # as the real toolkit's

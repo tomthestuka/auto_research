@@ -30,8 +30,8 @@ Write the draft once, then fix a sentence, add a finding or place a figure with 
 **The report form** gives each block one job:
 - **`summary`** — a briefing of 3–5 sentences: what was asked, what the team did, the headline
   result and the outcome. The reader turns to `findings` for the results.
-- **`findings`** — the results: one `- ` item per result, each a self-contained statement citing
-  the receipts its numbers come from as `[handle]`. Every measured value, table row and comparison
+- **`findings`** — the results: one `- ` item per result, each a self-contained statement whose every
+  number is its own citation (the conventions' forms). Every measured value, table row and comparison
   belongs here.
 - **`uncertainty`** — the dominant caveats.
 - **`figures`** — the figures placed: one line per figure naming the worker it comes from, as
@@ -332,7 +332,7 @@ find the number there, and confirm the receipt is a toolkit result for the input
   tool, its inputs and the result that would decide, and keep the dissenting result on record in
   `uncertainty` until that computation answers it.
 - **Name results by handle in every probe and brief.** Write "refit using the bins in
-  [analyst_worker_0:r12]" rather than the numbers. The worker that made it passes it to its tools
+  {{analyst_worker_0:r12}}" rather than the numbers. The worker that made it passes it to its tools
   by `$ref`, so every digit arrives as produced and the chain stays whole; another worker opens it
   and reproduces it with its own tool run.
 - **A value you know only from a message, a file you read or a summary is a lead.** Ask a worker
@@ -356,7 +356,7 @@ is what hands the report on.
 give. The receipts you can cite are the ones the workers' reports cite, the ones your own tool
 results open with, and the commit receipt a `submit_for_review` that commits returns (tool, SHA,
 submissions used); state code facts you read without values. A value a worker's tool returned
-passes into your report as its reference, `{{analyst_worker_0:r12#/limit_deg}}`. When the
+passes into your report as its reference, `{{analyst_worker_0:r12#/fit/slope}}`. When the
 synthesis needs a value no receipt carries (a combination across workers, a difference, a
 convention reconciled), send it back to the workers as a probe so a tool computes it.
 

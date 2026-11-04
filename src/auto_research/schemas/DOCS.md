@@ -321,3 +321,5 @@ Compacted 2026-10-07 and 2026-10-19 (every entry); detail in git history.
 - 2026-10-27 — `ReviewerSection.body`, `ReviewerTable` and `rows` descriptions: a value a tool
   returned is written as its reference `{{handle#/key}}`; a built table's numeric cell is a value
   reference or a paper attribution.
+- 2026-11-03 — Field descriptions (`AnalystReport.findings`, `ReviewerSection.body`) teach the one
+  citing syntax: every number its own citation inside `{{ }}`.

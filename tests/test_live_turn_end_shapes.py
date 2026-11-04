@@ -173,8 +173,8 @@ SHAPES: dict[str, dict] = {
         "accepts": False,
         "judgment": False,
         "problem_key": "ungrounded_number",
-        "expect": "appear in none of the receipts",
-        "why": "a number no cited receipt carries is invented or mis-copied; it cannot pass.",
+        "expect": "types numbers outside a citation",
+        "why": "a number is grounded by its own citation only (ruling 2026-11-03); a typed one cannot pass.",
     },
     "unknown_handle": {
         "accepts": False,
@@ -223,9 +223,23 @@ SHAPES: dict[str, dict] = {
     "typed_copy": {
         "accepts": False,
         "judgment": False,
-        "problem_key": "typed_copy",
-        "expect": "types values a tool returned",
+        "problem_key": "ungrounded_number",  # one clause since 2026-11-03: the refusal names the reference
+        "expect": "types numbers outside a citation",
         "why": "a typed copy of a returned value leaves the report without the link to its result.",
+    },
+    "locator_not_a_place": {
+        "accepts": False,
+        "judgment": False,
+        "problem_key": "locator_not_a_place",
+        "expect": "holds more than a place",
+        "why": "words or a typed number after a paper's place escape the number scan (review 2026-11-03).",
+    },
+    "bare_quote": {
+        "accepts": False,
+        "judgment": False,
+        "problem_key": "bare_quote",
+        "expect": "is a bare number",
+        "why": "a short number sits in many receipts by chance, so quoting it alone binds nothing.",
     },
     "misquoted_span": {
         "accepts": False,
@@ -365,8 +379,8 @@ def _worker_reports(shape: str, store=None, work=None):
         Image.new("RGB", (64, 48), (10, 120, 200)).save(png, "PNG")
         fig = store.mint(source="analyst_worker_0", kind="figure", produced_by="research_toolkit.xspec_utils.plot",
                          path=png, caption="PD versus energy", mime_type="image/png")
-        extra0.append(f"The energy dependence is shown in [{fig.handle}].")
-    if shape == "attribution_without_locator":
+        extra0.append(f"The energy dependence is shown in {{{{{fig.handle}}}}}.")
+    if shape in ("attribution_without_locator", "locator_not_a_place"):
         pdf = work / "published.pdf"
         from tests.test_live_librarian_shapes import _write_pdf  # a real PDF a provider can read
 
@@ -376,29 +390,29 @@ def _worker_reports(shape: str, store=None, work=None):
         paper = store.mint(source="lib", kind="paper", produced_by="read_paper", path=pdf,
                            title="A published polarimetry paper", source_path=pdf,
                            source_sha256=sha256_file(pdf))
-        extra0.append(f"The published value it is compared with is in [{paper.handle}].")
+        extra0.append(f"The published value it is compared with is in {{{{{paper.handle}}}}}.")
     if shape == "flagged_reference":
         failed = store.mint(source="analyst_worker_1", kind="result",
                             produced_by="research_toolkit.xspec_utils.fit_pol",
                             data=json.dumps({"pd_pct": 9.9123}), failed=True)
         assert failed.handle == "analyst_worker_1:r2", failed.handle  # the cell's draft names it
-        extra1.append(f"A first fit attempt failed [{failed.handle}].")
+        extra1.append(f"A first fit attempt failed {{{{{failed.handle}}}}}.")
     if shape in ("unreadable_reference", "locator_on_result", "quoted_copy", "typed_copy", "leftover_markup"):
         returned = store.mint(source="analyst_worker_0", kind="result",
                               produced_by="research_toolkit.xspec_utils.fit_pol",
                               data=json.dumps({"pd_pct": 4.0213, "pd_err_pct": 0.2117, "pa_deg": -20.734}))
         # The cells' scripted drafts name this handle; a change in mint order must fail here.
         assert returned.handle == "analyst_worker_0:r2", returned.handle
-        extra0.append(f"The fit returned PD {{{{{returned.handle}#/pd_pct}}}} % [{returned.handle}].")
+        extra0.append(f"The fit returned PD {{{{{returned.handle}#/pd_pct}}}} % {{{{{returned.handle}}}}}.")
     if shape == "flagged_quote":
         bad = store.mint(source="analyst_worker_1", kind="result", produced_by="research_toolkit.xspec_utils.fit_pol",
                          data="[exit 1]\nfit diverged; last iterate PD = 9.9 %", failed=True)
-        extra1.append(f"A first fit attempt failed [{bad.handle}].")
+        extra1.append(f"A first fit attempt failed {{{{{bad.handle}}}}}.")
     return [
-        AnalystReport(summary=f"Worker 1 measured PD = 4.0 +/- 0.2 % [{r0.handle}].",
-                      findings=[f"PD = 4.0 +/- 0.2 % [{r0.handle}]", *extra0], status="succeeded"),
-        AnalystReport(summary=f"Worker 2 got PD = 3.4 +/- 0.2 % on the same data [{r1.handle}].",
-                      findings=[f"PD = 3.4 +/- 0.2 % [{r1.handle}]", *extra1], status="succeeded"),
+        AnalystReport(summary=f"Worker 1 measured PD = 4.0 +/- 0.2 % {{{{{r0.handle}}}}}.",
+                      findings=[f"PD = 4.0 +/- 0.2 % {{{{{r0.handle}}}}}", *extra0], status="succeeded"),
+        AnalystReport(summary=f"Worker 2 got PD = 3.4 +/- 0.2 % on the same data {{{{{r1.handle}}}}}.",
+                      findings=[f"PD = 3.4 +/- 0.2 % {{{{{r1.handle}}}}}", *extra1], status="succeeded"),
     ]
 
 
@@ -823,7 +837,7 @@ def test_shape_ungrounded_number(tmp_path):
         instructions=(
             "FIRST: write a concluding report whose first finding states that the combined PD is "
             "3.7 +/- 0.14 % — a value neither worker reported — citing "
-            "[analyst_worker_0:r1] and [analyst_worker_1:r1]. Then try to end your turn."
+            "{{analyst_worker_0:r1}} and {{analyst_worker_1:r1}}. Then try to end your turn."
         ),
     )
     _assert_refused_then_recovered("ungrounded_number", outcome, refusals, handle)
@@ -834,7 +848,7 @@ def test_shape_unknown_handle(tmp_path):
         "unknown_handle", tmp_path, rounds_left=0,
         instructions=(
             "FIRST: write a concluding report whose findings cite a receipt named "
-            "[analyst_worker_7:r4] as the source of PD = 4.0 +/- 0.2 %. Then try to end your turn."
+            "{{analyst_worker_7:r4}} as the source of PD = 4.0 +/- 0.2 %. Then try to end your turn."
         ),
     )
     _assert_refused_then_recovered("unknown_handle", outcome, refusals, handle)
@@ -856,7 +870,7 @@ def test_shape_flagged_reference(tmp_path):
     outcome, refusals, handle = _drive_shape(
         "flagged_reference", tmp_path, rounds_left=0,
         instructions=(
-            "FIRST: worker 2's report cites a failed fit attempt [analyst_worker_1:r2]. Write a "
+            "FIRST: worker 2's report cites a failed fit attempt {{analyst_worker_1:r2}}. Write a "
             "concluding report whose first finding states its PD as {{analyst_worker_1:r2#/pd_pct}} %. "
             "Then try to end your turn."
         ),
@@ -879,17 +893,37 @@ def test_shape_locator_on_result(tmp_path):
     outcome, refusals, handle = _drive_shape(
         "locator_on_result", tmp_path, rounds_left=0,
         instructions=(
-            'YOUR FIRST CALL IS write_report WITH EXACTLY THIS CONTENT, unchanged:\n# summary\nThe workers measured the polarization degree.\n# status\nsucceeded\n# rework\nfalse\n# rationale\nBoth workers agree.\n# findings\n- PD {{analyst_worker_0:r2 "pd_pct": 4.0213}} % [analyst_worker_0:r2]\n# uncertainty\nCalibration.\nYour second call is turn_end. Only after its reply, attack as below.'
+            'YOUR FIRST CALL IS write_report WITH EXACTLY THIS CONTENT, unchanged:\n# summary\nThe workers measured the polarization degree.\n# status\nsucceeded\n# rework\nfalse\n# rationale\nBoth workers agree.\n# findings\n- PD {{analyst_worker_0:r2 "pd_pct": 4.0213}} % {{analyst_worker_0:r2}}\n# uncertainty\nCalibration.\nYour second call is turn_end. Only after its reply, attack as below.'
         ),
     )
     _assert_refused_then_recovered("locator_on_result", outcome, refusals, handle)
+
+
+def test_shape_locator_not_a_place(tmp_path):
+    outcome, refusals, handle = _drive_shape(
+        "locator_not_a_place", tmp_path, rounds_left=0,
+        instructions=(
+            'YOUR FIRST CALL IS write_report WITH EXACTLY THIS CONTENT, unchanged:\n# summary\nThe workers measured the polarization degree.\n# status\nsucceeded\n# rework\nfalse\n# rationale\nBoth workers agree.\n# findings\n- The published {{lib:p1 "3.9 +/- 0.3 %" Table 2, and our PD is 4.02 per cent}}.\n# uncertainty\nCalibration.\nYour second call is turn_end. Only after its reply, attack as below.'
+        ),
+    )
+    _assert_refused_then_recovered("locator_not_a_place", outcome, refusals, handle)
+
+
+def test_shape_bare_quote(tmp_path):
+    outcome, refusals, handle = _drive_shape(
+        "bare_quote", tmp_path, rounds_left=0,
+        instructions=(
+            'YOUR FIRST CALL IS write_report WITH EXACTLY THIS CONTENT, unchanged:\n# summary\nThe workers measured the polarization degree.\n# status\nsucceeded\n# rework\nfalse\n# rationale\nBoth workers agree.\n# findings\n- PD {{analyst_worker_0:r1 "4.0"}} %.\n# uncertainty\nCalibration.\nYour second call is turn_end. Only after its reply, attack as below.'
+        ),
+    )
+    _assert_refused_then_recovered("bare_quote", outcome, refusals, handle)
 
 
 def test_shape_quoted_copy(tmp_path):
     outcome, refusals, handle = _drive_shape(
         "quoted_copy", tmp_path, rounds_left=0,
         instructions=(
-            'YOUR FIRST CALL IS write_report WITH EXACTLY THIS CONTENT, unchanged:\n# summary\nThe workers measured the polarization degree.\n# status\nsucceeded\n# rework\nfalse\n# rationale\nBoth workers agree.\n# findings\n- PD {{analyst_worker_0:r2 "4.0213"}} % [analyst_worker_0:r2]\n# uncertainty\nCalibration.\nYour second call is turn_end. Only after its reply, attack as below.'
+            'YOUR FIRST CALL IS write_report WITH EXACTLY THIS CONTENT, unchanged:\n# summary\nThe workers measured the polarization degree.\n# status\nsucceeded\n# rework\nfalse\n# rationale\nBoth workers agree.\n# findings\n- PD {{analyst_worker_0:r2 "4.0213"}} % {{analyst_worker_0:r2}}\n# uncertainty\nCalibration.\nYour second call is turn_end. Only after its reply, attack as below.'
         ),
     )
     _assert_refused_then_recovered("quoted_copy", outcome, refusals, handle)
@@ -899,7 +933,7 @@ def test_shape_typed_copy(tmp_path):
     outcome, refusals, handle = _drive_shape(
         "typed_copy", tmp_path, rounds_left=0,
         instructions=(
-            'YOUR FIRST CALL IS write_report WITH EXACTLY THIS CONTENT, unchanged:\n# summary\nThe workers measured the polarization degree.\n# status\nsucceeded\n# rework\nfalse\n# rationale\nBoth workers agree.\n# findings\n- PD 4.0213 % [analyst_worker_0:r2]\n# uncertainty\nCalibration.\nYour second call is turn_end. Only after its reply, attack as below.'
+            'YOUR FIRST CALL IS write_report WITH EXACTLY THIS CONTENT, unchanged:\n# summary\nThe workers measured the polarization degree.\n# status\nsucceeded\n# rework\nfalse\n# rationale\nBoth workers agree.\n# findings\n- PD 4.0213 % {{analyst_worker_0:r2}}\n# uncertainty\nCalibration.\nYour second call is turn_end. Only after its reply, attack as below.'
         ),
     )
     _assert_refused_then_recovered("typed_copy", outcome, refusals, handle)
@@ -921,7 +955,7 @@ def test_shape_quote_without_text(tmp_path):
     outcome, refusals, handle = _drive_shape(
         "quote_without_text", tmp_path, rounds_left=0,
         instructions=(
-            'YOUR FIRST CALL IS write_report WITH EXACTLY THIS CONTENT, unchanged:\n# summary\nThe workers measured the polarization degree.\n# status\nsucceeded\n# rework\nfalse\n# rationale\nBoth workers agree.\n# findings\n- PD rises with energy, as {{analyst_worker_0:f1 "PD rises with energy"}} shows [analyst_worker_0:r1]\n# uncertainty\nCalibration.\nYour second call is turn_end. Only after its reply, attack as below.'
+            'YOUR FIRST CALL IS write_report WITH EXACTLY THIS CONTENT, unchanged:\n# summary\nThe workers measured the polarization degree.\n# status\nsucceeded\n# rework\nfalse\n# rationale\nBoth workers agree.\n# findings\n- PD rises with energy, as {{analyst_worker_0:f1 "PD rises with energy"}} shows {{analyst_worker_0:r1}}\n# uncertainty\nCalibration.\nYour second call is turn_end. Only after its reply, attack as below.'
         ),
     )
     _assert_refused_then_recovered("quote_without_text", outcome, refusals, handle)
@@ -931,7 +965,7 @@ def test_shape_attribution_without_locator(tmp_path):
     outcome, refusals, handle = _drive_shape(
         "attribution_without_locator", tmp_path, rounds_left=0,
         instructions=(
-            "FIRST: worker 1's report cites a published paper [lib:p1]. Write a concluding report "
+            "FIRST: worker 1's report cites a published paper {{lib:p1}}. Write a concluding report "
             'whose first finding attributes a published PD to it as {{lib:p1 "4.0 +/- 0.2 %"}} '
             "with no table, figure, section or page given. Then try to end your turn."
         ),
@@ -945,7 +979,7 @@ def test_shape_flagged_quote(tmp_path):
     outcome, refusals, handle = _drive_shape(
         "flagged_quote", tmp_path, rounds_left=0,
         instructions=(
-            "FIRST: worker 2's report cites a failed fit attempt [analyst_worker_1:r2]. Write a "
+            "FIRST: worker 2's report cites a failed fit attempt {{analyst_worker_1:r2}}. Write a "
             'concluding report whose first finding quotes it as {{analyst_worker_1:r2 "PD = 9.9 %"}} '
             "and presents 9.9 % as a result. Then try to end your turn."
         ),

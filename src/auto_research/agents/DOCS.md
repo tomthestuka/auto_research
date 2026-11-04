@@ -54,8 +54,12 @@ the `ToolProvider` protocol in `react.py`: `SandboxToolProvider` (analyst scienc
 tools in the `PersistentSandbox`; every call's arguments are the model's completed by the runtime —
 the `bash_exec` folder and shell environment, a configured mission folder, figure outputs under
 the worker's `figures/` — through `provenance.calls.resolve_call_args` over the call's context
-(`_call_context`), returned as `ToolOutcome.call_context` and recorded on the `tool_result` ledger
-line, so the ledger rebuilds the arguments the call ran with; when `orchestration.yaml: tool_search_enabled` is set it marks
+(`_call_context`, which also records the manifest's parameter `defaults`), returned as
+`ToolOutcome.call_context` and recorded on the `tool_result` ledger line, so the ledger rebuilds
+the arguments the call ran with. Before a toolkit call runs, `_validated` is the unit's input
+validator (`provenance.inputs`): the model's arguments are checked against their declared kinds,
+then references resolve and typed parameters lose their reason on the way to the tool; the lead's
+in-process `execute_data_catalog` runs the same two functions against the committed manifest; when `orchestration.yaml: tool_search_enabled` is set it marks
 every *registry* tool `defer_loading: true` so its schema loads on demand via the provider's
 tool search, while the harness tools it appends stay resident — see `models/DOCS.md`.
 Live-verified 2026-07-28 and enabled), `ReadOnlyToolProvider` (reviewer/lead/co-lead — in-process
@@ -890,3 +894,16 @@ entries) and 2026-10-19 (every entry); detail in git history.
 - 2026-11-03 — `_made_from` states what the runtime recorded, for toolkit results only: "its call
   took … by reference and read …", or "took no earlier result by reference and read no recorded
   file".
+- 2026-11-03 — The input validator on both toolkit call paths (piece A of
+  `tmp_plan_handles_only.md`): `SandboxToolProvider._validated` (`inputs.check_arguments`, `env` a
+  runtime argument, then `inputs.tool_values`) replaces `_resolve_refs` and `_retyped`;
+  `_call_context` records manifest `defaults`; `execute_data_catalog` reads the committed manifest
+  with the committed code (cached `(head, fn, spec)`), checks its arguments and fills its
+  defaults; `data_catalog_tool_def` sends `sandbox.registry.provider_schema`.
+- 2026-11-03 — `LEAD_KEY = "analyst_lead"` (used by `graph.runtime.attach_lead_runtime`);
+  `_cited_handles(report, own_source=LEAD_KEY)` resolves the lead's `self:` citations instead of
+  dropping them; `librarian_tools.LIBRARIAN_SOURCE = "lib"`; `LibrarianIOAgent.last_receipts` is
+  every document a pass opened (the graph hands on only those its filed report cites).
+- 2026-11-03 — One citing syntax (build item 9): `_ANALYST_EVIDENCE`, the report-document hints,
+  `REVIEWER_EDIT_DESCRIPTION` and `read_paper`'s description and reply teach `{{handle}}`,
+  `{{handle#/key}}`, `{{handle#/$args/<name>}}` and `{{handle "…"}}`; no text teaches `[handle]`.

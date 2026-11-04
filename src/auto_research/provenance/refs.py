@@ -5,19 +5,21 @@ replaces it, before the call runs, with the value at that pointer in the JSON th
 records the receipt as a parent of everything the call mints. The tool receives a plain value — the
 same Python object the producing tool returned, every digit of it — and never sees the reference.
 
-A reference resolves only the caller's own toolkit results (user ruling 2026-11-03): any unit may
-open any receipt, but a value from a peer's result enters a call once the caller's own tool has
-produced it, so a tool echoing it back cannot make it the caller's evidence. A receipt of
-something a role read is a place to look and is refused, and so is a failed result or one whose
-bytes changed. Every refusal is a sentence the model reads and acts on. Standard library only.
+A reference resolves the caller's own toolkit results and the files its own tools wrote (as their
+path, while the file still hashes to its receipt). A brief is an informal text, like a message,
+and is never a source (user ruling 2026-11-03). Any unit may open any receipt (user ruling 2026-11-03), but a
+value from a peer's result enters a call once the caller's own tool has produced it, so a tool
+echoing it back cannot make it the caller's evidence. A receipt of something a role read is a
+place to look and is refused, and so is a failed result or one whose bytes changed. Every refusal
+is a sentence the model reads and acts on. Which arguments must be references is the input
+validator's rule (``provenance.inputs``). Standard library only.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import weakref
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from auto_research.provenance.store import (
@@ -26,16 +28,21 @@ from auto_research.provenance.store import (
     ReceiptStore,
     is_evidence,
 )
-from auto_research.provenance.bindings import bounded_find
 from auto_research.schemas.artifacts import HANDLE_PATTERN
 
 #: A receipt handle written anywhere in a text, bracketed or bare.
 _HANDLE_IN_TEXT = re.compile(rf"(?<![\w:\-])({HANDLE_PATTERN})(?![\w])")
-#: A handle cited in brackets.
+
+#: A handle in brackets, the retired citation form, still read as a name in a brief.
 _HANDLE_BRACKETED = re.compile(rf"\[({HANDLE_PATTERN})\]")
 
 #: The one key of a reference object.
 REF_KEY = "$ref"
+#: The two keys of a typed parameter (``provenance.inputs``).
+VALUE_KEY, REASON_KEY = "value", "reason"
+#: A pointer starting here reaches into the arguments a toolkit result's call ran with, not into
+#: what it returned: ``<handle>#/$args/<argument>/…`` (user ruling 2026-11-03, one handle per number).
+ARGS_POINTER = "/$args"
 
 #: Where ``sandbox.runner.normalize_tool_raw`` folds a tool's console output under its JSON return
 #: (the same text; a test drives that function to keep them equal).
@@ -44,11 +51,6 @@ CONSOLE_SEPARATOR = "\n--- console ---\n"
 #: A list index in a pointer: RFC 6901's decimal form, bounded (``"²".isdigit()`` is true).
 _INDEX = re.compile(r"0|[1-9][0-9]{0,8}")
 
-#: A typed float this long (significant digits) that a usable receipt holds is a copy (RetypeCheck).
-_LINT_MIN_DIGITS = 4
-#: A typed float this long that rounds one of the caller's own results is a copy too, and the
-#: shortest a peer's value must be to count as one (a shorter value is a constant or a choice).
-_ROUNDED_MIN_DIGITS = 6
 
 
 class RefError(ValueError):
@@ -69,6 +71,38 @@ def _ref_text(value: Any) -> str | None:
             return None
     if isinstance(value, dict) and len(value) == 1 and isinstance(value.get(REF_KEY), str):
         return value[REF_KEY]
+    return None
+
+
+def _as_object(value: Any) -> Any:
+    """A JSON object written as a string, parsed (a model fills an object argument with its text;
+    the REPL would parse it the same way), else ``value``."""
+    if isinstance(value, str) and value.lstrip().startswith("{"):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _has_ref(value: Any) -> bool:
+    if is_ref(value):
+        return True
+    if isinstance(value, dict):
+        return any(_has_ref(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_ref(item) for item in value)
+    return False
+
+
+def typed_parameter(value: Any) -> tuple[Any, str] | None:
+    """``(value, reason)`` for a typed parameter, ``{"value": …, "reason": "<non-empty>"}`` holding
+    no reference, else ``None``."""
+    value = _as_object(value)
+    if (isinstance(value, dict) and set(value) == {VALUE_KEY, REASON_KEY}
+            and isinstance(value[REASON_KEY], str) and value[REASON_KEY].strip()
+            and not _has_ref(value[VALUE_KEY])):
+        return value[VALUE_KEY], value[REASON_KEY].strip()
     return None
 
 
@@ -109,14 +143,18 @@ def handles_named(text: str) -> list[str]:
 
 
 def unviewable_handles(text: str, viewable: Callable[[str], bool]) -> list[str]:
-    """The bracketed handles a brief names that are not receipts of this run — mistyped.
+    """The handles a brief names that are not receipts of this run — mistyped.
 
     Checked at the author's ``turn_end`` (the lead's ``what_to_probe``, the reviewer's
-    ``follow_up``), so a brief hands on only handles the next team can open.
-    Bracketed only (``[analyst_worker_0:r12]``, as the prompts write them): prose such as
-    ``powerlaw:p1`` has the shape of a handle and is no claim.
+    ``follow_up``), so a brief hands on only handles the next team can open. A brief names a
+    result as a citation does, ``{{analyst_worker_0:r12}}`` (one citing syntax, 2026-11-03); prose
+    such as ``powerlaw:p1`` has the shape of a handle and is no claim.
     """
-    return [h for h in dict.fromkeys(_HANDLE_BRACKETED.findall(text or "")) if not viewable(h)]
+    from auto_research.provenance.bindings import parse_bindings
+
+    named = [b.handle for b in parse_bindings(text or "") if not b.handle.startswith("self:")]
+    named += _HANDLE_BRACKETED.findall(text or "")  # the retired [h] still names a handle
+    return [h for h in dict.fromkeys(named) if not viewable(h)]
 
 
 def brief_handle_problems(field: str, text: str, viewable: Callable[[str], bool]) -> list[str]:
@@ -205,7 +243,29 @@ def resolve_one(store: ReceiptStore, text: str, usable: Callable[[str], bool]) -
     if receipt.source == INPUT_SOURCE:
         what = "the request" if receipt.produced_by == "research_request" else NOT_EVIDENCE_NAMES.get(
             receipt.produced_by, "a task text")
-        raise RefError(f"{handle} is {what}: type a value it states as a parameter.")
+        raise RefError(
+            f'{handle} is {what}: type a value it states as {{"value": …, "reason": "<where it is stated>"}}.'
+        )
+    if receipt.kind == "data" and is_evidence(receipt):
+        if not usable(handle):
+            raise RefError(
+                f"{handle} is a file {receipt.source}'s tool wrote. A call passes on its own agent's "
+                "files: reproduce it with a tool run of yours, then pass your file by reference."
+            )
+        if pointer not in ("", "/"):
+            raise RefError(f'{handle} is a file; it passes as its path, {{"$ref": "{handle}"}}.')
+        if "failed" in receipt.flags:
+            raise RefError(f"{handle} is flagged failed; pass a file from a chain that succeeded.")
+        try:
+            unchanged = _file_digest(receipt.path) == receipt.sha256
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            raise RefError(
+                f"{handle}: the file at its path no longer matches its receipt (another call wrote "
+                "it since); run the tool that writes it again and pass that file."
+            )
+        return str(receipt.path), handle
     if passable(store, handle) and not usable(handle):
         raise RefError(
             f"{handle} is {receipt.source}'s result. A call passes on its own agent's results: "
@@ -220,7 +280,116 @@ def resolve_one(store: ReceiptStore, text: str, usable: Callable[[str], bool]) -
     if "failed" in receipt.flags:
         raise RefError(f"{handle} is flagged failed (its call, or a result it came from, failed); pass a "
                        "result from a chain that succeeded.")
-    return _pointer(returned_value(store, handle), pointer, handle), handle
+    return point(store, handle, pointer), handle
+
+
+#: ``(path, size, mtime_ns) -> sha256`` of files a reference passed: a large reduction product is
+#: read once while it stays as it was, not once per reference (review 2026-11-03).
+_DIGESTS: dict[tuple[str, int, int], str] = {}
+
+
+def _file_digest(path: Any) -> str:
+    from pathlib import Path
+
+    from auto_research.provenance.store import sha256_file
+
+    stat = Path(path).stat()
+    key = (str(path), stat.st_size, stat.st_mtime_ns)
+    if key not in _DIGESTS:
+        _DIGESTS[key] = sha256_file(Path(path))
+    return _DIGESTS[key]
+
+
+def point(store: ReceiptStore, handle: str, pointer: str) -> Any:
+    """The value at ``pointer`` in a toolkit result: in what it returned, or, under
+    :data:`ARGS_POINTER`, in the arguments its call ran with (:func:`argument_value`)."""
+    if pointer == ARGS_POINTER or pointer.startswith(ARGS_POINTER + "/"):
+        return argument_value(store, handle, pointer)
+    return _pointer(returned_value(store, handle), pointer, handle)
+
+
+def argument_value(store: ReceiptStore, handle: str, pointer: str) -> Any:
+    """The value at ``/$args/<argument>/…``: a typed parameter's value without its reason, or a
+    reference as the value it named. Any other argument (a setting, a path, a default) is
+    refused: it carries no reason and no source."""
+    args = call_arguments(store, handle)
+    names = ", ".join(sorted(map(str, args))[:40]) if isinstance(args, dict) and args else "none recorded"
+    rest = pointer[len(ARGS_POINTER):]
+    if not rest.strip("/"):
+        raise RefError(f"{handle}#{pointer}: name an argument, {handle}#{ARGS_POINTER}/<argument>; "
+                       f"its arguments: {names}.")
+    raw, _, deeper = rest[1:].partition("/")
+    name = raw.replace("~1", "/").replace("~0", "~")
+    if not isinstance(args, dict) or name not in args:
+        raise RefError(f"{handle}#{pointer}: its call took no argument '{name}'; its arguments: {names}.")
+    value = args[name]
+    typed = typed_parameter(value)
+    if typed is not None:
+        value = typed[0]
+    elif refs_in(value):
+        value = resolve_refs({name: value}, store, lambda _h: True)[0][name]
+    else:
+        # A setting, a path, a default the runtime passed: typed with no reason and no source, so
+        # never a value to pass on or to state in a report (review 2026-11-03).
+        raise RefError(
+            f"{handle}#{pointer}: argument '{name}' was typed with no reason and no reference, so it "
+            "carries no record of where its value came from; pass a result's value, or a value with "
+            "its reason."
+        )
+    return _pointer(value, "/" + deeper if deeper else "", handle)
+
+
+def argument_source(store: ReceiptStore, handle: str, pointer: str, *, _depth: int = 0) -> str:
+    """Where the argument value at ``/$args/<name>/…`` came from, in words: its reason when it was
+    typed, else the reference that carried it (followed through an earlier call's ``$args`` to
+    the reason at its end), else that it is an argument of the call."""
+    args = call_arguments(store, handle)
+    tokens = [t.replace("~1", "/").replace("~0", "~") for t in pointer[len(ARGS_POINTER) + 1:].split("/")]
+    value: Any = args if isinstance(args, dict) else {}
+    for token in tokens:
+        typed = typed_parameter(value)
+        if typed is not None:
+            return f"chosen by {handle.split(':', 1)[0]}: {typed[1]}"
+        text = _ref_text(value)
+        if text is not None:
+            break
+        if isinstance(value, dict) and token in value:
+            value = value[token]
+        elif isinstance(value, list) and _INDEX.fullmatch(token) and int(token) < len(value):
+            value = value[int(token)]
+        else:
+            return "an argument of the call"
+    typed = typed_parameter(value)
+    if typed is not None:
+        return f"chosen by {handle.split(':', 1)[0]}: {typed[1]}"
+    text = _ref_text(value)
+    if text is None:
+        return "an argument of the call"
+    named, inner = split_ref(text)
+    if (inner == ARGS_POINTER or inner.startswith(ARGS_POINTER + "/")) and _depth < 8:
+        return f"passed from {text}, " + argument_source(store, named, inner, _depth=_depth + 1)
+    return f"passed from {text}"
+
+
+def received_arguments(store: ReceiptStore, handle: str) -> dict:
+    """The arguments a call ran with, as its tool received them: each typed parameter's value, each
+    reference as the value it named (a reference that no longer resolves stays as written)."""
+    args = call_arguments(store, handle)
+    if not isinstance(args, dict):
+        return {}
+    out: dict = {}
+    for name, value in args.items():
+        typed = typed_parameter(value)
+        if typed is not None:
+            out[name] = typed[0]
+        elif refs_in(value):
+            try:
+                out[name] = resolve_refs({name: value}, store, lambda _h: True)[0][name]
+            except (RefError, OSError, ValueError):
+                out[name] = value
+        else:
+            out[name] = value
+    return _as_received(out)
 
 
 def resolve_refs(
@@ -247,205 +416,20 @@ def resolve_refs(
     return resolved, list(dict.fromkeys(parents))
 
 
-def _floats(value: Any, path: str = "") -> Iterable[tuple[str, str]]:
-    """Every measured-looking number in a value tree (floats) with its JSON pointer, as
-    ``(shortest round-trip text, pointer)``. Integers (counts, ObsIDs, grid sizes) are parameters
-    a model types, so they are left out."""
-    if isinstance(value, bool):
-        return
-    if isinstance(value, float):
-        yield repr(value), path
-    elif isinstance(value, dict):
-        for key, item in value.items():
-            yield from _floats(item, f"{path}/{str(key).replace('~', '~0').replace('/', '~1')}")
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            yield from _floats(item, f"{path}/{index}")
+def call_arguments(store: ReceiptStore, handle: str) -> Any:
+    """The arguments a receipt's call ran with, from their blob (``args_sha256``): the model's
+    arguments completed by the runtime, each typed parameter with its reason. ``{}`` for a receipt
+    minted before arguments were stored, or whose blob changed."""
+    from auto_research.provenance.store import read_receipted
 
-
-def _significant(text: str) -> int:
-    mantissa = text.lstrip("-").split("e")[0].split("E")[0].replace(".", "")
-    return len(mantissa.strip("0"))
-
-
-#: A returned value larger than this is not scanned for copies (memory; such blocks are arrays a
-#: model passes by reference anyway).
-_MAX_SCANNED_BYTES = 2_000_000
-
-
-def _size(path: Any) -> int:
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
-
-
-_HELD: "weakref.WeakKeyDictionary[ReceiptStore, dict[str, dict[str, str]]]" = weakref.WeakKeyDictionary()
-
-
-class RetypeCheck:
-    """Refuses a typed number that a usable toolkit result already holds (user ruling 2026-10-26).
-
-    A float of 4+ significant digits typed into a toolkit call, equal to a value a result the
-    caller may pass on returned, is a copy: the call is refused before it runs and told the
-    reference to write. Measured live: a note after the call was ignored, and the copied value
-    left its call without a parent. Parameters a model chooses (``2.0``, ``0.99``, ``4.3e6``) and
-    integers pass. Never an edge by itself: a value can sit in many receipts, so the refusal names
-    where to point and the model's reference makes the link. Each receipt read once per store.
-    """
-
-    def __init__(self, store: ReceiptStore) -> None:
-        self.store = store
-        self._held = _HELD.setdefault(store, {})
-        self._texts: dict[str, str] = {}
-        self._numbers: dict[str, list[tuple[float, str]]] = {}
-        self._given: dict[str, set[str]] = {}
-
-    def _floats_of(self, handle: str) -> dict[str, str]:
-        """``{float text: pointer}`` for the 4+-digit floats a result returned that its own call
-        was not given: an echoed argument is that caller's parameter, never a value to copy."""
-        if handle not in self._held:
-            held: dict[str, str] = {}
-            receipt = self.store.get(handle)
-            too_big = receipt is not None and receipt.returned_sha256 is not None and _size(
-                self.store.blob_path(receipt.returned_sha256)) > _MAX_SCANNED_BYTES
-            if not too_big:
-                try:
-                    given = self._chosen_by(handle)
-                    for text, path in _floats(returned_value(self.store, handle)):
-                        if _significant(text) >= _LINT_MIN_DIGITS and text not in given:
-                            held.setdefault(text, path)
-                except (RefError, ValueError):
-                    held = {}
-            self._held[handle] = held
-        return self._held[handle]
-
-    def _args_of(self, handle: str) -> Any:
-        """The arguments the receipt's call was given, from their blob (``args_sha256``)."""
-        from auto_research.provenance.store import read_receipted
-
-        receipt = self.store.get(handle)
-        if receipt is None or not receipt.args_sha256 or not self.store.blob_path(receipt.args_sha256).is_file():
-            return {}  # a receipt minted before arguments were stored
-        read = read_receipted(self.store.blob_path(receipt.args_sha256), receipt.args_sha256,
-                              label=f"{handle} (arguments)")
-        if read.data is None or read.changed:
-            return {}
-        return json.loads(read.data.decode("utf-8"))
-
-    def _numbers_of(self, handle: str) -> list[tuple[float, str]]:
-        """``(value, pointer)`` for the held floats of :meth:`_floats_of`, for the rounded and
-        sign-flipped comparisons."""
-        if handle not in self._numbers:
-            self._numbers[handle] = [(float(text), pointer) for text, pointer in self._floats_of(handle).items()]
-        return self._numbers[handle]
-
-    def _chosen_by(self, handle: str) -> set[str]:
-        """The floats a result's own call was given, read as the tool received them (cached)."""
-        if handle not in self._given:
-            self._given[handle] = {text for text, _ in _floats(_as_received(self._args_of(handle)))}
-        return self._given[handle]
-
-    def _read_text(self, handle: str) -> str:
-        """The stored text of a receipt of something the caller read or ran (cached; empty when
-        its bytes changed or are not text)."""
-        if handle not in self._texts:
-            read = self.store.read(handle)
-            text = ""
-            if read is not None and read.data is not None and not read.changed and len(read.data) <= _MAX_SCANNED_BYTES:
-                text = read.data.decode("utf-8", errors="replace")
-            self._texts[handle] = text
-        return self._texts[handle]
-
-    def problem(self, typed_args: Mapping[str, Any], handles: Iterable[str]) -> str | None:
-        """The refusal for a call whose typed floats are copies, or ``None``.
-
-        A copy is a 4+-digit float that one of the caller's own results (``handles``) holds
-        exactly, with its sign flipped, or rounded to the digits typed (6+) (run
-        faraday-refs-20261026: ``|ci_lo|`` typed as ``0.37959418926306543`` passed the exact
-        check); a 6+-digit float a peer's result holds exactly or sign-flipped, unless the caller
-        gave it to an earlier call or a task text states it (answered with "reproduce it"; shorter
-        values are constants and chosen parameters, and a rounded match run-wide would collide with
-        them); or a value found in the text of any file read or shell output of the run (30 values
-        typed from a CSV a worker had read reached a fit without the CSV as an input).
-        """
-        # The arguments as the tool will receive them: the REPL parses a string holding a JSON
-        # container, and a number written as a string is a number to a tool that converts it.
-        typed = [(text, path) for text, path in _floats(_as_received(dict(typed_args)))
-                 if _significant(text) >= _LINT_MIN_DIGITS]
-        if not typed:
-            return None
-        # Exactly the results a reference could resolve, so a refusal never names a dead end.
-        usable = [h for h in handles if passable(self.store, h)
-                  and "failed" not in self.store.get(h).flags]
-        usable.sort(key=lambda h: self.store.get(h).created_at, reverse=True)  # newest first
-        mine = set(usable)
-        # Any seat may open any receipt (view is global), so a value seen in a peer's read or shell
-        # output is a copy as much as one from the caller's own.
-        # A task text (the request, a brief) states parameters; a file the human sent is material
-        # read, like any file (the human gives direction, never materials, ruling 2026-09-25).
-        read = [r.handle for r in self.store.receipts() if r.produced_by in NOT_EVIDENCE_NAMES
-                and (r.source != INPUT_SOURCE or r.produced_by == "human_reply")]
-        # A peer's result holding the value: typing it would make the peer's value this caller's.
-        peers = [r.handle for r in self.store.receipts(kind="result")
-                 if r.handle not in mine and passable(self.store, r.handle) and "failed" not in r.flags]
-        # A value the caller chose before (an argument of its own earlier calls) or a task text
-        # states (the request, a brief prescribing a starting value) is a parameter, whatever a
-        # peer's result also returned.
-        chosen = set().union(*(self._chosen_by(h) for h in usable)) if usable else set()
-        asked = [self._read_text(r.handle) for r in self.store.receipts(source=INPUT_SOURCE)
-                 if r.produced_by != "human_reply"]
-        lines: list[str] = []
-        for text, arg_path in typed:
-            name = arg_path.lstrip("/") or "(whole)"
-            value, half = float(text), _last_place(text) / 2
-            exact = [(h, self._floats_of(h)[text]) for h in usable if text in self._floats_of(h)]
-            if exact:
-                refs = " or ".join(f'{{"$ref": "{h}#{pointer}"}}' for h, pointer in exact[:3])
-                lines.append(f"argument {name} = {text}: pass {refs}")
-                continue
-            # Rounding counts only for a long typed value: a short one collides with chosen parameters.
-            rounded_ok = _significant(text) >= _ROUNDED_MIN_DIGITS
-            near = [(h, p, "with its sign flipped" if v == -value else "rounded")
-                    for h in usable for v, p in self._numbers_of(h)
-                    if v == -value or (rounded_ok and v != value and abs(v - value) <= half)]
-            if near:
-                h, pointer, how = near[0]
-                lines.append(
-                    f'argument {name} = {text} is {{"$ref": "{h}#{pointer}"}} {how}: pass the '
-                    "result by reference and let the tool take what it needs from it (its sign, its "
-                    "precision); when no argument does that, ask for a tool that does in "
-                    "tool_request"
-                )
-                continue
-            if (rounded_ok and text not in chosen
-                    and not any(bounded_find(hay, text) for hay in asked)):
-                flipped = repr(-value)
-                peer = next(((h, held[text], "") if text in held else (h, held[flipped], " with its sign flipped")
-                             for h in peers if text in (held := self._floats_of(h)) or flipped in held), None)
-                if peer is not None:
-                    h, pointer, how = peer
-                    lines.append(
-                        f"argument {name} = {text} is {self.store.get(h).source}'s result "
-                        f"({h}#{pointer}){how}: reproduce it with a tool run of yours, then pass "
-                        "your result by reference"
-                    )
-                    continue
-            seen = next((h for h in read if bounded_find(self._read_text(h), text)), None)
-            if seen is not None:
-                what = NOT_EVIDENCE_NAMES[self.store.get(seen).produced_by]
-                lines.append(
-                    f"argument {name} = {text} is copied from {seen}, {what}: pass the file itself "
-                    "to an argument that reads it, or ask for a tool that reads it in tool_request"
-                )
-        if not lines:
-            return None
-        shown = lines[:8] + ([f"... and {len(lines) - 8} more"] if len(lines) > 8 else [])
-        return (
-            "This call was not run: it types values that a tool result or a file already holds. "
-            "Each needs to arrive from where it was produced, so the call records where it came "
-            "from:\n- " + "\n- ".join(shown)
-        )
+    receipt = store.get(handle)
+    if receipt is None or not receipt.args_sha256 or not store.blob_path(receipt.args_sha256).is_file():
+        return {}
+    read = read_receipted(store.blob_path(receipt.args_sha256), receipt.args_sha256,
+                          label=f"{handle} (arguments)")
+    if read.data is None or read.changed:
+        return {}
+    return json.loads(read.data.decode("utf-8"))
 
 
 _NUMBER = re.compile(r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?")
@@ -469,10 +453,3 @@ def _as_received(value: Any) -> Any:
     if isinstance(value, list):
         return [_as_received(item) for item in value]
     return value
-
-
-def _last_place(text: str) -> float:
-    """The value of one unit in the last digit typed: ``0.3796`` → 1e-4, ``2.5e6`` → 1e5."""
-    mantissa, _, exponent = text.lower().partition("e")
-    decimals = len(mantissa.split(".", 1)[1]) if "." in mantissa else 0
-    return 10.0 ** ((int(exponent) if exponent else 0) - decimals)

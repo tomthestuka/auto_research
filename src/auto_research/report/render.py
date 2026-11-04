@@ -209,6 +209,11 @@ def check_table(
                 "for a table a tool computed, or columns and rows for a table you build."
             ]
         receipt = lookup.get(table.receipt)
+        if receipt is not None and receipt.flags:
+            return None, None, [
+                f"{label} cites {table.receipt}, which is marked {', '.join(receipt.flags)}: its values "
+                "cannot stand in a table. Cite a result without that mark."
+            ]
         if receipt is not None and not receipt.produced_by.startswith(TOOLKIT_PRODUCER_PREFIX):
             # The table stands for what a tool computed (user ruling 2026-10-17): a toolkit result or
             # file, never a read, the shell, a paper, a commit or the request.
@@ -248,7 +253,7 @@ def check_table(
         rows = ", ".join("the columns" if i == 0 else f"row {i}" for i in split)
         return None, None, [
             f"{label}: a quote or citation in {rows} is split across cells. Keep each "
-            '{{handle#/key}}, {{handle "…"}} and [handle] within one cell.'
+            '{{handle#/key}}, {{handle "…"}} and {{handle}} within one cell.'
         ]
     return None, None, []
 
@@ -256,9 +261,9 @@ def check_table(
 def _unbalanced(cell: str) -> bool:
     """A cell holding part of a quote binding: once its whole bindings are taken out (a quote may
     itself hold braces, a dict a tool printed), a ``{{`` or ``}}`` is left over."""
-    from auto_research.provenance.bindings import QUOTE_RE, VALUE_RE
+    from auto_research.provenance.bindings import CITE_RE, QUOTE_RE, VALUE_RE
 
-    rest = QUOTE_RE.sub("", VALUE_RE.sub("", cell))
+    rest = CITE_RE.sub("", QUOTE_RE.sub("", VALUE_RE.sub("", cell)))
     return bool(re.search(r"\{\{\s*[\w-]+:[a-z]\d", rest)) or '"}}' in rest
 
 

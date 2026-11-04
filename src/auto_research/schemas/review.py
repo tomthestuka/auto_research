@@ -17,8 +17,8 @@ class ReviewerSection(MessageModel):
         description=(
             "The section's prose, in plain text. Separate paragraphs with a blank line and start a "
             "bullet line with '- '. Write symbols as Unicode (χ², ±, σ, ≲). Write a value a tool "
-            "returned as its reference, {{handle#/key}}, which the runtime fills in; copy a value a "
-            "tool printed as text exactly, in text that cites that receipt as [handle]; attribute a "
+            "returned as its reference, {{handle#/key}}, which the runtime fills in; quote a value a "
+            'tool printed as text exactly, {{handle "exact text"}}; cite a whole result as {{handle}}; attribute a '
             'paper\'s value with where it is, {{lib:p4 "value" Table 2}}. Refer to the k-th entry of `figures` as '
             "'Figure k' and the k-th entry of `tables` as 'Table k'."
         ),

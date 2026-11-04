@@ -80,11 +80,17 @@ with `turn_end`.
   "analyst_worker_0:r3#/bins"}}` passes a whole block, `#/fit/norm` one value, `#/bins/0` one
   item. The runtime hands the tool exactly what the earlier tool returned and records that this
   call used it, so the chain from the first measurement to your figure stays whole and every
-  digit arrives as produced. Type a value yourself for a parameter you choose (a band, a
-  confidence level, a grid). A call that types a value a tool result already holds is answered
-  with the reference to write instead; write it and call again. A reference names your own
-  results: a value from a peer's result, a file you read or shell output is a place to look, so
-  run the toolkit tool that produces it yourself and pass your result on.
+  digit arrives as produced. A reference names your own results: a value from a peer's result, a
+  file you read or shell output is a place to look, so run the toolkit tool that produces it
+  yourself and pass your result on.
+- **Each argument's description names how its value arrives.** A data argument is a reference to
+  your own result. A parameter is a reference to your own result, or a value typed with its
+  reason, `{"value": 0.99, "reason": "the lead's probe asks for a 99% limit"}` (a value a brief or
+  a message states arrives this way), or left out for the default its description names. A path
+  is typed, or a reference to a file your own tool wrote, `{"$ref": "analyst_worker_0:d2"}`.
+  Settings are typed. A data argument comes from a tool of yours: a value the task or a brief
+  states reaches one through the tool that produces that data. A call that breaks this is
+  answered with what to write; write it and call again.
 - The available tools — names, arguments, descriptions — are supplied by the runtime. Call them
   exactly as offered, reading each tool's description and argument schema first. The runtime
   auto-fills local data-path arguments when you omit them.
@@ -127,8 +133,8 @@ Write the draft once, then fix a sentence, add a finding or place a figure with 
 **The report form** gives each block one job:
 - **`summary`** — a briefing of 3–5 sentences: what was asked, what you did, the headline result
   and the outcome. The reader turns to `findings` for the results.
-- **`findings`** — the results: one `- ` item per result, each a self-contained statement citing the
-  receipts its numbers come from as `[handle]`. Every measured value, table row and comparison
+- **`findings`** — the results: one `- ` item per result, each a self-contained statement whose every
+  number is its own citation (the conventions' forms). Every measured value, table row and comparison
   belongs here.
 - **`uncertainty`** — the dominant caveats.
 - **`figures`** — the figures placed: one `- [self:index]` line per figure, by the label it was
@@ -146,7 +152,8 @@ your prose. A catalog figure you leave unplaced stays citable later.
 
 **Every number in your report comes from a receipt**, written in one of the forms the
 conventions above give: a value a tool returned as its reference (`{{analyst_worker_0:r7#/fit/slope}}`),
-a value a tool printed as text cited and copied exactly. Each finding cites the results its
+a value you chose for a call as that call's argument (`{{analyst_worker_0:r7#/$args/cl}}`), a value
+a tool printed as text cited and copied exactly. Each finding cites the results its
 numbers come from. A derivation or a derived value comes from a toolkit tool; request one with
 `tool_request` when none exists. Your summary may use any number the report's findings cite.
 `edit_report` shows any number it cannot place, and `turn_end` names each one.

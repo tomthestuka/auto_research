@@ -1850,7 +1850,7 @@ class ReviewerAgent(AgentRole):
 
         ``arrived`` names what came back since the last turn (``request``, ``librarian``,
         ``analysts`` or ``human``); ``literature`` is every literature report of the run and
-        ``literature_receipts`` the documents they read; ``previous`` is the reviewer's own earlier
+        ``literature_receipts`` the documents those filed reports cite; ``previous`` is the reviewer's own earlier
         reports; ``human_nudges`` the human's replies (guidance, never receipts) and
         ``human_files`` the handles of files the human sent; ``budgets`` the passes left per capped
         team; ``render`` (a ``ReviewerRender``) makes a report to the human part of the
@@ -1882,7 +1882,7 @@ class ReviewerAgent(AgentRole):
         admitted = [
             request_handle,
             *(literature_receipts or {}),
-            *_cited_handles(report, REVIEWER_SOURCE),
+            *_cited_handles(report),
             *figure_handles,
             *human_files,
         ]
@@ -2007,7 +2007,7 @@ def _request_receipt(store: Any, request: ResearchRequest) -> str:
     """The research request as an input receipt (``input:hN``), one per distinct text.
 
     The request's own numbers — an ObsID, an energy band the human named — reach every role's
-    task, and a role that repeats them grounds them like any other number.
+    task, and a role that repeats one quotes it from this receipt, ``{{input:hN "…"}}``.
     """
     text = request.question + (f"\n\n{request.context}" if request.context else "")
     return store.mint_input(text, kind="human", produced_by="research_request").handle
@@ -2073,8 +2073,12 @@ def _receipt_handles_for_figures(store: Any, figures: Sequence[FigureRef]) -> li
     return list(dict.fromkeys(by_sha[f.sha256] for f in figures if f.sha256 in by_sha))
 
 
-def _cited_handles(report: AnalystReport | None, own_source: str) -> list[str]:
-    """Every receipt handle the lead's report cites in its prose."""
+#: The analyst lead's agent key and receipt source (set by ``graph.runtime.attach_lead_runtime``).
+LEAD_KEY = "analyst_lead"
+
+
+def _cited_handles(report: AnalystReport | None, own_source: str = LEAD_KEY) -> list[str]:
+    """Every receipt handle the lead's report cites in its prose, ``self:`` read as the lead's."""
     from auto_research.provenance import parse_bindings
 
     if report is None:
@@ -2082,7 +2086,7 @@ def _cited_handles(report: AnalystReport | None, own_source: str) -> list[str]:
     texts = [report.summary or "", report.uncertainty or "", report.rationale or "",
              *(report.findings or [])]
     return list(dict.fromkeys(
-        b.handle for text in texts for b in parse_bindings(text) if not b.handle.startswith("self:")
+        b.handle for text in texts for b in parse_bindings(text, own_source=own_source)
     ))
 
 
@@ -2128,7 +2132,8 @@ class LibrarianIOAgent(AgentRole):
         # — a standalone call with no run — the working folder stands in for the run directory, so
         # the call still mints and checks real receipts, beside that folder and outside it.
         self.receipts: ReceiptStore | None = None
-        # What the last pass read, by handle: the receipts its report cites.
+        # Every document the last pass opened, by handle (the graph hands on only those its
+        # filed report cites: `graph.builder._literature_cited`).
         self.last_receipts: dict[str, Receipt] = {}
 
     @_one_turn_at_a_time

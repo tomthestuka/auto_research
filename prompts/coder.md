@@ -132,6 +132,22 @@ entries you are given:
 Both halves reach the model, so nothing is lost by moving prose into the schema — and a tool
 whose one-line brief buries its subject in a paragraph is harder to find.
 
+**Every argument declares its kind** — a `"kind"` key on its `args_schema` property, which the
+runtime enforces before each call runs (the gate checks it):
+
+- `"data"` — a scientific artifact another tool returns (bins, a fit, a table). Callers pass it by
+  reference to that tool's result, so take it in exactly the shape the producing tool returns it.
+- `"parameter"` — a number that changes the science (a band, a grid, a confidence level, a prior).
+  Callers pass it by reference or type it with a reason. Give an optional one a `"default"`: the
+  runtime passes and records it when the caller leaves the argument out.
+- `"path"` — a file or folder path.
+- `"setting"` — text, a flag, an option, an identifier, or an operational number (a timeout, an
+  iteration count).
+
+So a tool takes its inputs as other tools return them and does its own conversions (an absolute
+value, a projection, bin centres, a unit change), states the convention it assumes, and returns
+its values as JSON so the next call can take them by reference.
+
 ## Data catalog — record acquired/produced data via `obsdb_catalog`
 
 When your tool acquires or produces data for an ObsID (download, reduction, polarization

@@ -68,7 +68,8 @@ def _worker(tmp_path, model, store, monitor):
     sandbox = _FakeSandbox(tool_fn=lambda m, f, a: {"exit_code": 0, "stdout": BIG})
     worker = AnalystWorkerAgent(
         model=model, sandbox=sandbox,
-        registry=_FakeRegistry(known={"tk_fit"}, mcp=set()), monitor=monitor, prompt="worker",
+        registry=_FakeRegistry(known={"tk_fit"}, mcp=set(), schema={"properties": {"model": {"kind": "setting"}}}),
+        monitor=monitor, prompt="worker",
     )
     worker.agent_key = KEY
     worker.report_dir = tmp_path / "runs" / "r1" / KEY

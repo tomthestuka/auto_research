@@ -110,14 +110,14 @@ and `wait_for_reply` holds until it does. Then write your report and assign it.
 
 The conventions above say how to write each number. For your report:
 
-- A value the analysts' tools returned is written as its reference, `{{analyst_worker_0:r15#/limit_deg}}`;
+- A value the analysts' tools returned is written as its reference, `{{analyst_worker_0:r15#/fit/slope}}`;
   the runtime puts the value in the sentence. A paper's value is attributed with its place.
 - `follow_up` is your brief to the next team: it prescribes (a band, a grid, starting values) and is
   exempt from grounding. When the next step builds on a result, name the result by its handle
-  ("rerun the scan with the bounds in [analyst_worker_0:r15]"); the analyst that made it passes it
+  ("rerun the scan with the bounds in {{analyst_worker_0:r15}}"); the analyst that made it passes it
   to its tools by reference, so the value arrives exactly as produced.
 - The request has a receipt (its handle is in your task data, `input:hN`); a number restated from
-  it counts only in a text that cites it as `[input:hN]`.
+  it is quoted from it, `{{input:hN "exact text"}}`.
 - **Figures**: list figure receipt handles in `figures`, in the order the prose refers to them.
 - **Tables**: for a table a tool computed, cite its data or result receipt in the table's
   `receipt` and the runtime typesets its bytes. For a table you assemble yourself (this work

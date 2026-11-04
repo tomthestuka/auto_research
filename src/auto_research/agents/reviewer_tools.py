@@ -59,10 +59,9 @@ _PASS_NAMES = {"librarian": "research passes", "analysts": "analysis passes"}
 def reviewer_scope(lookup: ReceiptLookup) -> list[str]:
     """The receipts that ground the reviewer's numbers without being cited in the same text.
 
-    Everything the reviewer can read, except its inputs (the request, a dispatched task): an input
-    grounds a text only when that text cites ``[input:hN]`` (human 2026-09-24, the analysts' rule).
-    A reproduction question carries the published values, so without this a value from the question
-    could reappear as a finding with nothing marking where it came from.
+    Everything the reviewer can read, except its inputs (the request, a dispatched task), whose
+    words a text quotes as ``{{input:hN "…"}}``. Since 2026-11-03 a number is grounded by its own
+    citation only, so this scope suggests the citation a typed number needs; it grounds nothing.
     """
     handles = getattr(lookup, "handles", None)
     return [h for h in (handles() if callable(handles) else []) if not h.startswith("input:")]
@@ -231,9 +230,9 @@ READ_PAPER_TOOL = "read_paper"
 #: The description the reviewer's ``edit_report`` carries; its field prose comes from the model.
 REVIEWER_EDIT_DESCRIPTION = (
     "Write plain text: the harness typesets the final report from it. Write a value a tool "
-    "returned as its reference, {{handle#/key}}, which the runtime fills in; copy a value a tool "
-    "printed as text exactly, in text that cites that receipt as [handle]; attribute a paper's value with its "
-    'place, {{lib:p4 "value" Table 2}}. Place figures by their receipt handle, one "- handle" '
+    "returned as its reference, {{handle#/key}}, which the runtime fills in; quote a value a tool "
+    'printed as text, {{handle "exact text"}}; cite a whole result as {{handle}}; attribute a '
+    'paper\'s value with its place, {{lib:p4 "value" Table 2}}. Place figures by their receipt handle, one "- handle" '
     "line under # figures."
 )
 

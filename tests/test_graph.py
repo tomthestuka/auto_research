@@ -35,8 +35,16 @@ class FakeIOAgent:
     async def research(self, request: ResearchRequest, *, follow_up=None) -> LiteratureReport:
         self.research_calls += 1
         self.follow_ups.append(follow_up)
-        self.last_receipts = {f"lib:p{self.research_calls}": object()}
-        return LiteratureReport(summary=f"Pass {self.research_calls}", status="succeeded")
+        n = self.research_calls
+        # Opened two documents; the filed report rests on the paper only.
+        self.last_receipts = {f"lib:p{n}": object(), f"lib:w{n}": object()}
+        if n == 2:  # a later pass cites the first one's paper by attribution and names a gap
+            self.last_receipts[f"lib:p{n + 10}"] = object()
+            return LiteratureReport(summary=f"Pass {n}", status="succeeded", findings=[
+                {"claim": f'As {{{{self:p{n + 10} "4.0" Table 2}}}} gives.', "support": [f"lib:p{n}"]}],
+                gaps=[f"The page {{{{lib:w{n}}}}} had no table."])
+        return LiteratureReport(summary=f"Pass {n}", status="succeeded",
+                                findings=[{"claim": "A claim.", "support": [f"lib:p{n}"]}])
 
 
 class FakeRetrieval:
@@ -201,10 +209,13 @@ def test_the_librarian_can_be_assigned_again_and_its_reports_accumulate():
     # The reviewer's own questions reach the librarian each pass, never the raw request.
     assert io_agent.follow_ups == ["task 1", "task 2"]
     assert [lit.summary for lit in state["literature"]] == ["Pass 1", "Pass 2"]
-    assert sorted(state["literature_receipts"]) == ["lib:p1", "lib:p2"]
-    # The second search's turn sees both passes and both passes' documents.
+    # Only what each filed report cites crosses the edge (ruling 2026-11-03): the page each pass
+    # opened and did not cite stays viewable, never citable.
+    # Pass 2 cites a paper by a `self:` attribution and a page in a gap; pass 1's page stays out.
+    assert sorted(state["literature_receipts"]) == ["lib:p1", "lib:p12", "lib:p2", "lib:w2"]
+    # The second search's turn sees both passes and both passes' cited documents.
     assert reviewer.turns[2]["literature"] == 2
-    assert reviewer.turns[2]["documents"] == ["lib:p1", "lib:p2"]
+    assert reviewer.turns[2]["documents"] == ["lib:p1", "lib:p12", "lib:p2", "lib:w2"]
 
 
 def test_an_assignment_past_its_cap_is_a_harness_defect_not_a_silent_reroute():

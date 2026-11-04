@@ -20,8 +20,9 @@ LIBRARIAN_CLAUSES = (
 )
 BINDING_CLAUSES = (
     "unresolved", "flagged_reference", "flagged_quote", "unreadable_reference",
-    "attribution_without_locator", "locator_on_result", "quoted_copy", "quote_without_text",
-    "misquoted_span", "leftover_markup", "typed_copy", "ungrounded_number",
+    "attribution_without_locator", "locator_not_a_place", "locator_on_result", "bare_quote",
+    "quoted_copy", "quote_without_text",
+    "misquoted_span", "leftover_markup", "ungrounded_number",
 )
 
 

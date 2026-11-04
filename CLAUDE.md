@@ -32,7 +32,7 @@ analyses, and reviews the results. The team has three roles:
 **Phase 1 — DONE.** A minimal end-to-end skeleton with real calls, real search, real fitting.
 **Phase 2 — DONE.** Tool authoring (author → deterministic gate → provider-decorrelated review →
 one commit on a branch, merged to master only by a human), plus provenance at every role edge:
-runtime-minted receipts, scoped grounding, and `turn_end` as the only exit. [§8](#8-what-phases-12-built-the-system-as-it-stands)
+runtime-minted receipts, every number cited, and `turn_end` as the only exit. [§8](#8-what-phases-12-built-the-system-as-it-stands)
 is the retrospective tour; `CLAUDE_p2.md` is the full spec.
 
 **Phase 3 — THE ACTIVE PHASE: generalize the MTA unit.** By the end of Phase 2 every graph role
@@ -148,8 +148,8 @@ Consequences, each with a measured failure behind it:
   rest a claim on — a tool's output, a figure, a data file, a paper, a web page, a file a human
   sent, the task it was handed — is a **receipt** the runtime mints (a human's text is a nudge, not
   a receipt, ruling 2026-09-25): bytes hashed by the runtime, producer and
-  inputs stamped, parents linked, `failed`/`synthetic` flags propagated. Prose cites receipts by
-  handle, and `turn_end` refuses a number that no cited receipt carries (*scoped grounding*, §7).
+  inputs stamped, parents linked, `failed`/`synthetic` flags propagated. Every number in prose is
+  its own citation of a receipt, and `turn_end` refuses a number typed outside one (§7).
   The figure discipline was the first instance of this; it is now the rule for every artifact.
 - **Evidence is what the analysis produced, never what a role read** (human ruling 2026-09-25:
   "citing in a report must be to sth it has produced, not just read"). Only a toolkit tool's
@@ -447,32 +447,31 @@ generalised and corrected.
   number. A value passes from one toolkit call to the next **by reference** (2026-10-26): an
   argument `{"$ref": "<handle>#<json-pointer>"}` is resolved by the runtime from the stored result
   and that receipt becomes the call's parent; only a toolkit result in the caller's reach resolves
-  (user rulings: a handle it can open but not cite counts; a typed float a usable result holds is refused with the reference to write).
+  (user rulings: a handle it can open but not cite counts).
   **View is global, citing is scoped** (user ruling 2026-10-27): any unit opens any receipt of the
   run (`view_receipt`, a message's handles); what a unit may rest a number on stays its scope. A
   `$ref` resolves only the caller's own results (ruling 2026-11-03, §9.3.9): a peer's value enters
-  a call once the caller's own tool has reproduced it. A copy typed into a call is refused
-  exactly, with its sign flipped, rounded, or taken from a peer's result, a file read or a shell
-  output.
+  a call once the caller's own tool has reproduced it. Each toolkit argument declares a kind in its
+  manifest (user rulings 2026-11-03): a tool's output arrives by reference only, a parameter by
+  reference or typed with its reason (recorded with the call, reachable as `<handle>#/$args/<name>`),
+  paths and settings typed. Nothing compares a typed number's digits (the copy refusal was
+  removed); a chosen value carries who chose it and why.
 - **One store per run** (`ReceiptStore.for_run`), append-only, replayed on resume, so a handle
   means the same artifact everywhere. It lives beside the run's ledger, outside every role's
   allow-list, so no role can read another's evidence and re-mint it as its own. Each unit cites through a scoped view: its own receipts, the
   run's inputs, and whatever the reports it received cite, with their ancestors.
-- **Scoped grounding** (human ruling 2026-09-24, replacing "every number quoted"): a finding cites
-  the receipts its numbers come from as `[handle]`, and every number in it must appear, on token
-  boundaries, in one of them; other fields are grounded by all the evidence the report cites.
-  `{{handle "…"}}` pins an exact span of a text receipt; for a paper the same form, with a
-  locator (`{{lib:p3 "4.0 ± 0.2 %" Table 2}}`), attributes the value instead, and only a paper
-  takes a locator. **A value a tool returned is written as its reference** (user ruling
-  2026-10-27), `{{handle#/json-pointer}}`: the validator reads it from the returned value and
-  renders it, at 3 significant digits for every reader (a model reads `2.72 [h#/k]`, so a typed number is the one with no source), with
-  the full value one click away on the page; a typed or quoted copy of a returned value is refused
-  with its reference. A task's own numbers ground a text only where it cites
-  `[input:…]`, for every unit including the reviewer, so a value handed in by the question cannot
-  reappear as a finding unmarked. Measured before the ruling, over 231 real reports: a median
-  worker report states ~240 numbers and 98% of its decimals already appear verbatim in that run's
-  tool outputs, so quoting every number would have meant hundreds of quotes per report while
-  scoped grounding refuses exactly the residue (mental arithmetic, rounding, sign drift). A derived
+- **One citing syntax; every number is its own citation** (user ruling 2026-11-03, replacing
+  *scoped grounding*, 2026-09-24, under which a `[handle]` let any number its receipts held stand
+  beside it). Every citation is inside `{{ }}`: `{{handle}}` cites a whole receipt (a statement
+  without a number); **a value a tool returned is its reference** (user ruling 2026-10-27),
+  `{{handle#/json-pointer}}`, read from the returned value and rendered at 3 significant digits for
+  every reader (a model reads `2.72 [h#/k]`, so a typed number is the one with no source), the
+  full value one click away on the page; a value a call was given is `{{handle#/$args/<name>}}`,
+  with who chose it and why; `{{handle "…"}}` quotes an exact span of a text receipt (a value a
+  tool only printed, the request's words); for a paper the same form with a locator
+  (`{{lib:p3 "4.0 ± 0.2 %" Table 2}}`) attributes the value, and only a paper takes a locator. A
+  number typed outside a citation is refused, with the citation to write where one is found; a
+  written `[handle]` is refused as markup. Exempt shapes (below) stay exempt. A derived
   number comes from a toolkit tool, requested through `tool_request` when none exists; the shell
   grounds nothing, so `echo`, write-then-read and `python -c` cannot mint evidence (2026-09-25,
   superseding the 2026-09-24 `python -c` route and its typed-number rule).
@@ -489,7 +488,7 @@ generalised and corrected.
   persistent identifiers (DOIs, bibcodes, prefixed arXiv ids), and HTTP status codes with their
   reason phrase.
 
-**Phase 3:** receipts, the store, the evidence predicate and scoped grounding keep their meaning.
+**Phase 3:** receipts, the store, the evidence predicate and number citation keep their meaning.
 Three things generalise:
 - a receipt's `source` is the **unit's name** (today's role keys already are);
 - "a toolkit tool" in the evidence predicate means **a tool of a toolkit registered for that unit
@@ -612,7 +611,7 @@ receipts" or "the first single-exit agent". Re-open the SDK question only with a
    │ execution (optional): REPL + shell, in an environment, under the jail     │
    │ input validator: tool inputs — $ref owner is self · copy refusal          │
    │                  model inputs — media decode before a provider sees them  │
-   │ turn_end validator: schema · role conditions · scoped grounding           │
+   │ turn_end validator: schema · role conditions · every number cited         │
    └─────────────────────────────────┬─────────────────────────────────────────┘
                                      │  the only exit
                     filed report + receipt closure  │  or honest failure (raised)
@@ -628,7 +627,8 @@ refusal and never remove a built-in one.
    it. No path composes an artifact on a model's behalf.
 2. **Runtime-minted receipts.** Every tool call's output, and every file it created or changed, is
    hashed and stamped by the runtime, with the environment it ran in.
-3. **Scoped grounding with a fixed evidence predicate.** A number stands only on:
+3. **Every number cited, with a fixed evidence predicate.** A number stands only as its own
+   citation of:
    - a receipt of a toolkit registered for that unit, at a recorded commit;
    - a coding-pipeline `commit`;
    - a paper, by attribution with a locator;
@@ -649,12 +649,16 @@ refusal and never remove a built-in one.
 9. **Inputs are validated** (user rulings 2026-11-03): the **input validator** is a standard
    component of the unit, the `turn_end` validator's twin — one binds what goes in, the other what
    leaves. Two jobs:
-   - **Tool inputs, before a call runs.** A `$ref` resolves only a result the unit itself
-     produced, so no tool echo can turn another unit's value into this unit's evidence. A typed
-     copy is refused, read as the tool receives it, with the reference to write (the unit's own
-     result: exact, sign-flipped, or rounded at 6+ digits) or the run to reproduce (a peer's
-     6+-digit value exact or sign-flipped, a value from a file read or shell output). A value the
-     unit chose before or a task text states is a parameter.
+   - **Tool inputs, before a call runs** (`provenance.inputs`). Every argument declares a kind:
+     `data` (references into what the unit's own tools returned), `parameter` (a reference to the
+     unit's own result, or `{"value", "reason"}`; omitted, the manifest's default, passed and
+     recorded), `path`, `setting`. A brief is never a source: it is informal, like a message, and
+     a value it states is typed with its reason. An undeclared argument and a
+     manifest without kinds are refused. A `$ref` resolves only what the unit itself produced, so
+     no tool echo can turn another unit's value into this unit's evidence. A typed parameter's
+     reason stays in the call's hashed arguments, so the value and why it was chosen sit behind
+     one handle (`#/$args/<name>`). (The copy refusal, `RetypeCheck`, is removed: ruling
+     2026-11-03.)
    - **Model inputs, before a provider sees them.** Every image and PDF must decode; one that does
      not is withheld with a note the model reads, never sent (a provider refuses it with a 400 that
      ended the lead's turn; `models/providers/_media.py`).
@@ -952,13 +956,18 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 - **Paper values are attributed, not verified** (ruling 2026-09-24) — a model can still attribute a
   wrong number; the `paper_attributions` list makes it cheap to check.
 - **Value references (2026-10-27):** a toolkit result printed only as text (33 of 407 in run
-  faraday-refs-20261026) has no returned value to point into, so its numbers stay typed-and-cited;
-  the copy check on typed numbers starts at 3 significant digits; values a model computes by hand
-  and types into a call are found by nothing (no receipt holds them).
+  faraday-refs-20261026) has no returned value to point into, so its numbers are quoted; a commit
+  receipt's record is referenced like a returned value. Values a model computes by hand and types
+  into a call with a reason are shown as its choice, never checked against any receipt.
 - **Input validator, accepted limits (rulings 2026-11-03):** a toolkit tool run on a file a peer's
   tool wrote yields the caller's own result (the peer's file is a recorded input, so ancestry holds);
   left as is until evidence shows it is used to launder. The data catalog's source names come from
   event-file headers no receipt hashes, and keep each header's spelling ("Cyg X-1" / "CYG X-1").
+- **Argument kinds and one citing syntax, LIVE-TESTED 2026-11-03** (83 cells, `logs/dev/live-20261103d/`):
+  lead, librarian and reviewer matrices, the worker kinds cell and a coder chain committed through
+  the kind gate; every cell passes after test-side fixes, except the graph cell
+  (`test_the_graph_holds_against_an_attacking_human`), which waits on the toolkit's kind edits
+  being committed (preflight `toolkit_branch_clean`).
 - **Reduction products share one path per ObsID and selection** (parked): a re-reduction with other
   settings replaces the file an earlier result points to (seen as `receipt.drift`, run
   faraday-refs-20261026). Workers run one after another within a round; only a resumed seat overlaps.
@@ -1051,8 +1060,8 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
   the host, not in its jail ([F29]); the shell server keeps `-P`, so the analysis interpreter must
   be 3.11+; a derived environment's human base activation is copied for the jail (relative
   sourcing inside it fails loudly).
-- **Provenance edges found 2026-10-07 ([R8]):** numbers inside a quote's locator are not scanned;
-  a decimal tail after an exempt ordinal passes; `env_untested` is visible only to the calling
+- **Provenance edges found 2026-10-07 ([R8]):** a paper's locator now holds a place only (closed 2026-11-03);
+  a decimal after an exempt ordinal is scanned (closed 2026-11-03); `env_untested` is visible only to the calling
   worker; a shell-written file passed to a toolkit reader can yield evidence.
 
 **Providers**
@@ -1069,6 +1078,8 @@ they land; delete when closed. Distinct from §12 (unbuilt features).
 - **Media:** eviction is oldest-first, so one near-ceiling document survives while small ones drop
   (size-aware needs a ruling) [V-6]; the `vision` flag gates only the call-time `images=` channel,
   not figures on a tool result [V-2].
+- **Gemini refuses `load_data`'s `epoch` object** (400 on `additionalProperties`, probed 2026-11-03,
+  predates argument kinds); Google seats no role that receives toolkit tools.
 - **Vendor schema quirks beyond the probed positions:** GLM writes `"null"` into `str | None` fields
   [I14]; `$ref` under `allOf`/`oneOf`/`additionalProperties` unmeasured [I20].
 - **DeepSeek:** `images_accepted=False` stands on policy; the docstring's text-only reason is stale.
@@ -1147,4 +1158,14 @@ Compacted 2026-10-19 (every entry); detail in git history.
 - 2026-11-03 — §9.2/§9.3.9/§9.4/§9.9/§9.10 step 1: the input validator has two jobs (user ruling):
   tool inputs (owner-only `$ref`, copy refusal) and model inputs (media that does not decode is
   withheld with a note); it generalises with the unit in Phase 3. §13 input-validator limits.
-
+- 2026-11-03 — §7 and §9.3.9: tool inputs by **argument kind** (user rulings 2026-11-03, plan
+  `tmp_plan_handles_only.md` piece A): data by reference, parameters by reference or with their
+  reason (recorded behind the call's handle, `#/$args/<name>`), paths and settings typed;
+  undeclared arguments refused; the copy refusal (`RetypeCheck`) removed.
+- 2026-11-03 — §2b, §7, §9.2, §9.3.3, §13: **one citing syntax** (user ruling 2026-11-03): every
+  citation inside `{{ }}` (`{{h}}`, `{{h#/p}}`, `{{h#/$args/<name>}}`, `{{h "…"}}`, a paper's
+  attribution); `[h]` retired; a number is grounded by its own citation only (scoped grounding
+  retired). Briefs and messages are informal and never citable; only reports filed through
+  `turn_end` are; the librarian → reviewer edge carries only what the filed report cites.
+- 2026-11-03 — §13: argument kinds and the one citing syntax live-tested (83 cells; the graph cell
+  waits on the toolkit commit); Gemini's `additionalProperties` refusal recorded.

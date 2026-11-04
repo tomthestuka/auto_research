@@ -117,8 +117,9 @@ class PaperReader:
                 + "Open a paper: its PDF is attached to your context, so you read the whole paper as "
                 "printed — text, tables, equations and figures — and it stays attached for the rest "
                 "of your work. Open a local PDF with path=..., or a paper you can read by handle. "
-                "Cite it by the handle this returns, e.g. [lib:p3]. A paper is cited, not quoted: "
-                "state what it reports in your own words beside its handle."
+                "Cite it by the handle this returns, e.g. {{lib:p3}}. A paper is cited, not quoted: "
+                "state what it reports in your own words, and attribute each value with its place, "
+                '{{lib:p3 "value" Table 2}}.'
             ),
             "input_schema": {"type": "object", "properties": properties},
         }
@@ -185,7 +186,8 @@ class PaperReader:
         return ToolOutcome(
             text=(
                 f"[{receipt.handle}] {receipt.title} — the PDF is attached ({ids}). Cite it as "
-                f"[{receipt.handle}]."
+                f'{{{{{receipt.handle}}}}}, and a value from it with its place, '
+                f'{{{{{receipt.handle} "<value>" Table 2}}}}.'
             ),
             documents=[
                 document_from_file(

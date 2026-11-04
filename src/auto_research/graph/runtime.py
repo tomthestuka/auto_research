@@ -36,7 +36,7 @@ from auto_research.sandbox.persistent import PersistentSandbox
 from auto_research.sandbox.registry import ToolkitRegistry
 from auto_research.agents.react import ReadOnlyToolProvider
 from auto_research.provenance import ReceiptStore
-from auto_research.agents.roles import _model_label
+from auto_research.agents.roles import LEAD_KEY, _model_label
 from auto_research.sandbox.workspace import (
     agent_dir,
     create_run_workspace,
@@ -445,7 +445,7 @@ def attach_lead_runtime(
     pre-wired ``tools`` alone, so routing the run path through this is behaviour-preserving.
     """
     try:
-        lead.agent_key = "analyst_lead"
+        lead.agent_key = LEAD_KEY
         lead.report_dir = agent_dir(run_id, "analyst_lead")
         lead.receipts = ReceiptStore.for_run(run_dir(run_id))
     except Exception:  # noqa: BLE001 — duck-typed fakes may not accept it

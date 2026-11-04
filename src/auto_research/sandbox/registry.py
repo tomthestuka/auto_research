@@ -50,17 +50,68 @@ class ToolSpec(TypedDict):
 # No hard upper clamp — ``tool_config.yaml`` is trusted human/coder-set infra, never LLM input.
 _CALL_TIMEOUT_FALLBACK_S = 300
 
-#: Appended to every toolkit tool's description: how to pass another tool's output on
-#: (``auto_research.provenance.refs``). The constraint lives where the model reads it.
+#: Appended to every toolkit tool's description: how an argument's value arrives, by the kind its
+#: manifest declares (``auto_research.provenance.inputs``). The constraint lives where the model
+#: reads it; each argument's own description names its kind.
 REF_NOTE = (
-    '\n\nAny argument value (a number, a list, a dict) can be {"$ref": "<receipt handle>#/<key>/<index>"}: the runtime passes '
-    "the value at that place in the named tool result, exactly as the tool returned it, and "
-    "records the result this call used. Pass the output of one of your earlier calls on this way, "
-    'e.g. {"$ref": "analyst_worker_0:r3#/bins"}; "#" alone passes the whole returned value. A '
-    "reference names your own results; a peer's value reaches your calls once a tool run of yours "
-    "reproduces it. A value an earlier tool result returned reaches a call this way only: a call "
-    "that types one runs once it carries the reference the reply names."
+    '\n\nEach argument\'s description says how its value arrives. A reference, {"$ref": '
+    '"<receipt handle>#/<key>/<index>"}, passes the value at that place in one of your own tool '
+    'results exactly as the tool returned it ("#" alone passes the whole returned value) and '
+    "records that result as this call's source; a peer's value reaches your calls once a tool run "
+    'of yours reproduces it. A parameter you choose is typed with its reason, {"value": <the '
+    'value>, "reason": "<why this value>"}, and the call records both.'
 )
+
+#: What each kind adds to an argument's description, after the toolkit's own words.
+_KIND_NOTES = {
+    "data": (' Pass {"$ref": "<handle>#/<key>"}, the result of your own call that produced it '
+             '(a list of references passes several).'),
+    "parameter": (
+        ' Pass {"$ref": "<handle>#/<key>"} (one of your results) or {"value": <the value>, '
+        '"reason": "<why this value>"}'
+    ),
+    "path": ' A path as text, or {"$ref": "<handle>"} of a file a tool of yours wrote.',
+}
+#: The same, for a call path that takes typed values only (the lead's in-process catalog read).
+_TYPED_NOTES = {"path": " A path as text."}
+
+
+def provider_schema(schema: dict | None, *, references: bool = True) -> dict:
+    """An ``args_schema`` as a provider receives it: ``kind`` and ``default`` taken out (the
+    runtime's keys, which some vendors' strict schemas refuse) and said in each description; a data
+    argument takes no type (a reference, or a list of them), nor does a parameter (a reference,
+    or a value with its reason, whose shape the schema keeps under ``value``), nor a path (text,
+    or a reference to a file). ``references=False``: a call path that takes typed values only, so
+    no description offers a reference (the lead's in-process ``data_catalog``)."""
+    import copy
+    import json
+
+    out = copy.deepcopy(schema or {"type": "object", "properties": {}})
+    properties = out.get("properties") or {}
+    for name, prop in list(properties.items()):
+        if not isinstance(prop, dict):
+            continue
+        prop = dict(prop)
+        kind = prop.pop("kind", None)
+        has_default, default = "default" in prop, prop.pop("default", None)
+        note = (_KIND_NOTES if references else _TYPED_NOTES).get(kind, "")
+        if kind == "parameter":
+            note += f", or leave it out for the default, {json.dumps(default)}." if has_default else "."
+        elif has_default:
+            note += f" Default: {json.dumps(default)}."
+        description = (str(prop.get("description") or "").rstrip() + note).strip()
+        if kind == "data":  # a reference, or a list or dict of references: no type
+            prop = {"description": description}
+        elif kind == "parameter":
+            value = {k: v for k, v in prop.items() if k != "description"}
+            # No type: a reference, a value with its reason, or a list of references.
+            prop = {"properties": {"value": value, "reason": {"type": "string"}}, "description": description}
+        elif kind == "path" and references:  # text, or a reference object: no type
+            prop = {k: v for k, v in prop.items() if k != "type"} | {"description": description}
+        elif description:
+            prop["description"] = description
+        properties[name] = prop
+    return out
 
 
 def _discover_manifest_packages(root: Path) -> list[str]:
@@ -100,6 +151,8 @@ class ToolkitRegistry:
         self._manifest_packages: list[str] = []
         #: package → why it exposed no tools on the last load (an import error, no TOOL_MANIFEST).
         self.import_errors: dict[str, str] = {}
+        #: why a loaded tool's arguments cannot be validated (``provenance.inputs.manifest_problems``).
+        self.manifest_errors: list[str] = []
         self._loaded = False
 
     # ------------------------------------------------------------------
@@ -144,6 +197,11 @@ class ToolkitRegistry:
                 sys.path.remove(root_str)
         for name in self._disabled:
             self._tools.pop(name, None)
+        from auto_research.provenance.inputs import manifest_problems
+
+        self.manifest_errors = [problem for name, spec in self._tools.items()
+                                for problem in manifest_problems(
+                                    name, spec.get("args_schema") if isinstance(spec, dict) else None)]
         self._loaded = True
 
     def reload(self) -> None:
@@ -306,7 +364,8 @@ class ToolkitRegistry:
                 if env:
                     description += f"\n\nRuns in its tested environment ar-{env}."
             description += REF_NOTE
-            defs.append({"name": self._function_name(kind), "description": description, "input_schema": schema})
+            defs.append({"name": self._function_name(kind), "description": description,
+                         "input_schema": provider_schema(schema)})
         for kind, desc in self._mcp_tools.items():
             defs.append(
                 {
@@ -356,15 +415,23 @@ def check_toolkit_manifests(root: Path | None = None) -> None:
     reach the analysts as missing tools and nothing else (found 2026-10-27: the loader skipped
     such a package silently). Registered in ``auto_research.preflight``.
     """
+    disabled: list[str] = []
     if root is None:
+        from auto_research.graph.runtime import load_orchestration_config
         from auto_research.sandbox.merge_flow import _resolve_toolkit_root
 
         root = _resolve_toolkit_root()
-    registry = ToolkitRegistry(root)
+        disabled = list(load_orchestration_config().get("disabled_tools") or [])
+    registry = ToolkitRegistry(root, disabled_tools=disabled)  # the tools the run will load
     registry.load()
     if registry.import_errors:
         raise RuntimeError(
             "toolkit packages expose no tools: "
             + "; ".join(f"{pkg} ({why})" for pkg, why in sorted(registry.import_errors.items()))
             + f". Fix them in {root} before launching."
+        )
+    if registry.manifest_errors:
+        raise RuntimeError(
+            "toolkit arguments the input validator cannot check: " + "; ".join(registry.manifest_errors)
+            + f". Declare each argument's kind (and each optional parameter's default) in {root}."
         )

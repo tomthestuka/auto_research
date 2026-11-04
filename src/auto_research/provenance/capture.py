@@ -265,7 +265,7 @@ def receipt_call(
         # Key order as the tool returned it: a consumer may iterate the dict.
         extra["returned_sha256"] = store.put_blob(json.dumps(dict(returned), default=str))[1]
         # The call's arguments under their own hash (`args_sha256`), so a value the call was
-        # given and merely echoes is known as the caller's parameter (`refs.RetypeCheck`).
+        # given and merely echoes is known as the caller's parameter (`refs.call_arguments`).
         from auto_research.provenance.calls import canonical_args
 
         store.put_blob(canonical_args(dict(args)))

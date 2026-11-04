@@ -46,6 +46,8 @@ def resolve_call_args(arguments: Mapping[str, Any], context: Mapping[str, Any]) 
     - ``cwd``: filled when the model names no ``cwd`` (``bash_exec``);
     - ``shell_env``: the runtime's record alone; a model-supplied value is dropped first;
     - ``observation_paths``: ``{argument: folder}``, filled when the model's value is empty;
+    - ``defaults``: ``{parameter: value}`` a toolkit manifest declares, filled when the model
+      leaves the argument out (``provenance.inputs.declared_defaults``);
     - ``figure_args`` + ``figures_dir`` + ``fn`` + ``stamp_ms``: each figure argument is placed in
       ``figures_dir``, keeping the model's file name (``<fn>_<stamp_ms>`` when it gave none) with
       the extension ``FIGURE_PATH_ARGS`` names;
@@ -63,6 +65,9 @@ def resolve_call_args(arguments: Mapping[str, Any], context: Mapping[str, Any]) 
     for name, path in (context.get("observation_paths") or {}).items():
         if not args.get(name):
             args[name] = path
+    for name, value in (context.get("defaults") or {}).items():
+        if name not in args:
+            args[name] = value
     for name in context.get("figure_args") or ():
         value = args.get(name)
         base = os.path.basename(value.strip()) if isinstance(value, str) and value.strip() else ""
@@ -81,8 +86,9 @@ class LedgerCall:
     """One tool call that minted receipts, as the ledger recorded it, and the arguments it ran with.
 
     ``ran_args`` is what the call's receipts hash (``args_sha256``): the model's arguments completed
-    by the runtime. ``sent_args`` is what the tool received, ``ran_args`` without the runtime-only
-    entries: ``env`` picks a toolkit call's environment; ``shell_env`` names the environment a
+    by the runtime. ``sent_args`` is ``ran_args`` without the runtime-only entries, before the input
+    validator turned it into what the tool received (``provenance.inputs.tool_values``: each
+    ``{"$ref"}`` resolved, each typed parameter's reason set aside); the runtime-only entries: ``env`` picks a toolkit call's environment; ``shell_env`` names the environment a
     ``bash_exec`` command ran in, and that command reached the shell wrapped in the environment's
     activation (``sandbox.envs.in_environment``), which ``sent_args`` does not spell out.
     """

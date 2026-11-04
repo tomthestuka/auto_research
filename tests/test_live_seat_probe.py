@@ -512,9 +512,9 @@ def test_the_reviewer_seat_files_a_rendered_report(tmp_path):
         result = store.mint(source="analyst_worker_0", kind="result", produced_by="xspec_utils.fit",
                             data="PD = 3.41 +/- 0.14 percent\nPA = -20.3 +/- 1.2 deg\n")
         report = AnalystReport(
-            summary=f"2-8 keV polarization measured from the May 2022 IXPE observation [{result.handle}].",
-            findings=[f"PD = 3.41 +/- 0.14 percent [{result.handle}]",
-                      f"PA = -20.3 +/- 1.2 deg [{result.handle}]"],
+            summary=f"2-8 keV polarization measured from the May 2022 IXPE observation {{{{{result.handle}}}}}.",
+            findings=[f"PD = 3.41 +/- 0.14 percent {{{{{result.handle}}}}}",
+                      f"PA = -20.3 +/- 1.2 deg {{{{{result.handle}}}}}"],
             figures=list(figures),
             status="succeeded",
         )

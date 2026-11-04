@@ -35,14 +35,24 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   `args_sha256` keep the references as written; the values they stand for are fixed by the
   parent's hash and the pointer. This replaced the retyping measured in run 32814459, where every
   derived input was typed into the arguments, so no call had a parent and two hand-built plot
-  inputs carried altered error bars. A typed float of 4+ significant digits that a usable result
-  holds exactly, with its sign flipped, or rounded to the digits typed is a copy, and the call is
-  refused before it runs with the reference to write (`RetypeCheck`; user ruling 2026-10-26,
-  replacing the after-call note, which a live model ignored; sign and rounding added 2026-10-27
-  after a `|ci_lo|` typed as `0.37959418926306543` passed in run faraday-refs-20261026). So is one
-  found in the text of a file the caller read or a shell output it ran: the refusal names the
-  file to pass, or a tool to request. A match is never an edge by itself: repeated runs return identical values, so the
-  model's reference makes the link.
+  inputs carried altered error bars.
+- **The input validator decides which arguments must be references** (`inputs.py`, user rulings
+  2026-11-03; CLAUDE.md §9.3.9). Every argument of a toolkit tool declares a `kind` in its
+  manifest: `data` (a tool's output: references into what the caller's own tools returned, never
+  a call's arguments), `parameter` (a reference to the caller's own result, or a typed
+  `{"value": …, "reason": "…"}`, or left out for the declared `default`), `path` (typed, or a
+  reference to a file the caller's own tool wrote) and `setting` (typed). `check_arguments` judges
+  the arguments as the model wrote them, before the runtime fills mission folders and defaults
+  (`calls.resolve_call_args`); an argument the manifest does not declare is refused, and so is a
+  reason on any kind but a parameter. `tool_values` then gives the tool plain values. The call's
+  arguments, which `args_sha256` hashes, keep each reason and reference, so a chosen value and why
+  it was chosen sit behind the handle of the call that used it: `<handle>#/$args/<name>` reaches
+  it (`refs.argument_value`), for a later call or a report, and only a typed parameter or a
+  reference is reachable that way (a setting, a path or a default carries no source). This
+  replaced the copy refusal (`RetypeCheck`, 2026-10-26 → 2026-11-03), which compared typed floats
+  with what results held: by ruling, a typed number now enters only with its reason, shown in every
+  result built on it, and nothing compares its digits. The ledger studies behind the design (three
+  runs, 926 calls) are the case tables of `tests/test_input_cases.py`.
   A toolkit tool prints summary lines with its result and returns the dict beside them (coder
   contract rule 5), and the result text keeps only the print; so `receipt_call(returned=)` stores
   the returned keys as one JSON blob named on the receipt (`returned_sha256`, hash-checked on every
@@ -74,12 +84,12 @@ report prose ──► check_bindings / check_report_fields ──► problems (
 - **Flags propagate.** `failed` (the producing call failed) and `synthetic` (an input under a
   marked `synth<YYMMDD>-<sha>` directory, §9.5) pass to every descendant. A flagged receipt can be
   cited to describe what happened; it cannot ground a number.
-- **Scoped grounding** (human ruling 2026-09-24, replacing "every number quoted"): a text cites
-  `[src:r12]`; every number in that text must appear, on token boundaries, in a receipt it cites.
-  Findings are scoped per item; other report fields by all the evidence the report cites. A pinned quote
-  `{{src:r12 "…"}}` must be a bounded substring of that receipt. Measured before the ruling over
-  231 real reports: 98% of decimals already appear verbatim in the run's tool outputs; quoting
-  every number would have meant hundreds of quotes per report.
+- **Every number is its own citation** (user ruling 2026-11-03, one citing syntax, replacing the
+  2026-09-24 *scoped grounding* under which a `[src:r12]` let any number its receipts held stand
+  beside it). Citations are `{{src:r12}}` (a whole receipt), `{{src:r12#/p}}` (a returned value;
+  `#/$args/<name>` a value the call was given), `{{src:r12 "…"}}` (a bounded substring of a text
+  receipt) and a paper's attribution with its place. A number outside one is refused; the receipts a
+  text cites, its scope and its support suggest the citation to write.
 - **Normalisation** applies to both sides of a comparison and never to what is rendered: NFC (not
   NFKC, which turns `10²³` into `1023`); U+2212 before a digit → `-` (sign-preserving); whitespace
   collapses; paper/web additionally rejoin line-end hyphens, expand ligatures, and drop whitespace
@@ -130,7 +140,16 @@ report prose ──► check_bindings / check_report_fields ──► problems (
   (`[receipt h] ← parents`). `capture.toolkit_commit(root)` reads HEAD (read-only).
 - `refs.resolve_refs(args, store, usable) -> (resolved_args, parents)` — every `{"$ref": …}` in an
   argument tree replaced by its value; `usable(handle)` is the caller's scope; raises `RefError`
-  (its message is the model's) on the first that does not resolve, so nothing runs.
+  (its message is the model's) on the first that does not resolve, so nothing runs. A `data`
+  receipt the caller's tool wrote resolves to its path while the file hashes to its receipt
+  (digest cached by path, size and mtime); `<handle>#/$args/<name>` to an argument of the
+  caller's earlier call. A brief (`input:`) is never a source: it is informal, like a message
+  (user ruling 2026-11-03); a value it states is typed with its reason.
+- `inputs.check_arguments(tool, arguments, schema, *, runtime=frozenset()) -> str | None` — the
+  refusal for arguments, as written, that break their kinds (`runtime`: names the runtime consumes,
+  `env`); `inputs.tool_values(args, schema, store, usable) -> ToolValues(sent, parents)` — the
+  completed arguments as the tool receives them. Both call paths use them: the worker's
+  `SandboxToolProvider.execute` and the lead's in-process `execute_data_catalog`.
   `ledger_calls(...).sent_args` keep the references; `report.html.reproduce_code` resolves them
   from the store for a rerun.
 - Invariant: every problem string names what is wrong and what to do, because it is returned to
@@ -192,11 +211,21 @@ report renderer.
   miss names the keys or the index bound that exist.
 - `refs.handles_named(text) -> list[str]` — every handle-shaped string a text names, bracketed or
   bare, once each (a message's handles).
-- `refs.RetypeCheck(store).problem(typed_args, handles, *, own_source=None) -> str | None` — the
-  refusal for a call whose typed floats of 4+ significant digits are copies: held exactly by a
-  usable result (the reference to write, newest first, up to 3), held with the sign flipped or
-  rounded to the digits typed, or found in the text of `own_source`'s navigation receipts (the
-  file to pass instead); integers and short floats are parameters and pass; each receipt read once.
+- `inputs.ARG_KINDS = ("data", "parameter", "path", "setting")`; `inputs.declared_kinds(schema)`,
+  `inputs.declared_defaults(schema)` (parameters with a `default`, which `_call_context` records as
+  `defaults`); `inputs.manifest_problems(tool, schema) -> list[str]` (no kind, an unknown kind, an
+  optional parameter without a default: refused at launch, at the gate and at the call).
+- `refs.VALUE_KEY, refs.REASON_KEY = "value", "reason"`; `refs.typed_parameter(value) -> (value,
+  reason) | None` (exactly those two keys, a non-empty reason, no reference inside; a JSON string
+  of one is read as the REPL would).
+- `refs.ARGS_POINTER = "/$args"`; `refs.point(store, handle, pointer)` (the returned value, or the
+  arguments under `/$args`); `refs.argument_value(store, handle, pointer)`;
+  `refs.argument_source(store, handle, pointer) -> str` ("chosen by X: reason", or "passed from
+  <the reference at the pointer>", followed through a `$args` chain to its reason);
+  `refs.received_arguments(store, handle) -> dict` (a call's arguments as its tool received them:
+  typed parameters unwrapped, references resolved; `leaves()` excludes every number in it, so an
+  echo of a value a reference carried is never credited to the echoing call);
+  `refs.call_arguments(store, handle)` (the call's recorded arguments, `{}` when absent or changed).
 - `refs.unviewable_handles(text, viewable)`, `refs.brief_handle_problems(field, text, viewable)` —
   the handles a brief names that are not receipts of the run, and the `turn_end` refusal naming
   them.
@@ -297,3 +326,43 @@ Compacted 2026-10-07 (the 2026-10-06/07 entries) and 2026-10-19 (every entry); d
 - 2026-11-03 — A file the human sent is a file read again for the copy check (not a task text);
   the prose check reads a result's arguments as the tool received them; a written `[handle#…]` is
   named whole in its refusal, with `[handle]` offered for citing a whole result.
+- 2026-11-03 — **The input validator's tool-input job** (user rulings 2026-11-03; plan
+  `tmp_plan_handles_only.md`, piece A). New `inputs.py`: argument kinds, `check_arguments`,
+  `tool_values`, `manifest_problems`, declared defaults. `refs.py`: `RetypeCheck` and its helpers
+  deleted (ruling 1); a file receipt resolves to its path (hash cached), a call's
+  `#/$args/<name>` (typed parameters and references only);
+  `call_arguments`, `typed_parameter`, `argument_value`, `argument_source`. `calls.resolve_call_args`
+  fills `defaults`. Stateless review (10 findings): fixed — undeclared arguments refused (the real
+  `load_data` takes seven science arguments its schema omits), `$args` limited to typed parameters
+  and references, data refuses a call's arguments, a reason on a non-parameter
+  refused, `null` is no default, file digests cached, the lead path fills defaults, the refusal
+  names no value to wrap, `sent_args` documented. Tests: `test_input_validator.py`,
+  `test_input_cases.py` (the ledger studies' cases plus every kind × shape × target; 53 fail with the
+  check switched off).
+- 2026-11-03 — Brief parameters (a `# parameters` block resolved as `input:hN#/parameters/<name>`,
+  briefly built) purged by user ruling: a brief is an informal text, like a message, never citable
+  and never a source; in a graph of MTA units only a report filed through `turn_end` is citable.
+- 2026-11-03 — A chosen value is stated through its call's argument only (user ruling 2026-11-03):
+  `_Resolved.given(handle)` maps each number a call was given as a typed parameter or by reference
+  to its `/$args/…` pointer; a value reference into the tool's echo of one, and a typed copy of
+  one, are refused with `{{handle#/$args/<name>}}`, the form that carries who chose it and why. A
+  data argument naming a task text (`input:`) is refused as a tool's output, with where its data
+  comes from.
+- 2026-11-03 — **One citing syntax** (user ruling 2026-11-03; build item 9): `CITE_RE` reads
+  `{{handle}}`; a written `[handle]` is leftover markup (`_MARKUP_LEFT`), answered with `{{handle}}`.
+  Scoped grounding is retired: `check_bindings` refuses every number outside a binding (exempt
+  shapes stay), and the receipts a text cites, its scope and its support only suggest the binding
+  (`_copies` references and `$args` pointers, `_rounded_from`, `_quotable` quotes for up to three
+  holders). The typed-copy and ungrounded-number clauses are one clause. A commit receipt's record
+  takes value references. `refs.unviewable_handles` reads a brief's `{{handle}}` citations.
+  `ungrounded_numbers` is unchanged (the gate's return check).
+- 2026-11-03 — Review of the one citing syntax (11 findings): fixed — a paper's locator holds a
+  place only (`LOCATOR_RE`; closes §13 [R8] "numbers inside a quote's locator are not scanned"),
+  an ordinal never swallows a decimal (`trial 4.02`), any bracket holding a handle is retired
+  markup, a bare short-number quote (`{{h "3"}}`) binds nothing and is never suggested, scope and
+  support are read only when a number needs a citation and rounding hints read only the cited
+  results (8.6 s → bounded on a 300-result scope), a brief's retired `[h]` is still checked as a
+  name. New clauses `locator_not_a_place`, `bare_quote`. Accepted: a number glued to a word
+  (`PD4.02`) is not scanned; a librarian gap's numbers stay exempt (a gap states what was not found).
+
+- 2026-11-03 — Live: argument kinds and the one citing syntax pass the lead, librarian, reviewer and worker cells and a coder chain through the kind gate (`logs/dev/live-20261103d/`); only the graph cell waits on the toolkit commit.

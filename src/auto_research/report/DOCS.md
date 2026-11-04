@@ -145,3 +145,23 @@ Compacted 2026-10-19 (every entry); detail in git history.
   is dirty, names git's reason when a commit cannot be read, and falls back for a Python without
   extraction filters; only a float value is typeset as ×10ⁿ (`source1` read as `sourc×10¹`); a
   nested `$ref` argument shows its value; one `_Resolved` per page.
+- 2026-11-03 — Chosen values on the page (plan `tmp_plan_handles_only.md`, build item 6): a value
+  reference `{{h#/$args/<name>}}` renders the argument a call was given, and its popover says who
+  chose it and why (`refs.argument_source`, following a `$args` chain to the reason at its end);
+  `_arguments_html` shows a typed parameter as its value and its reason; `reproduce_code` hands
+  the tool what it received (typed parameters unwrapped, `$args` references inlined, a file
+  reference as its path, hash-checked; a `$args` value that could not be read when the page was
+  made raises in the notebook). Stateless review (6 findings): fixed — the popover names the
+  reference at the pointer and follows `$args` chains, the notebook fails loudly, a large returned
+  value no longer bars citing the arguments, tests for each new path
+  (`tests/test_report_chosen_values.py`; each of four mutations fails a test). Accepted:
+  `check_page`'s reproduce-block check compares `data-args` with the literal it was built from,
+  so it guards escaping only.
+- 2026-11-03 — One citing syntax: `{{handle}}` renders as `[handle]` did (the binding is the same);
+  table-cell and page refusals name the `{{ }}` forms. The page's "scoped" number rendering is
+  now a backstop the check never reaches (every number is bound before rendering).
+- 2026-11-03 — A whole-receipt citation in a table cell reads as one binding (`_unbalanced` strips
+  `CITE_RE`); a table citing a flagged receipt is refused (`check_table`); the page refuses any
+  number the check left unbound instead of rendering it "scoped" (the `_held` popover and the
+  `scoped` class are gone).
+

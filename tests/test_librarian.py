@@ -134,6 +134,7 @@ def test_read_paper_captures_hashes_and_stores_once(tmp_path):
     outcome = _run(p.execute("read_paper", {"hit": 1}))
     assert not outcome.is_error
     assert outcome.text.startswith("[lib:p1] Lag paper") and "PDF is attached" in outcome.text
+    assert "Cite it as {{lib:p1}}" in outcome.text
     # The PDF itself is what the model reads: attached natively, never the checked text layer.
     (document,) = outcome.documents
     assert document.path == tmp_path / "papers" / "arxiv_2101.00001.pdf"
@@ -288,7 +289,7 @@ def test_a_paper_citation_never_exempts_the_numbers_beside_it(tmp_path):
     _run(p.execute("web_fetch", {"url": "https://docs.example.org/lag"}))  # lib:w1: "12 . 5 days"
     report = _report(summary="Two sources.", claims=[
         # An unattributed paper number: refused, with the attribution hint.
-        ("The paper reports a lag of 99.9 days [lib:p1].", ["lib:p1"]),
+        ("The paper reports a lag of 99.9 days {{lib:p1}}.", ["lib:p1"]),
         # Attributed to the paper: accepted, collected for a person to check.
         ('The paper reports {{lib:p1 "a lag of 12.5 ± 3.1 days" Table 1}}.', ["lib:p1"]),
         # A web-only number no page carries: refused.
@@ -297,7 +298,7 @@ def test_a_paper_citation_never_exempts_the_numbers_beside_it(tmp_path):
     _run(p.execute("write_report", report))
     outcome = _run(p.execute("turn_end", {"summary": "done"}))
     assert outcome.is_error and "99.9" in outcome.text and "77.7" in outcome.text
-    assert "attribute it" in outcome.text
+    assert "attributed with where it is in the paper" in outcome.text
     assert "Finding 2" not in outcome.text  # the attributed finding raised nothing
     values = p.attributed_values(p.written_report)
     assert [(v.handle, v.value, v.locator) for v in values] == [("lib:p1", "a lag of 12.5 ± 3.1 days", "Table 1")]
@@ -473,7 +474,7 @@ def test_a_librarian_cannot_cite_another_roles_receipt(tmp_path):
     p = _read_one(tmp_path)
     other = p.store.mint(source="analyst_worker_0", kind="result", produced_by="research_toolkit.xspec_utils.fit",
                          data="The fitted lag is 7.7 days.")
-    report = _report(claims=[(_CLAIM, ["lib:p1"]), (f"A fit gives 7.7 days [{other.handle}].", ["lib:p1"])])
+    report = _report(claims=[(_CLAIM, ["lib:p1"]), (f"A fit gives 7.7 days {{{{{other.handle}}}}}.", ["lib:p1"])])
     _run(p.execute("write_report", report))
     outcome = _run(p.execute("turn_end", {"summary": "done"}))
     assert outcome.is_error and "not a receipt you can cite" in outcome.text

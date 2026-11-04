@@ -283,7 +283,7 @@ class TestSandboxToolProvider:
                             lambda: {"ixpe_path": "/cfg/IXPE", "nustar_path": "/cfg/NuSTAR"})
         sb = _FakeSandbox()
         reg = _FakeRegistry(known={"tk.load_data"}, mcp=set(),
-                            schema={"properties": {"epoch": {}, "ixpe_path": {}}})
+                            schema={"properties": {"epoch": {"kind": "setting"}, "ixpe_path": {"kind": "path"}}})
         prov = SandboxToolProvider(reg, sb)
         asyncio.run(prov.execute("tk.load_data", {"epoch": "{}"}))
         _, _, args = sb.tool_calls[0]
@@ -296,7 +296,7 @@ class TestSandboxToolProvider:
         monkeypatch.setattr(react, "_observation_path_args", lambda: {"ixpe_path": "/cfg/IXPE"})
         sb = _FakeSandbox()
         reg = _FakeRegistry(known={"tk.load_data"}, mcp=set(),
-                            schema={"properties": {"ixpe_path": {}}})
+                            schema={"properties": {"ixpe_path": {"kind": "path"}}})
         prov = SandboxToolProvider(reg, sb)
         asyncio.run(prov.execute("tk.load_data", {"ixpe_path": "/custom/IXPE"}))
         _, _, args = sb.tool_calls[0]

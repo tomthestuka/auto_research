@@ -155,3 +155,7 @@ git history.
   into the shared task.
 - 2026-10-27 — After a commit's registry reload, `analyst.toolkit.load_error` (level 2) names every
   package that exposes no tools (`ToolkitRegistry.import_errors`).
+- 2026-11-03 — The same `analyst.toolkit.load_error` (level 2) also names every reloaded tool whose
+  arguments the input validator cannot check (`ToolkitRegistry.manifest_errors`): such a tool
+  refuses every call, so the reload says so.
+

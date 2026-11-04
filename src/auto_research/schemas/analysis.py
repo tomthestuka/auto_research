@@ -35,8 +35,9 @@ class AnalystReport(FiguredReport):
     findings: list[str] = Field(
         default_factory=list,
         description=(
-            "The results: one item per result, each a self-contained statement that cites the "
-            "receipts its numbers come from as [handle]. Every measured value, table row and "
+            "The results: one item per result, each a self-contained statement whose every number "
+            "is its own citation ({{handle#/key}}, {{handle \"exact text\"}}); cite what a statement "
+            "without a number rests on as {{handle}}. Every measured value, table row and "
             "comparison belongs here."
         ),
     )

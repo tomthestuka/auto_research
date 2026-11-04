@@ -760,3 +760,31 @@ def test_f9_the_unclean_error_names_the_dirty_paths(tmp_path):
     with pytest.raises(ToolkitBranchUnclean) as exc:
         check_toolkit_branch_clean(repo, "ai")
     assert "obsdb_catalog/neutral.py" in str(exc.value)
+
+
+def test_a_reloaded_tool_whose_arguments_declare_no_kind_is_said_loudly(tmp_path):
+    """Input validator (2026-11-03): a committed tool the validator cannot check refuses every call,
+    so the reload says so on the ledger at level 2."""
+    import json
+
+    from auto_research.monitor.events import RunMonitor
+
+    class KindlessAfterReload(FakeRegistry):
+        manifest_errors: list = []
+
+        def reload(self) -> None:
+            super().reload()
+            self.manifest_errors = ["research_toolkit.demo_utils.fit: argument x declares no kind"]
+
+    state = {"authored": 0}
+    workers = [AuthoringWorker("w1", state, stop_after=1)]
+    lead = AuthoringLead(should_author=True, converge_on=1, state=state, calls=[])
+    ledger = tmp_path / "monitor.jsonl"
+    asyncio.run(DebateToConverge(
+        max_rounds=3, registry=KindlessAfterReload(), tool_author_cap=3, toolkit_root=TOOLKIT,
+        direct_branch="ai", monitor=RunMonitor(chatter=10, jsonl_path=ledger),
+    ).run(workers, lead, AnalysisTask(question="q")))
+    events = [json.loads(line) for line in ledger.read_text().splitlines()]
+    [loud] = [e for e in events if e["event"] == "analyst.toolkit.load_error"]
+    assert loud["level"] == 2 and loud["data"]["manifest_errors"] == [
+        "research_toolkit.demo_utils.fit: argument x declares no kind"]

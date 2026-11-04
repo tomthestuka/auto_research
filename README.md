@@ -496,13 +496,18 @@ task a role is handed — is a **receipt** the runtime mints (`auto_research.pro
 runtime hashes the bytes itself, stamps the producer (tool, toolkit commit, call), hashes the
 call's input files and links the receipts that produced them, and propagates `failed` /
 `synthetic` marks. The model sees each result labelled `[receipt <handle>]`; a report's findings
-cite the receipts their numbers come from, and every role's `turn_end` refuses a number that no
-cited receipt carries (*scoped grounding*). A task's own numbers count only where the task is cited
-(`[input:…]`), so a value handed in by the question cannot reappear as a finding unmarked. A value a
-tool returned is written as its reference, `{{analyst_worker_0:r12#/fit/kT}}`: the runtime fills it
+write every number as its own citation, inside `{{ }}`, and every role's `turn_end` refuses a number
+typed outside one (one citing syntax, 2026-11-03; a whole result is `{{handle}}`, a printed value or
+the request's words a quote `{{handle "…"}}`). A value a tool returned is written as its reference, `{{analyst_worker_0:r12#/fit/kT}}`: the runtime fills it
 in at three significant digits, with the full value and the chain that produced it one click away
-on the HTML report, and refuses a typed copy of it. Any role may open any receipt of the run;
-what it may cite stays scoped.
+on the HTML report. Any role may open any receipt of the run; what it may cite is its own work and
+what the reports filed to it cite (briefs and messages are never citable).
+
+Every toolkit argument declares a kind, which the unit's **input validator** enforces before a
+call runs: a tool's output arrives by reference to the caller's own result (`{"$ref": …}`), a
+parameter by reference or typed with its reason (`{"value": 0.99, "reason": "…"}`, recorded with the
+call and cited as `{{handle#/$args/<name>}}`), paths and settings typed; an image or PDF that does
+not decode is withheld before a provider sees it.
 
 ---
 
